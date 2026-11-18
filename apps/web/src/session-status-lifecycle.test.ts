@@ -84,7 +84,7 @@ test("arbitrarily long healthy waits never create a session stall or an attentio
   const store = new Store({ name: "inbox" });
   store.dispatch({ type: "conn", conn: "online" });
   store.dispatch({ type: "msg", now: 0, msg: {
-    type: "snapshot", runners: [], boxes: [], runs: [], sessions: [session()],
+    type: "snapshot", runners: [], boxes: [], sessions: [session()],
   } });
   for (const now of [600_000, 3_600_000, 86_400_000, 365 * 86_400_000]) {
     store.tickActivity(now);

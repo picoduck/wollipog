@@ -15,7 +15,7 @@ function fixture(
   const store = new Store();
   store.dispatch({ type: "msg", msg: { type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [{ id: "s1", eventEpoch: 0 } as SessionView], runs: [],
+    runners: [], boxes: [], sessions: [{ id: "s1", eventEpoch: 0 } as SessionView]
   } });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -293,42 +293,6 @@ test("a connected HTTP tail still settles the reading prefix without claiming ga
   assert.equal(store.promoteDeferredEventTail(fence), false);
 });
 
-test("pre-stage and staged buffers share the byte budget across relevant sessions", () => {
-  const store = new Store();
-  store.dispatch({ type: "msg", msg: { type: "snapshot",
-    capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true }, runners: [], boxes: [],
-    sessions: ["s1", "s2"].map(id => ({ id, eventEpoch: 0 } as SessionView)),
-    runs: [{ id: "r1", sessionIds: ["s1", "s2"] } as never],
-  } });
-  store.navigate({ name: "run", id: "r1" });
-  const generation = store.getState().snapshotRevision;
-  store.prepareSubscriptionRecovery(1, ["s1", "s2"]);
-  store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 1,
-    sessionIds: ["s1", "s2"] } });
-  const fences = ["s1", "s2"].map(id => {
-    store.beginEventHistoryLoad(id, 0, 1, generation);
-    store.loadEvents(id, events(101, 110).map(row => ({ ...row, sessionId: id })), 0, 1, true, generation, true);
-    store.beginEventHistoryLoad(id, 0, 1, generation);
-    return store.beginEventGapRecovery(id, 0, 1, generation, () => true)!;
-  });
-  store.dispatch({ type: "msg", msg: { type: "session_event", event: event(10_010, "x".repeat(4 * 1024 * 1024)) } });
-  const largeTail = events(10_000, 10_001).map(row => ({ ...row, sessionId: "s2",
-    payload: { kind: "agent_message" as const, text: "x".repeat(2 * 1024 * 1024), final: true } }));
-  assert.equal(store.deferEventTail(fences[1]!, largeTail, true, true), true);
-  const privateBuffers = store as unknown as {
-    pendingGapLive: Map<string, { bytes: number }>;
-    deferredTails: Map<string, { bytes: number }>;
-  };
-  const total = [...privateBuffers.pendingGapLive.values(), ...privateBuffers.deferredTails.values()]
-    .reduce((bytes, buffer) => bytes + buffer.bytes, 0);
-  assert.ok(total <= 8 * 1024 * 1024);
-  assert.equal(store.getState().events.get("s1")!.length, 10);
-  assert.equal(store.getState().events.get("s2")!.length, 10);
-  store.cancelEventGapRecovery(fences[0]!);
-  store.cancelEventGapRecovery(fences[1]!);
-  assert.equal(privateBuffers.pendingGapLive.size + privateBuffers.deferredTails.size, 0);
-});
-
 test("finishing a small forward gap publishes buffered live without moving its frozen cursor", () => {
   const { store, fence, generation } = fixture(() => true);
   store.dispatch({ type: "msg", msg: { type: "session_event", event: event(115) } });
@@ -455,7 +419,7 @@ function emptyThenLiveFixture(firstLiveSeq = 1) {
   const store = new Store();
   store.dispatch({ type: "msg", msg: { type: "snapshot",
     capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true }, runners: [], boxes: [],
-    sessions: [{ id: "s1", eventEpoch: 0 } as SessionView], runs: [],
+    sessions: [{ id: "s1", eventEpoch: 0 } as SessionView]
   } });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -627,7 +591,7 @@ for (const obsolete of ["cancelled", "inactive", "epoch", "generation", "revisio
     } });
     else if (obsolete === "generation") store.dispatch({ type: "msg", msg: { type: "snapshot",
       capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true }, runners: [], boxes: [],
-      sessions: [{ id: "s1", eventEpoch: 0 } as SessionView], runs: [],
+      sessions: [{ id: "s1", eventEpoch: 0 } as SessionView]
     } });
     else {
       store.prepareSubscriptionRecovery(3, ["s1"]);

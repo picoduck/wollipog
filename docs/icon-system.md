@@ -47,8 +47,6 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `AlarmClockIcon` | Lucide | `AlarmClock` | Snooze: a snoozed Sessions row's return time (#2209) and the Sessions preview bar's Snooze button (#2210), and the Sessions No Snoozed Sessions and No Active Sessions states (#2220). |
 | `DismissReminderIcon` | Lucide | `AlarmClockOff` | Dismiss Reminder in the Sessions context menu (#2214). |
 | `ConnectionsIcon` | Lucide | `MonitorCog` | Runner connection management. |
-| `RunsIcon` | Lucide | `Workflow` | Generic workflow runs, and a workflow run's row in Multi-Agent Runs (#2974); an automation row's workflow target (#2969). |
-| `CompareIcon` | Lucide | `Columns2` | A comparison run's row in Multi-Agent Runs: several agents side by side on one task (#2974). `Columns3` is the Board. |
 | `AutomationsIcon` | Lucide | `Zap` | Automation action. |
 | `ServiceTierIcon` | Lucide | `Gauge` | Fast service-tier setting; distinct from the Automations bolt. |
 | `CostIcon` | Lucide | `DollarSign` | A dollar amount inside a field, such as the Guardrails cost thresholds; the Request Card's Budget kind. |
@@ -179,7 +177,6 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ExternalLinkIcon` | Lucide | `ExternalLink` | A link that opens outside Wollipog. |
 | `WrenchIcon` | Lucide | `Wrench` | Project setup suggestion, and a machine's Repair Connection… (#2988). |
 | `HeldIcon` | Lucide | `CirclePause` | Child sessions held from starting their next turn: the Held Children campaign notice. |
-| `ExperimentIcon` | Lucide | `FlaskConical` | An experimental feature, on the page a turned-off experiment's route shows, and Settings › Experimental. |
 | `AppearanceIcon` | Lucide | `Palette` | Settings › Appearance: theme, color scheme, density and navigation. |
 | `NotificationsIcon` | Lucide | `Bell` | Settings › Notifications: alerts when a session needs you. |
 | `StorageIcon` | Lucide | `Database` | Settings › Storage: how long archived sessions keep their history. |

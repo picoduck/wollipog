@@ -75,7 +75,7 @@ function snapshot(runners: RunnerView[], boxes: BoxView[] = []): UiSnapshotMessa
   return {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners, boxes, projects: [], sessions: [], runs: [],
+    runners, boxes, projects: [], sessions: []
   };
 }
 
@@ -270,7 +270,7 @@ test("at 390px the detail bar's ⋯ starts with Settings…, the body has no Set
     await settle();
     const confirmation = dialogNamed(view.body, "Delete Machine")!;
     assert.ok(confirmation, "the confirmation opens");
-    assert.match(confirmation.textContent ?? "", /Studio Mac, its sessions and its multi-agent runs are deleted from Wollipog\. Files on the machine stay where they are\./);
+    assert.match(confirmation.textContent ?? "", /Studio Mac and its sessions are deleted from Wollipog\. Files on the machine stay where they are\./);
     const back = confirmation.querySelector<HTMLButtonElement>('button[aria-label="Back to More Actions"]')!;
     assert.ok(back, "the confirmation has Back to More Actions");
     assertNoDomNode(view.body.querySelector('[role="menu"][aria-label="Machine Actions"]'), "it replaced the sheet");

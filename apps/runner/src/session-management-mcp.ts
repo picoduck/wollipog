@@ -295,13 +295,13 @@ function providerAccountChoiceSuffix(data: Json): string {
   const retryAt = typeof selection.retryAt === "number" ? ` retryAt=${new Date(selection.retryAt).toISOString()}` : "";
   return ` [${PROVIDER_ACCOUNT_CHOICE_REQUIRED} refusal=${String(selection.refusal)} actions=${actions}${retryAt}] ` +
     "choose_account: read get_provider_account_selection (wollipog session accounts) and pass an accountRef whose canName is true " +
-    "as create_session providerAccountId (wollipog session create --provider-account), or create_run providerAccountIds.";
+    "as create_session providerAccountId (wollipog session create --provider-account).";
 }
 
 /** A control plane below v337 can't read an account reference. Sending one would be refused as an
  * unknown account at best, so say what actually stands in the way. */
-async function providerAccountChoiceCompatibilityError(deps: McpDeps, capability: "providerAccountAgentChoice" | "memberProviderAccountChoice" = "providerAccountAgentChoice"): Promise<ToolResult | null> {
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL[capability];
+async function providerAccountChoiceCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccountAgentChoice;
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
@@ -910,8 +910,7 @@ async function publishedSpawnApprovalAbandonmentMs(deps: McpDeps): Promise<numbe
   return Number.isSafeInteger(value) && value >= 1_000 ? value : null;
 }
 
-/** Keep the exact invocation alive while its CP-owned child approval is pending, including
- * run fan-out. Each identical retry refreshes the durable approval's abandonment fence. Polling
+/** Keep the exact invocation alive while its CP-owned child approval is pending. Each identical retry refreshes the durable approval's abandonment fence. Polling
  * stops after SPAWN_APPROVAL_POLL_WINDOW_MS so the call returns before the harness times it out; the
  * result tells the agent to repeat the request and quotes the fence the control plane publishes,
  * falling back to POLICY_HOOK_ABANDONMENT_MS for a control plane that predates the longer spawn
@@ -1027,7 +1026,6 @@ function mapSession(s: Json): Json {
     runnerId: s?.runnerId,
     workspaceId: s?.workspaceId ?? null,
     agentId: s?.agentId ?? null,
-    runId: s?.runId ?? null,
     parentSessionId: s?.parentSessionId ?? null,
     maxChildSessions: s?.maxChildSessions ?? null,
     liveChildCapacity: s?.liveChildCapacity ?? null,
@@ -3407,25 +3405,6 @@ export const TOOLS: McpTool[] = [
     },
   },
   {
-    name: "list_runs",
-    description: "List multi-agent runs and their member session ids.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    handler: async (_args, deps) => {
-      const r = await cpFetch(deps, "GET", "/api/runs");
-      if (!r.ok) return errorResult(r.message);
-      const runs = capArray(r.data?.runs).map((run) => ({
-        id: run?.id,
-        title: run?.title,
-        prompt: truncate(String(run?.prompt ?? ""), MAX_LINE),
-        workspaceId: run?.workspaceId ?? null,
-        sessionIds: capArray(run?.sessionIds),
-        createdAt: run?.createdAt,
-        updatedAt: run?.updatedAt,
-      }));
-      return textResult({ runs });
-    },
-  },
-  {
     name: "list_governance_policies",
     description: "List stored and built-in governance policies with their exact scopes and conditions.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
@@ -4091,58 +4070,6 @@ export const TOOLS: McpTool[] = [
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/config`, body);
       if (!r.ok) return errorResult(r.message);
       return textResult({ session: mapSession(r.data) });
-    },
-  },
-  {
-    name: "create_run",
-    description:
-      "Start a multi-agent run: the same task fanned out to several agents in isolated worktrees. A pending human approval returns after about 45 seconds, stating how long the control plane keeps it pending between calls; repeat the identical call promptly, without ending your turn, to keep waiting. Subject to session permissions and governance policies.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        runnerId: { type: "string" },
-        workspaceId: { type: "string" },
-        agentIds: { type: "array", items: { type: "string" }, minItems: 1 },
-        task: { type: "string" },
-        title: { type: "string" },
-        costBudgetUsd: { type: "number" },
-        maxToolCalls: { type: "number" },
-        providerAccountIds: { type: "object", additionalProperties: { type: "string" }, description: "An accountRef from get_provider_account_selection whose canName is true, by agent id. Overrides the Machine's account policy for that member; omit a member to let the policy choose" },
-      },
-      required: ["runnerId", "workspaceId", "agentIds", "task"],
-      additionalProperties: false,
-    },
-    handler: async (args, deps) => {
-      if (
-        typeof args?.runnerId !== "string" ||
-        typeof args?.workspaceId !== "string" ||
-        !Array.isArray(args?.agentIds) ||
-        args.agentIds.length === 0 ||
-        typeof args?.task !== "string" ||
-        !args.task.trim()
-      ) {
-        return errorResult("runnerId, workspaceId, agentIds (non-empty), and task are required");
-      }
-      const body: Json = {
-        runnerId: args.runnerId,
-        workspaceId: args.workspaceId,
-        agentIds: args.agentIds,
-        task: args.task,
-      };
-      if (typeof args.title === "string") body.title = args.title;
-      if (typeof args.costBudgetUsd === "number") body.costBudgetUsd = args.costBudgetUsd;
-      if (typeof args.maxToolCalls === "number") body.maxToolCalls = args.maxToolCalls;
-      if (args.providerAccountIds !== undefined) {
-        const compatibilityError = await providerAccountChoiceCompatibilityError(deps, "memberProviderAccountChoice");
-        if (compatibilityError) return compatibilityError;
-        body.providerAccountIds = args.providerAccountIds;
-      }
-      const r = await createWithSpawnApproval(deps, "the same create_run call", "/api/runs", body);
-      if (!r.ok) return errorResult(r.message);
-      return textResult({
-        run: { id: r.data?.run?.id, title: r.data?.run?.title, sessionIds: capArray(r.data?.run?.sessionIds) },
-        sessions: capArray(r.data?.sessions).map(mapSession),
-      });
     },
   },
 ];

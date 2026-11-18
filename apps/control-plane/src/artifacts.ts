@@ -58,11 +58,11 @@ export function screenshotBytesMatchMime(mimeType: string, bytes: Buffer): boole
 export function validateArtifact(input: unknown): ArtifactValidation {
   if (!input || typeof input !== "object" || Array.isArray(input)) return { ok: false, error: "artifact must be an object" };
   const raw = input as Record<string, unknown>;
-  const allowed = new Set(["runId", "sessionId", "kind", "name", "mimeType", "encoding", "data", "metadata"]);
+  const allowed = new Set(["sessionId", "kind", "name", "mimeType", "encoding", "data", "metadata"]);
   if (Object.keys(raw).some((key) => !allowed.has(key))) return { ok: false, error: "artifact contains unsupported fields" };
-  const boundedId = (value: unknown) => value === undefined || (typeof value === "string" && value.length > 0 && value.length <= 256);
-  if (!boundedId(raw.runId) || !boundedId(raw.sessionId) || (!raw.runId && !raw.sessionId)) {
-    return { ok: false, error: "artifact requires a bounded runId or sessionId" };
+  const boundedId = (value: unknown) => typeof value === "string" && value.length > 0 && value.length <= 256;
+  if (!boundedId(raw.sessionId)) {
+    return { ok: false, error: "artifact requires a bounded sessionId" };
   }
   if (typeof raw.kind !== "string" || !(raw.kind in KIND_CONTRACT)) return { ok: false, error: "unsupported artifact kind" };
   const contract = KIND_CONTRACT[raw.kind as ArtifactKind];
@@ -126,8 +126,7 @@ export function validateArtifact(input: unknown): ArtifactValidation {
   return {
     ok: true,
     value: {
-      ...(typeof raw.runId === "string" ? { runId: raw.runId } : {}),
-      ...(typeof raw.sessionId === "string" ? { sessionId: raw.sessionId } : {}),
+      sessionId: raw.sessionId as string,
       kind: raw.kind as ArtifactKind,
       name: raw.name.trim(),
       mimeType: raw.mimeType,

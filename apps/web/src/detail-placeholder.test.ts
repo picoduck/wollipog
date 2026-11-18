@@ -2,19 +2,18 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   detailPlaceholder,
-  listPlaceholder,
   routedSessionPlaceholder,
   shouldHydrateRoutedSession,
 } from "./detail-placeholder.js";
 
-const RESOURCES = ["Session", "Run"] as const;
+const RESOURCES = ["Session", "Automation"] as const;
 const CONNS = ["connecting", "online", "offline", "unauthorized"] as const;
 
 test("detail placeholders do not claim a resource is missing before authoritative data", () => {
   assert.deepEqual(detailPlaceholder("Session", { authoritative: false, conn: "connecting" }), {
     title: "Loading Session…", hint: null, variant: "loading", actions: [],
   });
-  assert.equal(detailPlaceholder("Run", { authoritative: false, conn: "offline" }).title, "Waiting to Reconnect");
+  assert.equal(detailPlaceholder("Automation", { authoritative: false, conn: "offline" }).title, "Waiting to Reconnect");
 });
 
 test("every detail placeholder names a next step in the person's terms, never the control plane (#2202)", () => {
@@ -61,17 +60,6 @@ test("every detail placeholder names a next step in the person's terms, never th
       }
     }
   }
-});
-
-test("list placeholders name the loading, offline and unpaired states without Wollipog's internals", () => {
-  assert.deepEqual(listPlaceholder("runs", "connecting"), {
-    title: "Loading Multi-Agent Runs…", hint: null, variant: "loading",
-  });
-  assert.deepEqual(listPlaceholder("runs", "unauthorized"), {
-    title: "Pair to Load Multi-Agent Runs",
-    hint: "This device needs to be paired before it can load multi-agent runs.",
-    variant: "offline",
-  });
 });
 
 test("only an authoritative miss renders Not Found and transport errors stay distinct", () => {

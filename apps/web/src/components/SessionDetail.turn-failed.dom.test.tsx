@@ -90,7 +90,7 @@ async function withFailedTurn(
   const id = `turn-failed-${sequence}`;
   const session = {
     id, runnerId: runner.runnerId, workspaceId: null, workspaceName: "wollipog", projectId: null,
-    agentId: "claude", agentName: "Claude Code", title: "Failed Turn", status, column: "review", runId: null,
+    agentId: "claude", agentName: "Claude Code", title: "Failed Turn", status, column: "review",
     useWorktree: false, worktreePath: null, archived: false, createdAt: 1, updatedAt: 1, lastEventAt: null,
     messageCount: 2, eventEpoch: 0, preview: null, pendingApproval: null, driver: "claude-code", model: null,
     effort: null, permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,
@@ -146,7 +146,7 @@ async function withFailedTurn(
     await act(async () => socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [{ ...runner, status: runnerStatus, protocolVersion: runnerProtocolVersion }], boxes: [], projects: [], sessions: [session], runs: [],
+      runners: [{ ...runner, status: runnerStatus, protocolVersion: runnerProtocolVersion }], boxes: [], projects: [], sessions: [session]
     }));
     await flush();
     const resolve = tail.shift();

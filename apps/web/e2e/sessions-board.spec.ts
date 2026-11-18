@@ -21,6 +21,19 @@ async function openHarness(page: Page, path = "/") {
   await expect(page.locator(SESSIONS_HEADER)).toBeVisible();
 }
 
+test("the empty phone Board keeps the page gutter and offers New Session", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  await page.goto(`${PAGE}?full-shell&empty&path=/board`);
+  const board = page.locator(".board-wrap");
+  const title = board.getByText("No Sessions Yet", { exact: true });
+  const action = board.getByRole("button", { name: "New Session", exact: true });
+  await expect(title).toBeVisible();
+  await expect(board.getByText("Click “New Session” to start an agent.", { exact: true })).toBeVisible();
+  await expect(action).toBeVisible();
+  expect((await title.boundingBox())!.x).toBeGreaterThanOrEqual(16);
+  expect((await action.boundingBox())!.x).toBeGreaterThanOrEqual(16);
+});
+
 /** Switches List / Board: the header's view switch, or on a phone the app bar's ⋯ (#2211). */
 async function chooseView(page: Page, view: "List" | "Board") {
   const bar = page.locator(".sessions-app-bar");

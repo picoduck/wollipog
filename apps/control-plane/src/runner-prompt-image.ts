@@ -8,7 +8,7 @@ export type RunnerPromptImageResult =
 export function runnerPromptImage(
   db: Pick<ControlPlaneDb,
     "verifyActiveRunnerCredential" | "getSession" | "artifactExportPreflight" |
-    "readArtifactBytes" | "sessionForkIncludesAncestor">,
+    "readArtifactBytes" | "sessionForkIncludesAncestor" | "sessionEventReferencesArtifact">,
   runnerId: string,
   sessionId: string,
   artifactId: string,
@@ -28,7 +28,7 @@ export function runnerPromptImage(
   const artifact = preflight?.artifact;
   const authorized = artifact?.sessionId === sessionId ||
     Boolean(artifact?.sessionId && db.sessionForkIncludesAncestor(sessionId, artifact.sessionId)) ||
-    Boolean(session.runId && artifact?.runId === session.runId);
+    db.sessionEventReferencesArtifact(sessionId, artifactId);
   if (!artifact || artifact.kind !== "screenshot" || artifact.encoding !== "base64" || !authorized) {
     return { ok: false, status: 404, error: "artifact not found" };
   }

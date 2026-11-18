@@ -23,7 +23,6 @@ const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.m
  */
 const HOST_PICKERS: ReadonlyArray<[string, string]> = [
   ["./components/NewSessionDialog.tsx", "New Session"],
-  ["./components/NewRunDialog.tsx", "New Multi-Agent Run"],
   ["./components/AutomationEditor.tsx", "Automations"],
 ];
 
@@ -133,7 +132,6 @@ test("signed-trigger instructions publish only the Wollipog wire generation", ()
 test("machine selectors render disambiguated Machine labels", () => {
   for (const path of [
     "./components/NewSessionDialog.tsx",
-    "./components/NewRunDialog.tsx",
     "./components/AutomationEditor.tsx",
     // Both of these rendered a bare runnerDisplay().name. The Board filter silently hides the
     // sessions you wanted; the Location dialog creates the (Machine, Workspace) pair against the

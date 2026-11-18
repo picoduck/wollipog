@@ -65,7 +65,6 @@ const snapshot: UiSnapshotMessage = {
   runners: [],
   boxes: [],
   sessions: [],
-  runs: [],
 };
 
 function subscription(id: string, overrides: Partial<OutboundEventSubscriptionView> = {}): OutboundEventSubscriptionView {

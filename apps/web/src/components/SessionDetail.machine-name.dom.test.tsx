@@ -65,7 +65,7 @@ const project = {
 const session = {
   id: "machine-name", runnerId: RUNNER_ID, workspaceId: null, workspaceName: null, projectId: project.id,
   projectName: project.name, agentId: "gemini", agentName: "Gemini CLI", title: "Machine Name", status: "idle",
-  column: "review", runId: null, useWorktree: false, worktreePath: null, worktrees: [],
+  column: "review", useWorktree: false, worktreePath: null, worktrees: [],
   backgroundWorkTracking: "untracked", archived: false, createdAt: 1, updatedAt: 1,
   lastEventAt: null, messageCount: 0, eventEpoch: 0, preview: null, pendingApproval: null,
   driver: "acp", model: null, effort: null, permissionMode: null,
@@ -146,7 +146,7 @@ async function observe(runner: RunnerView, boxes: BoxView[]): Promise<Observed> 
     await act(async () => socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [runner], boxes, projects: [project], sessions: [session], runs: [],
+      runners: [runner], boxes, projects: [project], sessions: [session]
     } as ControlPlaneToUi));
     await settle();
     await settle();

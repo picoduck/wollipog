@@ -71,7 +71,7 @@ const project = {
 const session = {
   id: "facts", runnerId: runner.runnerId, workspaceId: null, workspaceName: null, projectId: project.id,
   projectName: project.name, agentId: "codex", agentName: "Codex", title: TITLE, status: "idle", column: "review",
-  runId: null, useWorktree: true, worktreePath: "/worktrees/facts",
+  useWorktree: true, worktreePath: "/worktrees/facts",
   worktrees: [{
     id: "wt-facts", path: "/worktrees/facts", branch: BRANCH, baseRef: "origin/main", source: "created",
     pullRequest: { url: PR_URL, state: "open", kind: "pull_request" },
@@ -152,7 +152,7 @@ async function withSession(
     await act(async () => socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [{ ...runner, ...options.runner }], boxes: [], projects: [project], sessions: [{ ...session, ...options.session }], runs: [],
+      runners: [{ ...runner, ...options.runner }], boxes: [], projects: [project], sessions: [{ ...session, ...options.session }]
     } as ControlPlaneToUi));
     await settle();
     await settle();

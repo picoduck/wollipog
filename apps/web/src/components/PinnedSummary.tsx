@@ -1,14 +1,13 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { isPolicyApproval, isTerminal, mergeQueueStatus, normalizeSourcePath, sessionRole, type GitChecksSummary, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { useLiveSession, useStoreActions, useStoreSelector } from "../store.js";
+import { useLiveSession, useStoreSelector } from "../store.js";
 import { deriveSidePaneContent, type TimelineItem } from "../timeline.js";
 import {
   COMMIT_ACTION_LABELS,
   deriveChanges,
   deriveCommitAction,
   deriveHost,
-  deriveSubagents,
   fixChecksPrompt,
   forgeStateLabel,
   legacyLocalGitFacts,
@@ -52,7 +51,6 @@ import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
 import { childSessionRequestsNote, workflowDecisionsNote } from "./OrchestratorControlsDialog.js";
 
-const BUSY = ["queued", "starting", "running", "input_required"];
 
 /** gh and glab report OPEN, OPENED, MERGED and CLOSED; a pull request's state is a fact (§11.2). */
 function requestNoun(kind: string | undefined): string {
@@ -93,11 +91,8 @@ export function PinnedSummary({
    * dismissible session notice states, kept here after it is dismissed. */
   skillsUnavailableReason?: string | null;
 }) {
-  const { navigate } = useStoreActions();
   const runners = useStoreSelector((s) => s.runners);
   const boxes = useStoreSelector((s) => s.boxes);
-  const runs = useStoreSelector((s) => s.runs);
-  const sessions = useStoreSelector((s) => s.sessions);
   const runner = runners.get(session.runnerId);
   const runnerOnline = runner?.status === "online";
   const pickerCaps = resolveCaps(runner, session);
@@ -124,7 +119,6 @@ export function PinnedSummary({
   const reviewable = !!session.worktreePath;
   const changes = deriveChanges(displayedFacts, git.status?.files.length);
   const commitAction = deriveCommitAction(reviewable ? displayedFacts : null);
-  const subagents = deriveSubagents(session, runs, sessions);
   const forgeFactsVisible = !richGitSupported || gitPresentation.state !== "not_repository";
   const { forge, remoteUrl, pr, checks } = visibleForgeFacts(
     summary,
@@ -351,7 +345,7 @@ export function PinnedSummary({
         )}
       </GitPinnedSection>
 
-      {(pane.plan.length > 0 || pane.artifacts.length > 0 || pane.tools.length > 0 || subagents.length > 0) && (
+      {(pane.plan.length > 0 || pane.artifacts.length > 0 || pane.tools.length > 0) && (
         <SummarySection title="Activity">
           {pane.plan.length > 0 && (
             <SummaryDisclosure label="Plan" count={pane.plan.length}>
@@ -392,26 +386,6 @@ export function PinnedSummary({
                 {pane.tools.map((tool, i) => (
                   <li key={i} className={tool.status === "failed" ? "ps-item is-failed" : "ps-item"} title={`${tool.title} · ${tool.status}`}>
                     <span className="ps-item-name">{tool.title}</span>
-                  </li>
-                ))}
-              </ul>
-            </SummaryDisclosure>
-          )}
-          {subagents.length > 0 && (
-            <SummaryDisclosure label="Subagents" count={subagents.length}>
-              <ul className="ps-items">
-                {subagents.map((subagent) => (
-                  <li key={subagent.id}>
-                    <button
-                      type="button"
-                      className="ps-item is-link"
-                      onClick={() => navigate({ name: "session", id: subagent.id })}
-                      title={subagent.preview ?? subagent.title}
-                    >
-                      <AgentIcon driver={subagent.driver} agentName={subagent.agentName} size={14} />
-                      <span className="ps-item-name">{subagent.title}</span>
-                      {BUSY.includes(subagent.status) && <span className={`sdot sdot-${subagent.status}`} />}
-                    </button>
                   </li>
                 ))}
               </ul>

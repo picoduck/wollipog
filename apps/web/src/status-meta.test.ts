@@ -161,11 +161,6 @@ const TABLE: readonly Row[] = [
   // Provider account
   // Member
   // Workflow run step (#2977)
-  // Multi-Agent Run row (#2974)
-  ["run", "awaiting_decision", "Awaiting Decision", "warning"],
-  ["run", "approval_required", "Approval Required", "warning"],
-  ["run", "running", "Running", "info"],
-  ["run", "failed", "Failed", "danger"],
   ["member", "active", "Active", "success"],
   ["member", "suspended", "Suspended", "neutral"],
   ["provider_account", "signed_in", "Signed In", "success"],
@@ -226,7 +221,6 @@ test("only actively progressing work pulses, and an unverified source draws a ho
   // A Stop waiting on an offline runner is not being delivered, so it does not claim progress (#208).
   assert.equal(statusMeta("session", "stop_waiting_for_runner").pulse, false);
   assert.equal(statusMeta("job", "running").pulse, true);
-  assert.deepEqual(pulsing("run"), ["running"]);
   assert.deepEqual(pulsing("queuedMessage"), ["sent", "started", "steering"]);
   // Sending is a spinner beside the word, never a pulsing badge (#2171).
   assert.deepEqual(pulsing("messageReceipt"), []);
@@ -249,7 +243,7 @@ test("an unknown value reads Status Unavailable, never its raw enum or a prototy
 
 test("every label is Title Case copy, with no glyph and no CSS transform needed", () => {
   for (const domain of ["attention", "session", "machine", "project_location", "skill", "automation", "automation_run", "automation_step", "subscription", "outbound_delivery", "tool", "family",
-    "job", "jobGroup", "background_work", "queuedMessage", "messageReceipt", "delivery", "notification", "workflow", "run", "member", "provider_account",
+    "job", "jobGroup", "background_work", "queuedMessage", "messageReceipt", "delivery", "notification", "workflow", "member", "provider_account",
     "shell", "share", "usage", "usageBudget", "agent"] as const) {
     for (const value of statusValues(domain)) {
       const { label } = statusMeta(domain, value);

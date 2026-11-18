@@ -32,7 +32,6 @@ import type {
   CreateAutomationRequest,
   CreateAutomationTriggerRequest,
   CreateOutboundEventSubscriptionRequest,
-  CreateRunRequest,
   CreateSessionRequest,
   CreateWorkspaceReferenceRequest,
   AddProjectLocationRequest,
@@ -75,7 +74,6 @@ import type {
   ProviderHomeLeaseInspection,
   QueuedPromptDraft,
   InvokeSessionCommandRequest,
-  RunView,
   ReviewFindingsResponse,
   ReviewSessionsPage,
   RunnerCredentialSecret,
@@ -1381,12 +1379,6 @@ export function createApiClient(transport: ApiTransport) {
   // Re-import an adopted session: re-parse its original CLI transcript with the current parser.
   reprocessSession: (id: string) =>
     req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/reprocess`, { method: "POST" }),
-
-  createRun: (body: CreateRunRequest) =>
-    req<{ run: RunView; sessions: SessionView[] }>("/api/runs", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
 
   artifactExport: (artifactId: string) => artifactExport(transport, artifactId),
 

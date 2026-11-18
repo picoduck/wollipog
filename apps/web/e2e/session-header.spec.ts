@@ -1263,34 +1263,3 @@ test("legacy unfiled sessions use the Workspace vocabulary in More Actions", asy
 
 // Back named for the destination, the entity title as the page's only h1, one status badge after
 // it, and destructive actions only in ⋯.
-test("shared Run headers retain their desktop geometry in the stacked Session range", async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto("/command-inbox-projects-e2e.html?view=run");
-  const run = page.locator(".run-detail");
-  await expect(run.getByRole("heading", { level: 1, name: "Final QA Run" })).toBeVisible();
-  await expect(page.locator("h1")).toHaveCount(1);
-  await expect(run.getByRole("button", { name: "Back to Multi-Agent Runs", exact: true })).toBeVisible();
-
-  const bar = run.locator(".detail-bar");
-  const measure = () => bar.evaluate((element) => {
-    const back = element.querySelector(".detail-bar-back")!.getBoundingClientRect();
-    return {
-      display: getComputedStyle(element).display,
-      height: element.getBoundingClientRect().height,
-      backWidth: back.width,
-      backHeight: back.height,
-    };
-  });
-  const desktop = await measure();
-  expect(desktop.display).toBe("flex");
-  expect(desktop.height).toBe(48);
-  expect(desktop.backWidth).toBe(32);
-  expect(desktop.backHeight).toBe(32);
-
-  await page.setViewportSize({ width: 700, height: 800 });
-  const stackedRange = await measure();
-  expect(stackedRange.display).toBe("flex");
-  expect(stackedRange.height).toBe(48);
-  expect(Math.abs(stackedRange.backWidth - desktop.backWidth)).toBeLessThanOrEqual(1);
-  expect(Math.abs(stackedRange.backHeight - desktop.backHeight)).toBeLessThanOrEqual(1);
-});

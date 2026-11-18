@@ -100,7 +100,7 @@ async function profileActions(viewer: IdentityAdministrationView): Promise<strin
     socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [runner], boxes: [], projects: [], sessions: [], runs: [],
+      runners: [runner], boxes: [], projects: [], sessions: []
     });
   });
   await act(async () => { for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setTimeout(resolve, 0)); });

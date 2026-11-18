@@ -26,7 +26,6 @@ import {
   type ProviderLoginView,
   type ResourceOwner,
   type ResourceScope,
-  type RunView,
   type RunnerView,
   type SessionConfig,
   type SessionProviderAccountOption,
@@ -63,7 +62,6 @@ import { CommandLineIcon, InfoIcon, PanelRightIcon } from "../components/Icons.j
 import { InboxView } from "../components/InboxView.js";
 import { NewSessionDialog, type NewSessionPreset } from "../components/NewSessionDialog.js";
 import { ProjectsView } from "../components/ProjectsView.js";
-import { RunDetail } from "../components/RunsView.js";
 import { SessionDetail } from "../components/SessionDetail.js";
 import { ShellDock } from "../components/ShellDock.js";
 import { SessionTerminalsProvider } from "../session-terminals.js";
@@ -283,7 +281,6 @@ function session(id: string, title: string, projectId: string | null, workspaceI
     title,
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,
@@ -331,6 +328,9 @@ function initialModel(): FixtureModel {
       session("session-no-project", "No Project Session", null, "loose-workspace"),
     ],
   };
+  if (SCENARIO === "former-comparison-member") {
+    initial.sessions[0]!.title = "Retry Audit";
+  }
   if (SCENARIO === "closure-reports") {
     initial.sessions = [session("session-alpha", "Review Campaign Delivery", "alpha", "alpha-workspace")];
     const now = Date.now();
@@ -1144,7 +1144,7 @@ const longGitBranch = "feature/session-alpha-with-a-deliberately-long-branch-nam
  * branch's work is all committed, and the counts agree with the empty list rather than reading
  * "2 of 0 files staged" (#2850).
  */
-const alphaDirty = (id: string) => id === "session-alpha" && (!REVIEW_READY || REVIEW_DIFF);
+const alphaDirty = (id: string) => SCENARIO !== "former-comparison-member" && id === "session-alpha" && (!REVIEW_READY || REVIEW_DIFF);
 const defaultGitStatus = (id: string): GitStatusInfo => ({
   branch: id === "session-no-project" ? "HEAD" : id === "session-alpha" ? longGitBranch : "main",
   files: id === "session-alpha" && REVIEW_DIFF ? DIFF_SECTIONS_STATUS_FILES : [],
@@ -1163,7 +1163,7 @@ const defaultGitStatus = (id: string): GitStatusInfo => ({
   modifiedCount: alphaDirty(id) ? 1 : 0,
   untrackedCount: alphaDirty(id) ? 1 : 0,
   conflictedCount: alphaDirty(id) ? 1 : 0,
-  operation: id === "session-alpha" ? "rebase" : null,
+  operation: id === "session-alpha" && SCENARIO !== "former-comparison-member" ? "rebase" : null,
   remoteRefsAt: Date.now() - 120_000,
   addedLines: alphaDirty(id) ? 9 : 0,
   deletedLines: alphaDirty(id) ? 3 : 0,
@@ -1617,34 +1617,13 @@ const formerPodMember: SessionView[] = FIXTURE_QUERY.get("pod") === "members" ? 
   worktreePath: "/worktrees/pod-worker",
 }] : [];
 
-const runStatusSession: SessionView[] = FIXTURE_QUERY.get("runStatus") === "running" ? [{
-  ...session("run-status-member", "Running Comparison Member", "alpha", "alpha-workspace"),
-  status: "running",
-}] : [];
-
-const activeRun: RunView = {
-  id: "run-active",
-  title: "Final QA Run",
-  prompt: "Verify the shared detail header remains unchanged.",
-  workspaceId: "alpha-workspace",
-  workspaceName: "Alpha",
-  createdAt: 1,
-  updatedAt: 1,
-  sessionIds: runStatusSession.map(({ id }) => id),
-};
-
-/**
- * `?runArtifacts=1`: the run's artifacts (#2855), saved by the Alpha session's agent and by
- * Wollipog, with real bytes that match their checksums, two pages of them. The Browser tool of any
- * session lists the same ones. Off by default, so the other cases see the run and sessions they
- * always have.
- */
-const RUN_ARTIFACTS = FIXTURE_QUERY.get("runArtifacts") === "1";
+/** Session attachments with real bytes and checksums, enabled by the artifact panel tests. */
+const SESSION_ARTIFACTS = FIXTURE_QUERY.get("sessionArtifactsFixture") === "1";
 /** `&artifactPreview=loading` never answers a preview; `mismatch` answers with bytes that fail their checksum. */
-const RUN_ARTIFACT_PREVIEW = FIXTURE_QUERY.get("artifactPreview");
-const runArtifactText = new TextEncoder();
+const SESSION_ARTIFACT_PREVIEW = FIXTURE_QUERY.get("artifactPreview");
+const sessionArtifactText = new TextEncoder();
 
-function runArtifactScreenshot(): Promise<Uint8Array> {
+function sessionArtifactScreenshot(): Promise<Uint8Array> {
   const canvas = document.createElement("canvas");
   canvas.width = 1200;
   canvas.height = 760;
@@ -1663,40 +1642,40 @@ function runArtifactScreenshot(): Promise<Uint8Array> {
   }, "image/png"));
 }
 
-const RUN_ARTIFACT_SOURCES: ReadonlyArray<{
+const SESSION_ARTIFACT_SOURCES: ReadonlyArray<{
   id: string; kind: ArtifactView["kind"]; name: string; mimeType: string; ageMinutes: number;
   author: ArtifactView["createdBy"]; body: () => Promise<Uint8Array>;
 }> = [
-  { id: "run-art-report", kind: "review_report", name: "Final QA report", mimeType: "text/markdown", ageMinutes: 6,
+  { id: "session-art-report", kind: "review_report", name: "Final QA report", mimeType: "text/markdown", ageMinutes: 6,
     author: { kind: "agent", id: "session-alpha" },
-    body: async () => runArtifactText.encode("# Final QA report\n\n## Summary\n\nAll 214 checks passed on the release candidate.\n\n- Checkout: passed\n- Settings: passed\n- Sign-in: passed after one retry\n") },
-  { id: "run-art-shot", kind: "screenshot", name: "Checkout at 1440px.png", mimeType: "image/png", ageMinutes: 9,
-    author: { kind: "agent", id: "session-alpha" }, body: runArtifactScreenshot },
-  { id: "run-art-log", kind: "test_log", name: "e2e shard 3 of 5.log", mimeType: "text/plain", ageMinutes: 14,
+    body: async () => sessionArtifactText.encode("# Final QA report\n\n## Summary\n\nAll 214 checks passed on the release candidate.\n\n- Checkout: passed\n- Settings: passed\n- Sign-in: passed after one retry\n") },
+  { id: "session-art-shot", kind: "screenshot", name: "Checkout at 1440px.png", mimeType: "image/png", ageMinutes: 9,
+    author: { kind: "agent", id: "session-alpha" }, body: sessionArtifactScreenshot },
+  { id: "session-art-log", kind: "test_log", name: "e2e shard 3 of 5.log", mimeType: "text/plain", ageMinutes: 14,
     author: { kind: "agent", id: "session-alpha" },
-    body: async () => runArtifactText.encode(Array.from({ length: 60 }, (_, index) => `12:04:${String(index).padStart(2, "0")} ✔ checkout.spec.ts › case ${index + 1} (${(index % 9) + 3}ms)`).join("\n")) },
-  { id: "run-art-html", kind: "html_preview", name: "Order summary preview for the redesigned checkout flow", mimeType: "text/html", ageMinutes: 20,
+    body: async () => sessionArtifactText.encode(Array.from({ length: 60 }, (_, index) => `12:04:${String(index).padStart(2, "0")} ✔ checkout.spec.ts › case ${index + 1} (${(index % 9) + 3}ms)`).join("\n")) },
+  { id: "session-art-html", kind: "html_preview", name: "Order summary preview for the redesigned checkout flow", mimeType: "text/html", ageMinutes: 20,
     author: { kind: "agent", id: "session-alpha" },
-    body: async () => runArtifactText.encode("<!doctype html><style>body{font:14px system-ui;margin:24px}h1{font-size:20px}</style><h1>Order Summary</h1><p>3 items · $42.00</p>") },
-  { id: "run-art-verdict", kind: "verdict", name: "Gate verdict", mimeType: "application/json", ageMinutes: 31,
+    body: async () => sessionArtifactText.encode("<!doctype html><style>body{font:14px system-ui;margin:24px}h1{font-size:20px}</style><h1>Order Summary</h1><p>3 items · $42.00</p>") },
+  { id: "session-art-verdict", kind: "verdict", name: "Gate verdict", mimeType: "application/json", ageMinutes: 31,
     author: { kind: "system", id: "control-plane" },
-    body: async () => runArtifactText.encode(JSON.stringify({ verdict: "pass", gate: "qa", blocking: 0, retried: ["sign-in"] })) },
+    body: async () => sessionArtifactText.encode(JSON.stringify({ verdict: "pass", gate: "qa", blocking: 0, retried: ["sign-in"] })) },
 ];
 
-let runArtifactsLoaded: Promise<Array<{ view: ArtifactView; bytes: Uint8Array }>> | null = null;
-function runArtifacts(): Promise<Array<{ view: ArtifactView; bytes: Uint8Array }>> {
-  runArtifactsLoaded ??= Promise.all(RUN_ARTIFACT_SOURCES.map(async (source) => {
+let sessionArtifactsFixtureLoaded: Promise<Array<{ view: ArtifactView; bytes: Uint8Array }>> | null = null;
+function sessionArtifactsFixture(): Promise<Array<{ view: ArtifactView; bytes: Uint8Array }>> {
+  sessionArtifactsFixtureLoaded ??= Promise.all(SESSION_ARTIFACT_SOURCES.map(async (source) => {
     const bytes = await source.body();
     const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
     const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
     const view: ArtifactView = {
-      artifactId: source.id, runId: activeRun.id, kind: source.kind, name: source.name, mimeType: source.mimeType,
+      artifactId: source.id, kind: source.kind, name: source.name, mimeType: source.mimeType,
       encoding: source.kind === "screenshot" ? "base64" : source.kind === "verdict" ? "json" : "utf8",
       sizeBytes: bytes.byteLength, sha256, createdBy: source.author, createdAt: Date.now() - source.ageMinutes * 60_000,
     };
     return { view, bytes };
   }));
-  return runArtifactsLoaded;
+  return sessionArtifactsFixtureLoaded;
 }
 
 /**
@@ -1743,9 +1722,8 @@ function snapshot(): UiSnapshotMessage {
       lastError: null, createdAt: 1,
     }] : [],
     ...(LEGACY_WORKSPACES || SHELL_PROJECTS_MODE === "unsupported" ? {} : { projects: structuredClone(model.projects) }),
-    sessions: structuredClone([...model.sessions.filter((candidate) => !candidate.archived), ...formerPodMember, ...runStatusSession]),
+    sessions: structuredClone([...model.sessions.filter((candidate) => !candidate.archived), ...formerPodMember]),
     ...(ROW_COLUMNS ? { reminders: [rowColumnsReminder()] } : {}),
-    runs: [structuredClone(activeRun)],
   };
 }
 
@@ -1845,8 +1823,6 @@ const connection: UiConnectionRuntime = {
 
 const navigation: ViewNavigation = {
   current: () => {
-    const fixtureView = new URLSearchParams(window.location.search).get("view");
-    if (fixtureView === "run") return { name: "run", id: activeRun.id };
     // `?fullShell=1&path=/skills` opens any destination in the real Shell.
     const fixturePath = new URLSearchParams(window.location.search).get("path");
     const view = (fixturePath ? viewFromPath(fixturePath) : null) ?? { name: "inbox" };
@@ -2637,16 +2613,16 @@ const client = {
     teams: structuredClone(identityTeams),
   }),
   artifactExport: async (artifactId: string) => {
-    const runArtifact = artifactId.startsWith("run-art-")
-      ? (await runArtifacts()).find((candidate) => candidate.view.artifactId === artifactId)
+    const sessionArtifact = artifactId.startsWith("session-art-")
+      ? (await sessionArtifactsFixture()).find((candidate) => candidate.view.artifactId === artifactId)
       : undefined;
-    if (runArtifact && RUN_ARTIFACT_PREVIEW === "loading") return new Promise<Blob>(() => undefined);
-    if (runArtifact) {
+    if (sessionArtifact && SESSION_ARTIFACT_PREVIEW === "loading") return new Promise<Blob>(() => undefined);
+    if (sessionArtifact) {
       // The same length and type, one byte different: only the checksum can tell.
-      const bytes = RUN_ARTIFACT_PREVIEW === "mismatch"
-        ? runArtifact.bytes.map((byte, index) => (index === 0 ? byte ^ 1 : byte))
-        : runArtifact.bytes;
-      return new Blob([bytes as BlobPart], { type: runArtifact.view.mimeType });
+      const bytes = SESSION_ARTIFACT_PREVIEW === "mismatch"
+        ? sessionArtifact.bytes.map((byte, index) => (index === 0 ? byte ^ 1 : byte))
+        : sessionArtifact.bytes;
+      return new Blob([bytes as BlobPart], { type: sessionArtifact.view.mimeType });
     }
     const encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
     const binary = atob(encoded);
@@ -2697,9 +2673,9 @@ const client = {
       status: "available" as const,
     },
   }),
-  ...(RUN_ARTIFACTS ? {
+  ...(SESSION_ARTIFACTS ? {
     sessionArtifacts: async (sessionId: string) => ({
-      artifacts: (await runArtifacts()).map((candidate) => ({ ...candidate.view, sessionId })),
+      artifacts: (await sessionArtifactsFixture()).map((candidate) => ({ ...candidate.view, sessionId })),
     }),
   } : {}),
   createSession: async (request: CreateSessionRequest) => {
@@ -4288,7 +4264,6 @@ function FixtureSurface() {
       </>
     );
   }
-  if (view.name === "run") return <RunDetail runId={view.id} />;
   if (view.name !== "inbox" && view.name !== "session") return <div>Fixture View: {view.name}</div>;
   return (
     <>

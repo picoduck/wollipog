@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { runnerPromptImage } from "./runner-prompt-image.js";
 
-function harness(scope: { sessionId?: string; runId?: string } = { sessionId: "s1" }, forkAncestor = false) {
+function harness(scope: { sessionId?: string } = { sessionId: "s1" }, forkAncestor = false, linked = false) {
   const bytes = Buffer.from("exact-image");
   let active = true;
   const db = {
     verifyActiveRunnerCredential: (runnerId: string, hash: string) => active && runnerId === "r1" && hash === "valid-hash",
-    getSession: (sessionId: string) => sessionId === "s1" ? { id: "s1", runnerId: "r1", runId: "run1" } : null,
+    getSession: (sessionId: string) => sessionId === "s1" ? { id: "s1", runnerId: "r1" } : null,
     sessionForkIncludesAncestor: (_target: string, source: string) => forkAncestor && source === scope.sessionId,
+    sessionEventReferencesArtifact: (session: string, id: string) => linked && session === "s1" && id === "art1",
     artifactExportPreflight: () => ({
       artifact: {
         artifactId: "art1", kind: "screenshot", encoding: "base64", mimeType: "image/png",
@@ -33,8 +34,8 @@ test("runner prompt-image read binds active credential, runner, and session", ()
   assert.equal(runnerPromptImage(db, "r1", "s1", "art1", "valid-hash").status, 401);
 });
 
-test("runner prompt-image read permits same-run workflow output but denies foreign scope", () => {
-  assert.equal(runnerPromptImage(harness({ runId: "run1", sessionId: "source" }).db, "r1", "s1", "art1", "valid-hash").ok, true);
-  assert.equal(runnerPromptImage(harness({ runId: "other", sessionId: "source" }).db, "r1", "s1", "art1", "valid-hash").status, 404);
+test("runner prompt-image read permits a persisted transcript link or fork ancestor and denies foreign scope", () => {
+  assert.equal(runnerPromptImage(harness({}, false, true).db, "r1", "s1", "art1", "valid-hash").ok, true);
+  assert.equal(runnerPromptImage(harness({ sessionId: "source" }).db, "r1", "s1", "art1", "valid-hash").status, 404);
   assert.equal(runnerPromptImage(harness({ sessionId: "source" }, true).db, "r1", "s1", "art1", "valid-hash").ok, true);
 });

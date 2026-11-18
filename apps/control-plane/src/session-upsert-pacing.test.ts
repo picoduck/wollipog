@@ -287,7 +287,7 @@ test("a dashboard not viewing a streaming session pays a bounded rate, not a per
 test("an upsert whose only change is a nested timestamp is a transition, not a streaming update", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 5_000 });
   const db = { listRunners: () => [], listSessions: () => [], listProjects: () => [], listBoxes: () => [],
-    listRuns: () => [], listSessionReminders: () => [], worktreeSetupNoticeDismissals: () => [],
+    listSessionReminders: () => [], worktreeSetupNoticeDismissals: () => [],
     getSession: () => null } as unknown as ControlPlaneDb;
   const hub = new Hub(db);
   const dashboard = new Dashboard();

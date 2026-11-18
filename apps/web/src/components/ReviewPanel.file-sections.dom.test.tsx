@@ -113,7 +113,7 @@ const status: GitStatusInfo = {
 const session = {
   id: "session-1", runnerId: "runner-1", workspaceId: null, workspaceName: null, projectId: null,
   agentId: "claude", agentName: "Claude", title: "File Sections Fixture", status: "idle", column: "review",
-  runId: null, useWorktree: true, worktreePath: "/repo/.agent-worktrees/session-1", archived: false,
+  useWorktree: true, worktreePath: "/repo/.agent-worktrees/session-1", archived: false,
   createdAt: 1, updatedAt: 1, lastEventAt: null, messageCount: 0, eventEpoch: 0, preview: null,
   pendingApproval: null, driver: "claude-code", model: null, effort: null, permissionMode: null,
   tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,

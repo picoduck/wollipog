@@ -139,7 +139,7 @@ const diffs: Record<GitDiffScope, GitDiffInfo> = {
 const session: SessionView = {
   id: "commit-bar", runnerId: "runner-1", workspaceId: "workspace-1", workspaceName: "Shop",
   projectId: null, agentId: "claude-native", agentName: "Claude", driver: "claude-code",
-  title: "Speed Up Checkout Totals", status: "idle", column: "review", runId: null,
+  title: "Speed Up Checkout Totals", status: "idle", column: "review",
   useWorktree: true, worktreePath: "/work/shop/.worktrees/commit-bar",
   archived: false, createdAt: NOW - 3_600_000, updatedAt: NOW, lastEventAt: NOW, messageCount: 4, eventEpoch: 1,
   preview: null, pendingApproval: null, model: null, effort: null, permissionMode: null,
@@ -208,7 +208,7 @@ class FixtureSocket implements UiSocket {
       this.onmessage?.({ data: JSON.stringify({
         type: "snapshot",
         capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false },
-        runners: [runner], boxes: [], projects: [], sessions: [session], runs: [],
+        runners: [runner], boxes: [], projects: [], sessions: [session],
       }) });
     }, 0);
   }

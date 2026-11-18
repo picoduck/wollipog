@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type {
-  CreateRunRequest,
   ProjectLocationView,
   ProjectView,
   RunnerView,
@@ -144,26 +143,6 @@ test("initial Project selection preserves real, explicit No Project, and absent 
   assert.equal(initialProjectSelectionForPreset(true, null, { projectId: null }), NO_PROJECT_SELECTION);
   assert.equal(initialProjectSelectionForPreset(true, null, undefined), "");
   assert.equal(initialProjectSelectionForPreset(false, selectedProject, { projectId: "project-1" }), "");
-});
-
-test("comparison run requests preserve exact Project placement", () => {
-  const selectedLocation = location("selected", { projectId: "project-1" });
-  const selectedProject = project("project-1", [selectedLocation]);
-  const placement = projectSessionPlacement(true, selectedProject, selectedLocation, {
-    runnerId: "wrong-runner",
-    workspaceId: "wrong-workspace",
-  });
-  const parallel: CreateRunRequest = {
-    ...placement,
-    agentIds: ["codex"],
-    task: "Compare implementations",
-  };
-  for (const request of [parallel]) {
-    assert.equal(request.runnerId, selectedLocation.runnerId);
-    assert.equal(request.workspaceId, selectedLocation.workspaceId);
-    assert.equal(request.projectId, selectedProject.id);
-    assert.equal(request.projectLocationId, selectedLocation.id);
-  }
 });
 
 test("a launchable default or sole Location is suggested without silently replacing an exact preset", () => {

@@ -564,19 +564,6 @@ export function runnerViewForAgent<T extends Pick<RunnerView, "agents">>(runner:
   return { ...narrowed, agents: runner.agents.map(({ defaultProviderAccountId: _default, providerAccountReadiness: _readiness, ...agent }) => agent) };
 }
 
-/** Shape-check the accounts a run or workflow names for its members, by the key each member has in that
- * request. A key that is no member is refused rather than dropped, so nobody believes a member got an
- * account it didn't. */
-export function memberProviderAccountsError(accounts: unknown, members: readonly string[], field: string): string | null {
-  if (accounts === undefined) return null;
-  if (typeof accounts !== "object" || accounts === null || Array.isArray(accounts)) return `${field} is invalid`;
-  for (const [member, account] of Object.entries(accounts)) {
-    if (!members.includes(member)) return `${field} names '${member}', which isn't a member of this launch`;
-    if (typeof account !== "string" || !(PROVIDER_ACCOUNT_ID.test(account) || isProviderAccountRef(account))) return `${field} is invalid`;
-  }
-  return null;
-}
-
 /** The structured form of a refusal: what an unattended caller can do next. */
 export function providerAccountChoiceRequired(result: ProviderAccountSelectionResult): ProviderAccountChoiceRequired {
   const refusal = result.refusal ?? "no_eligible_account";

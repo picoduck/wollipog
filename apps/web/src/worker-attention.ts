@@ -1,4 +1,4 @@
-import type { PendingApproval, RunView, SessionAttentionKind, SessionView } from "@wollipog/protocol";
+import type { PendingApproval, SessionAttentionKind } from "@wollipog/protocol";
 import { prioritizedPendingRequests } from "@wollipog/protocol";
 import { statusMeta, statusValues, type StatusMeta } from "./status-meta.js";
 import { requestAttentionKind } from "./worker-roster.js";
@@ -9,19 +9,13 @@ import { requestAttentionKind } from "./worker-roster.js";
  * Session Tools list's Agents badge counts the same kinds, so the two never disagree on a count.
  */
 export type AttentionAsker = {
-  /** The owning worker's id (a subagent's tool-call id, a member's row id), or null for the session's
-   * own requests. */
+  /** The owning worker's id (a subagent's tool-call id), or null for the session's own requests. */
   ownerId: string | null;
   /** The worker's name, when the panel can name it. */
   name?: string;
   kind: SessionAttentionKind;
-} & (
-  /** A request this session holds: its most urgent, in the request dock's priority order. */
-  | { request: PendingApproval; sessionId?: never; online?: never }
-  /** A run or workflow member session waiting on the person, answered in that session; `online`
-   * is whether its own machine is connected, so it can be opened to answer now. */
-  | { sessionId: string; online: boolean; request?: never }
-);
+  request: PendingApproval;
+};
 
 /**
  * The askers behind a session's pending requests, most urgent first: the first asker's request is
@@ -41,43 +35,6 @@ export function attentionAskers(
     askers.set(key, { ownerId, ...(name ? { name } : {}), kind: requestAttentionKind(request), request });
   }
   return [...askers.values()];
-}
-
-/** The member sessions a session's roster lists: its run's other sessions. */
-export function memberSessions(
-  session: Pick<SessionView, "id" | "runId">,
-  runs: ReadonlyMap<string, Pick<RunView, "sessionIds">>,
-  sessions: ReadonlyMap<string, SessionView>,
-  extraIds: Iterable<string> = [],
-): SessionView[] {
-  const run = session.runId ? runs.get(session.runId) : undefined;
-  const ids = new Set([...(run?.sessionIds ?? []), ...extraIds]);
-  ids.delete(session.id);
-  return [...ids].flatMap((id) => {
-    const member = sessions.get(id);
-    return member ? [member] : [];
-  });
-}
-
-const SETTLED: ReadonlySet<string> = new Set(["completed", "failed", "stopped"]);
-
-/**
- * Each member session waiting on the person, with what it waits for. Read from the member's own
- * requests, not from its row: a member whose machine went offline still waits (its row reads
- * Unverified), so it stays counted, with `online` false so nothing offers to open it (#2861).
- */
-export function memberAttentionAskers(
-  members: readonly SessionView[],
-  online: (runnerId: string) => boolean,
-  nameOf: (member: SessionView) => string = (member) => member.title,
-): AttentionAsker[] {
-  return members.flatMap((member): AttentionAsker[] => {
-    if (SETTLED.has(member.status)) return [];
-    const request = prioritizedPendingRequests(member.pendingApproval)[0];
-    if (!request && member.status !== "input_required") return [];
-    return [{ ownerId: `session:${member.id}`, name: nameOf(member), kind: request ? requestAttentionKind(request) : "input_required",
-      sessionId: member.id, online: online(member.runnerId) }];
-  });
 }
 
 const KIND_ORDER: readonly SessionAttentionKind[] = ["recovery_required", "authentication_required", "answer_required",

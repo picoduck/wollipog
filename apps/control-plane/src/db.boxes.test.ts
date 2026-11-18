@@ -325,7 +325,7 @@ test("deleteBox removes the box (and its runner row) and returns the runnerId", 
     runnerId: "box-runner-1", agentId: "codex-app-server", driver: "codex-app-server", model: "luna", effort: "low",
   }, 1);
   const res = db.deleteBox("box-1");
-  assert.deepEqual(res, { runnerId: "box-runner-1", sessionIds: [], runIds: [] });
+  assert.deepEqual(res, { runnerId: "box-runner-1", sessionIds: [] });
   assert.equal(db.getBox("box-1"), null);
   assert.equal(db.getSessionNamingHarnessTarget("org-delete-box"), null);
   assert.equal(db.getSessionNamingPreference("org-delete-box")?.mode, "prompt_text_only",
@@ -368,7 +368,7 @@ test("deleteRunner drops a stale runner + its sessions, returns null when alread
     id: "s2", runnerId: "stale-1", workspaceId: "w", agentId: "a", title: "t2",
     useWorktree: false, driver: "acp", config: {}, now: 1001,
   });
-  assert.deepEqual(db.deleteRunner("stale-1"), { sessionIds: ["s1", "s2"], runIds: [] });
+  assert.deepEqual(db.deleteRunner("stale-1"), { sessionIds: ["s1", "s2"] });
   assert.equal(db.getSession("s1"), null); // its sessions go with it
   assert.equal(db.getSessionNamingHarnessTarget("org-delete-runner"), null);
   assert.equal(db.getSessionNamingPreference("org-delete-runner")?.mode, "prompt_text_only",

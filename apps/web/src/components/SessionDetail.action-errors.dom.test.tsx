@@ -79,7 +79,7 @@ function sessionView(overrides: Partial<SessionView>): SessionView {
   return {
     id: `action-errors-${fixtureSequence}`, runnerId: runner.runnerId, workspaceId: null, workspaceName: null,
     projectId: null, agentId: "codex", agentName: "Codex", title: "Action Errors Fixture", status: "idle",
-    column: "review", runId: null, useWorktree: true, worktreePath: "/repos/demo/wt",
+    column: "review", useWorktree: true, worktreePath: "/repos/demo/wt",
     archived: false, createdAt: 1, updatedAt: 1, lastEventAt: null, messageCount: 0,
     eventEpoch: 0, preview: null, pendingApproval: null, driver: "codex-app-server",
     model: "gpt-5.6-sol", effort: "high", permissionMode: null, tokensIn: 0, tokensOut: 0,
@@ -193,7 +193,7 @@ async function mount(current: SessionView, { client: overrides = {}, events, exp
         ...agent, capabilities: current.agentCapabilities as RunnerView["agents"][number]["capabilities"],
       })) }
       : runner],
-    boxes: [], projects: [], sessions: [current], runs: [],
+    boxes: [], projects: [], sessions: [current]
   }));
   await flush();
   const slot = () => container.querySelector(".session-notice-slot") as HTMLElement | null;

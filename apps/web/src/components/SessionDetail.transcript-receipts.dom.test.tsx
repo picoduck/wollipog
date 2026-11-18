@@ -93,7 +93,6 @@ function session(id: string): SessionView {
     title: "Transcript Receipts Fixture",
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,
@@ -266,7 +265,6 @@ async function mountFixture(options: {
       boxes: [],
       projects: [],
       sessions: [currentSession],
-      runs: [],
     });
   });
   await flushAsyncWork();

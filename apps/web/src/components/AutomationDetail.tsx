@@ -193,7 +193,7 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
         error: error?.source === "poll" ? error.message : null,
       });
     return (
-      <div className="run-detail automation-detail" ref={pageRef}>
+      <div className="automation-detail" ref={pageRef}>
         <DetailBar title={viewTitle(pageView)} backLabel={backLabel("automations")} onBack={toList} />
         {placeholder.variant === "loading" ? (
           <div className="skeleton automation-glance-skeleton" role="status" aria-live="polite">
@@ -411,7 +411,7 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
     : policyCopy.offline(automation.runnerPolicy, machineLabel);
 
   return (
-    <div className="run-detail automation-detail" ref={pageRef}>
+    <div className="automation-detail" ref={pageRef}>
       <DetailBar
         title={viewTitle(pageView, automation.name)}
         backLabel={backLabel("automations")}

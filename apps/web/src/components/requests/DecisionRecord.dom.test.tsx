@@ -167,7 +167,7 @@ function parentSession(): SessionView {
   return {
     id: "parent-session-x7", runnerId: "runner-1", workspaceId: null, workspaceName: null, projectId: null,
     agentId: "codex", agentName: "Codex", title: "Release Orchestrator\nCoordinate the release.", status: "running",
-    column: "review", runId: null, useWorktree: false, worktreePath: null,
+    column: "review", useWorktree: false, worktreePath: null,
     archived: false, createdAt: 1, updatedAt: 1, lastEventAt: null, messageCount: 0,
     eventEpoch: 0, preview: null, pendingApproval: null, driver: "codex-app-server",
     model: null, effort: null, permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,
@@ -219,7 +219,7 @@ async function mount(
     rows,
     render,
     online: () => act(async () => {
-      sockets.at(-1)!.onmessage?.({ data: JSON.stringify({ type: "snapshot", runners: [], boxes: [], sessions: [parentSession()], runs: [] }) });
+      sockets.at(-1)!.onmessage?.({ data: JSON.stringify({ type: "snapshot", runners: [], boxes: [], sessions: [parentSession()] }) });
       await Promise.resolve();
     }),
     unmount: () => act(async () => { root.unmount(); container.remove(); }),

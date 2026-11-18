@@ -148,7 +148,6 @@ function snapshotOf(projects: ProjectView[], snapshot: Partial<UiSnapshotMessage
     runners: [runner],
     boxes: [],
     sessions: [],
-    runs: [],
     projects,
     ...snapshot,
   } as UiSnapshotMessage;

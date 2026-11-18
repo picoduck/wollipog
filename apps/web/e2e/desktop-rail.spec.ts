@@ -45,7 +45,7 @@ test.describe("at 1440×900 with a mouse", () => {
     expect(new Set(geometry.glyphs)).toEqual(new Set([20]));
     expect(geometry.first).toBe("Search");
     expect(geometry.separators).toEqual([
-      { width: 24, height: 1, next: "Multi-Agent Runs", gap: 13 },
+      { width: 24, height: 1, next: "Connections", gap: 13 },
       { width: 24, height: 1, next: "Archived Sessions", gap: 13 },
     ]);
     expect(geometry.settingsBottom, "Settings sits directly above the foot button").toBeLessThanOrEqual(4);
@@ -90,7 +90,7 @@ test.describe("at 1440×900 with a mouse", () => {
     await page.locator(".main").hover();
     await page.locator("#page-title").focus();
     await expect(tooltip(page)).toBeHidden();
-    await rail(page).getByRole("link", { name: "Multi-Agent Runs", exact: true }).click();
+    await rail(page).getByRole("link", { name: "Connections", exact: true }).click();
     await page.mouse.move(700, 450);
     await expect(tooltip(page)).toBeHidden();
   });
@@ -259,7 +259,7 @@ test.describe("the labelled rail at 1440×900 (#1968)", () => {
       clipped: element.scrollWidth > element.clientWidth,
     })));
     expect(labels.map((label) => label.name)).toEqual([
-      "Search", "Sessions", "Assistants", "Automations", "Projects", "Multi-Agent Runs", "Connections", "Agent Skills",
+      "Search", "Sessions", "Assistants", "Automations", "Projects", "Connections", "Agent Skills",
       "Archived Sessions", "Usage and Cost", "Settings",
     ]);
     expect(labels.filter((label) => label.clipped), "every shipped name fits").toEqual([]);
@@ -278,13 +278,13 @@ test.describe("the labelled rail at 1440×900 (#1968)", () => {
   test("a hover shows the digit at the trailing edge, not a tooltip, and the attention mark sits inline", async ({ page }) => {
     await openShell(page);
     await rail(page).getByRole("button", { name: "Expand Navigation", exact: true }).click();
-    const runs = rail(page).getByRole("link", { name: "Multi-Agent Runs", exact: true });
-    await expect(runs.locator(".rail-item-keys")).toBeHidden();
-    await runs.hover();
-    await expect(runs.locator(".rail-item-keys")).toHaveText("5");
+    const machines = rail(page).getByRole("link", { name: "Connections", exact: true });
+    await expect(machines.locator(".rail-item-keys")).toBeHidden();
+    await machines.hover();
+    await expect(machines.locator(".rail-item-keys")).toHaveText("5");
     await page.waitForTimeout(700);
     await expect(tooltip(page), "the labelled rail already shows the name").toBeHidden();
-    const hovered = await runs.evaluate((item) => {
+    const hovered = await machines.evaluate((item) => {
       const box = (selector: string) => item.querySelector(selector)!.getBoundingClientRect();
       const label = item.querySelector<HTMLElement>(".rail-item-label")!;
       return {
@@ -374,15 +374,15 @@ test.describe("on an 834px coarse-pointer tablet", () => {
       [...new Set(items.map((item) => `${item.getBoundingClientRect().width}x${item.getBoundingClientRect().height}`))]);
     expect(sizes).toEqual(["48x48"]);
 
-    const runs = rail(page).getByRole("link", { name: "Multi-Agent Runs", exact: true });
-    await runs.tap();
-    await expect(page.getByRole("heading", { level: 1, name: "Multi-Agent Runs" })).toBeVisible();
+    const machines = rail(page).getByRole("link", { name: "Connections", exact: true });
+    await machines.tap();
+    await expect(page.getByRole("heading", { level: 1, name: "Connections" })).toBeVisible();
     await page.waitForTimeout(700);
     await expect(tooltip(page)).toBeHidden();
     const automations = rail(page).getByRole("link", { name: "Automations", exact: true });
     await automations.tap();
     await expect(page.getByRole("heading", { level: 1, name: "Automations" })).toBeVisible();
-    // Multi-Agent Runs was tapped and left: its fill must be the rest fill, not the hover one.
-    expect(await runs.evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgba(0, 0, 0, 0)");
+    // Connections was tapped and left: its fill must be the rest fill, not the hover one.
+    expect(await machines.evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgba(0, 0, 0, 0)");
   });
 });

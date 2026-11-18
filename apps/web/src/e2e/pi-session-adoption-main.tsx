@@ -56,7 +56,7 @@ const client: ApiClient = {
     return {
       id: "s_adopted_pi", runnerId, workspaceId: null, workspaceName: null,
       agentId: "pi-native", agentName: "Pi", title: descriptor.title, status: "idle",
-      column: "queued", runId: null, useWorktree: false, worktreePath: null, archived: false,
+      column: "queued", useWorktree: false, worktreePath: null, archived: false,
       createdAt: descriptor.createdAt, updatedAt: descriptor.updatedAt, lastEventAt: descriptor.updatedAt,
       messageCount: descriptor.messageCount, preview: null, pendingApproval: null, driver: "pi",
       model: null, effort: null, permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0,

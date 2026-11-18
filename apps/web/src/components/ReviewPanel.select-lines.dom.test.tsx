@@ -166,7 +166,6 @@ const session: SessionView = {
   title: "Select Lines Fixture",
   status: "idle",
   column: "review",
-  runId: null,
   useWorktree: true,
   worktreePath: "/repo/.agent-worktrees/session-1",
   archived: false,

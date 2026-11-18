@@ -321,7 +321,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v337 (#4353): a control plane reads an agent's account reference and lists the accounts it may name. */
   providerAccountAgentChoice: 337,
   /** v338 (#4353): a run names an account per member. An older control plane ignores it on a run. */
-  memberProviderAccountChoice: 338,
+  // Capability floor 338 for per-run-member account choice is retired.
   providerLogin: 171,
   providerAccountRemoval: 188,
   accountScopedAgentSkills: 172,
@@ -8586,7 +8586,6 @@ export interface SessionView {
   /** Exact current admission boundary for a capacity-queued session. */
   capacityWait?: RunnerCapacityBlocker;
   column: BoardColumn;
-  runId: string | null;
   useWorktree: boolean;
   worktreePath: string | null;
   /** All runner-linked worktrees attributed to this session. `worktreePath` identifies the one
@@ -8995,21 +8994,6 @@ export interface WorktreeTeardownState {
   steps: WorktreeTeardownStepResult[];
 }
 
-/* ========================================================================== */
-/* Multi-agent runs                                                           */
-/* ========================================================================== */
-
-export interface RunView {
-  id: string;
-  title: string;
-  prompt: string;
-  workspaceId: string | null;
-  workspaceName: string | null;
-  createdAt: number;
-  updatedAt: number;
-  sessionIds: string[];
-}
-
 export type ArtifactKind = "html_preview" | "patch" | "review_report" | "screenshot" | "video" | "test_log" | "verdict";
 export const MAX_SESSION_VIDEO_BYTES = 32 * 1024 * 1024;
 export type ArtifactEncoding = "utf8" | "base64" | "json";
@@ -9017,7 +9001,6 @@ export type ArtifactMetadataValue = string | number | boolean | null;
 
 export interface ArtifactView {
   artifactId: string;
-  runId?: string;
   sessionId?: string;
   kind: ArtifactKind;
   name: string;
@@ -9040,8 +9023,7 @@ export interface ArtifactPage {
 }
 
 export interface CreateArtifactRequest {
-  runId?: string;
-  sessionId?: string;
+  sessionId: string;
   kind: ArtifactKind;
   name: string;
   mimeType: string;
@@ -12721,7 +12703,6 @@ export interface UiSnapshotMessage {
   reminders?: SessionReminderView[];
   /** Project ids whose one-time setup notice this user dismissed. */
   worktreeSetupNoticeDismissals?: string[];
-  runs: RunView[];
 }
 
 export interface UiSessionSnapshotPageMessage {
@@ -12838,16 +12819,6 @@ export interface UiShellRegistryReconciledMessage {
   sessionIds: string[];
 }
 
-export interface UiRunUpsertMessage {
-  type: "run_upsert";
-  run: RunView;
-}
-
-export interface UiRunRemovedMessage {
-  type: "run_removed";
-  runId: string;
-}
-
 /** Confirms that the server has atomically replaced this socket's high-volume stream selection.
  * The browser performs a cursor fetch after this ordered acknowledgement, closing the race between
  * navigation over the WebSocket and history hydration over a separate HTTP connection. */
@@ -12885,8 +12856,6 @@ export type ControlPlaneToUi =
   | UiShellOutputMessage
   | UiShellExitMessage
   | UiShellRegistryReconciledMessage
-  | UiRunUpsertMessage
-  | UiRunRemovedMessage
   | UiSessionSubscriptionsAppliedMessage
   | UiIdentityDirectoryChangedMessage
   | UiAssistantThreadUpsertMessage;
@@ -12964,26 +12933,6 @@ export interface CreateSessionRequest {
   /** Protocol v220: the creating Orchestrator's campaign work item. The control plane opens the
    * child's ledger attempt on it before the launch is sent, or creates nothing (#3106). */
   campaignWorkItemId?: string;
-}
-
-export interface CreateRunRequest {
-  runnerId: string;
-  workspaceId: string;
-  /** Exact durable Project assignment. Omit both fields for legacy exact-Location inference. */
-  projectId?: string | null;
-  projectLocationId?: string | null;
-  agentIds: string[];
-  task: string;
-  title?: string;
-  useWorktree?: boolean;
-  config?: SessionConfig;
-  /** Run-wide accumulated-cost ceiling (USD); absent ⇒ unlimited. Applied to each member. */
-  costBudgetUsd?: number;
-  /** Run-wide tool-call limit; absent ⇒ unlimited. Applied to each member. */
-  maxToolCalls?: number;
-  /** Protocol v338: the account a member uses instead of the Machine's policy, by agent id. A person
-   * names an account id; an agent names an opaque reference. Omitted members follow the policy. */
-  providerAccountIds?: Record<string, string>;
 }
 
 export interface PromptRequest {
@@ -13374,10 +13323,6 @@ export interface SessionHistoryPreview {
   hasMore: boolean;
 }
 
-export interface RunsResponse {
-  runs: RunView[];
-}
-
 export interface SessionResponse {
   session: SessionView;
 }
@@ -13394,11 +13339,6 @@ export interface SideChatResponse {
  */
 export interface CreateSideChatRequest {
   replaceEnded?: boolean;
-}
-
-export interface RunResponse {
-  run: RunView;
-  sessions: SessionView[];
 }
 
 /* ========================================================================== */

@@ -130,7 +130,6 @@ const snapshot: ControlPlaneToUi = {
       ...(new URLSearchParams(location.search).has("orphansOffline") ? { status: "offline" as const } : {}) }] : [])],
   boxes: [],
   sessions: [],
-  runs: [],
 };
 
 class FixtureSocket implements UiSocket {

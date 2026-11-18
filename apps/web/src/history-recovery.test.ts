@@ -977,7 +977,7 @@ test("reconnect tail replacement merges newer live rows and keeps omitted histor
   const store = new Store();
   store.dispatch({ type: "msg", msg: {
     type: "snapshot", capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [{ id: "s1", eventEpoch: 3 } as SessionView], runs: [],
+    runners: [], boxes: [], sessions: [{ id: "s1", eventEpoch: 3 } as SessionView]
   } });
   store.navigate({ name: "session", id: "s1" });
   const generation = store.getState().snapshotRevision;
@@ -1119,7 +1119,7 @@ for (const cachedRows of [[], [event(1)]]) for (const resumed of [false, true]) 
     const store = new Store();
     store.dispatch({ type: "msg", msg: {
       type: "snapshot", capabilities: { sessionSubscriptionsV2: true, boundedDelivery: true },
-      runners: [], boxes: [], sessions: [{ id: "s1", eventEpoch: 3 } as SessionView], runs: [],
+      runners: [], boxes: [], sessions: [{ id: "s1", eventEpoch: 3 } as SessionView]
     } });
     store.navigate({ name: "session", id: "s1" });
     const generation = store.getState().snapshotRevision;

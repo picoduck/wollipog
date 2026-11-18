@@ -83,7 +83,6 @@ function session(index: number): SessionView {
     title: SESSION_TITLES[index]!,
     status: index === 0 ? "running" : "idle",
     column: index === 0 ? "running" : "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,
@@ -155,7 +154,6 @@ function snapshot(): UiSnapshotMessage {
     projects: structuredClone(projects),
     sessions: structuredClone(sessions.filter(value => !value.archived)),
     reminders: [],
-    runs: [],
   };
 }
 

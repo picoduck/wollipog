@@ -44,7 +44,7 @@ const session: SessionView = {
   id: "files-panel-e2e", runnerId: "runner-1", workspaceId: "workspace-1",
   workspaceName: managedWorktree ? "acme-storefront" : "Wollipog",
   projectId: null, agentId: "claude", agentName: "Claude", title: "Browse the Worktree", status: "idle",
-  column: "review", runId: null, useWorktree: managedWorktree,
+  column: "review", useWorktree: managedWorktree,
   worktreePath: managedWorktree ? "/home/me/.wollipog/worktrees/acme-storefront-1f2e/s_8c41d2" : "/workspace/wollipog",
   archived: false, createdAt: 1, updatedAt: 1, lastEventAt: 1, messageCount: 1, eventEpoch: 0,
   preview: null, pendingApproval: null, driver: "claude-code", model: null, effort: null,
@@ -201,7 +201,7 @@ class FixtureSocket implements UiSocket {
             { id: "cursor", name: "Cursor", locations: { native: "column" } },
           ],
         }] : [],
-        boxes: [], projects: [], sessions: [], runs: [],
+        boxes: [], projects: [], sessions: [],
       };
       this.onmessage?.({ data: JSON.stringify(snapshot) });
     }, 0);

@@ -72,7 +72,7 @@ const delayed: BackgroundDeliveryView = {
 const session = (backgroundDeliveries: BackgroundDeliveryView[]) => ({
   id: "several-deliveries", runnerId: RUNNER_ID, workspaceId: null, workspaceName: null, projectId: project.id,
   projectName: project.name, agentId: "claude", agentName: "Claude Code", title: "Several Deliveries", status: "idle",
-  column: "review", runId: null, useWorktree: false, worktreePath: null, worktrees: [],
+  column: "review", useWorktree: false, worktreePath: null, worktrees: [],
   backgroundWorkTracking: "managed", backgroundDeliveries, archived: false, createdAt: 1, updatedAt: 1,
   lastEventAt: null, messageCount: 0, eventEpoch: 0, preview: null, pendingApproval: null,
   driver: "claude", model: null, effort: null, permissionMode: null,
@@ -151,7 +151,7 @@ async function observe(mode: SessionDetailMode, backgroundDeliveries: Background
     await act(async () => socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [runner], boxes: [], projects: [project], sessions: [session(backgroundDeliveries)], runs: [],
+      runners: [runner], boxes: [], projects: [project], sessions: [session(backgroundDeliveries)]
     } as ControlPlaneToUi));
     await settle();
     await settle();

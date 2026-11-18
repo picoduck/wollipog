@@ -23,7 +23,7 @@ const events = (id: string, first = 100, count = 101): SessionEvent[] =>
   }));
 function snapshot(store: Store, sessions: SessionView[], targeted = true) {
   store.dispatch({ type: "msg", msg: {
-    type: "snapshot", runners: [], boxes: [], sessions, runs: [],
+    type: "snapshot", runners: [], boxes: [], sessions,
     capabilities: { sessionSubscriptionsV2: targeted },
   } });
 }

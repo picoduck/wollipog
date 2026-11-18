@@ -11,7 +11,6 @@ import type {
   GitStatusInfo,
   GitSummaryInfo,
   RunnerView,
-  RunView,
   SessionView,
 } from "@wollipog/protocol";
 import { runnerDisplay } from "./runners.js";
@@ -382,21 +381,6 @@ export const COMMIT_ACTION_LABELS: Record<CommitAction, string> = {
   push: "Push",
   up_to_date: "Up to Date",
 };
-
-/** Sibling sessions of a multi-agent run — the Subagents section. */
-export function deriveSubagents(
-  session: SessionView,
-  runs: Map<string, RunView>,
-  sessions: Map<string, SessionView>,
-): SessionView[] {
-  if (!session.runId) return [];
-  const run = runs.get(session.runId);
-  if (!run) return [];
-  return run.sessionIds
-    .filter((id) => id !== session.id)
-    .map((id) => sessions.get(id))
-    .filter((s): s is SessionView => !!s);
-}
 
 /** Which forge the remote is: Git Details names it, and Review offers GitLab's own flow. GitHub
  * means the remote HOST is exactly github.com — `notgithub.com` / `mygithub.com` must not match. */

@@ -5,7 +5,6 @@ import {
   AboutPanel,
   AppearancePanel,
   BehaviorPanel,
-  ExperimentalPanel,
   NavigationRailPanel,
   NetworkPanel,
   NotificationsPanel,
@@ -34,7 +33,6 @@ import { ApiProvider } from "../api-context.js";
 import type { ApiTransport } from "../api-transport.js";
 import type { DecisionModelSettingsView, DecisionModelTestResult } from "@wollipog/protocol";
 import { aboutUpdateFixture, isAboutUpdateState } from "./about-update-fixtures.js";
-import { DEFAULT_EXPERIMENT_FLAGS } from "../experiments.js";
 import {
   COLOR_SCHEMES,
   DENSITY_OPTIONS,
@@ -625,7 +623,6 @@ function Harness() {
    */
   const [scheme, setScheme] = React.useState<ColorScheme>("wollipog");
   const [previewScheme, setPreviewScheme] = React.useState<ColorScheme | null>(null);
-  const [experimentFlags, setExperimentFlags] = React.useState(DEFAULT_EXPERIMENT_FLAGS);
   const [tailnetRetry, setTailnetRetry] = React.useState<TailnetRetryPhase>("failed");
   React.useEffect(() => {
     window.settleTailnetWrite = (saved) => setTailnetRetry(saved ? "saved" : "failed");
@@ -754,14 +751,6 @@ function Harness() {
                 <FeedbackProvider>
                   <ApiProvider client={harnessDefaultsApi}><ArchivedHistoryRetentionPanel /></ApiProvider>
                 </FeedbackProvider>
-              ),
-              // The production panel with injected state, like Notifications above. Storage is
-              // deliberately not touched.
-              experimental: (
-                <ExperimentalPanel
-                  flags={experimentFlags}
-                  onToggle={(id, enabled) => setExperimentFlags((current) => ({ ...current, [id]: enabled }))}
-                />
               ),
               about: <ApiProvider client={harnessDefaultsApi}><AboutPanel update={update} /></ApiProvider>,
             }}

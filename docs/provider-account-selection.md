@@ -45,10 +45,9 @@ expected to use and why, and marks it **Next Session**. **Add to Priority Order*
 Priority Order** are in the account's menu. An account that isn't ranked reads **Not Ranked**, and one
 that left the machine keeps its place until removed. Turning Priority Order on starts from the saved
 default, then the listed accounts this server may use; returning to Default Account restores the
-default. New Session and New Multi-Agent Run show the expected account and its reason. Choosing a
-different account in New Session overrides the policy for that session. When no account is eligible,
-New Session asks for one before it can start, and New Multi-Agent Run asks for each member that needs
-one, under either Run Type. A member whose account is fine stays with its expected account.
+default. New Session shows the expected account and its reason. Choosing a different account
+overrides the policy for that session. When no account is eligible, New Session asks you to choose
+one before it can start.
 
 ## Selection Policy
 
@@ -78,9 +77,7 @@ Missing or old usage readings don't disqualify an account: only a reading that s
 Selection never crosses providers.
 
 Explicit choices win. A session or child that names an account uses it, whatever the policy says or
-would skip. A run names one per member (`providerAccountIds` by agent id), and a member it doesn't name
-follows the policy. All of them resolve through one function (`launchProviderAccount`), and multi-agent
-runs bind the same account a session would, including a fixed default. Of automations,
+would skip. Session launches resolve through one function (`launchProviderAccount`). Of automations,
 only an Orchestrator session automation can name one; every other run resolves when it starts. The
 automation editor and an agent's Create Automation approval show that resolution from the preview below
 as an expectation, rechecked when each run starts, and a session automation with no eligible account still
@@ -148,10 +145,8 @@ of them. Unattended callers can act on this result; interactive ones offer the s
 
 `create_session` and `wollipog session create --provider-account` accept an optional account, and
 `get_provider_account_selection` and `wollipog session accounts` list what can be named. An agent's
-refusal text names this route. Both need protocol 337 on the control plane; the tools refuse before
-sending anything to an older one, so a choice is never silently dropped. `create_run`
-(`providerAccountIds`) does the same per member and needs protocol 338, for the same reason. A key that is no member is refused rather than ignored, and
-a refusal of a named account starts no member and names the member it was for.
+refusal text names this route. Both need protocol 337 on the control plane. To compare agents, call `create_session` for each
+child with the same prompt and its own optional account reference.
 
 Agents see accounts only as opaque `accountRef` values, stable for one account on one Machine, because
 an account's id contains its label. The server enforces this on the selection route and on a launch's
@@ -205,8 +200,7 @@ and reason codes instead. These are narrowed for it:
 | Every other JSON response to that credential | No `providerAccountId` or `providerAccountLabel` anywhere in it. |
 
 Every other JSON response covers what returns or embeds a session: launches, stop, restart,
-configuration and worktree commands, `POST /api/runs`, and the Orchestrator's
-campaign reads. It also covers a session's account-switch failure, provider-HOME refusal and wait, and
+configuration and worktree commands, and the Orchestrator's campaign reads. It also covers a session's account-switch failure, provider-HOME refusal and wait, and
 `provider_account_switched` events on `GET /api/sessions/:id/events`, which keep their other fields. A
 reference an agent sent stays as it is. Account ids and labels are removed in the response serializer for
 every agent principal (`withoutProviderAccountNames`). The session list's cached entry is narrowed before

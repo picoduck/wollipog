@@ -94,7 +94,6 @@ function sessionView(id: string): SessionView {
     title: "Composer Render Fixture",
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,
@@ -250,7 +249,6 @@ async function mount(client: Partial<ApiClient> = {}) {
     boxes: [],
     projects: [],
     sessions: [first, second],
-    runs: [],
   }));
   await settle();
   assert.equal(fixture.historyReady, true, "history recovery completes before render counting begins");

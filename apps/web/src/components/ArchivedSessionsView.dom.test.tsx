@@ -52,7 +52,6 @@ function session(index: number, overrides: Partial<SessionView> = {}): SessionVi
     title: `Archived Session ${index}`,
     status: index === 0 ? "input_required" : "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: true,
@@ -97,7 +96,7 @@ function snapshot(capabilities: UiSnapshotMessage["capabilities"] = {}): UiSnaps
       projects: true,
       ...capabilities,
     },
-    runners: [], boxes: [], projects: [], sessions: [], runs: [],
+    runners: [], boxes: [], projects: [], sessions: []
   };
 }
 

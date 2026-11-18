@@ -146,7 +146,6 @@ const session = {
   title: "Reading Column States",
   status,
   column: "review",
-  runId: null,
   useWorktree: false,
   worktreePath: null,
   archived: archivedState,
@@ -191,7 +190,6 @@ const snapshotMessage: ControlPlaneToUi = {
   boxes: [],
   projects: [project],
   sessions: [session],
-  runs: [],
 };
 
 class FixtureSocket implements UiSocket {

@@ -76,7 +76,7 @@ const runner = { runnerId: "runner-1", hostname: "host", os: "linux", version: "
 const emptySnapshot = {
   type: "snapshot",
   capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-  runners: [runner], boxes: [], projects: [], sessions: [] as SessionView[], runs: [],
+  runners: [runner], boxes: [], projects: [], sessions: [] as SessionView[]
 } as unknown as UiSnapshotMessage;
 
 function BoardHarness() {

@@ -335,45 +335,6 @@ test("budget authority accepts bounded contracts and rejects clearing, unknown a
     allowance({ acceptedFollowUps: -1 }), allowance({ costUsd: 5, checkpointsUsd: [4, 3] }), { ...allowance(), accounting: "external" }, { ...allowance(), unknown: true }]) assert.equal(validCampaignBudgetAuthority(value), false);
 });
 
-test("run fanout carries exactly its admitted limits; downgraded peers refuse all new admission",()=>{
-  const h=harness();
-  try {
-    assert.ok(h.enable(allowance({costUsd:100})).ok);
-    const result=h.svc.createRun({runnerId:"r",workspaceId:"w",agentIds:["claude"],task:"Implement #2936",config:{model:"claude-opus-5-5"}},{parentSessionId:"root"});
-    assert.ok(result.ok,result.error??"run admission failed");
-    const member=result.data!.sessions[0]!;
-    const start=h.sent.find((m)=>(m as any).type==="start_session") as any;
-    assert.equal(start.spec.config.costBudgetUsd,h.db.campaignBudgets.allocation(member.id)!.costUsd);
-    assert.equal(start.spec.config.maxToolCalls,h.db.campaignBudgets.allocation(member.id)!.toolCalls);
-    h.db.registerRunner(h.metadata,10,217);
-    assert.equal(h.svc.prompt("root","continue").ok,false);
-    assert.equal(h.svc.campaignBudgetWorkerPreflight("root",{kind:"managed",sessionId:member.id}).ok,false);
-    assert.equal(h.svc.allocateCampaignBudget("root",{sessionId:member.id,toolCalls:1}).ok,false);
-  } finally {h.db.close();}
-});
-
-test("a run on a runner without campaign budget admission is refused with the shared sentence and versions (#3457)",()=>{
-  const h=harness();
-  try {
-    assert.ok(h.enable(allowance({costUsd:100})).ok);
-    h.db.registerRunner({...h.metadata,runnerId:"older"},10,217);
-    // Same campaign Project, and a Location of its boundary (#4119), so the run reaches the worker
-    // gate rather than Location admission or placement.
-    const older=h.db.addProjectLocation(h.db.getSession("root")!.projectId!,{runnerId:"older",workspaceId:"w"});
-    const policy=h.db.getSession("root")!.orchestratorPolicy!;
-    if(policy.control?.mode!=="full_control") throw new Error("fixture control expected");
-    policy.control.boundary.repositories=[{repository:policy.control.boundary.repository,locationIds:[older.id]}];
-    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
-    const members=h.db.campaignBudgets.members("root").length;
-    const refused=h.svc.createRun({runnerId:"older",workspaceId:"w",agentIds:["claude"],task:"Implement #2936",config:{model:"claude-opus-5-5"}},{parentSessionId:"root"});
-    assert.equal(refused.status,409);
-    assert.equal(refused.error,"This machine needs a newer runner for campaign run workers. Update and restart the runner.");
-    assert.deepEqual(refused.capabilityRequirement,{requiredRunnerProtocolVersion:218,runnerProtocolVersion:217});
-    assert.equal(h.db.campaignBudgets.members("root").length,members,"a refused run leaves no reservation");
-    assert.equal(h.sent.some((m)=>(m as {type?:string}).type==="start_session"),false);
-  } finally {h.db.close();}
-});
-
 test("a campaign with limits on a downgraded runner refuses with the shared sentence and versions (#3803)",()=>{
   const h=harness();
   try {
@@ -383,9 +344,8 @@ test("a campaign with limits on a downgraded runner refuses with the shared sent
     const versions={requiredRunnerProtocolVersion:218,runnerProtocolVersion:217};
     const child=h.svc.createSession({runnerId:"r",workspaceId:"w",agentId:"claude",config:{model:"claude-opus-5-5"},prompt:"Implement authorized #2936"},
       undefined,undefined,false,false,false,{parentSessionId:"root"});
-    const run=h.svc.createRun({runnerId:"r",workspaceId:"w",agentIds:["claude"],task:"Implement #2936",config:{model:"claude-opus-5-5"}},{parentSessionId:"root"});
     const prompt=h.svc.prompt("root","continue");
-    for (const [label,refused] of [["child",child],["run",run],["prompt",prompt]] as const) {
+    for (const [label,refused] of [["child",child],["prompt",prompt]] as const) {
       assert.equal(refused.status,409,label);
       assert.equal(refused.error,error,label);
       assert.deepEqual(refused.capabilityRequirement,versions,label);
@@ -548,17 +508,6 @@ test("under Custom, a child's creation is bounded by the parent's current limit,
       prompt: "Implement #2936" }, undefined, undefined, false, false, false, { parentSessionId: "root" });
     assert.ok(child.ok, child.error ?? "child creation");
     assert.ok(child.data!.maxToolCalls != null && child.data!.maxToolCalls <= 5, `creation: ${child.data!.maxToolCalls}`);
-  } finally { h.db.close(); }
-});
-
-test("under Custom, a batch of children is bounded by the parent's current limit, not the revoked allowance's record (#2940)", () => {
-  const h = revokedAndLowered();
-  try {
-    const run = h.svc.createRun({ runnerId: "r", workspaceId: "w", agentIds: ["claude"], task: "Implement #2936",
-      config: { model: "claude-opus-5-5", maxToolCalls: 10 } }, { parentSessionId: "root" });
-    assert.ok(run.ok, run.error ?? "batch admission");
-    assert.ok(run.data!.sessions.every((member) => member.maxToolCalls != null && member.maxToolCalls <= 5),
-      `batch: ${run.data!.sessions.map((member) => member.maxToolCalls).join(",")}`);
   } finally { h.db.close(); }
 });
 
@@ -1372,8 +1321,6 @@ test("retirement preserves a legacy boundary's child ceiling restriction until h
       assert.match(refused.error!,/review sessions do not inherit a native-review grant/u);
     }
     assert.equal(members(),before,"a refused child leaves no reservation");
-    const runRefused=h.svc.createRun({runnerId:"r",workspaceId:"w",agentIds:["claude"],task:"Implement #2936",config:{model:"claude-opus-5-5",costBudgetUsd:5}},{parentSessionId:"root"});
-    assert.equal(runRefused.ok,false,"run workers follow the same rule");
 
     // Project child-session defaults would become the same ceiling; they are refused with the same reason.
     const project=h.db.createProject({name:"Ceilings",scope:{organizationId:h.principal.organizationId,owner:{kind:"organization",organizationId:h.principal.organizationId}}});

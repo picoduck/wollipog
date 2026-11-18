@@ -16,7 +16,6 @@ import type {
   ControlPlaneToUi,
   ProjectView,
   RunnerView,
-  RunView,
   SessionEvent,
   SessionEventsResponse,
   SessionHistoryHandoff,
@@ -396,7 +395,6 @@ export interface State {
   sessions: Map<string, SessionView>;
   reminders: Map<string, SessionReminderView>;
   worktreeSetupNoticeDismissals: Set<string>;
-  runs: Map<string, RunView>;
   events: Map<string, SessionEvent[]>;
   /** Fixed-size per-session heartbeat rings. Unlike full timelines, these survive view changes.
    * Updated in place; a batch of socket frames waiting to be published works on its own copy. */
@@ -602,8 +600,6 @@ function relevantSessions(state: State): Set<string> {
   else if (state.view.name === "session") keep.add(state.view.id);
   else if (state.view.name === "assistants" && state.view.threadId !== undefined && state.assistantSessionId) {
     keep.add(state.assistantSessionId);
-  } else if (state.view.name === "run") {
-    state.runs.get(state.view.id)?.sessionIds.forEach((id) => keep.add(id));
   }
   return keep;
 }
@@ -721,33 +717,6 @@ function withLegacyRecovery(state: State): State {
   return { ...state, streamRecoveryCursors: captureRecoveryCursors(state, relevantSessions(state)) };
 }
 
-/** Run comparison columns render whole histories and offer no reach-back control, so a
- * bounded window carried in from the session reader would silently truncate a member forever: fleet
- * recovery only pages ABOVE the cursor that window published. Entering those views drops the
- * partial caches so their own recovery refetches the full history, exactly as before windowing. */
-function dropBoundedWindowsForView(state: State): State {
-  if (state.view.name !== "run") return state;
-  // Any window that is not the whole history, including a budget-expired prefix that reports no
-  // older rows: a fleet column recovers only ABOVE the cursor it published.
-  const partial = [...state.eventWindows]
-    .filter(([, window]) => isPartialHistory(window))
-    .map(([sessionId]) => sessionId);
-  if (partial.length === 0) return state;
-  const events = new Map(state.events);
-  const eventHistory = new Map(state.eventHistory);
-  const eventWindows = new Map(state.eventWindows);
-  const streamRecoveryCursors = new Map(state.streamRecoveryCursors);
-  for (const sessionId of partial) {
-    events.delete(sessionId);
-    eventHistory.delete(sessionId);
-    eventWindows.delete(sessionId);
-    streamRecoveryCursors.delete(sessionId);
-    // The window these rows were held for is being discarded with the cache; keeping the hold would
-    // withhold this member's live events from a fleet column that never applies a window.
-  }
-  return { ...state, events, eventHistory, eventWindows, streamRecoveryCursors };
-}
-
 function pruneViewStreams(state: State): State {
   const keep = relevantSessions(state);
   const events = new Map([...state.events].filter(([id]) => keep.has(id)));
@@ -825,7 +794,7 @@ function reducer(state: State, action: Action): State {
         : stayingInSettings
         ? state.settingsReturnView
         : null;
-      const next = dropBoundedWindowsForView({ ...state, view: action.view, settingsReturnView });
+      const next = { ...state, view: action.view, settingsReturnView };
       const pruned = pruneViewStreams(next);
       next.events = pruned.events;
       next.eventEpochs = pruned.eventEpochs;
@@ -1200,7 +1169,6 @@ function reducer(state: State, action: Action): State {
             sessions,
             reminders: new Map((msg.reminders ?? []).map((reminder) => [reminder.sessionId, reminder])),
             worktreeSetupNoticeDismissals: new Set(msg.worktreeSetupNoticeDismissals ?? []),
-            runs: new Map(msg.runs.map((r) => [r.id, r])),
             events,
             activity,
             eventEpochs,
@@ -1580,19 +1548,6 @@ function reducer(state: State, action: Action): State {
           }
           return { ...state, shellRegistryRevision };
         }
-        case "run_upsert": {
-          const runs = new Map(state.runs);
-          runs.set(msg.run.id, msg.run);
-          const next = { ...state, runs };
-          const pruned = state.view.name === "run" && state.view.id === msg.run.id ? pruneViewStreams(next) : next;
-          return withLegacyRecovery(pruned);
-        }
-        case "run_removed": {
-          const runs = new Map(state.runs);
-          runs.delete(msg.runId);
-          const next = { ...state, runs };
-          return state.view.name === "run" && state.view.id === msg.runId ? pruneViewStreams(next) : next;
-        }
         case "identity_directory_changed":
           return { ...state, identityDirectoryRevision: state.identityDirectoryRevision + 1 };
       }
@@ -1634,7 +1589,6 @@ function initialState(
     sessions: new Map(),
     reminders: new Map(),
     worktreeSetupNoticeDismissals: new Set(),
-    runs: new Map(),
     events: new Map(),
     activity: new Map(),
     activityNow: Date.now(),
@@ -2106,9 +2060,7 @@ export class Store {
       if (wasRelevant.has(sessionId)) continue;
       const cached = this.readerCache.get(sessionId);
       this.dropReaderCache(sessionId);
-      // Fleet columns have no Load Earlier Activity control and must recover whole histories.
-      const fleet = next.view.name === "run";
-      if (!cached || (fleet && isPartialHistory(cached.window))) {
+      if (!cached) {
         expireFollowTailAnchor(this.instanceScope, sessionId);
         continue;
       }

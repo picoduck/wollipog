@@ -81,7 +81,7 @@ const viewer = viewerIdentity({
 const parentSession = {
   id: PARENT, runnerId: "runner", workspaceId: null, workspaceName: null, projectId: null,
   agentId: "codex", agentName: "Codex", title: "Release Orchestrator", status: "running",
-  column: "review", runId: null, useWorktree: false, worktreePath: null,
+  column: "review", useWorktree: false, worktreePath: null,
   archived: false, createdAt: base, updatedAt: base, lastEventAt: null, messageCount: 0,
   eventEpoch: 0, preview: null, pendingApproval: null, driver: "codex-app-server",
   model: null, effort: null, permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,
@@ -94,7 +94,7 @@ const connection: UiConnectionRuntime = {
   createSocket: () => {
     const socket: UiSocket = { readyState: UI_SOCKET_OPEN, onopen: null, onmessage: null, onclose: null, onerror: null, send() {}, close() {} };
     setTimeout(() => socket.onmessage?.({
-      data: JSON.stringify({ type: "snapshot", runners: [], boxes: [], sessions: [parentSession], runs: [] }),
+      data: JSON.stringify({ type: "snapshot", runners: [], boxes: [], sessions: [parentSession] }),
     }), 0);
     return socket;
   },

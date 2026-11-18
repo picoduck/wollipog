@@ -1,4 +1,3 @@
-import { destination } from "./navigation.js";
 import type { ConnState } from "./store.js";
 
 /** A next step a placeholder offers, in the order it shows them. The view renders the button. */
@@ -22,9 +21,6 @@ export interface DetailPlaceholder {
   details?: string;
 }
 
-/** A list before its first snapshot, or while disconnected: a title and a sentence, no actions. */
-export type ListPlaceholder = Pick<DetailPlaceholder, "title" | "hint" | "variant">;
-
 export interface RoutedSessionLookup {
   sessionId: string;
   complete: boolean;
@@ -41,10 +37,10 @@ export function shouldHydrateRoutedSession(
   return !session || session.projection === "summary" || ((Boolean(session.archived) || summarySnapshot) && snapshotRevision > 0);
 }
 
-const RESOURCE_NOUN = { Session: "session", Run: "run", Automation: "automation" } as const;
+const RESOURCE_NOUN = { Session: "session", Automation: "automation" } as const;
 
 /**
- * The state a Session, Run or Automation page shows while its entity is not loaded (docs/design-system.md
+ * The state a Session or Automation page shows while its entity is not loaded (docs/design-system.md
  * §12). The copy names what the person can do, never Wollipog's internals: the shell's offline
  * banner already offers Retry Now, and the pairing banner holds the pairing form (#2202).
  */
@@ -88,27 +84,6 @@ export function detailPlaceholder(
     };
   }
   return { title: `Loading ${resource}…`, hint: null, variant: "loading", actions: [] };
-}
-
-/** A resource list before the first snapshot, or while disconnected. An empty map proves nothing
- * then, so the list must not claim "No … Yet" or offer to create what may already exist. */
-export function listPlaceholder(list: "runs", conn: ConnState): ListPlaceholder {
-  const resource = destination(list).name;
-  if (conn === "unauthorized") {
-    return {
-      title: `Pair to Load ${resource}`,
-      hint: `This device needs to be paired before it can load ${resource.toLowerCase()}.`,
-      variant: "offline",
-    };
-  }
-  if (conn === "offline") {
-    return {
-      title: `${resource} Unavailable`,
-      hint: `Wollipog loads ${resource.toLowerCase()} when the connection comes back.`,
-      variant: "offline",
-    };
-  }
-  return { title: `Loading ${resource}…`, hint: null, variant: "loading" };
 }
 
 /** Scope lookup completion to the route that produced it. This is defensive against stale async

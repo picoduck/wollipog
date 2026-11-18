@@ -55,7 +55,7 @@ const connection: UiConnectionRuntime = {
 const now = Date.now();
 const baseSession = {
   id: "orchestrator", runnerId: "runner", workspaceId: null, agentId: null,
-  title: "Orchestrator", status: "running", runId: null, archived: false,
+  title: "Orchestrator", status: "running", archived: false,
   createdAt: now - 60_000, updatedAt: now, lastEventAt: now, messageCount: 10,
   eventEpoch: 0, pendingApproval: null,
 } as unknown as SessionView;

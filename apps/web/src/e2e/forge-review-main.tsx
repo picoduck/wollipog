@@ -36,7 +36,7 @@ const queueFacts: GitPrSummary | null = queue === "queued" || queue === "removed
 const session: SessionView = {
   id: "gitlab-review-e2e", runnerId: "runner-1", workspaceId: "workspace-1", workspaceName: "Wollipog",
   projectId: null, agentId: "codex", agentName: "Codex", title: "Add GitLab Integration", status: "idle",
-  column: "review", runId: null, useWorktree: true, worktreePath: "/workspace/wollipog-gitlab",
+  column: "review", useWorktree: true, worktreePath: "/workspace/wollipog-gitlab",
   archived: false, createdAt: 1, updatedAt: 1, lastEventAt: 1, messageCount: 1, eventEpoch: 0,
   preview: null, pendingApproval: null, driver: "codex-app-server", model: null, effort: null,
   permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,

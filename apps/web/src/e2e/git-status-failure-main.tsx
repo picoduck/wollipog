@@ -17,7 +17,7 @@ document.documentElement.setAttribute("data-theme", params.get("theme") === "lig
 const session: SessionView = {
   id: "git-status-failure-e2e", runnerId: "runner-1", workspaceId: "workspace-1", workspaceName: "Example",
   projectId: null, agentId: "codex", agentName: "Codex", title: "Review Git Changes", status: "idle",
-  column: "review", runId: null, useWorktree: true, worktreePath: "/workspace/example",
+  column: "review", useWorktree: true, worktreePath: "/workspace/example",
   archived: false, createdAt: 1, updatedAt: 1, lastEventAt: 1, messageCount: 1, eventEpoch: 0,
   preview: null, pendingApproval: null, driver: "codex-app-server", model: null, effort: null,
   permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,

@@ -66,7 +66,7 @@ const session: SessionView = {
   id: "shell-dock-e2e", runnerId: runner.runnerId, workspaceId: "workspace-1", workspaceName: "Acme Storefront",
   projectId: null, agentId: "claude", agentName: "Claude Code", title: "Fix the Checkout Total",
   status: params.get("status") === "completed" ? "completed" : "idle",
-  column: "review", runId: null, useWorktree: true, worktreePath: "/home/dev/worktrees/acme-storefront",
+  column: "review", useWorktree: true, worktreePath: "/home/dev/worktrees/acme-storefront",
   archived: false, createdAt: 1, updatedAt: 1, lastEventAt: 1, messageCount: 1, eventEpoch: 0,
   preview: null, pendingApproval: null, driver: tui === "unsupported" ? "acp" : "claude-code", model: null,
   effort: null, permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,
@@ -171,7 +171,7 @@ class FixtureSocket implements UiSocket {
           sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false,
           projects: true, createProjectLocations: true,
         },
-        runners: [runner], boxes: [], projects: [], sessions: [session], runs: [],
+        runners: [runner], boxes: [], projects: [], sessions: [session],
       };
       this.onmessage?.({ data: JSON.stringify(snapshot) });
     }, 0);

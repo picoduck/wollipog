@@ -68,7 +68,6 @@ function session(id: string, title: string, overrides: Partial<SessionView> = {}
     title,
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,
@@ -226,7 +225,6 @@ function snapshot(): UiSnapshotMessage {
     boxes: [],
     // The launched sessions arrive as summaries; the backing sessions in full.
     sessions: [...sessions.values()].map((entry) => launched(entry.id) ? summary(entry) : structuredClone(entry)),
-    runs: [],
   } as UiSnapshotMessage;
 }
 

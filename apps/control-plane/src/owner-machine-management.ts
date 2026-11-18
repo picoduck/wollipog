@@ -122,7 +122,6 @@ export function createOwnerMachineManagement(db: ControlPlaneDb, hub: Hub, svc: 
     const projectIds = db.projectIdsForRunner(id), removed = db.deleteRunner(id);
     if (!removed) return reply.code(404).send({error: "runner not found"});
     for (const sessionId of removed.sessionIds) hub.sessionRemoved(sessionId, false);
-    for (const runId of removed.runIds) hub.runRemoved(runId);
     hub.runnerRemoved(id);
     for (const projectId of projectIds) hub.projectChangedById(projectId);
     return reply.code(204).send(undefined);

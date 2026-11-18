@@ -2,7 +2,6 @@ import {
   MAX_UI_SESSION_SUBSCRIPTIONS,
   MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW,
   UI_SUBSCRIPTION_RATE_WINDOW_MS,
-  type RunView,
   type SessionEvent,
   type SessionView,
   type UiToControlPlane,
@@ -14,7 +13,6 @@ export { MAX_UI_SESSION_SUBSCRIPTIONS };
 type SubscriptionView =
   | { name: "inbox" }
   | { name: "session"; id: string }
-  | { name: "run"; id: string }
   // Settings subscribes to nothing — it reads local preferences — but it is a View like any other,
   // and leaving it out made the whole View union unassignable here.
   | { name: "settings"; section?: string }
@@ -27,7 +25,6 @@ export interface UiSubscriptionSource {
   /** The open assistant thread's backing session (#4664), whose transcript the thread view shows. */
   assistantSessionId?: string | null;
   sessions: Map<string, SessionView>;
-  runs: Map<string, RunView>;
 }
 
 export interface UiSubscriptionDeliveryState {
@@ -54,7 +51,7 @@ export function uiStreamSubscriptions(state: UiSubscriptionSource): { sessionIds
   else if (state.view.name === "session") required.add(state.view.id);
   else if (state.view.name === "assistants" && state.view.threadId !== undefined && state.assistantSessionId) {
     required.add(state.assistantSessionId);
-  } else if (state.view.name === "run") state.runs.get(state.view.id)?.sessionIds.forEach((id) => required.add(id));
+  }
   const requiredIds = [...required].sort();
   const busyIds = [...state.sessions.values()]
     .filter((session) => !session.archived && isHeartbeatBusy(session.status) && !required.has(session.id))
@@ -72,7 +69,6 @@ export class UiSubscriptionSynchronizer {
   private inboxSessionId: string | null = null;
   private assistantSessionId: string | null = null;
   private sessions: Map<string, SessionView> | null = null;
-  private runs: Map<string, RunView> | null = null;
   private desired: { sessionIds: string[]; key: string } | null = null;
   private sentKey: string | null = null;
   private revision = 0;
@@ -106,12 +102,11 @@ export class UiSubscriptionSynchronizer {
     const assistantSessionId = state.view.name === "assistants" ? state.assistantSessionId ?? null : null;
     if (state.view !== this.view || inboxSessionId !== this.inboxSessionId ||
         assistantSessionId !== this.assistantSessionId ||
-        state.sessions !== this.sessions || state.runs !== this.runs || !this.desired) {
+        state.sessions !== this.sessions || !this.desired) {
       this.view = state.view;
       this.inboxSessionId = inboxSessionId;
       this.assistantSessionId = assistantSessionId;
       this.sessions = state.sessions;
-      this.runs = state.runs;
       const subscriptions = this.derive(state);
       this.desired = {
         ...subscriptions,

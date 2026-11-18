@@ -8,7 +8,7 @@ import { Store } from "./store.js";
 import { TestBrowserHistory } from "./test-browser-history.js";
 
 const EDITOR = "/settings/orchestrator";
-const OTHERS = ["/usage", "/runs", "/pods", "/automations", "/archived", "/skills", "/projects"];
+const OTHERS = ["/usage", "/pods", "/automations", "/archived", "/skills", "/projects"];
 
 /** One step: the person presses Back or Forward `delta` entries, or the browser lands the app's next move, or time passes. */
 type Step = { kind: "person"; delta: number } | { kind: "land" } | { kind: "wait" };

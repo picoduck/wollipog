@@ -18,18 +18,24 @@ const FALLBACK_EXTENSION: Record<Exclude<ArtifactKind, "screenshot" | "video">, 
   verdict: "json",
 };
 
-export function principalCanReadArtifact(
+export function artifactReadSession(
   db: ControlPlaneDb,
   principal: AuthPrincipal,
-  artifact: { runId?: string; sessionId?: string },
-): boolean {
-  return Boolean(artifact.sessionId && db.canAccessSession(principal, artifact.sessionId));
+  artifact: Pick<Artifact, "artifactId" | "sessionId" | "kind">,
+): string | undefined {
+  if (artifact.sessionId) {
+    return db.canAccessSession(principal, artifact.sessionId) ? artifact.sessionId : undefined;
+  }
+  // Former comparison members can share an image through their recorded transcript references.
+  // Keep the fallback limited to human image export. Other artifacts still need a direct owner.
+  if (principal.kind !== "human" || artifact.kind !== "screenshot") return undefined;
+  return db.sessionsReferencingArtifact(artifact.artifactId)
+    .find((sessionId) => db.canAccessSession(principal, sessionId));
 }
 
-function storedArtifactRequest(artifact: Artifact) {
+function storedArtifactRequest(artifact: Artifact, sessionId: string) {
   return {
-    ...(artifact.runId ? { runId: artifact.runId } : {}),
-    ...(artifact.sessionId ? { sessionId: artifact.sessionId } : {}),
+    sessionId,
     kind: artifact.kind,
     name: artifact.name,
     mimeType: artifact.mimeType,
@@ -54,7 +60,7 @@ export function buildAuthorizedArtifactExport(
   } catch {
     return { ok: false, status: 422, error: "artifact content is invalid", code: "invalid_artifact" };
   }
-  if (!preflight || !principalCanReadArtifact(db, principal, preflight.artifact)) {
+  if (!preflight || !artifactReadSession(db, principal, preflight.artifact)) {
     return { ok: false, status: 404, error: "artifact not found", code: "not_found" };
   }
   if (!Number.isSafeInteger(preflight.storedDataBytes) || preflight.storedDataBytes < 0 ||
@@ -68,11 +74,11 @@ export function buildAuthorizedArtifactExport(
   } catch {
     return { ok: false, status: 422, error: "artifact content is invalid", code: "invalid_artifact" };
   }
-  if (!artifact) return { ok: false, status: 404, error: "artifact not found", code: "not_found" };
-  if (!principalCanReadArtifact(db, principal, artifact)) {
+  const sessionId = artifact ? artifactReadSession(db, principal, artifact) : undefined;
+  if (!artifact || !sessionId) {
     return { ok: false, status: 404, error: "artifact not found", code: "not_found" };
   }
-  const validated = validateArtifact(storedArtifactRequest(artifact));
+  const validated = validateArtifact(storedArtifactRequest(artifact, sessionId));
   if (!validated.ok || validated.value.data !== artifact.data || validated.value.name !== artifact.name ||
       validated.value.sizeBytes !== artifact.sizeBytes || validated.value.sha256 !== artifact.sha256) {
     return { ok: false, status: 422, error: "artifact content is invalid", code: "invalid_artifact" };

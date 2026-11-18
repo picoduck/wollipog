@@ -98,7 +98,6 @@ const session: SessionView = {
   title: "Tidy the Session Notice Slot",
   status: retryMode ? "failed" : "idle",
   column: "review",
-  runId: null,
   useWorktree: true,
   worktreePath: "/repos/wollipog/worktrees/notice-slot",
   archived: false,
@@ -159,7 +158,6 @@ class FixtureSocket implements UiSocket {
         boxes: [],
         projects: [],
         sessions: [session],
-        runs: [],
       } satisfies ControlPlaneToUi) });
     }, 0);
   }

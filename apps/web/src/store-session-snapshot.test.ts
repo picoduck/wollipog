@@ -25,19 +25,19 @@ test("detail hydration preserves legacy live state and rejects stale responses",
   assert.equal(removed.apply(live),false);
   assert.equal(store.getSession("active"),undefined);
   const reconnect=store.beginSessionDetailLoad("active");
-  store.dispatch({ type: "msg",msg: { type: "snapshot",runners: [],boxes: [],sessions: [],runs: [] } });
+  store.dispatch({ type: "msg",msg: { type: "snapshot",runners: [],boxes: [],sessions: [] } });
   assert.equal(reconnect.apply(live),false);
 });
 
 test("paged snapshots retain the routed history until its row arrives and reconcile inventory at completion", () => {
   const store=new Store({ name: "session",id: "active" });
   store.dispatch({ type: "msg",msg: { type: "snapshot",capabilities: { sessionSubscriptionsV2: true },
-    runners: [],boxes: [],sessions: [session("active"),session("removed")],runs: [] } });
+    runners: [],boxes: [],sessions: [session("active"),session("removed")] } });
   store.dispatch({ type: "msg",msg: { type: "session_event",event: {
     id: 1,sessionId: "active",seq: 1,ts: 1,payload: { kind: "agent_message",text: "Retained" },
   } } });
   store.dispatch({ type: "msg",msg: { type: "snapshot",sessionsComplete: false,
-    capabilities: { sessionSubscriptionsV2: true },runners: [],boxes: [],sessions: [],runs: [] } });
+    capabilities: { sessionSubscriptionsV2: true },runners: [],boxes: [],sessions: [] } });
   assert.equal(store.getState().snapshotLoaded,false);
   assert.equal(store.getState().sessions.has("removed"),true,"keep the inventory during a reconnect");
   assert.equal(store.getState().events.get("active")?.[0]?.seq,1);
@@ -53,7 +53,7 @@ test("paged snapshots retain the routed history until its row arrives and reconc
 
 test("a page invalidates a replaced timeline and final absence removes a stale routed session", () => {
   const store=new Store({ name: "session",id: "active" });
-  const header={ type: "snapshot" as const,capabilities: { sessionSubscriptionsV2: true },runners: [],boxes: [],sessions: [session("active")],runs: [] };
+  const header={ type: "snapshot" as const,capabilities: { sessionSubscriptionsV2: true },runners: [],boxes: [],sessions: [session("active")] };
   store.dispatch({ type: "msg",msg: header });
   store.dispatch({ type: "msg",msg: { type: "session_event",event: {
     id: 1,sessionId: "active",seq: 1,ts: 1,payload: { kind: "agent_message",text: "Old" },
@@ -73,7 +73,7 @@ test("paged summary hydration preserves a current-turn opening and its unread ra
   const store=new Store({ name: "session",id: "active" });
   store.dispatch({ type: "msg",msg: { type: "snapshot",sessionsComplete: false,
     capabilities: { sessionSubscriptionsV2: true,currentTurnOpening: true },
-    runners: [],boxes: [],sessions: [],runs: [] } });
+    runners: [],boxes: [],sessions: [] } });
   assert.equal(store.getState().snapshotLoaded,false);
   assert.equal(store.getState().currentTurnOpeningSupported,true);
   store.dispatch({ type: "msg",msg: { type: "session_snapshot_page",
@@ -96,7 +96,7 @@ test("paged summary hydration preserves a current-turn opening and its unread ra
   assert.equal(store.getState().eventWindows.get("active")?.laterGap?.tailSeq,100);
   assert.equal(store.getState().eventHistory.get("active")?.everComplete,false);
   store.dispatch({ type: "msg",msg: { type: "snapshot",
-    runners: [],boxes: [],sessions: [session("active")],runs: [] } });
+    runners: [],boxes: [],sessions: [session("active")] } });
   assert.equal(store.getState().currentTurnOpeningSupported,false,"legacy reconnect cannot retain a stale capability");
   assert.equal(store.getState().sessionSummarySnapshots,false);
 });
@@ -109,8 +109,8 @@ test("authoritative summary omissions clear optional list facts without discardi
     worktreePath: "/active",worktrees: [{ id: "active",path: "/active",branch: "Old",source: "created" }],
     campaignRequests: { human: 3,orchestrator: 0 },queueHeld: true,activeTurnId: "old-turn",
     agentCapabilities: { slashCommands: [{ name: "retained",description: "Detail" }] } } as unknown as SessionView;
-  store.dispatch({ type: "msg",msg: { type: "snapshot",runners: [],boxes: [],sessions: [previous],runs: [] } });
-  store.dispatch({ type: "msg",msg: { type: "snapshot",runners: [],boxes: [],sessions: [],runs: [],sessionsComplete: false } });
+  store.dispatch({ type: "msg",msg: { type: "snapshot",runners: [],boxes: [],sessions: [previous] } });
+  store.dispatch({ type: "msg",msg: { type: "snapshot",runners: [],boxes: [],sessions: [], sessionsComplete: false } });
   store.dispatch({ type: "msg",msg: { type: "session_snapshot_page",sessions: [{ ...session("active"),projection: "summary" }],complete: true } });
   const current=store.getState().sessions.get("active")!;
   for (const field of ["stopOperation","holds","queueHold","backgroundDeliveries","roleConversion","capacityWait","campaignRequests","worktrees","queueHeld","activeTurnId"] as const) {
@@ -128,9 +128,9 @@ test("a retained Full Control detail never makes a reconnected Custom summary re
   const attention={ version: 1,humanActions: [],meaningfulAt: 1,result: { revision: "r1",at: 1,owner: "human" },acknowledgedRevision: null };
   const detail={ ...session("root"),role: "orchestrator",attention,orchestratorPolicy: { control: fullControl },
     fullControlCampaignStatus: "verified_complete",orchestratorCampaign: { status: "verified_complete",policyRevision: 2,control: fullControl } } as unknown as SessionView;
-  store.dispatch({ type: "msg",msg: { type: "snapshot",runners: [],boxes: [],sessions: [detail],runs: [] } });
+  store.dispatch({ type: "msg",msg: { type: "snapshot",runners: [],boxes: [],sessions: [detail] } });
   assert.equal(completedFullControlCampaign(store.getState().sessions.get("root")!),true,"before the revoke");
-  store.dispatch({ type: "msg",msg: { type: "snapshot",runners: [],boxes: [],sessions: [],runs: [],sessionsComplete: false } });
+  store.dispatch({ type: "msg",msg: { type: "snapshot",runners: [],boxes: [],sessions: [], sessionsComplete: false } });
   store.dispatch({ type: "msg",msg: { type: "session_snapshot_page",sessions: [{ ...session("root"),projection: "summary",role: "orchestrator",
     attention,orchestratorPolicy: { control: { mode: "custom" } } } as unknown as SessionView],complete: true } });
   const current=store.getState().sessions.get("root")!;

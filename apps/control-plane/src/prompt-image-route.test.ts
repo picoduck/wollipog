@@ -57,7 +57,7 @@ test("runner prompt-image route returns exact bytes with hardened headers", asyn
   const db = {
     canAccessSession: () => false,
     verifyActiveRunnerCredential: (_runner: string, hash: string) => hash.length === 64,
-    getSession: () => ({ id: "s1", runnerId: "r1", runId: null }),
+    getSession: () => ({ id: "s1", runnerId: "r1" }),
     artifactExportPreflight: () => ({
       artifact: {
         artifactId: "art1", sessionId: "s1", kind: "screenshot", encoding: "base64",

@@ -221,7 +221,6 @@ const snapshotDb = {
   listSessionsForPrincipal: () => [],
   listProjects: () => [],
   listProjectsForPrincipal: () => [],
-  listRuns: () => [],
   listSessionReminders: () => [],
   worktreeSetupNoticeDismissals: () => [],
 } as unknown as ControlPlaneDb;
@@ -1334,7 +1333,6 @@ test("unsubscribed high-volume events skip authorization database reads", () => 
     listSessionsForPrincipal: () => [],
     listProjectsForPrincipal: () => [],
     listBoxes: () => [],
-    listRuns: () => [],
     listSessionReminders: () => [],
     worktreeSetupNoticeDismissals: () => [],
     canAccessSession: () => { authorizationReads++; return true; },

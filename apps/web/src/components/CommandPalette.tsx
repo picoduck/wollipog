@@ -10,7 +10,6 @@ import {
   type TranscriptHit,
 } from "../palette.js";
 import { destination, EXTRA_PALETTE_DESTINATIONS } from "../navigation.js";
-import { useExperiments } from "../use-experiments.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { loadSessionsViewMode, sessionsDestination } from "../sessions-view-mode.js";
 import { railDigits, setRailLabels, visibleRailViews } from "../rail-preferences.js";
@@ -186,14 +185,11 @@ export function CommandPalette({ initialQuery = "", onClose, onOpenShortcuts }: 
   }, [api, transcriptQuery]);
   const searching = transcriptQuery !== "" && !(attempt.query === transcriptQuery && attempt.settled);
 
-  const { flags } = useExperiments();
   const sessionsMode = view.name === "board" || (view.name !== "inbox" && loadSessionsViewMode(instanceScope) === "board")
     ? "board" : "list";
   const sections = useMemo(() => {
-    // Every visible destination with its digit, in rail order. A hidden or turned-off destination
-    // is not listed: a palette hit that lands on the "turned off" notice would advertise a
-    // destination the rail says does not exist. Digits are desktop bindings, so phones show none.
-    const visible = visibleRailViews(railPreferences, flags);
+    // Match the visible rail order; only desktop bindings display digits.
+    const visible = visibleRailViews(railPreferences);
     const digits = railDigits(visible);
     const destinations: PaletteEntry[] = [
       ...visible.map((id) => {
@@ -247,7 +243,7 @@ export function CommandPalette({ initialQuery = "", onClose, onOpenShortcuts }: 
     const merged = new Map(catalogSessions);
     for (const session of sessions.values()) merged.set(session.id, session);
     return paletteSections({ query: q, sessions: merged, recent, hits: hits.results, destinations, actions });
-  }, [catalogSessions, sessions, q, hits, flags, railPreferences, isMobile, touchOnly, onOpenShortcuts, sessionsMode, view.name, recent]);
+  }, [catalogSessions, sessions, q, hits, railPreferences, isMobile, touchOnly, onOpenShortcuts, sessionsMode, view.name, recent]);
 
   const entries = useMemo(() => sections.flatMap((section) => section.entries), [sections]);
   const found = entries.findIndex((entry) => entry.key === activeKey);

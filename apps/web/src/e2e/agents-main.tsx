@@ -25,7 +25,7 @@ const registryRetryMode = params.get("registry-retry");
 const initial: SessionView = {
   id: "agents-fixture", runnerId: "runner", workspaceId: null, workspaceName: null,
   agentId: null, agentName: null, title: "Unified Supervision", status: "input_required",
-  column: "review", runId: null, useWorktree: false, worktreePath: null, archived: false,
+  column: "review", useWorktree: false, worktreePath: null, archived: false,
   createdAt: now - 120_000, updatedAt: now, lastEventAt: now, messageCount: 2,
   preview: null, driver: "codex-app-server", model: null, effort: null, permissionMode: null,
   tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,
@@ -83,7 +83,7 @@ const connection: UiConnectionRuntime = {
       onmessage: null as ((event: { data: string }) => void) | null, onclose: null, onerror: null, send() {}, close() {} };
     window.setTimeout(() => {
       socket.onopen?.();
-      socket.onmessage?.({ data: JSON.stringify({ type: "snapshot", boxes: [], sessions: [], runs: [],
+      socket.onmessage?.({ data: JSON.stringify({ type: "snapshot", boxes: [], sessions: [],
         runners: [{ runnerId: "runner", displayName: "Build Box", hostname: "build-box", os: "linux", version: "1.0.0",
           status: "online", agents: [], workspaces: [], connectedAt: now, lastSeen: now }] }) });
     }, 0);

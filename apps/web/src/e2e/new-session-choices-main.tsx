@@ -14,7 +14,6 @@ import {
 import { saveAgentDefault } from "../agent-defaults.js";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { NewRunDialog } from "../components/NewRunDialog.js";
 import { NewSessionDialog } from "../components/NewSessionDialog.js";
 import { Select } from "../components/ui/ChoiceControls.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -93,19 +92,7 @@ const cloudTargets = fixtureParams.get("cloudTargets") === "1";
  */
 const acpAgent = fixtureParams.get("acp") === "1";
 
-/**
- * #2365: the saved permission defaults' three states under Session Role. `error` shows the field's
- * `span.form-error`, `pending` its "Loading…" `span.muted`, and `orchestrator` the `span.muted` that
- * names a saved Orchestrator default.
- */
 const savedDefaults = fixtureParams.get("defaults");
-
-/**
- * #2365: `?dialog=run` mounts the real New Multi-Agent Run dialog on the same snapshot, plus three
- * Projects whose Location field shows each of its notes: no Locations, none available, and two to
- * choose between.
- */
-const runDialog = fixtureParams.get("dialog") === "run";
 
 /**
  * #3224: `?codexDiscovery=1` gives the Codex rows the shape discovery reports, so the exec row is
@@ -345,17 +332,6 @@ function fixtureProject(id: string, name: string, locations: ProjectLocationView
 const project = fixtureProject("project-1", "Wollipog", [fixtureLocation("project-1", "location-1"),
   ...(fixtureParams.get("projectLocations") === "2" ? [fixtureLocation("project-1", "location-old", { isDefault: false, name: "Wollipog on Old Mac", path: "/repos/old" })] : [])]);
 
-const runProjects: ProjectView[] = runDialog ? [
-  fixtureProject("project-empty", "No Locations Yet", []),
-  fixtureProject("project-offline", "Offline Location", [
-    fixtureLocation("project-offline", "location-offline", { availability: "runner_offline" }),
-  ]),
-  fixtureProject("project-two", "Two Locations", [
-    fixtureLocation("project-two", "location-two-a", { isDefault: false }),
-    fixtureLocation("project-two", "location-two-b", { isDefault: false, name: "Docs", path: "/repos/docs" }),
-  ]),
-] : [];
-
 // #4438: deterministic account-setup states; no live provider sign-in runs in this fixture.
 const accountSetup = fixtureParams.get("accountSetup");
 if (accountSetup) {
@@ -399,9 +375,8 @@ const snapshot: UiSnapshotMessage = {
   },
   runners: [runner],
   boxes: [],
-  projects: [project, ...runProjects],
+  projects: [project],
   sessions: [],
-  runs: [],
 };
 
 class FakeSocket implements UiSocket {
@@ -545,7 +520,6 @@ function Harness() {
   if (!ready) return null;
   if (openedSession) return <main className="section"><h1 className="section-title">Session Opened</h1><p role="status">{openedSession}</p></main>;
   if (fixtureParams.get("probe") === "select") return <SelectProbe />;
-  if (runDialog) return <NewRunDialog onClose={() => undefined} />;
   if (keyboardFixture) return (
     <>
       <button type="button" onClick={() => setDialogOpen(true)}>New Session</button>

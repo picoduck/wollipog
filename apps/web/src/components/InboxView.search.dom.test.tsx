@@ -123,7 +123,6 @@ function session(id: string, lastEventAt: number, overrides: Partial<SessionView
     title: `Session ${id}`,
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,
@@ -152,7 +151,6 @@ function snapshot(sessions: SessionView[]): UiSnapshotMessage {
     runners: [],
     boxes: [],
     sessions,
-    runs: [],
   };
 }
 

@@ -72,7 +72,6 @@ function snapshot(id: string, title: string): string {
   return JSON.stringify({
     type: "snapshot",
     runners: [],
-    runs: [],
     sessions: [{
       id,
       title,

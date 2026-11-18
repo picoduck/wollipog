@@ -1,5 +1,5 @@
 import type { ManagedBackgroundJobView, PendingApproval, SessionAttentionKind, SessionStatus, SessionView } from "@wollipog/protocol";
-import { plainTextPreview, prioritizedPendingRequests, sessionAttentionStatus } from "@wollipog/protocol";
+import { prioritizedPendingRequests, sessionAttentionStatus } from "@wollipog/protocol";
 import { statusMeta, statusValues, type StatusMeta } from "./status-meta.js";
 import type { SubagentDescriptor } from "./subagents.js";
 import { splitStepTitle } from "./work-steps.js";
@@ -22,21 +22,11 @@ export type WorkerState =
   | "stopped"
   | "unverified"
   | "lost";
-export type WorkerTarget = { kind: "subagent"; id: string } | { kind: "background"; id: string } | { kind: "session"; id: string };
-/** The heading a row sits under: Subagents, Background Jobs, or the run's own title. */
+export type WorkerTarget = { kind: "subagent"; id: string } | { kind: "background"; id: string };
+/** The heading a row sits under: Subagents or Background Jobs. */
 export interface WorkerGroup { id: string; name: string }
 export const SUBAGENT_GROUP: WorkerGroup = { id: "subagents", name: "Subagents" };
 export const BACKGROUND_GROUP: WorkerGroup = { id: "background", name: "Background Jobs" };
-export interface WorkerMemberMetadata {
-  group?: WorkerGroup;
-  /** The run's title, which a run member's own title repeats ahead of its agent. */
-  runTitle?: string;
-  role?: string;
-  phase?: string;
-  activations?: number;
-  terminalState?: "completed" | "failed" | "stopped";
-  completedAt?: number;
-}
 export interface WorkerRow {
   id: string;
   name: string;
@@ -159,24 +149,6 @@ export function backgroundWorkerState(job: ManagedBackgroundJobView, session: Se
     ? "running" : "unverified";
 }
 
-/** A member session's worker state, on the Session vocabulary: idle is Awaiting Prompt. */
-export function memberWorkerStatus(
-  member: Pick<SessionView, "status" | "pendingApproval">,
-  online: boolean,
-  terminalState?: WorkerMemberMetadata["terminalState"],
-): Pick<WorkerRow, "state" | "attention"> {
-  if (member.status === "completed" || member.status === "failed" || member.status === "stopped") return { state: member.status };
-  if (member.status === "idle" && terminalState) return { state: terminalState };
-  if (!online) return { state: "unverified" };
-  const request = prioritizedPendingRequests(member.pendingApproval)[0];
-  if (request || member.status === "input_required") {
-    return { state: "attention", attention: request ? requestAttentionKind(request) : "input_required" };
-  }
-  if (member.status === "running" || member.status === "starting") return { state: "running" };
-  if (member.status === "queued") return { state: "queued" };
-  return { state: "awaiting_prompt" };
-}
-
 /** Provider verbs (after `splitStepTitle`) as what a worker is doing, did, or waits to do. */
 const STEP_PHRASES: Record<string, { now: string; done: string; wait: string }> = {
   Run: { now: "Running", done: "Ran", wait: "run" },
@@ -243,9 +215,7 @@ const LAUNCH_NOUNS: Record<ManagedBackgroundJobView["launchType"], string> = {
 export function workerRoster(
   session: SessionView,
   subagents: readonly SubagentDescriptor[],
-  members: readonly SessionView[],
-  online: (runnerId: string) => boolean,
-  metadata: ReadonlyMap<string, WorkerMemberMetadata> = new Map(),
+  runnerOnline: boolean,
 ): WorkerRow[] {
   const root = session.worktreePath ?? undefined;
   const owners = pendingRequestsByOwner(session.pendingApproval);
@@ -287,7 +257,7 @@ export function workerRoster(
     name: backgroundJobLabel(job),
     nameParts: { kind: backgroundJobKind(job), id: backgroundJobShortId(job) },
     group: BACKGROUND_GROUP,
-    state: backgroundWorkerState(job, session, online(session.runnerId)),
+    state: backgroundWorkerState(job, session, runnerOnline),
     activity: `${LAUNCH_NOUNS[job.launchType] ?? LAUNCH_NOUNS.unknown} the agent started in the background`,
     target: { kind: "background", id: job.id },
     depth: 0,
@@ -295,48 +265,7 @@ export function workerRoster(
     lastActivityAt: job.lastObservedAt,
     completedAt: job.terminalObservedAt,
   });
-  const seen = new Set<string>();
-  for (const member of members) {
-    if (member.id === session.id || seen.has(member.id)) continue;
-    seen.add(member.id);
-    const facts = metadata.get(member.id);
-    const status = memberWorkerStatus(member, online(member.runnerId), facts?.terminalState);
-    const settled = status.state === "completed" || status.state === "failed" || status.state === "stopped";
-    const request = status.state === "attention" ? prioritizedPendingRequests(member.pendingApproval)[0] : undefined;
-    rows.push({
-      id: `session:${member.id}`,
-      name: memberName(member, facts?.runTitle),
-      group: facts?.group ?? { id: "run", name: "Workflow" },
-      ...status,
-      activity: request ? stepActivity(request.title, "wait", member.worktreePath ?? undefined)
-        : plainTextPreview(member.preview) || "No messages yet",
-      ...(facts?.role ? { role: facts.role } : {}),
-      ...(facts?.phase ? { phase: facts.phase } : {}),
-      ...(facts?.activations != null ? { activations: facts.activations } : {}),
-      target: { kind: "session", id: member.id }, depth: 0,
-      startedAt: member.createdAt, lastActivityAt: member.lastEventAt ?? undefined,
-      ...(settled ? { completedAt: facts?.completedAt ?? member.updatedAt } : {}),
-      ...(member.resolvedModel || member.model ? { model: member.resolvedModel || member.model! } : {}),
-      ...(member.effort ? { effort: member.effort } : {}),
-      // A running Claude turn's completed requests count as tokens so far (#3086).
-      tokens: member.tokensIn + member.tokensOut + (member.liveUsage ? member.liveUsage.tokensIn + member.liveUsage.tokensOut : 0),
-      ...(inputTokenBasis(member.driver) ? { inputBasis: inputTokenBasis(member.driver) } : {}),
-    });
-  }
   return rows;
-}
-
-/**
- * A member's name, leading with what tells it apart. A run titles its members "<Run Title> · <agent>",
- * so truncation hid the agent, the only part that differs; under the run's own heading the row leads
- * with the agent instead.
- */
-export function memberName(member: Pick<SessionView, "title" | "agentName">, runTitle?: string): string {
-  if (!runTitle) return member.title;
-  const prefix = `${runTitle} · `;
-  if (member.title.startsWith(prefix) && member.title.length > prefix.length) return member.title.slice(prefix.length);
-  if (member.agentName && member.title !== runTitle && !member.title.startsWith(member.agentName)) return `${member.agentName} · ${member.title}`;
-  return member.agentName && member.title === runTitle ? member.agentName : member.title;
 }
 
 /** Whether a worker belongs under Active: still working, waiting, or not verifiably settled. A worker

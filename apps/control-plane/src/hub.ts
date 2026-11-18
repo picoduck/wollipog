@@ -52,7 +52,6 @@ import type {
   SkillAdoptionRecoveryResultMessage,
   SkillDriftResultMessage,
   SkillKeptAsideResultMessage,
-  RunView,
   ProjectView,
   PolicyHookDecisionRecordedMessage,
   ProviderLoginResultMessage,
@@ -960,7 +959,6 @@ export class Hub {
       projects,
       reminders,
       worktreeSetupNoticeDismissals,
-      runs: globalAdmin ? this.db.listRuns() : [],
     };
     return snapshot;
   }
@@ -1651,14 +1649,6 @@ export class Hub {
     this.broadcast({ type: "session_events_reset", sessionId, events, eventEpoch });
   }
 
-  runChanged(run: RunView): void {
-    this.broadcast({ type: "run_upsert", run });
-  }
-
-  runRemoved(runId: string): void {
-    this.broadcast({ type: "run_removed", runId });
-  }
-
   private isOrganizationAdmin(principal: AuthPrincipal): boolean {
     return principal.kind === "human" && (principal.role === "owner" || principal.role === "admin");
   }
@@ -1721,8 +1711,6 @@ export class Hub {
         return msg.sessionIds.every((sessionId) => this.clientCanAccessSession(principal, sessionId, info));
       case "box_upsert":
       case "box_removed":
-      case "run_upsert":
-      case "run_removed":
         return this.isGlobalAdmin(principal);
       case "snapshot":
       case "session_snapshot_page":
@@ -1875,7 +1863,6 @@ export class Hub {
       case "worktree_setup_notice_dismissed": return `worktree-setup-notice:${msg.projectId}`;
       case "assistant_thread_upsert": return `assistant-thread:${msg.thread.id}`;
       case "project_upsert": return `project:${msg.project.id}`;
-      case "run_upsert": return `run:${msg.run.id}`;
       default: return undefined;
     }
   }

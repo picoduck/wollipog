@@ -22,7 +22,6 @@ const projectsView = readFileSync(new URL("./components/ProjectsView.tsx", impor
 const projectList = readFileSync(new URL("./components/ProjectList.tsx", import.meta.url), "utf8");
 const projectLocationRow = readFileSync(new URL("./components/ProjectLocationRow.tsx", import.meta.url), "utf8");
 const pageHeader = readFileSync(new URL("./components/PageHeader.tsx", import.meta.url), "utf8");
-const runsView = readFileSync(new URL("./components/RunsView.tsx", import.meta.url), "utf8");
 const createProjectDialog = readFileSync(new URL("./components/CreateProjectDialog.tsx", import.meta.url), "utf8");
 const commandPalette = readFileSync(new URL("./components/CommandPalette.tsx", import.meta.url), "utf8");
 const projectLocationDialog = readFileSync(new URL("./components/ProjectLocationDialog.tsx", import.meta.url), "utf8");
@@ -66,7 +65,7 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   // Rail.dom.test.tsx.
   assert.match(rail, /const entries: RailEntry\[\] = \[...visibleItems\];[\s\S]*?entries\.map\(/);
   assert.match(rail, /const itemFor = [^\n]*GLOBAL_VIEW_ITEMS/);
-  assert.match(rail, /const barNames = isMobile \? phoneBarViews\(preferences, flags\) : visibleNames;/);
+  assert.match(rail, /const barNames = isMobile \? phoneBarViews\(preferences\) : visibleNames;/);
   assert.match(rail, /overflowItems = isMobile \? visibleNames\.filter\(\(name\) => !barNames\.includes\(name\)\)/);
   // Creation is an Inbox action, never a navigation destination or breakpoint-specific shell action.
   assert.match(rail, /export const RAIL_ICON_SIZE = 20;[\s\S]*const TAB_ICON_SIZE = 24;[\s\S]*<Icon size=\{isMobile \? TAB_ICON_SIZE : RAIL_ICON_SIZE\}/);
@@ -220,8 +219,8 @@ test("the global keyboard layer wires rail navigation, Inbox search, creation, a
     "digit handling shares the bare-key gating with every other binding");
   assert.match(app, /railViewForDigit\(visibleRailNamesRef\.current, digit\)/,
     "the digit resolves against the CURRENT visible order");
-  assert.match(app, /const visibleRailNames = visibleRailViews\(railPreferences, experiments\.flags\)/,
-    "visibility folds preferences and experiment flags together");
+  assert.match(app, /const visibleRailNames = visibleRailViews\(railPreferences\)/,
+    "visibility follows the saved rail preferences");
   assert.doesNotMatch(app, /matchesShortcut\(event, "navigate-/,
     "no static digit table may survive beside the derived mapping");
   for (const id of [
@@ -579,18 +578,6 @@ test("the desktop app never reaches the phone layout, which is why no phone bar 
       assert.ok((window.minWidth ?? 0) > MOBILE_BREAKPOINT_PX, `${config}: minWidth ${window.minWidth}`);
     }
   }
-});
-
-test("the Multi-Agent Run create action is a page header primary", () => {
-  // Runs hides its primary while the empty state offers the one New Run (#2974); the dialog keeps
-  // its title, New Multi-Agent Run.
-  assert.match(runsView, /<PageHeader\s+title=\{runsDestination\.name\}\s+description=\{runsDestination\.description\}\s+primary=\{empty \? undefined : \{ label: "New Run", onClick: onNewRun \}\}\s+\/>/);
-  assert.doesNotMatch(app, /topbar-create|NewPodHeaderButton/, "the top bar holds no create action");
-  // One `.btn.primary` with a `+` icon; on a phone it is the quiet `+` icon button alone, and its
-  // label stays in the accessibility tree (clipped, never display: none) so the name still matches.
-  assert.match(pageHeader, /className=\{phone \? "icon-btn page-primary" : "btn primary page-primary"\}[\s\S]*?<PlusIcon \/>\s*<span className="page-primary-label">\{primary\.label\}<\/span>/);
-  assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.page-primary-label \{[^}]*clip-path: inset\(50%\)/);
-  assert.doesNotMatch(css, /\.page-primary-label \{[^}]*display: none/);
 });
 
 test("keyboard reachability does not depend on optional viewport metadata alone", () => {

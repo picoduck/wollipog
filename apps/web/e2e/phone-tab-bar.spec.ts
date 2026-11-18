@@ -98,19 +98,6 @@ for (const theme of ["dark", "light"] as const) {
   });
 }
 
-test("experiments and a hidden default tab do not hand the bar to an experiment", async ({ page }) => {
-  // The harness turns every experiment on; hiding Projects (and Automations, the next in rail order)
-  // then fills its slot, in place, with the next visible non-experimental destination in rail order,
-  // passing over Multi-Agent Runs.
-  await page.addInitScript((key) => {
-    localStorage.setItem(key, JSON.stringify({ v: 1, order: [], hidden: ["projects", "automations"] }));
-  }, instanceStorageKey(RAIL_PREFERENCES_STORAGE_KEY));
-  await open(page);
-  await expect(page.locator(TABS).locator(".rail-tab-label"))
-    .toHaveText(["Sessions", "Assistants", "Agent Skills", "Connections", "More"]);
-  await expect(page.locator(TABS).nth(2)).toHaveAttribute("aria-label", "Agent Skills");
-});
-
 test("a tap through More leaves More current with no ring and no hover fill", async ({ page }) => {
   await open(page);
   await openMore(page);
@@ -219,7 +206,7 @@ for (const theme of ["dark", "light"] as const) {
 
     const rows = sheet.locator(".menu-item");
     await expect(rows.locator(".menu-text"))
-      .toHaveText(["Automations", "Multi-Agent Runs", "Agent Skills", "Archived Sessions", "Usage and Cost", "Settings"]);
+      .toHaveText(["Automations", "Agent Skills", "Archived Sessions", "Usage and Cost", "Settings"]);
     const surfaceSelected = await tokenColor(page, "--surface-selected");
     const accent = await tokenColor(page, "--accent");
     for (let index = 0; index < await rows.count(); index += 1) {
@@ -227,7 +214,7 @@ for (const theme of ["dark", "light"] as const) {
       expect(Math.round((await box(row)).height), "48px rows").toBe(48);
       expect(Math.round((await box(row.locator(".menu-icon svg"))).width), "20px icons").toBe(20);
       const isCurrent = (await row.getAttribute("aria-current")) === "page";
-      expect(isCurrent).toBe(index === 4);
+      expect(isCurrent).toBe(index === 3);
       if (isCurrent) {
         expect(await style(row, "background-color")).toBe(surfaceSelected);
         expect(await style(row, "box-shadow"), "a 2px accent bar on the leading edge").toBe(`${accent} 2px 0px 0px 0px inset`);
@@ -242,8 +229,8 @@ for (const theme of ["dark", "light"] as const) {
     const separator = await box(sheet.locator('[role="separator"]'));
     const sheetBox = await box(sheet);
     expectGeometry(Math.abs(separator.width - sheetBox.width), "the separator spans the sheet").toBeLessThanOrEqual(0.61);
-    const above = await box(rows.nth(4));
-    const below = await box(rows.nth(5));
+    const above = await box(rows.nth(3));
+    const below = await box(rows.nth(4));
     expectGeometry(Math.abs(separator.y - (above.y + above.height) - 8), "8px above").toBeLessThanOrEqual(0.61);
     expectGeometry(Math.abs(below.y - (separator.y + separator.height) - 8), "8px below").toBeLessThanOrEqual(0.61);
 
@@ -270,7 +257,7 @@ test("from the keyboard, Escape returns focus to More with a ring and the keys r
   await page.keyboard.press("ArrowDown");
   expect(await focused()).toBe("Automations");
   await page.keyboard.press("ArrowDown");
-  expect(await focused()).toBe("Multi-Agent Runs");
+  expect(await focused()).toBe("Agent Skills");
 
   await page.keyboard.press("Escape");
   await expect(sheet).toHaveCount(0);
@@ -292,8 +279,8 @@ test.describe("on a phone on its side", () => {
       .toBe(true);
     const sheetBox = await box(sheet);
     const rows = sheet.locator(".menu-item");
-    expect(await rows.count()).toBe(6);
-    for (let index = 0; index < 6; index += 1) {
+    expect(await rows.count()).toBe(5);
+    for (let index = 0; index < 5; index += 1) {
       const row = await box(rows.nth(index));
       expectGeometry(row.y - sheetBox.y, "inside the sheet's top").toBeGreaterThanOrEqual(0);
       expectGeometry(sheetBox.y + sheetBox.height - (row.y + row.height), "inside the sheet's bottom").toBeGreaterThanOrEqual(0);

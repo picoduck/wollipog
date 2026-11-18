@@ -72,7 +72,7 @@ function snapshot(runners: RunnerView[], boxes: BoxView[] = []): UiSnapshotMessa
   return {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners, boxes, projects: [], sessions: [], runs: [],
+    runners, boxes, projects: [], sessions: []
   };
 }
 

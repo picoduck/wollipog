@@ -3,7 +3,6 @@ import { test } from "node:test";
 import {
   MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW,
   UI_SUBSCRIPTION_RATE_WINDOW_MS,
-  type RunView,
   type SessionView,
 } from "@wollipog/protocol";
 import {
@@ -17,11 +16,10 @@ import {
   uiStreamSubscriptions,
 } from "./ui-subscriptions.js";
 
-const run = { id: "run-1", sessionIds: ["s2", "s1", "s2"] } as RunView;
 const sessions = new Map<string, SessionView>();
 
-test("UI session subscriptions follow Inbox, session, and run navigation deterministically", () => {
-  const state = { sessions, runs: new Map([[run.id, run]]) };
+test("UI session subscriptions follow Inbox, session navigation deterministically", () => {
+  const state = { sessions };
   assert.deepEqual(uiStreamSubscriptions({ ...state, view: { name: "board" } }), { sessionIds: [] });
   assert.deepEqual(uiStreamSubscriptions({ ...state, view: { name: "archived" } }), { sessionIds: [] });
   assert.deepEqual(uiStreamSubscriptions({ ...state, view: { name: "projects" } }), { sessionIds: [] });
@@ -37,22 +35,6 @@ test("UI session subscriptions follow Inbox, session, and run navigation determi
     inbox: { selectedSessionId: null },
   }), { sessionIds: [] });
   assert.deepEqual(uiStreamSubscriptions({ ...state, view: { name: "session", id: "s9" } }), { sessionIds: ["s9"] });
-  assert.deepEqual(uiStreamSubscriptions({ ...state, view: { name: "run", id: run.id } }), { sessionIds: ["s1", "s2"] });
-  assert.deepEqual(uiStreamSubscriptions({ ...state, view: { name: "run", id: "missing" } }), { sessionIds: [] });
-});
-
-test("UI session subscription derivation is bounded for malformed or future oversized run state", () => {
-  const oversized = {
-    id: "run-large",
-    sessionIds: Array.from({ length: MAX_UI_SESSION_SUBSCRIPTIONS + 20 }, (_, i) => `s${i}`),
-  } as RunView;
-  const result = uiStreamSubscriptions({
-    view: { name: "run", id: oversized.id },
-    sessions,
-    runs: new Map([[oversized.id, oversized]]),
-  });
-  assert.equal(result.sessionIds.length, MAX_UI_SESSION_SUBSCRIPTIONS);
-  assert.equal(new Set(result.sessionIds).size, result.sessionIds.length);
 });
 
 test("reconnect recovery advances from the greatest cached runner sequence", () => {
@@ -69,26 +51,25 @@ test("subscription synchronization is O(1) for event-only state changes and rese
     derivations++;
     return uiStreamSubscriptions(state);
   });
-  const runs = new Map([[run.id, run]]);
-  const view = { name: "run" as const, id: run.id };
-  const state = { view, sessions, runs };
+  const view = { name: "session" as const, id: "s1" };
+  const state = { view, sessions };
 
   assert.deepEqual(synchronizer.nextMessage(state, false), null, "wait for advertised support");
   assert.equal(derivations, 1);
   assert.deepEqual(synchronizer.nextMessage(state, true), {
-    type: "session_subscriptions", revision: 1, sessionIds: ["s1", "s2"],
+    type: "session_subscriptions", revision: 1, sessionIds: ["s1"],
   });
   for (let i = 0; i < 100; i++) assert.equal(synchronizer.nextMessage(state, true), null);
   assert.equal(derivations, 1, "event-only store notifications do not rebuild/sort the set");
 
   synchronizer.resetConnection();
   assert.deepEqual(synchronizer.nextMessage(state, true), {
-    type: "session_subscriptions", revision: 1, sessionIds: ["s1", "s2"],
+    type: "session_subscriptions", revision: 1, sessionIds: ["s1"],
   });
   assert.equal(derivations, 1, "same desired set is reused across reconnect");
 
   const nextView = { name: "session" as const, id: "s9" };
-  assert.deepEqual(synchronizer.nextMessage({ view: nextView, sessions, runs }, true), {
+  assert.deepEqual(synchronizer.nextMessage({ view: nextView, sessions }, true), {
     type: "session_subscriptions", revision: 2, sessionIds: ["s9"],
   });
   assert.equal(derivations, 2);
@@ -101,15 +82,14 @@ test("subscription synchronization reacts to Inbox selection without requiring a
     return uiStreamSubscriptions(state);
   });
   const view = { name: "inbox" as const };
-  const runs = new Map<string, RunView>();
 
   assert.deepEqual(synchronizer.nextMessage({
-    view, sessions, runs, inbox: { selectedSessionId: "s1" },
+    view, sessions, inbox: { selectedSessionId: "s1" },
   }, true), {
     type: "session_subscriptions", revision: 1, sessionIds: ["s1"],
   });
   assert.deepEqual(synchronizer.nextMessage({
-    view, sessions, runs, inbox: { selectedSessionId: "s2" },
+    view, sessions, inbox: { selectedSessionId: "s2" },
   }, true), {
     type: "session_subscriptions", revision: 2, sessionIds: ["s2"],
   });
@@ -123,16 +103,15 @@ test("subscription synchronization reacts to busy-session metadata but not activ
     return uiStreamSubscriptions(state);
   });
   const view = { name: "board" as const };
-  const runs = new Map<string, RunView>();
   const idle = new Map([["s1", { id: "s1", status: "idle", archived: false } as SessionView]]);
   const running = new Map([["s1", { id: "s1", status: "running", archived: false } as SessionView]]);
 
-  assert.deepEqual(synchronizer.nextMessage({ view, sessions: idle, runs }, true), {
+  assert.deepEqual(synchronizer.nextMessage({ view, sessions: idle }, true), {
     type: "session_subscriptions", revision: 1, sessionIds: [],
   });
-  assert.equal(synchronizer.nextMessage({ view, sessions: idle, runs }, true), null);
+  assert.equal(synchronizer.nextMessage({ view, sessions: idle }, true), null);
   assert.equal(derivations, 1, "activity-only state leaves all subscription inputs stable");
-  assert.deepEqual(synchronizer.nextMessage({ view, sessions: running, runs }, true), {
+  assert.deepEqual(synchronizer.nextMessage({ view, sessions: running }, true), {
     type: "session_subscriptions", revision: 2, sessionIds: ["s1"],
   });
   assert.equal(derivations, 2);
@@ -164,7 +143,7 @@ test("busy sessions join every targeted subscription after required detail strea
     ["archived", { id: "archived", status: "running", archived: true } as SessionView],
   ]);
   assert.deepEqual(uiStreamSubscriptions({
-    view: { name: "session", id: "detail" }, sessions: busySessions, runs: new Map(),
+    view: { name: "session", id: "detail" }, sessions: busySessions,
   }), { sessionIds: ["detail", "busy-a", "busy-b"] });
 });
 
@@ -176,7 +155,7 @@ test("required streams remain observable at the subscription cap", () => {
     } as SessionView],
   ));
   const result = uiStreamSubscriptions({
-    view: { name: "session", id: "selected-last" }, sessions: busySessions, runs: new Map(),
+    view: { name: "session", id: "selected-last" }, sessions: busySessions,
   });
   assert.equal(result.sessionIds.length, MAX_UI_SESSION_SUBSCRIPTIONS);
   assert.equal(result.sessionIds[0], "selected-last");
@@ -215,7 +194,7 @@ test("subscription pacing reports a finite wait and survives a clock stepping ba
 
 test("pending reports an unsent selection without spending a revision", () => {
   const synchronizer = new UiSubscriptionSynchronizer();
-  const state = { view: { name: "session" as const, id: "s1" }, sessions, runs: new Map() };
+  const state = { view: { name: "session" as const, id: "s1" }, sessions };
   assert.equal(synchronizer.pending(state, false), false);
   assert.equal(synchronizer.pending(state, true), true);
   assert.equal(synchronizer.pending(state, true), true);

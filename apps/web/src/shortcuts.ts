@@ -1,11 +1,9 @@
-import type { ExperimentFlags, ExperimentId } from "./experiments.js";
 import { GLOBAL_VIEW_ITEMS, type GlobalViewName } from "./navigation.js";
 
 export type ShortcutId =
   | "search"
   | "navigate-inbox"
   | "navigate-projects"
-  | "navigate-runs"
   | "navigate-automations"
   | "navigate-usage"
   | "navigate-connections"
@@ -29,8 +27,6 @@ export type ShortcutId =
   | "open-side-chat"
   | "toggle-terminal"
   | "toggle-side-panel"
-  | "submit-run"
-  | "send-run-follow-up"
   | "shortcut-reference"
   | "inbox-next"
   | "inbox-previous"
@@ -108,7 +104,6 @@ export type ShortcutDefinition = {
 export const RAIL_SHORTCUT_IDS = {
   inbox: "navigate-inbox",
   automations: "navigate-automations",
-  runs: "navigate-runs",
   runners: "navigate-connections",
   skills: "navigate-skills",
   projects: "navigate-projects",
@@ -270,20 +265,6 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     label: "Side Panel",
     scope: "Session",
     binding: { key: "\\", primary: true },
-  },
-  {
-    id: "submit-run",
-    group: "Actions",
-    label: "Start Multi-Agent Run",
-    scope: "Run dialog",
-    binding: { key: "Enter", primary: true },
-  },
-  {
-    id: "send-run-follow-up",
-    group: "Actions",
-    label: "Send Follow-Up to Agents",
-    scope: "Follow Up dialog",
-    binding: { key: "Enter", primary: true },
   },
   {
     id: "shortcut-reference",
@@ -754,15 +735,6 @@ export function advanceShortcutSequence(
   return { matched: false, state: { index: index + 1, expiresAt: now + windowMs } };
 }
 
-/** Shortcuts whose feature can be switched off in Settings → Experimental. Their handlers all
- * live inside the gated surfaces, so the binding is already dead when the flag is off — this
- * mapping exists so the reference says why instead of advertising a working key. */
-const EXPERIMENT_SHORTCUT_IDS: Partial<Record<ShortcutId, ExperimentId>> = {
-  "navigate-runs": "multiAgent",
-  "submit-run": "multiAgent",
-  "send-run-follow-up": "multiAgent",
-};
-
 /** The rail destination a navigation shortcut advertises, or null for every other binding. */
 export function railViewForShortcut(id: ShortcutId): keyof typeof RAIL_SHORTCUT_IDS | null {
   for (const [name, shortcutId] of Object.entries(RAIL_SHORTCUT_IDS)) {
@@ -778,7 +750,6 @@ export type ShortcutAvailability = {
   filesSupported: boolean;
   conversationSteeringSupported?: boolean;
   turnInterruptionSupported?: boolean;
-  experimentFlags?: ExperimentFlags;
   /** Rail destinations hidden by preference (#385); their digits are unassigned, not dead. */
   hiddenRailViews?: ReadonlySet<string>;
 };
@@ -799,10 +770,6 @@ export function shortcutUnavailableReason(definition: ShortcutDefinition, contex
   const railView = railViewForShortcut(definition.id);
   if (railView && context.hiddenRailViews?.has(railView)) {
     return "Hidden in Settings → Appearance";
-  }
-  const experiment = EXPERIMENT_SHORTCUT_IDS[definition.id];
-  if (experiment && context.experimentFlags && !context.experimentFlags[experiment]) {
-    return "Turned off in Settings → Experimental";
   }
   // The row names the feature, so the reason only has to say whose fault it is. It stays short
   // enough to share the row's one line with the label and the keycap.

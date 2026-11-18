@@ -123,7 +123,6 @@ function session(id: string): SessionView {
     title: "Transcript Recovery Fixture",
     status: "idle",
     column: "review",
-    runId: null,
     useWorktree: false,
     worktreePath: null,
     archived: false,
@@ -468,7 +467,7 @@ test("reconnecting a paused turn-start reader preserves its slice when a new pro
     const saved = fixture.readLoadedEvents()!.map(event => event.seq);
     await act(async () => fixture.socket.push({ type: "snapshot",
       capabilities: { sessionSubscriptionsV2: true, currentTurnOpening: true }, runners: [runner], boxes: [],
-      sessions: [fixture.readSession()!], runs: [] }));
+      sessions: [fixture.readSession()!] }));
     await act(async () => fixture.socket.push({ type: "session_upsert",
       session: { ...session(`${fixture.sessionId}-busy`), status: "running" } }));
     await flushAsyncWork();
@@ -824,7 +823,6 @@ async function mountFixture(
       boxes: [],
       projects: [],
       sessions: [currentSession],
-      runs: [],
     });
   });
   if (!initialSnapshot) await act(async () => connectionSetter("online"));

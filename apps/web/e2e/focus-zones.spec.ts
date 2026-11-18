@@ -22,14 +22,12 @@ const ROUTES = [
   { name: "Sessions", url: shell("/inbox"), current: /^Sessions/, list: true },
   { name: "Automations", url: shell("/automations"), current: /^Automations/, list: false },
   { name: "Projects", url: shell("/projects"), current: /^Projects/, list: true },
-  { name: "Multi-Agent Runs", url: shell("/runs"), current: /^Multi-Agent/, list: false },
   // The Machines tab is a list beside the detail (#2985).
   { name: "Connections", url: shell("/connections"), current: /^Connections/, list: true },
   { name: "Agent Skills", url: shell("/skills"), current: /Skills/, list: true },
   { name: "Archived Sessions", url: shell("/archived"), current: /^Archived/, list: false },
   { name: "Usage and Cost", url: shell("/usage"), current: /^Usage/, list: false },
   { name: "Settings", url: shell("/settings"), current: /^Settings$/, list: false },
-  { name: "a run detail", url: `${HARNESS}&view=run`, current: /^Multi-Agent/, list: false },
 ] as const;
 
 for (const route of ROUTES) {

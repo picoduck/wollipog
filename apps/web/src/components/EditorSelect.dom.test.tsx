@@ -68,7 +68,6 @@ const session: SessionView = {
   title: "Editor Selection Fixture",
   status: "idle",
   column: "review",
-  runId: null,
   useWorktree: false,
   worktreePath: null,
   archived: false,
@@ -126,7 +125,6 @@ function snapshot(runnerView: RunnerView = runner, boxes: BoxView[] = []): UiSna
     boxes,
     projects: [],
     sessions: [session],
-    runs: [],
   };
 }
 

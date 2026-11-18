@@ -10,7 +10,7 @@ import { sessionDisplayTitle } from "../session-title.js";
 import { statusMeta } from "../status-meta.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
-import { AutomationsIcon, BotIcon, InboxIcon, NextRunIcon, RunsIcon, ScheduleIcon } from "./Icons.js";
+import { AutomationsIcon, BotIcon, InboxIcon, NextRunIcon, ScheduleIcon } from "./Icons.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { Notice } from "./Notice.js";
 import { OutboundEventSubscriptions } from "./OutboundEventSubscriptions.js";

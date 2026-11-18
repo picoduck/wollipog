@@ -440,7 +440,6 @@ function snapshot(): UiSnapshotMessage {
     ],
     projects: [],
     sessions: [],
-    runs: [],
   };
 }
 

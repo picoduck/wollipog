@@ -102,7 +102,7 @@ async function mountSession(patch: Partial<SessionView>, options: { accept?: boo
   sequence += 1;
   const session = {
     id: `fork-shortcut-${sequence}`, runnerId: runner.runnerId, workspaceId: null, workspaceName: null, projectId: null,
-    agentId: "codex", agentName: "Codex", title: "Fork Shortcut", status: "idle", column: "review", runId: null,
+    agentId: "codex", agentName: "Codex", title: "Fork Shortcut", status: "idle", column: "review",
     useWorktree: false, worktreePath: null, archived: false, createdAt: 1, updatedAt: 1, lastEventAt: null,
     messageCount: 0, eventEpoch: 0, preview: null, pendingApproval: null, driver: "codex-app-server", model: null,
     effort: null, permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,
@@ -156,7 +156,7 @@ async function mountSession(patch: Partial<SessionView>, options: { accept?: boo
   await act(async () => socket.push({
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners: [runner], boxes: [], projects: [], sessions: [session], runs: [],
+    runners: [runner], boxes: [], projects: [], sessions: [session]
   } as ControlPlaneToUi));
   await settle();
   await settle();

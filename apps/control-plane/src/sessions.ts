@@ -9,7 +9,7 @@ import { failedCampaignRun } from "./campaign-failed-run.js";
 import { providerAccountRef } from "./agent-account-view.js";
 import {
   isProviderAccountRef, PROVIDER_ACCOUNT_CHOICE_REQUIRED, providerAccountChoiceRequired, providerAccountChoiceRequiredSentence,
-  memberProviderAccountsError, providerAccountExplicitRecord, providerAccountIneligibility, providerAccountNamedRefusal, providerAccountNamedRefusalSentence,
+  providerAccountExplicitRecord, providerAccountIneligibility, providerAccountNamedRefusal, providerAccountNamedRefusalSentence,
   providerAccountSelectionRecord, providerForDriver, resolveProviderAccountSelection,
   supportsClaudeProjectMemory, type AgentDefinition, type ProviderAccountChoice, type ProviderAccountChoiceRequired, type ProviderAccountDefinition, type ProviderAccountSelectionPreview,
   type ProviderAccountSelectionRecord, type ProviderAccountSelectionResult, type RunnerProviderAccountDefault, type RunnerView,
@@ -181,7 +181,6 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type DescendantRequestResolution,
   type DescendantRequestView,
   type DescendantRequestsView,
-  type CreateRunRequest,
   type CreateSessionRequest,
   type CreateWorkspaceReferenceRequest,
   type DirectoryEntry,
@@ -262,7 +261,6 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type QueuedPromptView,
   type ResolveSteeringAttemptMessage,
   type ResolveSteeringAttemptResultMessage,
-  type RunView,
   type ReviewFinding,
   type ReviewDecisionApprovalReviewReceipt,
   type ResourceScope,
@@ -858,12 +856,6 @@ export interface PreStagedDeliveryPlan {
   runnerId: string;
   commands: DurableSessionCommand[];
   sessionId?: string;
-}
-
-/** The account a run member starts on, resolved like any session's. */
-interface RunMemberAccount {
-  providerAccount?: ProviderAccountDefinition;
-  selection?: ProviderAccountSelectionRecord;
 }
 
 /** Optional delivery seam used by durable automations. Callers supply deterministic resource IDs;
@@ -2152,21 +2144,9 @@ const ASSISTANT_THREAD_BUDGET_REFUSAL = "This Wollipog Assistant thread has spen
 const ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL = "A Wollipog Assistant thread cannot start an Orchestrator. " +
   "Launch an ordinary session instead, or ask your owner to start the campaign.";
 
-/** A multi-session run or workflow would start several sessions outside one thread launch. */
-const ASSISTANT_THREAD_RUN_REFUSAL = "A Wollipog Assistant thread launches one session at a time and cannot start runs. " +
-  "Launch a session instead, or ask your owner to start it.";
-
-/** A fan-out from inside a thread's launched tree would start several sessions outside the per-child
- * reservation that keeps the tree within the thread's budget (#4671). */
-const ASSISTANT_THREAD_TREE_RUN_REFUSAL = "This session runs in a Wollipog Assistant thread, whose budget its whole session tree shares, " +
-  "so it creates child sessions one at a time and cannot start runs. Create a child session instead.";
-
 /** An agent raising or clearing a thread-tree session's cap would give it budget nobody reserved (#4671). */
 const ASSISTANT_THREAD_TREE_CAP_REFUSAL = "This session runs in a Wollipog Assistant thread, whose budget its whole session tree shares. " +
   "An agent may only lower its cost budget; ask the owner to raise it.";
-
-/** A run's title derived from its task, short enough that each member's " · <role>" still fits in 120. */
-const RUN_TASK_TITLE_MAX = 60;
 
 /** Persist capability-dependent harness defaults at creation time so the selector, stored
  * session, and launch argv all describe the same mode. Older sessions with no stored mode keep
@@ -2189,19 +2169,6 @@ export function defaultPermissionModeForNewSession(
  * rows, so the catalog, not the launch, is what lets a refusal name the reason. */
 function retiredCodexExecAgent(db: ControlPlaneDb, runnerId: string, agentId: string): boolean {
   return db.getRunner(runnerId)?.agents.some((agent) => agent.id === agentId && isRetiredCodexExec(agent)) ?? false;
-}
-
-function runMemberCapabilityError(
-  agentId: string,
-  config: SessionConfig | undefined,
-  launch: AgentLaunch,
-): string | null {
-  if (isRetiredCodexExec(launch)) return `${agentId}: ${CODEX_EXEC_RETIRED_REASON}`;
-  if (config?.serviceTier && launch.driver !== "codex-app-server") {
-    return `${agentId}: service tier selection is supported only by Codex app-server sessions`;
-  }
-  const error = capabilityConfigError(config, launch.capabilities);
-  return error ? `${agentId}: ${error}` : null;
 }
 
 export function auditDigest(value: unknown): string | undefined {
@@ -3957,7 +3924,6 @@ export class SessionsService {
   private sessionSpawnGate(
     parentSessionId: string,
     request: { title?: string; agentId: string },
-    childCount = 1,
   ): ServiceResult<null> {
     if (this.mediaSessionPurposes.owns(parentSessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     if (this.db.delegatedImageReviews.isReviewer(parentSessionId)) return fail(DELEGATED_IMAGE_REVIEWER_ERROR, 409);
@@ -3981,7 +3947,6 @@ export class SessionsService {
     ]);
     const identity = {
       request,
-      ...(childCount === 1 ? {} : { childCount }),
       parentSessionId,
       ordinal: this.db.childSessionAllocations(parentSessionId).count,
     };
@@ -4012,11 +3977,11 @@ export class SessionsService {
     const approval: PendingApproval = {
       requestId,
       kind: "policy_hook",
-      title: `${parent.title} requests ${childCount === 1 ? "a child" : `${childCount} children`}: ${request.title || request.agentId}`.slice(0, 240),
+      title: `${parent.title} requests a child: ${request.title || request.agentId}`.slice(0, 240),
       context: { toolName },
       governancePolicyId: decision.policy!.policyId,
       options: [
-        { optionId: "allow", name: childCount === 1 ? "Create Child" : "Create Children", kind: "allow_once" },
+        { optionId: "allow", name: "Create Child", kind: "allow_once" },
         { optionId: "deny", name: "Reject", kind: "reject_once" },
       ],
       ...(decision.policy?.askTimeout ? { expiresAt: now + decision.policy.askTimeout * 1000 } : {}),
@@ -4052,107 +4017,6 @@ export class SessionsService {
       status: decision.effect === "allow" ? "allowed" : "denied", approval, audits, now,
     });
     return decision.effect === "allow" ? ok(null) : fail("child session creation is denied by policy", 403);
-  }
-
-  private runMemberConfig(
-    request: Pick<CreateRunRequest, "config" | "costBudgetUsd" | "maxToolCalls">,
-    agentCreated: boolean,
-  ): SessionConfig {
-    const config = { ...(request.config ?? {}) };
-    if (agentCreated) {
-      // Preserve explicit zero/invalid values so child admission rejects, rather than silently
-      // replacing them with defaults. Human run normalization retains its existing semantics.
-      if (request.costBudgetUsd !== undefined) config.costBudgetUsd = request.costBudgetUsd;
-      if (request.maxToolCalls !== undefined) config.maxToolCalls = request.maxToolCalls;
-    } else {
-      if (request.costBudgetUsd && request.costBudgetUsd > 0) config.costBudgetUsd = request.costBudgetUsd;
-      const maxCalls = request.maxToolCalls != null ? Math.floor(request.maxToolCalls) : 0;
-      if (maxCalls > 0) config.maxToolCalls = maxCalls;
-    }
-    return config;
-  }
-
-  /** Preflight the whole fan-out before creating a run or delivering any member. Planning
-   * uses virtual reservations; db.createSession persists each reservation with its child. */
-  private admitRunChildren(
-    parentSessionId: string | undefined,
-    configs: SessionConfig[],
-    request: { title?: string; agentId: string },
-    members: Array<{ agentId: string; launch: AgentLaunch }> = [],
-    /** Where every member runs; a Full Control campaign checks it as it checks one child (#4119). */
-    place?: { runnerId: string; workspaceId: string },
-  ): ServiceResult<SessionConfig[]> {
-    if (!parentSessionId || configs.length === 0) return ok(configs);
-    if (this.db.assistantThreads.member(parentSessionId)) return fail(ASSISTANT_THREAD_TREE_RUN_REFUSAL, 409);
-    const parent = this.db.getSession(parentSessionId);
-    if (!parent || !["starting", "running", "input_required"].includes(parent.status)) {
-      return fail("the creating parent session is no longer active", 409);
-    }
-    const campaignAuthority = this.orchestratorCampaignController(parent);
-    if (campaignAuthority === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);
-    if (campaignAuthority?.orchestratorPolicy?.control?.mode === "full_control") {
-      const misplaced = place ? this.campaignPlacementRefusal(campaignAuthority, parent, place)
-        : "Full Control children must use a Location of a repository in the campaign's boundary";
-      if (misplaced) return fail(misplaced, 409);
-    } else if (campaignAuthority && place) {
-      const misplaced = this.campaignPlacementRefusal(campaignAuthority, parent, place);
-      if (misplaced) return fail(misplaced, 409);
-    }
-    const campaignPolicy = campaignAuthority?.orchestratorPolicy;
-    const campaignBehavior = campaignPolicy?.behavior;
-    const reserved = { ...this.db.childSessionAllocations(parentSessionId) };
-    if (configs.length > (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount) {
-      const remaining = Math.max(0, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount);
-      return fail(`the parent session has ${remaining} remaining live child slot${remaining === 1 ? "" : "s"}; raise maxChildSessions before creating this run`, 409);
-    }
-    const applied: SessionConfig[] = [];
-    for (const [index, config] of configs.entries()) {
-      const member = members[index];
-      const candidate = { ...config };
-      if (campaignBehavior && member) {
-        const launchHarness = agentHarnessIdentityFor({
-          id: member.agentId,
-          driver: member.launch.driver,
-          context: member.launch.context,
-        });
-        if (!childHarnessAdmits(campaignPolicy!, launchHarness)) return fail(childHarnessRefusal(campaignPolicy!), 409);
-        if (campaignBehavior.childModel !== null && candidate.model !== undefined &&
-            candidate.model !== campaignBehavior.childModel) {
-          return fail(`child model is fixed by campaign policy at ${campaignBehavior.childModel}`, 409);
-        }
-        if (campaignBehavior.childEffort !== null && candidate.effort !== undefined &&
-            candidate.effort !== campaignBehavior.childEffort) {
-          return fail(`child effort is fixed by campaign policy at ${campaignBehavior.childEffort}`, 409);
-        }
-        if (candidate.model === undefined && campaignBehavior.childModel !== null) {
-          candidate.model = campaignBehavior.childModel;
-        }
-        if (candidate.effort === undefined && campaignBehavior.childEffort !== null) {
-          candidate.effort = campaignBehavior.childEffort;
-        }
-        const capabilityError = runMemberCapabilityError(member.agentId, candidate, member.launch);
-        if (capabilityError) return fail(capabilityError, 409);
-      }
-      if (candidate.maxChildSessions !== undefined && (!Number.isSafeInteger(candidate.maxChildSessions) ||
-          candidate.maxChildSessions < 0 || candidate.maxChildSessions > 64)) {
-        return fail("maxChildSessions must be an integer from 0 to 64", 400);
-      }
-      const guarded = childSessionGuardrails({
-        ...parent,
-        ...this.childCeilingsOf(parent),
-        costUsd: (parent.costUsd ?? 0) + reserved.costBudgetUsd,
-        toolCallCount: (parent.toolCallCount ?? 0) + reserved.maxToolCalls,
-      }, candidate, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount,
-      parent.projectId ? this.db.projectChildSessionDefaults(parent.projectId) : null);
-      if ("error" in guarded) return fail(guarded.error, 409);
-      applied.push(guarded.config);
-      reserved.count++;
-      reserved.liveCount++;
-      reserved.costBudgetUsd += guarded.config.costBudgetUsd ?? 0;
-      reserved.maxToolCalls += guarded.config.maxToolCalls ?? 0;
-    }
-    const gate = this.sessionSpawnGate(parentSessionId, request, configs.length);
-    return gate.ok ? ok(applied) : failAs(gate);
   }
 
   /** Private server materialization, called only inside PreparedMediaSessions' transaction.
@@ -5432,7 +5296,6 @@ export class SessionsService {
       existing.useWorktree !== useWorktree ||
       JSON.stringify(existing.executionTarget) !== JSON.stringify(executionTarget) ||
       JSON.stringify(this.db.getExecutionHandoffRequest(id)) !== JSON.stringify(executionHandoff) ||
-      existing.runId !== null ||
       existing.driver !== (launch.driver ?? "acp") ||
       this.db.getAdHocWorkspacePath(id) !== (adHoc || null) ||
       JSON.stringify(this.db.getAcpSessionContext(id)) !== JSON.stringify(acpSessionContext)
@@ -20889,14 +20752,10 @@ export class SessionsService {
     value: Extract<ReturnType<typeof validateArtifact>, { ok: true }>["value"],
     actor: GovernanceActor,
   ): ServiceResult<Artifact> {
-    const run = value.runId ? this.db.getRun(value.runId) : null;
     const session = value.sessionId ? this.db.getSession(value.sessionId) : null;
-    if (value.runId && !run) return fail("run not found", 404);
     if (value.sessionId && !session) return fail("session not found", 404);
-    if (run && session && session.runId !== run.id) return fail("session is not a member of the artifact run", 409);
     const artifact: Artifact = {
       artifactId: shortId("art_"),
-      ...(value.runId ? { runId: value.runId } : {}),
       ...(value.sessionId ? { sessionId: value.sessionId } : {}),
       kind: value.kind,
       name: value.name,
@@ -20915,10 +20774,6 @@ export class SessionsService {
       if (error instanceof SessionArtifactQuotaError) return fail(error.message, 409);
       throw error;
     }
-    if (artifact.runId) {
-      const updated = this.db.getRun(artifact.runId);
-      if (updated) this.hub.runChanged(updated);
-    }
     return ok(artifact, 201);
   }
 
@@ -20928,22 +20783,6 @@ export class SessionsService {
     const after = parseArtifactCursor(cursor);
     if (after === false) return fail("artifact cursor is malformed", 400);
     return ok(artifactPage(this.db.listSessionArtifacts(sessionId, after, limit + 1), limit));
-  }
-
-  /** One run or workflow member's account: what it names, else the Machine's policy. A refusal of a named
-   * account says whose it was, since a launch has several members and none of them started. */
-  private namedMemberProviderAccount(
-    runner: RunnerView,
-    member: string,
-    named: string | undefined,
-    launch: { agentId: string; launch: AgentLaunch; namedByAgent?: boolean; model?: string;
-      pinned?: { accountId?: string; selection?: ProviderAccountSelectionRecord } },
-  ): ServiceResult<RunMemberAccount> {
-    if (named && !launch.pinned && !runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")) {
-      return capabilityFail(runnerCapabilityRequirementError(runner.protocolVersion, "providerAccounts", "choosing an account"));
-    }
-    const account = this.launchProviderAccount({ ...launch, runner, hostTarget: true, ...(named ? { requestedId: named } : {}) });
-    return named && !account.ok ? { ...account, error: `${member}: ${account.error}` } : account;
   }
 
   /** The saved policy this runner's launch must honor. A fixed default needs a runner with accounts.
@@ -20994,8 +20833,7 @@ export class SessionsService {
   }
 
   /**
-   * The one place a new session's account is decided, for sessions, children, runs and workflows
-   * alike: a retried launch's recorded account, then an explicit choice, then the Machine's policy.
+   * The one place a new session's account is decided, for new and child sessions: a retried launch's recorded account, then an explicit choice, then the Machine's policy.
    * Nothing here moves an existing session, whose binding the runner keeps across restarts.
    */
   private launchProviderAccount(input: {
@@ -21211,229 +21049,6 @@ export class SessionsService {
         ...(named ? { reason: named } : limit ?? {}),
       };
     });
-  }
-
-  createRun(
-    req: CreateRunRequest,
-    creationContext?: { parentSessionId?: string; /** The authenticated human launching it (#3840). */ launcherUserId?: string },
-  ): ServiceResult<{ run: RunView; sessions: SessionView[] }> {
-    const parentSessionId = creationContext?.parentSessionId;
-    if (parentSessionId) {
-      const reviewRefusal = this.reviewSessionRefusal(parentSessionId, "creates no sessions");
-      if (reviewRefusal) return fail(reviewRefusal, 409);
-    }
-    if (this.assistantThreadLaunch()) return fail(ASSISTANT_THREAD_RUN_REFUSAL, 409);
-    if (!req.agentIds?.length) return fail("at least one agent is required");
-    if (req.agentIds.length > MAX_UI_SESSION_SUBSCRIPTIONS) {
-      return fail(`at most ${MAX_UI_SESSION_SUBSCRIPTIONS} agents are allowed in one run`);
-    }
-    if (typeof req.task !== "string" || !req.task.trim()) return fail("a task is required");
-    const workspacePath = this.db.getWorkspacePath(req.runnerId, req.workspaceId);
-    if (!workspacePath) return fail(`unknown workspace '${req.workspaceId}'`, 404);
-    if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
-    const requestedProject = this.requestedProjectAssignment(
-      req, req.runnerId, req.workspaceId, false, parentSessionId,
-    );
-    if (!requestedProject.ok || !requestedProject.data) {
-      return failAs(requestedProject, "project assignment is invalid");
-    }
-    const projectSessionScope = this.sessionScopeForProjectAssignment(
-      requestedProject.data,
-      this.db.workspaceScope(req.runnerId, req.workspaceId) ?? this.db.runnerScope(req.runnerId),
-    );
-    if (!projectSessionScope.ok || !projectSessionScope.data) {
-      return failAs(projectSessionScope, "run session ownership is unavailable");
-    }
-    let sessionScope = projectSessionScope.data;
-    if (parentSessionId) {
-      const parentScope = this.db.sessionScope(parentSessionId);
-      if (!parentScope) return fail("parent session ownership is unavailable", 409);
-      if (!this.db.scopeAudienceContainedWithMembership(parentScope, projectSessionScope.data)) {
-        return fail("parent session access is broader than the selected Project or execution Location", 409);
-      }
-      sessionScope = parentScope;
-    }
-    // Every member session carries the run's scope and launcher, so an owner or launcher over their
-    // daily allowance cannot launch a fleet of new turns through a run either.
-    const launcherUserId = parentSessionId
-      ? this.db.sessionLauncherUserId(parentSessionId)
-      : creationContext?.launcherUserId ?? null;
-    const runAdmissionDenied = this.dailyBudgetAdmissionError(sessionScope, launcherUserId);
-    if (runAdmissionDenied) return fail(runAdmissionDenied, 409);
-
-    // Resolve every agent before creating the run so we never persist an empty run.
-    const resolved: { agentId: string; launch: AgentLaunch }[] = [];
-    const unknown: string[] = [];
-    for (const agentId of req.agentIds) {
-      // Account readiness is `launchProviderAccount`'s to refuse below, with its reasons.
-      const launch = this.db.getAgentLaunch(req.runnerId, agentId, false, { allowAccountSelection: true });
-      // Checked against the catalog too, so a retired member never leaves a partial run behind.
-      if ((launch && isRetiredCodexExec(launch)) || retiredCodexExecAgent(this.db, req.runnerId, agentId)) {
-        return fail(`${agentId}: ${CODEX_EXEC_RETIRED_REASON}`, 409);
-      }
-      const configCapabilityError = capabilityConfigError(req.config, launch?.capabilities);
-      if (configCapabilityError) return fail(`${agentId}: ${configCapabilityError}`, 409);
-      if (req.config?.serviceTier && launch?.driver !== "codex-app-server") {
-        return fail(`${agentId}: service tier selection is supported only by Codex app-server sessions`, 409);
-      }
-      if (req.config?.serviceTier) {
-        const unsupported = this.capabilityFailure(req.runnerId, "codexServiceTiers", "Codex service tier selection");
-        if (unsupported) return unsupported;
-      }
-      if (launch) resolved.push({ agentId, launch });
-      else unknown.push(agentId);
-    }
-    if (!resolved.length) {
-      return fail(`no known agents on runner '${req.runnerId}': ${unknown.join(", ")}`, 404);
-    }
-    // Each member resolves the same way a session does, before anything is created, so one member
-    // without an account refuses the run rather than leaving part of it started.
-    const runRunner = this.db.getRunner(req.runnerId);
-    if (!runRunner) return fail("runner not found", 404);
-    const namedAccountsError = memberProviderAccountsError(req.providerAccountIds, resolved.map((member) => member.agentId), "providerAccountIds");
-    if (namedAccountsError) return fail(namedAccountsError, 400);
-    const memberAccounts = new Map<string, { providerAccount?: ProviderAccountDefinition; selection?: ProviderAccountSelectionRecord }>();
-    for (const { agentId, launch } of resolved) {
-      const named = req.providerAccountIds && Object.hasOwn(req.providerAccountIds, agentId) ? req.providerAccountIds[agentId] : undefined;
-      const account = this.namedMemberProviderAccount(runRunner, agentId, named, {
-        agentId, launch, ...(parentSessionId ? { namedByAgent: true } : {}), ...(req.config?.model ? { model: req.config.model } : {}) });
-      if (!account.ok || !account.data) return failAs(account);
-      const memoryRefusal = this.accountMemoryRefusal<{ run: RunView; sessions: SessionView[] }>(
-        runRunner, agentId, launch, account.data.selection, this.memberLaunchProjectId(requestedProject.data, req, parentSessionId));
-      if (memoryRefusal) return memoryRefusal;
-      memberAccounts.set(agentId, account.data);
-    }
-
-    const memberConfig = this.runMemberConfig(req, Boolean(parentSessionId));
-    const spawnRequest = { title: req.title, agentId: resolved.map((member) => member.agentId).join(", "),
-      operation: "run", request: req, members: resolved.map((member) => member.agentId) };
-    const admitted = this.admitRunChildren(
-      parentSessionId,
-      resolved.map(() => ({ ...memberConfig })),
-      spawnRequest,
-      resolved,
-      { runnerId: req.runnerId, workspaceId: req.workspaceId },
-    );
-    if (!admitted.ok || !admitted.data) return failAs(admitted);
-
-    const now = Date.now();
-    const runId = shortId("r_");
-    const title = (req.title?.trim() || titleFromPrompt(req.task, RUN_TASK_TITLE_MAX) || "Multi-agent run").slice(0, 120);
-    const titleSource = req.title?.trim() ? "user" as const : "generated" as const;
-    const launches: SessionLaunchSpec[] = [];
-    const materialize = () => {
-    this.db.createRun({
-      id: runId,
-      title,
-      prompt: req.task,
-      workspaceId: req.workspaceId,
-      runnerId: req.runnerId,
-      now,
-    });
-
-    const sessions: SessionView[] = [];
-    for (const [memberIndex, { agentId, launch }] of resolved.entries()) {
-      const memberAccount = memberAccounts.get(agentId);
-      const id = shortId("s_");
-      // Multi-agent runs always isolate in their own worktree (brief: don't let
-      // multiple agents write the same working tree).
-      // Clone per member so guardrail normalization never changes the shared request.
-      const config = { ...admitted.data![memberIndex]! };
-      const campaignBudgetUserLimits = { costUsd: config.costBudgetUsd, toolCalls: config.maxToolCalls };
-      const budgetRoot = parentSessionId ? this.db.campaignBudgets.governingRoot(parentSessionId) : null;
-      if (budgetRoot) {
-        const ceilingError = this.controlledReviewCeilingError(budgetRoot, campaignBudgetUserLimits);
-        if (ceilingError) throw new Error(ceilingError);
-        const view = this.db.campaignBudgets.view(budgetRoot)!;
-        const parentError=this.campaignBudgetConfigError(this.db.getSession(parentSessionId!)!, undefined, undefined,
-          { runnerId: req.runnerId, workspaceId: req.workspaceId });
-        if(parentError) throw typeof parentError === "string" ? new Error(parentError) : new RunnerCapabilityRefusal(parentError);
-        const peer = this.db.getRunner(req.runnerId)?.protocolVersion;
-        if (!runnerSupportsProtocol(peer, "campaignBudgetAdmission")) {
-          throw new RunnerCapabilityRefusal(runnerCapabilityRequirementError(peer, "campaignBudgetAdmission", "campaign run workers"));
-        }
-        const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, view.authority.costUsd !== undefined);
-        if (accountingError) throw new Error(accountingError);
-        const allocation = this.db.campaignBudgets.prepare(budgetRoot, id, campaignBudgetUserLimits);
-        if (allocation.costUsd !== undefined) config.costBudgetUsd = allocation.costUsd;
-        if (allocation.toolCalls !== undefined) config.maxToolCalls = allocation.toolCalls;
-      }
-      const maxCalls = parentSessionId ? config.maxToolCalls : req.maxToolCalls;
-      const runMaxCalls = maxCalls != null ? Math.floor(maxCalls) : 0;
-      const runCheckpoints = normalizeCostCheckpoints(req.config?.costCheckpointsUsd);
-      if (runMaxCalls > 0) config.maxToolCalls = runMaxCalls;
-      const session = this.db.createSession({
-        campaignBudgetUserLimits,
-        id,
-        parentSessionId,
-        runnerId: req.runnerId,
-        workspaceId: req.workspaceId,
-        ...requestedProject.data,
-        agentId,
-        ...(memberAccount?.providerAccount
-          ? { providerAccountId: memberAccount.providerAccount.id, providerAccountLabel: memberAccount.providerAccount.label } : {}),
-        ...(memberAccount?.selection ? { providerAccountSelection: memberAccount.selection } : {}),
-        title: `${title} · ${agentId}`,
-        titleSource,
-        useWorktree: req.useWorktree ?? true,
-        runId,
-        driver: launch.driver,
-        config,
-        scope: sessionScope,
-        ...(launcherUserId ? { launcherUserId } : {}),
-        now,
-      });
-      // Run-level guardrails apply to every member session; each member gates independently.
-      const costBudget = parentSessionId ? config.costBudgetUsd : req.costBudgetUsd;
-      if (costBudget && costBudget > 0) this.db.updateSessionCostBudget(id, costBudget, now);
-      if (runMaxCalls > 0) this.db.updateSessionMaxToolCalls(id, runMaxCalls, now);
-      if (runCheckpoints) this.db.updateSessionCostCheckpoints(id, runCheckpoints, now);
-      this.db.addRunMember(runId, id, agentId);
-
-      // The runner emits the user_message into the box store (source of truth) when it runs the
-      // initial prompt — the control plane no longer appends it (would duplicate it on the timeline).
-
-      const spec: SessionLaunchSpec = {
-        sessionId: id,
-        workspaceId: req.workspaceId,
-        campaignBudgetDispatch: this.db.campaignBudgets.dispatchTo(id),
-        workspacePath,
-        agentId,
-        ...(memberAccount?.providerAccount
-          ? { providerAccountId: memberAccount.providerAccount.id, providerAccountLabel: memberAccount.providerAccount.label } : {}),
-        ...this.providerAccountSelectionForRunner(runRunner, memberAccount?.selection),
-        agentVersion: launch.version,
-        capabilities: launch.capabilities,
-        title: `${title} · ${agentId}`,
-        titleSource,
-        command: launch.command,
-        args: launch.args,
-        env: launch.env,
-        useWorktree: req.useWorktree ?? true,
-        driver: launch.driver,
-        context: launch.context,
-        config,
-      };
-      launches.push(spec);
-      sessions.push(this.db.getSession(id)!);
-    }
-
-    return { run: this.db.getRun(runId)!, sessions };
-    };
-    let materialized: ReturnType<typeof materialize>;
-    try { materialized = this.db.campaignBudgetTransaction(materialize); }
-    catch (error) {
-      if (error instanceof RunnerCapabilityRefusal) return capabilityFail(error.requirement);
-      return fail((error as Error).message, 409);
-    }
-    for (const spec of launches) {
-      this.hub.sessionChangedById(spec.sessionId);
-      this.hub.sendToRunner(req.runnerId, { type: "start_session", spec, initialPrompt: req.task });
-    }
-    const { run, sessions } = materialized;
-    this.hub.runChanged(run);
-    this.log.info(`run created ${runId} with ${sessions.length} agent(s)` + (unknown.length ? `, skipped: ${unknown.join(", ")}` : ""));
-    return ok({ run, sessions }, 201);
   }
 
   /* --------------------- Runner event ingestion -------------------------- */

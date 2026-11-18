@@ -17,7 +17,7 @@ import { useTerminalPlacement } from "../terminal-placement.js";
 import { IncrementalSubagentProjector } from "../subagents.js";
 import type { TimelineItem } from "../timeline.js";
 import { workerRoster, workerStatusMeta } from "../worker-roster.js";
-import { attentionAskers, attentionBadge, memberAttentionAskers, memberSessions } from "../worker-attention.js";
+import { attentionAskers, attentionBadge } from "../worker-attention.js";
 import {
   SESSION_TOOL_GROUPS,
   SESSION_TOOLS,
@@ -254,22 +254,11 @@ function SessionToolsListView({
     // An id the transcript cannot attribute to one agent is Unverified, as the panel shows it.
     const unambiguous = agents.map((agent) => projection.ambiguousIds.has(agent.id)
       ? { ...agent, lifecycle: "unknown" as const, availability: "recorded" as const } : agent);
-    return workerRoster(session, unambiguous, [], () => runnerOnline)
+    return workerRoster(session, unambiguous, runnerOnline)
       .filter((row) => row.target.kind === "subagent");
   }, [projection, registry, runnerOnline, session]);
-  // The Agents row's one status badge (§11.1): the workers that need the person (subagents and
-  // run members), every kind counted from the same askers as the Agents panel's attention notice
-  // (#2861), and kept while the machine is offline; else "1 Running", where an Unverified agent never
-  // takes the badge.
-  const runs = useOptionalStoreSelector((state) => state.runs);
-  const sessions = useOptionalStoreSelector((state) => state.sessions);
-  const runners = useOptionalStoreSelector((state) => state.runners);
-  const members = useMemo(() => runs && sessions ? memberSessions(session, runs, sessions) : [],
-    [session, runs, sessions]);
-  const attention = attentionBadge([
-    ...attentionAskers(session.pendingApproval, () => undefined).filter((asker) => asker.ownerId !== null),
-    ...memberAttentionAskers(members, (id) => id === session.runnerId ? runnerOnline : runners?.get(id)?.status === "online"),
-  ].map((asker) => asker.kind), runnerOnline);
+  const attention = attentionBadge(attentionAskers(session.pendingApproval, () => undefined)
+    .filter((asker) => asker.ownerId !== null).map((asker) => asker.kind), runnerOnline);
   const running = subagents.filter((row) => row.state === "running");
   const agentsBadge = attention
     ? <StatusBadge meta={attention.meta} label={attention.label}

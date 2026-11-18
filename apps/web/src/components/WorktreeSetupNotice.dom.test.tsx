@@ -196,7 +196,7 @@ async function withSuggestion(
       runnerId: "runner-1", hostname: "build-box", displayName: "Build Box", os: "linux", version: "1",
       status: "online", agents: [], workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: PROTOCOL_VERSION,
     }],
-    boxes: [], sessions: [], runs: [],
+    boxes: [], sessions: []
   }));
   try {
     await run({ container: view.container, calls });
