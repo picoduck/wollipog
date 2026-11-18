@@ -7416,16 +7416,64 @@ body.shell-dock-dragging * {
 }
 /* A tertiary option sits at the far left, apart from the rest (§3.2): a sign-in's Dismiss Recovery. */
 .request-card-foot > .request-card-tertiary { margin-right: auto; }
-/* An Assistant thread's owner confirmations (#4665): request cards in a plain list, in the Inbox's
-   notice slot and among a thread's work cards. An argument's whole value wraps rather than hides. */
-.assistant-confirmations { padding: var(--space-3) var(--space-3) 0; }
-.assistant-confirmations-list {
+/* The Inbox's Assistant Approvals (#4665): one request card above the Sessions list, a line for each
+   of at most three threads (AssistantConfirmationsNotice), then "+N More". Where the pane is wide a
+   line is one 28px row; where it is not, the title takes its own line over the count, expiry and
+   Review, and in the narrowest pane the expiry gives way. A title only ever ends in an ellipsis. So
+   every line is at most two rows, the card's height has a small fixed bound whatever number of
+   requests wait, and the sessions under it keep their room. */
+.request-card.assistant-approvals {
+  gap: 0;
+  padding: var(--space-1) var(--space-3);
+}
+.assistant-approvals-list {
   display: grid;
-  gap: var(--space-2);
+  grid-template-columns: minmax(0, 1fr);
   margin: 0;
   padding: 0;
   list-style: none;
 }
+.assistant-approvals-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--space-3);
+  min-width: 0;
+  min-height: var(--control-h-sm);
+}
+.assistant-approvals-title {
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow: hidden;
+  font: var(--type-body-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Beside its title or wrapped under it, it keeps the line's trailing edge, Review last. */
+.assistant-approvals-meta {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-left: auto;
+  color: var(--text-dim-on-tint);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.assistant-approvals-expiry {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.assistant-approvals-meta > .btn {
+  flex: none;
+  margin-left: var(--space-1);
+}
+.assistant-approvals-more { align-self: flex-end; }
+/* An Assistant thread's owner confirmations (#4665): request cards among a thread's work cards. An
+   argument's whole value wraps rather than hides. */
 .assistant-confirmation-summary {
   margin: 0;
   font: var(--type-body);
@@ -13153,8 +13201,12 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   overflow-y: auto;
   padding: var(--space-5) var(--page-gutter) var(--space-12) var(--space-6);
 }
+/* One column as wide as the pane. An implicit `auto` column would grow to its rows' min-content, the
+   longest title on one line, and push the list and New Thread past the pane; this one lets each row's
+   title shrink and end in its ellipsis instead. */
 .assistant-group {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-1);
 }
 /* The empty state's column starts where the Threads label and the rows' titles do. */

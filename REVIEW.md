@@ -58,3 +58,15 @@ constraints before recommending removal of apparently redundant defenses or comp
 Check Title Case for compact UI labels and accessible control names, sentence case for prose,
 keyboard and focus behavior, responsive layouts, and meaningful loading and error states.
 Distinguish captured evidence from an interaction or environment that has not been verified.
+
+Check how the change behaves under load, not only in its tidy case:
+
+- **Growable content is bounded.** Anything that can grow (a list, a notice, a set of cards or
+  requests) has a height limit or collapses, with many items and with long text.
+- **Existing views stay usable.** Content added to a view never pushes out that view's own
+  primary content, such as the rows of a list.
+- **Nothing overflows sideways.** No pane scrolls horizontally at desktop, compact or phone
+  widths, and every primary action stays visible.
+
+Treat a growable view without an automated layout check (see `apps/web/e2e/layout-invariants.ts`)
+as missing test coverage.

@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { expectFullyInViewport, expectPageNoHorizontalOverflow } from "./layout-invariants.js";
 
 /**
  * A thread's owner confirmations in the open thread (#4665): the destructive command its assistant
@@ -99,6 +100,22 @@ test("on a phone three requests scroll in a bounded area, and every action and t
   await expectEveryRequestReachable(page, 3);
 });
 
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test(`at ${viewport.width}px six waiting requests stay bounded, and the transcript and composer keep their room`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await openThread(page, "dark", 6);
+    await expect(requests(page)).toHaveCount(6);
+    const area = await page.locator(".assistant-work").boundingBox();
+    expect(area!.height, "the requests and work cards take at most 60% of the window").toBeLessThanOrEqual(viewport.height * 0.6 + 1);
+    const transcript = await page.locator(".detail-scroll").boundingBox();
+    expect(transcript!.height, "the transcript keeps room to read").toBeGreaterThanOrEqual(80);
+    await expectFullyInViewport(page.locator(".composer"), "The composer");
+    await expectPageNoHorizontalOverflow(page);
+    await expectEveryRequestReachable(page, 6);
+    await expectFullyInViewport(page.locator(".composer"), "The composer, after scrolling to every request");
+  });
+}
+
 test("Deny refuses it on a phone", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openThread(page, "light");
@@ -127,4 +144,19 @@ test("captures the thread's confirmation card in both themes at desktop and phon
       await page.screenshot({ path: join(EVIDENCE_DIR!, `thread-card-${viewport.name}-${theme}.png`) });
     }
   }
+});
+
+test.describe("evidence with six requests", () => {
+  test.use({ timezoneId: "UTC", locale: "en-US", colorScheme: "dark", viewport: { width: 1440, height: 900 } });
+
+  test("captures the thread with six waiting requests", async ({ page }) => {
+    test.skip(!EVIDENCE_DIR, "evidence capture only");
+    mkdirSync(EVIDENCE_DIR!, { recursive: true });
+    // A fixed clock, so the fixture's times and the requests' expiries never change between runs.
+    await page.clock.setFixedTime(Date.UTC(2026, 10, 17, 17, 0));
+    await openThread(page, "dark", 6);
+    await expect(requests(page)).toHaveCount(6);
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: join(EVIDENCE_DIR!, "thread-view-1440-dark.png") });
+  });
 });
