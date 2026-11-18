@@ -256,7 +256,7 @@ test("every Notifications and Experimental sentence ends with a period, and the 
       ...[notifications, experimental].flatMap((view) =>
         [...view.container.querySelectorAll(".setting-row-desc")].map((element) => element.textContent ?? "")),
     ];
-    assert.equal(sentences.length, 8, "two index lines, two panel heads and four row descriptions");
+    assert.equal(sentences.length, 7, "two index lines, two panel heads and three row descriptions");
     for (const sentence of sentences) assert.match(sentence, /\.$/, `"${sentence}" ends with a period`);
     for (const view of [notifications, experimental]) {
       assert.doesNotMatch(view.container.textContent ?? "", /Push-to-wake|Untested Features/i);
@@ -268,7 +268,6 @@ test("every Notifications and Experimental sentence ends with a period, and the 
     ]);
     assert.deepEqual([...experimental.container.querySelectorAll(".setting-row-desc")].map((element) => element.textContent), [
       "Runs that coordinate several agents in a workflow graph.",
-      "Shared-context groups of sessions.",
     ]);
   } finally {
     await notifications.unmount();
