@@ -255,6 +255,7 @@ export interface SessionMeta {
   /** Launch params, persisted so any runner on the box can re-spawn the agent to RESUME the session. */
   command: string;
   args: string[];
+  /** Runtime-only launch environment. Durable session metadata always writes an empty record. */
   env: Record<string, string>;
   context: AgentContext;
   /** Agent-native resumable id (claude UUID / codex threadId / acp sessionId), or null if not resumable. */
@@ -787,6 +788,8 @@ const OWN_PROCESS_START = processStartTime(process.pid);
  * left behind names a writer that died in between. */
 const WRITER_TEMP_FILE =
   /^(?:meta\.json|lock|lock\.guard|events\.idx|events\.reset\.json)\.([1-9]\d*)\.[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.tmp$|^lock\.guard\.([1-9]\d*)\.[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.broken$/;
+const STATE_DOCTOR_META_TEMP_FILE =
+  /^meta\.json\.state-doctor-[1-9]\d*-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
 
 /** Names of the writer temp files this process may still rename after an await (the background meta
  * flush), across every store. Every other writer writes and renames without yielding, and no worker
@@ -1424,7 +1427,9 @@ export class SessionStore {
 
   /** Immediate durable write. Callers must have FOLDED any pending deltas into `meta`
    * (readMeta does) — this clears them and any scheduled flush. */
-  private writeMeta(meta: SessionMeta): void {
+  private writeMeta(input: SessionMeta): SessionMeta {
+    // Store and cache only durable metadata, even if a caller hands back a launch object.
+    const meta: SessionMeta = { ...input, env: {} };
     // Write to a temp file then rename, so a reader never sees a half-written meta.json.
     const p = this.metaPath(meta.sessionId);
     const tmp = `${p}.${process.pid}.${randomUUID()}.tmp`;
@@ -1443,6 +1448,7 @@ export class SessionStore {
     }
     this.pending.delete(meta.sessionId);
     this.cache.set(meta.sessionId, { meta, key: this.statKey(p) ?? "" });
+    return meta;
   }
 
   private fsyncFile(path: string): void {
@@ -2145,6 +2151,7 @@ export class SessionStore {
           return;
         }
         next = this.mergeDelta(disk, entry.delta);
+        next.env = {};
       } catch {
         this.pending.delete(id); // removed or reset beyond repair by another process
         return;
@@ -2256,7 +2263,7 @@ export class SessionStore {
   patchMeta(id: string, patch: Partial<SessionMeta>): SessionMeta | null {
     const cur = this.readMeta(id);
     if (!cur) return null;
-    const next: SessionMeta = { ...cur, ...patch, sessionId: cur.sessionId, updatedAt: Date.now() };
+    let next: SessionMeta = { ...cur, ...patch, sessionId: cur.sessionId, updatedAt: Date.now() };
     if ("pendingBackgroundTaskIds" in patch || "backgroundJobs" in patch) {
       const listed = new Set((next.backgroundJobs ?? []).filter((job) => !job.terminalStatus)
         .flatMap((job) => job.toolUseId ? [job.id, `tool:${job.toolUseId}`] : [job.id]));
@@ -2269,7 +2276,7 @@ export class SessionStore {
     if (Object.keys(patch).every((k) => LAZY_META_KEYS.has(k))) {
       this.patchMetaLazy(id, { ...patch, updatedAt: next.updatedAt });
     } else {
-      this.writeMeta(next); // folds the pending deltas readMeta overlaid into `cur`
+      next = this.writeMeta(next); // folds the pending deltas readMeta overlaid into `cur`
     }
     if (this.metaPatchObserver) {
       try {
@@ -3790,32 +3797,47 @@ export class SessionStore {
     }
   }
 
-  listSessions(): SessionMeta[] {
-    let names: string[];
+  private sessionDirectoryIds(): string[] {
     try {
-      names = readdirSync(this.root, { withFileTypes: true })
+      return readdirSync(this.root, { withFileTypes: true })
         .filter((d) => d.isDirectory())
         .map((d) => d.name);
     } catch {
       return [];
     }
+  }
+
+  listSessions(): SessionMeta[] {
     const out: SessionMeta[] = [];
-    for (const id of names) {
+    for (const id of this.sessionDirectoryIds()) {
       const m = this.readMeta(id);
       if (m) out.push(m);
     }
     return out.sort((a, b) => a.createdAt - b.createdAt);
   }
 
-  /** Remove pre-v54 resolved agent environment from durable session metadata. Launch-time
-   * resolution reconstructs it from current runner-local config. */
+  /** Remove legacy launch environments before any writers start, under the runner data-dir lease.
+   * Launch-time resolution reconstructs the environment from current runner-local config. */
   scrubLegacyAgentEnv(): number {
     let scrubbed = 0;
-    for (const meta of this.listSessions()) {
-      if (!meta.env || Object.keys(meta.env).length === 0) continue;
-      this.patchMeta(meta.sessionId, { env: {} });
-      this.flush(meta.sessionId);
-      scrubbed++;
+    for (const id of this.sessionDirectoryIds()) {
+      const meta = this.readMeta(id);
+      if (meta?.env && Object.keys(meta.env).length > 0) {
+        this.patchMeta(id, { env: {} });
+        this.flush(id);
+        scrubbed++;
+      }
+      // A crash can leave an unpublished metadata write even with a clean or missing meta.json.
+      // The data-dir lease excludes both another runner and offline state-doctor maintenance.
+      const directory = this.dir(id);
+      let removedTemp = false;
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (!entry.isFile() || !entry.name.startsWith("meta.json.")) continue;
+        if (!WRITER_TEMP_FILE.test(entry.name) && !STATE_DOCTOR_META_TEMP_FILE.test(entry.name)) continue;
+        rmSync(join(directory, entry.name), { force: true });
+        removedTemp = true;
+      }
+      if (removedTemp) this.fsyncDirectory(directory);
     }
     return scrubbed;
   }

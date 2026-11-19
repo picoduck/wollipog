@@ -39,7 +39,7 @@ import {
   writeSync,
 } from "node:fs";
 import fs from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { setImmediate as nextTurn } from "node:timers/promises";
@@ -130,14 +130,49 @@ test("create + readMeta round-trips", () => {
   }
 });
 
-test("scrubLegacyAgentEnv durably removes pre-v54 resolved secrets from session meta", () => {
+test("metadata creation and critical patches keep the launch environment off disk", () => {
   const { store, root } = tmpStore();
   try {
-    store.create(meta({ env: { API_TOKEN: "legacy-secret" } }));
-    assert.equal(store.scrubLegacyAgentEnv(), 1);
+    const env = { TEST_LAUNCH_ENV: randomUUID() };
+    store.create(meta());
+    const path = join(root, "s_abc", "meta.json");
+    const cached = store.readMeta("s_abc")!;
+    cached.env = env;
+    const updated = store.patchMeta("s_abc", { args: ["--test"] });
+    assert.deepEqual(updated?.env, {});
     assert.deepEqual(store.readMeta("s_abc")?.env, {});
-    assert.equal(readFileSync(join(root, "s_abc", "meta.json"), "utf8").includes("legacy-secret"), false);
-    assert.equal(store.scrubLegacyAgentEnv(), 0);
+    const persisted = JSON.parse(readFileSync(path, "utf8"));
+    assert.deepEqual(persisted.env, {});
+    assert.deepEqual(persisted.args, ["--test"]);
+    store.create(meta({ env }));
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).env, {});
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("startup scrub removes legacy environment values from metadata and abandoned writes", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.create(meta({ sessionId: "s_clean" }));
+    const directory = join(root, "s_abc");
+    const cleanDirectory = join(root, "s_clean");
+    const sentinel = randomUUID();
+    const path = join(directory, "meta.json");
+    const legacy = { ...JSON.parse(readFileSync(path, "utf8")), env: { TEST_LAUNCH_ENV: sentinel } };
+    writeFileSync(path, JSON.stringify(legacy));
+    writeFileSync(join(directory, `meta.json.${process.pid}.${randomUUID()}.tmp`), JSON.stringify(legacy));
+    writeFileSync(join(cleanDirectory, `meta.json.state-doctor-${process.pid}-${randomUUID()}`), JSON.stringify(legacy));
+    const upgraded = new SessionStore(root);
+    assert.equal(upgraded.scrubLegacyAgentEnv(), 1);
+    assert.deepEqual(upgraded.readMeta("s_abc")?.env, {});
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).env, {});
+    for (const entry of readdirSync(root, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      assert.equal(readFileSync(join(entry.parentPath, entry.name)).includes(sentinel), false, entry.name);
+    }
+    assert.equal(upgraded.scrubLegacyAgentEnv(), 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1372,6 +1407,22 @@ function fireDebouncedFlush(store: SessionStore, id: string): Promise<void> {
   internals.startBackgroundFlush(id);
   return internals.backgroundFlushes.get(id) ?? Promise.resolve();
 }
+
+test("debounced metadata writes keep the launch environment off disk", async () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.readMeta("s_abc")!.env = { TEST_LAUNCH_ENV: randomUUID() };
+    store.appendEvent("s_abc", { kind: "agent_message", text: "hello" });
+    await fireDebouncedFlush(store, "s_abc");
+    const persisted = JSON.parse(readFileSync(join(root, "s_abc", "meta.json"), "utf8"));
+    assert.equal(persisted.seq, 1);
+    assert.deepEqual(persisted.env, {});
+    assert.deepEqual(store.readMeta("s_abc")?.env, {});
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 /** Hold the first call of one of the store's async I/O steps until released. */
 function holdFirstCall(store: SessionStore, method: string): { reached: Promise<void>; release: () => void } {

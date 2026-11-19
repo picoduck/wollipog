@@ -1142,9 +1142,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
       }
     };
     assertPreparationCurrent();
-    meta.env = meta.adopted && !meta.agentId
-      ? adoptedLaunchEnvironment(meta)
-      : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
+    meta.env = sessionAgentEnvironment(meta);
     if (meta.providerCredentialHome && meta.providerAccountProvider) {
       Object.assign(meta.env, providerAccountEnvironment({
         provider: meta.providerAccountProvider,
@@ -1391,6 +1389,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
   attestation.instanceId,
 );
 sessions.onProviderAccountCooldown = publishProviderAccountInventory;
+sessions.setDetachedClaudeEnvironment(sessionAgentEnvironment);
 const sharedDirectoryForbiddenRoots = [parsed.configPath, providerAccountsConfigPath,
   ...(tokenFile ? [tokenFile] : []), ...config.providerAccounts.map((account) => account.directory)];
 sessions.configureSharedDirectories(config.workspaces, sharedDirectoryForbiddenRoots);

@@ -1,8 +1,9 @@
 import { PROVIDER_RETRY_CONTINUATION } from "./provider-turn-retry.js";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import os, { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -469,6 +470,57 @@ function harness(
   };
 }
 
+for (const mode of ["start", "resume", "queued recovery"] as const) {
+  test(`${mode} keeps the prepared environment out of the session store`, async () => {
+    const sessionId = "resume-session";
+    const sentinel = randomUUID();
+    const session = mode === "start" ? { agentSessionId: null }
+      : mode === "queued recovery" ? { status: "running" as const } : {};
+    let wroteIntoCache = false;
+    const h = harness(session, undefined, undefined, undefined, (launch) => {
+      launch.env = { TEST_LAUNCH_ENV: sentinel };
+      wroteIntoCache = h.store.readMeta(sessionId)?.env.TEST_LAUNCH_ENV === sentinel;
+    });
+    const prompt = "Continue the conversation";
+    try {
+      h.store.flushAll(); // Begin each launch with no pending metadata delta.
+      if (mode === "start") {
+        assert.equal(await h.manager.start(launchSpec(h.root), prompt), true);
+      } else if (mode === "resume") {
+        assert.equal(h.manager.prompt(sessionId, prompt), true);
+      } else {
+        // Reuse the crash-recovery entry point with a known-unsubmitted prompt in its FIFO.
+        (h.manager as any).active.set(sessionId, {
+          sessionId, repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
+          client: { dispose: () => {}, agentSessionId: () => "thread-persisted" },
+          queue: [{ id: "queued", text: prompt, images: [] }],
+        });
+        exitActive(h.manager, sessionId, 1);
+      }
+      for (let turn = 0; turn < 10 && (h.prompts.length === 0 || h.store.readMeta(sessionId)?.status !== "idle"); turn++) {
+        await tick();
+      }
+      assert.deepEqual(h.prompts, [prompt]);
+      assert.equal(h.store.readMeta(sessionId)?.status, "idle");
+      assert.equal(h.launches.length, 1);
+      assert.equal(h.launches[0]?.options.resumeId, mode === "start" ? undefined : "thread-persisted");
+      assert.equal(h.launches[0]?.options.env?.TEST_LAUNCH_ENV, sentinel, "the driver still receives the environment");
+      assert.equal(wroteIntoCache, false, "launch preparation must not modify cached metadata");
+      h.store.flushAll();
+      const directory = join(h.root, sessionId);
+      assert.deepEqual(h.store.readMeta(sessionId)?.env, {});
+      assert.deepEqual(JSON.parse(readFileSync(join(directory, "meta.json"), "utf8")).env, {});
+      for (const entry of readdirSync(directory, { recursive: true, withFileTypes: true })) {
+        if (!entry.isFile()) continue;
+        assert.equal(readFileSync(join(entry.parentPath, entry.name)).includes(sentinel), false, entry.name);
+      }
+    } finally {
+      h.manager.shutdownAll();
+      h.cleanup();
+    }
+  });
+}
+
 test("follow-up projection requires exact executing job ids and retains its durable queue time", () => {
   const h = harness({ driver: "claude-code", backgroundWorkState: "continuation_pending", backgroundJobs: [{
     id: "finished", parentTurnId: "parent", runnerId: "runner", workspaceId: null,
@@ -575,7 +627,7 @@ test("startup repairs historical TaskStop rows without artifacts, aggregate stat
       continuationRequired: true, continuationId: "old-continuation", continuationSubmittedAt: 3,
     }] });
   try {
-    h.store.patchMeta("resume-session", { env: { HOME: h.root, TMPDIR: h.root } });
+    h.manager.setDetachedClaudeEnvironment(() => ({ HOME: h.root, TMPDIR: h.root }));
     const projects = join(h.root, ".claude", "projects", claudeProjectPathKey(h.root));
     mkdirSync(projects, { recursive: true });
     writeFileSync(join(projects, "provider-history.jsonl"), [
@@ -628,7 +680,7 @@ for (const entryPoint of ["startup", "reconnect", "recovery_request"] as const) 
       backgroundJobs: [job, { ...job, id: "held", terminalStatus: "completed", terminalObservedAt: 2,
         continuationRequired: true }, ...(unresolved !== "none" ? [{ ...job, id: "unresolved" }] : [])] });
     try {
-      h.store.patchMeta("resume-session", { env: { HOME: h.root, TMPDIR: h.root } });
+      h.manager.setDetachedClaudeEnvironment(() => ({ HOME: h.root, TMPDIR: h.root }));
       const projects = join(h.root, ".claude", "projects", claudeProjectPathKey(h.root));
       mkdirSync(projects, { recursive: true });
       writeFileSync(join(projects, "mixed-history.jsonl"), [
@@ -692,7 +744,7 @@ for (const mode of ["budget", "request", "adopted", "history", "auth", "explicit
         continuationRequired: true }, { ...job, id: "retired", parentTurnId: "retired-parent", restartedAt: 5 },
         ...(pendingCase === "omitted" ? [{ ...job, id: "unresolved", parentTurnId: "other-parent" }] : [])] });
     try {
-      h.store.patchMeta("resume-session", { env: { HOME: h.root, TMPDIR: h.root } });
+      h.manager.setDetachedClaudeEnvironment(() => ({ HOME: h.root, TMPDIR: h.root }));
       const projects = join(h.root, ".claude", "projects", claudeProjectPathKey(h.root));
       mkdirSync(projects, { recursive: true });
       writeFileSync(join(projects, "incomplete-history.jsonl"), ["stopped", "retired"].flatMap((id) => [
@@ -5380,10 +5432,10 @@ test("startup discovers an incomplete Claude task directory even without a persi
     driver: "claude-code",
     agentId: "claude-code",
     command: "claude",
-    env: { HOME: "/provider/home", TMPDIR: "/provider/tmp" },
     agentSessionId: "claude-session",
   });
   try {
+    h.manager.setDetachedClaudeEnvironment(() => ({ HOME: "/provider/home", TMPDIR: "/provider/tmp" }));
     Object.assign(h.manager as object, {
       discoverClaudeTasks: (_cwd: string, _sessionId: string, roots: { tempRoot?: string; claudeHome?: string }) => {
         assert.equal(roots.tempRoot, "/provider/tmp");
@@ -7506,7 +7558,9 @@ test("Claude Code and Codex launches carry zsh guidance only when their command 
   let loginShell = join(shells, "bash");
   t.mock.method(os, "userInfo", () => ({ username: "agent", uid: 1, gid: 1, homedir: "/home/agent", shell: loginShell }));
   const launchGuidance = async (driver: AgentDriverKind, env: Record<string, string>) => {
-    const h = harness({ driver, env: { ...env, WOLLIPOG_CLI: "/runner-private/cli" } });
+    const h = harness({ driver }, undefined, undefined, undefined, (meta) => {
+      meta.env = { ...env, WOLLIPOG_CLI: "/runner-private/cli" };
+    });
     try {
       h.manager.prompt("resume-session", "task");
       for (let i = 0; i < 100 && !h.prompts.length; i++) await shortDelay();
