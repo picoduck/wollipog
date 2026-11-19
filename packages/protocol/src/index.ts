@@ -349,6 +349,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * an unsupported harness. v383 runners launched the role without the proxy. */
   assistantRole: 384,
   assistantThreadProviderAccount: 388,
+  assistantCampaignLaunch: 391,
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
   indexedHistory: 55,

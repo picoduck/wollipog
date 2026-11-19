@@ -22,7 +22,7 @@ import {
 import type { HumanPrincipal } from "./identity.js";
 import type { AssistantConnections, AssistantOperations } from "./assistant-connections.js";
 import { AssistantCommandReceipts } from "./assistant-command-receipts.js";
-import { AssistantOwnerConfirmationService } from "./assistant-owner-confirmations.js";
+import { ASSISTANT_CAMPAIGN_START, assistantCampaignLaunchId, AssistantOwnerConfirmationService } from "./assistant-owner-confirmations.js";
 import type { AssistantThreadStore, StoredThreadState, ThreadRow } from "./assistant-thread-store.js";
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
@@ -112,6 +112,7 @@ export interface AssistantThreadDeps {
     ReturnType<SessionsService["changeAssistantThreadAccount"]>;
   /** The thread's owner confirmations waiting for its owner (#4665). */
   pendingConfirmations?(threadId: string): AssistantOwnerConfirmation[];
+  launchedCampaignIds?(threadId: string): string[];
   now?(): number;
 }
 
@@ -132,6 +133,7 @@ export class AssistantThreads {
 
   view(row: ThreadRow, session = row.session_id ? this.deps.getSession(row.session_id) : null): AssistantThread {
     const launched = this.store.launchedSessionIds(row.id);
+    const campaigns = this.deps.launchedCampaignIds?.(row.id) ?? [];
     const confirmations = row.state === "active" ? this.deps.pendingConfirmations?.(row.id) ?? [] : [];
     const status = assistantThreadStatus(row.state, session, confirmations.length);
     return {
@@ -147,8 +149,9 @@ export class AssistantThreads {
       accountChangeSupported: true,
       ...(session?.providerAccountLabel ? { providerAccountLabel: session.providerAccountLabel } : {}),
       launchedSessionIds: launched,
+      ...(campaigns.length ? { launchedCampaignIds: campaigns } : {}),
       usage: {
-        launchedSessions: { used: launched.length, limit: row.launch_limit },
+        launchedSessions: { used: launched.length + campaigns.length, limit: row.launch_limit },
         costUsd: { used: Math.round(this.store.costs(row.id).spentUsd * 10_000) / 10_000, limit: row.cost_limit_usd },
       },
       ...(status !== "archived" ? { limitsEditable: true } : {}),
@@ -471,6 +474,7 @@ export function createAssistantThreads(db: ControlPlaneDb, hub: Hub, svc: Sessio
     accountChoices: (runner, agent, session) => svc.assistantThreadAccountChoices(runner, agent, session),
     changeAccount: (runner, agent, session, threadId, input) => svc.changeAssistantThreadAccount(runner, agent, session, threadId, input),
     pendingConfirmations: (threadId) => db.assistantOwnerConfirmations.pendingForThread(threadId),
+    launchedCampaignIds: (threadId) => db.assistantOwnerConfirmations.launchedCampaignIds(threadId),
   });
   hub.onAssistantSessionUpsert((view) => threads.sessionChanged(view));
   db.assistantOwnerConfirmations.onChange((threadId) => threads.confirmationsChanged(threadId));
@@ -495,6 +499,14 @@ export function createAssistantOwnerConfirmationService(db: ControlPlaneDb, svc:
   const service = new AssistantOwnerConfirmationService({
     store: db.assistantOwnerConfirmations,
     receiptStatus: (connectionId, commandId) => receipts.get(connectionId, commandId)?.status,
+    campaignOutcome: (id) => {
+      const command = db.assistantOwnerConfirmations.command(id);
+      if (command?.operation !== ASSISTANT_CAMPAIGN_START) return undefined;
+      const retained = db.humanCampaignLaunchIdentity(command.ownerUserId, assistantCampaignLaunchId(id));
+      if (!retained) return undefined;
+      const receipt = receipts.settle(command.connectionId, command.commandId, "uncertain", retained.sessionId);
+      return { receiptStatus: receipt.status, sessionId: retained.sessionId };
+    },
     run: (connectionId, operation, args, id) => operations.callOwnerApproved(connectionId, operation, args, id),
     // The outcome reaches the assistant as a message in its own conversation, queued if it is
     // busy. A refused admission (its runner offline, say) is retried until it is admitted.

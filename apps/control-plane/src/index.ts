@@ -3,6 +3,7 @@ import { withoutProviderAccountNames } from "./agent-account-view.js";
 import { AssistantPromptImages } from "./assistant-prompt-images.js";
 import { createCampaignReviewManagement } from "./campaign-review-management.js";
 import { registerAssistantCampaignManagement } from "./assistant-campaign-management.js";
+import { registerAssistantCampaignStart } from "./assistant-campaign-start.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 import { providerLoginStartFailure } from "./provider-login-start-failure.js";
 import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
@@ -2478,6 +2479,9 @@ app.get("/api/onboarding", async (): Promise<OnboardingInfo> => {
 
 registerRunnerCredentialRoutes(app, { db, hub, requestHuman });
 const {operations: assistantOperations, ingress: assistantDiscordIngress, receipts: assistantCommandReceipts} = createAssistantManagement(db, svc);
+const reviseAssistantCampaign = registerAssistantCampaignStart(assistantOperations, { db, hub, sessions: svc,
+  settings: orchestratorSettings, evidenceDisclosures: evidenceAuthorityDisclosures,
+  videoCertification: (runnerId) => videoEvidence.launchCertification(runnerId) }, assistantCommandReceipts);
 export { assistantOperations };
 const assistantManagementMutations = new ManagementMutations(assistantCommandReceipts, db.instanceId(), assistantRequestDigest,
   id => db.assistantConnections.get(id)!, id => db.assistantConnections.destructiveConfirmation(id),
@@ -2492,7 +2496,7 @@ registerAssistantConnectionOperations(assistantOperations, {db, outbound: outbou
 registerAssistantRoutes(app, { db, operations: assistantOperations, requestHuman });
 const assistantThreads = createAssistantThreads(db, hub, svc);
 const assistantOwnerConfirmations = createAssistantOwnerConfirmationService(db, svc, assistantOperations);
-registerAssistantThreadRoutes(app, { threads: assistantThreads, confirmations: assistantOwnerConfirmations, requestHuman });
+registerAssistantThreadRoutes(app, { threads: assistantThreads, confirmations: assistantOwnerConfirmations, requestHuman, reviseCampaign: reviseAssistantCampaign });
 registerAssistantWorkOwnerRoutes(app, { db, outboundEvents, requestHuman });
 registerAssistantDiscordIngress(app, { db, ingress: assistantDiscordIngress, requestHuman });
 
