@@ -1,4 +1,4 @@
-import type { AgentDriverKind, SessionStatus } from "@wollipog/protocol";
+import type { AgentDriverKind, PendingApproval, SessionStatus } from "@wollipog/protocol";
 
 /** The agent a composer addresses, by its product name: "Claude Code", "Codex", "Pi", or a generic
  * ACP agent's own name (docs/design-system.md §17). Never the driver's variant. */
@@ -27,6 +27,8 @@ export function composerUnavailableReason(input: {
   machineName: string;
   noticeReason: string | undefined;
   policyPaused: boolean;
+  /** Whose workflow decision pauses the session, when that is what pauses it (#4713). */
+  workflowDecision?: WorkflowDecisionPause | null;
 }): string | null {
   if (input.refusal !== null) return input.refusal;
   if (input.archivedReason !== undefined) return input.archivedReason;
@@ -37,8 +39,23 @@ export function composerUnavailableReason(input: {
     return `${input.machineName || "This machine"} is offline. You can send again when it reconnects.`;
   }
   if (input.noticeReason !== undefined) return input.noticeReason;
-  if (input.policyPaused) return "Paused by a guardrail. Continue or stop in the request above.";
+  if (input.policyPaused) {
+    // A workflow decision is not a guardrail and offers no Continue or Stop: name who decides it.
+    if (input.workflowDecision === "yours") return "Waiting for your decision. Answer the request above to continue.";
+    if (input.workflowDecision === "orchestrator") return "Waiting for the Orchestrator's decision on the request above.";
+    if (input.workflowDecision === "unknown") return "Waiting for a decision on the request above.";
+    return "Paused by a guardrail. Continue or stop in the request above.";
+  }
   return null;
+}
+
+export type WorkflowDecisionPause = "yours" | "orchestrator" | "unknown";
+
+/** Who decides the workflow decision a session waits on, or null when it waits on something else. */
+export function workflowDecisionPause(approval: PendingApproval | null | undefined): WorkflowDecisionPause | null {
+  if (approval?.kind !== "workflow_decision") return null;
+  const authority = approval.workflowDecision?.authority;
+  return authority === "human" ? "yours" : authority === "orchestrator" ? "orchestrator" : "unknown";
 }
 
 /** The composer's placeholder: why it cannot send, or what a message sent now will do. */

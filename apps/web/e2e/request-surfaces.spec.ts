@@ -1041,3 +1041,81 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
     if (process.env.CAMPAIGN_SCOPE_EVIDENCE_DIR) await page.screenshot({ path: `${process.env.CAMPAIGN_SCOPE_EVIDENCE_DIR}/request-${viewport.name}.png`, fullPage: true });
   });
 }
+
+/** Every direct child of the card sits inside its border: nothing paints past the card's edge. */
+async function expectChildrenInsideCard(page: Page) {
+  const escaped = await card(page).evaluate((element) => {
+    const outer = element.getBoundingClientRect();
+    return [...element.children].filter((child) => {
+      const box = child.getBoundingClientRect();
+      return box.height > 0 && (box.top < outer.top - 1 || box.bottom > outer.bottom + 1 ||
+        box.left < outer.left - 1 || box.right > outer.right + 1);
+    }).map((child) => child.className);
+  });
+  expect(escaped).toEqual([]);
+}
+
+for (const viewport of [{ name: "desktop", width: 1440, height: 900 }, { name: "phone", width: 390, height: 850 }]) {
+  test(`an owner-kept merge keeps Approve and Deny in view with its ownership line inside the card, ${viewport.name} (#4713)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=workflow&owner=handoff");
+    const footnote = card(page).locator(".owner-resource-footnote");
+    const returnLink = footnote.getByRole("button", { name: "Return to the Orchestrator", exact: true });
+    await expect(card(page).locator(".request-card-title")).toHaveText("PR Merge Approval Required");
+    await expect(footnote).toHaveText("The Orchestrator handed this PR to you. Return to the Orchestrator");
+    await expect(footnote.getByRole("heading")).toHaveCount(0);
+    // One card in the dock's column: the control is no longer a sibling that squeezes it.
+    await expect(page.locator(".request-dock-card > *")).toHaveCount(1);
+    await expect(page.locator(".owner-resource-return-inline")).toHaveCount(0);
+
+    const inView = async () => {
+      for (const target of [card(page).locator(".request-card-head"), card(page).locator(".request-card-title"),
+        // The body may scroll under its cap; its first fact, the repository, still shows.
+        card(page).locator(".request-card-body dl.facts").first().locator("dt").first(), footnote,
+        footButton(page, "Deny"), footButton(page, "Approve")]) {
+        await expect(target).toBeInViewport({ ratio: 1 });
+        await assertInside(page, ".request-dock .request-card", target);
+      }
+      await expectChildrenInsideCard(page);
+      await assertNoHorizontalOverflow(page, ".request-card");
+    };
+    await inView();
+    const order = await page.evaluate(() => {
+      const box = (selector: string) => document.querySelector(`.request-dock .request-card ${selector}`)!.getBoundingClientRect();
+      return { body: box(".request-card-body").bottom, footnoteTop: box(".owner-resource-footnote").top,
+        footnoteBottom: box(".owner-resource-footnote").bottom, foot: box(".request-card-foot").top };
+    });
+    expect(order.footnoteTop).toBeGreaterThanOrEqual(order.body - 1);
+    expect(order.footnoteBottom).toBeLessThanOrEqual(order.foot + 1);
+    const evidence = process.env.OWNER_FOOTNOTE_EVIDENCE_DIR;
+    if (evidence) await page.screenshot({ path: `${evidence}/footnote-${viewport.name}.png` });
+
+    await returnLink.click();
+    await expect(footnote).toContainText("Send future requests for PR #2179 in picoduck/wollipog to the Orchestrator? This request stays yours.");
+    const cancel = footnote.getByRole("button", { name: "Cancel", exact: true });
+    await expect(cancel).toBeFocused();
+    await inView();
+    if (evidence) {
+      await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+      await page.screenshot({ path: `${evidence}/confirm-${viewport.name}.png` });
+    }
+    await cancel.click();
+    await expect(returnLink).toBeFocused();
+    await expect(footnote).toHaveText("The Orchestrator handed this PR to you. Return to the Orchestrator");
+
+    await returnLink.click();
+    await footnote.getByRole("button", { name: "Return", exact: true }).click();
+    await expect(card(page).getByRole("status").filter({
+      hasText: "PR #2179 in picoduck/wollipog returned to the Orchestrator for future requests. Pending requests remain yours.",
+    })).toBeFocused();
+    expect(await submissions(page)).toContainEqual({ returnOwnerResource: { sessionId: "dock-session", occurrenceId: "merge-occurrence" } });
+    // Returning answers nothing: the merge decision is still the owner's to make here.
+    await expect(footButton(page, "Approve")).toBeEnabled();
+    await expect(footButton(page, "Approve")).toBeInViewport({ ratio: 1 });
+    if (evidence) await page.screenshot({ path: `${evidence}/returned-${viewport.name}.png` });
+
+    await page.goto("/request-surfaces-e2e.html?scenario=workflow&owner=rule");
+    await expect(footnote).toHaveText("A rule keeps this PR with you. Return to the Orchestrator");
+    await inView();
+  });
+}

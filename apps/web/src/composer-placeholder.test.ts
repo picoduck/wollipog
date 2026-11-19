@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { composerAgentName, composerPlaceholder, composerUnavailableReason } from "./composer-placeholder.js";
+import type { PendingApproval } from "@wollipog/protocol";
+import { composerAgentName, composerPlaceholder, composerUnavailableReason, workflowDecisionPause } from "./composer-placeholder.js";
 
 const ready = {
   refusal: null,
@@ -83,4 +84,29 @@ test("the reasons keep the order a person has to act on them", () => {
   assert.equal(composerUnavailableReason({
     ...everything, refusal: null, archivedReason: undefined, status: "idle", runnerOnline: true,
   }), everything.noticeReason, "a notice-slot condition comes before a guardrail pause (#2037)");
+});
+
+test("a workflow decision pauses the composer in words about the decision, not a guardrail (#4713)", () => {
+  const guardrail = "Paused by a guardrail. Continue or stop in the request above.";
+  assert.equal(composerUnavailableReason({ ...ready, policyPaused: true, workflowDecision: "yours" }),
+    "Waiting for your decision. Answer the request above to continue.");
+  assert.equal(composerUnavailableReason({ ...ready, policyPaused: true, workflowDecision: "orchestrator" }),
+    "Waiting for the Orchestrator's decision on the request above.");
+  assert.equal(composerUnavailableReason({ ...ready, policyPaused: true, workflowDecision: "unknown" }),
+    "Waiting for a decision on the request above.");
+  assert.equal(composerUnavailableReason({ ...ready, policyPaused: true, workflowDecision: null }), guardrail);
+  for (const sentence of [composerUnavailableReason({ ...ready, policyPaused: true, workflowDecision: "yours" }),
+    composerUnavailableReason({ ...ready, policyPaused: true, workflowDecision: "orchestrator" })]) {
+    assert.doesNotMatch(sentence ?? "", /guardrail|Continue or stop/u);
+  }
+
+  const decision = (authority?: "human" | "orchestrator") => ({
+    kind: "workflow_decision",
+    ...(authority ? { workflowDecision: { authority } } : {}),
+  }) as unknown as PendingApproval;
+  assert.equal(workflowDecisionPause(decision("human")), "yours");
+  assert.equal(workflowDecisionPause(decision("orchestrator")), "orchestrator");
+  assert.equal(workflowDecisionPause(decision()), "unknown");
+  assert.equal(workflowDecisionPause({ kind: "cost_budget" } as unknown as PendingApproval), null, "a guardrail keeps its sentence");
+  assert.equal(workflowDecisionPause(null), null);
 });

@@ -10,7 +10,7 @@ import React, {
   type Ref,
 } from "react";
 import type { GovernancePolicy, PendingApproval, PermissionOption, SessionView } from "@wollipog/protocol";
-import { isChildQuestionSnapshot, ownerResourceLabel, ownerResourceKeepReason } from "@wollipog/protocol";
+import { isChildQuestionSnapshot, ownerResourceKeepReason, ownerResourceLabel, ownerResourceNoun } from "@wollipog/protocol";
 import { useApi } from "../../api-context.js";
 import type { ApiClient } from "../../api.js";
 import { titleCaseLabel } from "../../format.js";
@@ -455,7 +455,7 @@ export function RequestCard({
   ].filter(Boolean);
 
   return (
-    <><section
+    <section
       ref={cardRef}
       className="request-card"
       data-presentation={presentation}
@@ -496,6 +496,12 @@ export function RequestCard({
       {request.kind === "runner_recovery" && <p className="request-card-policy">The runner restarted, so this Orchestrator needs a fresh connection for its tools. Relaunching refreshes its credential and guard and continues its pending work.</p>}
       {policyLine && <p className="request-card-policy">{policyLine}</p>}
       {body.length > 0 && <div className="request-card-body" id={bodyId} ref={bodyRef}>{body}</div>}
+      {/* Inside the card, under what it asks (#4713): a sibling shared the dock's capped column with the
+          card and squeezed the decision's own title, facts and footer out of view. */}
+      {!readOnly && workflowDecision?.returnableOwnerResource && <ReturnOwnerResource
+        key={workflowDecision.occurrenceId} sessionId={workflowDecision.sessionId} occurrenceId={workflowDecision.occurrenceId}
+        resourceLabel={ownerResourceLabel(workflowDecision.resourceSnapshot)} presentation="footnote"
+        ownershipReason={ownerResourceKeepReason(workflowDecision, ownerResourceNoun(workflowDecision.resourceSnapshot.category))} />}
       {error && !readOnly && (
         <Notice tone="danger" compact role="alert">
           {REQUEST_CARD_COPY.notSent} {error}
@@ -637,11 +643,6 @@ export function RequestCard({
         />
       )}
     </section>
-    {!readOnly && workflowDecision?.returnableOwnerResource && <ReturnOwnerResource
-      key={workflowDecision.occurrenceId} sessionId={workflowDecision.sessionId} occurrenceId={workflowDecision.occurrenceId}
-      resourceLabel={ownerResourceLabel(workflowDecision.resourceSnapshot)}
-      ownershipReason={ownerResourceKeepReason(workflowDecision)} />}
-    </>
   );
 }
 

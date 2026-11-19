@@ -132,7 +132,7 @@ test("the completed count and the plan step move into the step link's tooltip", 
   }
 });
 
-test("one failed step with two retries adds an exception line in the danger color", async () => {
+test("a failed step is counted on the working line, and two retries add an exception line (#4713)", async () => {
   const { container, root, unmount } = await mount();
   try {
     await act(async () => root.render(
@@ -148,8 +148,10 @@ test("one failed step with two retries adds an exception line in the danger colo
       />,
     ));
     const note = container.querySelector("p.tl-working-note");
-    assert.ok(note, "a failure earns the second line");
-    assert.equal(text(note?.querySelector(".tl-working-failed")), "1 failed");
+    assert.ok(note, "a retry earns the second line");
+    assert.equal(text(container.querySelector(".tl-working-line > .tl-working-failed")), "1 failed",
+      "the count sits on the line it counts");
+    assertNoDomNode(note!.querySelector(".tl-working-failed"), "the count is not on the exception line");
     const retry = note?.querySelector(".tl-working-retry");
     assert.equal(text(retry), "Retried 2 times: ECONNRESET");
     assert.equal(retry?.getAttribute("title"), "ECONNRESET", "the full error stays reachable when it clips");
