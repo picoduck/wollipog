@@ -1517,6 +1517,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 388: Owner-selected Assistant thread provider accounts and guarded account handoffs.
   388,
   // v389 slot
+  // 389: Bind Add Account profile grants before dispatch with start_provider_login.newAccountId.
+  389,
   // v390 slot
   // v391 slot
   // v392 slot

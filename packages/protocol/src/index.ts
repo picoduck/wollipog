@@ -401,6 +401,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v260 runner imports a Codex API-key sign-in into a new managed profile (#3719). The runner
    * must also report `runtime.providerCredentialImport`, which only supported hosts do. */
   providerCredentialImport: 260,
+  /** Add Account accepts a control-plane-chosen new-account id. */
+  providerLoginNewAccountId: 389,
   /** Session-scoped assertion that Restart retains an established provider conversation (#2515). */
   sessionRestartResume: 263,
   /** v255 runner continues a session's own mid-turn worktree switch after its relaunch (#3810). */
@@ -11410,6 +11412,9 @@ export interface StartProviderLoginMessage {
   provider?: "claude" | "codex";
   label?: string;
   accountId?: string;
+  /** With a pending profile grant, record the new account under this `login-<8 hex>` id.
+   * Never sent with the existing-account repair target `accountId`. */
+  newAccountId?: string;
   /** Exact Machine choices from the control plane. Missing chosen targets fail closed on runner. */
   installationSelections?: Array<{ context: AgentContext; installationId: string }>;
   /** Protocol v225 (#3239): the pending grant the control plane recorded for a new account. The

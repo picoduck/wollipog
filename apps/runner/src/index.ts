@@ -3360,9 +3360,20 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         });
         break;
       }
+      if (msg.accountId !== undefined && msg.newAccountId !== undefined) {
+        sendUp({
+          type: "provider_login_result",
+          requestId: msg.requestId,
+          action: "start",
+          ok: false,
+          error: "Provider sign-in cannot name both a new and an existing account.",
+        });
+        break;
+      }
       runCommandTask("start_provider_login", providerLoginSupervisor.startAccount(
         msg.accountId ? { accountId: msg.accountId } : {
           provider: msg.provider!, label: msg.label!,
+          newAccountId: msg.newAccountId,
           // A managed profile needs a v225 control plane's grant; anything else keeps today's HOME.
           ...(typeof msg.profileGrantId === "string" && runnerSupportsProtocol(controlPlaneProtocolVersion, "providerProfiles")
             ? { profileGrantId: msg.profileGrantId } : {}),
