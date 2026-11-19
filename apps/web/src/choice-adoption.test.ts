@@ -92,6 +92,9 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // A fenced block's Wrap Lines button (#2152): one on/off toggle per block, not one of N options.
   ["components/Markdown.tsx", "aria-pressed", 1],
   ["components/SessionDetail.tsx", "aria-pressed", 2],
+  // Answer Mode's dictation mic while a touch phone types Something Else (#4714), the composer bar's
+  // mic over again: listening or not, one toggle.
+  ["components/ComposerQuestionResponse.tsx", "aria-pressed", 1],
   ["components/SessionPanelToggles.tsx", "aria-pressed", 3],
   // Instructions' file chips (#1980): §11.3 meta chips (`button.chip` with `aria-pressed`, as the
   // issue specifies) that choose which file the one view shows. A view switch, not a form choice.

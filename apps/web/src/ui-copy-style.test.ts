@@ -42,7 +42,7 @@ import {
   requestPolicyLine,
 } from "./components/requests/request-meta.js";
 import { ASK_MARKER_COPY } from "./components/requests/AskMarker.js";
-import { QUESTION_CARD_COPY, questionStepLabel } from "./components/requests/QuestionStep.js";
+import { QUESTION_CARD_COPY, answeringStepLabel, questionStepLabel } from "./components/requests/QuestionStep.js";
 import { SIGN_IN_COPY } from "./components/AuthenticationRecoveryPanel.js";
 import { REQUEST_PANEL_COPY, requestPanelPositionLabel } from "./components/SessionRequestPanel.js";
 import { childRequestsLabel } from "./status-meta.js";
@@ -793,7 +793,8 @@ test("the Requests panel's labels are Title Case, and its notice and state sente
 test("the question card's labels and buttons are Title Case, and its hints and errors are sentences (#2196)", () => {
   const titles = ["agentQuestions", "question", "asyncQuestion", "recoveryRequired", "dismiss", "dismissAndContinue",
     "back", "next", "submitAnswers", "tryAgain", "somethingElse", "somethingElseField", "showWhereAsked",
-    "showFullQuestion", "expandQuestion", "collapseQuestion", "answer", "exitAnswerMode", "showContext", "showAnswer"] as const;
+    "showFullQuestion", "expandQuestion", "collapseQuestion", "answer", "exitAnswerMode", "showContext", "showAnswer",
+    "showOptions", "hideOptions", "dictate", "stopDictating"] as const;
   // "Choose one", "Choose any" and "Optional" are the dim line above a question, Answer Mode's summary
   // ("Nothing chosen yet") and placeholders say what to type: sentence fragments (#2212).
   const fragments = ["chooseOne", "chooseAny", "optional", "nothingChosen", "answerEntered", "typeAnswer", "typeChoice",
@@ -822,6 +823,10 @@ test("the question card's labels and buttons are Title Case, and its hints and e
   }
   // The step count is a foot-note, written as the issue words it.
   assert.equal(questionStepLabel(1, 3), "Question 2 of 3");
+  // Answer Mode's head while a touch phone types Something Else (#4714) is a Title Case label.
+  assert.equal(answeringStepLabel(0, 2), "Answering Question 1 of 2");
+  assert.equal(answeringStepLabel(0, 1), "Answering the Question");
+  assert.ok(isTitleCase(answeringStepLabel(0, 1)));
 });
 
 test("the sign-in card's labels are Title Case and its help lines are sentences (#2198)", () => {

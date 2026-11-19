@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ownerQuestionAgentQuestions, presentOwnerQuestionRequest, scopeProposalAgentQuestions, summarizeQuestionAnswers, type AgentQuestion,
   type CampaignIssueScopeSnapshot, type CampaignScopeProposal, type OwnerDecisionSnapshot,
@@ -6,7 +6,7 @@ import { ownerQuestionAgentQuestions, presentOwnerQuestionRequest, scopeProposal
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { focusSessionRequest, useQuestionDraftRetirement } from "../components/SessionApproval.js";
-import { ComposerQuestionResponse } from "../components/ComposerQuestionResponse.js";
+import { ComposerQuestionResponse, type AnswerField } from "../components/ComposerQuestionResponse.js";
 import { QueuedMessages } from "../components/QueuedMessages.js";
 import { EventTimeline, type TimelineRevealRequest } from "../components/EventTimeline.js";
 import { SESSION_NOTICE_RANK, SessionNoticeSlot, type SessionNoticeEntry } from "../components/SessionNoticeSlot.js";
@@ -182,6 +182,24 @@ const longTextQuestions: AgentQuestion[] = [{
 const longChoiceQuestions: AgentQuestion[] = [{
   ...longTextQuestions[0]!,
   options: ["Proceed", "Hold", "Split the Plan", "Ask Again Later", "Escalate", "Close It"].map((label) => ({ label })),
+}];
+
+// A phone types Something Else in the composer (#4714): a waiting child, as reported, then a note.
+const somethingElseQuestions: AgentQuestion[] = [{
+  id: "runner",
+  header: "Runner",
+  question: "The runner hasn't picked up the child session yet. What should I do?",
+  context: "It has waited in the runner's queue for two hours.",
+  options: [
+    { label: "I'll Check the Runner (Recommended)", description: "You inspect or restart the runner; I wait for it to pick up the child." },
+    { label: "Replace the Child", description: "I stop the waiting child and start a fresh one from the same pull request." },
+    { label: "Keep Waiting", description: "Leave it queued; I check again on each wake." },
+  ],
+}, {
+  id: "after",
+  header: "Afterwards",
+  question: "Once it runs, should I merge the pull request myself?",
+  options: [{ label: "Yes, Merge It" }, { label: "No, Ask Me First" }],
 }];
 
 // Complete Markdown drafts taller than the composer viewport (#3256).
@@ -410,6 +428,8 @@ function Fixture() {
       ? scopeProposalAgentQuestions(scopeProposalSnapshot)
       : params.get("set") === "issue-drafts"
       ? issueDraftQuestions
+      : params.get("set") === "something-else"
+      ? somethingElseQuestions
       : params.get("set") === "long"
       ? longQuestions
       : params.get("set") === "long-text"
@@ -435,8 +455,20 @@ function Fixture() {
   const [runnerOnline, setRunnerOnline] = useState(initialOnline);
   const [resolved, setResolved] = useState(false);
   const [answerActive, setAnswerActive] = useState(responseStyle === "composer");
-  const answerInputRef = useRef<HTMLInputElement>(null);
+  const answerInputRef = useRef<AnswerField>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // As the session does, a card's Answer (or a phone's Something Else, #4714) hands focus to the
+  // answer field in the commit that opens Answer Mode.
+  const focusAnswerRef = useRef(false);
+  const enterAnswerMode = useCallback(() => {
+    focusAnswerRef.current = true;
+    setAnswerActive(true);
+  }, []);
+  useLayoutEffect(() => {
+    if (!answerActive || !focusAnswerRef.current) return;
+    focusAnswerRef.current = false;
+    answerInputRef.current?.focus();
+  }, [answerActive]);
 
   useEffect(() => {
     if (!resolved && responseStyle === "composer") setAnswerActive(true);
@@ -561,9 +593,11 @@ function Fixture() {
   }), [pendingRequestIds, selectedRequestId]);
 
   // Composer Response answers in the composer (#2212): the dock's card is compact, and while Answer
-  // Mode is open the question is shown there alone.
+  // Mode is open the question is shown there alone. The form's card can hand a touch phone's Something
+  // Else to the composer too (#4714), as the session does; `composer=1` offers it. Without it the form
+  // stands for a card no composer can answer (a worker's or a child's), which keeps its own field.
   const composerAnswers = request?.kind === "question" && !resolved && !ownerRaw && !childRaw &&
-    responseStyle === "composer" && (!recoveryRequired || recoveryCanResume);
+    (responseStyle === "composer" || params.get("composer") === "1") && (!recoveryRequired || recoveryCanResume);
   const answering = composerAnswers && answerActive;
   const composerContent = answering ? (
     <div className="composer-box answer-mode">
@@ -653,7 +687,7 @@ function Fixture() {
                         readerRef={scrollRef}
                         onConceal={concealTrailing}
                         whereAsked={whereAsked}
-                        composerAnswer={composerAnswers ? { requestId, onAnswer: () => setAnswerActive(true) } : undefined}
+                        composerAnswer={composerAnswers ? { requestId, onAnswer: enterAnswerMode } : undefined}
                       />
                     ),
                   }} />

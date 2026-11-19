@@ -3295,7 +3295,7 @@ follows these rules so it never crowds out the conversation it asks about:
   Required" in the danger tone after a provider restart), owner and time; then the question's header
   with "Choose one", "Choose any" or "Optional" as 12px dim text, the question as the title, its
   context, and its options as ChoiceRows (§8.4) whose last row is **Something Else…**, which opens a
-  text field in the step. Each description is one line; the chosen row shows all of it. The footer is
+  text field in the step (on a touch phone, the composer: see Answer Mode below). Each description is one line; the chosen row shows all of it. The footer is
   Dismiss (ghost) at the far left, "Question 2 of 3" with step dots when there are several, Back from
   step 2, and Next or **Submit Answers** as the one primary, last; on a narrow card the step count
   takes its own row above the buttons. Nothing is marked before Next or Submit Answers: then the
@@ -3473,6 +3473,24 @@ follows these rules so it never crowds out the conversation it asks about:
   request-keyed draft the card shares. A number key opens the panel before it chooses, and Jump to
   Question opens it and focuses its field. Below 760px Show Context, Show Where Asked and Jump to
   Question are icon buttons with the same accessible names.
+- **A touch phone types Something Else in the composer** (#4714). A card field with the software
+  keyboard open gets a sliver of the reading column and scrolls one line sideways. So on a touch phone
+  (`TOUCH_PHONE_MEDIA`), choosing Something Else on the form's card opens Answer Mode on it, whichever
+  style answers questions. The draft and the step are stored first, because the card leaves the dock
+  in that same commit. While the card waits again, Something Else's field is a `.question-handoff`
+  button drawn as a field, holding the answer so far (three lines) or "Type your answer", which opens
+  Answer Mode again. In Answer Mode the head reads "Answering Question 1 of 2" (or "Answering the
+  Question"), with an icon-only **Show Options** / **Hide Options** (Lucide `List`) in Show
+  Context's place. The question keeps one line, and the context and options wait behind Show
+  Options. The field is labelled "Something Else" in a dim small line above it, where a phone's
+  width never cuts it short. It is a `textarea` that wraps and grows to six lines, then scrolls itself. Its `enterkeyhint`
+  is Next or Send, Enter moves on as on the line field, and Shift+Enter starts a line. The mic
+  (as the composer bar's, #2193) dictates into it. Dictation ends with its mic: on Next, Back or
+  sending, on choosing an offered option, and when the runner goes offline. The usage triggers step
+  aside to leave the keyboard room. An answer with a format of its own (an email, a number, a date)
+  keeps the card's field and its keyboard. So does every question of a request with a secret: a
+  secret typed on the card lives in its memory alone, and Answer Mode takes the card off the dock.
+  Fine pointers are unchanged.
 
 ### 13.3 Page Banner
 
