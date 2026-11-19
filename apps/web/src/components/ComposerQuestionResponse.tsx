@@ -235,11 +235,16 @@ export function ComposerQuestionResponse({
   // Dictation lives as long as an enabled mic shows it, as the composer bar's does (#2193): leaving
   // Answer Mode, choosing an offered option, going offline or sending each end it, so nothing listens
   // without a control to stop it. Each render sets this once it knows whether the mic is shown.
+  // Stop leaves the recognizer finalizing its last phrase after `recording` turns false, so the mic
+  // going away cancels whether or not it still records: no late phrase lands in a hidden answer.
   const micAvailableRef = useRef(false);
+  const micWasAvailableRef = useRef(false);
   micAvailableRef.current = false;
   const recording = dictation.recording;
   useEffect(() => {
-    if (recording && !micAvailableRef.current) cancelDictation();
+    const available = micAvailableRef.current;
+    if (!available && (recording || micWasAvailableRef.current)) cancelDictation();
+    micWasAvailableRef.current = available;
   });
   useEffect(() => cancelDictation, [cancelDictation]);
   const [focusRequest, setFocusRequest] = useState<{ target: AnswerFocus; serial: number } | null>(null);
@@ -368,6 +373,8 @@ export function ComposerQuestionResponse({
     if (field?.tagName === "TEXTAREA") growOwnAnswerField(field as HTMLTextAreaElement);
   });
 
+  // Closed, the panel takes no phrase: the last open render's draft is no longer what is shown.
+  dictatePhraseRef.current = () => {};
   if (questions.length === 0 || !active) return null;
 
   const currentIndex = Math.min(Math.max(questionIndex, 0), questions.length - 1);

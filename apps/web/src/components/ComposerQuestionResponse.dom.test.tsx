@@ -1124,3 +1124,56 @@ test("dictation ends whenever its mic goes: an offered option chosen, or the run
     }
   });
 });
+
+test("leaving Answer Mode while a stopped dictation still finalizes drops its last phrase (#4714)", async () => {
+  class FakeRecognition {
+    static last: FakeRecognition | null = null;
+    continuous = false;
+    interimResults = false;
+    lang = "";
+    started = false;
+    stopped = false;
+    aborted = false;
+    onresult: ((ev: unknown) => void) | null = null;
+    onend: (() => void) | null = null;
+    onerror: ((ev: unknown) => void) | null = null;
+    constructor() { FakeRecognition.last = this; }
+    start() { this.started = true; }
+    // The engine finalizes asynchronously: its last phrase and its end arrive later.
+    stop() { this.stopped = true; }
+    abort() { this.aborted = true; }
+  }
+  const win = domWindow as unknown as { webkitSpeechRecognition?: unknown };
+  win.webkitSpeechRecognition = FakeRecognition;
+  await asTouchPhone(async () => {
+    const { container, root } = mount();
+    const key = questionDraftIdentity("ask-own-finalizing", somethingElseQuestions);
+    const render = (active: boolean) => act(async () => root.render(<ApiProvider client={recordingClient([])}>
+      <ComposerQuestionResponse sessionId="session-1" requestId="ask-own-finalizing" questions={somethingElseQuestions}
+        runnerOnline active={active} inputRef={{ current: null }} onExit={() => {}} />
+    </ApiProvider>));
+    const click = (button: HTMLButtonElement) => act(async () => {
+      button.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, detail: 0 }) as never);
+    });
+    try {
+      storeQuestionDrafts("session-1", key, { runner: { kind: "other", value: "Restarted it." } });
+      await render(true);
+      await click(buttonNamed(container, "Dictate"));
+      const recognition = FakeRecognition.last!;
+      await click(buttonNamed(container, "Stop Dictating"));
+      assert.ok(recognition.stopped && !recognition.aborted, "Stop lets the engine finalize");
+      assert.ok(recognition.onresult, "its last phrase could still arrive");
+
+      await render(false);
+      assert.equal(recognition.aborted, true, "leaving Answer Mode ends the finalizing engine");
+      assert.equal(recognition.onresult, null, "and detaches it");
+      assert.deepEqual(storedQuestionDrafts("session-1", key), { runner: { kind: "other", value: "Restarted it." } },
+        "the hidden answer is what it showed");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      clearQuestionDrafts("session-1", key);
+      delete win.webkitSpeechRecognition;
+    }
+  });
+});
