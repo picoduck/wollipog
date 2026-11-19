@@ -348,6 +348,7 @@ test("a thread's status follows its backing session and the thread republishes w
     const session = h.db.getSession(thread.sessionId)!;
     assert.equal(assistantThreadStatus("active", { ...session, status: "running", pendingApproval: null }), "working");
     assert.equal(assistantThreadStatus("active", { ...session, status: "completed", pendingApproval: null }), "done");
+    assert.equal(assistantThreadStatus("active", { ...session, archived: true }), "archived");
     assert.equal(assistantThreadStatus("active", null), "archived");
     assert.equal(assistantThreadStatus("archived", { ...session, status: "running" }), "archived");
   } finally { await h.close(); }

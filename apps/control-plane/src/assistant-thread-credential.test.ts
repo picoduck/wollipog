@@ -330,6 +330,19 @@ test("restoring a thread budget preserves the owner's backing session cap", asyn
   } finally { await h.close(); }
 });
 
+test("a launch distinguishes a rounded requested cap from a cap applied by the thread budget", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const env = await h.provision(thread.sessionId);
+    const request = launch(64, h.location.id);
+    Object.assign(request.params.arguments, { config: { costBudgetUsd: 7.505 } });
+    const launched = resultOf((await h.callTools(env, request))[0]);
+    assert.equal(h.db.getSession(launched.sessionId)!.costBudgetUsd, 7.50);
+    assert.match(launched.threadBudget.explanation, /requested cost cap was rounded down to \$7\.50/);
+  } finally { await h.close(); }
+});
+
 test("a thread cannot launch or create an Orchestrator, whose children it could not count", async () => {
   const h = await harness();
   try {

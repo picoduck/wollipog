@@ -4320,7 +4320,9 @@ export class SessionsService {
         if (requested !== capUsd) {
           threadBudget = {
             costBudgetUsd: capUsd,
-            explanation: `This session has a $${capUsd.toFixed(2)} cost cap based on what the Assistant thread's budget has left.`,
+            explanation: requested > 0 && requested <= remainingUsd
+              ? `The requested cost cap was rounded down to $${capUsd.toFixed(2)} in whole cents.`
+              : `This session has a $${capUsd.toFixed(2)} cost cap based on what the Assistant thread's budget has left.`,
           };
         }
         req = { ...req, config: { ...req.config, costBudgetUsd: capUsd } };

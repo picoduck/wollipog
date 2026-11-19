@@ -195,10 +195,19 @@ export function AssistantsView({ threadId, rightPanel }: {
       return latest ? latest.thread : previous;
     });
   }, [events, refresh]);
-  // While a thread works, read the list now and then in case an event was lost. Keep refreshing
-  // the open thread's spend while launched work can accrue costs after the Assistant goes idle.
-  const watchingUsage = Boolean(selected?.usage && selected.status !== "archived" && selected.launchedSessionIds.length);
-  const refreshInBackground = watchingUsage || threads.some((thread) => thread.status === "working");
+  // Launched work can outlive its Assistant's turn. Refresh accumulated usage while that work
+  // is active, then read its final cost once without continuing to poll an idle thread.
+  const launchedWorkActive = useStoreSelector((state) => Boolean(selected?.usage && selected.status !== "archived" &&
+    selected.launchedSessionIds.some((id) => {
+      const status = state.sessions.get(id)?.status;
+      return status === "queued" || status === "starting" || status === "running";
+    })));
+  const wasLaunchedWorkActive = useRef(false);
+  useEffect(() => {
+    if (wasLaunchedWorkActive.current && !launchedWorkActive) refresh();
+    wasLaunchedWorkActive.current = launchedWorkActive;
+  }, [launchedWorkActive, refresh]);
+  const refreshInBackground = launchedWorkActive || threads.some((thread) => thread.status === "working");
   useEffect(() => {
     if (!refreshInBackground) return;
     const timer = setInterval(refresh, WORKING_POLL_MS);
