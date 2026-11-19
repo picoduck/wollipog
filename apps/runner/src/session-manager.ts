@@ -975,7 +975,7 @@ interface ApprovedProviderAuthentication {
 
 type ProviderReplacementResult =
   | { status: "launched"; entry: ActiveSession; queuedWork: boolean }
-  | { status: "not_resumable" | "lock_unavailable" | "retirement_failed" | "launch_failed" | "stopped" | "superseded" }
+  | { status: "not_resumable" | "lock_unavailable" | "capacity_unavailable" | "retirement_failed" | "launch_failed" | "stopped" | "superseded" }
   | { status: "prepare_failed"; error: string };
 
 /** Capability-derived resume gate. ACP must have proven stable resume or load in its last live
@@ -9561,7 +9561,7 @@ export class SessionManager {
     return this.latestLaunchGenerations.get(sessionId) ?? 0;
   }
 
-  private acquireAdmission(sessionId: string): Promise<boolean> {
+  private acquireAdmission(sessionId: string, { wait = true } = {}): Promise<boolean> {
     if (this.admitted.has(sessionId)) return Promise.resolve(true);
     // Review sessions take no runner slot and count against no agent limit (#3368).
     if (this.isReviewSession(sessionId)) return Promise.resolve(true);
@@ -9573,6 +9573,10 @@ export class SessionManager {
       this.admissionWaitReasons.delete(sessionId);
       this.reportCapacity();
       return Promise.resolve(true);
+    }
+    if (!wait) {
+      this.boxAdmission.clearFailure(sessionId);
+      return Promise.resolve(false);
     }
     const waiting = new Promise<boolean>((resolve) => this.admissionQueue.push({ request, bypasses: 0, resolve }));
     this.emitAdmissionWait(request);
@@ -14928,8 +14932,8 @@ export class SessionManager {
     } catch (error) {
       return refuse(errText(error));
     }
-    // The replacement may wait for a process slot or for the old process to exit. Resolve the
-    // target again before binding, so an intervening configuration change fails closed.
+    // Resolve the target again after retiring the old provider so a configuration change during
+    // retirement fails closed.
     const replacement = await this.replaceProviderProcess(sessionId, entry, {
       freshConversation: change.freshConversation,
       prepareReplacement: async () => { target = this.pendingProviderAccountTarget(current, target, true); },
@@ -14958,6 +14962,9 @@ export class SessionManager {
     if (replacement.status === "launched") {
       if (!replacement.queuedWork) this.emitStatus(sessionId, "idle");
       return { ok: true };
+    }
+    if (replacement.status === "capacity_unavailable") {
+      return refuse("This Machine has no available provider process slot. Try changing the account when a slot is free.");
     }
     if (replacement.status === "launch_failed") {
       this.parkProviderAccountSwitchFailure(sessionId, target, "The thread couldn't resume on the selected account. If its conversation can't be carried over, try Start a Fresh Conversation.");
@@ -15599,8 +15606,10 @@ export class SessionManager {
     let preserveLockForQueue = false;
     let result: ProviderReplacementResult = { status: "launch_failed" };
     try {
-      if (!entry && !await this.acquireAdmission(sessionId)) {
-        result = { status: "superseded" };
+      // The account change is a bounded request. A dormant thread must not queue a switch that
+      // could take effect after the control plane has already reported a timeout.
+      if (!entry && !await this.acquireAdmission(sessionId, { wait: false })) {
+        result = { status: "capacity_unavailable" };
         return result;
       }
       try {
