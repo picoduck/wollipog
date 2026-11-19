@@ -217,7 +217,7 @@ test("reopening the database rebuilds Assistant thread membership without review
         hub.sendToRunner = () => true;
         const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
         const updated = svc.updateAssistantThreadLimits(db.assistantThreads.get(thread.id)!, { costUsd: 24, launchedSessions: 10 });
-        assert.ok(updated.ok, "error" in updated ? updated.error : undefined);
+        assert.ok(updated.ok, ("error" in updated ? updated.error : undefined) ?? "Expected the thread budget change to succeed");
         assert.equal(db.getSession(thread.sessionId)?.costBudgetUsd, 14, "only the worker tree holds part of the backing cap");
       } finally { db.close(); }
     });
