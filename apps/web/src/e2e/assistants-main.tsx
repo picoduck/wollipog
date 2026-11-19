@@ -2,11 +2,13 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import {
   PROTOCOL_VERSION,
+  type AgentHarnessDefaultsView,
   type AssistantThreadLimits,
   type ControlPlaneToUi,
   type PendingApproval,
   type RunnerView,
   type SessionEvent,
+  type SessionNamingSettingsView,
   type SessionView,
   type UiSnapshotMessage,
 } from "@wollipog/protocol";
@@ -345,6 +347,23 @@ const client = {
   assistantConfirmationThreads: () => refused() ?? Promise.resolve({
     threads: structuredClone(threads.filter((candidate) => candidate.status !== "archived")),
   }),
+  agentHarnessDefaults: async (): Promise<AgentHarnessDefaultsView> => ({
+    defaults: runner.agents.map((agent) => ({
+      agentId: agent.id, driver: agent.driver ?? "claude-code", context: { kind: "native" }, name: agent.name,
+      compatibleInstallations: 0,
+      installations: [{ runnerId: runner.runnerId, machineName: runner.displayName ?? runner.hostname, online: true,
+        models: [], effortLevels: [], permissionModes: ["default"] }],
+    })),
+  }),
+  sessionNamingSettings: async (): Promise<SessionNamingSettingsView> => ({
+    mode: "prompt_text_only", effectiveMode: "prompt_text_only", source: "default", canManage: true,
+    modes: {
+      prompt_text_only: { available: true },
+      session_agent_account: { available: false },
+      custom_model_endpoint: { available: false },
+    },
+  }),
+  artifactUploadSettings: async () => ({ preference: "manual" }),
   assistantThreads: (options: { includeArchived?: boolean } = {}) => {
     const refusal = refused();
     if (refusal) return refusal;

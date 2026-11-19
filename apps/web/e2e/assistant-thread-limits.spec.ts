@@ -71,7 +71,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       const capture = async (view: string) => {
         if (!EVIDENCE) return;
         mkdirSync(EVIDENCE, { recursive: true });
-        await page.screenshot({ path: join(EVIDENCE, `${view}-${layout}-${theme}.png`) });
+        await page.screenshot({ path: join(EVIDENCE, `${view}-${layout}-${theme}.png`), animations: "disabled" });
       };
       await open(page, THREAD, theme, "stress");
       await expect(page.getByLabel("Thread Details")).toContainText("40 launched · No Launch Limit");
@@ -87,6 +87,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       const action = group.getByRole("button", { name: /Edit Limits/ });
       await action.scrollIntoViewIfNeeded();
       await expectFullyInViewport(action, "Edit Default Thread Limits");
+      await expect(page.getByRole("alert")).toHaveCount(0);
       await expectPageNoHorizontalOverflow(page);
       await capture("settings-behavior");
       const defaults = await editDefaults(page);
