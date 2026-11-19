@@ -76,6 +76,7 @@ import { SCOPE_CHECKS_PER_ADDITIONS, scopeCheckAdditionsPrefix, scopeCheckInputD
 import { scopeGrantDigest, scopeReviewInputDigest, scopeReviewInputs, scopeReviewKey } from "./scope-selection.js";
 import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type CampaignScopeOwnerReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
+import { CAMPAIGN_HANDOFF_QUESTION_KEY, isCampaignHandoffQuestion } from "@wollipog/protocol";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision, outstandingDecisionsBearOnScopeRequest, campaignAwaitsInitialScope, campaignScopeIsProposed, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
 import { boundedDecisionString, boundedDecisionStringProblem, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
@@ -7164,13 +7165,31 @@ export class SessionsService {
         !runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "ownerQuestions")) return;
     const prior = this.db.campaignHandoffQuestion(campaignId);
     const handoffs = this.db.campaignWorkLedger.completionFacts(campaignId).handoffs;
+    const revision = root.parentControlPolicy?.revision ?? 0;
+    const retireSupersededDecline = (current: string | null) => {
+      const retired = this.db.campaignRecovery.retireSupersededHandoffDecline(campaignId, current);
+      const legacy = this.db.campaignRecovery.singleRootCredentialDecline(campaignId, revision);
+      let retiredLegacy = false;
+      if (current !== null && legacy === current) {
+        // Old floor and model refusals used the exact same content coordinate but a shared row.
+        this.db.campaignRecovery.blockHandoffCredentials(campaignId, current, revision, Date.now());
+        retiredLegacy = this.db.campaignRecovery.retireLegacyHandoffDecline(campaignId, current, current, revision);
+      } else if (legacy) {
+        const oldQuestion = this.db.campaignDeniedHandoffQuestions(campaignId).find(decision =>
+          recoveryCoordinate(`workflow:${campaignId}:${decision.requestId}`) === legacy);
+        if (oldQuestion) {
+          const content = recoveryCoordinate(`campaign_handoffs:${oldQuestion.resourceDigest}`);
+          if (content !== current) retiredLegacy = this.db.campaignRecovery.retireLegacyHandoffDecline(campaignId, legacy, content, revision);
+        }
+      }
+      if (retired || retiredLegacy) this.campaignRecovery.synchronize(root, Date.now());
+    };
     if (!handoffs.some(item => item.handoff.responsibleActor === "human")) {
+      retireSupersededDecline(null);
       if (prior?.status === "pending") this.revokeWorkflowDecision(prior, { reason: "authority_superseded",
         triggeredBy: { kind: "system", id: "campaign_handoffs" } });
       return;
     }
-    const projection = this.db.campaignProjection(campaignId);
-    if (prior?.status !== "pending" && projection?.status !== "stuck" && projection?.status !== "complete_needs_cleanup") return;
     const material = [...handoffs].sort((a, b) => a.workItemId.localeCompare(b.workItemId)).map(item => {
       const issue = item.issue ? `${item.issue.repository}#${item.issue.number}: ` : "";
       return `- ${issue}${item.title} (${item.handoff.responsibleActor})\n  Reason: ${item.handoff.reason}\n  Next action: ${item.handoff.nextAction}`;
@@ -7182,26 +7201,23 @@ export class SessionsService {
     const snapshot = normalized.data;
     snapshot.material = material + "\n\nThis question authorizes nothing. Your answer grants no action authority.";
     const digest = workflowDecisionResourceDigest(snapshot);
-    if (prior?.resourceDigest === digest && prior.status !== "revoked") return;
     const declineCoordinate = recoveryCoordinate(`campaign_handoffs:${digest}`);
-    const revision = root.parentControlPolicy?.revision ?? 0;
-    if (this.db.campaignRecovery.hasDeclinedOccurrence(campaignId, campaignId, declineCoordinate, revision)) {
-      if (prior?.status === "pending") this.revokeWorkflowDecision(prior, { reason: "authority_superseded",
-        triggeredBy: { kind: "system", id: "campaign_handoffs" } });
-      this.campaignRecovery.synchronize(this.db.getSession(campaignId) ?? root, Date.now());
-      return;
-    }
-    const requestId = prior?.status === "pending" ? prior.requestId : `campaign_handoffs_${digest}_${prior?.occurrenceId ?? "initial"}`;
+    retireSupersededDecline(declineCoordinate);
+    const previouslyDeclined = this.db.campaignRecovery.hasDeclinedOccurrence(campaignId, campaignId, declineCoordinate, revision);
     const blocked = () => {
       if (prior?.status === "pending") this.revokeWorkflowDecision(prior, { reason: "authority_superseded",
         triggeredBy: { kind: "system", id: "campaign_handoffs" } });
-      this.db.campaignRecovery.recordDecline(campaignId, campaignId, "secrets_and_sign_in",
-        declineCoordinate, revision, Date.now());
+      this.db.campaignRecovery.blockHandoffCredentials(campaignId, declineCoordinate, revision, Date.now());
       this.campaignRecovery.synchronize(this.db.getSession(campaignId) ?? root, Date.now());
     };
+    if (previouslyDeclined) { blocked(); return; }
+    if (prior?.resourceDigest === digest && prior.status !== "revoked") return;
+    const projection = this.db.campaignProjection(campaignId);
+    if (prior?.status !== "pending" && projection?.status !== "stuck" && projection?.status !== "complete_needs_cleanup") return;
+    const requestId = prior?.status === "pending" ? prior.requestId : `campaign_handoffs_${digest}_${prior?.occurrenceId ?? "initial"}`;
     // Handoff text is agent-written. Server-owned coordinates do not make its content trusted.
     if (credentialFormFloor(snapshot)) { blocked(); return; }
-    const screen = await this.screenCredentialText(root, campaignId, "owner_decision", requestId, ownerDecisionScreenData(snapshot));
+    const screen = await this.screenCredentialText(root, campaignId, "owner_decision", requestId, ownerDecisionScreenData(snapshot), true);
     const latest = this.db.getSession(campaignId);
     const current = this.db.campaignHandoffQuestion(campaignId);
     if (!latest || latest.archived || isTerminal(latest.status) || latest.orchestratorPolicy?.control?.mode !== "full_control" ||
@@ -7223,7 +7239,7 @@ export class SessionsService {
       return;
     }
     const result = this.createWorkflowDecision(campaignId, {
-      requestId, resourceKey: "campaign_handoffs:owner", resourceSnapshot: snapshot,
+      requestId, resourceKey: CAMPAIGN_HANDOFF_QUESTION_KEY, resourceSnapshot: snapshot,
     }, () => true, { trustedOwnerDecision: true, trustedCampaignHandoffs: true, credentialScreen: screen });
     if (!result.ok) this.log.warn(`campaign handoff question for ${campaignId} was refused: ${result.error}`);
   }
@@ -14769,7 +14785,7 @@ export class SessionsService {
       return fail(`requestId and resourceKey may not start with ${MERGE_CLOSURE_REPORT_REQUEST_PREFIX} or ${MERGE_CLOSURE_REPORT_RESOURCE_PREFIX}, ` +
         "which Wollipog reserves for its own reports", 400);
     }
-    if ((request.requestId.startsWith("campaign_handoffs_") || request.resourceKey === "campaign_handoffs:owner") &&
+    if ((request.requestId.startsWith("campaign_handoffs_") || request.resourceKey === CAMPAIGN_HANDOFF_QUESTION_KEY) &&
         !internal?.trustedCampaignHandoffs) return fail("Campaign handoff question coordinates are reserved for the server", 400);
     const ownerRule = normalizeWorkflowDecisionOwnerRule(request.ownerRule);
     if (!ownerRule.ok) return fail(ownerRule.message, 400);
@@ -15149,10 +15165,11 @@ export class SessionsService {
     if (decision.authority !== "human" || actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(sessionId, actor.id)) {
       return fail("Only the campaign's owner can answer an owner question", 403);
     }
-    // A question the Decision Model could not screen is classified first, never answered (#4104):
-    // only its owner's Decline, which dismisses it, settles it from there.
+    // A held question cannot be answered. The owner may discard the server's informational
+    // handoff without making a statement about credentials.
     if (credentialScreenDecline && action !== "dismiss") return fail("a declined question cannot be answered", 400);
-    if (decision.authorityEvaluation?.reason === "credential_screen_review" && !credentialScreenDecline) {
+    const plainHandoffDismissal = action === "dismiss" && isCampaignHandoffQuestion(decision);
+    if (decision.authorityEvaluation?.reason === "credential_screen_review" && !credentialScreenDecline && !plainHandoffDismissal) {
       return fail(TYPED_QUESTION_CLASSIFY_FIRST, 409);
     }
     const root = this.db.getSession(sessionId);
@@ -15168,6 +15185,7 @@ export class SessionsService {
     if (!resolved) return fail("this owner question was answered concurrently", 409);
     this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
     this.recordWorkflowDecisionAudit(resolved, answer ? "answered" : "denied", actor, now);
+    if (plainHandoffDismissal) this.campaignRecovery.synchronize(root, now);
     void this.reconcileUncertainIssueClosures(sessionId).catch(() => this.log.warn("Issue closure acknowledgement is pending"));
     this.hub.sessionChangedById(sessionId);
     this.publishCampaignAttentionTransition(root);
@@ -15262,8 +15280,13 @@ export class SessionsService {
             "sign-in or access. Continue without them; the request is recorded as blocked work." },
           "human", actor, canAccess, { credentialScreenDecline: true });
         if (!denied.ok) return failAs(denied);
-        this.db.campaignRecovery.recordDecline(root.id, session.id, "secrets_and_sign_in",
-          recoveryCoordinate(`workflow:${session.id}:${decision.requestId}`), root.parentControlPolicy?.revision ?? 0, now);
+        const revision = root.parentControlPolicy?.revision ?? 0;
+        if (isCampaignHandoffQuestion(decision)) {
+          this.db.campaignRecovery.blockHandoffCredentials(root.id, recoveryCoordinate(`campaign_handoffs:${decision.resourceDigest}`), revision, now);
+        } else {
+          this.db.campaignRecovery.recordDecline(root.id, session.id, "secrets_and_sign_in",
+            recoveryCoordinate(`workflow:${session.id}:${decision.requestId}`), revision, now);
+        }
         this.campaignRecovery.synchronize(root, now);
       } else {
         const control = root.orchestratorPolicy?.control;
@@ -15359,7 +15382,7 @@ export class SessionsService {
    * The runtime is idempotent per occurrence, so a replay joins the recorded outcome and never
    * records a second verdict. A screen that cannot even start is a failure: the owner classifies. */
   private async screenCredentialText(root: SessionView, sessionId: string, surface: CredentialScreenSurface,
-    requestId: string, data: string): Promise<CredentialScreenFact | null> {
+    requestId: string, data: string, retryUnavailableHarness = false): Promise<CredentialScreenFact | null> {
     const organizationId = this.db.sessionScope(root.id)?.organizationId;
     // With no organization there is no audit to hold a failure for its owner to classify, so the
     // caller refuses the request and nobody can answer it.
@@ -15367,7 +15390,8 @@ export class SessionsService {
     try {
       // A screen the runtime cannot finish is recorded as an audited failure the owner classifies.
       return await screenCredentialRequest(this.db, this.decisionRuntime, { organizationId, campaignSessionId: root.id, sessionId,
-        surface, requestId, data, automaticHarness: root.agentId ? { runnerId: root.runnerId, agentId: root.agentId, driver: root.driver } : null });
+        surface, requestId, data, retryUnavailableHarness,
+        automaticHarness: root.agentId ? { runnerId: root.runnerId, agentId: root.agentId, driver: root.driver } : null });
     } catch (error) {
       this.log.warn(`credential screen for ${sessionId} could not be recorded: ${(error as Error).message}`);
       return null;

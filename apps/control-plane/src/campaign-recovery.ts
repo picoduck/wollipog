@@ -4,7 +4,7 @@ import { campaignAuthorityPreflight, isTerminal, pendingRequests, runnerSupports
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
 import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
 import type { ControlPlaneDb, SessionStopProvenance } from "./db.js";
-import type { CampaignRecoveryObservation } from "./campaign-recovery-store.js";
+import { HANDOFF_CREDENTIAL_DECLINE, type CampaignRecoveryObservation } from "./campaign-recovery-store.js";
 
 /** Hash untrusted provider coordinates rather than allowing an identifier to become a credential,
  * bearer URL, command or media leak. The digest still identifies the exact original resource. */
@@ -152,7 +152,7 @@ export class CampaignRecoveryService {
       }
       // An unresolved-effect decline is a plain decline: the child was told how to retry, and
       // nothing it could not supply is blocked. Its row only keeps that message to once per child.
-      if (!FULL_CONTROL_DECLINED_CLASSES.has(decline.requestClass as FullControlRequestClass)) continue;
+      if (decline.requestClass !== HANDOFF_CREDENTIAL_DECLINE && !FULL_CONTROL_DECLINED_CLASSES.has(decline.requestClass as FullControlRequestClass)) continue;
       observations.push({ action: "continue_without_request",
         resource: { kind: "request", sessionId: decline.sessionId, occurrenceId: decline.occurrenceId },
         reason: "request_declined", owner: "orchestrator", signal: `declined:${decline.requestClass}` });

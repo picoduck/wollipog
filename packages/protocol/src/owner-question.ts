@@ -1,4 +1,4 @@
-import type { AgentQuestion, OwnerDecisionSnapshot, PendingApproval, WorkflowDecisionResourceSnapshot } from "./index.js";
+import type { AgentQuestion, OwnerDecisionSnapshot, PendingApproval, WorkflowDecisionResourceSnapshot, WorkflowDecisionView } from "./index.js";
 import { presentScopeProposalRequest, scopeProposalOfRequest } from "./scope-proposal.js";
 
 /**
@@ -36,6 +36,13 @@ export const OWNER_QUESTION_RECOMMENDED_SUFFIX = " (Recommended)";
 
 export function isOwnerQuestionSnapshot(snapshot: WorkflowDecisionResourceSnapshot | null | undefined): snapshot is OwnerQuestionSnapshot {
   return snapshot?.category === "owner_decision" && snapshot.kind === "question";
+}
+
+/** Reserved for the server's consolidated campaign handoff question. */
+export const CAMPAIGN_HANDOFF_QUESTION_KEY = "campaign_handoffs:owner";
+
+export function isCampaignHandoffQuestion(decision: Pick<WorkflowDecisionView, "resourceKey" | "resourceSnapshot"> | null | undefined): boolean {
+  return decision?.resourceKey === CAMPAIGN_HANDOFF_QUESTION_KEY && isOwnerQuestionSnapshot(decision.resourceSnapshot);
 }
 
 /** A stored question card: a root's Owner Question or an explicit child clarification (#4359).
