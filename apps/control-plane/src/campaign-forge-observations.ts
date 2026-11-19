@@ -48,6 +48,21 @@ export type ForgeFactEntry = { ref: CampaignPullRequestRef; fact: ForgeFact };
 /** One validated answer for one ref: an observation or a recognized failure. */
 export type ForgeReadResult = { ref: CampaignPullRequestRef; observation?: CampaignForgeChangeRequestObservation; failure?: CampaignForgeObservationFailure };
 
+/** A repair needs a failed required check when GitHub identifies required results. An unknown
+ * rollup can still contain passing required checks if GitHub cannot prove the set is complete.
+ * Such a partial pass suppresses optional-check repairs without establishing merge readiness. */
+export function hasCampaignCheckFailure(observation: CampaignForgeChangeRequestObservation): boolean {
+  if (observation.forge === "gitlab") return observation.pipeline?.status === "failed";
+  const { checks, requiredChecks } = observation;
+  if (requiredChecks.state === "failing") return true;
+  if (requiredChecks.state === "none") return checks.state === "failing";
+  if (requiredChecks.state === "unknown") {
+    const observedRequiredPass = requiredChecks.passing > 0 && requiredChecks.failing === 0;
+    return !observedRequiredPass && checks.state === "failing";
+  }
+  return false;
+}
+
 /** How the runner hosting the campaign stands right now. */
 export type ForgeObserverState = "online" | "offline" | "unsupported";
 

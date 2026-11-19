@@ -1417,6 +1417,54 @@ test("explicit incomplete work still admits an independently eligible failed-che
   } finally { h.db.close(); }
 });
 
+const failingCheckRollup = { state: "failing", failing: 1, passing: 0, pending: 0 } as const;
+const repairCheckCases = [
+  { label: "required passing", state: "passing", passing: 1, failing: 0, pending: 0, repair: false },
+  { label: "required pending", state: "pending", passing: 0, failing: 0, pending: 1, repair: false },
+  { label: "required failing", ...failingCheckRollup, repair: true },
+  { label: "no required results", state: "none", passing: 0, failing: 0, pending: 0, repair: true },
+  { label: "unknown without required results", state: "unknown", passing: 0, failing: 0, pending: 0, repair: true },
+  { label: "unknown with a passing required result", state: "unknown", passing: 1, failing: 0, pending: 0, repair: false },
+] as const;
+
+for (const { label, repair, ...requiredChecks } of repairCheckCases) {
+  test(`#4562 recovery records and wakes for check failures with ${label} only when actionable`, () => {
+    const h = mergedWorkVerificationFixture("incomplete");
+    try {
+      const observation = { ...h.observation, state: "open" as const, mergeCommitSha: null,
+        checks: { ...failingCheckRollup, passing: requiredChecks.passing, pending: requiredChecks.pending },
+        requiredChecks };
+      h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, observation }], h.now);
+      h.recovery.maintain(h.now);
+      h.svc.retryDuePrompts(h.now + 31_000);
+      const records = h.db.campaignRecovery.activeRecords("root").filter(record => record.action === "repair_checks");
+      const wake = h.db.latestCampaignContinuation("root");
+      assert.deepEqual(records.map(record => record.reason), repair ? ["failed_checks"] : []);
+      assert.equal(wake !== null, repair, "check failures wake the Orchestrator only when actionable");
+      if (wake) assert.match(h.db.getSessionPromptCommand(wake.commandId)!.payloadJson, /repair_checks/u);
+    } finally { h.db.close(); }
+  });
+
+  test(`#4562 completion rechecks an existing repair with ${label}`, () => {
+    const h = mergedWorkVerificationFixture("incomplete");
+    try {
+      const observation = { ...h.observation, state: "open" as const, mergeCommitSha: null,
+        checks: failingCheckRollup, requiredChecks: failingCheckRollup };
+      h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, observation }], h.now);
+      h.recovery.maintain(h.now);
+      const [record] = h.db.campaignRecovery.activeRecords("root").filter(record => record.action === "repair_checks");
+      assert.ok(record, "a real required failure establishes a repair record");
+      // Completion can run after a fresh forge read but before recovery has swept the old record.
+      h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, observation: { ...observation,
+        checks: { ...failingCheckRollup, passing: requiredChecks.passing, pending: requiredChecks.pending },
+        requiredChecks } }], h.now + 1);
+      assert.deepEqual(h.db.campaignRecoveryCompletion("root", h.now + 1), repair
+        ? { state: "recovery_ready", recoveryIds: [record.id] }
+        : { state: "recovery_held", recoveryIds: [] });
+    } finally { h.db.close(); }
+  });
+}
+
 test("Custom completion retains its existing report-based compatibility with explicit incomplete work", () => {
   const h = mergedWorkVerificationFixture("incomplete");
   try {

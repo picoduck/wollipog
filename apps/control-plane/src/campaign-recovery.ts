@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { campaignAuthorityPreflight, isTerminal, pendingRequests, runnerSupportsProtocol, FULL_CONTROL_DECLINED_CLASSES, type FullControlRequestClass,
   type CampaignAuthorityEvaluation, type CampaignRecoveryReason, type SessionView, type WorkflowDecisionCategory } from "@wollipog/protocol";
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
+import { hasCampaignCheckFailure } from "./campaign-forge-observations.js";
 import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
 import type { ControlPlaneDb, SessionStopProvenance } from "./db.js";
 import type { CampaignRecoveryObservation } from "./campaign-recovery-store.js";
@@ -220,19 +221,12 @@ export class CampaignRecoveryService {
         if (value.state !== "open") continue;
         const resource = { kind: "pull_request" as const, sessionId: root.id, repository: ref.repository,
           pullRequest: ref.number, occurrenceId: value.headSha };
-        if (value.forge === "gitlab") {
-          // GitLab has no "changes requested" decision; a failed pipeline is the repair signal (#3600).
-          if (value.pipeline?.status === "failed") {
-            observations.push({ action: "repair_checks", resource, reason: "failed_checks", owner: "orchestrator",
-              signal: `${value.headSha}:pipeline:${value.pipeline.id}:failed` });
-          }
-          continue;
-        }
-        if (value.checks.state === "failing" || value.requiredChecks.state === "failing") {
+        if (hasCampaignCheckFailure(value)) {
           observations.push({ action: "repair_checks", resource, reason: "failed_checks", owner: "orchestrator",
-            signal: `${value.headSha}:checks:${value.checks.state}:${value.requiredChecks.state}` });
+            signal: value.forge === "gitlab" ? `${value.headSha}:pipeline:${value.pipeline!.id}:failed`
+              : `${value.headSha}:checks:${value.checks.state}:${value.requiredChecks.state}` });
         }
-        if (value.reviewDecision === "changes_requested" && !observations.some(item =>
+        if (value.forge !== "gitlab" && value.reviewDecision === "changes_requested" && !observations.some(item =>
           item.action === "rereview" && item.resource.repository === ref.repository && item.resource.pullRequest === ref.number)) {
           observations.push({ action: "rereview", resource, reason: "reviewer_objection", owner: "orchestrator",
             signal: `${value.headSha}:review:${value.reviewDecision}` });
