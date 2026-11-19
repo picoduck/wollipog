@@ -48,16 +48,17 @@ export type ForgeFactEntry = { ref: CampaignPullRequestRef; fact: ForgeFact };
 /** One validated answer for one ref: an observation or a recognized failure. */
 export type ForgeReadResult = { ref: CampaignPullRequestRef; observation?: CampaignForgeChangeRequestObservation; failure?: CampaignForgeObservationFailure };
 
-/** A repair needs a failed required check when GitHub identifies required results. An unknown
- * rollup can still contain passing required checks if GitHub cannot prove the set is complete.
- * Such a partial pass suppresses optional-check repairs without establishing merge readiness. */
+/** Prefer required results for check repair. When a complete page shows a required pass without
+ * failures, the overall rollup does not justify a repair even if GitHub cannot confirm that every
+ * required check has reported. Truncated and older reads still need the overall fallback. */
 export function hasCampaignCheckFailure(observation: CampaignForgeChangeRequestObservation): boolean {
   if (observation.forge === "gitlab") return observation.pipeline?.status === "failed";
   const { checks, requiredChecks } = observation;
   if (requiredChecks.state === "failing") return true;
   if (requiredChecks.state === "none") return checks.state === "failing";
   if (requiredChecks.state === "unknown") {
-    const observedRequiredPass = requiredChecks.passing > 0 && requiredChecks.failing === 0;
+    const observedRequiredPass = observation.checkContextsComplete === true &&
+      requiredChecks.passing > 0 && requiredChecks.failing === 0;
     return !observedRequiredPass && checks.state === "failing";
   }
   return false;
@@ -595,6 +596,7 @@ export function sanitizedObservation(pr: CampaignForgePullRequestObservation): C
     reviewDecision: pr.reviewDecision,
     checks: rollup(pr.checks),
     requiredChecks: rollup(pr.requiredChecks),
+    ...(typeof pr.checkContextsComplete === "boolean" ? { checkContextsComplete: pr.checkContextsComplete } : {}),
     mergeQueue: pr.mergeQueue ? { state: pr.mergeQueue.state, position: pr.mergeQueue.position } : null,
     mergeCommitSha: pr.mergeCommitSha,
     ...mergedAtField(pr.mergedAt),

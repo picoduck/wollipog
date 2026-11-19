@@ -1418,22 +1418,31 @@ test("explicit incomplete work still admits an independently eligible failed-che
 });
 
 const failingCheckRollup = { state: "failing", failing: 1, passing: 0, pending: 0 } as const;
-const repairCheckCases = [
+const repairCheckCases: ReadonlyArray<CampaignForgePullRequestObservation["requiredChecks"] & {
+  label: string;
+  repair: boolean;
+  checkContextsComplete?: boolean;
+}> = [
   { label: "required passing", state: "passing", passing: 1, failing: 0, pending: 0, repair: false },
   { label: "required pending", state: "pending", passing: 0, failing: 0, pending: 1, repair: false },
   { label: "required failing", ...failingCheckRollup, repair: true },
   { label: "no required results", state: "none", passing: 0, failing: 0, pending: 0, repair: true },
   { label: "unknown without required results", state: "unknown", passing: 0, failing: 0, pending: 0, repair: true },
-  { label: "unknown with a passing required result", state: "unknown", passing: 1, failing: 0, pending: 0, repair: false },
-] as const;
+  { label: "unknown with a passing required result on a complete page", state: "unknown",
+    passing: 1, failing: 0, pending: 0, checkContextsComplete: true, repair: false },
+  { label: "unknown with a passing required result on a truncated page", state: "unknown",
+    passing: 1, failing: 0, pending: 0, checkContextsComplete: false, repair: true },
+  { label: "unknown with a passing required result on a legacy observation", state: "unknown",
+    passing: 1, failing: 0, pending: 0, repair: true },
+];
 
-for (const { label, repair, ...requiredChecks } of repairCheckCases) {
+for (const { label, repair, checkContextsComplete, ...requiredChecks } of repairCheckCases) {
   test(`#4562 recovery records and wakes for check failures with ${label} only when actionable`, () => {
     const h = mergedWorkVerificationFixture("incomplete");
     try {
       const observation = { ...h.observation, state: "open" as const, mergeCommitSha: null,
         checks: { ...failingCheckRollup, passing: requiredChecks.passing, pending: requiredChecks.pending },
-        requiredChecks };
+        requiredChecks, ...(checkContextsComplete !== undefined ? { checkContextsComplete } : {}) };
       h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, observation }], h.now);
       h.recovery.maintain(h.now);
       h.svc.retryDuePrompts(h.now + 31_000);
@@ -1457,7 +1466,7 @@ for (const { label, repair, ...requiredChecks } of repairCheckCases) {
       // Completion can run after a fresh forge read but before recovery has swept the old record.
       h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, observation: { ...observation,
         checks: { ...failingCheckRollup, passing: requiredChecks.passing, pending: requiredChecks.pending },
-        requiredChecks } }], h.now + 1);
+        requiredChecks, ...(checkContextsComplete !== undefined ? { checkContextsComplete } : {}) } }], h.now + 1);
       assert.deepEqual(h.db.campaignRecoveryCompletion("root", h.now + 1), repair
         ? { state: "recovery_ready", recoveryIds: [record.id] }
         : { state: "recovery_held", recoveryIds: [] });

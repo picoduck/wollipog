@@ -354,6 +354,9 @@ export interface CampaignForgePullRequestObservation {
   checks: CampaignForgeCheckRollup;
   /** Only the checks the base branch's rules require for this pull request. */
   requiredChecks: CampaignForgeCheckRollup;
+  /** Whether the bounded check read included all reported contexts. Even a complete read can
+   * miss required checks that have yet to report. Older runners omit this. */
+  checkContextsComplete?: boolean;
   /** The pull request's merge-queue entry, or null when it is not queued. */
   mergeQueue: { state: CampaignForgeMergeQueueState; position: number | null } | null;
   mergeCommitSha: string | null;
