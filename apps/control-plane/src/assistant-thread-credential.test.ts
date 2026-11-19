@@ -4,7 +4,7 @@ import { PassThrough } from "node:stream";
 import Fastify from "fastify";
 import {
   ASSISTANT_THREAD_CREDENTIAL_TTL_MS,
-  ASSISTANT_THREAD_LIMITS,
+  DEFAULT_ASSISTANT_THREAD_LIMITS,
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   type AgentDefinition,
@@ -50,7 +50,7 @@ async function harness(protocolVersion = PROTOCOL_VERSION) {
   registerAssistantRoutes(app, { db, operations, requestHuman: (req) => req.headers.authorization === "Bearer owner" ? owner : null });
   registerAssistantThreadRoutes(app, { threads, requestHuman: (req) => req.headers.authorization === "Bearer owner" ? owner : null });
   await app.ready();
-  const ownerCall = async (method: "GET" | "POST", url: string, payload?: object) => {
+  const ownerCall = async (method: "GET" | "POST" | "PUT", url: string, payload?: object) => {
     const response = await app.inject({ method, url, headers: { authorization: "Bearer owner" }, ...(payload ? { payload } : {}) });
     return { status: response.statusCode, body: response.json() as any };
   };
@@ -204,7 +204,7 @@ test("a thread launches sessions within its limits and the assistant hears why i
   try {
     const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
     // The assistant's own session is capped at the thread budget and carries the shared skill.
-    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, ASSISTANT_THREAD_LIMITS.costUsd);
+    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd);
     const start = h.toRunner.find((message) => message.type === "start_session" && message.spec.sessionId === thread.sessionId);
     assert.ok(start?.type === "start_session" && start.spec.assistant?.guide?.includes("## Discover First"));
 
@@ -212,13 +212,15 @@ test("a thread launches sessions within its limits and the assistant hears why i
     const first = resultOf((await h.callTools(env, launch(1, h.location.id)))[0]);
     assert.equal(first.receipt.status, "succeeded", JSON.stringify(first));
     const launched = h.db.getSession(first.sessionId)!;
-    assert.equal(launched.costBudgetUsd, ASSISTANT_THREAD_LIMITS.costUsd, "a launch is capped at what the thread has left");
+    assert.equal(launched.costBudgetUsd, DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd, "a launch is capped at what the thread has left");
+    assert.equal(first.threadBudget.costBudgetUsd, 25);
+    assert.match(first.threadBudget.explanation, /\$25\.00 cost cap.*thread's budget/);
     let view = (await h.ownerCall("GET", `/api/assistant-threads/${thread.id}`)).body.thread as AssistantThread;
     assert.deepEqual(view.launchedSessionIds, [first.sessionId]);
-    assert.deepEqual(view.usage?.launchedSessions, { used: 1, limit: ASSISTANT_THREAD_LIMITS.launchedSessions });
+    assert.deepEqual(view.usage?.launchedSessions, { used: 1, limit: DEFAULT_ASSISTANT_THREAD_LIMITS.launchedSessions });
 
     // Reaching the launch limit stops further launches with a clear message, and creates nothing.
-    for (let index = 1; index < ASSISTANT_THREAD_LIMITS.launchedSessions; index++) h.db.assistantThreads.recordLaunch(thread.id, `s_prior_${index}`, Date.now());
+    for (let index = 1; index < DEFAULT_ASSISTANT_THREAD_LIMITS.launchedSessions; index++) h.db.assistantThreads.recordLaunch(thread.id, `s_prior_${index}`, Date.now());
     const sessionsBefore = h.db.listSessions({ includeArchived: true }).length;
     const refused = resultOf((await h.callTools(env, launch(2, h.location.id)))[0]);
     assert.equal(refused.receipt.status, "failed");
@@ -228,14 +230,15 @@ test("a thread launches sessions within its limits and the assistant hears why i
     // Spend and committed budgets stop launches too.
     const spender = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
     const spenderEnv = await h.provision(spender.sessionId);
-    h.db.raw().prepare("UPDATE sessions SET cost_usd=? WHERE id=?").run(ASSISTANT_THREAD_LIMITS.costUsd - 8, spender.sessionId);
+    h.db.raw().prepare("UPDATE sessions SET cost_usd=? WHERE id=?").run(DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd - 8, spender.sessionId);
     // A zero or negative requested budget still gets a cap, never "no budget".
     const zero = { ...launch(3, h.location.id) };
     zero.params.arguments = { ...zero.params.arguments, config: { costBudgetUsd: 0 } } as typeof zero.params.arguments;
     const capped = resultOf((await h.callTools(spenderEnv, zero))[0]);
     assert.equal(h.db.getSession(capped.sessionId)!.costBudgetUsd, 8);
+    assert.equal(capped.threadBudget.costBudgetUsd, 8);
     // The cap is taken from the backing assistant's own allowance, so the two caps sum to the budget.
-    assert.equal(h.db.getSession(spender.sessionId)!.costBudgetUsd, ASSISTANT_THREAD_LIMITS.costUsd - 8);
+    assert.equal(h.db.getSession(spender.sessionId)!.costBudgetUsd, DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd - 8);
     // That cap is held: nothing is left for another launch even before the first one spends.
     const committed = resultOf((await h.callTools(spenderEnv, launch(4, h.location.id)))[0]);
     assert.match(committed.error, /has spent or committed its whole \$25 budget/);
@@ -244,7 +247,69 @@ test("a thread launches sessions within its limits and the assistant hears why i
       title: "Child", driver: "claude-code", useWorktree: false, config: {}, now: Date.now() });
     h.db.raw().prepare("UPDATE sessions SET cost_usd=? WHERE id=?").run(3, "s_grandchild");
     view = (await h.ownerCall("GET", `/api/assistant-threads/${spender.id}`)).body.thread as AssistantThread;
-    assert.deepEqual(view.usage?.costUsd, { used: 20, limit: ASSISTANT_THREAD_LIMITS.costUsd });
+    assert.deepEqual(view.usage?.costUsd, { used: 20, limit: DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd });
+  } finally { await h.close(); }
+});
+
+test("the owner can raise exhausted thread limits, but cannot lower the budget past commitments", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const edit = `/api/assistant-threads/${thread.id}/limits`;
+    const env = await h.provision(thread.sessionId);
+    const run = async (id: number) => resultOf((await h.callTools(env, launch(id, h.location.id)))[0]);
+    assert.equal((await h.ownerCall("PUT", edit, { costUsd: 10, launchedSessions: 1 })).status, 200);
+    h.db.raw().prepare("UPDATE sessions SET cost_usd=1.13 WHERE id=?").run(thread.sessionId);
+    const first = await run(51);
+    assert.equal(first.threadBudget.costBudgetUsd, 8.87);
+    assert.equal(h.db.getSession(first.sessionId)!.costBudgetUsd, 8.87);
+    assert.match((await run(52)).error, /1 of the 1 sessions/);
+    assert.equal((await h.ownerCall("PUT", edit, { costUsd: 10, launchedSessions: null })).status, 200);
+    assert.match((await run(53)).error, /whole \$10 budget/);
+    const tooLow = await h.ownerCall("PUT", edit, { costUsd: 9.99, launchedSessions: 0 });
+    assert.equal(tooLow.status, 409);
+    assert.match(tooLow.body.error, /already spent or committed \$10\.00/);
+    assert.equal(h.threads.get(h.owner, thread.id).usage!.launchedSessions.limit, null, "a refused budget leaves both limits intact");
+    assert.equal((await h.ownerCall("PUT", edit, { costUsd: 14, launchedSessions: null })).status, 200);
+    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, 5.13);
+    const next = await run(54);
+    assert.equal(next.threadBudget.costBudgetUsd, 4);
+    assert.equal(h.db.getSession(next.sessionId)!.costBudgetUsd, 4);
+    assert.deepEqual(h.threads.get(h.owner, thread.id).usage, {
+      costUsd: { used: 1.13, limit: 14 }, launchedSessions: { used: 2, limit: null },
+    });
+  } finally { await h.close(); }
+});
+
+test("removing a thread budget removes implicit caps and keeps explicitly requested caps", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const edit = `/api/assistant-threads/${thread.id}/limits`;
+    const env = await h.provision(thread.sessionId);
+    assert.equal((await h.ownerCall("PUT", edit, { costUsd: null, launchedSessions: 2 })).status, 200);
+    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, null);
+    assert.ok(h.toRunner.some((message) => message.type === "rearm_governance" &&
+      message.sessionId === thread.sessionId && message.config.costBudgetUsd === null));
+    const unbounded = resultOf((await h.callTools(env, launch(61, h.location.id)))[0]);
+    assert.equal(unbounded.threadBudget.costBudgetUsd, null);
+    assert.match(unbounded.threadBudget.explanation, /thread has no budget and none was requested/);
+    assert.equal(h.db.getSession(unbounded.sessionId)!.costBudgetUsd, null);
+    const explicit = launch(62, h.location.id);
+    Object.assign(explicit.params.arguments, { config: { costBudgetUsd: 7.50 } });
+    const capped = resultOf((await h.callTools(env, explicit))[0]);
+    assert.equal(h.db.getSession(capped.sessionId)!.costBudgetUsd, 7.50);
+    assert.equal(capped.threadBudget, undefined);
+    assert.match(resultOf((await h.callTools(env, launch(63, h.location.id)))[0]).error, /2 of the 2 sessions/);
+
+    const refused = await h.ownerCall("PUT", edit, { costUsd: 20, launchedSessions: null });
+    assert.equal(refused.status, 409);
+    assert.match(refused.body.error, /work launched without a cost cap/);
+    h.db.deleteSession(unbounded.sessionId);
+    const restored = await h.ownerCall("PUT", edit, { costUsd: 20, launchedSessions: null });
+    assert.equal(restored.status, 200, JSON.stringify(restored.body));
+    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, 12.50);
+    assert.equal(restored.body.thread.usage.launchedSessions.used, 2, "deletion does not refund a launch");
   } finally { await h.close(); }
 });
 
@@ -303,7 +368,7 @@ test("launched caps come out of the assistant's own allowance, and deleting a se
     assert.equal(h.svc.delete("s_worker_child").ok, true);
     assert.equal(spent().spentUsd, 11, "a deleted descendant's spend is kept, even after its parent was deleted first");
     const view = (await h.ownerCall("GET", `/api/assistant-threads/${thread.id}`)).body.thread as AssistantThread;
-    assert.deepEqual(view.usage?.costUsd, { used: 11, limit: ASSISTANT_THREAD_LIMITS.costUsd });
+    assert.deepEqual(view.usage?.costUsd, { used: 11, limit: DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd });
     // Deletion freed none of the budget: what the worker spent is still held.
     assert.ok(h.db.assistantThreads.costs(thread.id).launchedHeldUsd >= 10);
   } finally { await h.close(); }
@@ -322,14 +387,14 @@ test("a refused launch reserves nothing, and an unspent deleted launch gives its
     const env = await h.provision(thread.sessionId);
     const refused = resultOf((await h.callTools(env, launchWith(21, h.location.id, { agentId: "no-such-agent" })))[0]);
     assert.equal(refused.receipt.status, "failed");
-    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, ASSISTANT_THREAD_LIMITS.costUsd, "the backing allowance is untouched");
+    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd, "the backing allowance is untouched");
     const worker = resultOf((await h.callTools(env, launchWith(22, h.location.id, { config: { costBudgetUsd: 10 } })))[0]);
     assert.equal(h.db.getSession(worker.sessionId)!.costBudgetUsd, 10, "the corrected launch gets its full request");
     assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, 15);
     // Deleting the worker before it spent anything releases its cap at the next admission.
     assert.equal(h.svc.delete(worker.sessionId).ok, true);
     const next = resultOf((await h.callTools(env, launch(23, h.location.id)))[0]);
-    assert.equal(h.db.getSession(next.sessionId)!.costBudgetUsd, ASSISTANT_THREAD_LIMITS.costUsd);
+    assert.equal(h.db.getSession(next.sessionId)!.costBudgetUsd, DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd);
     assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, 0.01, "the new launch holds the rest; the assistant keeps nothing extra");
   } finally { await h.close(); }
 });
@@ -447,7 +512,7 @@ test("#4671: a launched worker's children are carved out of its own cap, so the 
     assert.equal(first.data!.costBudgetUsd, 3.33);
     assert.equal(second.data!.costBudgetUsd, 3.33);
     assert.equal(h.cap(h.worker), 3.34);
-    assert.equal(h.capsTotal(), ASSISTANT_THREAD_LIMITS.costUsd);
+    assert.equal(h.capsTotal(), DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd);
     assert.equal(h.db.assistantThreads.costs(h.thread.id).launchedHeldUsd, 10, "the tree still holds its whole launched cap");
 
     // Another launch must not reclaim what the carved worker gave its children.
@@ -455,7 +520,7 @@ test("#4671: a launched worker's children are carved out of its own cap, so the 
     assert.equal(another.receipt.status, "succeeded", JSON.stringify(another));
     assert.equal(h.cap(h.thread.sessionId), 14);
     assert.equal(h.db.assistantThreads.costs(h.thread.id).launchedHeldUsd, 11);
-    assert.equal(h.capsTotal(), ASSISTANT_THREAD_LIMITS.costUsd);
+    assert.equal(h.capsTotal(), DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd);
 
     // Deleting the carved worker while its children run keeps their part held too.
     assert.equal(h.svc.delete(h.worker).ok, true);
@@ -481,14 +546,14 @@ test("#4671: children created anywhere in a thread's tree never take the caps ab
           assert.ok(child.ok, child.error ?? "");
           created.push(child.data!.id);
           next.push(child.data!.id);
-          assert.ok(h.capsTotal() <= ASSISTANT_THREAD_LIMITS.costUsd + 1e-9, `caps total ${h.capsTotal()} after ${created.length} children`);
+          assert.ok(h.capsTotal() <= DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd + 1e-9, `caps total ${h.capsTotal()} after ${created.length} children`);
         }
       }
       generation = next;
     }
     assert.equal(created.length, 14);
     // Every creation moved cents from its creator to the child, so nothing was lost or added.
-    assert.equal(h.capsTotal(), ASSISTANT_THREAD_LIMITS.costUsd);
+    assert.equal(h.capsTotal(), DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd);
     for (const id of created) assert.ok(h.cap(id) >= 0.01, "every child is capped");
   } finally { await h.close(); }
 });
@@ -505,7 +570,7 @@ test("#4671: a fully reserved creator is refused clearly, and a finished child's
     assert.equal(refused.status, 409);
     assert.match(refused.error ?? "", /insufficient remaining budget to create a child: \$0\.00 of its \$10\.00 cost budget/);
     assert.match(refused.error ?? "", /Wollipog Assistant thread, whose budget its whole session tree shares/);
-    assert.equal(h.capsTotal(), ASSISTANT_THREAD_LIMITS.costUsd, "the refusal reserved nothing");
+    assert.equal(h.capsTotal(), DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd, "the refusal reserved nothing");
 
     // The child finishes having spent $1: its unspent $2 returns to the worker at the next creation.
     h.db.addSessionUsage(child.data!.id, { costUsd: 1 }, Date.now());
@@ -540,7 +605,7 @@ test("#4671: restarting a finished child takes its unspent cap back out of its c
       const restarted = other.svc.restart(finished.data!.id);
       assert.ok(restarted.ok, restarted.error ?? "");
       assert.equal(other.cap(other.worker), 7, "the restarted child holds its $3 again");
-      assert.equal(other.capsTotal(), ASSISTANT_THREAD_LIMITS.costUsd);
+      assert.equal(other.capsTotal(), DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd);
     } finally { await other.close(); }
   } finally { await h.close(); }
 });

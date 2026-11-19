@@ -13,12 +13,14 @@ import {
 } from "../assistant-threads.js";
 import { useReportEntityTitle } from "../entity-title.js";
 import { relativeTime } from "../format.js";
+import { formatUsd } from "../guardrail-values.js";
 import { backLabel, destination } from "../navigation.js";
 import { statusMeta } from "../status-meta.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { pendingAssistantConfirmations } from "../assistant-confirmations.js";
 import { AssistantConfirmationCard } from "./AssistantConfirmationCard.js";
+import { AssistantThreadLimitsDialog } from "./AssistantThreadLimitsDialog.js";
 import { AssistantWorkCards } from "./AssistantWorkCards.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { AssistantsIcon, BotIcon, PlusIcon } from "./Icons.js";
@@ -82,6 +84,7 @@ export function AssistantsView({ threadId, rightPanel }: {
   const [missing, setMissing] = useState(false);
   const [creating, setCreating] = useState(false);
   const [renaming, setRenaming] = useState<AssistantThread | null>(null);
+  const [editingLimits, setEditingLimits] = useState<AssistantThread | null>(null);
   const [archiving, setArchiving] = useState(false);
   const generation = useRef(0);
   /** A read is in flight, and whether another was asked for while it was. */
@@ -192,14 +195,15 @@ export function AssistantsView({ threadId, rightPanel }: {
       return latest ? latest.thread : previous;
     });
   }, [events, refresh]);
-  // While a thread works, read the list now and then too: a net under the events, should one be
-  // lost between the control plane and this dashboard.
-  const working = threads.some((thread) => thread.status === "working");
+  // While a thread works, read the list now and then in case an event was lost. Keep refreshing
+  // the open thread's spend while launched work can accrue costs after the Assistant goes idle.
+  const watchingUsage = Boolean(selected?.usage && selected.status !== "archived" && selected.launchedSessionIds.length);
+  const refreshInBackground = watchingUsage || threads.some((thread) => thread.status === "working");
   useEffect(() => {
-    if (!working) return;
+    if (!refreshInBackground) return;
     const timer = setInterval(refresh, WORKING_POLL_MS);
     return () => clearInterval(timer);
-  }, [working, refresh]);
+  }, [refreshInBackground, refresh]);
 
   // The open thread's backing session streams live while it is open.
   const backingSessionId = selected?.sessionId ?? null;
@@ -247,6 +251,7 @@ export function AssistantsView({ threadId, rightPanel }: {
     { label: "Open Session", onClick: () => navigate({ name: "session", id: thread.sessionId }) },
     ...(thread.status === "archived" ? [] : [
       { label: "Rename", onClick: () => setRenaming(thread) },
+      ...(thread.limitsEditable && thread.usage ? [{ label: "Thread Limits", onClick: () => setEditingLimits(thread) }] : []),
       { label: "Archive", disabled: archiving, onClick: () => void archive(thread) },
     ]),
   ];
@@ -339,6 +344,13 @@ export function AssistantsView({ threadId, rightPanel }: {
             replace(thread);
             if (extra?.id === thread.id) setExtra(thread);
           }}
+        />
+      )}
+      {editingLimits?.usage && (
+        <AssistantThreadLimitsDialog
+          limits={{ costUsd: editingLimits.usage.costUsd.limit, launchedSessions: editingLimits.usage.launchedSessions.limit }}
+          onClose={() => setEditingLimits(null)}
+          onSave={async (limits) => replace((await api.setAssistantThreadLimits(editingLimits.id, limits)).thread)}
         />
       )}
     </section>
@@ -443,6 +455,7 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
   // Destructive commands this thread's assistant is waiting on the owner for (#4665), drawn ahead
   // of the work they would unblock.
   const pending = pendingAssistantConfirmations([thread]);
+  const usage = thread.usage;
   return (
     <div className="assistant-thread-head">
       {!compact && (
@@ -456,6 +469,14 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
         <li>{WOLLIPOG_ASSISTANT}</li>
         <li>{assistantThreadHarnessLabel(thread.harness)}</li>
         <li className="assistant-thread-access">{assistantThreadAccessLabel(thread.access)}</li>
+        {usage && <>
+          <li>{usage.costUsd.limit === null
+            ? `${formatUsd(usage.costUsd.used)} spent · No Budget`
+            : `${formatUsd(usage.costUsd.used)} of ${formatUsd(usage.costUsd.limit)} spent`}</li>
+          <li>{usage.launchedSessions.limit === null
+            ? `${usage.launchedSessions.used} launched · No Launch Limit`
+            : `${usage.launchedSessions.used} of ${usage.launchedSessions.limit} sessions launched`}</li>
+        </>}
       </ul>
       <AssistantWorkCards
         sessionIds={thread.launchedSessionIds}

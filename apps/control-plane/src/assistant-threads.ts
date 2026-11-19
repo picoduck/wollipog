@@ -1,7 +1,6 @@
 import {
   ASSISTANT_THREAD_CREDENTIAL_TTL_MS,
   ASSISTANT_THREAD_HARNESSES,
-  ASSISTANT_THREAD_LIMITS,
   resolveAgentHarnessRow,
   runnerCapabilityRequirementError,
   runnerSupportsProtocol,
@@ -11,6 +10,7 @@ import {
   type AssistantThread,
   type AssistantThreadDefaultsResponse,
   type AssistantThreadHarness,
+  type AssistantThreadLimits,
   type AssistantThreadStatus,
   type CreateSessionRequest,
   type RunnerView,
@@ -36,6 +36,23 @@ const HARNESS_DRIVERS: Record<AssistantThreadHarness, AgentDriverKind[]> = {
 
 export class AssistantThreadRefusal extends Error {
   constructor(message: string, readonly status: number, readonly details: Record<string, unknown> = {}) { super(message); }
+}
+
+function threadLimits(body: unknown): AssistantThreadLimits {
+  if (!body || typeof body !== "object" || Array.isArray(body) ||
+      Object.keys(body).some((key) => key !== "costUsd" && key !== "launchedSessions")) {
+    throw new AssistantThreadRefusal("Only costUsd and launchedSessions are accepted.", 400);
+  }
+  const { costUsd, launchedSessions } = body as Record<string, unknown>;
+  if (costUsd !== null && (typeof costUsd !== "number" || costUsd <= 0 ||
+      !Number.isSafeInteger(Math.round(costUsd * 100)) || Number(costUsd.toFixed(2)) !== costUsd)) {
+    throw new AssistantThreadRefusal("The cost budget must be a positive amount in whole cents, or null for no budget.", 400);
+  }
+  if (launchedSessions !== null && (typeof launchedSessions !== "number" ||
+      !Number.isSafeInteger(launchedSessions) || launchedSessions < 0)) {
+    throw new AssistantThreadRefusal("The session launch limit must be a nonnegative whole number, or null for no limit.", 400);
+  }
+  return { costUsd, launchedSessions };
 }
 
 function threadTitle(value: unknown): string {
@@ -85,6 +102,7 @@ export interface AssistantThreadDeps {
   createBackingSession(owner: HumanPrincipal, request: CreateSessionRequest, threadId: string):
     { ok: boolean; status: number; data?: SessionView; error?: string; [key: string]: unknown };
   archiveBackingSession(sessionId: string): { ok: boolean; status: number; error?: string };
+  updateLimits(row: ThreadRow, limits: AssistantThreadLimits): { ok: boolean; status?: number; error?: string };
   broadcast(userId: string, thread: AssistantThread): void;
   /** The thread's owner confirmations waiting for its owner (#4665). */
   pendingConfirmations?(threadId: string): AssistantOwnerConfirmation[];
@@ -109,6 +127,7 @@ export class AssistantThreads {
   view(row: ThreadRow, session = row.session_id ? this.deps.getSession(row.session_id) : null): AssistantThread {
     const launched = this.store.launchedSessionIds(row.id);
     const confirmations = row.state === "active" ? this.deps.pendingConfirmations?.(row.id) ?? [] : [];
+    const status = assistantThreadStatus(row.state, session, confirmations.length);
     return {
       id: row.id,
       assistant: row.assistant,
@@ -116,19 +135,43 @@ export class AssistantThreads {
       title: row.title ?? (session && session.title !== UNTITLED ? session.title : DEFAULT_THREAD_TITLE),
       harness: row.harness,
       sessionId: row.session_id ?? "",
-      status: assistantThreadStatus(row.state, session, confirmations.length),
+      status,
       access: { level: "full_access", destructive: "ask" },
       connectionId: row.connection_id,
       launchedSessionIds: launched,
       usage: {
-        launchedSessions: { used: launched.length, limit: ASSISTANT_THREAD_LIMITS.launchedSessions },
-        costUsd: { used: Math.round(this.store.costs(row.id).spentUsd * 10_000) / 10_000, limit: ASSISTANT_THREAD_LIMITS.costUsd },
+        launchedSessions: { used: launched.length, limit: row.launch_limit },
+        costUsd: { used: Math.round(this.store.costs(row.id).spentUsd * 10_000) / 10_000, limit: row.cost_limit_usd },
       },
+      ...(status !== "archived" ? { limitsEditable: true } : {}),
       confirmations,
       lastActivityAt: Math.max(row.updated_at, session?.updatedAt ?? 0),
       createdAt: row.created_at,
       archivedAt: row.archived_at,
     };
+  }
+
+  limitDefaults(owner: HumanPrincipal): AssistantThreadLimits {
+    return this.store.defaultLimits(owner);
+  }
+
+  setLimitDefaults(owner: HumanPrincipal, body: unknown): AssistantThreadLimits {
+    const limits = threadLimits(body);
+    this.store.setDefaultLimits(owner, limits);
+    return limits;
+  }
+
+  setLimits(owner: HumanPrincipal, id: string, body: unknown): AssistantThread {
+    const row = this.owned(owner, id);
+    const session = row.session_id ? this.deps.getSession(row.session_id) : null;
+    if (row.state !== "active" || !session || session.archived) {
+      throw new AssistantThreadRefusal("Limits cannot be changed on an archived thread.", 409);
+    }
+    const updated = this.deps.updateLimits(row, threadLimits(body));
+    if (!updated.ok) {
+      throw new AssistantThreadRefusal(updated.error ?? "The thread limits could not be updated.", updated.status ?? 409);
+    }
+    return this.publish(this.store.get(id)!);
   }
 
   list(owner: HumanPrincipal, includeArchived: boolean): AssistantThread[] {
@@ -211,7 +254,8 @@ export class AssistantThreads {
     const agent = harnessAgent(runner, harness)!;
 
     const now = this.now();
-    const threadId = this.store.reserve(owner, harness, title, now);
+    const limits = this.store.defaultLimits(owner);
+    const threadId = this.store.reserve(owner, harness, title, now, limits);
     // The thread's own Assistant connection. It authenticates nothing until the session's runner
     // proxy binds a credential it minted and keeps in memory.
     const connection = this.deps.connections.createForThread(owner, threadId);
@@ -227,7 +271,7 @@ export class AssistantThreads {
         useWorktree: false,
         role: "normal",
         // The assistant's own spend counts against the thread's budget too.
-        config: { costBudgetUsd: ASSISTANT_THREAD_LIMITS.costUsd },
+        ...(limits.costUsd === null ? {} : { config: { costBudgetUsd: limits.costUsd } }),
       }, threadId);
     } catch (error) {
       this.store.abandon(threadId);
@@ -355,6 +399,7 @@ export function createAssistantThreads(db: ControlPlaneDb, hub: Hub, svc: Sessio
       return created.ok ? { ok: true, status: created.status, data: created.data } : { ...failureBody(created), ok: false, status: created.status };
     },
     archiveBackingSession: (sessionId) => svc.setArchived(sessionId, true),
+    updateLimits: (row, limits) => svc.updateAssistantThreadLimits(row, limits),
     broadcast: (userId, thread) => hub.assistantThreadChanged(userId, thread),
     pendingConfirmations: (threadId) => db.assistantOwnerConfirmations.pendingForThread(threadId),
   });

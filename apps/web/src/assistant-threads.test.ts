@@ -45,6 +45,10 @@ test("every Thread API request goes to the control plane's thread routes", async
   await routes.assistantThreads({ includeArchived: true });
   await routes.assistantThread("thr_a/b");
   await routes.assistantThreadDefaults();
+  await routes.assistantThreadLimitDefaults();
+  const limits = { costUsd: null, launchedSessions: 0 };
+  await routes.setAssistantThreadLimitDefaults(limits);
+  await routes.setAssistantThreadLimits("thr_a/b", limits);
   await routes.createAssistantThread({ harness: "codex", title: "Ship It" });
   await routes.renameAssistantThread("thr_a/b", "Renamed");
   await routes.archiveAssistantThread("thr_a/b");
@@ -53,11 +57,27 @@ test("every Thread API request goes to the control plane's thread routes", async
     { path: "/api/assistant-threads?includeArchived=true", method: "GET" },
     { path: "/api/assistant-threads/thr_a%2Fb", method: "GET" },
     { path: "/api/assistant-threads/defaults", method: "GET" },
+    { path: "/api/assistant-threads/defaults/limits", method: "GET" },
+    { path: "/api/assistant-threads/defaults/limits", method: "PUT", body: limits },
+    { path: "/api/assistant-threads/thr_a%2Fb/limits", method: "PUT", body: limits },
     { path: "/api/assistant-threads", method: "POST", body: { harness: "codex", title: "Ship It" } },
     // A thread id is one path segment whatever it contains.
     { path: "/api/assistant-threads/thr_a%2Fb", method: "PATCH", body: { title: "Renamed" } },
     { path: "/api/assistant-threads/thr_a%2Fb/archive", method: "POST", body: {} },
   ]);
+});
+
+test("an older control plane's missing limit routes refuse writes without falling back to rename", async () => {
+  const refusal = new ApiError("not found", 404, undefined, { error: "not found" });
+  const calls: string[] = [];
+  const routes = assistantThreadRoutes(async (path, init) => {
+    calls.push(`${init?.method ?? "GET"} ${path}`);
+    throw refusal;
+  });
+  const limits = { costUsd: null, launchedSessions: null };
+  await assert.rejects(routes.setAssistantThreadLimits("thr_1", limits), assistantThreadsUnavailable);
+  await assert.rejects(routes.setAssistantThreadLimitDefaults(limits), assistantThreadsUnavailable);
+  assert.deepEqual(calls, ["PUT /api/assistant-threads/thr_1/limits", "PUT /api/assistant-threads/defaults/limits"]);
 });
 
 test("a control plane without the Thread API is unavailable, not failing", () => {

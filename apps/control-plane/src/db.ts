@@ -6822,6 +6822,9 @@ export class ControlPlaneDb {
   /** Server-only wrapper: insert a campaign child and open its work-item attempt together (#3106). */
   campaignChildCreationTransaction<T>(work: () => T): T { return this.atomic(work); }
 
+  /** Persist a thread's owner limits and the matching backing session cap together. */
+  assistantThreadLimitsTransaction<T>(work: () => T): T { return this.atomic(work); }
+
   static open(location: string, options: { artifactBlobDir?: string; hostBootId?: string; incrementalVacuum?: boolean } = {}): ControlPlaneDb {
     if (location !== ":memory:") mkdirSync(dirname(location), { recursive: true });
     const artifactBlobs = location === ":memory:" && !options.artifactBlobDir

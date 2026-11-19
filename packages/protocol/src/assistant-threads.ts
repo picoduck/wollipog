@@ -20,16 +20,19 @@ export interface AssistantThreadAccess {
   destructive: "ask";
 }
 
-/** What one thread may spend and launch (#4663). They stop a runaway or recursive assistant: the
- * backing session is capped at the cost budget, a launch is refused once the thread has launched
- * `launchedSessions` sessions or spent its budget, and each launched session is capped at what
- * remains. The owner can always start a new thread. */
-export const ASSISTANT_THREAD_LIMITS = { launchedSessions: 10, costUsd: 25 } as const;
+/** Independent limits. A null limit is an explicit owner choice to remove it. */
+export interface AssistantThreadLimits {
+  costUsd: number | null;
+  launchedSessions: number | null;
+}
+
+/** Saved on creation, so changing the owner's defaults never changes an existing thread. */
+export const DEFAULT_ASSISTANT_THREAD_LIMITS = { launchedSessions: 10, costUsd: 25 } as const;
 
 export interface AssistantThreadUsage {
-  launchedSessions: { used: number; limit: number };
+  launchedSessions: { used: number; limit: number | null };
   /** The backing session's cost plus every launched session's. */
-  costUsd: { used: number; limit: number };
+  costUsd: { used: number; limit: number | null };
 }
 
 export interface AssistantThread {
@@ -48,6 +51,8 @@ export interface AssistantThread {
   launchedSessionIds: string[];
   /** Additive: the thread's limits and what it has used of them. */
   usage?: AssistantThreadUsage;
+  /** Advertises the dedicated owner limits write route. Absent on older control planes. */
+  limitsEditable?: true;
   /** Additive (#4665): destructive commands of this thread's assistant waiting for the owner, oldest
    * first. While any is listed the thread's status is `needs_you`. */
   confirmations?: AssistantOwnerConfirmation[];

@@ -57,16 +57,26 @@ Each change is published to the owner's dashboards as the `assistant_thread_upse
 
 ## Thread Limits
 
-`ASSISTANT_THREAD_LIMITS` bounds what one thread does, so a runaway or recursive assistant stops:
+Owners can set a default cost budget and session launch limit under **Settings → Behavior →
+Assistant Threads**. The defaults are $25 and 10 launches, and each new thread keeps the limits
+it starts with. Threads created before these settings also keep $25 and 10 launches.
 
-- The backing session's own cost budget is the thread budget ($25).
+To edit an existing thread, open **Thread Actions → Thread Limits**. The header shows what the
+thread has spent and launched. Clearing a field removes its limit, and a launch limit of zero
+pauses new launches. A budget below spend and outstanding commitments is refused. Setting a
+finite budget again requires that any work launched without a cap and its descendants have been
+deleted. These settings are owner-only.
+
+- The backing session starts with the thread budget as its own cost budget, when set.
 - While a thread's Assistant call executes, every session it creates counts as a launch of that
   thread. This covers `session_launch`, side chats and every other operation that passes through
   session creation inside the call. A launch is refused with a message to the
-  assistant once the thread has launched 10 sessions, or once its budget is spent or held.
-  - Each launch is capped at whatever the backing assistant has not spent and launched work does
-    not hold, rounded down to whole cents. A missing, zero or negative requested budget gets that
-    cap too, never "no budget".
+  assistant when the thread reaches its launch limit or its remaining budget is spent or held.
+  - With a budget, each launch is capped at the remaining budget the backing assistant can use,
+    rounded down to whole cents. The launch result tells the assistant what cap was applied when
+    the request did not set one or set a higher one.
+  - Without a thread budget, the launch keeps any explicit session cap. If none was requested it
+    has no cost cap, and the launch result tells the assistant why.
   - The backing session's own cap is lowered by the same amount once every other check has passed,
     just before the session is created. The launch is refused if the cap cannot be lowered. All
     of the thread's caps together therefore never exceed its budget.
