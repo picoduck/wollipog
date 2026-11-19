@@ -30,7 +30,7 @@ export function ReturnOwnerResource({ sessionId, occurrenceId, resourceLabel, on
   };
   const returnedText = `${resourceLabel} returned to the Orchestrator for future requests. Pending requests remain yours.`;
   if (presentation === "footnote") {
-    if (returned) return <p className="owner-resource-footnote" role="status">{returnedText}</p>;
+    if (returned) return <ReturnedFootnote text={returnedText} />;
     return <OwnerResourceFootnote resourceLabel={resourceLabel} ownershipReason={ownershipReason} confirming={confirming}
       busy={busy} error={error} onConfirm={() => setConfirming(true)} onCancel={() => { setConfirming(false); setError(null); }}
       onReturn={() => void save()} />;
@@ -48,6 +48,18 @@ export function ReturnOwnerResource({ sessionId, occurrenceId, resourceLabel, on
     {confirming && <button type="button" className="btn sm" disabled={busy} onClick={() => setConfirming(false)}>Cancel</button>}
     </div>
   </section>;
+}
+
+/** The footnote once returned. Return was pressed inside the confirmation this replaces, so focus
+ * left with it: the result takes focus rather than leaving it on the page, unless it went elsewhere. */
+function ReturnedFootnote({ text }: { text: string }) {
+  const ref = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    const node = ref.current;
+    const active = node?.ownerDocument.activeElement;
+    if (!active || active === node?.ownerDocument.body || !active.isConnected) node?.focus({ preventScroll: true });
+  }, []);
+  return <p ref={ref} className="owner-resource-footnote" role="status" tabIndex={-1}>{text}</p>;
 }
 
 function OwnerResourceFootnote({ resourceLabel, ownershipReason, confirming, busy, error, onConfirm, onCancel, onReturn }: {

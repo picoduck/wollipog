@@ -1107,7 +1107,7 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 900 }, { name: "
     await footnote.getByRole("button", { name: "Return", exact: true }).click();
     await expect(card(page).getByRole("status").filter({
       hasText: "PR #2179 in picoduck/wollipog returned to the Orchestrator for future requests. Pending requests remain yours.",
-    })).toBeVisible();
+    })).toBeFocused();
     expect(await submissions(page)).toContainEqual({ returnOwnerResource: { sessionId: "dock-session", occurrenceId: "merge-occurrence" } });
     // Returning answers nothing: the merge decision is still the owner's to make here.
     await expect(footButton(page, "Approve")).toBeEnabled();

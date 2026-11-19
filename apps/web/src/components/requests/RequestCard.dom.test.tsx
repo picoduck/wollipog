@@ -1351,10 +1351,10 @@ test("an owner-kept resource is one line inside the card, above Deny and Approve
   });
   try {
     const card = view.container.querySelector<HTMLElement>("section.request-card")!;
-    assert.equal(card.nextElementSibling, null, "nothing renders beside the card to share the dock's column with it");
+    assertNoDomNode(card.nextElementSibling, "nothing renders beside the card to share the dock's column with it");
     const footnote = () => card.querySelector<HTMLElement>(".owner-resource-footnote");
     assert.equal(footnote()?.textContent, "The Orchestrator handed this PR to you. Return to the Orchestrator");
-    assert.equal(footnote()?.querySelector("h4, h3"), null, "the card's facts already name the pull request");
+    assertNoDomNode(footnote()!.querySelector("h4, h3"), "the card's facts already name the pull request");
     const order = [...card.children].map((child) => child.className);
     assert.ok(order.indexOf("request-card-body") < order.indexOf("owner-resource-footnote"));
     assert.ok(order.indexOf("owner-resource-footnote") < order.indexOf("request-card-foot"));
@@ -1374,6 +1374,8 @@ test("an owner-kept resource is one line inside the card, above Deny and Approve
     assert.deepEqual(returned, [["session-dock", "merge"]]);
     assert.equal(card.querySelector("[role='status']")?.textContent,
       "PR #64 in example/project returned to the Orchestrator for future requests. Pending requests remain yours.");
+    assert.ok((domWindow.document.activeElement as unknown) === card.querySelector("[role='status']"),
+      "the result takes focus from the confirmation it replaced");
     assert.deepEqual(footer(view.container), ["Deny", "Approve (primary)"]);
   } finally {
     await view.unmount();
@@ -1388,7 +1390,7 @@ test("a rule-kept resource says so, and a read-only card offers no return (#4713
       "A rule keeps this PR with you. Return to the Orchestrator");
     await view.rerender(<RequestCard session={sessionWith(request)} request={request} runnerOnline presentation="panel"
       readOnlyNotice="The Orchestrator decides this request." />);
-    assert.equal(view.container.querySelector(".owner-resource-footnote"), null);
+    assertNoDomNode(view.container.querySelector(".owner-resource-footnote"), "a read-only card offers no return");
   } finally {
     await view.unmount();
   }

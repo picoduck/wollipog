@@ -151,7 +151,7 @@ test("a failed step is counted on the working line, and two retries add an excep
     assert.ok(note, "a retry earns the second line");
     assert.equal(text(container.querySelector(".tl-working-line > .tl-working-failed")), "1 failed",
       "the count sits on the line it counts");
-    assert.equal(note?.querySelector(".tl-working-failed"), null);
+    assertNoDomNode(note!.querySelector(".tl-working-failed"), "the count is not on the exception line");
     const retry = note?.querySelector(".tl-working-retry");
     assert.equal(text(retry), "Retried 2 times: ECONNRESET");
     assert.equal(retry?.getAttribute("title"), "ECONNRESET", "the full error stays reachable when it clips");
