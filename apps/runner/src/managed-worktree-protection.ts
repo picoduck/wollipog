@@ -2984,6 +2984,69 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
   return { scan: command, parse };
 }
 
+/** The closing delimiter is unambiguous for this subset of shell words. Reject other syntax
+ * instead of guessing where a nested command, expansion, comment or compound command ends. */
+const GUARD_STATE_SUBSTITUTION_BODY = /(?:[A-Za-z0-9._/:=,@+%~ \t-]|'[^'\\`\r\n]*'|"[^"\\`$\r\n]*")*/uy;
+
+function guardStateSubstitutionEnd(command: string, start: number, close: ")" | "`"): number | null {
+  const body = new RegExp(GUARD_STATE_SUBSTITUTION_BODY);
+  body.lastIndex = start;
+  body.exec(command);
+  if (command[body.lastIndex] === close) return body.lastIndex;
+  if (close === "`") return null;
+
+  // Preserve command messages built with a quoted copy heredoc. Its first delimiter line
+  // must be followed immediately by the substitution's closing parenthesis.
+  const headerEnd = command.indexOf("\n", start);
+  if (headerEnd < 0) return null;
+  const header = command.slice(start, headerEnd);
+  if (!GUARD_STATE_STRIPPABLE_HEREDOC_LINE.test(header)) return null;
+  const delimiter = /<<-?'([A-Za-z_][A-Za-z0-9_]*)'/u.exec(header)![1];
+  for (let lineStart = headerEnd + 1; lineStart < command.length;) {
+    const lineEnd = command.indexOf("\n", lineStart);
+    if (lineEnd < 0) return null;
+    const line = command.slice(lineStart, lineEnd);
+    if ((header.includes("<<-") ? line.replace(/^\t+/u, "") : line) === delimiter) {
+      return command[lineEnd + 1] === ")" ? lineEnd + 1 : null;
+    }
+    lineStart = lineEnd + 1;
+  }
+  return null;
+}
+
+/** Inspect extra command readings from the source text. The outer command keeps every existing
+ * reading, including the original shell-quote tokens and raw path scan. */
+function quotedGuardStateSubstitutionRefusal(command: string, cwd: string, directory: string): string | null {
+  if (!command.includes('"') || (!command.includes("$(") && !command.includes("`"))) return null;
+  let quote: "'" | '"' | "ansi" | null = null;
+  for (let i = 0; i < command.length; i += 1) {
+    const char = command[i];
+    if (quote === "'") {
+      if (char === "'") quote = null;
+      continue;
+    }
+    if (char === "\\") { i += 1; continue; }
+    if (quote === '"' && (char === "`" || (char === "$" && command[i + 1] === "("))) {
+      const start = i + (char === "`" ? 1 : 2);
+      const end = guardStateSubstitutionEnd(command, start, char === "`" ? "`" : ")");
+      if (end === null) return guardStateUninspectableRefusal("a quoted command substitution cannot be inspected");
+      // The whitelist excludes active nested substitutions. The only multiline form has an
+      // inert heredoc body, which the classifier strips before looking for new readings.
+      const refusal = commandTargetsGuardState(command.slice(start, end), cwd, directory);
+      if (refusal !== null) return refusal;
+      i = end;
+    } else if (quote !== null) {
+      if (char === (quote === "ansi" ? "'" : quote)) quote = null;
+    } else if (char === "$" && command[i + 1] === "'") {
+      quote = "ansi";
+      i += 1;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+    }
+  }
+  return null;
+}
+
 /**
  * Refuse a shell command that references the guard-state directory in any form. Unparsable input
  * is refused rather than allowed: this is the state the veto itself depends on. An operand that is
@@ -3055,7 +3118,7 @@ export function commandTargetsGuardState(
       // Refuse the entire reading, including non-path uses, rather than emulate Bash expansion.
       // This also covers partial operands, assignment values and nested operator expressions.
       // An empty name is shell-quote's sentinel for a bare `$` or `$(`, not an operator
-      // expression. Keep its original unresolved reading; command substitution is out of scope.
+      // expression. Keep its original unresolved reading; quoted substitutions are checked separately.
       if (name !== "" && !/^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?$!_-])$/u.test(name)) {
         throw new UnclassifiableCommandError("shell parameter operators cannot be inspected");
       }
@@ -3073,6 +3136,8 @@ export function commandTargetsGuardState(
   if (tokens.some((token) => token != null && typeof token === "object" && "comment" in token)) {
     return guardStateUninspectableRefusal(GUARD_STATE_COMMENT_REASON);
   }
+  const substitutionRefusal = quotedGuardStateSubstitutionRefusal(scanText, cwd, directory);
+  if (substitutionRefusal !== null) return substitutionRefusal;
   // Each distinct reading is resolved once, and a bounded `find` reads its START depths back from here.
   const relations = new Map<string, GuardStateRelation | null>();
   const relationOf = (path: string): GuardStateRelation | null => {

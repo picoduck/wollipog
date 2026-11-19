@@ -1678,12 +1678,16 @@ this conservative restriction avoids emulating Bash and covers partial operands 
 Single-quoted or escaped literal text and already admitted inert copy-only heredoc bodies retain
 their existing treatment. No new command allowance is introduced.
 
+The veto also checks the body of a double-quoted command substitution when it can delimit the
+body as a simple command or a whitelisted copy heredoc. It refuses nested or otherwise
+uninspectable quoted substitutions (#3322).
+
 Sessions without OS isolation rely on this best-effort text veto to protect hook state. This
 includes Claude in provider mode and Codex launches whose provider boundary is not enforced, as
 described above; native Windows and WSL launches must likewise not assume a filesystem deny unless
 their selected isolation boundary enforces one. OS-isolated launches retain the veto as defense in
-depth. It is not a sandbox: plain unknown variables remain opaque, quoted command substitution
-(#3322) and script-file indirection remain limitations; #1336 tracks the OS boundary. The separate
+depth. Plain unknown variables and script-file indirection remain limitations of the text veto.
+The OS boundary is tracked in #1336. The separate
 misleading managed-worktree refusal wording tracked under #1734 is unchanged here.
 
 ## Typed Parent Control Decisions
