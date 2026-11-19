@@ -21,6 +21,8 @@ export const WOLLIPOG_ASSISTANT_SKILL = {
     "  for the rest of the list. For an operation's full input schema, call it with",
     "  `{\"operations\": [\"<name>\", ...]}`; request any it lists in `remaining` again. Use only granted",
     "  operations and the arguments their schemas list.",
+    "- If a discovery result shows `skillHint`, call `assistant_discover` with `{\"skill\": true}`",
+    "  to read this guide separately.",
     "- Find resources by listing them (`project_list`, `session_list`, Machines) instead of guessing",
     "  ids. A refusal that a target is excluded or inaccessible is final for this connection: report it.",
     "",

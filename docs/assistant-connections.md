@@ -64,13 +64,20 @@ bearer/grant works locally and remotely. Deployment, DNS and proxy provisioning 
 The endpoint rejects foreign browser Origins. Existing device/session auth is unchanged.
 
 Call `assistant_discover` to obtain `controlPlane.id` (existing database instance ID),
-`controlPlane.name`, `connection.id`, current grant/revision and the granted operations' names and
-descriptions. Each result fits one harness tool result (at most 24,000 bytes, under Claude Code's
-50,000-character and Codex's 10,000-token limits). When it returns `nextCursor`, call it again with
+`controlPlane.name`, `connection.id`, the current revision and the granted operations' names and
+descriptions. Discovery budgets at most 9,000 UTF-8 bytes for the escaped result text, leaving room
+for the MCP envelope under Codex's 10,000-byte fallback for models outside its catalog.
+When discovery returns `nextCursor`, call it again with
 `{"cursor": "<nextCursor>"}` for the rest of the list. Call it with
 `{"operations": ["<name>", ...]}` (up to 64 names) for those operations' full input schemas; names
 the grant does not allow come back in `unavailable`, and schemas that did not fit in `remaining`,
 to request again. `tools/list` still returns every granted tool with its full schema.
+
+The first page includes the shared guide in `skill` when it fits. Call `assistant_discover` with
+`{"skill": true}` to get the guide separately. The first page includes `connection.grant` when
+the exact grant fits. Otherwise `grantNotice` explains where the owner can inspect the grant.
+Operation and schema discovery still use the complete grant.
+
 IDs, never editable names or tool prefixes, distinguish connections and installations. The initial
 installation display name is Wollipog and is editable through owner management.
 
