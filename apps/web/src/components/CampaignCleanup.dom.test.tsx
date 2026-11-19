@@ -190,6 +190,6 @@ test("#4187 image reviewer cleanup names automatic retirement and links its sess
     assert.ok(view.container.textContent?.includes("Image Reviewer"));
     assert.ok(view.container.textContent?.includes("Wollipog stops and archives the reviewer."));
     assert.equal(view.container.querySelector("a")?.getAttribute("href"), "/sessions/reviewer");
-    assert.equal(view.container.querySelector("code"), null);
+    assertNoDomNode(view.container.querySelector("code"), "reviewer cleanup shows no shell command");
   } finally { view.unmount(); }
 });
