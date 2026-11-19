@@ -2117,7 +2117,7 @@ mod tests {
         for (method, path) in [(Method::POST, images), (Method::GET, export)] {
             let (timed, last_progress) =
                 timed_request_tracking_upload(&lease, &origin, method, path, image()).await;
-            assert_eq!(timed.1.as_deref(), Err("Stalled"));
+            assert_eq!(timed.1, Err("Stalled".to_string()));
             assert_timed_out_at(
                 timed,
                 upload_time.max(last_progress) + DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
