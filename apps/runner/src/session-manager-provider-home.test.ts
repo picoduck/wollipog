@@ -17,7 +17,7 @@ test("a refused home lease reaches failed status and the visible conversation er
   const store = new SessionStore(join(root, "sessions"));
   const meta: SessionMeta = {
     sessionId: "lease-refusal", agentId: "claude", workspaceId: "repo", repoPath: root, worktreePath: null,
-    driver: "claude-code", command: "claude", args: [], env: { HOME: home }, context: { kind: "native" },
+    driver: "claude-code", command: "claude", args: [], env: {}, context: { kind: "native" },
     agentSessionId: null, status: "starting", title: "Lease Refusal", config: {}, tokensIn: 0, tokensOut: 0,
     costUsd: 0, preview: null, pendingApproval: null, seq: 0, createdAt: 1, updatedAt: 1,
   };
@@ -29,7 +29,8 @@ test("a refused home lease reaches failed status and the visible conversation er
     (() => { driversCreated++; throw new Error("provider must not start"); }) as never,
     join(root, "runner-data"), 1, undefined, undefined, undefined,
     { mode: "provider", network: "inherit" }, async () => undefined,
-    undefined, undefined, async () => {}, undefined, [], undefined, undefined, undefined, undefined,
+    undefined, undefined, async () => {}, undefined, [],
+    (launch) => { launch.env = { CLAUDE_CONFIG_DIR: home }; }, undefined, undefined, undefined,
     undefined, "a".repeat(64),
   );
   t.after(async () => {
@@ -37,13 +38,9 @@ test("a refused home lease reaches failed status and the visible conversation er
     await manager.releaseProviderHomeLeasesAfterShutdown(true);
   });
   const internals = manager as unknown as {
-    runnerEnvironment: NodeJS.ProcessEnv;
     acquireAdmission: (sessionId: string) => Promise<boolean>;
     launch: (meta: SessionMeta) => Promise<boolean>;
   };
-  // Native providers inherit the runner's provider home beneath meta.env. Keep this
-  // fixture on its malformed temporary HOME, independent of the invoking agent's account.
-  internals.runnerEnvironment = { HOME: home };
   assert.equal(await internals.acquireAdmission(meta.sessionId), true);
   assert.equal(await internals.launch(store.readMeta(meta.sessionId)!), false);
   assert.equal(driversCreated, 0);
