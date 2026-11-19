@@ -16,9 +16,9 @@ barrier only after both children are ready. No production lease deadline or owne
 
 | Fixture Phase | Bound |
 | --- | ---: |
-| Both children ready, including loader and native-helper initialization | 10 seconds |
-| Both results published after the start barrier | 10 seconds |
-| Graceful exit after release | 5 seconds |
+| Both children ready, including loader and native-helper initialization | 30 seconds on Windows; 10 elsewhere |
+| Both results published after the start barrier | 10 seconds plus measured helper-call allowance; at most 58 seconds |
+| Graceful exit after release | 5 seconds plus measured helper-call allowance; at most 23 seconds |
 | Forced cleanup of fixture-owned trees | 5 seconds |
 
 The first controlled probe injected 2.6 seconds of startup and 2.6 seconds of publication delay.
@@ -33,13 +33,14 @@ but after the reporting allowance increased to ten seconds, removing only the re
 passed in a controlled 5.626-second Linux run (#3274).
 
 The regression now derives its startup pause from the reporting window: ten seconds plus two
-seconds of separation, with no publication pause. Its separate twenty-two-second readiness bound
-adds the normal ten-second native setup margin to that twelve-second pause. Without the readiness
+seconds of separation, with no publication pause. Windows exercises the default thirty-second
+readiness bound; other platforms add their normal ten-second setup margin for a separate
+twenty-two-second bound. Without the readiness
 wait, reporting expires before startup finishes; with it, real acquisition/publication/verification
-retains the full ten-second reporting allowance. `verify-successor-readiness-regression.mjs` makes
+retains the full measured reporting allowance. `verify-successor-readiness-regression.mjs` makes
 a temporary copy beside the test, removes only the parent readiness wait, and requires the exact
 focused test to fail at the reporting deadline with both contenders closed and no retained fixture
-state. Platform Isolation runs this check on Linux, both Windows images, and macOS, after the
+state. Platform Isolation runs this check on Linux, Windows, and macOS, after the
 unmodified lease suite. The temporary copy is removed on normal completion or handled failure.
 An external interruption may leave its uniquely named `provider-home-lease.readiness-*.mutation.ts`
 copy behind. These scratch copies do not match normal test discovery and are explicitly excluded
@@ -47,7 +48,7 @@ from production TypeScript compilation. After the interrupted validation has exi
 remove its untracked copy; never commit it. The test-only typecheck may still check its types,
 without executing or emitting it.
 
-Normal readiness is ten seconds: Windows PR validation at head `7ba963e4` failed a post-report fault regression
+Normal readiness was increased to ten seconds after Windows PR validation at head `7ba963e4` failed a post-report fault regression
 before reaching that fault, with both contenders still initializing when the prior five-second
 readiness deadline expired. Other measured Windows runs reached readiness around 0.8–1.1 seconds;
 this full-suite outlier supports a separate bounded setup allowance.
@@ -55,10 +56,22 @@ this full-suite outlier supports a separate bounded setup allowance.
 Windows dispatch validation at head `bbd2d330` then measured a winner acquisition of 5.389 seconds
 and losing-contender verification of 0.884 seconds. Both contenders exited successfully with one
 winner and one refusal, but reporting crossed its former five-second bound. This measures actual
-post-readiness work, so the reporting allowance is now a finite ten seconds. Graceful exit and forced
-cleanup retain five seconds each, and production deadlines remain unchanged. The focused load runner
-allows 35 seconds for the fixture and 45 seconds overall; five outer timeouts plus owned-tree cleanup
-fit within the existing five-minute validation step.
+post-readiness work. The reporting allowance was increased to ten seconds and subsequently gained
+bounded helper-call allowances (#3859): calibration scales fixed call counts, capped at 58 seconds
+for reporting and 23 seconds for graceful cleanup. Forced cleanup retains five seconds.
+
+In #4718, the ten-second readiness limit expired before Windows contenders became ready at
+12.64 and 13.10 seconds. Native-helper initialization took 2.83 and 4.00 seconds, calibration
+calls 0.52 and 0.41 seconds, and the remaining startup preceded initialization. Both contenders
+reached readiness during cleanup, before any election began. This supports extra Windows startup
+headroom, without establishing a production regression or attributing all startup time to one
+launcher. The same job's successful 14.5-second startup includes the slow-start test's deliberate
+12-second pause. Windows now has a finite thirty-second readiness allowance; the explicit
+hung-readiness fault still uses one second. Production deadlines remain unchanged.
+
+The focused load runner allows 130 seconds for each fixture and 145 seconds overall per run,
+so the fixture's readiness, reporting, and cleanup bounds fire first. The opt-in five-run step
+allows fifteen minutes for five outer bounds plus worker startup/cleanup and scheduling margin.
 
 These measurements establish a defect in the fixture's combined phase budget. Historical Windows
 failure logs do not identify their stalled phase, so they do not prove a production lease defect or
@@ -101,5 +114,5 @@ evidence and an unrelated process/file, and injects termination, close-wait, and
 Its synthetic detached child exits itself after eight seconds; the tests never signal stored PIDs.
 
 For native Windows evidence, dispatch the Platform Isolation workflow on the tested branch with
-`successor_election_load=true`. Both Windows images run the five focused loaded tests alongside the
+`successor_election_load=true`. The Windows job runs the five focused loaded tests alongside the
 complete normal platform job. Linux validation does not substitute for these Windows results.
