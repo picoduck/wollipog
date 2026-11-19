@@ -407,7 +407,12 @@ const VOCABULARY = {
   /** A provider's subscription usage. */
   usage: {
     available: success("Available"),
+    /** Less than a quarter of a usage window is left. */
     approaching_limit: warning("Approaching Limit"),
+    /** The provider warned while plenty is left: the window is being used faster than it elapses. */
+    on_pace_to_run_out: warning("On Pace to Run Out"),
+    /** The provider warned about a window that reports no percentage. */
+    usage_warning: warning("Usage Warning"),
     temporarily_unavailable: danger("Temporarily Unavailable"),
     exhausted: danger("Exhausted"),
     limit_reached: danger("Limit Reached"),

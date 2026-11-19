@@ -239,8 +239,10 @@ const subscription: SubscriptionUsageResponse = {
       buckets: [
         { id: "five_hour", label: "Five-Hour Window", usedPercent: 83, remainingPercent: 17,
           resetsAt: SUBSCRIPTION_NOW + 2 * 3_600_000 + 41 * 60_000, status: "warning" },
+        // Claude's pace warning: 46% of the week used one day in, with plenty still left. At that
+        // rate it runs out in about 28 hours, long before it resets (On Pace to Run Out).
         { id: "seven_day", label: "Weekly — All Models", usedPercent: 46, remainingPercent: 54,
-          resetsAt: SUBSCRIPTION_NOW + 4 * DAY, status: "available" },
+          windowDurationMinutes: 10_080, resetsAt: SUBSCRIPTION_NOW + 6 * DAY, status: "warning" },
         { id: "seven_day_overage_included", label: "Weekly — Extra Usage", usedPercent: 12,
           remainingPercent: 88, resetsAt: SUBSCRIPTION_NOW + 4 * DAY, status: "available" },
       ],
@@ -256,7 +258,8 @@ const subscription: SubscriptionUsageResponse = {
       buckets: [
         { id: "five_hour", label: "Five-Hour Window",
           resetsAt: SUBSCRIPTION_NOW + 3 * 3_600_000 + 12 * 60_000, status: "available" },
-        // A status-only `allowed_warning` event: no utilization, but the provider still warned.
+        // A status-only `allowed_warning` event: no utilization, but the provider still warned
+        // (Usage Warning, since it cannot say whether it is about the limit or the pace).
         { id: "seven_day", label: "Weekly — All Models",
           resetsAt: SUBSCRIPTION_NOW + 5 * DAY, status: "warning" },
       ],

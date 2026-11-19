@@ -320,6 +320,13 @@ export function normalizeCodexRateLimits(
   };
 }
 
+/** The length of a Claude allowance window its id names: the five-hour window and the weekly ones. */
+function claudeWindowDurationMinutes(id: string): number | undefined {
+  if (id === "five_hour") return 5 * 60;
+  if (id === "seven_day" || id.startsWith("seven_day_")) return 7 * 24 * 60;
+  return undefined;
+}
+
 function claudeWindow(id: string, input: unknown, observedAt: number): SubscriptionUsageBucket | null {
   const window = record(input);
   if (!window) return null;
@@ -336,6 +343,9 @@ function claudeWindow(id: string, input: unknown, observedAt: number): Subscript
       : "available" as const;
   const safeId = stringValue(id, 96);
   if (!safeId) return null;
+  // Claude does not report a window's length, but its id names it. With the reset time, the length
+  // places the window's start, which is what lets a pace warning say when the window would run out.
+  const windowDurationMinutes = duration ?? claudeWindowDurationMinutes(safeId);
   return {
     id: safeId,
     label: subscriptionUsageBucketLabel(safeId),
@@ -343,7 +353,7 @@ function claudeWindow(id: string, input: unknown, observedAt: number): Subscript
       usedPercent,
       remainingPercent: Math.max(0, 100 - usedPercent),
     }),
-    ...(duration === undefined ? {} : { windowDurationMinutes: duration }),
+    ...(windowDurationMinutes === undefined ? {} : { windowDurationMinutes }),
     ...(resetsAt === undefined ? {} : { resetsAt }),
     status,
   };

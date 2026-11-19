@@ -798,17 +798,17 @@ test("a link saved from Subscriptions' old path still opens Subscriptions", asyn
   await expect(page.locator(".usage-toolbar")).toHaveCount(0);
 });
 
-test("the Subscriptions tab counts its Approaching Limit and Exhausted badges", async ({ page }) => {
+test("the Subscriptions tab counts its window badges", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/usage-view-e2e.html?subscriptions=1");
   const tab = page.getByRole("tab", { name: /^Subscriptions/ });
   await tab.click();
   await expect(page).toHaveURL(/tab=subscriptions/);
   const badges = page.locator("#usage-subscriptions-panel .subscription-window .status")
-    .filter({ hasText: /^(Approaching Limit|Exhausted)$/ });
-  await expect(badges).toHaveCount(3);
-  await expect(tab.locator(".count-badge")).toHaveText("3");
-  await expect(tab).toHaveAccessibleName("Subscriptions, 3 Need Attention");
+    .filter({ hasText: /^(Approaching Limit|On Pace to Run Out|Usage Warning|Exhausted)$/ });
+  await expect(badges).toHaveText(["Exhausted", "Approaching Limit", "On Pace to Run Out", "Usage Warning"]);
+  await expect(tab.locator(".count-badge")).toHaveText("4");
+  await expect(tab).toHaveAccessibleName("Subscriptions, 4 Need Attention");
   await page.screenshot({ path: `${SHOT}/desktop-1440-dark-subscriptions.png`, fullPage: true });
   await page.goBack();
   await expect(page.getByRole("tab", { name: "API Usage" })).toHaveAttribute("aria-selected", "true");
@@ -858,6 +858,13 @@ test("each account is one surface with a row per window, in the provider's order
   await expect(windows.nth(0).locator(".subscription-window-reset")).toHaveText(/^Resets in \d hours?$/);
   // The full reset time is the tooltip, to the minute.
   await expect(windows.nth(0).locator(".subscription-window-reset")).toHaveAttribute("title", /\d:\d\d [AP]M$/);
+  // Claude's pace warning with over half the week left is not Approaching Limit: the badge names
+  // the pace, its tooltip says when the window runs out, and the meter of what is left stays plain.
+  await expect(windows.nth(1).locator(".status")).toHaveText("On Pace to Run Out");
+  await expect(windows.nth(1).locator(".status")).toHaveAttribute("title",
+    "At this pace, this window runs out in about 28 hours, before it resets.");
+  await expect(windows.nth(1).locator(".meter")).toHaveClass("meter");
+  await expect(windows.nth(2).locator(".status")).toHaveCount(0);
   await expect(current).not.toContainText(/Remaining|Used/);
 
   // A build that reports resets but no utilization says so on each window.
@@ -866,7 +873,9 @@ test("each account is one surface with a row per window, in the provider's order
   await expect(unmeasured).toHaveCount(2);
   await expect(unmeasured.locator(".subscription-window-left")).toHaveText(["No percentage reported", "No percentage reported"]);
   await expect(unmeasured.locator(".subscription-window-reset")).toHaveText([/^Resets in /, /^Resets in /]);
-  await expect(unmeasured.nth(1).locator(".status")).toHaveText("Approaching Limit");
+  // A warning without a percentage cannot say whether it is about the limit or the pace.
+  await expect(unmeasured.nth(1).locator(".status")).toHaveText("Usage Warning");
+  await expect(unmeasured.nth(1).locator(".status")).toHaveAttribute("title", "The provider warned about this window's usage.");
   await expect(resetOnly).toContainText("without utilization percentages");
 
   // The sources with no windows fold into one line.
