@@ -9743,13 +9743,16 @@ export class SessionsService {
     const rootId = this.db.resolvedCampaignSessionId(campaignSessionId);
     const root = rootId ? this.db.getSession(rootId) : null;
     if (!root?.orchestratorPolicy) return fail("Orchestrator campaign not found", 404);
-    const imageReview = this.db.delegatedImageReviews.byReviewer(child.id);
-    if (imageReview && (imageReview.state === "consumed" || imageReview.state === "ended") && !workItem) {
-      if (!checkOnly) this.setArchived(child.id, true);
-      return ok({ campaign: this.db.campaignProjection(root.id)!, child: this.db.getSession(child.id)! });
-    }
     const completion = root.orchestratorPolicy.behavior.completion;
     if (this.db.campaignPaused(root.id)) return fail("The campaign is paused; paused children cannot be verified.", 409);
+    const imageReview = this.db.delegatedImageReviews.byReviewer(child.id);
+    if (imageReview && (imageReview.state === "consumed" || imageReview.state === "ended") && !workItem) {
+      if (!checkOnly) {
+        const archived = this.setArchived(child.id, true);
+        if (!archived.ok) return failAs(archived, "reviewer archive failed");
+      }
+      return ok({ campaign: this.db.campaignProjection(root.id)!, child: this.db.getSession(child.id)! });
+    }
     // A requested stop, a guardrail Stop, a runner disconnect, and startup settlement all write
     // `stopped` before the runner confirms anything, so that row is not yet proof the child's last
     // report is final. Only a recorded confirmation is (#1466): it survives the runner going

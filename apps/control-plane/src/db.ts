@@ -23890,11 +23890,16 @@ export class ControlPlaneDb {
   private campaignCleanupItems(campaignId: string,
     worktrees: NonNullable<OrchestratorCampaignProjection["cleanupWorktrees"]>,
     handoffs: readonly OrchestratorCampaignHandoff[]): CampaignCleanupItem[] {
-    const items: CampaignCleanupItem[] = this.campaignReviewerCleanup(campaignId).map(sessionId => ({
-      kind: "image_reviewer", sessionId,
-      reason: "The finished image reviewer is waiting for confirmed stop and archival.",
-      action: { kind: "automatic", text: "Wollipog stops and archives the reviewer when its runner confirms release." },
-    }));
+    const items: CampaignCleanupItem[] = this.campaignReviewerCleanup(campaignId).map(sessionId => {
+      const failed = Boolean(this.sessionStopIntent(sessionId)?.operation.failure);
+      return { kind: "image_reviewer", sessionId,
+        reason: failed ? "The image reviewer's Stop failed; archival is still pending."
+          : "The finished image reviewer is waiting for confirmed stop and archival.",
+        action: failed
+          ? { kind: "person", text: "Open the reviewer session and choose Retry Stop, or reconnect its runner." }
+          : { kind: "automatic", text: "Wollipog stops and archives the reviewer when its runner confirms release." },
+      };
+    });
     const branches = this.campaignMergedBranches(campaignId).filter((row) => row.state !== "deleted");
     if (branches.length) {
       const workItems = this.campaignWorkLedger.pullRequestWorkItems(campaignId);

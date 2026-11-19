@@ -25877,8 +25877,8 @@ test("#4187 a provisional Stop preserves a live review until runner reconciliati
     const child = h.createChild("UI Child");
     const decision = h.request(child.id, "disconnect", [h.screenshot(child.id, "disconnect").item]).data!;
     const review = prepareImageReview(h, child.id, decision.occurrenceId).data!;
-    h.db.updateSessionStatus(review.reviewerSessionId, "stopped", Date.now());
-    h.svc.maintainImageReviewerRetirement(Date.now());
+    h.svc.failRunnerSessions(RUNNER_ID);
+    h.svc.retryDuePrompts();
     assert.equal(h.db.delegatedImageReviews.get(review.reviewId)!.state, "running");
     assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, undefined);
     assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, false);
@@ -25908,12 +25908,30 @@ test("#4187 failed automatic retirement stays pending and recovers on reconnect"
     h.db.setSessionArchived(child.id, true, Date.now());
     h.db.verifyCampaignChildReport(h.parent.id, child.id, report.seq, Date.now());
     h.db.updateSessionStatus(h.parent.id, "idle", Date.now());
-    assert.ok(h.db.campaignProjection(h.parent.id)!.cleanup?.items.some(item => item.kind === "image_reviewer"));
+    const cleanup = h.db.campaignProjection(h.parent.id)!.cleanup?.items.find(item => item.kind === "image_reviewer");
+    assert.equal(cleanup?.action.kind, "person");
+    if (cleanup?.action.kind === "person") assert.match(cleanup.action.text, /Retry Stop/);
     h.hub.online = true;
     h.svc.maintainImageReviewerRetirement(Date.now(), RUNNER_ID);
     assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, "stop_pending");
     h.svc.onSessionStatus(review.reviewerSessionId, "stopped");
     assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, true);
+  } finally { h.db.close(); }
+});
+
+test("#4187 legacy reviewer verification respects campaign pause", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const decision = h.request(child.id, "pause", [h.screenshot(child.id, "pause").item]).data!;
+    const review = prepareImageReview(h, child.id, decision.occurrenceId).data!;
+    h.db.delegatedImageReviews.end(review.reviewId, "decision_revoked", Date.now());
+    const local = h.db.localIdentityContext();
+    assert.ok(h.svc.setCampaignPause(h.parent.id, { action: "pause" },
+      { ...local, kind: "human", actorId: local.userId }).ok);
+    assert.equal(h.svc.verifyCampaignChild(h.parent.id, { childSessionId: review.reviewerSessionId,
+      reportEventSeq: 1, followUpsAccounted: true }).status, 409);
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, false);
   } finally { h.db.close(); }
 });
 
