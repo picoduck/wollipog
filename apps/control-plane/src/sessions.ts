@@ -338,6 +338,7 @@ import {
   type SessionStopConfirmation,
   type WorkflowDecisionResumeState,
   type DecisionOccurrenceRecord,
+  FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS,
 } from "./db.js";
 import { questionPolicyAnswers } from "./question-policy.js";
 import type { SessionEvent } from "@wollipog/protocol";
@@ -18815,11 +18816,12 @@ export class SessionsService {
     if (pause && pause.resumedAt === undefined && pause.stoppedSessionIds.includes(sessionId)) return;
     const child = this.db.getSession(sessionId);
     for (const decision of this.db.unconsumedWorkflowDecisionsForSession(sessionId)) {
-      const settle = child ? this.forgeSettlesArmedMerge(child, decision) : false;
+      const settle = child && decision.authority === "orchestrator" &&
+        FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS.includes(actorId) && this.forgeSettlesArmedMerge(child, decision);
       this.revokeWorkflowDecision(decision, {
         reason: actorId === "session-restarted" ? "session_restarted" : "session_ended", systemId: actorId,
-      }, actorId === "session-restarted", undefined, settle && decision.authority === "orchestrator");
-      if (settle) void this.settleArmedMergeFromForge(child!, decision);
+      }, actorId === "session-restarted", undefined, Boolean(settle));
+      if (settle) void this.settleArmedMergeFromForge(child, decision);
     }
     // A child that already reads terminal was stopped provisionally, which kept any in-flight
     // resume for the runner's return (#1827). This end is final, so that resume ends too; a live
@@ -18900,7 +18902,8 @@ export class SessionsService {
           !this.db.deferLifecycleMergeCheck(occurrenceId, now, now + LIFECYCLE_MERGE_RECHECK_MS)) continue;
       const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
       const snapshot = decision?.resourceSnapshot;
-      if (!decision || snapshot?.category !== "pr_merge" || !this.mergeSettlementAuthority(decision, false)) {
+      if (!decision || snapshot?.category !== "pr_merge" || !this.mergeSettlementAuthority(decision, false) ||
+          !this.db.isRecoverableWorkflowDecisionActionRevocation(decision.sessionId, occurrenceId, FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS)) {
         this.db.finishLifecycleMergeCheck(occurrenceId);
         continue;
       }

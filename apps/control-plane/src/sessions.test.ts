@@ -7672,6 +7672,55 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
+  await t.test("a superseded Codex admission cannot also claim a merge recorded on its replacement", async () => {
+    const { db, hub, svc, parent, child, arm } = setup();
+    try {
+      const original = await arm(3492);
+      const retry = svc.createWorkflowDecision(child.id, {
+        requestId: "external-retry", resourceKey: original.decision.resourceKey, resourceSnapshot: original.snapshot,
+      });
+      assert.ok(retry.ok && retry.data, retry.error);
+      assert.ok(svc.resolveDescendantRequest(parent.id, child.id, retry.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+      const approved = db.workflowDecisionByOccurrence(retry.data.occurrenceId)!;
+      svc.campaignForgeReadNow = async (_campaign, [ref]) => [{ ref: ref!,
+        observation: mergeObservation("merged", original.snapshot.headSha, approved.resolvedAt! + 1_000) }];
+      const recorded = await svc.reconcileWorkflowDecision(child.id, approved.occurrenceId, {
+        resourceSnapshot: original.snapshot, externalMerge: true,
+      });
+      assert.equal(recorded.data?.status, "consumed", recorded.error);
+      let providerReads = 0;
+      hub.requestHandler = (message) => {
+        providerReads += 1;
+        assert.equal(message.type, "reconcile_workflow_action");
+        return { type: "workflow_action_reconciliation_result", requestId: message.requestId,
+          sessionId: child.id, occurrenceId: original.decision.occurrenceId, accepted: true,
+          commandDigest: createHash("sha256").update(original.command, "utf8").digest("hex"),
+          providerThreadId: "thread-1", providerTurnId: "provider-session-turn-1",
+          providerAdmissionItemId: "original-admission", providerItemId: "original-command",
+          forgeHeadSha: original.snapshot.headSha };
+      };
+      const replay = await svc.reconcileWorkflowDecision(child.id, original.decision.occurrenceId, {
+        resourceSnapshot: original.snapshot,
+      });
+      assert.equal(replay.errorDetails?.code, "workflow_decision_superseded");
+      assert.equal(providerReads, 0);
+    } finally { db.close(); }
+  });
+
+  await t.test("archiving a provisionally stopped child does not schedule unrecoverable merge checks", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      const original = await arm(1449);
+      hub.requestHandler = forgeProof(child, original, () => false);
+      db.updateSessionStatus(child.id, "stopped", Date.now());
+      assert.ok(svc.setArchived(child.id, true).ok);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(db.workflowDecisionByOccurrence(original.decision.occurrenceId)?.status, "revoked");
+      assert.deepEqual(db.dueLifecycleMergeChecks(Date.now() + 5 * 60_000), []);
+    } finally { db.close(); }
+  });
+
   await t.test("lifecycle merge observation survives a service restart and never restores the grant", async () => {
     for (const outcome of ["merged", "closed", "moved", "expired"] as const) {
       const directory = mkdtempSync(join(tmpdir(), "wollipog-merge-settlement-"));

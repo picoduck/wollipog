@@ -26621,7 +26621,7 @@ export class ControlPlaneDb {
       ) SELECT (SELECT occurrence_id FROM replacements WHERE status IN ('pending','approved')
         ORDER BY serial DESC LIMIT 1) AS pendingReplacement FROM original
       WHERE EXISTS (SELECT 1 FROM replacements WHERE occurrence_id=original.superseded_by)
-        AND NOT EXISTS (SELECT 1 FROM replacements WHERE action_kind='pr_merge_enqueue')
+        AND NOT EXISTS (SELECT 1 FROM replacements WHERE action_kind='pr_merge_enqueue' OR status='consumed')
         AND NOT EXISTS (SELECT 1 FROM workflow_decisions admitted
           WHERE admitted.session_id=original.session_id AND admitted.category='pr_merge' AND admitted.rowid>original.serial
             AND admitted.action_command_digest=original.action_command_digest)`)
