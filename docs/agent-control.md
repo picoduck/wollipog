@@ -1679,8 +1679,8 @@ Single-quoted or escaped literal text and already admitted inert copy-only hered
 their existing treatment. No new command allowance is introduced.
 
 The veto also checks the body of a double-quoted command substitution when it can delimit the
-body as a simple command or a whitelisted copy heredoc. It refuses nested or otherwise
-uninspectable quoted substitutions (#3322).
+body, including ordinary pipelines and redirects and whitelisted copy heredocs. It refuses nested
+or otherwise uninspectable quoted substitutions (#3322).
 
 Sessions without OS isolation rely on this best-effort text veto to protect hook state. This
 includes Claude in provider mode and Codex launches whose provider boundary is not enforced, as

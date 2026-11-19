@@ -2984,15 +2984,45 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
   return { scan: command, parse };
 }
 
-/** The closing delimiter is unambiguous for this subset of shell words. Reject other syntax
- * instead of guessing where a nested command, expansion, comment or compound command ends. */
-const GUARD_STATE_SUBSTITUTION_BODY = /(?:[A-Za-z0-9._/:=,@+%~ \t-]|'[^'\\`\r\n]*'|"[^"\\`$\r\n]*")*/uy;
+/** Ordinary words, pipelines and redirects leave a clear closing delimiter. Compound syntax,
+ * shell comments and active nested substitutions require more than this lexical reading. */
+const GUARD_STATE_PLAIN_PARAMETER = /\$(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\})/u.source;
+const GUARD_STATE_SUBSTITUTION_BODY = new RegExp(
+  "(?:" +
+  [
+    /[A-Za-z0-9._/:=,@+%~ \t|>&*?!-]|<(?!<)/u.source,
+    /\\[^\r\n]/u.source,
+    /'[^'\r\n]*'/u.source,
+    String.raw`"(?:[^"\\\x60$\r\n]|\\[^\r\n]|${GUARD_STATE_PLAIN_PARAMETER})*"`,
+    GUARD_STATE_PLAIN_PARAMETER,
+  ].join("|") +
+  ")*",
+  "uy",
+);
+
+function guardStateHeredocTerminator(
+  command: string, start: number, delimiter: string, stripTabs: boolean,
+): number | null {
+  for (let lineStart = start; lineStart < command.length;) {
+    const newline = command.indexOf("\n", lineStart);
+    const lineEnd = newline < 0 ? command.length : newline;
+    const line = command.slice(lineStart, lineEnd);
+    if ((stripTabs ? line.replace(/^\t+/u, "") : line) === delimiter) return lineEnd;
+    lineStart = lineEnd + 1;
+  }
+  return null;
+}
 
 function guardStateSubstitutionEnd(command: string, start: number, close: ")" | "`"): number | null {
   const body = new RegExp(GUARD_STATE_SUBSTITUTION_BODY);
   body.lastIndex = start;
-  body.exec(command);
-  if (command[body.lastIndex] === close) return body.lastIndex;
+  const reading = body.exec(command)![0];
+  if (command[body.lastIndex] === close) {
+    // A case pattern can contain an unmatched closing parenthesis, and legacy backticks
+    // process escapes before they parse the body. Neither has an unambiguous reading here.
+    const ambiguous = close === ")" ? /\bcase\b/u.test(reading) : /[\\`]/u.test(reading);
+    return ambiguous ? null : body.lastIndex;
+  }
   if (close === "`") return null;
 
   // Preserve command messages built with a quoted copy heredoc. Its first delimiter line
@@ -3001,25 +3031,24 @@ function guardStateSubstitutionEnd(command: string, start: number, close: ")" | 
   if (headerEnd < 0) return null;
   const header = command.slice(start, headerEnd);
   if (!GUARD_STATE_STRIPPABLE_HEREDOC_LINE.test(header)) return null;
-  const delimiter = /<<-?'([A-Za-z_][A-Za-z0-9_]*)'/u.exec(header)![1];
-  for (let lineStart = headerEnd + 1; lineStart < command.length;) {
-    const lineEnd = command.indexOf("\n", lineStart);
-    if (lineEnd < 0) return null;
-    const line = command.slice(lineStart, lineEnd);
-    if ((header.includes("<<-") ? line.replace(/^\t+/u, "") : line) === delimiter) {
-      return command[lineEnd + 1] === ")" ? lineEnd + 1 : null;
-    }
-    lineStart = lineEnd + 1;
-  }
-  return null;
+  const delimiter = /<<-?'([A-Za-z_][A-Za-z0-9_]*)'/u.exec(header)![1]!;
+  const end = guardStateHeredocTerminator(command, headerEnd + 1, delimiter, header.includes("<<-"));
+  return end !== null && command[end + 1] === ")" ? end + 1 : null;
 }
 
 /** Inspect extra command readings from the source text. The outer command keeps every existing
  * reading, including the original shell-quote tokens and raw path scan. */
 function quotedGuardStateSubstitutionRefusal(command: string, cwd: string, directory: string): string | null {
   if (!command.includes('"') || (!command.includes("$(") && !command.includes("`"))) return null;
+  // A leading simple command with a single quoted delimiter has a literal body. Skip only
+  // the first complete body in this additional scan, then inspect any following commands.
+  // The original path scan still receives the full source.
+  const heredoc = /^[A-Za-z0-9._/:=,@+%~ \t-]+<<(-)?[ \t]*(['"])([A-Za-z_][A-Za-z0-9_]*)\2[ \t]*\n/u.exec(command);
+  const bodyEnd = heredoc === null ? null :
+    guardStateHeredocTerminator(command, heredoc[0].length, heredoc[3]!, heredoc[1] !== undefined);
+  const arithmetic = /\(\([A-Za-z0-9_$*/%~^&|<>=?:, \t+-]+\)\)/uy;
   let quote: "'" | '"' | "ansi" | null = null;
-  for (let i = 0; i < command.length; i += 1) {
+  for (let i = bodyEnd === null ? 0 : bodyEnd + 1; i < command.length; i += 1) {
     const char = command[i];
     if (quote === "'") {
       if (char === "'") quote = null;
@@ -3027,6 +3056,12 @@ function quotedGuardStateSubstitutionRefusal(command: string, cwd: string, direc
     }
     if (char === "\\") { i += 1; continue; }
     if (quote === '"' && (char === "`" || (char === "$" && command[i + 1] === "("))) {
+      // Simple arithmetic has no executable expansion. Leave more involved arithmetic
+      // to the uninspectable path rather than treating its opening parenthesis as a body.
+      if (char === "$" && command[i + 2] === "(") {
+        arithmetic.lastIndex = i + 1;
+        if (arithmetic.test(command)) { i = arithmetic.lastIndex - 1; continue; }
+      }
       const start = i + (char === "`" ? 1 : 2);
       const end = guardStateSubstitutionEnd(command, start, char === "`" ? "`" : ")");
       if (end === null) return guardStateUninspectableRefusal("a quoted command substitution cannot be inspected");
