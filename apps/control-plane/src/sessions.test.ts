@@ -7837,6 +7837,44 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       occurrenceId: message.occurrenceId, ...answer(message) };
   };
 
+  await t.test("a durable recheck cannot record the merge a newer provider admission settled", async () => {
+    const { db, hub, svc, child, arm } = setup();
+    try {
+      const original = await arm(1449);
+      const armOnRunner = hub.requestHandler;
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "uncertain" }));
+      const uncertain = await svc.executeWorkflowDecision(child.id, original.decision.occurrenceId,
+        { resourceDigest: original.decision.resourceDigest });
+      assert.equal(uncertain.data?.forgeAction?.outcome, "uncertain", uncertain.error);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "refused" }));
+      assert.ok(svc.restart(child.id).ok);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(db.workflowDecisionByOccurrence(original.decision.occurrenceId)?.status, "revoked");
+
+      db.updateSessionStatus(child.id, "running", Date.now());
+      hub.setSessionQueue(child.id, [], false, "session-turn-2");
+      hub.requestHandler = armOnRunner;
+      const replacement = await arm(1449);
+      hub.requestHandler = (message) => {
+        assert.equal(message.type, "reconcile_workflow_action");
+        return { type: "workflow_action_reconciliation_result", requestId: message.requestId,
+          sessionId: child.id, occurrenceId: replacement.decision.occurrenceId, accepted: true,
+          commandDigest: createHash("sha256").update(replacement.command, "utf8").digest("hex"),
+          providerThreadId: "thread-1", providerTurnId: "provider-session-turn-2",
+          providerAdmissionItemId: "replacement-admission", providerItemId: "replacement-command",
+          forgeHeadSha: replacement.snapshot.headSha };
+      };
+      const reconciled = await svc.reconcileWorkflowDecision(child.id, replacement.decision.occurrenceId,
+        { resourceSnapshot: replacement.snapshot });
+      assert.equal(reconciled.data?.status, "consumed", reconciled.error);
+
+      svc.campaignForgeReadNow = async (_campaign, [ref]) => [{ ref: ref!,
+        observation: mergeObservation("merged", original.snapshot.headSha, Date.now()) }];
+      await svc.retryLifecycleMergeSettlements(Date.now() + 5 * 60_000);
+      assert.equal(db.workflowDecisionByOccurrence(original.decision.occurrenceId)?.status, "revoked");
+    } finally { db.close(); }
+  });
+
   await t.test("an approved enqueue the provider refused is performed once by Wollipog itself (#4067)", async () => {
     const { db, hub, svc, child, arm } = setup(AGENT_ID);
     try {

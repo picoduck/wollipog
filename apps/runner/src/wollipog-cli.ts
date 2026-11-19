@@ -611,12 +611,15 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       if (optionPresent(args, "--action")) {
         return { error: "decision reconcile does not accept --action" };
       }
+      if (args.some((arg) => arg.startsWith("--external-merge="))) {
+        return { error: "decision reconcile --external-merge does not accept a value" };
+      }
       const snapshot = jsonObjectOption(args, "--snapshot");
       if ("error" in snapshot) return snapshot;
       return {
         tool: "reconcile_workflow_decision",
         input: { occurrenceId, resourceSnapshot: snapshot.value,
-          ...(optionPresent(args, "--external-merge") ? { externalMerge: true } : {}) },
+          ...(flag(args, "--external-merge") ? { externalMerge: true } : {}) },
       };
     }
     if (verb === "execute") {

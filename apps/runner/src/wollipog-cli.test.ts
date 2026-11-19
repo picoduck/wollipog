@@ -1564,6 +1564,7 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
     ["decision", "reconcile", "workflow_1", "--snapshot", "[]"],
     ["decision", "reconcile", "workflow_1", "--snapshot", "not-json"],
     ["decision", "reconcile", "workflow_1", "--snapshot", "{}", "--action", "{}"],
+    ["decision", "reconcile", "workflow_1", "--snapshot", "{}", "--external-merge=false"],
     ["decision", "reconcile", "workflow_1", "--session", "other", "--snapshot", "{}"],
     ["decision", "get", "workflow_1", "--session"],
     ["decision", "list", "--limit", "101"],

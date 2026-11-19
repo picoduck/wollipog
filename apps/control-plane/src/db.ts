@@ -26661,7 +26661,14 @@ export class ControlPlaneDb {
       const claimedElsewhere = options.forgeAttested === true && this.stmt(
         "SELECT 1 FROM workflow_decision_action_receipts WHERE receipt_digest=? LIMIT 1",
       ).get(receiptDigest) !== undefined;
-      if (!eligible || (!unarmedExternal && decision?.actionAdmission?.commandDigest !== commandDigest) || claimedElsewhere ||
+      // A restarted child can record its re-enqueue through a provider receipt before a delayed
+      // forge read observes the same head. Keep the revoked occurrence terminal in that case.
+      const newerEnqueueRecorded = options.forgeAttested === true && decision?.status === "revoked" && this.stmt(`
+        SELECT 1 FROM workflow_decisions earlier JOIN workflow_decisions later ON later.session_id=earlier.session_id
+        WHERE earlier.occurrence_id=? AND later.category='pr_merge' AND later.status='consumed'
+          AND later.action_command_digest=? AND later.rowid>earlier.rowid LIMIT 1`).get(occurrenceId, commandDigest) !== undefined;
+      if (!eligible || (!unarmedExternal && decision?.actionAdmission?.commandDigest !== commandDigest) ||
+          claimedElsewhere || newerEnqueueRecorded ||
           !this.claimWorkflowDecisionActionReceipt(sessionId, receiptDigest, commandDigest, now)) {
         this.db.exec("COMMIT");
         return null;
