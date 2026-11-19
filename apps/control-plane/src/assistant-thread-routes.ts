@@ -32,6 +32,9 @@ export function registerAssistantThreadRoutes(app: FastifyInstance, deps: {
   app.get("/api/assistant-threads/:threadId", handle((owner, req) => ({ thread: deps.threads.get(owner, threadId(req)) })));
   app.patch("/api/assistant-threads/:threadId", handle((owner, req) => ({ thread: deps.threads.rename(owner, threadId(req), req.body) })));
   app.post("/api/assistant-threads/:threadId/archive", handle((owner, req) => ({ thread: deps.threads.archive(owner, threadId(req)) })));
+  app.get("/api/assistant-threads/:threadId/account", handle((owner, req) => deps.threads.accountChoices(owner, threadId(req))));
+  app.post("/api/assistant-threads/:threadId/account", handle(async (owner, req) =>
+    ({ thread: await deps.threads.changeAccount(owner, threadId(req), req.body) })));
 
   const confirmations = deps.confirmations;
   if (!confirmations) return;

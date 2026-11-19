@@ -13,11 +13,13 @@
 import type {
   AssistantThread,
   AssistantThreadAccess,
+  AssistantThreadAccountChoices,
   AssistantThreadDefaultsResponse,
   AssistantThreadHarness,
   AssistantThreadHarnessOption,
   AssistantThreadListResponse,
   AssistantThreadResponse,
+  ChangeAssistantThreadAccountRequest,
   CreateAssistantThreadRequest,
   UpdateAssistantThreadRequest,
 } from "@wollipog/protocol";
@@ -63,6 +65,10 @@ export function assistantThreadRoutes(req: JsonRequest) {
       }),
     archiveAssistantThread: (threadId: string) =>
       req<AssistantThreadResponse>(`${threadPath(threadId)}/archive`, { method: "POST", body: "{}" }),
+    assistantThreadAccountChoices: (threadId: string) =>
+      req<AssistantThreadAccountChoices>(`${threadPath(threadId)}/account`),
+    changeAssistantThreadAccount: (threadId: string, body: ChangeAssistantThreadAccountRequest) =>
+      req<AssistantThreadResponse>(`${threadPath(threadId)}/account`, { method: "POST", body: JSON.stringify(body) }),
   };
 }
 

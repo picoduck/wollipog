@@ -15,6 +15,7 @@ import { Notice } from "./Notice.js";
 import { Skeleton } from "./common.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { ChoiceRows } from "./ui/ChoiceControls.js";
+import { AssistantThreadAccountField, MACHINE_ACCOUNT_POLICY, canUseMachineAccountPolicy } from "./AssistantThreadAccountField.js";
 
 /** What New Thread says on a control plane that predates assistant threads. */
 export const THREADS_UNAVAILABLE_MESSAGE =
@@ -56,6 +57,7 @@ export function NewAssistantThreadDialog({ blocked, onClose, onCreated }: {
   const [initialBlock] = useState(blocked);
   const [state, setState] = useState<DefaultsState>(initialBlock ? { kind: "blocked", block: initialBlock } : { kind: "loading" });
   const [harness, setHarness] = useState<AssistantThreadHarness | null>(null);
+  const [chosenAccount, setChosenAccount] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -78,13 +80,20 @@ export function NewAssistantThreadDialog({ blocked, onClose, onCreated }: {
     return () => { current = false; };
   }, [api, initialBlock, attempt]);
 
+  const accounts = state.kind === "ready" ? state.defaults.harnesses.find((option) => option.id === harness)?.accountSelection : undefined;
+  const account = chosenAccount ?? (accounts && canUseMachineAccountPolicy(accounts) ? MACHINE_ACCOUNT_POLICY : null);
+  const needsAccount = !!accounts && !accounts.unavailable && account === null;
   const create = async () => {
-    if (!harness || busy) return;
+    if (!harness || busy || needsAccount) return;
     setBusy(true);
     setFailure(null);
     try {
       const trimmed = title.trim();
-      const { thread } = await api.createAssistantThread({ harness, ...(trimmed ? { title: trimmed } : {}) });
+      const { thread } = await api.createAssistantThread({
+        harness, ...(trimmed ? { title: trimmed } : {}),
+        ...(accounts && !accounts.unavailable ? { runnerId: accounts.runnerId, workspaceId: accounts.workspaceId } : {}),
+        ...(account && account !== MACHINE_ACCOUNT_POLICY ? { providerAccountRef: account } : {}),
+      });
       onCreated(thread);
     } catch (cause) {
       const block = blockFor(cause);
@@ -108,7 +117,7 @@ export function NewAssistantThreadDialog({ blocked, onClose, onCreated }: {
       footer={ready ? (
         <>
           <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
-          <BusyButton className="btn primary" busy={busy} progress="Starting the thread…" disabled={!harness}
+          <BusyButton className="btn primary" busy={busy} progress="Starting the thread…" disabled={!harness || needsAccount}
             onClick={() => void create()}>
             Start Thread
           </BusyButton>
@@ -133,7 +142,7 @@ export function NewAssistantThreadDialog({ blocked, onClose, onCreated }: {
           <ChoiceRows<AssistantThreadHarness>
             label="Harness"
             value={harness}
-            onChange={setHarness}
+            onChange={(next) => { setChosenAccount(null); setHarness(next); }}
             options={state.defaults.harnesses.map((option) => ({
               value: option.id,
               title: option.label || ASSISTANT_THREAD_HARNESS_LABELS[option.id],
@@ -142,6 +151,9 @@ export function NewAssistantThreadDialog({ blocked, onClose, onCreated }: {
               disabledReason: option.available ? undefined : option.reason ?? "Not available on your machines.",
             }))}
           />
+          {accounts && (
+            <AssistantThreadAccountField key={harness} choices={accounts} value={account} onChange={setChosenAccount} disabled={busy} creating />
+          )}
           <label className="field">
             <span>Title (Optional)</span>
             <input value={title} maxLength={ASSISTANT_THREAD_TITLE_MAX} placeholder="New Thread" onChange={(event) => setTitle(event.target.value)} />

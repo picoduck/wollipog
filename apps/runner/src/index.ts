@@ -3666,7 +3666,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "switch_session_provider_account":
       runCommandTask(
         "switch_session_provider_account",
-        sessions.switchProviderAccount(msg.sessionId, msg.providerAccountId).then((result) =>
+        (msg.assistantThread
+          ? sessions.changeAssistantThreadAccount(msg.sessionId, msg.providerAccountId, msg.assistantThread)
+          : sessions.switchProviderAccount(msg.sessionId, msg.providerAccountId)).then((result) =>
           sendUp({
             type: "switch_session_provider_account_result",
             requestId: msg.requestId,

@@ -148,6 +148,63 @@ test("an idle Codex session switches credential homes, resumes the same thread, 
   }
 });
 
+test("changing an Assistant thread's account refuses a racing turn and keeps its visible history", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-assistant-account-switch-"));
+  const launches: Array<{ home?: string; resumeId?: string }> = [];
+  let finishTurn!: () => void;
+  let turnStarted!: () => void;
+  const started = new Promise<void>((resolve) => { turnStarted = resolve; });
+  const finished = new Promise<void>((resolve) => { finishTurn = resolve; });
+  const { manager, store } = makeManager(root, (_driver: unknown, launch: {
+    env: Record<string, string>; resumeId?: string;
+  }) => {
+    launches.push({ home: launch.env.CLAUDE_CONFIG_DIR, resumeId: launch.resumeId });
+    const id = launch.resumeId ?? `claude-conversation-${launches.length}`;
+    return {
+      pid: launches.length, initialize: async () => {}, newSession: async () => {},
+      async prompt() { turnStarted(); await finished; return "end_turn" as const; },
+      cancel: () => {}, dispose: () => {}, setConfig: async () => {}, resolvePermission: () => false,
+      agentSessionId: () => id,
+    };
+  }, []);
+  (manager as unknown as { providerAccounts: () => ProviderAccountDefinition[] }).providerAccounts = () =>
+    [accounts.claudeWork, accounts.claudePersonal].map((account) => ({
+      id: account.id, label: account.label, provider: account.provider, authStatus: "authenticated", billing: "subscription",
+    }));
+  try {
+    const spec = launchSpec(root, "claude-code", "claude-work");
+    assert.equal(await manager.start(spec), true);
+    store.patchMeta(spec.sessionId, { assistant: { threadId: "thr_fixture" } });
+    assert.equal(manager.prompt(spec.sessionId, "Keep this in the thread"), true);
+    await started;
+    const change = { threadId: "thr_fixture", expectedProviderAccountId: "claude-work", freshConversation: false };
+    const refused = await manager.changeAssistantThreadAccount(spec.sessionId, "claude-personal", change);
+    assert.equal(refused.ok, false);
+    assert.match(refused.error ?? "", /pending work to finish/);
+    assert.equal(launches.length, 1);
+    finishTurn();
+    await waitFor(() => store.readMeta(spec.sessionId)?.status === "idle", "the turn did not finish");
+    const before = store.readEvents(spec.sessionId);
+    assert.ok(before.some((event) => event.payload.kind === "user_message"));
+
+    const changed = await manager.changeAssistantThreadAccount(spec.sessionId, "claude-personal", change);
+    assert.equal(changed.ok, true, changed.error ?? "");
+    assert.deepEqual(launches[1], { home: "/claude/personal", resumeId: "claude-conversation-1" });
+    assert.equal(store.readMeta(spec.sessionId)?.assistant?.threadId, "thr_fixture");
+
+    const fresh = await manager.changeAssistantThreadAccount(spec.sessionId, "claude-work", {
+      ...change, expectedProviderAccountId: "claude-personal", freshConversation: true,
+    });
+    assert.equal(fresh.ok, true, fresh.error ?? "");
+    assert.deepEqual(launches[2], { home: "/claude/work", resumeId: undefined });
+    assert.deepEqual(store.readEvents(spec.sessionId).slice(0, before.length), before);
+  } finally {
+    finishTurn();
+    manager.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a running Claude turn finishes before the account switch and queued work uses the new account", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-claude-"));
   const messages: RunnerToControlPlane[] = [];

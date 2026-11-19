@@ -8,11 +8,12 @@ import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import { failedCampaignRun } from "./campaign-failed-run.js";
 import { providerAccountRef } from "./agent-account-view.js";
 import {
-  isProviderAccountRef, PROVIDER_ACCOUNT_CHOICE_REQUIRED, providerAccountChoiceRequired, providerAccountChoiceRequiredSentence,
+  isProviderAccountRef, PROVIDER_ACCOUNT_CHOICE_REQUIRED, PROVIDER_ACCOUNT_SKIP_TEXT, providerAccountChoiceRequired, providerAccountChoiceRequiredSentence,
   providerAccountExplicitRecord, providerAccountIneligibility, providerAccountNamedRefusal, providerAccountNamedRefusalSentence,
   providerAccountSelectionRecord, providerForDriver, resolveProviderAccountSelection,
   supportsClaudeProjectMemory, type AgentDefinition, type ProviderAccountChoice, type ProviderAccountChoiceRequired, type ProviderAccountDefinition, type ProviderAccountSelectionPreview,
-  type ProviderAccountSelectionRecord, type ProviderAccountSelectionResult, type RunnerProviderAccountDefault, type RunnerView,
+  type AssistantThreadAccountChoices, type ChangeAssistantThreadAccountRequest, type ProviderAccountSelectionRecord,
+  type ProviderAccountSelectionResult, type RunnerProviderAccountDefault, type RunnerView,
 } from "@wollipog/protocol";
 import { runnerSupportsReviewQuestionPreservation } from "./review-session-capability.js";
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
@@ -4514,6 +4515,7 @@ export class SessionsService {
       launch,
       hostTarget: usesRunnerProviderAccount,
       ...(req.providerAccountId ? { requestedId: req.providerAccountId } : {}),
+      ...(assistantThread && req.providerAccountId ? { assistantChoice: true } : {}),
       ...(creationContext?.parentSessionId ? { namedByAgent: true } : {}),
       ...(req.config?.model ? { model: req.config.model } : {}),
       ...(snapshotSpec
@@ -20844,13 +20846,15 @@ export class SessionsService {
     requestedId?: string;
     /** The account was named by an agent, which can't recover a sign-in or accept a billing choice. */
     namedByAgent?: boolean;
+    /** An Assistant thread can explicitly choose only a ready subscription account. */
+    assistantChoice?: boolean;
     /** The model this launch names, if any: a policy's choice can't vouch for it. */
     model?: string;
     pinned?: { accountId?: string; selection?: ProviderAccountSelectionRecord };
   }): ServiceResult<{ providerAccount?: ProviderAccountDefinition; selection?: ProviderAccountSelectionRecord }> {
     if (!input.hostTarget) {
       // A person's request keeps its long-standing shape; an agent must learn its choice can't apply.
-      return input.namedByAgent && input.requestedId && !input.pinned
+      return (input.namedByAgent || input.assistantChoice) && input.requestedId && !input.pinned
         ? fail("This session's execution target doesn't use this machine's provider accounts, so it can't run with the chosen account.", 409)
         : ok({});
     }
@@ -20912,6 +20916,11 @@ export class SessionsService {
       const profileRefusal = providerProfileSessionRefusal(this.db, runner, providerAccount);
       if (profileRefusal && "capability" in profileRefusal) return capabilityFail(profileRefusal.capability);
       if (profileRefusal) return fail(profileRefusal.error, 409);
+      if (input.assistantChoice && requestedId && !pinned) {
+        const refusal = this.assistantThreadAccountIneligibility(runner, agent, providerAccount);
+        if (refusal) return fail(`The chosen account ${PROVIDER_ACCOUNT_SKIP_TEXT[refusal.reason]}. Choose another account for this thread.`, 409);
+        selection = { ...providerAccountExplicitRecord(policy), revalidateAtLaunch: true };
+      }
       if (input.namedByAgent && requestedId && !pinned) {
         const usage = this.db.providerAccountUsageSnapshots(runner.runnerId).find((snapshot) => snapshot.providerAccountId === providerAccount.id);
         const refused = providerAccountNamedRefusal(providerAccount, { ...(agent ? { agent } : {}), ...(usage ? { usage } : {}), now: Date.now() });
@@ -20924,6 +20933,76 @@ export class SessionsService {
       return fail("The default provider account is not ready. Choose a ready account or review its sign-in and ownership details.", 409);
     }
     return ok({ ...(providerAccount ? { providerAccount } : {}), ...(selection ? { selection } : {}) });
+  }
+
+  private assistantThreadAccountIneligibility(
+    runner: RunnerView, agent: AgentDefinition | undefined, account: ProviderAccountDefinition,
+    usage = this.db.providerAccountUsageSnapshots(runner.runnerId),
+  ) {
+    return providerAccountIneligibility(account, {
+      agent,
+      usage: usage.find((entry) => entry.providerAccountId === account.id),
+      accessRefused: providerProfileSessionRefusal(this.db, runner, account) !== null,
+      now: Date.now(),
+    });
+  }
+
+  /** An owner-only view of the shared Machine policy and eligibility for this thread's native agent. */
+  assistantThreadAccountChoices(runner: RunnerView, agent: AgentDefinition, session?: SessionView): AssistantThreadAccountChoices {
+    const provider = providerForDriver(agent.driver ?? "acp");
+    if (!provider) return { accounts: [], unavailable: "This harness doesn't use Machine provider accounts." };
+    const result = this.providerAccountPolicyResult(runner, provider, agent, true, this.applicableProviderAccountPolicy(runner, provider));
+    const usage = this.db.providerAccountUsageSnapshots(runner.runnerId);
+    const accounts = (runner.providerAccounts ?? []).filter((account) => account.provider === provider).map((account) => {
+      const refusal = this.assistantThreadAccountIneligibility(runner, agent, account, usage);
+      return { accountRef: providerAccountRef(runner.runnerId, account.id), label: account.label,
+        ...(refusal ? { reason: refusal.reason } : {}) };
+    });
+    const policyAccountRef = result.status === "selected" && result.accountId
+      ? providerAccountRef(runner.runnerId, result.accountId)
+      : undefined;
+    return {
+      accounts,
+      ...(policyAccountRef ? { policyAccountRef } : {}),
+      ...(result.status === "choice_required" && result.refusal
+        ? { policyRefusal: providerAccountChoiceRequiredSentence(provider, result.refusal, result.candidates) } : {}),
+      ...(session?.providerAccountId ? { currentAccountRef: providerAccountRef(runner.runnerId, session.providerAccountId) } : {}),
+      ...(session?.providerAccountSwitchFailure ? { retryCurrentAccount: true } : {}),
+    };
+  }
+
+  async changeAssistantThreadAccount(
+    runner: RunnerView, agent: AgentDefinition, session: SessionView, threadId: string, input: ChangeAssistantThreadAccountRequest,
+  ): Promise<ServiceResult<void>> {
+    const unsupported = this.capabilityFailure(runner.runnerId, "assistantThreadProviderAccount", "changing an Assistant thread's account");
+    if (unsupported) return unsupported;
+    if (!this.hub.isRunnerOnline(runner.runnerId)) return fail("This Machine is offline. Connect it before changing the account.", 409);
+    if (session.status === "queued" || session.status === "starting" || session.status === "running") {
+      return fail("The thread is working. Wait for the current turn to finish before changing accounts.", 409);
+    }
+    if (session.status === "stopped" || this.db.hasSessionStopIntent(session.id)) {
+      return fail("Restart the stopped thread before changing accounts.", 409);
+    }
+    const current = session.providerAccountId ? providerAccountRef(runner.runnerId, session.providerAccountId) : null;
+    if (input.expectedProviderAccountRef !== current) return fail("The thread's account changed. Reopen Change Account to see the current account.", 409);
+    const provider = providerForDriver(session.driver);
+    const account = (runner.providerAccounts ?? []).find((candidate) => candidate.provider === provider &&
+      providerAccountRef(runner.runnerId, candidate.id) === input.providerAccountRef);
+    if (!account) return fail("The chosen account is no longer available for this thread.", 409);
+    const refusal = this.assistantThreadAccountIneligibility(runner, agent, account);
+    if (refusal) return fail(`The chosen account ${PROVIDER_ACCOUNT_SKIP_TEXT[refusal.reason]}. Choose another account for this thread.`, 409);
+    const requestId = randomUUID();
+    try {
+      const result = await this.hub.requestFromRunner(runner.runnerId, requestId, {
+        type: "switch_session_provider_account", requestId, sessionId: session.id, providerAccountId: account.id,
+        assistantThread: { threadId, expectedProviderAccountId: session.providerAccountId ?? null, freshConversation: input.freshConversation === true },
+      }, 30_000);
+      if (result.type !== "switch_session_provider_account_result") return fail("The Machine sent an unexpected reply.", 502);
+      if (!result.ok) return fail(result.error ?? "The thread's account could not be changed.", 409);
+      return ok(undefined);
+    } catch {
+      return fail("The Machine did not confirm the account change. Check the thread before trying again.", 504);
+    }
   }
 
   /** A Claude project session on a version without Wollipog's project memory keeps that memory in the

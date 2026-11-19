@@ -12,7 +12,7 @@ import { Shell } from "../App.js";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { AssistantThread, AssistantThreadDefaults, CreateAssistantThreadRequest } from "../assistant-threads.js";
-import type { AssistantOwnerConfirmation } from "@wollipog/protocol";
+import type { AssistantOwnerConfirmation, AssistantThreadAccountChoices, ChangeAssistantThreadAccountRequest } from "@wollipog/protocol";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { ThemeProvider } from "../components/ThemeProvider.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
@@ -38,6 +38,26 @@ const params = new URLSearchParams(location.search);
 const scenario = params.get("threads") ?? "some";
 const NOW = Date.now();
 const minute = 60_000;
+const accountStress = params.get("accounts") === "stress";
+const fixtureAccountRef = (index: number) => `acct:${index.toString(16).padStart(16, "0")}`;
+const fixtureAccounts: AssistantThreadAccountChoices["accounts"] = [
+  { accountRef: fixtureAccountRef(1), label: "Studio Subscription" },
+  { accountRef: fixtureAccountRef(2), label: "DesignResearchAndEngineeringSubscriptionForLongRunningProjectsAcrossTheEntireNorthAmericanWorkspace" },
+  { accountRef: fixtureAccountRef(3), label: "Field Subscription", reason: "signed_out" },
+  { accountRef: fixtureAccountRef(4), label: "Remote Subscription", reason: "context_incompatible" },
+  { accountRef: fixtureAccountRef(5), label: "Metered Account", reason: "api_billing" },
+  { accountRef: fixtureAccountRef(6), label: "Review Subscription", reason: "usage_exhausted" },
+  { accountRef: fixtureAccountRef(7), label: "QA Subscription" },
+  { accountRef: fixtureAccountRef(8), label: "Weekend Subscription" },
+  { accountRef: fixtureAccountRef(9), label: "Release Subscription" },
+];
+const accountSelections = new Map([["thr_triage", fixtureAccountRef(2)]]);
+
+function fixtureAccountChoices(harness: string, currentAccountRef?: string): AssistantThreadAccountChoices {
+  return harness === "codex"
+    ? { accounts: [{ accountRef: fixtureAccountRef(10), label: "Codex Studio" }], policyAccountRef: fixtureAccountRef(10), currentAccountRef }
+    : { accounts: fixtureAccounts, policyAccountRef: fixtureAccountRef(1), currentAccountRef };
+}
 
 const runner: RunnerView = {
   runnerId: "runner-1",
@@ -149,6 +169,7 @@ const LONG_TITLES = [
 const longTitle = (index: number) => `${LONG_TITLES[(index - 1) % LONG_TITLES.length]!.slice(0, 116)} ${index}`;
 const triage = (overrides: Partial<AssistantThread> = {}) =>
   thread("thr_triage", "sess-triage", { status: "needs_you", launchedSessionIds: ["sess-flaky", "sess-deps"], lastActivityAt: NOW - minute,
+    ...(accountStress ? { accountChangeSupported: true, providerAccountLabel: fixtureAccounts[1]!.label } : {}),
     ...(confirmationCount > 0 ? { confirmations: Array.from({ length: confirmationCount }, (_unused, index) => confirmation(index)) } : {}),
     ...overrides });
 
@@ -173,6 +194,11 @@ const defaults: AssistantThreadDefaults = {
     { id: "codex", label: "Codex", available: true },
   ],
 };
+if (accountStress) {
+  for (const harness of defaults.harnesses) {
+    harness.accountSelection = { ...fixtureAccountChoices(harness.id), runnerId: "runner-1", workspaceId: "workspace-1" };
+  }
+}
 
 let seq = 0;
 const event = (sessionId: string, ts: number, payload: SessionEvent["payload"]): SessionEvent =>
@@ -314,15 +340,39 @@ const client = {
     if (refusal) return refusal;
     const id = `thr_new_${threads.length + 1}`;
     const sessionId = `sess-new-${threads.length + 1}`;
+    const harness = body.harness ?? defaults.harness;
+    const choices = fixtureAccountChoices(harness);
+    const accountRef = body.providerAccountRef ?? choices.policyAccountRef;
+    const account = choices.accounts.find((candidate) => candidate.accountRef === accountRef);
+    if (accountStress && account) {
+      accountSelections.set(id, account.accountRef);
+      document.body.dataset.createdAccount = body.providerAccountRef ?? "policy";
+    }
     upsert(session(sessionId, body.title ?? "New Thread", { createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0,
       ...(body.harness === "codex" ? { agentId: "codex", agentName: "Codex", driver: "codex-app-server" } : {}) }));
     const created: AssistantThread = {
       id, assistant: "wollipog", title: body.title ?? "", harness: body.harness ?? defaults.harness, sessionId, status: "done",
       access, connectionId: null, launchedSessionIds: [], lastActivityAt: Date.now(), createdAt: Date.now(), archivedAt: null,
+      ...(accountStress ? { accountChangeSupported: true, providerAccountLabel: account?.label } : {}),
     };
     threads = [created, ...threads];
     publish(created);
     return { thread: structuredClone(created) };
+  },
+  assistantThreadAccountChoices: async (threadId: string) => fixtureAccountChoices(found(threadId).harness, accountSelections.get(threadId)),
+  changeAssistantThreadAccount: async (threadId: string, input: ChangeAssistantThreadAccountRequest) => {
+    const current = found(threadId);
+    const choices = fixtureAccountChoices(current.harness, accountSelections.get(threadId));
+    const account = choices.accounts.find((option) => option.accountRef === input.providerAccountRef && !option.reason);
+    if (!account || input.expectedProviderAccountRef !== (choices.currentAccountRef ?? null)) {
+      throw new ApiError("The account choice changed. Open the picker again.", 409);
+    }
+    const changed = { ...current, providerAccountLabel: account.label };
+    accountSelections.set(threadId, account.accountRef);
+    document.body.dataset.changedAccount = account.accountRef;
+    threads = threads.map((candidate) => candidate.id === threadId ? changed : candidate);
+    publish(changed);
+    return { thread: structuredClone(changed) };
   },
   renameAssistantThread: async (threadId: string, title: string) => {
     const renamed = { ...found(threadId), title };
