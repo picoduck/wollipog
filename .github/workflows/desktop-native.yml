@@ -94,5 +94,16 @@ jobs:
       - name: Test Native Desktop
         run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }}
 
+      # Temporary bounded Windows evidence for #4717; remove before merge.
+      - name: Repeat Upload Timing Regression (Windows)
+        if: startsWith(matrix.os, 'windows')
+        shell: pwsh
+        run: |
+          for ($iteration = 1; $iteration -le 20; $iteration++) {
+            Write-Host "Focused upload timing iteration $iteration/20"
+            cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }} a_large_body_uploads_at_the_floor_past_the_budgets_a_small_body_keeps -- --nocapture
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
       - name: Lint Native Desktop
         run: cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --target ${{ matrix.target }} -- -D warnings

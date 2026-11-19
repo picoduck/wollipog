@@ -1740,6 +1740,62 @@ mod tests {
         },
     }
 
+    /// Keep real socket I/O from consuming simulated upload time. A small ticker only bounds
+    /// each auto-advance: thousands of advances can still elapse while Windows completes a write.
+    /// Tokio inhibits auto-advance while a spawn_blocking task is outstanding. Releasing the
+    /// channel on completion (or cancellation) lets simulated server delays advance normally.
+    async fn real_io<T>(io: impl std::future::Future<Output = T>) -> T {
+        let (done, waiting) = std::sync::mpsc::channel::<()>();
+        let guard = tokio::task::spawn_blocking(move || {
+            assert!(
+                matches!(
+                    waiting.recv_timeout(Duration::from_secs(10)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+                ),
+                "loopback I/O did not finish within 10 real seconds"
+            );
+        });
+        let result = io.await;
+        drop(done);
+        guard.await.unwrap();
+        result
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn loopback_io_waits_do_not_consume_the_simulated_upload_budget() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let sender = std::thread::spawn(move || {
+            use std::io::Write;
+            let mut stream = std::net::TcpStream::connect(address).unwrap();
+            // Force a real I/O wait, independent of OS loopback completion speed.
+            std::thread::sleep(Duration::from_millis(100));
+            stream.write_all(b"x").unwrap();
+        });
+        let ticker = tokio::spawn(async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let started = tokio::time::Instant::now();
+        real_io(async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut byte = [0];
+            stream.read_exact(&mut byte).await.unwrap();
+            assert_eq!(&byte, b"x");
+        })
+        .await;
+        sender.join().unwrap();
+        ticker.abort();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // The guard must also release the clock for deliberate server delays.
+        tokio::time::sleep(Duration::from_secs(128)).await;
+        assert!(started.elapsed() >= Duration::from_secs(128));
+        assert!(started.elapsed() < Duration::from_secs(129));
+    }
+
     /// Serves one reply per connection, in the order the connections arrive, each on its own task
     /// so a reply still sleeping never holds up the next connection.
     async fn serve_slowly(replies: Vec<SlowReply>) -> String {
@@ -1754,7 +1810,7 @@ mod tests {
                     let mut request = Vec::new();
                     let mut chunk = [0_u8; 1024];
                     loop {
-                        let count = stream.read(&mut chunk).await.unwrap_or(0);
+                        let count = real_io(stream.read(&mut chunk)).await.unwrap_or(0);
                         request.extend_from_slice(&chunk[..count]);
                         if count == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
                             break;
@@ -1780,12 +1836,15 @@ mod tests {
                         while received < length {
                             tokio::time::sleep(Duration::from_secs(1)).await;
                             let mut second = per_second.min(length - received);
-                            while second > 0 {
-                                let count = stream.read(&mut buffer[..second]).await.unwrap();
-                                assert!(count > 0, "the request body ended early");
-                                second -= count;
-                                received += count;
-                            }
+                            real_io(async {
+                                while second > 0 {
+                                    let count = stream.read(&mut buffer[..second]).await.unwrap();
+                                    assert!(count > 0, "the request body ended early");
+                                    second -= count;
+                                    received += count;
+                                }
+                            })
+                            .await;
                         }
                         reply = *then;
                     }
@@ -1795,18 +1854,19 @@ mod tests {
                         }
                         SlowReply::After(delay) => {
                             tokio::time::sleep(delay).await;
-                            let _ = stream
-                                .write_all(http_response("200 OK", "{}", "").as_bytes())
-                                .await;
+                            let _ = real_io(
+                                stream.write_all(http_response("200 OK", "{}", "").as_bytes()),
+                            )
+                            .await;
                         }
                         SlowReply::Trickle { every, bytes } => {
                             let head = format!(
                                 "HTTP/1.1 200 OK\r\nContent-Length: {bytes}\r\nConnection: close\r\n\r\n"
                             );
-                            let _ = stream.write_all(head.as_bytes()).await;
+                            let _ = real_io(stream.write_all(head.as_bytes())).await;
                             for _ in 0..bytes {
                                 tokio::time::sleep(every).await;
-                                if stream.write_all(b"x").await.is_err() {
+                                if real_io(stream.write_all(b"x")).await.is_err() {
                                     break;
                                 }
                             }
@@ -1842,6 +1902,7 @@ mod tests {
 
     /// Asserts that a request failed at its `budget` on the paused clock. The test servers keep
     /// every connection open, so only a timeout can end a request then.
+    #[track_caller]
     fn assert_timed_out_at(
         (elapsed, result): (Duration, Result<Vec<u8>, String>),
         budget: Duration,
