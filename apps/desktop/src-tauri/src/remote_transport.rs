@@ -1951,7 +1951,6 @@ mod tests {
         budget: Duration,
     ) {
         let error = result.expect_err("the request should have timed out");
-        eprintln!("timeout: elapsed={elapsed:?}, budget={budget:?}, error={error}");
         assert!(
             elapsed >= budget && elapsed < budget + Duration::from_secs(1),
             "timed out after {elapsed:?}, not at its {budget:?} budget: {error}"
@@ -2118,6 +2117,13 @@ mod tests {
             let (timed, last_progress) =
                 timed_request_tracking_upload(&lease, &origin, method, path, image()).await;
             assert_eq!(timed.1, Err("Stalled".to_string()));
+            // Keep an independent ceiling even on the export route without a total, so a
+            // runaway progress timestamp cannot make this assertion's deadline unbounded.
+            assert!(
+                timed.0 < upload_time + DEFAULT_REMOTE_HTTP_TOTAL_TIMEOUT,
+                "a stopped reader outlasted the ordinary route's total: {:?}",
+                timed.0
+            );
             assert_timed_out_at(
                 timed,
                 upload_time.max(last_progress) + DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
