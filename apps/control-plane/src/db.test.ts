@@ -9053,7 +9053,9 @@ test("upgrading populated Pods, workflow runs and comparison runs preserves sess
         assert.equal(raw.prepare("PRAGMA foreign_keys").get()?.foreign_keys, 1);
         assert.deepEqual(raw.prepare("PRAGMA foreign_key_check").all(), []);
         const tables = raw.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name GLOB 'workflow_*' ORDER BY name").all();
-        assert.deepEqual(tables.map((table) => table.name), ["workflow_decision_action_receipts", "workflow_decisions"]);
+        assert.deepEqual(tables.map((table) => table.name), [
+          "workflow_decision_action_receipts", "workflow_decisions", "workflow_merge_settlement_checks",
+        ]);
         assert.equal(raw.prepare("PRAGMA table_info(automation_executions)").all().some((column) => column.name === "workflow_instance_id"), false);
         const retiredTables = raw.prepare(
           "SELECT name FROM sqlite_schema WHERE type='table' AND (name='pods' OR name GLOB 'pod_*' OR name GLOB 'multi_agent_run*')",
