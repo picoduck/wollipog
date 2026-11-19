@@ -615,7 +615,8 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       if ("error" in snapshot) return snapshot;
       return {
         tool: "reconcile_workflow_decision",
-        input: { occurrenceId, resourceSnapshot: snapshot.value },
+        input: { occurrenceId, resourceSnapshot: snapshot.value,
+          ...(optionPresent(args, "--external-merge") ? { externalMerge: true } : {}) },
       };
     }
     if (verb === "execute") {
@@ -1116,7 +1117,8 @@ export async function runWollipogCli(
     : parsed.tool === "attach_session_artifact"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach
     : parsed.tool === "reconcile_workflow_decision"
-    ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation
+    ? parsed.input.externalMerge === true ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionExternalMergeReconciliation
+      : RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation
     : parsed.tool === "retire_workflow_decision"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionRetirement
     : parsed.tool === "withdraw_workflow_decision"

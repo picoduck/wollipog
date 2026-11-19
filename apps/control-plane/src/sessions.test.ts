@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import fc from "fast-check";
 import type {
@@ -694,8 +696,9 @@ function makeHarness(
   titleGenerationTimeoutMs = 1_000,
   titleGenerationEnabled?: (sessionId: string) => boolean,
   titleGenerationRevision?: (sessionId: string) => string,
+  dbPath = ":memory:",
 ) {
-  const db = ControlPlaneDb.open(":memory:");
+  const db = ControlPlaneDb.open(dbPath);
   db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
   const hub = new FakeHub();
   hub.requestHandler = (message) => {
@@ -7035,8 +7038,8 @@ test("resolving any Orchestrator-owned typed decision resumes the idle child wit
 });
 
 test("Guardian-direct merge receipts consume once and fail closed across every correlation boundary", async (t) => {
-  const setup = (agentId = CODEX_APP_AGENT_ID) => {
-    const { db, hub, svc } = makeHarness();
+  const setup = (agentId = CODEX_APP_AGENT_ID, dbPath?: string) => {
+    const { db, hub, svc } = makeHarness(undefined, undefined, undefined, undefined, dbPath);
     const meta = runnerMeta();
     const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
     orchestrator.capabilities = {
@@ -7562,6 +7565,157 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     }
     return db.workflowDecisionByOccurrence(occurrenceId)?.status;
   };
+
+  await t.test("a same-head replacement without an admission leaves the original enqueue reconcilable", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      const original = await arm(4192);
+      const retry = svc.createWorkflowDecision(child.id, {
+        requestId: "retry-4192", resourceKey: original.decision.resourceKey, resourceSnapshot: original.snapshot,
+      });
+      assert.ok(retry.ok && retry.data, retry.error);
+      assert.equal(db.workflowDecisionByOccurrence(original.decision.occurrenceId)?.status, "superseded");
+      const reconcile = (occurrenceId: string) => svc.reconcileWorkflowDecision(child.id, occurrenceId,
+        { resourceSnapshot: original.snapshot });
+
+      let merged = false;
+      const proof = forgeProof(child, original, () => merged);
+      hub.requestHandler = proof;
+      assert.equal((await reconcile(original.decision.occurrenceId)).status, 409);
+      assert.equal((await reconcile(retry.data.occurrenceId)).status, 409);
+      assert.equal((await svc.consumeWorkflowDecision(child.id, original.decision.occurrenceId, {
+        resourceSnapshot: original.snapshot, action: { kind: "pr_merge_enqueue", command: original.command },
+      })).status, 409);
+
+      merged = true;
+      hub.requestHandler = (message) => ({ ...proof(message), forgeHeadSha: "f".repeat(40) });
+      assert.equal((await reconcile(original.decision.occurrenceId)).status, 409);
+      hub.requestHandler = proof;
+      const landed = await reconcile(original.decision.occurrenceId);
+      assert.equal(landed.data?.status, "consumed", landed.error);
+      const superseded = db.workflowDecisionByOccurrence(retry.data.occurrenceId);
+      assert.equal(superseded?.status, "superseded");
+      assert.equal(superseded?.supersededBy, original.decision.occurrenceId);
+      assert.equal((await reconcile(original.decision.occurrenceId)).status, 409);
+      assert.equal(svc.governanceAudit(child.id).filter((entry) =>
+        entry.requestId === original.decision.occurrenceId && entry.outcome === "consumed").length, 1);
+    } finally { db.close(); }
+  });
+
+  await t.test("a later armed same-key retry still has precedence over the superseded admission", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      const original = await arm(4193);
+      const retry = await arm(4193);
+      const seen: ReconcileWorkflowActionMessage[] = [];
+      hub.requestHandler = forgeProof(child, retry, () => true, seen);
+      const old = await svc.reconcileWorkflowDecision(child.id, original.decision.occurrenceId,
+        { resourceSnapshot: original.snapshot });
+      assert.equal(old.errorDetails?.code, "workflow_decision_superseded");
+      assert.equal(seen.length, 0);
+      const latest = await svc.reconcileWorkflowDecision(child.id, retry.decision.occurrenceId,
+        { resourceSnapshot: retry.snapshot });
+      assert.equal(latest.data?.status, "consumed", latest.error);
+    } finally { db.close(); }
+  });
+
+  const mergeObservation = (state: "open" | "merged" | "closed", headSha: string, mergedAt?: number) => ({
+    state, headSha, draft: false, baseRef: "main", reviewDecision: "approved" as const,
+    checks: { state: "passing" as const, passing: 1, failing: 0, pending: 0 },
+    requiredChecks: { state: "passing" as const, passing: 1, failing: 0, pending: 0 },
+    mergeQueue: state === "open" ? { state: "awaiting_checks" as const, position: 1 } : null,
+    mergeCommitSha: state === "merged" ? "c".repeat(40) : null, mergedAt,
+  });
+
+  await t.test("a human-run enqueue settles a Codex approval without a provider receipt or forge write", async () => {
+    const { db, hub, svc, parent, child, arm } = setup();
+    try {
+      const original = await arm(3492);
+      const occurrenceId = original.decision.occurrenceId;
+      const approved = db.workflowDecisionByOccurrence(occurrenceId)!;
+      const { headSha, repository, pullRequest } = original.snapshot;
+      const ref = { repository, number: pullRequest };
+      const reconcile = () => svc.reconcileWorkflowDecision(child.id, occurrenceId,
+        { resourceSnapshot: original.snapshot, externalMerge: true });
+      hub.requestHandler = (message) => {
+        assert.equal(message.type, "reconcile_workflow_action");
+        return { type: "workflow_action_reconciliation_result", requestId: message.requestId,
+          sessionId: child.id, occurrenceId, accepted: false, error: "no successful provider command" };
+      };
+      assert.equal((await svc.reconcileWorkflowDecision(child.id, occurrenceId, {
+        resourceSnapshot: original.snapshot,
+      })).status, 409, "normal reconciliation still requires a provider receipt");
+      hub.requestHandler = (message) => { throw new Error(`unexpected runner action ${message.type}`); };
+      let observation = mergeObservation("open", headSha);
+      svc.campaignForgeReadNow = async (_campaign, refs) => {
+        assert.deepEqual(refs, [ref]);
+        return [{ ref, observation }];
+      };
+
+      assert.equal((await reconcile()).status, 409, "an open pull request is not an external merge");
+      observation = mergeObservation("merged", "f".repeat(40), approved.resolvedAt);
+      assert.equal((await reconcile()).status, 409, "a different merged head is not the approved one");
+      observation = mergeObservation("merged", headSha, approved.resolvedAt! - 1);
+      assert.equal((await reconcile()).status, 409, "the approval cannot be credited for a prior merge");
+      observation = mergeObservation("merged", headSha, approved.resolvedAt! + 1_000);
+      const recorded = await reconcile();
+      assert.equal(recorded.data?.status, "consumed", recorded.error);
+      assert.deepEqual(recorded.data?.actionAdmission, approved.actionAdmission, "settlement does not re-arm");
+      assert.equal((await reconcile()).status, 409, "a later request cannot reuse the settlement");
+      assert.ok(svc.governanceAudit(child.id).some((entry) => entry.requestId === occurrenceId &&
+        entry.outcome === "consumed" && entry.actor.id === "workflow-decision-external-merge-reconciliation"));
+      svc.onSessionStatus(child.id, "idle");
+      const report = db.appendEvent(child.id, { kind: "agent_message", text: "Delivered.", final: true }, Date.now());
+      const verified = svc.verifyCampaignChild(parent.id, { childSessionId: child.id,
+        reportEventSeq: report.seq, followUpsAccounted: true });
+      assert.ok(verified.ok, verified.error);
+    } finally { db.close(); }
+  });
+
+  await t.test("lifecycle merge observation survives a service restart and never restores the grant", async () => {
+    for (const outcome of ["merged", "closed", "moved", "expired"] as const) {
+      const directory = mkdtempSync(join(tmpdir(), "wollipog-merge-settlement-"));
+      const path = join(directory, "control-plane.sqlite");
+      const { db, hub, svc, child, arm } = setup(AGENT_ID, path);
+      let openDb = db;
+      try {
+        const original = await arm(1449);
+        const occurrenceId = original.decision.occurrenceId;
+        const { repository, pullRequest, headSha } = original.snapshot;
+        const seen: ReconcileWorkflowActionMessage[] = [];
+        hub.requestHandler = forgeProof(child, original, () => false, seen);
+        assert.ok(svc.stop(child.id).ok);
+        assert.equal(db.workflowDecisionByOccurrence(occurrenceId)?.status, "revoked");
+        assert.equal(seen.length, 1, "the read at stop saw an open pull request");
+        await new Promise((resolve) => setImmediate(resolve));
+
+        db.close();
+        openDb = ControlPlaneDb.open(path);
+        const restarted = new SessionsService(openDb, hub as unknown as Hub, NOOP_LOG);
+        const now = Date.now();
+        const state = outcome === "closed" ? "closed" : "merged";
+        const observation = mergeObservation(state, outcome === "moved" ? "f".repeat(40) : headSha, now);
+        let reads = 0;
+        restarted.campaignForgeReadNow = async (_campaign, refs) => {
+          const ref = { repository, number: pullRequest };
+          assert.deepEqual(refs, [ref]);
+          reads += 1;
+          return [{ ref, observation }];
+        };
+        const due = outcome === "expired" ? now + 48 * 60 * 60_000 : now + 5 * 60_000;
+        await restarted.retryLifecycleMergeSettlements(due);
+        await restarted.retryLifecycleMergeSettlements(due + 5 * 60_000);
+        assert.equal(reads, outcome === "expired" ? 0 : 1);
+        assert.equal(openDb.workflowDecisionByOccurrence(occurrenceId)?.status, outcome === "merged" ? "consumed" : "revoked");
+        assert.equal((await restarted.consumeWorkflowDecision(child.id, occurrenceId, {
+          resourceSnapshot: original.snapshot, action: { kind: "pr_merge_enqueue", command: original.command },
+        })).status, 409);
+      } finally {
+        openDb.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  });
 
   await t.test("a Claude Code child's receipt-less merge is consumed by forge reconciliation (#1351)", async () => {
     const { db, hub, svc, child, createChild, arm } = setup(AGENT_ID);

@@ -357,7 +357,7 @@ export interface CampaignForgePullRequestObservation {
   /** The pull request's merge-queue entry, or null when it is not queued. */
   mergeQueue: { state: CampaignForgeMergeQueueState; position: number | null } | null;
   mergeCommitSha: string | null;
-  /** When the forge says it merged, in epoch milliseconds. Only for Waiting Time: no gate reads it.
+  /** When the forge says it merged, in epoch milliseconds. Also bounds external merge settlement.
    * Absent while unmerged, from older runners, and from a fact stored before they reported it. */
   mergedAt?: number;
   /** v275: the repository's default branch. Absent from older runners, which cannot prove that a

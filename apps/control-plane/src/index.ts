@@ -91,6 +91,7 @@ import {
   type DescendantRequestResolution,
   type CreateWorkflowDecisionRequest,
   type ConsumeWorkflowDecisionRequest,
+  type ReconcileWorkflowDecisionRequest,
   type WithdrawWorkflowDecisionRequest,
   type ExecuteWorkflowDecisionRequest,
   type CreateOwnerDecisionRequest,
@@ -4239,7 +4240,7 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/reconcile", async (
   return respond(reply, await svc.reconcileWorkflowDecision(
     id,
     occurrenceId,
-    req.body as Pick<ConsumeWorkflowDecisionRequest, "resourceSnapshot">,
+    req.body as ReconcileWorkflowDecisionRequest,
     (sessionId) => db.canAccessSession(principal, sessionId),
   ));
 });

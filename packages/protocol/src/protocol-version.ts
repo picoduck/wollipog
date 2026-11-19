@@ -1518,6 +1518,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   388,
   // v389 slot
   // v390 slot
+  // 390: Reconcile an externally completed PR merge using read-only forge evidence.
+  390,
   // v391 slot
   // v392 slot
   // v393 slot
