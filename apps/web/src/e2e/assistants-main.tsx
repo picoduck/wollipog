@@ -38,7 +38,7 @@ const params = new URLSearchParams(location.search);
 const scenario = params.get("threads") ?? "some";
 const NOW = Date.now();
 const minute = 60_000;
-const accountStress = params.get("accounts") === "stress";
+const accountScenario = params.get("accounts");
 const fixtureAccountRef = (index: number) => `acct:${index.toString(16).padStart(16, "0")}`;
 const fixtureAccounts: AssistantThreadAccountChoices["accounts"] = [
   { accountRef: fixtureAccountRef(1), label: "Studio Subscription" },
@@ -51,12 +51,16 @@ const fixtureAccounts: AssistantThreadAccountChoices["accounts"] = [
   { accountRef: fixtureAccountRef(8), label: "Weekend Subscription" },
   { accountRef: fixtureAccountRef(9), label: "Release Subscription" },
 ];
-const accountSelections = new Map([["thr_triage", fixtureAccountRef(2)]]);
+const triageAccount = fixtureAccounts[accountScenario === "stress" ? 1 : 6]!;
+const accountSelections = new Map([["thr_triage", triageAccount.accountRef]]);
 
 function fixtureAccountChoices(harness: string, currentAccountRef?: string): AssistantThreadAccountChoices {
+  const accounts = accountScenario === "stress" ? fixtureAccounts
+    : accountScenario === "choices" ? [fixtureAccounts[0]!, ...fixtureAccounts.slice(2, 6)]
+    : [fixtureAccounts[0]!, fixtureAccounts[6]!, fixtureAccounts[2]!];
   return harness === "codex"
     ? { accounts: [{ accountRef: fixtureAccountRef(10), label: "Codex Studio" }], policyAccountRef: fixtureAccountRef(10), currentAccountRef }
-    : { accounts: fixtureAccounts, policyAccountRef: fixtureAccountRef(1), currentAccountRef };
+    : { accounts, policyAccountRef: fixtureAccountRef(1), currentAccountRef };
 }
 
 const runner: RunnerView = {
@@ -169,7 +173,7 @@ const LONG_TITLES = [
 const longTitle = (index: number) => `${LONG_TITLES[(index - 1) % LONG_TITLES.length]!.slice(0, 116)} ${index}`;
 const triage = (overrides: Partial<AssistantThread> = {}) =>
   thread("thr_triage", "sess-triage", { status: "needs_you", launchedSessionIds: ["sess-flaky", "sess-deps"], lastActivityAt: NOW - minute,
-    ...(accountStress ? { accountChangeSupported: true, providerAccountLabel: fixtureAccounts[1]!.label } : {}),
+    ...(accountScenario ? { accountChangeSupported: true, providerAccountLabel: triageAccount.label } : {}),
     ...(confirmationCount > 0 ? { confirmations: Array.from({ length: confirmationCount }, (_unused, index) => confirmation(index)) } : {}),
     ...overrides });
 
@@ -194,7 +198,7 @@ const defaults: AssistantThreadDefaults = {
     { id: "codex", label: "Codex", available: true },
   ],
 };
-if (accountStress) {
+if (accountScenario) {
   for (const harness of defaults.harnesses) {
     harness.accountSelection = { ...fixtureAccountChoices(harness.id), runnerId: "runner-1", workspaceId: "workspace-1" };
   }
@@ -344,7 +348,7 @@ const client = {
     const choices = fixtureAccountChoices(harness);
     const accountRef = body.providerAccountRef ?? choices.policyAccountRef;
     const account = choices.accounts.find((candidate) => candidate.accountRef === accountRef);
-    if (accountStress && account) {
+    if (accountScenario && account) {
       accountSelections.set(id, account.accountRef);
       document.body.dataset.createdAccount = body.providerAccountRef ?? "policy";
     }
@@ -353,7 +357,7 @@ const client = {
     const created: AssistantThread = {
       id, assistant: "wollipog", title: body.title ?? "", harness: body.harness ?? defaults.harness, sessionId, status: "done",
       access, connectionId: null, launchedSessionIds: [], lastActivityAt: Date.now(), createdAt: Date.now(), archivedAt: null,
-      ...(accountStress ? { accountChangeSupported: true, providerAccountLabel: account?.label } : {}),
+      ...(accountScenario ? { accountChangeSupported: true, providerAccountLabel: account?.label } : {}),
     };
     threads = [created, ...threads];
     publish(created);
