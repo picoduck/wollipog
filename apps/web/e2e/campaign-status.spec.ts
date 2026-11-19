@@ -58,16 +58,19 @@ for (const width of [1440, 390]) test(`owner can return a kept resource from bot
   const detail = page.locator(".request-panel-detail");
   const inboxAction = detail.getByRole("button", { name: "Return to the Orchestrator", exact: true });
   await expect(inboxAction).toBeVisible();
-  await expect(detail.locator(".request-card .owner-resource-return")).toHaveCount(0);
-  await expect(detail.locator(".owner-resource-return")).toContainText("PR #4141 in picoduck/wollipog");
-  await expect(detail.locator(".owner-resource-return")).toContainText("The Orchestrator handed this resource to you.");
+  // One line inside the card, under its facts and above Deny and Approve (#4713).
+  const footnote = detail.locator(".request-card .owner-resource-footnote");
+  await expect(footnote).toHaveText("The Orchestrator handed this PR to you. Return to the Orchestrator");
   await inboxAction.click();
+  await expect(footnote).toContainText("Send future requests for PR #4141 in picoduck/wollipog to the Orchestrator? This request stays yours.");
+  await expect(footnote.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+  await expect(detail.getByRole("button", { name: "Approve", exact: true })).toBeVisible();
   await page.mouse.move(width - 100, 220);
   await page.mouse.wheel(0, -10000);
   await expect(detail).toHaveJSProperty("scrollTop", 0);
   await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
   if (process.env.OWNER_RETURN_EVIDENCE_DIR) await page.screenshot({ path: `${process.env.OWNER_RETURN_EVIDENCE_DIR}/inbox-action-${width}.png` });
-  await inboxAction.click();
+  await footnote.getByRole("button", { name: "Return", exact: true }).click();
   await expect(detail.getByRole("status").filter({ hasText: "Pending requests remain yours." })).toBeVisible();
   await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=after&fullControl=ready&ownerReturned=1");
   await page.getByRole("button", { name: "Expand All", exact: true }).click();

@@ -138,6 +138,8 @@ export function WorkingIndicator({
             )}
           </span>
         )}
+        {/* On the line it counts, never a line of its own under it (#4713). */}
+        {failed > 0 && <span className="tl-working-failed">{failed} failed</span>}
         {waiting && onReviewPendingRequest ? (
           <button type="button" className="btn sm ghost tl-working-action" onClick={() => onReviewPendingRequest(waiting.requestId)}>
             Review
@@ -148,9 +150,8 @@ export function WorkingIndicator({
           </button>
         ) : null}
       </div>
-      {(failed > 0 || retry || silence) && (
+      {(retry || silence) && (
         <p className="tl-working-note">
-          {failed > 0 && <span className="tl-working-failed">{failed} failed</span>}
           {retry && (
             <span className="tl-working-retry" title={retry.latestError}>
               {`Retried ${retry.retries} ${retry.retries === 1 ? "time" : "times"}: ${retry.latestError}`}

@@ -1324,6 +1324,76 @@ test("a workflow decision shows everything it approves: the exact issue body, an
   }
 });
 
+function ownerKeptMerge(ownerRule = false): PendingApproval {
+  return {
+    requestId: "merge", occurrenceId: "merge", kind: "workflow_decision", title: "PR Merge Approval Required",
+    options: [
+      { optionId: "approve", name: "Approve", kind: "allow_once" },
+      { optionId: "deny", name: "Deny", kind: "reject_once" },
+    ],
+    workflowDecision: {
+      requestId: "merge", occurrenceId: "merge", sessionId: "session-dock", controllingSessionId: "parent",
+      category: "pr_merge", resourceKey: "pr-64",
+      resourceSnapshot: { category: "pr_merge", repository: "example/project", pullRequest: 64, headSha: "a".repeat(40), reviewResult: "merge",
+        requiredChecks: { headSha: "a".repeat(40), status: "passed", checkedAt: 1, checks: [] } },
+      resourceDigest: "d".repeat(64), policyRevision: 1, authority: "human", status: "pending", createdAt: 1,
+      returnableOwnerResource: true,
+      ...(ownerRule ? { ownerRule: { source: "AGENTS.md", quote: "Ask me before merging." } } : {}),
+    },
+  } as PendingApproval;
+}
+
+test("an owner-kept resource is one line inside the card, above Deny and Approve, with an in-place confirmation (#4713)", async () => {
+  const returned: unknown[] = [];
+  const request = ownerKeptMerge();
+  const view = await render(<RequestCard session={sessionWith(request)} request={request} runnerOnline presentation="dock" />, {
+    returnOwnerResource: async (...args) => { returned.push(args); return request.workflowDecision!; },
+  });
+  try {
+    const card = view.container.querySelector<HTMLElement>("section.request-card")!;
+    assert.equal(card.nextElementSibling, null, "nothing renders beside the card to share the dock's column with it");
+    const footnote = () => card.querySelector<HTMLElement>(".owner-resource-footnote");
+    assert.equal(footnote()?.textContent, "The Orchestrator handed this PR to you. Return to the Orchestrator");
+    assert.equal(footnote()?.querySelector("h4, h3"), null, "the card's facts already name the pull request");
+    const order = [...card.children].map((child) => child.className);
+    assert.ok(order.indexOf("request-card-body") < order.indexOf("owner-resource-footnote"));
+    assert.ok(order.indexOf("owner-resource-footnote") < order.indexOf("request-card-foot"));
+    const button = (name: string) => [...card.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent === name)!;
+
+    await act(async () => { button("Return to the Orchestrator").click(); await tick(); });
+    assert.match(footnote()?.textContent ?? "",
+      /^Send future requests for PR #64 in example\/project to the Orchestrator\? This request stays yours\./u);
+    assert.ok((domWindow.document.activeElement as unknown) === button("Cancel"), "focus moves to the confirmation");
+    assert.deepEqual(footer(view.container), ["Deny", "Approve (primary)"], "the decision stays answerable");
+    await act(async () => { button("Cancel").click(); await tick(); });
+    assert.ok((domWindow.document.activeElement as unknown) === button("Return to the Orchestrator"), "focus comes back to the link");
+    assert.equal(returned.length, 0);
+
+    await act(async () => { button("Return to the Orchestrator").click(); await tick(); });
+    await act(async () => { button("Return").click(); await tick(); });
+    assert.deepEqual(returned, [["session-dock", "merge"]]);
+    assert.equal(card.querySelector("[role='status']")?.textContent,
+      "PR #64 in example/project returned to the Orchestrator for future requests. Pending requests remain yours.");
+    assert.deepEqual(footer(view.container), ["Deny", "Approve (primary)"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a rule-kept resource says so, and a read-only card offers no return (#4713)", async () => {
+  const request = ownerKeptMerge(true);
+  const view = await render(<RequestCard session={sessionWith(request)} request={request} runnerOnline presentation="dock" />);
+  try {
+    assert.equal(view.container.querySelector(".owner-resource-footnote")?.textContent,
+      "A rule keeps this PR with you. Return to the Orchestrator");
+    await view.rerender(<RequestCard session={sessionWith(request)} request={request} runnerOnline presentation="panel"
+      readOnlyNotice="The Orchestrator decides this request." />);
+    assert.equal(view.container.querySelector(".owner-resource-footnote"), null);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("UI evidence keeps its signed links out of the card: no Request Details", async () => {
   const evidence = [{ evidenceId: "after", uri: "https://evidence.example/after.png?signature=secret", sha256: "a".repeat(64) }];
   const request = {

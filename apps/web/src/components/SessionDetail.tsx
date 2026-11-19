@@ -344,6 +344,7 @@ import {
   composerAgentName,
   composerPlaceholder as composerPlaceholderText,
   composerUnavailableReason,
+  workflowDecisionPause,
 } from "../composer-placeholder.js";
 import { IncrementalActiveTurnProgress } from "../turn-progress.js";
 import { IncrementalSubagentProjector } from "../subagents.js";
@@ -3763,6 +3764,7 @@ function SessionDetailLoaded({
     machineName: runnerDisp.name,
     noticeReason: sessionNoticeReason,
     policyPaused,
+    workflowDecision: workflowDecisionPause(session.pendingApproval),
   });
   const canPrompt = promptUnavailableReason === null;
   const composerAgent = composerAgentName(session.driver, session.agentName, session.agentId);

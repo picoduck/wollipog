@@ -533,7 +533,7 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
                 onClick={open}>Open Request</button>}
               {item.returnableOwnerResource &&
                 <ReturnOwnerResource sessionId={item.sessionId} occurrenceId={item.occurrenceId}
-                  resourceLabel={item.resourceLabel ?? item.summary} onChanged={onChanged} inRow
+                  resourceLabel={item.resourceLabel ?? item.summary} onChanged={onChanged} presentation="row"
                   ownershipReason={ownerResourceKeepReason(item)} />}
             </li>
           );
