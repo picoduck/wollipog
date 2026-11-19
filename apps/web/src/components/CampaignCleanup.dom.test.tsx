@@ -179,3 +179,17 @@ test("Campaign Stuck names each unfinished item and why nothing is moving (#4146
     assert.match(container.textContent ?? "", /The child's latest report has not been verified\./u);
   } finally { view.unmount(); }
 });
+
+
+test("#4187 image reviewer cleanup names automatic retirement and links its session", async () => {
+  const view = await render(<CampaignCleanup campaignId="root" canAct cleanup={{ total: 1, items: [{
+    kind: "image_reviewer", sessionId: "reviewer", reason: "Waiting for confirmed stop and archival.",
+    action: { kind: "automatic", text: "Wollipog stops and archives the reviewer." },
+  }] }} onOpenSession={id => <a href={`/sessions/${id}`}>UI Evidence Review of a Long Settings Change</a>} />);
+  try {
+    assert.ok(view.container.textContent?.includes("Image Reviewer"));
+    assert.ok(view.container.textContent?.includes("Wollipog stops and archives the reviewer."));
+    assert.equal(view.container.querySelector("a")?.getAttribute("href"), "/sessions/reviewer");
+    assert.equal(view.container.querySelector("code"), null);
+  } finally { view.unmount(); }
+});

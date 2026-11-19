@@ -3631,7 +3631,7 @@ function campaignLeftoverDigest(status: "stuck" | "complete_needs_cleanup", stuc
     ...cleanup.map((item) => item.kind === "merged_branch"
       ? `branch:${item.repository.toLowerCase()}#${item.pullRequest}:${item.state}:${item.branch ?? ""}:${item.action.kind}`
       : item.kind === "worktree" ? `worktree:${item.sessionId}:${item.path}:${item.status}`
-      : `handoff:${item.workItemId}`),
+      : item.kind === "image_reviewer" ? `reviewer:${item.sessionId}` : `handoff:${item.workItemId}`),
     ...recoveryIds.map((id) => `recovery:${id}`),
   ].sort();
   return createHash("sha256").update(JSON.stringify([status, keys])).digest("hex");
@@ -6344,9 +6344,9 @@ export class ControlPlaneDb {
   } {
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
     const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
-    const children = this.campaignDescendantIds(campaignId), verified = this.validCampaignChildReportIds(campaignId);
+    const children = this.campaignCompletionChildIds(campaignId), verified = this.validCampaignChildReportIds(campaignId);
     const childRows = children.map(id => this.stmt("SELECT archived FROM sessions WHERE id=?").get(id) as { archived: number });
-    if (!row || !policy || children.length === 0 || children.some((id, i) => !(verified.has(id) || this.campaignChildFailureSuperseded(campaignId, id)) ||
+    if (!row || !policy || this.campaignReviewerCleanup(campaignId).length > 0 || children.length === 0 || children.some((id, i) => !(verified.has(id) || this.campaignChildFailureSuperseded(campaignId, id)) ||
         policy.behavior.completion !== "retain" && (childRows[i]!.archived !== 1 || this.campaignWorktreeCleanup(id).length > 0)) ||
         pendingRequests(parseJson<PendingApproval>(row.pending_approval)).length > 0 ||
         this.stmt("SELECT 1 FROM workflow_decisions WHERE controlling_session_id=? AND status='pending'").get(campaignId)) {
@@ -22523,6 +22523,21 @@ export class ControlPlaneDb {
       UNION ALL SELECT 1 FROM session_command_invocations WHERE session_id=? LIMIT 1`).get(sessionId, sessionId, sessionId));
   }
 
+  /** Helpers are excluded from implementation bookkeeping, but a live review still blocks completion. */
+  private campaignCompletionChildIds(campaignId: string): string[] {
+    const reviewers = this.stmt(`SELECT reviewer_session_id AS id FROM delegated_image_reviews
+      WHERE root_session_id=? AND state IN ('running','verdict')`).all(campaignId) as Array<{ id: string }>;
+    return [...this.campaignDescendantIds(campaignId), ...reviewers.map(row => row.id)];
+  }
+
+  /** A terminal review is server-proven; retirement is complete only after the normal lifecycle confirms it. */
+  private campaignReviewerCleanup(campaignId: string): string[] {
+    return (this.stmt(`SELECT session.id FROM delegated_image_reviews review JOIN sessions session
+      ON session.id=review.reviewer_session_id WHERE review.root_session_id=? AND review.state IN ('consumed','ended')
+      AND (session.archived=0 OR EXISTS (SELECT 1 FROM session_stop_intents WHERE session_id=session.id))`)
+      .all(campaignId) as Array<{ id: string }>).map(row => row.id);
+  }
+
   campaignDescendantIds(campaignSessionId: string): string[] {
     return (this.stmt(`
       WITH RECURSIVE descendants(id) AS (
@@ -23601,7 +23616,7 @@ export class ControlPlaneDb {
    * view, so it cannot re-enter a projection. */
   private campaignStatusState(campaign: SessionRow, policy: OrchestratorCampaignPolicy, campaignSessionId: string) {
     const resolvedCampaignId = campaign.id;
-    const childIds = this.campaignDescendantIds(resolvedCampaignId);
+    const childIds = this.campaignCompletionChildIds(resolvedCampaignId);
     const rows = childIds.length ? (this.stmt(
       `SELECT id, runner_id, driver, workspace_id, status, archived, worktree_path, worktrees, pending_approval, worktree_recovery,
               queue_hold
@@ -23630,7 +23645,7 @@ export class ControlPlaneDb {
     let active = 0;
     let blocked = 0;
     let fullyVerified = 0;
-    let cleanupPending = 0;
+    let cleanupPending = this.campaignReviewerCleanup(resolvedCampaignId).length;
     const cleanupWorktrees: NonNullable<OrchestratorCampaignProjection["cleanupWorktrees"]> = [];
     const heldChildren: NonNullable<OrchestratorCampaignProjection["heldChildren"]> = [];
     const genericOrchestratorRequests: Array<{ sessionId: string; occurrenceId: string }> = [];
@@ -23719,7 +23734,8 @@ export class ControlPlaneDb {
     } else {
       for (const child of unverifiedChildren) {
         stuckItems.push({ kind: "unverified_child", sessionId: child.sessionId, status: child.status,
-          reason: child.held ? "The child is held from starting its next turn."
+          reason: this.delegatedImageReviews.isReviewer(child.sessionId) ? "The image review is still live; resolve its evidence decision before retirement."
+            : child.held ? "The child is held from starting its next turn."
             : child.status === "failed" || child.status === "stopped" ? `The child ${child.status === "failed" ? "failed" : "was stopped"} before its report was verified.`
             : child.status === "idle" || child.status === "completed" ? "The child's latest report has not been verified."
             : child.status === "input_required" ? "The child is waiting for input."
@@ -23874,7 +23890,11 @@ export class ControlPlaneDb {
   private campaignCleanupItems(campaignId: string,
     worktrees: NonNullable<OrchestratorCampaignProjection["cleanupWorktrees"]>,
     handoffs: readonly OrchestratorCampaignHandoff[]): CampaignCleanupItem[] {
-    const items: CampaignCleanupItem[] = [];
+    const items: CampaignCleanupItem[] = this.campaignReviewerCleanup(campaignId).map(sessionId => ({
+      kind: "image_reviewer", sessionId,
+      reason: "The finished image reviewer is waiting for confirmed stop and archival.",
+      action: { kind: "automatic", text: "Wollipog stops and archives the reviewer when its runner confirms release." },
+    }));
     const branches = this.campaignMergedBranches(campaignId).filter((row) => row.state !== "deleted");
     if (branches.length) {
       const workItems = this.campaignWorkLedger.pullRequestWorkItems(campaignId);

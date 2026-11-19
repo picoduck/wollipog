@@ -43,7 +43,7 @@ function CleanupAction({ action, subject, worktree, reason }: { action: Campaign
 type CleanupItem = Exclude<CampaignCleanupItem, { kind: "handoff" }>;
 
 function cleanupSubject(item: CleanupItem): string {
-  return item.kind === "merged_branch" ? item.branch ?? `the branch of ${item.repository}#${item.pullRequest}` : item.path;
+  return item.kind === "merged_branch" ? item.branch ?? `the branch of ${item.repository}#${item.pullRequest}` : item.kind === "image_reviewer" ? "the image reviewer" : item.path;
 }
 
 function CleanupList({ items, onOpenSession, campaignId, canAct }: { items: readonly CleanupItem[];
@@ -51,7 +51,7 @@ function CleanupList({ items, onOpenSession, campaignId, canAct }: { items: read
   return (
     <ul className="campaign-detail-list">
       {items.map((item) => (
-        <li key={item.kind === "merged_branch" ? `${item.repository}#${item.pullRequest}` : `${item.sessionId}:${item.path}`}>
+        <li key={item.kind === "merged_branch" ? `${item.repository}#${item.pullRequest}` : `${item.sessionId}:${item.kind === "worktree" ? item.path : item.kind}`}>
           <dl className="facts">
             {item.kind === "merged_branch" ? (
               <div>
@@ -64,6 +64,8 @@ function CleanupList({ items, onOpenSession, campaignId, canAct }: { items: read
                   </span>
                 </dd>
               </div>
+            ) : item.kind === "image_reviewer" ? (
+              <div><dt>Image Reviewer</dt><dd>{onOpenSession(item.sessionId)}</dd></div>
             ) : (
               <div>
                 <dt>Worktree</dt>
@@ -97,7 +99,7 @@ export function CampaignCleanup({ campaignId, cleanup, canAct, onOpenSession }: 
   const items = cleanup.items.filter((item): item is CleanupItem => item.kind !== "handoff");
   // Merged branches first, with Delete Merged Branches right under them, then retained worktrees.
   const branches = items.filter((item) => item.kind === "merged_branch");
-  const worktrees = items.filter((item) => item.kind === "worktree");
+  const sessions = items.filter((item) => item.kind === "worktree" || item.kind === "image_reviewer");
   const handoffs = cleanup.items.length - items.length;
   const hidden = cleanup.total - cleanup.items.length;
   const performable = branches.some((item) => item.action.kind === "delete_merged_branches");
@@ -129,7 +131,7 @@ export function CampaignCleanup({ campaignId, cleanup, canAct, onOpenSession }: 
           Delete Merged Branches
         </BusyButton>
       </div>}
-      {worktrees.length > 0 && <CleanupList items={worktrees} onOpenSession={onOpenSession} campaignId={campaignId} canAct={canAct} />}
+      {sessions.length > 0 && <CleanupList items={sessions} onOpenSession={onOpenSession} campaignId={campaignId} canAct={canAct} />}
       {handoffs > 0 && <p className="section-note">
         {handoffs} handed-off item{handoffs === 1 ? " is" : "s are"} listed under Handed Off.
       </p>}

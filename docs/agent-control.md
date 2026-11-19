@@ -2448,6 +2448,17 @@ The reviewer follows the video reviewer's provenance pattern, but for images:
   with the reviewer's receipts: supersession, a policy or ownership change, an authority loss, or
   a digest mismatch. A resolved decision ends any other live review. Receipts expire after an hour,
   as they do under direct review, so an old verdict has to be prepared again.
+- **Automatic reviewer retirement (#4187).** Once a review is `consumed` or `ended`, the control
+  plane stops and archives its reviewer through the normal durable lifecycle. Maintenance and
+  runner reconnects recover reviews that ended before an upgrade. A `running` review or an
+  unconsumed `verdict` still blocks campaign completion. A terminal review requires no report
+  verification from the Orchestrator; unconfirmed stop or archival remains visible as automatic
+  cleanup and prevents verified completion. Review records, receipts, verdicts and usage stay
+  available after archival. The maintenance query advances in batches of 64; existing Stop
+  intents own bounded retries, and a reconnect rearms a failed retirement.
+  `delegated_image_reviewer_retirement` logs identify each requested retirement by review, root and
+  reviewer, with its review state and archive state. Check the Session's durable Stop state for a
+  pending or failed runner confirmation; no evidence bytes or transcripts are logged.
 - **One review at a time.** An occurrence has at most one live review, and preparing again returns
   it. Some reviews can no longer back an approval: the reviewer ended its turn or Session without a
   verdict, or one of its verdict's receipts expired. Such a review is retired, and preparing again

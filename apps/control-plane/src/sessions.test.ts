@@ -25605,7 +25605,7 @@ for (const refusal of ["harness", "capacity", "placement"] as const) {
       assert.equal(reviewer.maxChildSessions, 0);
       assert.equal(reviewer.useWorktree, false);
       assert.deepEqual(h.db.campaignDescendantIds(h.parent.id), [child.id]);
-      assert.equal(h.db.campaignProjection(h.parent.id)!.children.total, 1);
+      assert.equal(h.db.campaignProjection(h.parent.id)!.children.total, 2, "a live review blocks completion without using implementation capacity");
       assert.equal(h.svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID },
         undefined, undefined, false, false, false, { parentSessionId: reviewer.id }).status, 409);
       assert.equal(h.db.childSessionAllocations(h.parent.id).liveCount, 1);
@@ -25773,6 +25773,155 @@ const passingVerdict = (ids: string[]) => ({
   recommendation: "approve", summary: "Every image matches the claims.",
   items: ids.map((evidenceId) => ({ evidenceId, outcome: "pass", defects: [] })),
 });
+
+test("#4187 terminal image reviewers are automatically stopped and archived", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const decision = h.request(child.id, "retire", [h.screenshot(child.id, "image").item]);
+    assert.ok(decision.data);
+    const review = prepareImageReview(h, child.id, decision.data.occurrenceId).data!;
+    h.db.updateSessionStatus(review.reviewerSessionId, "running", Date.now());
+    assert.ok(h.svc.resolveDescendantRequest(h.parent.id, child.id, decision.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "deny", reason: "Recapture required" }, () => true).ok);
+    h.svc.retryDuePrompts();
+    const reviewer = h.db.getSession(review.reviewerSessionId)!;
+    assert.equal(reviewer.archiveStatus, "stop_pending", "retirement must await runner confirmation");
+    assert.equal(reviewer.archived, false);
+    h.svc.onSessionStatus(reviewer.id, "stopped");
+    h.svc.retryDuePrompts();
+    assert.equal(h.db.getSession(reviewer.id)!.archived, true);
+    assert.equal(h.db.delegatedImageReviews.get(review.reviewId)!.state, "ended");
+  } finally { h.db.close(); }
+});
+
+test("#4187 live reviews block completion and terminal reviewers need no report verification", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    h.db.updateSessionOrchestratorBehavior(h.parent.id, { completion: "stop_and_archive" }, Date.now());
+    const reviewers: string[] = [];
+    for (let round = 0; round < 2; round++) {
+      const decision = h.request(child.id, `review-${round}`, [h.screenshot(child.id, `image-${round}`).item]).data!;
+      const prepared = prepareImageReview(h, child.id, decision.occurrenceId);
+      assert.ok(prepared.ok && prepared.data, prepared.error);
+      const review = prepared.data;
+      reviewers.push(review.reviewerSessionId);
+      h.db.updateSessionStatus(review.reviewerSessionId, "running", Date.now());
+      assert.equal(h.db.campaignProjection(h.parent.id)!.children.total, 2);
+      h.svc.maintainImageReviewerRetirement(Date.now());
+      assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, undefined, "live review is preserved");
+      assert.ok(reviewerLook(h, review.reviewerSessionId, `image-${round}`).ok);
+      assert.ok(reviewerVerdict(h, review.reviewerSessionId, passingVerdict([`image-${round}`])).ok);
+      const ref = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, review.reviewId, () => true).data!.delegatedImageReview!;
+      h.svc.maintainImageReviewerRetirement(Date.now());
+      assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, undefined, "unconsumed verdict is preserved");
+      assert.ok(h.svc.resolveDescendantRequest(h.parent.id, child.id, decision.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: [`image-${round}`], delegatedImageReview: ref }, () => true).ok);
+      h.svc.onSessionEvent(review.reviewerSessionId, { kind: "token_usage", model: "vision", costUsd: 1.25 });
+      const costBefore = h.db.campaignWorkLedger.accounting.costSummary(h.parent.id, h.parent.createdAt).total;
+      h.svc.maintainImageReviewerRetirement(Date.now());
+      assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, "stop_pending");
+      assert.ok(!h.db.campaignContinuationChildCandidates(h.parent.id).some(c => c.sessionId === review.reviewerSessionId));
+      assert.equal(h.db.campaignRecoveryCompletion(h.parent.id).state, "children_unfinished");
+      h.svc.onSessionStatus(review.reviewerSessionId, "stopped");
+      h.svc.maintainImageReviewerRetirement(Date.now());
+      assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, true);
+      assert.equal(h.db.getSession(review.reviewerSessionId)!.costUsd, 1.25);
+      assert.deepEqual(h.db.campaignWorkLedger.accounting.costSummary(h.parent.id, h.parent.createdAt).total, costBefore);
+      assert.equal(h.db.delegatedImageReviews.get(review.reviewId)!.state, "consumed");
+      assert.ok(h.svc.verifyCampaignChild(h.parent.id, { childSessionId: review.reviewerSessionId,
+        reportEventSeq: 1, followUpsAccounted: true }).ok, "older skills get an already-handled result");
+      assert.ok(h.svc.setArchived(review.reviewerSessionId, true).ok);
+    }
+    h.svc.onSessionStatus(child.id, "completed");
+    const report = h.db.appendEvent(child.id, { kind: "agent_message", text: "Delivered", final: true }, Date.now());
+    assert.ok(h.svc.verifyCampaignChild(h.parent.id, { childSessionId: child.id, reportEventSeq: report.seq,
+      followUpsAccounted: true }).ok);
+
+    // Complete the coordination wake, as the fake runner would after receiving the final events.
+    h.db.updateSessionStatus(h.parent.id, "idle", Date.now());
+    h.svc.retryDuePrompts();
+    const wake = h.db.latestCampaignContinuation(h.parent.id);
+    if (wake) h.db.updateCampaignContinuationForCommand(wake.commandId, "completed", Date.now());
+    h.db.updateSessionStatus(h.parent.id, "idle", Date.now());
+    assert.equal(h.db.campaignProjection(h.parent.id)!.status, "verified_complete", JSON.stringify(h.db.campaignProjection(h.parent.id)));
+    assert.equal(h.db.campaignRecoveryCompletion(h.parent.id).state, "complete");
+    assert.equal(reviewers.length, 2);
+  } finally { h.db.close(); }
+});
+
+test("#4187 old ended reviewers retire on reconnect; provisional stops never prove archival", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const decision = h.request(child.id, "old", [h.screenshot(child.id, "old").item]).data!;
+    const review = prepareImageReview(h, child.id, decision.occurrenceId).data!;
+    h.db.delegatedImageReviews.end(review.reviewId, "decision_revoked", Date.now() - 1000);
+    h.db.updateSessionStatus(review.reviewerSessionId, "stopped", Date.now());
+    // Stored state from an earlier control plane is enough; no in-memory retirement queue.
+    const svc = new SessionsService(h.db, h.hub as unknown as Hub, NOOP_LOG);
+    svc.retryDuePrompts(Date.now(), RUNNER_ID);
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, false);
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, "stop_pending");
+    svc.onSessionStatus(review.reviewerSessionId, "stopped");
+    svc.retryDuePrompts();
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, true);
+    assert.equal(h.db.delegatedImageReviews.get(review.reviewId)!.endedReason, "decision_revoked");
+  } finally { h.db.close(); }
+});
+
+test("#4187 failed automatic retirement stays pending and recovers on reconnect", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const decision = h.request(child.id, "offline", [h.screenshot(child.id, "offline").item]).data!;
+    const review = prepareImageReview(h, child.id, decision.occurrenceId).data!;
+    h.db.updateSessionStatus(review.reviewerSessionId, "running", Date.now());
+    assert.ok(h.svc.resolveDescendantRequest(h.parent.id, child.id, decision.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "deny", reason: "Recapture required" }, () => true).ok);
+    h.hub.online = false;
+    h.svc.maintainImageReviewerRetirement(Date.now());
+    h.svc.maintainSessionStopIntents(Date.now() + 60 * 60_000);
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, "stop_failed");
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, false);
+    const report = h.db.appendEvent(child.id, { kind: "agent_message", text: "Done", final: true }, Date.now());
+    h.db.updateSessionStatus(child.id, "completed", Date.now());
+    h.db.setSessionArchived(child.id, true, Date.now());
+    h.db.verifyCampaignChildReport(h.parent.id, child.id, report.seq, Date.now());
+    h.db.updateSessionStatus(h.parent.id, "idle", Date.now());
+    assert.ok(h.db.campaignProjection(h.parent.id)!.cleanup?.items.some(item => item.kind === "image_reviewer"));
+    h.hub.online = true;
+    h.svc.maintainImageReviewerRetirement(Date.now(), RUNNER_ID);
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, "stop_pending");
+    h.svc.onSessionStatus(review.reviewerSessionId, "stopped");
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, true);
+  } finally { h.db.close(); }
+});
+
+for (const failure of ["no_verdict", "deadline", "expired_verdict"] as const) {
+  test(`#4187 ${failure} reviews retire without an Orchestrator read`, () => {
+    const h = uiEvidenceReviewHarness();
+    try {
+      const child = h.createChild("UI Child");
+      const decision = h.request(child.id, failure, [h.screenshot(child.id, failure).item]).data!;
+      const review = prepareImageReview(h, child.id, decision.occurrenceId).data!;
+      h.db.updateSessionStatus(review.reviewerSessionId, "running", Date.now());
+      if (failure === "no_verdict") h.svc.onSessionStatus(review.reviewerSessionId, "idle");
+      if (failure === "deadline") h.db.raw().prepare("UPDATE delegated_image_reviews SET created_at=0 WHERE review_id=?").run(review.reviewId);
+      if (failure === "expired_verdict") {
+        assert.ok(reviewerLook(h, review.reviewerSessionId, failure).ok);
+        assert.ok(reviewerVerdict(h, review.reviewerSessionId, passingVerdict([failure])).ok);
+        h.db.raw().prepare("UPDATE ui_evidence_review_receipts SET expires_at=0 WHERE reviewer_session_id=?").run(review.reviewerSessionId);
+      }
+      h.svc.maintainImageReviewerRetirement(Date.now());
+      assert.equal(h.db.delegatedImageReviews.get(review.reviewId)!.state, "ended");
+      assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, "stop_pending");
+      h.svc.onSessionStatus(review.reviewerSessionId, "stopped");
+      assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, true);
+    } finally { h.db.close(); }
+  });
+}
 
 test("a delegated image reviewer approves N images without any reaching the Orchestrator (#4074)", () => {
   const h = uiEvidenceReviewHarness();

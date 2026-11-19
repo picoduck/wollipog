@@ -232,6 +232,16 @@ export class DelegatedImageReviews {
       .map((row) => this.parse(row)!);
   }
 
+  /** Durable review rows drive retirement, including rows written before an upgrade. */
+  unsettled(runnerId?: string, after = ""): DelegatedImageReviewRecord[] {
+    return (this.stmt(`SELECT review.* FROM delegated_image_reviews review JOIN sessions session
+      ON session.id=review.reviewer_session_id
+      WHERE review.review_id>? AND (review.state IN ('running','verdict') OR session.archived=0
+        OR EXISTS (SELECT 1 FROM session_stop_intents WHERE session_id=session.id))
+      ${runnerId ? "AND session.runner_id=?" : ""} ORDER BY review.review_id LIMIT 64`)
+      .all(after, ...(runnerId ? [runnerId] : [])) as unknown as Row[]).map(row => this.parse(row)!);
+  }
+
   liveForOccurrence(occurrenceId: string): DelegatedImageReviewRecord | null {
     return this.parse(this.stmt(`SELECT * FROM delegated_image_reviews WHERE occurrence_id=? AND state IN ${LIVE}`)
       .get(occurrenceId) as Row | undefined);
