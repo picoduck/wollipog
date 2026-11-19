@@ -20974,7 +20974,7 @@ export class SessionsService {
   async changeAssistantThreadAccount(
     runner: RunnerView, agent: AgentDefinition, session: SessionView, threadId: string, input: ChangeAssistantThreadAccountRequest,
   ): Promise<ServiceResult<void>> {
-    const unsupported = this.capabilityFailure(runner.runnerId, "assistantThreadProviderAccount", "changing an Assistant thread's account");
+    const unsupported = this.capabilityFailure(runner.runnerId, "assistantThreadProviderAccount", "changing an assistant thread's account");
     if (unsupported) return unsupported;
     if (!this.hub.isRunnerOnline(runner.runnerId)) return fail("This Machine is offline. Connect it before changing the account.", 409);
     if (session.status === "queued" || session.status === "starting" || session.status === "running") {

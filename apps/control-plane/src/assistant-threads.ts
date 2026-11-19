@@ -231,7 +231,7 @@ export class AssistantThreads {
     }
     const agent = harnessAgent(runner, harness)!;
     if (accountRef && !runnerSupportsProtocol(runner.protocolVersion, "assistantThreadProviderAccount")) {
-      const { error, ...details } = runnerCapabilityRequirementError(runner.protocolVersion, "assistantThreadProviderAccount", "choosing an Assistant thread's account");
+      const { error, ...details } = runnerCapabilityRequirementError(runner.protocolVersion, "assistantThreadProviderAccount", "choosing an assistant thread's account");
       throw new AssistantThreadRefusal(error, 409, details);
     }
 
@@ -289,7 +289,7 @@ export class AssistantThreads {
       throw new AssistantThreadRefusal("The thread's harness is no longer available on this Machine.", 409);
     }
     if (!runnerSupportsProtocol(runner.protocolVersion, "assistantThreadProviderAccount")) {
-      const { error, ...details } = runnerCapabilityRequirementError(runner.protocolVersion, "assistantThreadProviderAccount", "changing an Assistant thread's account");
+      const { error, ...details } = runnerCapabilityRequirementError(runner.protocolVersion, "assistantThreadProviderAccount", "changing an assistant thread's account");
       throw new AssistantThreadRefusal(error, 409, details);
     }
     return { session, runner, agent };
