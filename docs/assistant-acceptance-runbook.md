@@ -335,6 +335,39 @@ one launch available in the test thread.
 settings, and separate usage recorded for the thread and campaign. **Mark REAL** after a real
 provider turn on the approved campaign.
 
+### N. Review Session Accounting Across a Restart
+
+**Prerequisites:** 1 and a disposable control plane running #4726, with an available cross-model
+reviewer and a disposable open pull request.
+
+1. Have an Assistant thread launch an ordinary session for that PR. From that session, have the
+   agent request a review with `request_review_session` and record the review Session ID. Let the
+   review report nonzero usage. When the thread and its ordinary work are idle, record the
+   thread's spend and launch count in **Thread Details** and the backing session's cost cap.
+2. The owner restarts the disposable control plane and reopens the same thread. Verify the review
+   still appears in the requesting session's review history and remains excluded from the thread's
+   spend, launch count, and backing session cap. Verify spend from the ordinary launched session
+   is still included.
+
+**Observe and capture:** sanitized Session IDs and usage before and after the restart. **Mark REAL**
+after a review with recorded spend survives the database reopen.
+
+### O. Assistant Discovery on a Codex Fallback Model
+
+**Prerequisites:** 1, a Full Access test connection, and a Codex model outside the runner's
+model catalog that uses the default tool-output limit.
+
+1. On that Codex model, call `assistant_discover` with `{}`. Verify it returns the connection
+   identity and operation summaries. Measure the first JSON-RPC response in UTF-8 bytes,
+   including the escaped result text and its envelope. It must be under the 10,000-byte fallback
+   limit, with no truncation marker in the model's tool result.
+2. Follow any returned `nextCursor` until `campaign_start` appears. Call
+   `assistant_discover` with `{"operations":["campaign_start"]}` and verify its full input
+   schema is returned within the same limit. Do this as discovery only.
+
+**Observe and capture:** the model ID, first page byte count, and whether continuation and schema
+lookup worked. **Mark REAL** after verification on the intended Codex model.
+
 ## Completion and Recovery Handoff
 
 Use the linked setup guides for authentication, TLS, signed callback, permission, version and
