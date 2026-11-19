@@ -480,6 +480,18 @@ test("typed workflow decision tools preserve exact request, resolution, and cons
   });
   assert.deepEqual(calls.at(-1)?.body, { resourceSnapshot: snapshot });
   assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_1/reconcile`);
+  const beforeExternal = calls.length;
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionExternalMergeReconciliation - 1;
+  const unsupportedExternal = await callTool(deps, "reconcile_workflow_decision", {
+    occurrenceId: "workflow_1", resourceSnapshot: snapshot, externalMerge: true,
+  });
+  assert.equal(unsupportedExternal.isError, true);
+  assert.equal(calls.length, beforeExternal, "an older control plane never receives an external settlement");
+  deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  await callTool(deps, "reconcile_workflow_decision", {
+    occurrenceId: "workflow_1", resourceSnapshot: snapshot, externalMerge: true,
+  });
+  assert.deepEqual(calls.at(-1)?.body, { resourceSnapshot: snapshot, externalMerge: true });
 
   // #4067: Wollipog performs the approved action; the tool sends only the occurrence and its digest.
   const before = calls.length;

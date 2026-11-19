@@ -197,7 +197,7 @@ export function decisionHelp(): string {
     "  decision get <occurrence-id> [--session <id>] [--json]",
     "  decision list [--session <id>] [--limit <1-100>] [--cursor <occurrence-id>] [--json]",
     "  decision consume <occurrence-id> --snapshot <json> [--action <json>] [--json]",
-    "  decision reconcile <occurrence-id> --snapshot <json> [--json]",
+    "  decision reconcile <occurrence-id> --snapshot <json> [--external-merge] [--json]",
     "  decision execute <occurrence-id> --resource-digest <sha256> [--json]",
     "  decision retire <occurrence-id> --reason <text> [--session <id>] [--json]",
     "  decision withdraw <occurrence-id> --reason <text> [--session <id>] [--json]",

@@ -742,8 +742,9 @@ async function sessionArtifactFileAttachCompatibilityError(deps: McpDeps, video 
     : controlPlaneUpdateRequired(needsNewerWollipog("Attaching a file needs", "Update Wollipog, then attach again."), required, actual);
 }
 
-async function workflowDecisionReconciliationCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation;
+async function workflowDecisionReconciliationCompatibilityError(deps: McpDeps, externalMerge: boolean): Promise<ToolResult | null> {
+  const required = externalMerge ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionExternalMergeReconciliation
+    : RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation;
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
@@ -2927,12 +2928,13 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "reconcile_workflow_decision",
-    description: "Reconcile an already-successful canonical PR merge action without executing it again. For a Codex App Server child the runner must prove one exact successful provider-history command and the forge must report the approved head as merged. A Claude Code child produces no command receipt, so call this once the PR reads MERGED; the forge's merged approved head is its proof. After a same-head re-enqueue, reconcile the latest occurrence: its admission must precede the last successful exact command with no other admission between them, and your other armed occurrences of that command then read superseded. Stale, mismatched, replayed, unavailable, and mixed-version evidence fails closed.",
+    description: "Record a completed PR merge without executing an enqueue. By default, Codex App Server needs the exact provider command receipt and the merged approved head. Claude Code and managed enqueues may use the forge proof alone. After a same-head re-enqueue, reconcile the latest armed occurrence that performed the enqueue. If the replacement was never armed, reconcile the original armed occurrence. When a person ran the enqueue, pass externalMerge: true (control plane v390) to record the forge-observed exact head merged after approval, without an admission or provider receipt. This never grants write authority.",
     inputSchema: {
       type: "object",
       properties: {
         occurrenceId: { type: "string" },
         resourceSnapshot: WORKFLOW_DECISION_RESOURCE_SCHEMA,
+        externalMerge: { const: true, description: "Record a merge completed outside the session using read-only forge proof." },
       },
       required: ["occurrenceId", "resourceSnapshot"],
       additionalProperties: false,
@@ -2947,13 +2949,17 @@ export const TOOLS: McpTool[] = [
       if (args?.resourceSnapshot?.category !== "pr_merge") {
         return errorResult("only PR merge decisions support action reconciliation");
       }
-      const compatibilityError = await workflowDecisionReconciliationCompatibilityError(deps);
+      if (args.externalMerge !== undefined && args.externalMerge !== true) {
+        return errorResult("externalMerge must be true when supplied");
+      }
+      const compatibilityError = await workflowDecisionReconciliationCompatibilityError(deps, args.externalMerge === true);
       if (compatibilityError) return compatibilityError;
       const r = await cpFetch(
         deps,
         "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions/${encodeURIComponent(args.occurrenceId)}/reconcile`,
-        { resourceSnapshot: args.resourceSnapshot },
+        { resourceSnapshot: args.resourceSnapshot, ...(args.externalMerge === true ? { externalMerge: true } : {}) },
+        Math.max(deps.requestTimeoutMs ?? CP_TIMEOUT_MS, MERGE_DECISION_TIMEOUT_MS),
       );
       return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
     },

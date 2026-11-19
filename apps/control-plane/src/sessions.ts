@@ -298,6 +298,7 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type WorkflowDecisionRevocationReason,
   type CreateWorkflowDecisionRequest,
   type ConsumeWorkflowDecisionRequest,
+  type ReconcileWorkflowDecisionRequest,
   type ResolveWorkflowDecisionRequest,
   type WithdrawWorkflowDecisionRequest,
   type CreateOwnerDecisionRequest,
@@ -338,6 +339,7 @@ import {
   type SessionStopConfirmation,
   type WorkflowDecisionResumeState,
   type DecisionOccurrenceRecord,
+  FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS,
 } from "./db.js";
 import { questionPolicyAnswers } from "./question-policy.js";
 import type { SessionEvent } from "@wollipog/protocol";
@@ -477,6 +479,8 @@ export const GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS = 45_000;
 export const GITLAB_MERGE_CLOSURES_TIMEOUT_MS = 40_000;
 /** #4067: one GraphQL read (30s), an origin check and a push (60s each), or a `gh pr merge` (30s). */
 export const FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS = 120_000;
+const LIFECYCLE_MERGE_RECHECK_MS = 60_000;
+const LIFECYCLE_MERGE_CHECK_WINDOW_MS = 24 * 60 * 60_000;
 
 /** A runner's refusal summary, kept bounded and single-line on the decision. */
 function boundedForgeSummary(value: unknown): string {
@@ -6963,6 +6967,8 @@ export class SessionsService {
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
     this.expireAutomationCreationDecisions(now);
+    void this.retryLifecycleMergeSettlements(now, runnerId).catch((error: unknown) =>
+      this.log.warn(`lifecycle merge observation sweep deferred: ${String(error)}`));
     this.maintainArchivedWorktreeRemoval(now, runnerId);
     for (const campaignId of this.db.listOrchestratorCampaignSessionIds(runnerId)) {
       void this.reconcileUncertainIssueClosures(campaignId).catch(() => this.log.warn(`Issue closure recovery is pending for ${campaignId}`));
@@ -16905,18 +16911,24 @@ export class SessionsService {
   async reconcileWorkflowDecision(
     sessionId: string,
     occurrenceId: string,
-    request: Pick<ConsumeWorkflowDecisionRequest, "resourceSnapshot">,
+    request: ReconcileWorkflowDecisionRequest,
     canAccess: (sessionId: string) => boolean = () => true,
   ): Promise<ServiceResult<WorkflowDecisionView>> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
-    if (decision.status === "superseded" && decision.supersededBy) {
+    if (request?.externalMerge !== undefined && request.externalMerge !== true) {
+      return fail("externalMerge must be true when supplied", 400);
+    }
+    const externalMerge = request?.externalMerge === true;
+    const superseded = !externalMerge && decision.status === "superseded" &&
+      this.db.reconcilableSupersededMerge(occurrenceId) !== null;
+    if (decision.status === "superseded" && decision.supersededBy && !superseded) {
       return { ok: false, status: 409, errorDetails: { code: "workflow_decision_superseded", supersededBy: decision.supersededBy },
         error: `workflow decision ${occurrenceId} was superseded by workflow decision ${decision.supersededBy}; ` +
           "it is settled and has nothing left to reconcile" };
     }
-    if (decision.status !== "approved" && decision.status !== "retired" &&
-        !this.db.isRecoverableWorkflowDecisionActionRevocation(sessionId, occurrenceId)) {
+    if (decision.status !== "approved" && (externalMerge || (!superseded && decision.status !== "retired" &&
+        !this.db.isRecoverableWorkflowDecisionActionRevocation(sessionId, occurrenceId)))) {
       return fail(`workflow decision cannot be reconciled from ${decision.status} state`, 409);
     }
     const normalized = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot);
@@ -16946,16 +16958,32 @@ export class SessionsService {
     const command = canonicalPrMergeEnqueueCommand(normalized.data);
     const admission = decision.actionAdmission;
     const action: WorkflowDecisionAction = { kind: "pr_merge_enqueue", command };
-    if (!admission || admission.kind !== action.kind || admission.command !== command ||
+    if (admission && (admission.kind !== action.kind || admission.command !== command ||
         admission.commandDigest !== auditDigest(action) || !Number.isSafeInteger(admission.armedAt) ||
-        admission.armedAt < 1) {
+        admission.armedAt < 1)) {
       return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     }
+    if (externalMerge) {
+      const observation = await this.readMergeSettlementObservation(decision, normalized.data);
+      if (observation?.state !== "merged" || observation.headSha !== normalized.data.headSha ||
+          observation.mergedAt === undefined || decision.resolvedAt === undefined ||
+          observation.mergedAt <= decision.resolvedAt) {
+        return fail("the forge must prove that the approved head merged after the approval", 409);
+      }
+      if (!this.mergeSettlementAuthority(decision, true, canAccess)) {
+        return fail("workflow decision authority or ancestry changed during reconciliation", 409);
+      }
+      const consumed = this.consumeForgeAttestedMerge(decision, normalized.data, { forgeHeadSha: observation.headSha }, true);
+      if (!consumed) return fail("workflow action proof was already used or the decision changed", 409);
+      this.retireResumeConsumedByRequester(consumed, Date.now());
+      return ok(this.withMergeReviewEvidence(consumed));
+    }
+    if (!admission) return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     // An enqueue Wollipog ran itself left no provider receipt in any harness, so the forge settles it.
     if (decision.retirement || child.driver === "claude-code" || this.wollipogMayHaveEnqueued(decision)) {
       const proven = await this.forgeAttestedMergeProof(child, decision, normalized.data);
       if (!proven.ok) return fail(proven.error!, 409);
-      const current = this.forgeAttestedMergeAuthority(decision, true, canAccess);
+      const current = this.mergeSettlementAuthority(decision, true, canAccess);
       if (!current) return fail("workflow decision authority or ancestry changed during reconciliation", 409);
       const consumed = this.consumeForgeAttestedMerge(decision, normalized.data, proven.data!);
       if (!consumed) return fail("workflow action proof was already used or the decision changed", 409);
@@ -17046,6 +17074,7 @@ export class SessionsService {
       admission.commandDigest,
       receiptDigest,
       now,
+      { recoverSuperseded: superseded },
     );
     if (!reconciled) return fail("workflow action proof was already used or the decision changed", 409);
     const consumed = reconciled.decision;
@@ -18260,6 +18289,7 @@ export class SessionsService {
 
   private revokeWorkflowDecision(
     decision: WorkflowDecisionView, cause: WorkflowDecisionRevocationCause, oweRestartNotice = false, rationale?: string,
+    scheduleMergeCheck = false,
   ): void {
     // A caller may hold a decision it read before an await. One that settled meanwhile (withdrawn,
     // consumed or resolved) keeps its own record: a later refusal must not audit or report it again
@@ -18268,9 +18298,14 @@ export class SessionsService {
     if (current?.status !== "pending" && current?.status !== "approved") return;
     const now = Date.now();
     const controllerBefore = this.db.getSession(decision.controllingSessionId);
-    this.db.markWorkflowDecisionRevoked(decision.occurrenceId, now, oweRestartNotice);
+    const mergeCheck = scheduleMergeCheck && current.status === "approved" ? {
+      nextAt: now + LIFECYCLE_MERGE_RECHECK_MS,
+      expiresAt: now + LIFECYCLE_MERGE_CHECK_WINDOW_MS,
+      audit: () => this.recordWorkflowDecisionRevocation(current, cause, now, rationale),
+    } : undefined;
+    this.db.markWorkflowDecisionRevoked(decision.occurrenceId, now, oweRestartNotice, false, mergeCheck);
     this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
-    this.recordWorkflowDecisionRevocation(current, cause, now, rationale);
+    if (!mergeCheck) this.recordWorkflowDecisionRevocation(current, cause, now, rationale);
     this.hub.sessionChangedById(decision.sessionId);
     this.publishCampaignAttentionTransition(controllerBefore);
   }
@@ -18812,11 +18847,12 @@ export class SessionsService {
     if (pause && pause.resumedAt === undefined && pause.stoppedSessionIds.includes(sessionId)) return;
     const child = this.db.getSession(sessionId);
     for (const decision of this.db.unconsumedWorkflowDecisionsForSession(sessionId)) {
-      const settle = child ? this.forgeSettlesArmedMerge(child, decision) : false;
+      const settle = child && decision.authority === "orchestrator" &&
+        FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS.includes(actorId) && this.forgeSettlesArmedMerge(child, decision);
       this.revokeWorkflowDecision(decision, {
         reason: actorId === "session-restarted" ? "session_restarted" : "session_ended", systemId: actorId,
-      }, actorId === "session-restarted");
-      if (settle) void this.settleArmedMergeFromForge(child!, decision);
+      }, actorId === "session-restarted", undefined, Boolean(settle));
+      if (settle) void this.settleArmedMergeFromForge(child, decision);
     }
     // A child that already reads terminal was stopped provisionally, which kept any in-flight
     // resume for the runner's return (#1827). This end is final, so that resume ends too; a live
@@ -18865,7 +18901,7 @@ export class SessionsService {
         WorkflowDecisionResourceSnapshot, { category: "pr_merge" }
       >;
       const proven = await this.forgeAttestedMergeProof(child, decision, snapshot);
-      if (proven.ok && this.forgeAttestedMergeAuthority(decision, false)) {
+      if (proven.ok && this.mergeSettlementAuthority(decision, false)) {
         this.consumeForgeAttestedMerge(decision, snapshot, proven.data!);
       }
     } catch (error) {
@@ -18875,6 +18911,47 @@ export class SessionsService {
     } finally {
       this.forgeMergeSettlements.delete(decision.occurrenceId);
     }
+  }
+
+  private async readMergeSettlementObservation(
+    decision: WorkflowDecisionView, snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
+  ) {
+    const ref = { repository: snapshot.repository, number: snapshot.pullRequest };
+    const campaign = this.db.campaignAncestryRoot(decision.sessionId);
+    if (typeof campaign !== "object" || !campaign.hasPolicy || !this.campaignForgeReadNow) return undefined;
+    const results = await this.campaignForgeReadNow(campaign.id, [ref]);
+    return results?.find((result) => forgeRefKey(result.ref) === forgeRefKey(ref))?.observation;
+  }
+
+  /** Retry a stopped child's read only. The next attempt and deadline survive a restart. */
+  async retryLifecycleMergeSettlements(now = Date.now(), runnerId?: string): Promise<void> {
+    if (!this.campaignForgeReadNow) return;
+    const attempts: Promise<void>[] = [];
+    for (const { occurrenceId, expiresAt } of this.db.dueLifecycleMergeChecks(now, runnerId)) {
+      if (this.forgeMergeSettlements.size >= 16) break;
+      if (this.forgeMergeSettlements.has(occurrenceId) ||
+          !this.db.deferLifecycleMergeCheck(occurrenceId, now, now + LIFECYCLE_MERGE_RECHECK_MS)) continue;
+      const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+      const snapshot = decision?.resourceSnapshot;
+      if (!decision || snapshot?.category !== "pr_merge" || !this.mergeSettlementAuthority(decision, false) ||
+          !this.db.isRecoverableWorkflowDecisionActionRevocation(decision.sessionId, occurrenceId, FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS)) {
+        this.db.finishLifecycleMergeCheck(occurrenceId);
+        continue;
+      }
+      this.forgeMergeSettlements.add(occurrenceId);
+      attempts.push(this.readMergeSettlementObservation(decision, snapshot).then((observation) => {
+        if (!observation) return;
+        if (observation.state !== "open" || observation.headSha !== snapshot.headSha) {
+          if (Date.now() < expiresAt && observation.state === "merged" && observation.headSha === snapshot.headSha &&
+              this.mergeSettlementAuthority(decision, false)) {
+            this.consumeForgeAttestedMerge(decision, snapshot, { forgeHeadSha: observation.headSha });
+          }
+          this.db.finishLifecycleMergeCheck(occurrenceId);
+        }
+      }).catch((error: unknown) => this.log.warn(`lifecycle merge observation for ${occurrenceId} failed: ${String(error)}`))
+        .finally(() => this.forgeMergeSettlements.delete(occurrenceId)));
+    }
+    await Promise.all(attempts);
   }
 
   /** Whether Wollipog itself may have run this armed enqueue (#4067): its own record shows an
@@ -18989,7 +19066,7 @@ export class SessionsService {
       this.evaluateWorkflowDecisionAuthority(parent, policy, decision.sessionId, decision.resourceSnapshot).effectiveOwner === "orchestrator";
   }
 
-  private forgeAttestedMergeAuthority(
+  private mergeSettlementAuthority(
     decision: WorkflowDecisionView,
     requireLive: boolean,
     canAccess: (sessionId: string) => boolean = () => true,
@@ -18997,7 +19074,7 @@ export class SessionsService {
     const child = this.db.getSession(decision.sessionId);
     const parent = this.db.getSession(decision.controllingSessionId);
     const policy = parent?.parentControlPolicy;
-    if (!child || !parent || !policy || (!decision.retirement && child.driver !== "claude-code" && !this.wollipogMayHaveEnqueued(decision)) ||
+    if (!child || !parent || !policy ||
         (requireLive && (isTerminal(child.status) || isTerminal(parent.status))) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
         !this.workflowDecisionRelationship(parent.id, child.id) ||
@@ -19015,6 +19092,7 @@ export class SessionsService {
     decision: WorkflowDecisionView,
     snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
     proof: { forgeHeadSha: string },
+    externalMerge = false,
   ): WorkflowDecisionView | null {
     // One merged head is one action: the same forge fact cannot settle a second occurrence in any
     // session.
@@ -19028,14 +19106,16 @@ export class SessionsService {
     const reconciled = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(
       decision.sessionId,
       decision.occurrenceId,
-      decision.actionAdmission!.commandDigest,
+      decision.actionAdmission?.commandDigest ?? auditDigest({ kind: "pr_merge_enqueue",
+        command: canonicalPrMergeEnqueueCommand(snapshot) })!,
       receiptDigest,
       now,
-      { forgeAttested: true },
+      { forgeAttested: true, externalMerge, recoverSuperseded: decision.status === "superseded" },
     );
     if (!reconciled) return null;
     const consumed = reconciled.decision;
-    const actor: GovernanceActor = { kind: "system", id: "workflow-decision-forge-reconciliation" };
+    const actor: GovernanceActor = { kind: "system", id: externalMerge
+      ? "workflow-decision-external-merge-reconciliation" : "workflow-decision-forge-reconciliation" };
     this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
     this.settleSupersededArmedMerges(reconciled.supersededOccurrenceIds, actor, now);
     this.hub.sessionChangedById(consumed.sessionId);

@@ -476,6 +476,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v269 control plane withdraws a pending or approved, unconsumed workflow decision (#3917). */
   workflowDecisionWithdrawal: 269,
   workflowDecisionRetirement: 369,
+  workflowDecisionExternalMergeReconciliation: 390,
   /** v281 owner decisions (#4064): a Full Control root's typed question for its campaign's owner,
    * and a one-way handoff of an Orchestrator-owned occurrence to that owner. Checked against the
    * root's runner by the control plane and against the control plane by the runner. */
@@ -5528,6 +5529,12 @@ export interface ConsumeWorkflowDecisionRequest {
   /** Required for PR merge. The approved grant remains unconsumed until this exact command's
    * correlated provider decision evidence arrives; other decision categories consume directly. */
   action?: WorkflowDecisionAction;
+}
+
+export interface ReconcileWorkflowDecisionRequest {
+  resourceSnapshot: WorkflowDecisionResourceSnapshot;
+  /** Observe a merge completed outside the session without arming or running an enqueue. */
+  externalMerge?: true;
 }
 
 /** v269 (#3917): retire one pending or approved, unconsumed and unarmed occurrence. It never

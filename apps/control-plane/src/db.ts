@@ -1157,6 +1157,14 @@ CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resource
   ON workflow_decisions(session_id, category, resource_key, created_at);
 CREATE INDEX IF NOT EXISTS idx_workflow_decisions_automation_expiry
   ON workflow_decisions(category, status) WHERE category='automation_creation' AND status IN ('pending','approved');
+-- A lifecycle revocation keeps a bounded, read-only forge observation alive after the child ends.
+CREATE TABLE IF NOT EXISTS workflow_merge_settlement_checks (
+  occurrence_id TEXT PRIMARY KEY REFERENCES workflow_decisions(occurrence_id) ON DELETE CASCADE,
+  next_check_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_merge_settlement_due ON workflow_merge_settlement_checks(next_check_at);
+CREATE INDEX IF NOT EXISTS idx_workflow_merge_settlement_expiry ON workflow_merge_settlement_checks(expires_at);
 -- Durable post-commit work: lifecycle callbacks can send prompts and open their own transactions.
 CREATE TABLE IF NOT EXISTS automation_expiration_effects (
   occurrence_id TEXT PRIMARY KEY,
@@ -25921,7 +25929,8 @@ export class ControlPlaneDb {
   /** `oweRestartNotice` records, in the revocation's own transaction, the notice a restart owes
    * the child for this occurrence (#1861): no crash can leave the revocation without it, and it
    * stays owed whatever the decision's status becomes later (a forge-settled merge, say). */
-  markWorkflowDecisionRevoked(occurrenceId: string, now: number, oweRestartNotice = false, stopResumeDelivery = false): WorkflowDecisionView | null {
+  markWorkflowDecisionRevoked(occurrenceId: string, now: number, oweRestartNotice = false, stopResumeDelivery = false,
+    mergeCheck?: { nextAt: number; expiresAt: number; audit: () => void }): WorkflowDecisionView | null {
     // One transaction, so a restart can never leave a revoked decision with its resume still
     // waiting to be sent.
     return this.atomic(() => {
@@ -25941,9 +25950,34 @@ export class ControlPlaneDb {
            WHERE occurrence_id=?`,
         ).run(prior.status, now, now, occurrenceId);
       }
+      if (revoked && prior?.status === "approved" && mergeCheck) {
+        this.stmt(`INSERT INTO workflow_merge_settlement_checks (occurrence_id, next_check_at, expires_at) VALUES (?,?,?)`)
+          .run(occurrenceId, mergeCheck.nextAt, mergeCheck.expiresAt);
+        mergeCheck.audit();
+      }
       this.revokeUiEvidenceReviewReceipts(occurrenceId, now);
       return this.workflowDecisionByOccurrence(occurrenceId);
     });
+  }
+
+  dueLifecycleMergeChecks(now: number, runnerId?: string): Array<{ occurrenceId: string; expiresAt: number }> {
+    this.stmt(`DELETE FROM workflow_merge_settlement_checks WHERE expires_at<=?`).run(now);
+    return this.stmt(`SELECT checks.occurrence_id AS occurrenceId, checks.expires_at AS expiresAt
+      FROM workflow_merge_settlement_checks checks
+      JOIN workflow_decisions d ON d.occurrence_id=checks.occurrence_id
+      JOIN sessions s ON s.id=d.session_id
+      WHERE checks.next_check_at<=? AND d.status='revoked' AND (? IS NULL OR s.runner_id=?)
+      ORDER BY checks.next_check_at, checks.occurrence_id LIMIT 16`).all(now, runnerId ?? null, runnerId ?? null) as
+      Array<{ occurrenceId: string; expiresAt: number }>;
+  }
+
+  deferLifecycleMergeCheck(occurrenceId: string, now: number, nextAt: number): boolean {
+    return Number(this.stmt(`UPDATE workflow_merge_settlement_checks SET next_check_at=?
+      WHERE occurrence_id=? AND next_check_at<=? AND expires_at>?`).run(nextAt, occurrenceId, now, now).changes) === 1;
+  }
+
+  finishLifecycleMergeCheck(occurrenceId: string): void {
+    this.stmt(`DELETE FROM workflow_merge_settlement_checks WHERE occurrence_id=?`).run(occurrenceId);
   }
 
   /** Record one delivery. Redelivering the same item replaces its receipt and restarts its expiry. */
@@ -26595,6 +26629,33 @@ export class ControlPlaneDb {
       (scope.scopeRevokedDecisions ?? scope.resourceSnapshot.affectedDecisions).includes(decision.occurrenceId) ? scope : null;
   }
 
+  /** A request can supersede an armed approval without issuing a later admission. A merge receipt
+   * can still belong to the original occurrence while every later same-head request is unarmed. */
+  reconcilableSupersededMerge(occurrenceId: string): { pendingReplacement: string | null } | null {
+    const row = this.stmt(`WITH original AS (
+        SELECT rowid AS serial, * FROM workflow_decisions
+        WHERE occurrence_id=? AND category='pr_merge' AND status='superseded'
+          AND action_kind='pr_merge_enqueue' AND action_command_digest IS NOT NULL
+          AND consumed_at IS NULL AND retirement IS NULL
+      ), replacements AS (
+        SELECT later.rowid AS serial, later.occurrence_id, later.status, later.action_kind
+        FROM original JOIN workflow_decisions later ON later.session_id=original.session_id
+        WHERE later.category='pr_merge' AND later.resource_key=original.resource_key AND later.rowid>original.serial
+          AND later.policy_revision=original.policy_revision
+          AND lower(json_extract(later.resource_snapshot,'$.repository'))=lower(json_extract(original.resource_snapshot,'$.repository'))
+          AND json_extract(later.resource_snapshot,'$.pullRequest')=json_extract(original.resource_snapshot,'$.pullRequest')
+          AND json_extract(later.resource_snapshot,'$.headSha')=json_extract(original.resource_snapshot,'$.headSha')
+      ) SELECT (SELECT occurrence_id FROM replacements WHERE status IN ('pending','approved')
+        ORDER BY serial DESC LIMIT 1) AS pendingReplacement FROM original
+      WHERE EXISTS (SELECT 1 FROM replacements WHERE occurrence_id=original.superseded_by)
+        AND NOT EXISTS (SELECT 1 FROM replacements WHERE action_kind='pr_merge_enqueue' OR status='consumed')
+        AND NOT EXISTS (SELECT 1 FROM workflow_decisions admitted
+          WHERE admitted.session_id=original.session_id AND admitted.category='pr_merge' AND admitted.rowid>original.serial
+            AND admitted.action_command_digest=original.action_command_digest)`)
+      .get(occurrenceId) as { pendingReplacement: string | null } | undefined;
+    return row ?? null;
+  }
+
   /** Atomically claim one reconciliation proof and consume either a live approval or the narrowly
    * auditable lifecycle-revoked state above. The eligibility check is repeated under the write
    * lock so restart/revocation races cannot widen recovery. The proof shows the exact approved head
@@ -26607,32 +26668,44 @@ export class ControlPlaneDb {
     commandDigest: string,
     receiptDigest: string,
     now: number,
-    options: { forgeAttested?: boolean } = {},
+    options: { forgeAttested?: boolean; externalMerge?: boolean; recoverSuperseded?: boolean } = {},
   ): { decision: WorkflowDecisionView; supersededOccurrenceIds: string[] } | null {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const decision = this.workflowDecisionByOccurrence(occurrenceId);
+      const recovery = options.recoverSuperseded && decision?.status === "superseded"
+        ? this.reconcilableSupersededMerge(occurrenceId) : null;
       const eligible = decision?.sessionId === sessionId &&
-        (decision.status === "approved" || decision.status === "retired" && Boolean(decision.retirement) ||
+        (decision.status === "approved" || (!options.externalMerge && (recovery !== null ||
+          decision.status === "retired" && Boolean(decision.retirement) ||
           this.isRecoverableWorkflowDecisionActionRevocation(
             sessionId,
             occurrenceId,
             options.forgeAttested ? FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS : RECOVERABLE_ACTION_REVOCATION_ACTORS,
-          ));
+          ))));
+      const unarmedExternal = options.externalMerge === true && decision?.status === "approved" && !decision.actionAdmission;
       // A provider receipt names one session's command; a forge merge is one fact for every session.
       const claimedElsewhere = options.forgeAttested === true && this.stmt(
         "SELECT 1 FROM workflow_decision_action_receipts WHERE receipt_digest=? LIMIT 1",
       ).get(receiptDigest) !== undefined;
-      if (!eligible || decision?.actionAdmission?.commandDigest !== commandDigest || claimedElsewhere ||
+      // A restarted child can record its re-enqueue through a provider receipt before a delayed
+      // forge read observes the same head. Keep the revoked occurrence terminal in that case.
+      const newerEnqueueRecorded = options.forgeAttested === true && decision?.status === "revoked" && this.stmt(`
+        SELECT 1 FROM workflow_decisions earlier JOIN workflow_decisions later ON later.session_id=earlier.session_id
+        WHERE earlier.occurrence_id=? AND later.category='pr_merge' AND later.status='consumed'
+          AND later.action_command_digest=? AND later.rowid>earlier.rowid LIMIT 1`).get(occurrenceId, commandDigest) !== undefined;
+      if (!eligible || (!unarmedExternal && decision?.actionAdmission?.commandDigest !== commandDigest) ||
+          claimedElsewhere || newerEnqueueRecorded ||
           !this.claimWorkflowDecisionActionReceipt(sessionId, receiptDigest, commandDigest, now)) {
         this.db.exec("COMMIT");
         return null;
       }
       const result = this.stmt(
-        `UPDATE workflow_decisions SET status='consumed', consumed_at=?
-         WHERE occurrence_id=? AND session_id=? AND status IN ('approved','revoked')
-           AND action_command_digest=?`,
-      ).run(now, occurrenceId, sessionId, commandDigest);
+        `UPDATE workflow_decisions SET status='consumed', consumed_at=?, superseded_by=NULL
+         WHERE occurrence_id=? AND session_id=? AND status=?
+           AND action_command_digest IS ?`,
+      ).run(now, occurrenceId, sessionId, decision!.status === "retired" ? "revoked" : decision!.status,
+        unarmedExternal ? null : commandDigest);
       if (Number(result.changes) !== 1) {
         this.db.exec("ROLLBACK");
         return null;
@@ -26646,12 +26719,14 @@ export class ControlPlaneDb {
         .map((row) => row.occurrence_id);
       const supersede = this.stmt(
         `UPDATE workflow_decisions SET status='superseded', resolved_at=?, superseded_by=?
-         WHERE occurrence_id=? AND (status='approved' OR status='revoked' AND retirement IS NOT NULL) AND consumed_at IS NULL`,
+         WHERE occurrence_id=? AND (status IN ('pending','approved') OR status='revoked' AND retirement IS NOT NULL) AND consumed_at IS NULL`,
       );
+      if (recovery?.pendingReplacement) siblings.push(recovery.pendingReplacement);
       for (const sibling of siblings) {
         supersede.run(now, occurrenceId, sibling);
         this.retireWorkflowDecisionResume(sibling, now);
       }
+      this.finishLifecycleMergeCheck(occurrenceId);
       this.db.exec("COMMIT");
       return { decision: this.workflowDecisionByOccurrence(occurrenceId)!, supersededOccurrenceIds: siblings };
     } catch (error) {
