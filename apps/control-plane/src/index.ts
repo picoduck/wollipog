@@ -774,8 +774,12 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   const sessionId = typeof params.id === "string" && routePath.startsWith("/api/sessions/") ? params.id
     : typeof params.sessionId === "string" ? params.sessionId : null;
   if (sessionId && principal.kind === "agent") {
+    const credentialSessionId = principal.credentialSessionId;
     const credentialTargetError = agentCredentialSessionTargetError(routePath, principal, sessionId,
-      Boolean(principal.credentialSessionId && db.isSessionDescendant(principal.credentialSessionId, sessionId)));
+      Boolean(credentialSessionId && db.isSessionDescendant(credentialSessionId, sessionId)),
+      () => Boolean(credentialSessionId && req.method === "POST" &&
+        (routePath !== "/api/sessions/:id/archive" || (req.body as { archived?: unknown } | null)?.archived === true) &&
+        db.reviewSessions.isTerminalForRequester(sessionId, credentialSessionId)));
     if (credentialTargetError) return { statusCode: 404, error: "session not found" };
   }
   if (sessionId && !db.canAccessSession(principal, sessionId)) {

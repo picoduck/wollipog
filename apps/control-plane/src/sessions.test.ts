@@ -19726,6 +19726,29 @@ test("legacy reconnect inventory retries a durable stop and clears it only when 
   assert.equal(db.hasSessionStopIntent(id), false);
 });
 
+test("restart reports the initial prompt it leaves behind after stopping before admission", () => {
+  for (const mode of ["waiting", "unconfirmed-stop", "already-started", "no-prompt"] as const) {
+    const { db, hub, svc } = makeHarness();
+    try {
+      const id = seedSession(svc, hub, mode === "no-prompt" ? {} : { prompt: "Initial assignment" });
+      assert.equal(hub.sentOfType("start_session").at(-1)?.initialPrompt,
+        mode === "no-prompt" ? undefined : "Initial assignment");
+      if (mode === "already-started") db.appendEvent(id, { kind: "user_message", text: "Initial assignment" }, Date.now());
+      svc.onSessionStatus(id, "queued", undefined, undefined, RUNNER_ID, undefined, {
+        kind: "agent_quota", description: "Provider slots are full", usedUnits: 1, limitUnits: 1, requiredUnits: 1,
+      });
+      assert.ok(svc.stop(id).ok);
+      if (mode !== "unconfirmed-stop") svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+      const restarted = svc.restart(id);
+      assert.equal(restarted.status, 200, restarted.error);
+      assert.equal(hub.sentOfType("start_session").at(-1)?.initialPrompt, undefined);
+      if (mode === "waiting" || mode === "unconfirmed-stop") {
+        assert.match(restarted.data?.initialPromptWarning ?? "", /initial prompt.*resend/iu);
+      } else assert.equal(restarted.data?.initialPromptWarning, undefined, mode);
+    } finally { db.close(); }
+  }
+});
+
 test("restart retains a durable stop until correlated runner evidence proves replacement", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);

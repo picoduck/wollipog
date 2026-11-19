@@ -385,6 +385,104 @@ function sessionSnapshot(id: string) {
   };
 }
 
+test("only the requester can stop and archive its terminal review sessions", { timeout: 45_000 }, async (t) => {
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-review-cleanup-"));
+  const databasePath = join(temp, "control-plane.db");
+  const port = await reservePort();
+  const seed = ControlPlaneDb.open(databasePath);
+  const headSha = "a".repeat(40);
+  const findings = [{ severity: "high", blocking: true, file: "src/a.ts", line: 3, title: "Wrong result",
+    scenario: "Calling the fixture", evidence: "The test fails", verify: "Run the fixture test" }];
+  const output = JSON.stringify({ schema_version: 2, reviewed_head: headSha, vote: "DOWNVOTE", summary: "One blocker",
+    findings, examined_changed_files: ["src/a.ts"], not_examined_changed_files: [], context_files_examined: [],
+    commands_run: [], verification_requests: [] });
+  try {
+    seed.registerRunner({ runnerId: "r", hostname: "fixture", os: "linux", version: "fixture", agents: [], workspaces: [] },
+      Date.now(), PROTOCOL_VERSION);
+    for (const id of ["requester", "unrelated", "review-to-stop", "review-to-archive", "active-review"]) {
+      seed.createSession({ id, runnerId: "r", workspaceId: null, agentId: null, title: id, useWorktree: false,
+        driver: "codex-app-server", config: {}, now: Date.now() });
+      if (id === "requester" || id === "unrelated") {
+        assert.equal(seed.setAgentControlCredential(id, "r", hashToken(`token-${id}`), Date.now()), true);
+        continue;
+      }
+      seed.reviewSessions.record({ reviewSessionId: id, requesterSessionId: "requester", runnerId: "r",
+        pullRequest: { repository: "example/repo", number: 42 }, headSha, reviewer: "claude-code" }, Date.now());
+      seed.linkReviewSession(id);
+      if (id === "active-review") continue;
+      assert.ok(seed.reviewSessions.accept("r", { type: "review_session_update", sessionId: id, state: "completed", output,
+        round: { epoch: 1, round: 1, attempt: 1, mode: "full", baseSha: "b".repeat(40), scopeFiles: ["src/a.ts"] },
+        verdict: { valid: true, consumed: true, effectiveVote: "DOWNVOTE", failureClass: null, validationErrors: [] },
+      }, Date.now()));
+      seed.updateSessionStatus(id, "stopped", Date.now());
+    }
+  } finally { seed.close(); }
+
+  let logs = "";
+  const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
+    cwd: REPO_ROOT,
+    env: { ...process.env, CONTROL_PLANE_HOST: "127.0.0.1", CONTROL_PLANE_PORT: String(port),
+      CONTROL_PLANE_DB: databasePath, CONTROL_PLANE_TOKEN, CONTROL_PLANE_USAGE_PRICING_URL: "off" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout?.on("data", (chunk) => { logs += chunk; });
+  child.stderr?.on("data", (chunk) => { logs += chunk; });
+  t.after(async () => { await stopChild(child); rmSync(temp, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${port}`;
+  await waitForHealth(base, child, () => logs);
+  const live = ControlPlaneDb.attach(databasePath);
+  try {
+    for (const id of ["requester", "unrelated", "review-to-stop", "active-review"]) {
+      live.updateSessionStatus(id, "running", Date.now());
+    }
+  } finally { live.close(); }
+
+  const call = (actor: string, path: string, method = "GET", body?: object) => fetchWithBearer(
+    `${base}/api/sessions${path}`, `token-${actor}`, {
+      method, headers: { [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: actor,
+        ...(body ? { "content-type": "application/json" } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+  const reviewPath = "/requester/review-sessions";
+  const readReview = () => call("requester", `${reviewPath}/review-to-archive`);
+  const readBefore = await readReview();
+  assert.equal(readBefore.status, 200);
+  const before = await readBefore.json();
+  assert.equal(before.terminal, true);
+  assert.equal(before.continuation, "pending");
+  assert.equal(before.verdict.valid, true);
+  assert.deepEqual(before.findings, findings);
+  for (const actor of ["requester", "unrelated"]) {
+    const read = await call(actor, "/review-to-archive");
+    assert.equal(read.status, 200, "both credentials can read the review Session");
+    const { commandPermissions } = (await read.json()).session;
+    assert.equal(commandPermissions.stop.allowed, actor === "requester");
+    assert.equal(commandPermissions.archive.allowed, actor === "requester");
+    assert.equal(commandPermissions.restart.allowed, false);
+    assert.equal(commandPermissions.unarchive.allowed, false);
+  }
+  assert.equal((await call("unrelated", "/review-to-stop/stop", "POST")).status, 404);
+  assert.equal((await call("unrelated", "/review-to-archive/archive", "POST", { archived: true })).status, 404);
+  assert.equal((await call("requester", "/active-review/stop", "POST")).status, 404);
+  assert.equal((await call("requester", "/active-review/archive", "POST", { archived: true })).status, 404);
+  assert.equal((await call("requester", "/review-to-stop/restart", "POST")).status, 404);
+
+  const stopped = await call("requester", "/review-to-stop/stop", "POST");
+  assert.equal(stopped.status, 200, "the original requester can stop a terminal review's still-running Session");
+  assert.equal((await stopped.json()).status, "stopped");
+  const archived = await call("requester", "/review-to-archive/archive", "POST", { archived: true });
+  assert.equal(archived.status, 200);
+  assert.equal((await archived.json()).archived, true);
+  assert.equal((await call("requester", "/review-to-archive/archive", "POST", { archived: false })).status, 404);
+  const after = await readReview();
+  assert.equal(after.status, 200);
+  assert.deepEqual(await after.json(), before, "archival does not change the verdict, findings or pending continuation");
+  const reviews = await call("requester", reviewPath);
+  assert.equal(reviews.status, 200);
+  assert.deepEqual((await reviews.json()).reviews.find((review: { reviewSessionId: string }) =>
+    review.reviewSessionId === "review-to-archive"), before);
+});
+
 function runnerRegistration(runnerId: string, token: string) {
   return {
     type: "register",

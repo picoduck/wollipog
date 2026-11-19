@@ -1032,6 +1032,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   worktree_recovery TEXT,
   queue_hold TEXT,
   capacity_wait TEXT,
+  initial_prompt_state TEXT CHECK (initial_prompt_state IN ('submitted','interrupted')),
   status         TEXT NOT NULL DEFAULT 'queued',
   board_column   TEXT,
   use_worktree   INTEGER NOT NULL DEFAULT 0,
@@ -4820,6 +4821,8 @@ export class HourlyUsageUnavailableError extends RangeError {
 }
 
 export interface NewSessionInput {
+  /** A direct launch includes an initial message. Retain only its presence, never its content. */
+  initialPromptSubmitted?: boolean;
   /** Server-validated origin reserved alongside the Assistant command receipt. */
   assistantWorkOrigin?: {connectionId: string; commandId: string};
   /** Server-owned campaign fields and the actual implementing harness, captured atomically. */
@@ -7991,6 +7994,7 @@ export class ControlPlaneDb {
       "worktree_recovery TEXT",
       // Protocol v187: a runner-reported prompt held behind a handoff barrier (#1651).
       "queue_hold TEXT",
+      "initial_prompt_state TEXT CHECK (initial_prompt_state IN ('submitted','interrupted'))",
       // Secret-free ACP MCP environment references and explicit directory selections.
       "acp_session_context TEXT",
       // Protocol v60 immutable launch placement. NULL identifies legacy sessions.
@@ -19409,8 +19413,8 @@ export class ControlPlaneDb {
            (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, status, use_worktree, archived, creation_actor,
              driver, model, effort, service_tier, permission_mode, parent_control, parent_control_policy,
              parent_control_policy_revision, orchestrator_policy, session_role, workspace_path, acp_session_context, created_at, updated_at,
-             archived_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             archived_at, initial_prompt_state)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -19441,6 +19445,7 @@ export class ControlPlaneDb {
         input.now,
         input.now,
         input.archived ? input.now : null,
+        input.initialPromptSubmitted ? "submitted" : null,
       );
       if (input.role === "assistant") {
         if (!input.assistantThreadId) throw new Error("an assistant session requires its thread");
@@ -21549,6 +21554,11 @@ export class ControlPlaneDb {
     // The overloads require provenance for `stopped`; an untyped caller still records a stop that
     // nothing has confirmed rather than one that claims runner evidence it never had.
     const stopWrite = stop ?? { cause: "unrecorded" };
+    if (effectiveStatus === "stopped" && stopWrite.cause === "requested" &&
+        (current?.status === "queued" || current?.status === "starting")) {
+      this.stmt(`UPDATE sessions SET initial_prompt_state='interrupted'
+        WHERE id=? AND initial_prompt_state='submitted'`).run(id);
+    }
     this.writeSessionStopProvenance(id, current?.status, effectiveStatus, stopWrite, now);
     const restorableStop = effectiveStatus === "stopped" && sessionStopRestorable({
       cause: stopWrite.cause,
@@ -21708,6 +21718,13 @@ export class ControlPlaneDb {
   setSessionColumn(id: string, column: BoardColumn | null, now: number): void {
     this.stmt("UPDATE sessions SET board_column=?, updated_at=? WHERE id=?")
       .run(column, now, id);
+  }
+
+  /** A requested Stop interrupted startup, and we have no recorded user turn. A Stop can race
+   * provider admission, so absence of history does not prove the provider never saw the prompt. */
+  hasInterruptedInitialPrompt(id: string): boolean {
+    return Boolean(this.stmt("SELECT 1 FROM sessions WHERE id=? AND initial_prompt_state='interrupted'").get(id)) &&
+      !this.hasCompletedUserMessage(id);
   }
 
   /** Pin a session's resolved launch directory before the legacy workspace-group adapter changes
