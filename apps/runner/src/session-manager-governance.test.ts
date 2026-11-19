@@ -841,8 +841,9 @@ test("a budget trip with managed work settles idle and reconciles a killed recei
   const h = harness({ costBudgetUsd: 8 });
   try {
     h.store.patchMeta("s_governance", {
-      agentSessionId: "provider-session", env: { HOME: h.root, TMPDIR: h.root },
+      agentSessionId: "provider-session",
     });
+    h.sm.setDetachedClaudeEnvironment(() => ({ HOME: h.root, TMPDIR: h.root }));
     h.entry.client.prompt = async () => {
       (h.sm as any).onDriverBackgroundWork("s_governance", {
         state: "running", pendingTaskIds: ["job"], observedTaskIds: ["job"],
