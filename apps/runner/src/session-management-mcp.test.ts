@@ -1970,6 +1970,24 @@ test("list_sessions caps the array at 100 items", async () => {
   assert.equal(resultJson(result).sessions.length, 100);
 });
 
+test("get_session and list_sessions report the runner admission blocker and what clears it", async () => {
+  for (const [kind, guidance] of [["agent_quota", /provider slot/u], ["request_weight", /Machine owner.*capacity or weight/u]] as const) {
+    const capacityWait = { kind, description: "Codex is waiting for admission", usedUnits: 2, limitUnits: 2,
+      requiredUnits: 1, agentId: "codex" };
+    const child = { id: "s_child", title: "Child", status: "queued", capacityWait };
+    const { deps } = makeDeps((call) => ({ status: 200, body: call.url.endsWith("/sessions")
+      ? { sessions: [child, { id: "s_idle", status: "idle" }] } : { session: child } }));
+    const detail = resultJson(await callTool(deps, "get_session", { sessionId: child.id })).session;
+    const { sessions: [summary, idle] } = resultJson(await callTool(deps, "list_sessions"));
+    for (const session of [detail, summary]) {
+      const { recoveryAction, ...blocker } = session.capacityWait ?? {};
+      assert.deepEqual(blocker, capacityWait);
+      assert.match(recoveryAction, guidance);
+    }
+    assert.equal(idle.capacityWait, undefined);
+  }
+});
+
 test("get_session -> GET /api/sessions/:id", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 200, body: { session: { id: "s_9", title: "x" } } }));
   const result = await callTool(deps, "get_session", { sessionId: "s_9" });
@@ -3005,6 +3023,13 @@ test("restart_session uses the descendant restart route and refuses self", async
   assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/s_2/restart`);
   assert.equal((await callTool(deps, "restart_session", { sessionId: SELF_ID })).isError, true);
   assert.equal(calls.length, 1);
+});
+
+test("restart_session returns the initial-prompt warning in its result", async () => {
+  const initialPromptWarning = "The initial prompt was not carried forward. Resend it if it did not run before Stop.";
+  const { deps } = makeDeps(() => ({ status: 200, body: { id: "s_2", status: "starting", initialPromptWarning } }));
+  const result = resultJson(await callTool(deps, "restart_session", { sessionId: "s_2" }));
+  assert.equal(result.initialPromptWarning, initialPromptWarning);
 });
 
 test("governance policy inspection and authoring tools preserve exact validated shapes", async () => {

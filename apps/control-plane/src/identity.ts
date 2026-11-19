@@ -227,6 +227,7 @@ export function agentCredentialSessionTargetError(
   principal: AgentPrincipal,
   targetSessionId: string,
   targetIsDescendant = false,
+  canCleanUpTerminalReview?: () => boolean,
 ): string | null {
   const worktreeRoute = routePath === "/api/sessions/:id/worktrees" ||
     routePath === "/api/sessions/:id/worktrees/attach" ||
@@ -252,8 +253,10 @@ export function agentCredentialSessionTargetError(
     return null;
   }
   if (descendantMutation || (principal.orchestrator && worktreeRoute)) {
-    return principal.credentialSessionId && targetIsDescendant &&
-      targetSessionId !== principal.credentialSessionId ? null : "the session credential may manage only its descendants";
+    if (principal.credentialSessionId && targetSessionId !== principal.credentialSessionId &&
+        (targetIsDescendant || (routePath === "/api/sessions/:id/stop" || routePath === "/api/sessions/:id/archive") &&
+          canCleanUpTerminalReview?.())) return null;
+    return "the session credential may manage only its descendants";
   }
   // Evidence is attributed to the session that produced it. A credential may attach only to its own
   // row — not to a descendant, and not to any other session it can merely see — so an artifact's

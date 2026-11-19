@@ -5392,6 +5392,8 @@ export class SessionsService {
       ...(launcherUserId ? { launcherUserId } : {}),
       campaignBudgetUserLimits,
       reviewRequesterSessionId: creationContext?.review?.policy.requesterSessionId,
+      initialPromptSubmitted: !delivery && !capture && !creationContext?.review && !imageReview &&
+        Boolean(command.type === "start_session" && (command.initialPrompt || images.length)),
       id,
       parentSessionId,
       creationActor: creationContext?.defaultOwnerUserId
@@ -9046,7 +9048,7 @@ export class SessionsService {
     /** #3240: wait for a busy provider account instead of failing the launch. */
     waitForProviderHome?: boolean;
     campaignResume?: boolean;
-  } = {}): ServiceResult<SessionView> {
+  } = {}): ServiceResult<SessionView & { initialPromptWarning?: string }> {
     if (this.db.campaignPaused(sessionId) && !options.campaignResume) return fail("The campaign is paused; only its owner or scheduled resume can restart it.", 409);
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "runs once and cannot be restarted");
     if (reviewRefusal) return fail(reviewRefusal, 409);
@@ -9360,7 +9362,12 @@ export class SessionsService {
     this.hub.sessionChangedById(sessionId);
     this.publishCampaignAttentionTransition(campaignBefore);
     this.log.info(unarchived ? `session unarchived and restarted ${sessionId}` : `session restarted ${sessionId}`);
-    return ok(this.db.getSession(sessionId)!);
+    const restarted = this.db.getSession(sessionId)!;
+    if (session.status === "stopped" && this.db.hasInterruptedInitialPrompt(sessionId)) {
+      return ok({ ...restarted,
+        initialPromptWarning: "The initial prompt was not carried into this restart. Resend it if it did not run before Stop." });
+    }
+    return ok(restarted);
   }
 
   setParentControl(sessionId: string, mode: ParentControlMode): ServiceResult<SessionView> {
