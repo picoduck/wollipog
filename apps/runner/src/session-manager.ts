@@ -2053,12 +2053,18 @@ export class SessionManager {
     this.resolveDetachedClaudeEnvironment = resolveEnvironment;
   }
 
-  private claudeTaskInspectionEnvironment(meta: SessionMeta): Record<string, string> | null {
+  private claudeTaskInspectionLocation(meta: SessionMeta): { cwd: string; env: Record<string, string> } | null {
     try {
-      return this.active.get(meta.sessionId)?.launchEnv ?? {
-        ...this.resolveDetachedClaudeEnvironment(meta),
-        ...this.orchestratorTempEnvironment(meta, meta.worktreePath ?? meta.repoPath),
-        ...this.worktreeSetupEnvironmentFor(meta, meta.worktreePath),
+      const active = this.active.get(meta.sessionId);
+      if (active?.launchEnv) return { cwd: active.cwd, env: active.launchEnv };
+      const cwd = this.orchestratorLaunchDirectory(meta);
+      return {
+        cwd,
+        env: {
+          ...this.resolveDetachedClaudeEnvironment(meta),
+          ...this.worktreeSetupEnvironmentFor(meta, meta.worktreePath),
+          ...this.orchestratorTempEnvironment(meta, cwd),
+        },
       };
     } catch {
       // An unavailable configuration must not redirect inspection to a different provider home.
@@ -11438,18 +11444,23 @@ export class SessionManager {
    * Project Location writable. Native storage lives under the session row and is removed by
    * SessionStore.remove; Direct WSL uses the launcher's root-owned per-session partition. */
   async prepareOrchestratorScratch(meta: SessionMeta): Promise<string> {
-    if (!this.strictProjectIsolation(meta)) return meta.worktreePath ?? meta.repoPath;
-    if (meta.context.kind === "wsl") {
-      if (!this.runnerOwnerHash) throw new Error("Direct WSL Orchestrator scratch requires an attested runner owner");
-      return `${wslBwrapSessionRoot(this.runnerOwnerHash, providerStateKey(meta.sessionId))}/scratch`;
-    }
-    const scratch = join(this.store.sessionPath(meta.sessionId), "orchestrator-scratch");
+    const scratch = this.orchestratorLaunchDirectory(meta);
+    if (!this.strictProjectIsolation(meta) || meta.context.kind === "wsl") return scratch;
     await mkdir(scratch, { recursive: true, mode: 0o700 });
     if (!this.store.has(meta.sessionId)) {
       await rm(this.store.sessionPath(meta.sessionId), { recursive: true, force: true });
       throw new Error("session disappeared while Orchestrator scratch was being prepared");
     }
     return scratch;
+  }
+
+  private orchestratorLaunchDirectory(meta: SessionMeta): string {
+    if (!this.strictProjectIsolation(meta)) return meta.worktreePath ?? meta.repoPath;
+    if (meta.context.kind === "wsl") {
+      if (!this.runnerOwnerHash) throw new Error("Direct WSL Orchestrator scratch requires an attested runner owner");
+      return `${wslBwrapSessionRoot(this.runnerOwnerHash, providerStateKey(meta.sessionId))}/scratch`;
+    }
+    return join(this.store.sessionPath(meta.sessionId), "orchestrator-scratch");
   }
 
   /** Missing execution policy came from a pre-v144 control plane and must retain the legacy
@@ -23402,12 +23413,12 @@ export class SessionManager {
     const ids = (meta.backgroundJobs ?? []).filter((job) => !job.terminalStatus &&
       job.restartedAt === undefined).map((job) => job.id);
     if (ids.length === 0) return;
-    const env = this.claudeTaskInspectionEnvironment(meta);
-    if (!env) return;
+    const location = this.claudeTaskInspectionLocation(meta);
+    if (!location) return;
     const correlationId = randomUUID();
     this.historicalJobInspections.add(meta.sessionId);
-    void inspectClaudeBackgroundWorkInContext(meta.context, meta.worktreePath ?? meta.repoPath,
-      meta.agentSessionId, ids, { env, ...(this.executionIsolation.mode === "bwrap" ? {
+    void inspectClaudeBackgroundWorkInContext(meta.context, location.cwd,
+      meta.agentSessionId, ids, { env: location.env, ...(this.executionIsolation.mode === "bwrap" ? {
         projectsRoot: join(this.stateDir, "provider-state", "claude", providerStateKey(meta.sessionId), "projects"),
       } : {}) })
       .then((inspection) => {
@@ -23448,10 +23459,10 @@ export class SessionManager {
   private discoverOrphanedClaudeWork(meta: SessionMeta): SessionMeta {
     if (meta.driver !== "claude-code" || meta.context.kind !== "native" || !meta.agentSessionId ||
         meta.status === "stopped" || meta.orphanedWork || this.active.has(meta.sessionId)) return meta;
-    const cwd = meta.worktreePath ?? meta.repoPath;
     const recovered = new Set(meta.recoveredBackgroundTaskIds ?? []);
-    const env = this.claudeTaskInspectionEnvironment(meta);
-    if (!env) return meta;
+    const location = this.claudeTaskInspectionLocation(meta);
+    if (!location) return meta;
+    const { cwd, env } = location;
     const tasks = this.discoverClaudeTasks(cwd, meta.agentSessionId, {
       tempRoot: env.TMPDIR ?? env.TEMP ?? env.TMP,
       claudeHome: env.HOME ? join(env.HOME, ".claude") : undefined,
@@ -23486,14 +23497,14 @@ export class SessionManager {
     if (this.shuttingDown || meta.driver !== "claude-code" || meta.context.kind !== "wsl" ||
         meta.status === "stopped" || !meta.agentSessionId || meta.orphanedWork || this.active.has(meta.sessionId) ||
         this.orphanDiscoveryLaunching.has(meta.sessionId)) return;
-    const env = this.claudeTaskInspectionEnvironment(meta);
-    if (!env) return;
+    const location = this.claudeTaskInspectionLocation(meta);
+    if (!location) return;
     this.orphanDiscoveryLaunching.add(meta.sessionId);
     void this.discoverClaudeTasksInContext(
       meta.context,
-      meta.worktreePath ?? meta.repoPath,
+      location.cwd,
       meta.agentSessionId,
-      { env },
+      { env: location.env },
     )
       .then((tasks) => {
         if (this.shuttingDown || tasks.length === 0) return;
@@ -24065,18 +24076,18 @@ export class SessionManager {
     // Terminal receipts settle ownership without a paid recovery turn, including while a
     // governance ceiling holds that turn. Keep unknown tasks pending; absence is not proof.
     if (meta.agentSessionId && !this.active.get(sessionId)?.running) {
-      const env = this.claudeTaskInspectionEnvironment(meta);
-      if (!env) return;
+      const location = this.claudeTaskInspectionLocation(meta);
+      if (!location) return;
       this.orphanRecoveryLaunching.add(sessionId);
       try {
         const inspection = await inspectClaudeBackgroundWorkInContext(
-          meta.context, meta.worktreePath ?? meta.repoPath, meta.agentSessionId,
+          meta.context, location.cwd, meta.agentSessionId,
           new Set([
             ...(meta.pendingBackgroundTaskIds ?? []), ...meta.orphanedWork.pendingTaskIds,
             ...(meta.backgroundJobs ?? []).filter((job) => !job.terminalStatus && job.restartedAt === undefined)
               .map((job) => job.id),
           ]),
-          { env, ...(this.executionIsolation.mode === "bwrap" ? {
+          { env: location.env, ...(this.executionIsolation.mode === "bwrap" ? {
             projectsRoot: join(this.stateDir, "provider-state", "claude", providerStateKey(sessionId), "projects"),
           } : {}) },
         );
