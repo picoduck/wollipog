@@ -7703,13 +7703,22 @@ body.shell-dock-dragging * {
   margin-bottom: var(--space-1);
 }
 /* Shrunk by Show Context, the panel is its head: the question on one line, then the answer so far. */
-.composer-answer[data-collapsed] > .answer-title {
+/* A touch phone typing Something Else (#4714) keeps the question to one line in the same way, above
+   the field, until Show Options opens it whole with its options. */
+.composer-answer:is([data-collapsed], [data-own-answer]:not([data-options-shown])) > .answer-title {
   display: -webkit-box;
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 1;
 }
-.composer-answer[data-collapsed] > .answer-title > * { display: inline; }
+.composer-answer:is([data-collapsed], [data-own-answer]:not([data-options-shown])) > .answer-title > * { display: inline; }
+/* "Answering Question 1 of 2", then Show Options and the × at the end (#4714). The field below is
+   labelled "Something Else", in the dim line a field label is. */
+.answer-options-toggle { margin-left: auto; }
+.answer-own {
+  color: var(--text-dim);
+  font: var(--type-small);
+}
 .answer-summary {
   min-width: 0;
   margin: 0;
@@ -7759,6 +7768,16 @@ body.shell-dock-dragging * {
   font: var(--type-reading);
 }
 .composer-answer-input::placeholder { color: var(--text-faint); }
+/* Something Else on a touch phone (#4714): a box that wraps, never scrolls sideways, and grows with
+   its text; ComposerQuestionResponse sizes it to six lines at most, past which it scrolls itself. */
+textarea.composer-answer-input {
+  display: block;
+  resize: none;
+  overflow-wrap: anywhere;
+}
+/* Its mic (#4714), an icon button whose pressed state shows it listening. The press is held on the
+   field (holdFieldFocus), so the keyboard stays up while it listens. */
+.answer-mic { flex: none; }
 /* Dismiss, Back from question 2, the usage triggers, then Next or Submit Answers, last. */
 .answer-foot {
   display: flex;
@@ -14839,6 +14858,34 @@ button.review-finding-location {
   white-space: normal;
 }
 .question-input { display: block; }
+/* On a touch phone Something Else is typed in the composer (#4714). The card shows the answer so far
+   where its field would be, drawn as that field (§8.1), and a tap opens the composer to go on. */
+.question-handoff {
+  display: block;
+  width: 100%;
+  min-height: var(--control-h);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--control-outline);
+  border-radius: var(--radius-sm);
+  background: var(--field-bg);
+  color: var(--text);
+  font: var(--type-body);
+  text-align: start;
+  cursor: text;
+}
+/* Three lines at most, clamped inside the padding so no part of a fourth shows. */
+.question-handoff-text {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.question-handoff:disabled {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+.question-handoff-placeholder { color: var(--text-faint); }
 /* Dismiss at the far left, then the step count, Back and the primary, last (§3.2). */
 .question-dismiss { margin-right: auto; }
 .question-step-note {

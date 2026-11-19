@@ -16,6 +16,7 @@ import {
   questionDraftIdentity,
 } from "../question-response.js";
 import { setQuestionResponseStyle } from "../question-response-style.js";
+import { TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
 import { SessionQuestionBanner } from "./SessionApproval.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
@@ -1486,4 +1487,115 @@ test("late question schema hydration reads the incoming occurrence's existing dr
     clearQuestionDrafts("hydrate", key);
     container.remove();
   }
+});
+
+/** Stubs the touch-phone media query for the lifetime of `run` (#4714). */
+async function asTouchPhone(run: () => Promise<void>) {
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query === TOUCH_PHONE_MEDIA, media: query, onchange: null,
+    addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  try {
+    await run();
+  } finally {
+    domWindow.matchMedia = priorMatchMedia;
+  }
+}
+
+const ownAnswerQuestions: AgentQuestion[] = [
+  {
+    id: "next",
+    question: "The child hasn't started yet. What should I do?",
+    options: [{ label: "Check the runner" }, { label: "Keep waiting" }],
+    allowOther: true,
+  },
+  { id: "why", question: "Anything else to pass on?", options: [], allowOther: true },
+];
+
+test("on a touch phone the form's Something Else is typed in the composer, and the card shows the answer so far (#4714)", async () => {
+  await asTouchPhone(async () => {
+    let answers = 0;
+    const key = questionDraftIdentity("question-1", ownAnswerQuestions);
+    let { container, root } = mount();
+    try {
+      setQuestionResponseStyle("interactive", domWindow as never);
+      await renderComposerCard(root, ownAnswerQuestions, { onAnswer: () => { answers += 1; } });
+      assert.ok(container.querySelector(".question-card")!.matches(".question-style-interactive"), "the form keeps its card");
+      await act(async () => { row(container, "Something Else…").click(); });
+      assert.equal(answers, 1, "choosing Something Else opens the composer");
+      // Stored before the composer opens: opening it takes the card off the dock in the same commit.
+      assert.deepEqual(storedQuestionDrafts("session-1", key), { next: { kind: "other", value: "" } });
+      assert.equal(storedQuestionStep("session-1", key), 0);
+      assertNoDomNode(container.querySelector(".question-input"), "the card has no field of its own");
+      let handoff = container.querySelector<HTMLButtonElement>(".question-handoff")!;
+      assert.equal(handoff.textContent, "Type your answer");
+      assert.ok(container.querySelector(".question-handoff-placeholder"));
+
+      // Answer Mode typed the answer and was left; the docked card comes back with it.
+      await act(async () => root.unmount());
+      container.remove();
+      storeQuestionDrafts("session-1", key, { next: { kind: "other", value: "I restarted it. Check again first." } });
+      ({ container, root } = mount());
+      await renderComposerCard(root, ownAnswerQuestions, { onAnswer: () => { answers += 1; } });
+      assert.equal(row(container, "Something Else…").checked, true);
+      handoff = container.querySelector<HTMLButtonElement>(".question-handoff")!;
+      const names = handoff.getAttribute("aria-labelledby")!.split(" ").map((id) => domWindow.document.getElementById(id)?.textContent);
+      assert.deepEqual(names, ["Something Else", "I restarted it. Check again first."]);
+      await act(async () => { handoff.click(); });
+      assert.equal(answers, 2, "the answer so far opens the composer again");
+
+      // Next moves on with the composer's answer, as the card's own field would.
+      await act(async () => { button(container, "next").click(); });
+      assert.equal(storedQuestionStep("session-1", key), 1);
+      assert.equal(answers, 2);
+      // A question with no options keeps the card's field.
+      assert.ok(container.querySelector(".question-input"));
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      clearQuestionDrafts("session-1", key);
+    }
+  });
+});
+
+test("the form's Something Else keeps its field off a touch phone, and for a format of its own (#4714)", async () => {
+  let answers = 0;
+  const key = questionDraftIdentity("question-1", ownAnswerQuestions);
+  const { container, root } = mount();
+  try {
+    setQuestionResponseStyle("interactive", domWindow as never);
+    await renderComposerCard(root, ownAnswerQuestions, { onAnswer: () => { answers += 1; } });
+    await act(async () => { row(container, "Something Else…").click(); });
+    assert.equal(answers, 0);
+    assert.ok(container.querySelector(".question-input"));
+    assertNoDomNode(container.querySelector(".question-handoff"));
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    clearQuestionDrafts("session-1", key);
+  }
+
+  await asTouchPhone(async () => {
+    const emailQuestions: AgentQuestion[] = [{
+      id: "contact",
+      question: "Who should review it?",
+      options: [{ label: "The owner" }],
+      allowOther: true,
+      inputFormat: "email",
+    }];
+    const emailKey = questionDraftIdentity("question-1", emailQuestions);
+    const phone = mount();
+    try {
+      await renderComposerCard(phone.root, emailQuestions, { onAnswer: () => { answers += 1; } });
+      await act(async () => { row(phone.container, "Something Else…").click(); });
+      assert.equal(answers, 0, "an email keeps the card's field and its keyboard");
+      assert.equal(phone.container.querySelector<HTMLInputElement>(".question-input")?.type, "email");
+    } finally {
+      await act(async () => phone.root.unmount());
+      phone.container.remove();
+      clearQuestionDrafts("session-1", emailKey);
+    }
+  });
 });

@@ -7785,3 +7785,77 @@ for (const leave of ["closing and reopening the panel", "remounting the session"
     }
   });
 }
+
+test("on a touch phone the form's Something Else opens Answer Mode on a growing field, and leaving it brings the card back (#4714)", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("interactive", domWindow as never);
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query === TOUCH_PHONE_MEDIA,
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  const questions = [{
+    id: "next",
+    question: "The child hasn't started yet. What should I do?",
+    options: [{ label: "Check the runner" }, { label: "Keep waiting" }],
+    allowOther: true,
+  }];
+  const questionCount = () => ({
+    cards: fixture.container.querySelectorAll(".request-dock .question-card").length,
+    answers: fixture.container.querySelectorAll(".composer-answer").length,
+  });
+  try {
+    await resolveDraft(draft, "kept message draft");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      flushFrames();
+    });
+    await fixture.pushEvent({ kind: "question_request", requestId: "ask-own", questions });
+    await fixture.pushSession({
+      pendingApproval: { requestId: "ask-own", title: questions[0]!.question, options: [], kind: "question", questions },
+    });
+    await act(async () => { flushFrames(); });
+    assert.deepEqual(questionCount(), { cards: 1, answers: 0 }, "the form waits on its card");
+    assert.ok(fixture.container.querySelector(".request-dock .question-style-interactive"));
+
+    const somethingElse = [...fixture.container.querySelectorAll<HTMLElement>(".request-dock .choice-row")]
+      .find((row) => row.querySelector(".choice-row-title")?.textContent === "Something Else…")
+      ?.querySelector<HTMLInputElement>("input");
+    assert.ok(somethingElse);
+    await act(async () => {
+      somethingElse.click();
+      flushFrames();
+    });
+    assert.deepEqual(questionCount(), { cards: 0, answers: 1 }, "Something Else is typed in the composer alone");
+    const field = fixture.container.querySelector<HTMLTextAreaElement>(".composer-answer-input");
+    assert.ok(field);
+    assert.equal(field.tagName, "TEXTAREA", "the growing field, chosen in the same press");
+    assert.equal(field.ownerDocument.activeElement, field, "the field takes the focus, so the keyboard opens for it");
+    assert.equal(fixture.container.querySelector(".composer-answer .answer-own")?.textContent, "Something Else");
+    assertNoDomNode(fixture.container.querySelector(".composer-input"), "the message draft waits behind Answer Mode");
+
+    await act(async () => {
+      field.value = "I restarted it. Check again first.";
+      fireDomEvent.change(field, { target: { value: field.value } } as never);
+    });
+    await act(async () => {
+      fixture.container.querySelector<HTMLButtonElement>('.answer-head .icon-btn[aria-label="Exit Answer Mode"]')!.click();
+      flushFrames();
+    });
+    assert.deepEqual(questionCount(), { cards: 1, answers: 0 }, "leaving Answer Mode brings the card back");
+    assert.equal(fixture.container.querySelector(".request-dock .question-handoff")?.textContent,
+      "I restarted it. Check again first.", "with Something Else's answer so far");
+    assert.equal(fixture.container.querySelector<HTMLTextAreaElement>(".composer-input")?.value, "kept message draft",
+      "and the message draft is untouched");
+  } finally {
+    await unmountFixture(fixture);
+    domWindow.matchMedia = priorMatchMedia;
+  }
+});

@@ -7,7 +7,8 @@ import { Window } from "happy-dom";
 import type { AgentQuestion, SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { clearQuestionDrafts, questionDraftIdentity, storedQuestionDrafts, storedQuestionStep, storeQuestionStep } from "../question-response.js";
+import { clearQuestionDrafts, questionDraftIdentity, storedQuestionDrafts, storedQuestionStep, storeQuestionDrafts, storeQuestionStep } from "../question-response.js";
+import { TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
 import { focusSessionRequest } from "./SessionApproval.js";
 import { ComposerQuestionResponse, answerSelectionSummary } from "./ComposerQuestionResponse.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -859,3 +860,208 @@ for (const action of ["navigate to request", "Enter while reading"] as const) {
     }
   });
 }
+
+/** Stubs the touch-phone media query for the lifetime of `run` (#4714). */
+async function asTouchPhone(run: () => Promise<void>) {
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query === TOUCH_PHONE_MEDIA, media: query, onchange: null,
+    addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  try {
+    await run();
+  } finally {
+    domWindow.matchMedia = priorMatchMedia;
+  }
+}
+
+function setFieldValue(field: HTMLInputElement | HTMLTextAreaElement, value: string) {
+  field.value = value;
+  fireDomEvent.change(field, { target: { value } } as never);
+}
+
+const somethingElseQuestions: AgentQuestion[] = [
+  {
+    id: "runner",
+    question: "The child hasn't started yet. What should I do?",
+    context: "It has waited in the queue for an hour.",
+    options: [{ label: "Check the runner" }, { label: "Keep waiting" }],
+    allowOther: true,
+  },
+  { id: "notes", question: "Anything else to pass on?", options: [], allowOther: true },
+];
+
+test("a touch phone types Something Else in a growing field, with the options behind Show Options (#4714)", async () => {
+  await asTouchPhone(async () => {
+    const { container, root } = mount();
+    const calls: Parameters<ApiClient["answerQuestion"]>[1][] = [];
+    const key = questionDraftIdentity("ask-own-answer", somethingElseQuestions);
+    // The card chose Something Else and opened Answer Mode on it.
+    storeQuestionDrafts("session-1", key, { runner: { kind: "other", value: "" } });
+    try {
+      await act(async () => root.render(<ApiProvider client={recordingClient(calls)}>
+        <ComposerQuestionResponse sessionId="session-1" requestId="ask-own-answer" questions={somethingElseQuestions}
+          runnerOnline active inputRef={{ current: null }} onExit={() => {}}
+          usage={<span className="usage-probe">usage</span>} usageOwnRow />
+      </ApiProvider>));
+      const section = container.querySelector<HTMLElement>(".composer-answer")!;
+      const field = answerInput(container) as unknown as HTMLTextAreaElement;
+      assert.equal(field.tagName, "TEXTAREA", "the answer wraps and grows instead of scrolling sideways");
+      assert.equal(field.getAttribute("enterkeyhint"), "next");
+      assert.equal(field.getAttribute("placeholder"), "Type your answer");
+      assert.equal(section.querySelector(".answer-kind")?.textContent, "Answering Question 1 of 2");
+      assert.equal(section.querySelector(".answer-own")?.textContent, "Something Else");
+      assert.ok(section.hasAttribute("data-own-answer"));
+      // The field's name is the question and Something Else, as the card's field is.
+      const names = field.getAttribute("aria-labelledby")!.split(" ").map((id) => domWindow.document.getElementById(id)?.textContent);
+      assert.deepEqual(names, ["The child hasn't started yet. What should I do?", "Something Else"]);
+      // The options, the context and the usage triggers give the keyboard their room.
+      assert.equal(section.querySelector<HTMLElement>(".answer-options")!.hidden, true);
+      assert.equal(section.querySelector<HTMLElement>(".answer-context")!.hidden, true);
+      assertNoDomNode(container.querySelector(".usage-probe"), "the usage triggers step aside");
+      assertNoDomNode(container.querySelector(".answer-context-toggle"), "Show Options takes Show Context's place");
+      const toggle = buttonNamed(container, "Show Options");
+      assert.equal(toggle.getAttribute("aria-expanded"), "false");
+
+      await act(async () => toggle.click());
+      assert.equal(section.querySelector<HTMLElement>(".answer-options")!.hidden, false);
+      assert.equal(section.querySelector<HTMLElement>(".answer-context")!.hidden, false);
+      assert.equal(buttonNamed(container, "Hide Options").getAttribute("aria-expanded"), "true");
+      assert.equal(row(container, "Something Else…").checked, true);
+
+      await act(async () => setFieldValue(field, "I restarted it. Check again before replacing anything."));
+      // Shift+Enter is a new line, never Next.
+      await act(async () => {
+        field.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true, cancelable: true }) as never);
+      });
+      assert.equal(section.querySelector(".answer-kind")?.textContent, "Answering Question 1 of 2");
+      // Enter is the keyboard's Next.
+      await act(async () => press(field, "Enter"));
+      assert.deepEqual(storedQuestionDrafts("session-1", key), {
+        runner: { kind: "other", value: "I restarted it. Check again before replacing anything." },
+      });
+      assert.equal(storedQuestionStep("session-1", key), 1);
+      // A question without options is not Something Else: its field is the composer's line.
+      assert.equal(answerInput(container).tagName, "INPUT");
+      assert.ok(container.querySelector(".usage-probe"), "the usage triggers are back");
+
+      await act(async () => setFieldValue(answerInput(container), "Nothing else."));
+      await act(async () => { buttonNamed(container, "Submit Answers").click(); await tick(); });
+      assert.deepEqual(calls, [{
+        requestId: "ask-own-answer",
+        answers: { runner: "I restarted it. Check again before replacing anything.", notes: "Nothing else." },
+        action: "submit",
+      }], "the answer sent is the one the card's field would send");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      clearQuestionDrafts("session-1", key);
+    }
+  });
+});
+
+test("Answer Mode keeps its line field and its options for Something Else off a touch phone (#4714)", async () => {
+  const { container, root } = mount();
+  const key = questionDraftIdentity("ask-own-answer-desk", somethingElseQuestions);
+  storeQuestionDrafts("session-1", key, { runner: { kind: "other", value: "Typed on a desk" } });
+  try {
+    await act(async () => root.render(<ApiProvider client={recordingClient([])}>
+      <ComposerQuestionResponse sessionId="session-1" requestId="ask-own-answer-desk" questions={somethingElseQuestions}
+        runnerOnline active inputRef={{ current: null }} onExit={() => {}} />
+    </ApiProvider>));
+    const field = answerInput(container);
+    assert.equal(field.tagName, "INPUT");
+    assert.equal(field.value, "Typed on a desk");
+    assert.equal(container.querySelector<HTMLElement>(".answer-options")!.hidden, false);
+    assert.equal(container.querySelector(".answer-kind")?.textContent, "Question");
+    assertNoDomNode(container.querySelector(".answer-own"), "no Something Else head");
+    assertNoDomNode(container.querySelector(".answer-mic"), "no mic of its own");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    clearQuestionDrafts("session-1", key);
+  }
+});
+
+test("a touch phone dictates Something Else into the answer, and a step change ends dictation (#4714)", async () => {
+  class FakeRecognition {
+    static last: FakeRecognition | null = null;
+    continuous = false;
+    interimResults = false;
+    lang = "";
+    started = false;
+    aborted = false;
+    onresult: ((ev: unknown) => void) | null = null;
+    onend: (() => void) | null = null;
+    onerror: ((ev: unknown) => void) | null = null;
+    constructor() { FakeRecognition.last = this; }
+    start() { this.started = true; }
+    stop() {}
+    abort() { this.aborted = true; }
+  }
+  const win = domWindow as unknown as { webkitSpeechRecognition?: unknown };
+  win.webkitSpeechRecognition = FakeRecognition;
+  await asTouchPhone(async () => {
+    const { container, root } = mount();
+    const key = questionDraftIdentity("ask-own-dictation", somethingElseQuestions);
+    storeQuestionDrafts("session-1", key, { runner: { kind: "other", value: "Restarted it." } });
+    try {
+      await act(async () => root.render(<ApiProvider client={recordingClient([])}>
+        <ComposerQuestionResponse sessionId="session-1" requestId="ask-own-dictation" questions={somethingElseQuestions}
+          runnerOnline active inputRef={{ current: null }} onExit={() => {}} />
+      </ApiProvider>));
+      const mic = buttonNamed(container, "Dictate");
+      assert.equal(mic.getAttribute("aria-pressed"), "false");
+      // Enter, Space and assistive technology click without a pointer.
+      await act(async () => { mic.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, detail: 0 }) as never); });
+      const recognition = FakeRecognition.last!;
+      assert.ok(recognition.started);
+      assert.equal(buttonNamed(container, "Stop Dictating").getAttribute("aria-pressed"), "true");
+      await act(async () => recognition.onresult!({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: " check again " } }] }));
+      assert.equal((answerInput(container) as unknown as HTMLTextAreaElement).value, "Restarted it. check again");
+      assert.deepEqual(storedQuestionDrafts("session-1", key), { runner: { kind: "other", value: "Restarted it. check again" } });
+
+      await act(async () => press(answerInput(container), "Enter"));
+      assert.equal(recognition.aborted, true, "Next ends dictation, so no phrase lands in the next step");
+      assertNoDomNode(container.querySelector(".answer-mic"), "the next step is not Something Else");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      clearQuestionDrafts("session-1", key);
+      delete win.webkitSpeechRecognition;
+    }
+  });
+});
+
+test("Answer Mode that opens by itself on a touch phone's Something Else leaves focus alone (#4714)", async () => {
+  await asTouchPhone(async () => {
+    const { container, root } = mount();
+    const key = questionDraftIdentity("ask-own-quiet", somethingElseQuestions);
+    storeQuestionDrafts("session-1", key, { runner: { kind: "other", value: "Restored after a reload" } });
+    const outside = domWindow.document.createElement("button");
+    domWindow.document.body.append(outside);
+    outside.focus();
+    try {
+      await act(async () => root.render(<ApiProvider client={recordingClient([])}>
+        <ComposerQuestionResponse sessionId="session-1" requestId="ask-own-quiet" questions={somethingElseQuestions}
+          runnerOnline active inputRef={{ current: null }} onExit={() => {}} />
+      </ApiProvider>));
+      const field = answerInput(container);
+      assert.equal(field.tagName, "TEXTAREA");
+      assert.equal((field as unknown as HTMLTextAreaElement).value, "Restored after a reload");
+      assert.equal(domWindow.document.activeElement, outside, "no keyboard opens unasked");
+      outside.blur();
+      await act(async () => root.render(<ApiProvider client={recordingClient([])}>
+        <ComposerQuestionResponse sessionId="session-1" requestId="ask-own-quiet" questions={somethingElseQuestions}
+          runnerOnline active inputRef={{ current: null }} onExit={() => {}} usage={<span>usage</span>} />
+      </ApiProvider>));
+      assert.notEqual(domWindow.document.activeElement, field, "nor on a later render with focus on the page");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      outside.remove();
+      clearQuestionDrafts("session-1", key);
+    }
+  });
+});

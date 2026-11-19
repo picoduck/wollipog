@@ -248,7 +248,7 @@ import { decideDockedRequest, registerRequestRevealer } from "./requests/request
 import { useRemovedFocus } from "./useRemovedFocus.js";
 import { useBodyWidth } from "./useBodyWidth.js";
 import { CampaignHeldChildren, type CampaignHeldChild } from "./CampaignHeldChildren.js";
-import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
+import { ComposerQuestionResponse, type AnswerField } from "./ComposerQuestionResponse.js";
 import { withPresentedOwnerQuestions } from "../owner-question-presentation.js";
 import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.js";
 import {
@@ -1657,7 +1657,7 @@ function SessionDetailLoaded({
   const dragDepth = useRef(0); // enter/leave bubble from children — count depth so the overlay doesn't stick
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const answerInputRef = useRef<HTMLInputElement>(null);
+  const answerInputRef = useRef<AnswerField>(null);
   // While a question is answered in the composer it is shown there alone, not on the dock (#2212):
   // bringing it up opens the answer panel and focuses its field. Registered with the shared request
   // revealer, so every control that brings a request up (Jump to Question, an attention link, the
@@ -7056,9 +7056,12 @@ function SessionDetailLoaded({
     : dockedRequests, [answeringInComposer, dockedRequests, pendingQuestion?.requestId]);
   // Composer Response answers the session's question in the composer, so its card is compact. A
   // preview has no composer: its question is the preview's own card, answered in the session (#2210).
-  const dockComposerAnswer = useMemo(() => mode === "expanded" && questionResponseStyle === "composer" &&
-    pendingQuestion && composerQuestions.length > 0 ? { requestId: pendingQuestion.requestId, onAnswer: enterAnswerMode } : undefined,
-  [composerQuestions.length, enterAnswerMode, mode, pendingQuestion, questionResponseStyle]);
+  // The form keeps its card, and on a touch phone types Something Else in the composer, which needs
+  // Answer Mode to be open to this person (#4714).
+  const dockComposerAnswer = useMemo(() => mode === "expanded" && pendingQuestion && composerQuestions.length > 0 &&
+    (questionResponseStyle === "composer" || canAnswerPendingQuestion)
+    ? { requestId: pendingQuestion.requestId, onAnswer: enterAnswerMode } : undefined,
+  [canAnswerPendingQuestion, composerQuestions.length, enterAnswerMode, mode, pendingQuestion, questionResponseStyle]);
   useLayoutEffect(() => {
     const had = dockHadRequestsRef.current;
     dockHadRequestsRef.current = dockShownRequests.length > 0;
