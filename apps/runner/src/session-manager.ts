@@ -2055,12 +2055,23 @@ export class SessionManager {
 
   private claudeTaskInspectionEnvironment(meta: SessionMeta): Record<string, string> | null {
     try {
-      return this.active.get(meta.sessionId)?.launchEnv ?? this.resolveDetachedClaudeEnvironment(meta);
+      return this.active.get(meta.sessionId)?.launchEnv ?? {
+        ...this.resolveDetachedClaudeEnvironment(meta),
+        ...this.orchestratorTempEnvironment(meta, meta.worktreePath ?? meta.repoPath),
+        ...this.worktreeSetupEnvironmentFor(meta, meta.worktreePath),
+      };
     } catch {
       // An unavailable configuration must not redirect inspection to a different provider home.
       this.log(`Could not resolve the Claude task inspection environment for ${boundedSessionIdForLog(meta.sessionId)}`);
       return null;
     }
+  }
+
+  private orchestratorTempEnvironment(meta: SessionMeta, cwd: string): Record<string, string> {
+    if (meta.config.permissionMode !== "orchestrator") return {};
+    return meta.context.kind === "native" && process.platform === "win32"
+      ? { TEMP: cwd, TMP: cwd }
+      : { TMPDIR: cwd };
   }
   private readonly sessionCommandAuthority = new SessionCommandAuthorityRegistry();
   private readonly providerHomeLeases?: AsyncProviderHomeLeaseRegistry;
@@ -10531,15 +10542,7 @@ export class SessionManager {
       // Apply them after agent-config refresh so they reach hooks and the provider without ever
       // being persisted in meta.json or projected to the control plane.
       const setupEnvironment = this.worktreeSetupEnvironmentFor(meta, worktree?.path ?? null);
-      meta.env = { ...meta.env, ...setupEnvironment };
-      if (meta.config.permissionMode === "orchestrator") {
-        meta.env = {
-          ...meta.env,
-          ...(meta.context.kind === "native" && process.platform === "win32"
-            ? { TEMP: cwd, TMP: cwd }
-            : { TMPDIR: cwd }),
-        };
-      }
+      meta.env = { ...meta.env, ...setupEnvironment, ...this.orchestratorTempEnvironment(meta, cwd) };
       if (sameSlashCommandCatalog(priorSessionSlashCommands, meta.sessionSlashCommands)) {
         meta.sessionSlashCommands = priorSessionSlashCommands;
       }

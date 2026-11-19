@@ -5456,6 +5456,33 @@ test("startup discovers an incomplete Claude task directory even without a persi
   }
 });
 
+test("detached Claude task inspection honors the Orchestrator temp directory and worktree setup overrides", () => {
+  const sessionId = "resume-session";
+  const h = harness({ driver: "claude-code", config: { permissionMode: "orchestrator" } });
+  try {
+    const worktreePath = join(h.root, "worktree");
+    h.store.patchMeta(sessionId, { worktreePath });
+    const tempRoots: Array<string | undefined> = [];
+    const internals = h.manager as unknown as {
+      discoverClaudeTasks: (_cwd: string, _id: string, roots: { tempRoot?: string }) => [];
+      setWorktreeSetupEnvironment: (id: string, worktree: string, env: Record<string, string>) => void;
+    };
+    internals.discoverClaudeTasks = (_cwd, _id, roots) => {
+      tempRoots.push(roots.tempRoot);
+      return [];
+    };
+    h.manager.recoverOrphanedWork(sessionId, false);
+    const setupTemp = join(worktreePath, "setup-temp");
+    internals.setWorktreeSetupEnvironment(sessionId, worktreePath, { TMPDIR: setupTemp });
+    h.manager.recoverOrphanedWork(sessionId, false);
+    assert.deepEqual(tempRoots, [worktreePath, setupTemp]);
+    assert.deepEqual(h.store.readMeta(sessionId)?.env, {});
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("a reconnect scan discovers a later markerless task after prior recovery", () => {
   const h = harness({
     driver: "claude-code",

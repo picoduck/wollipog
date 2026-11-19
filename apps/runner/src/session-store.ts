@@ -3818,8 +3818,9 @@ export class SessionStore {
 
   /** Remove legacy launch environments before any writers start, under the runner data-dir lease.
    * Launch-time resolution reconstructs the environment from current runner-local config. */
-  scrubLegacyAgentEnv(): number {
+  scrubLegacyAgentEnv(reportUnreadableDirectories?: (count: number) => void): number {
     let scrubbed = 0;
+    let unreadableDirectories = 0;
     for (const id of this.sessionDirectoryIds()) {
       const meta = this.readMeta(id);
       if (meta?.env && Object.keys(meta.env).length > 0) {
@@ -3830,15 +3831,20 @@ export class SessionStore {
       // A crash can leave an unpublished metadata write even with a clean or missing meta.json.
       // The data-dir lease excludes both another runner and offline state-doctor maintenance.
       const directory = this.dir(id);
-      let removedTemp = false;
-      for (const entry of readdirSync(directory, { withFileTypes: true })) {
-        if (!entry.isFile() || !entry.name.startsWith("meta.json.")) continue;
-        if (!WRITER_TEMP_FILE.test(entry.name) && !STATE_DOCTOR_META_TEMP_FILE.test(entry.name)) continue;
-        rmSync(join(directory, entry.name), { force: true });
-        removedTemp = true;
+      try {
+        let removedTemp = false;
+        for (const entry of readdirSync(directory, { withFileTypes: true })) {
+          if (!entry.isFile() || !entry.name.startsWith("meta.json.")) continue;
+          if (!WRITER_TEMP_FILE.test(entry.name) && !STATE_DOCTOR_META_TEMP_FILE.test(entry.name)) continue;
+          rmSync(join(directory, entry.name), { force: true });
+          removedTemp = true;
+        }
+        if (removedTemp) this.fsyncDirectory(directory);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") unreadableDirectories++;
       }
-      if (removedTemp) this.fsyncDirectory(directory);
     }
+    if (unreadableDirectories) reportUnreadableDirectories?.(unreadableDirectories);
     return scrubbed;
   }
 

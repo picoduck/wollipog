@@ -178,6 +178,31 @@ test("startup scrub removes legacy environment values from metadata and abandone
   }
 });
 
+test("startup scrub reports an unreadable metadata directory and continues", (t) => {
+  const { store, root } = tmpStore();
+  const blocked = join(root, "s_blocked");
+  mkdirSync(blocked);
+  store.create(meta());
+  const path = join(root, "s_abc", "meta.json");
+  writeFileSync(path, JSON.stringify({ ...meta(), env: { TEST_LAUNCH_ENV: "legacy-fixture" } }));
+  const read = fs.readdirSync;
+  const spy = t.mock.method(fs, "readdirSync", ((...args: Parameters<typeof fs.readdirSync>) => {
+    if (String(args[0]) === blocked) throw Object.assign(new Error("test access error"), { code: "EACCES" });
+    return read(...args);
+  }) as typeof fs.readdirSync);
+  syncBuiltinESMExports();
+  try {
+    const failures: number[] = [];
+    assert.equal(store.scrubLegacyAgentEnv((count) => failures.push(count)), 1);
+    assert.deepEqual(failures, [1]);
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).env, {});
+  } finally {
+    spy.mock.restore();
+    syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("appendEvent assigns increasing seq and readEvents filters by afterSeq", () => {
   const { store, root } = tmpStore();
   try {

@@ -1084,7 +1084,7 @@ setCampaignCredentialRoots(() => {
     userHome: homedir(),
   });
 });
-store.scrubLegacyAgentEnv();
+store.scrubLegacyAgentEnv((count) => log(`Could not complete session metadata cleanup in ${count} directories`));
 const durableCommands = new DurableCommandStore(resolve(config.dataDir, "command-receipts"));
 durableCommands.prune();
 const sessionCommandReceipts = new SessionCommandReceiptStore(
