@@ -6,7 +6,7 @@ import { Notice } from "../Notice.js";
 import { BusyButton } from "../ui/BusyButton.js";
 
 export const QUESTION_CLASSIFICATION_REASON = "The campaign owner must classify this question first on this card or in Campaign Status. Nobody can answer it until then.";
-export const HANDOFF_CLASSIFICATION_REASON = "The Decision Model could not tell whether this handoff asks for credentials, sign-in, or access. The campaign owner can dismiss it or classify it before answering.";
+export const HANDOFF_CLASSIFICATION_REASON = "The credential check was inconclusive. The campaign owner can dismiss or classify this handoff.";
 
 /** Reuses the screen occurrence and the existing owner-only classification route. */
 export function QuestionClassification({ sessionId, request, onSessionUpdate }: {

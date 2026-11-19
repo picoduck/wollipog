@@ -28,7 +28,16 @@ for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
       const expand = card.getByRole("button", { name: "Expand Decision", exact: true });
       if (await expand.count()) await expand.click();
       await expect(actions.getByRole("button", { name: "Decline Credentials Request", exact: true })).toBeVisible();
-      await expect(card).toContainText("The Decision Model could not tell whether this handoff asks for credentials, sign-in, or access.");
+      const uncertainty = card.getByText(/The credential check was inconclusive/);
+      await expect(uncertainty).toBeVisible();
+      if (surface === "inbox" && device === "desktop") {
+        const lines = await uncertainty.evaluate((element) => {
+          const text = document.createRange();
+          text.selectNodeContents(element);
+          return text.getClientRects().length;
+        });
+        expect(lines).toBe(1);
+      }
       await expect(dismiss).toBeInViewport();
       await page.screenshot({ path: testInfo.outputPath(`handoff-${surface}-${device}-before.png`) });
       await dismiss.click();
