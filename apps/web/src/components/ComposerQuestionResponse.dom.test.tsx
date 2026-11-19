@@ -1065,3 +1065,62 @@ test("Answer Mode that opens by itself on a touch phone's Something Else leaves 
     }
   });
 });
+
+test("dictation ends whenever its mic goes: an offered option chosen, or the runner offline (#4714)", async () => {
+  class FakeRecognition {
+    static last: FakeRecognition | null = null;
+    continuous = false;
+    interimResults = false;
+    lang = "";
+    started = false;
+    aborted = false;
+    onresult: ((ev: unknown) => void) | null = null;
+    onend: (() => void) | null = null;
+    onerror: ((ev: unknown) => void) | null = null;
+    constructor() { FakeRecognition.last = this; }
+    start() { this.started = true; }
+    stop() {}
+    abort() { this.aborted = true; }
+  }
+  const win = domWindow as unknown as { webkitSpeechRecognition?: unknown };
+  win.webkitSpeechRecognition = FakeRecognition;
+  await asTouchPhone(async () => {
+    const { container, root } = mount();
+    const key = questionDraftIdentity("ask-own-mic-life", somethingElseQuestions);
+    const render = (runnerOnline: boolean) => act(async () => root.render(<ApiProvider client={recordingClient([])}>
+      <ComposerQuestionResponse sessionId="session-1" requestId="ask-own-mic-life" questions={somethingElseQuestions}
+        runnerOnline={runnerOnline} active inputRef={{ current: null }} onExit={() => {}} />
+    </ApiProvider>));
+    const startDictating = async () => {
+      await act(async () => {
+        buttonNamed(container, "Dictate").dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, detail: 0 }) as never);
+      });
+      const recognition = FakeRecognition.last!;
+      assert.ok(recognition.started && !recognition.aborted);
+      return recognition;
+    };
+    try {
+      storeQuestionDrafts("session-1", key, { runner: { kind: "other", value: "" } });
+      await render(true);
+      let recognition = await startDictating();
+      // Choosing an offered option takes Something Else, and with it the mic, away.
+      await act(async () => buttonNamed(container, "Show Options").click());
+      await act(async () => row(container, "Check the runner").click());
+      assertNoDomNode(container.querySelector(".answer-mic"), "no mic once an option is chosen");
+      assert.equal(recognition.aborted, true, "nothing listens without a control to stop it");
+      assert.equal(recognition.onresult, null, "and no late phrase lands");
+
+      // Back on Something Else, the runner going offline disables the mic: dictation ends with it.
+      await act(async () => row(container, "Something Else…").click());
+      recognition = await startDictating();
+      await render(false);
+      assert.equal(recognition.aborted, true, "an offline runner ends dictation");
+      assert.equal(buttonNamed(container, "Dictate").getAttribute("aria-pressed"), "false");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      clearQuestionDrafts("session-1", key);
+      delete win.webkitSpeechRecognition;
+    }
+  });
+});

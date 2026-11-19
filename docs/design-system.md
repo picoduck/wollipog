@@ -3481,9 +3481,12 @@ follows these rules so it never crowds out the conversation it asks about:
   Options. The field is labelled "Something Else" in a dim small line above it, where a phone's
   width never cuts it short. It is a `textarea` that wraps and grows to six lines, then scrolls itself. Its `enterkeyhint`
   is Next or Send, Enter moves on as on the line field, and Shift+Enter starts a line. The mic
-  (as the composer bar's, #2193) dictates into it, and Next, Back and sending end dictation. The usage
-  triggers step aside to leave the keyboard room. A secret, or an answer with a format of its own
-  (an email, a number, a date), keeps the card's field and its keyboard. Fine pointers are unchanged.
+  (as the composer bar's, #2193) dictates into it. Dictation ends with its mic: on Next, Back or
+  sending, on choosing an offered option, and when the runner goes offline. The usage triggers step
+  aside to leave the keyboard room. An answer with a format of its own (an email, a number, a date)
+  keeps the card's field and its keyboard. So does every question of a request with a secret: a
+  secret typed on the card lives in its memory alone, and Answer Mode takes the card off the dock.
+  Fine pointers are unchanged.
 
 ### 13.3 Page Banner
 

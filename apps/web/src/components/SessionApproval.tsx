@@ -494,7 +494,10 @@ export function SessionQuestionBanner({
   const interactive = !compact;
   // On a touch phone the form's Something Else is typed in the composer, which has the room, the
   // keyboard's place and the mic that a card's field lacks (#4714).
-  const typeInComposer = interactive && touchPhone && onAnswer !== undefined;
+  // A secret answered here lives in this card's memory alone (never storage), and opening Answer
+  // Mode takes the card off the dock, so a request with a secret keeps every answer on the card.
+  const typeInComposer = interactive && touchPhone && onAnswer !== undefined &&
+    !questions.some((candidate) => candidate.secret);
   const cardStyle: typeof responseStyle = compact ? "composer" : "interactive";
   const controlsDisabled = busy !== null || !responsesAvailable || unsupportedQuestionFormat || recoveryRequiresDismiss;
   // The form can be answered here: Next checks the step and the last step submits.

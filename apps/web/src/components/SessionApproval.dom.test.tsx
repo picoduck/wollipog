@@ -1599,3 +1599,27 @@ test("the form's Something Else keeps its field off a touch phone, and for a for
     }
   });
 });
+
+test("a request with a secret keeps Something Else on the card, where the secret's page-only answer lives (#4714)", async () => {
+  await asTouchPhone(async () => {
+    let answers = 0;
+    const questions: AgentQuestion[] = [
+      ...ownAnswerQuestions.slice(0, 1),
+      { id: "token", question: "Paste the deploy token.", options: [], allowOther: true, secret: true, required: false },
+    ];
+    const key = questionDraftIdentity("question-1", questions);
+    const { container, root } = mount();
+    try {
+      setQuestionResponseStyle("interactive", domWindow as never);
+      await renderComposerCard(root, questions, { onAnswer: () => { answers += 1; } });
+      await act(async () => { row(container, "Something Else…").click(); });
+      assert.equal(answers, 0, "opening the composer would take the card, and a secret typed on it, off the dock");
+      assert.ok(container.querySelector(".question-input"), "the card's own field");
+      assertNoDomNode(container.querySelector(".question-handoff"));
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      clearQuestionDrafts("session-1", key);
+    }
+  });
+});

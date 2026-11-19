@@ -232,9 +232,15 @@ export function ComposerQuestionResponse({
   const dictatePhraseRef = useRef<(phrase: string) => void>(() => {});
   const dictation = useVoiceDictation((phrase) => dictatePhraseRef.current(phrase));
   const cancelDictation = dictation.cancel;
+  // Dictation lives as long as an enabled mic shows it, as the composer bar's does (#2193): leaving
+  // Answer Mode, choosing an offered option, going offline or sending each end it, so nothing listens
+  // without a control to stop it. Each render sets this once it knows whether the mic is shown.
+  const micAvailableRef = useRef(false);
+  micAvailableRef.current = false;
+  const recording = dictation.recording;
   useEffect(() => {
-    if (!active) cancelDictation();
-  }, [active, cancelDictation]);
+    if (recording && !micAvailableRef.current) cancelDictation();
+  });
   useEffect(() => cancelDictation, [cancelDictation]);
   const [focusRequest, setFocusRequest] = useState<{ target: AnswerFocus; serial: number } | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -382,6 +388,7 @@ export function ComposerQuestionResponse({
   // A touch phone typing Something Else in words (#4714): the field takes the room the options had.
   const typingOwnAnswer = touchPhone && otherChosen && !unsupported && questionTypesWords(question);
   const choicesShown = !typingOwnAnswer || optionsShown;
+  micAvailableRef.current = typingOwnAnswer && dictation.supported && !controlsDisabled;
   // Show Context's shrunk panel gives way to the field while Something Else is typed.
   const shrunk = collapsed && !typingOwnAnswer;
   const eyebrow = questionEyebrowParts(question);
