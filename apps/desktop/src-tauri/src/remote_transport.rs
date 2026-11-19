@@ -87,6 +87,28 @@ impl RuntimeLease {
         headers: HeaderMap,
         body: Vec<u8>,
     ) -> Result<(reqwest::Response, Option<Duration>), NativeRequestError> {
+        self.send_tracking_upload(
+            method,
+            path,
+            url,
+            headers,
+            body,
+            Arc::new(Mutex::new(tokio::time::Instant::now())),
+        )
+        .await
+    }
+
+    /// Shares actual body-consumption progress with the caller so tests can distinguish a
+    /// stopped upload from a response that stalls after a completed upload.
+    async fn send_tracking_upload(
+        &self,
+        method: Method,
+        path: &str,
+        url: Url,
+        headers: HeaderMap,
+        body: Vec<u8>,
+        last_taken: Arc<Mutex<tokio::time::Instant>>,
+    ) -> Result<(reqwest::Response, Option<Duration>), NativeRequestError> {
         let started = tokio::time::Instant::now();
         let budget = native_request_budget(&method, path, body.len());
         // The client's read timeout runs from the start of a request until its response head, so it
@@ -105,7 +127,7 @@ impl RuntimeLease {
         if !upload_stall_bounded {
             return Ok((request.body(body).send().await?, None));
         }
-        let last_taken = Arc::new(Mutex::new(started));
+        *last_taken.lock().unwrap_or_else(|error| error.into_inner()) = started;
         let response = request
             .body(reqwest::Body::wrap(UploadBody {
                 remaining: body.into(),
@@ -1887,17 +1909,38 @@ mod tests {
         path: &str,
         body: Vec<u8>,
     ) -> (Duration, Result<Vec<u8>, String>) {
+        timed_request_tracking_upload(lease, origin, method, path, body)
+            .await
+            .0
+    }
+
+    async fn timed_request_tracking_upload(
+        lease: &RuntimeLease,
+        origin: &str,
+        method: Method,
+        path: &str,
+        body: Vec<u8>,
+    ) -> ((Duration, Result<Vec<u8>, String>), Duration) {
         let started = tokio::time::Instant::now();
+        let last_taken = Arc::new(Mutex::new(started));
         let url = remote_url(origin, path).unwrap();
         let result = async {
             let (response, stall_bound) = lease
-                .send(method, path, url, HeaderMap::new(), body)
+                .send_tracking_upload(
+                    method,
+                    path,
+                    url,
+                    HeaderMap::new(),
+                    body,
+                    last_taken.clone(),
+                )
                 .await
                 .map_err(|error| format!("{error:?}"))?;
             bounded_response(response, MAX_RESPONSE_BODY_BYTES, stall_bound).await
         }
         .await;
-        (started.elapsed(), result)
+        let last_progress = last_taken.lock().unwrap().duration_since(started);
+        ((started.elapsed(), result), last_progress)
     }
 
     /// Asserts that a request failed at its `budget` on the paused clock. The test servers keep
@@ -1908,6 +1951,7 @@ mod tests {
         budget: Duration,
     ) {
         let error = result.expect_err("the request should have timed out");
+        eprintln!("timeout: elapsed={elapsed:?}, budget={budget:?}, error={error}");
         assert!(
             elapsed >= budget && elapsed < budget + Duration::from_secs(1),
             "timed out after {elapsed:?}, not at its {budget:?} budget: {error}"
@@ -2064,18 +2108,21 @@ mod tests {
             upload_time + DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
         );
 
-        // A server that stops reading the body fails the upload on the same bound, even on a route
-        // with no total.
-        assert_timed_out_at(
-            timed_request(&lease, &origin, Method::POST, images, image()).await,
-            upload_time + DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
-        );
+        // A server that stops reading still allows the client to fill socket buffers. On
+        // Windows, those writes can complete after the simulated upload allowance. Assert the
+        // stall deadline against observed body consumption, not an assumed last-write time.
+        // Neither the bounded route nor the export with no total may wait beyond that deadline.
         let export = "/api/sessions/s_1/export?format=json";
         assert_eq!(budget(Method::GET, export).total, None);
-        assert_timed_out_at(
-            timed_request(&lease, &origin, Method::GET, export, image()).await,
-            upload_time + DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
-        );
+        for (method, path) in [(Method::POST, images), (Method::GET, export)] {
+            let (timed, last_progress) =
+                timed_request_tracking_upload(&lease, &origin, method, path, image()).await;
+            assert_eq!(timed.1.as_deref(), Err("Stalled"));
+            assert_timed_out_at(
+                timed,
+                upload_time.max(last_progress) + DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
+            );
+        }
         ticker.abort();
     }
 
