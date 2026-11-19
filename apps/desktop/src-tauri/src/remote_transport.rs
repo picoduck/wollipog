@@ -87,6 +87,28 @@ impl RuntimeLease {
         headers: HeaderMap,
         body: Vec<u8>,
     ) -> Result<(reqwest::Response, Option<Duration>), NativeRequestError> {
+        self.send_tracking_upload(
+            method,
+            path,
+            url,
+            headers,
+            body,
+            Arc::new(Mutex::new(tokio::time::Instant::now())),
+        )
+        .await
+    }
+
+    /// Shares actual body-consumption progress with the caller so tests can distinguish a
+    /// stopped upload from a response that stalls after a completed upload.
+    async fn send_tracking_upload(
+        &self,
+        method: Method,
+        path: &str,
+        url: Url,
+        headers: HeaderMap,
+        body: Vec<u8>,
+        last_taken: Arc<Mutex<tokio::time::Instant>>,
+    ) -> Result<(reqwest::Response, Option<Duration>), NativeRequestError> {
         let started = tokio::time::Instant::now();
         let budget = native_request_budget(&method, path, body.len());
         // The client's read timeout runs from the start of a request until its response head, so it
@@ -105,7 +127,7 @@ impl RuntimeLease {
         if !upload_stall_bounded {
             return Ok((request.body(body).send().await?, None));
         }
-        let last_taken = Arc::new(Mutex::new(started));
+        *last_taken.lock().unwrap_or_else(|error| error.into_inner()) = started;
         let response = request
             .body(reqwest::Body::wrap(UploadBody {
                 remaining: body.into(),
@@ -1740,6 +1762,62 @@ mod tests {
         },
     }
 
+    /// Keep real socket I/O from consuming simulated upload time. A small ticker only bounds
+    /// each auto-advance: thousands of advances can still elapse while Windows completes a write.
+    /// Tokio inhibits auto-advance while a spawn_blocking task is outstanding. Releasing the
+    /// channel on completion (or cancellation) lets simulated server delays advance normally.
+    async fn real_io<T>(io: impl std::future::Future<Output = T>) -> T {
+        let (done, waiting) = std::sync::mpsc::channel::<()>();
+        let guard = tokio::task::spawn_blocking(move || {
+            assert!(
+                matches!(
+                    waiting.recv_timeout(Duration::from_secs(10)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+                ),
+                "loopback I/O did not finish within 10 real seconds"
+            );
+        });
+        let result = io.await;
+        drop(done);
+        guard.await.unwrap();
+        result
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn loopback_io_waits_do_not_consume_the_simulated_upload_budget() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let sender = std::thread::spawn(move || {
+            use std::io::Write;
+            let mut stream = std::net::TcpStream::connect(address).unwrap();
+            // Force a real I/O wait, independent of OS loopback completion speed.
+            std::thread::sleep(Duration::from_millis(100));
+            stream.write_all(b"x").unwrap();
+        });
+        let ticker = tokio::spawn(async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let started = tokio::time::Instant::now();
+        real_io(async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut byte = [0];
+            stream.read_exact(&mut byte).await.unwrap();
+            assert_eq!(&byte, b"x");
+        })
+        .await;
+        sender.join().unwrap();
+        ticker.abort();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // The guard must also release the clock for deliberate server delays.
+        tokio::time::sleep(Duration::from_secs(128)).await;
+        assert!(started.elapsed() >= Duration::from_secs(128));
+        assert!(started.elapsed() < Duration::from_secs(129));
+    }
+
     /// Serves one reply per connection, in the order the connections arrive, each on its own task
     /// so a reply still sleeping never holds up the next connection.
     async fn serve_slowly(replies: Vec<SlowReply>) -> String {
@@ -1754,7 +1832,7 @@ mod tests {
                     let mut request = Vec::new();
                     let mut chunk = [0_u8; 1024];
                     loop {
-                        let count = stream.read(&mut chunk).await.unwrap_or(0);
+                        let count = real_io(stream.read(&mut chunk)).await.unwrap_or(0);
                         request.extend_from_slice(&chunk[..count]);
                         if count == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
                             break;
@@ -1780,12 +1858,15 @@ mod tests {
                         while received < length {
                             tokio::time::sleep(Duration::from_secs(1)).await;
                             let mut second = per_second.min(length - received);
-                            while second > 0 {
-                                let count = stream.read(&mut buffer[..second]).await.unwrap();
-                                assert!(count > 0, "the request body ended early");
-                                second -= count;
-                                received += count;
-                            }
+                            real_io(async {
+                                while second > 0 {
+                                    let count = stream.read(&mut buffer[..second]).await.unwrap();
+                                    assert!(count > 0, "the request body ended early");
+                                    second -= count;
+                                    received += count;
+                                }
+                            })
+                            .await;
                         }
                         reply = *then;
                     }
@@ -1795,18 +1876,19 @@ mod tests {
                         }
                         SlowReply::After(delay) => {
                             tokio::time::sleep(delay).await;
-                            let _ = stream
-                                .write_all(http_response("200 OK", "{}", "").as_bytes())
-                                .await;
+                            let _ = real_io(
+                                stream.write_all(http_response("200 OK", "{}", "").as_bytes()),
+                            )
+                            .await;
                         }
                         SlowReply::Trickle { every, bytes } => {
                             let head = format!(
                                 "HTTP/1.1 200 OK\r\nContent-Length: {bytes}\r\nConnection: close\r\n\r\n"
                             );
-                            let _ = stream.write_all(head.as_bytes()).await;
+                            let _ = real_io(stream.write_all(head.as_bytes())).await;
                             for _ in 0..bytes {
                                 tokio::time::sleep(every).await;
-                                if stream.write_all(b"x").await.is_err() {
+                                if real_io(stream.write_all(b"x")).await.is_err() {
                                     break;
                                 }
                             }
@@ -1827,21 +1909,43 @@ mod tests {
         path: &str,
         body: Vec<u8>,
     ) -> (Duration, Result<Vec<u8>, String>) {
+        timed_request_tracking_upload(lease, origin, method, path, body)
+            .await
+            .0
+    }
+
+    async fn timed_request_tracking_upload(
+        lease: &RuntimeLease,
+        origin: &str,
+        method: Method,
+        path: &str,
+        body: Vec<u8>,
+    ) -> ((Duration, Result<Vec<u8>, String>), Duration) {
         let started = tokio::time::Instant::now();
+        let last_taken = Arc::new(Mutex::new(started));
         let url = remote_url(origin, path).unwrap();
         let result = async {
             let (response, stall_bound) = lease
-                .send(method, path, url, HeaderMap::new(), body)
+                .send_tracking_upload(
+                    method,
+                    path,
+                    url,
+                    HeaderMap::new(),
+                    body,
+                    last_taken.clone(),
+                )
                 .await
                 .map_err(|error| format!("{error:?}"))?;
             bounded_response(response, MAX_RESPONSE_BODY_BYTES, stall_bound).await
         }
         .await;
-        (started.elapsed(), result)
+        let last_progress = last_taken.lock().unwrap().duration_since(started);
+        ((started.elapsed(), result), last_progress)
     }
 
     /// Asserts that a request failed at its `budget` on the paused clock. The test servers keep
     /// every connection open, so only a timeout can end a request then.
+    #[track_caller]
     fn assert_timed_out_at(
         (elapsed, result): (Duration, Result<Vec<u8>, String>),
         budget: Duration,
@@ -2003,18 +2107,28 @@ mod tests {
             upload_time + DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
         );
 
-        // A server that stops reading the body fails the upload on the same bound, even on a route
-        // with no total.
-        assert_timed_out_at(
-            timed_request(&lease, &origin, Method::POST, images, image()).await,
-            upload_time + DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
-        );
+        // A server that stops reading still allows the client to fill socket buffers. On
+        // Windows, those writes can complete after the simulated upload allowance. Assert the
+        // stall deadline against observed body consumption, not an assumed last-write time.
+        // Neither the bounded route nor the export with no total may wait beyond that deadline.
         let export = "/api/sessions/s_1/export?format=json";
         assert_eq!(budget(Method::GET, export).total, None);
-        assert_timed_out_at(
-            timed_request(&lease, &origin, Method::GET, export, image()).await,
-            upload_time + DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
-        );
+        for (method, path) in [(Method::POST, images), (Method::GET, export)] {
+            let (timed, last_progress) =
+                timed_request_tracking_upload(&lease, &origin, method, path, image()).await;
+            assert_eq!(timed.1, Err("Stalled".to_string()));
+            // Keep an independent ceiling even on the export route without a total, so a
+            // runaway progress timestamp cannot make this assertion's deadline unbounded.
+            assert!(
+                timed.0 < upload_time + DEFAULT_REMOTE_HTTP_TOTAL_TIMEOUT,
+                "a stopped reader outlasted the ordinary route's total: {:?}",
+                timed.0
+            );
+            assert_timed_out_at(
+                timed,
+                upload_time.max(last_progress) + DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
+            );
+        }
         ticker.abort();
     }
 
