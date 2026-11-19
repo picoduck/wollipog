@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   PROTOCOL_VERSION,
   type ControlPlaneToUi,
+  type PendingApproval,
   type RunnerView,
   type SessionEvent,
   type SessionView,
@@ -32,10 +33,12 @@ import "../styles.css";
  * launched two sessions, one of them waiting on a tool approval. The SPA path rides in `?path=`.
  * `window.assistantsAdvance()` finishes the running launched session, as its stream would.
  * `?confirm=N` (1–8) gives the first thread N owner confirmations waiting for its owner (#4665).
+ * `?attention=N` gives the first thread a confirmation, the second a question, and extra threads confirmations (#4723).
  */
 const SCOPE = "assistants-e2e";
 const params = new URLSearchParams(location.search);
 const scenario = params.get("threads") ?? "some";
+const attentionCount = Number(params.get("attention") ?? 0);
 const NOW = Date.now();
 const minute = 60_000;
 
@@ -109,6 +112,22 @@ const sessions = new Map<string, SessionView>([
   })],
 ]);
 
+const question: PendingApproval = {
+  kind: "question", requestId: "ask-release", title: "Release Scope", options: [],
+  questions: [{ id: "scope", question: "Which release should I write up?", options: [{ label: "Next Release" }, { label: "Last Release" }] }],
+};
+
+if (attentionCount > 0) {
+  for (const id of ["sess-triage", "sess-release", "sess-cleanup"]) {
+    sessions.set(id, { ...sessions.get(id)!, role: "assistant" });
+  }
+}
+if (attentionCount > 1) {
+  sessions.set("sess-release", session("sess-release", "Ship the Release Notes", {
+    role: "assistant", status: "input_required", pendingApproval: structuredClone(question),
+  }));
+}
+
 const access = { level: "full_access", destructive: "ask" } as const;
 
 /** `?confirm=N` (#4665): the first thread's assistant asked for N destructive commands (1–8) and waits
@@ -129,7 +148,7 @@ function confirmation(index: number): AssistantOwnerConfirmation {
     status: "pending", createdAt: NOW - minute + index, expiresAt: NOW + 59 * minute, resolvedAt: null,
   };
 }
-const confirmationCount = Math.min(8, Math.max(0, Number(params.get("confirm") ?? 0) || 0));
+const confirmationCount = Math.min(8, Math.max(0, Number(params.get("confirm") ?? (attentionCount > 0 ? 1 : 0)) || 0));
 function thread(id: string, sessionId: string, overrides: Partial<AssistantThread>): AssistantThread {
   const backing = sessions.get(sessionId)!;
   return {
@@ -159,12 +178,21 @@ let threads: AssistantThread[] = scenario === "long" ? [
   })),
 ] : scenario === "some" ? [
   triage(),
-  thread("thr_release", "sess-release", { status: "working", harness: "codex", lastActivityAt: NOW - 3 * minute }),
+  thread("thr_release", "sess-release", { status: attentionCount > 1 ? "needs_you" : "working", harness: "codex", lastActivityAt: NOW - 3 * minute }),
   thread("thr_cleanup", "sess-cleanup", { status: "done" }),
   // Archived: the list leaves it out, and a link to it opens it on its own.
   thread("thr_retired", "sess-cleanup", { title: "Retire the Old Runner", status: "archived", archivedAt: NOW - 2 * 24 * 60 * minute,
     lastActivityAt: NOW - 3 * 24 * 60 * minute }),
 ] : [];
+for (let index = 2; index < attentionCount; index += 1) {
+  const threadId = `thr_attention_${index}`;
+  const sessionId = `sess_attention_${index}`;
+  sessions.set(sessionId, session(sessionId, longTitle(index + 1), { role: "assistant" }));
+  threads.push(thread(threadId, sessionId, {
+    status: "needs_you", lastActivityAt: NOW - (index + 3) * minute,
+    confirmations: [{ ...confirmation(0), id: `aoc_attention_${index}`, threadId }],
+  }));
+}
 
 const defaults: AssistantThreadDefaults = {
   harness: "claude-code",
@@ -278,7 +306,8 @@ function settleConfirmation(threadId: string, confirmationId: string, intent: "a
     ? { ...asked, status: "executed", resolvedAt: Date.now(), outcome: { receiptStatus: "succeeded" } }
     : { ...asked, status: "denied", resolvedAt: Date.now(), outcome: { reason: "The owner denied it." } };
   document.body.dataset.confirmationAnswer = `${confirmationId}:${intent}`;
-  const settled = { ...current, status: "working" as const, confirmations: (current.confirmations ?? []).filter((candidate) => candidate.id !== confirmationId) };
+  const confirmations = (current.confirmations ?? []).filter((candidate) => candidate.id !== confirmationId);
+  const settled = { ...current, status: confirmations.length ? "needs_you" as const : "working" as const, confirmations };
   threads = threads.map((candidate) => candidate.id === threadId ? settled : candidate);
   publish(settled);
   return { confirmation: structuredClone(confirmation), thread: structuredClone(settled) };
@@ -291,6 +320,9 @@ function publish(changed: AssistantThread) {
 
 const client = {
   ...api,
+  assistantConfirmationThreads: () => refused() ?? Promise.resolve({
+    threads: structuredClone(threads.filter((candidate) => candidate.status !== "archived")),
+  }),
   assistantThreads: (options: { includeArchived?: boolean } = {}) => {
     const refusal = refused();
     if (refusal) return refusal;
@@ -334,6 +366,15 @@ const client = {
   // thread stops listing the request and is republished.
   approveAssistantConfirmation: async (threadId: string, confirmationId: string) => settleConfirmation(threadId, confirmationId, "approve"),
   denyAssistantConfirmation: async (threadId: string, confirmationId: string) => settleConfirmation(threadId, confirmationId, "deny"),
+  answerQuestion: async (sessionId: string) => {
+    const next = { ...sessions.get(sessionId)!, status: "running" as const, pendingApproval: null, updatedAt: Date.now() };
+    upsert(next);
+    const changed = threads.find((candidate) => candidate.sessionId === sessionId)!;
+    const answered = { ...changed, status: "working" as const };
+    threads = threads.map((candidate) => candidate === changed ? answered : candidate);
+    publish(answered);
+    return structuredClone(next);
+  },
   archiveAssistantThread: async (threadId: string) => {
     const archived = { ...found(threadId), status: "archived" as const, archivedAt: Date.now() };
     threads = threads.map((candidate) => candidate.id === threadId ? archived : candidate);

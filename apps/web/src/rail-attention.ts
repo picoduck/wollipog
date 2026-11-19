@@ -63,6 +63,8 @@ export interface RailAttentionState {
   /** Sessions waiting on the user (the Sessions list's Blocked). */
   blocked: number;
   machines: MachineAttention;
+  /** Threads whose owner needs to answer a request. */
+  assistantThreads: number;
 }
 
 /**
@@ -80,6 +82,12 @@ export function railAttention(view: GlobalViewName, state: RailAttentionState): 
     const blocked = Math.max(0, state.blocked);
     if (blocked === 0) return null;
     return { kind: "count", count: blocked, tone: "warning", note: `${blocked} waiting on you` };
+  }
+  if (view === "assistants") {
+    const count = state.assistantThreads;
+    if (!(count > 0)) return null;
+    const threads = count === 1 ? "thread" : "threads";
+    return { kind: "count", count, tone: "warning", note: `${count} ${threads} waiting on you` };
   }
   if (view === "runners") {
     const offline = Math.max(0, state.machines.offlineWithActiveSessions);
@@ -100,8 +108,8 @@ export function railAttention(view: GlobalViewName, state: RailAttentionState): 
 /**
  * What the phone's More tab says about the destinations behind it (#2110): one dot in the most
  * severe tone among them, danger over warning, and a description naming each one with its own
- * breakdown, in the sheet's order. A count is never summed across destinations, because sessions
- * and machines cannot be read as one number. Destinations on the bar contribute nothing.
+ * breakdown, in the sheet's order. Sessions, Assistant threads and machines are separate counts.
+ * Destinations on the bar contribute nothing.
  */
 export interface OverflowAttention {
   tone: "warning" | "danger";

@@ -293,7 +293,7 @@ export function createApiClient(transport: ApiTransport) {
   acknowledgeCampaignClosureReport: (occurrenceId: string, kind: string) => req<{ ok: true }>(
     `/api/campaign-closure-reports/${encodeURIComponent(occurrenceId)}/${encodeURIComponent(kind)}/acknowledge`, { method: "POST" }),
 
-  /** The owner's Assistant threads, read for their pending owner confirmations (#4665). */
+  /** The owner's Assistant threads, read for navigation attention and pending owner confirmations. */
   assistantConfirmationThreads: () => req<AssistantThreadListResponse>("/api/assistant-threads"),
   /** Approve Once: the control plane runs the bound command, then answers with how it ended. */
   approveAssistantConfirmation: (threadId: string, confirmationId: string) => req<AssistantOwnerConfirmationResponse>(
