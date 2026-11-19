@@ -18,6 +18,7 @@ import type {
   AssistantThreadHarness,
   AssistantThreadHarnessOption,
   AssistantThreadListResponse,
+  AssistantThreadLimits,
   AssistantThreadResponse,
   ChangeAssistantThreadAccountRequest,
   CreateAssistantThreadRequest,
@@ -55,6 +56,11 @@ export function assistantThreadRoutes(req: JsonRequest) {
     /** One thread, archived ones included: what a link to a thread the list leaves out opens. */
     assistantThread: (threadId: string) => req<AssistantThreadResponse>(threadPath(threadId)),
     assistantThreadDefaults: () => req<AssistantThreadDefaults>(`${ASSISTANT_THREADS_PATH}/defaults`),
+    assistantThreadLimitDefaults: () => req<AssistantThreadLimits>(`${ASSISTANT_THREADS_PATH}/defaults/limits`),
+    setAssistantThreadLimitDefaults: (limits: AssistantThreadLimits) =>
+      req<AssistantThreadLimits>(`${ASSISTANT_THREADS_PATH}/defaults/limits`, { method: "PUT", body: JSON.stringify(limits) }),
+    setAssistantThreadLimits: (threadId: string, limits: AssistantThreadLimits) =>
+      req<AssistantThreadResponse>(`${threadPath(threadId)}/limits`, { method: "PUT", body: JSON.stringify(limits) }),
     /** An unsupported runner or harness is refused with 409 and the server's guidance. */
     createAssistantThread: (body: CreateAssistantThreadRequest) =>
       req<AssistantThreadResponse>(ASSISTANT_THREADS_PATH, { method: "POST", body: JSON.stringify(body) }),

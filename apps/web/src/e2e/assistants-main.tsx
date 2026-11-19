@@ -2,10 +2,13 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import {
   PROTOCOL_VERSION,
+  type AgentHarnessDefaultsView,
+  type AssistantThreadLimits,
   type ControlPlaneToUi,
   type PendingApproval,
   type RunnerView,
   type SessionEvent,
+  type SessionNamingSettingsView,
   type SessionView,
   type UiSnapshotMessage,
 } from "@wollipog/protocol";
@@ -39,6 +42,7 @@ const SCOPE = "assistants-e2e";
 const params = new URLSearchParams(location.search);
 const scenario = params.get("threads") ?? "some";
 const attentionCount = Number(params.get("attention") ?? 0);
+const limitsScenario = params.get("limits");
 const NOW = Date.now();
 const minute = 60_000;
 const accountScenario = params.get("accounts");
@@ -219,6 +223,26 @@ for (let index = 2; index < attentionCount; index += 1) {
   }));
 }
 
+if (limitsScenario === "stress") {
+  const current = threads[0]!;
+  current.title = longTitle(1);
+  for (let index = 3; index <= 40; index += 1) {
+    const id = `sess-limit-${index}`;
+    sessions.set(id, session(id, longTitle(index)));
+    current.launchedSessionIds.push(id);
+  }
+}
+if (limitsScenario) {
+  for (const item of threads) {
+    item.usage = {
+      costUsd: { used: item.id === "thr_triage" ? 8.13 : 0, limit: 25 },
+      launchedSessions: { used: item.launchedSessionIds.length, limit: limitsScenario === "stress" ? null : 10 },
+    };
+    if (item.status !== "archived" && limitsScenario !== "old") item.limitsEditable = true;
+  }
+}
+
+let limitDefaults: AssistantThreadLimits = { costUsd: 25, launchedSessions: 10 };
 const defaults: AssistantThreadDefaults = {
   harness: "claude-code",
   harnesses: [
@@ -353,6 +377,23 @@ const client = {
   assistantConfirmationThreads: () => refused() ?? Promise.resolve({
     threads: structuredClone(threads.filter((candidate) => candidate.status !== "archived")),
   }),
+  agentHarnessDefaults: async (): Promise<AgentHarnessDefaultsView> => ({
+    defaults: runner.agents.map((agent) => ({
+      agentId: agent.id, driver: agent.driver ?? "claude-code", context: { kind: "native" }, name: agent.name,
+      compatibleInstallations: 0,
+      installations: [{ runnerId: runner.runnerId, machineName: runner.displayName ?? runner.hostname, online: true,
+        models: [], effortLevels: [], permissionModes: ["default"] }],
+    })),
+  }),
+  sessionNamingSettings: async (): Promise<SessionNamingSettingsView> => ({
+    mode: "prompt_text_only", effectiveMode: "prompt_text_only", source: "default", canManage: true,
+    modes: {
+      prompt_text_only: { available: true },
+      session_agent_account: { available: false },
+      custom_model_endpoint: { available: false },
+    },
+  }),
+  artifactUploadSettings: async () => ({ preference: "manual" }),
   assistantThreads: (options: { includeArchived?: boolean } = {}) => {
     const refusal = refused();
     if (refusal) return refusal;
@@ -371,6 +412,24 @@ const client = {
     return { thread: structuredClone(found(threadId)) };
   },
   assistantThreadDefaults: () => refused() ?? Promise.resolve(structuredClone(defaults)),
+  assistantThreadLimitDefaults: () => refused() ?? (limitsScenario && limitsScenario !== "old"
+    ? Promise.resolve(structuredClone(limitDefaults)) : unavailable()),
+  setAssistantThreadLimitDefaults: async (limits: AssistantThreadLimits) => {
+    limitDefaults = limits;
+    return structuredClone(limitDefaults);
+  },
+  setAssistantThreadLimits: async (threadId: string, limits: AssistantThreadLimits) => {
+    const current = found(threadId);
+    if (limits.costUsd !== null && limits.costUsd < 15) {
+      throw new ApiError("The thread has already spent or committed $15.00. Choose a budget at least that high.", 409);
+    }
+    current.usage = {
+      costUsd: { used: current.usage!.costUsd.used, limit: limits.costUsd },
+      launchedSessions: { used: current.usage!.launchedSessions.used, limit: limits.launchedSessions },
+    };
+    publish(current);
+    return { thread: structuredClone(current) };
+  },
   createAssistantThread: async (body: CreateAssistantThreadRequest) => {
     const refusal = refused();
     if (refusal) return refusal;
@@ -391,6 +450,13 @@ const client = {
       access, connectionId: null, launchedSessionIds: [], lastActivityAt: Date.now(), createdAt: Date.now(), archivedAt: null,
       ...(accountScenario ? { accountChangeSupported: true, providerAccountLabel: account?.label } : {}),
     };
+    if (limitsScenario && limitsScenario !== "old") {
+      created.limitsEditable = true;
+      created.usage = {
+        costUsd: { used: 0, limit: limitDefaults.costUsd },
+        launchedSessions: { used: 0, limit: limitDefaults.launchedSessions },
+      };
+    }
     threads = [created, ...threads];
     publish(created);
     return { thread: structuredClone(created) };

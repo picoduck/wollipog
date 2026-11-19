@@ -152,7 +152,7 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
       try {
         const result = await run(args, owner, sessionOrigin);
         return {receipt: receipts.settle(current.id, commandId, result.ok ? "succeeded" : "failed", result.data?.id),
-          ...(result.ok ? {sessionId: result.data?.id} : {error: result.error,
+          ...(result.ok ? {sessionId: result.data?.id, ...(result.threadBudget ? {threadBudget: result.threadBudget} : {})} : {error: result.error,
             capabilityRequirement: result.capabilityRequirement, errorDetails: result.errorDetails,
             recovery: "Use the reported lifecycle/worktree recovery in this session's Wollipog detail, then submit a new command ID."}),
           meaning: result.ok ? "Application service accepted the command. Read the session for execution/lifecycle completion." : "Service refused the command. Correct the reported cause before submitting a new command."};

@@ -28,9 +28,14 @@ export function registerAssistantThreadRoutes(app: FastifyInstance, deps: {
   app.get("/api/assistant-threads", handle((owner, req) =>
     ({ threads: deps.threads.list(owner, (req.query as { includeArchived?: unknown }).includeArchived === "true") })));
   app.get("/api/assistant-threads/defaults", handle((owner) => deps.threads.defaults(owner)));
+  // Separate write routes ensure older control planes refuse these inputs instead of silently
+  // treating an update as a rename or applying the historic fixed limits.
+  app.get("/api/assistant-threads/defaults/limits", handle((owner) => deps.threads.limitDefaults(owner)));
+  app.put("/api/assistant-threads/defaults/limits", handle((owner, req) => deps.threads.setLimitDefaults(owner, req.body)));
   app.post("/api/assistant-threads", handle(async (owner, req) => ({ thread: deps.threads.create(owner, req.body) })));
   app.get("/api/assistant-threads/:threadId", handle((owner, req) => ({ thread: deps.threads.get(owner, threadId(req)) })));
   app.patch("/api/assistant-threads/:threadId", handle((owner, req) => ({ thread: deps.threads.rename(owner, threadId(req), req.body) })));
+  app.put("/api/assistant-threads/:threadId/limits", handle((owner, req) => ({ thread: deps.threads.setLimits(owner, threadId(req), req.body) })));
   app.post("/api/assistant-threads/:threadId/archive", handle((owner, req) => ({ thread: deps.threads.archive(owner, threadId(req)) })));
   app.get("/api/assistant-threads/:threadId/account", handle((owner, req) => deps.threads.accountChoices(owner, threadId(req))));
   app.post("/api/assistant-threads/:threadId/account", handle(async (owner, req) =>

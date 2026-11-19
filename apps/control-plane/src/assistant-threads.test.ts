@@ -65,7 +65,7 @@ async function harness(options: { protocolVersion?: number; agents?: AgentDefini
   let principal: HumanPrincipal | null = owner;
   registerAssistantThreadRoutes(app, { threads, requestHuman: () => principal });
   await app.ready();
-  const call = async (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => {
+  const call = async (method: "GET" | "POST" | "PATCH" | "PUT", url: string, payload?: unknown) => {
     const response = await app.inject({ method, url, ...(payload === undefined ? {} : { payload: payload as object }) });
     return { status: response.statusCode, body: response.json() as any, raw: response.body };
   };
@@ -88,7 +88,7 @@ test("a new thread launches an assistant-role session whose every launch carries
       id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined, connectionId: undefined,
       assistant: "wollipog", title: "Weekly Cleanup", harness: "claude-code", status: "working",
       access: { level: "full_access", destructive: "ask" }, launchedSessionIds: [], archivedAt: null,
-      usage: { launchedSessions: { used: 0, limit: 10 }, costUsd: { used: 0, limit: 25 } }, confirmations: [],
+      usage: { launchedSessions: { used: 0, limit: 10 }, costUsd: { used: 0, limit: 25 } }, limitsEditable: true, confirmations: [],
     });
     const session = h.db.getSession(thread.sessionId)!;
     assert.equal(session.role, "assistant");
@@ -115,6 +115,54 @@ test("a new thread launches an assistant-role session whose every launch carries
     const listed = await h.call("GET", "/api/assistant-threads");
     assert.deepEqual(listed.body.threads.map((t: AssistantThread) => t.id), [thread.id]);
     assert.doesNotMatch(listed.raw, /wollipoga_|token/i);
+  } finally { await h.close(); }
+});
+
+test("saved limits belong to the owner and only apply on thread creation", async () => {
+  const h = await harness({ protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.assistantRole });
+  try {
+    const path = "/api/assistant-threads";
+    const defaults = `${path}/defaults/limits`;
+    const original = (await h.call("POST", path, {})).body.thread as AssistantThread;
+    assert.deepEqual((await h.call("GET", defaults)).body, { costUsd: 25, launchedSessions: 10 });
+    assert.equal((await h.call("PUT", defaults, { costUsd: 12.34, launchedSessions: 0 })).status, 200);
+    const next = (await h.call("POST", path, {})).body.thread as AssistantThread;
+    assert.deepEqual(next.usage, { costUsd: { used: 0, limit: 12.34 }, launchedSessions: { used: 0, limit: 0 } });
+    assert.equal(h.sent.at(-1)!.spec.config?.costBudgetUsd, 12.34);
+    assert.deepEqual((await h.call("GET", `${path}/${original.id}`)).body.thread.usage, original.usage);
+    assert.equal(h.db.getSession(original.sessionId)!.costBudgetUsd, 25);
+
+    const edit = `${path}/${next.id}/limits`;
+    const unlimited = { costUsd: null, launchedSessions: null };
+    for (const invalid of [{ costUsd: -1 }, { costUsd: 3.001 }, { launchedSessions: -1 }, { launchedSessions: 1.5 }, { other: 5 }]) {
+      for (const url of [defaults, edit]) assert.equal((await h.call("PUT", url, { ...unlimited, ...invalid })).status, 400);
+    }
+    h.as(null);
+    for (const url of [defaults, edit]) {
+      assert.equal((await h.call("PUT", url, unlimited)).status, 403);
+      assert.equal(isAgentControlApiRouteAllowed("PUT", url, "normal"), false, url);
+      assert.equal(isAgentControlApiRouteAllowed("PUT", url, "assistant"), false, url);
+    }
+    h.as({ ...h.owner, userId: "usr_other_owner" });
+    assert.deepEqual((await h.call("GET", defaults)).body, { costUsd: 25, launchedSessions: 10 });
+    assert.equal((await h.call("PUT", edit, unlimited)).status, 404);
+    h.as(h.owner);
+    assert.equal((await h.call("PUT", defaults, unlimited)).status, 200);
+    const uncapped = (await h.call("POST", path, {})).body.thread as AssistantThread;
+    assert.deepEqual(uncapped.usage, { costUsd: { used: 0, limit: null }, launchedSessions: { used: 0, limit: null } });
+    assert.equal(h.db.getSession(uncapped.sessionId)!.costBudgetUsd, null);
+    assert.equal(h.sent.at(-1)!.spec.config?.costBudgetUsd, undefined);
+  } finally { await h.close(); }
+});
+
+test("install backfills pre-existing threads with the historical fixed limits", async () => {
+  const h = await harness();
+  try {
+    const created = (await h.call("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    h.db.raw().exec("ALTER TABLE assistant_threads DROP COLUMN cost_limit_usd; ALTER TABLE assistant_threads DROP COLUMN launch_limit");
+    const { AssistantThreadStore } = await import("./assistant-thread-store.js");
+    AssistantThreadStore.install(h.db.raw());
+    assert.deepEqual(h.threads.get(h.owner, created.id).usage, created.usage);
   } finally { await h.close(); }
 });
 
@@ -409,6 +457,7 @@ test("a thread's status follows its backing session and the thread republishes w
     const session = h.db.getSession(thread.sessionId)!;
     assert.equal(assistantThreadStatus("active", { ...session, status: "running", pendingApproval: null }), "working");
     assert.equal(assistantThreadStatus("active", { ...session, status: "completed", pendingApproval: null }), "done");
+    assert.equal(assistantThreadStatus("active", { ...session, archived: true }), "archived");
     assert.equal(assistantThreadStatus("active", null), "archived");
     assert.equal(assistantThreadStatus("archived", { ...session, status: "running" }), "archived");
   } finally { await h.close(); }
