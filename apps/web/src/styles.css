@@ -7500,6 +7500,24 @@ body.shell-dock-dragging * {
   flex: none;
   overflow: visible;
 }
+.request-card[data-assistant-campaign] > .request-card-body {
+  max-height: min(27vh, 16rem);
+  overflow-y: auto;
+}
+.request-card[data-assistant-campaign] .facts dd {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.assistant-campaign-budget,
+.assistant-inbox-campaigns {
+  display: grid;
+  gap: var(--space-2);
+}
+.assistant-inbox-campaigns {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
 /* With requests waiting, the requests and work cards scroll together within a bound at every width,
    wrapped or not, so the transcript and composer always keep their room. A phone (below) allows
    more, enough for a whole request. */

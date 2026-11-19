@@ -1519,6 +1519,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // v389 slot
   // v390 slot
   // v391 slot
+  // 391: Owner-confirmed Assistant campaign launch with a separate campaign allowance.
+  391,
   // v392 slot
   // v393 slot
   // v394 slot

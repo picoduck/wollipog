@@ -3640,13 +3640,8 @@ export class SessionsService {
     const call = assistantCallContext.getStore();
     const thread = call ? this.db.assistantThreads.forConnection(call.connectionId) : null;
     if (!thread) return null;
-    if (thread.launch_limit !== null) {
-      const launched = this.db.assistantThreads.launchedSessionIds(thread.id).length;
-      if (launched >= thread.launch_limit) {
-        return { refusal: `This Wollipog Assistant thread has launched ${launched} of the ${thread.launch_limit} sessions it may launch, ` +
-          "so it cannot launch another. Tell your owner they can change the launch limit in Thread Limits." };
-      }
-    }
+    const refusal = this.assistantThreadLaunchLimitRefusal(thread.id, thread.launch_limit);
+    if (refusal) return { refusal };
     const launch = { threadId: thread.id, backingSessionId: thread.session_id };
     const limitUsd = thread.cost_limit_usd;
     if (limitUsd === null) return { ...launch, budget: null };
@@ -3662,6 +3657,14 @@ export class SessionsService {
     const remainingUsd = floorBudgetCents(Math.min(unheld, backingCap === null ? unheld : backingCap - backingSpentUsd));
     if (remainingUsd < 0.01) return { refusal: assistantThreadBudgetRefusal(limitUsd) };
     return { ...launch, budget: { limitUsd, heldUsd: launchedHeldUsd, remainingUsd } };
+  }
+
+  assistantThreadLaunchLimitRefusal(threadId: string, limit: number | null): string | null {
+    if (limit === null) return null;
+    const launched = this.db.assistantThreads.launchedSessionIds(threadId).length +
+      this.db.assistantOwnerConfirmations.launchedCampaignIds(threadId).length;
+    return launched >= limit ? `This Wollipog Assistant thread has launched ${launched} of the ${limit} sessions it may launch, ` +
+      "so it cannot launch another. Tell your owner they can change the launch limit in Thread Limits." : null;
   }
 
   /** The authenticated thread-owner route is the only caller. Existing launch allowances and
@@ -4276,8 +4279,11 @@ export class SessionsService {
         tasks: import("@wollipog/protocol").AutomationCampaign["tasks"];
       };
       /** Internal fixture/admission seam; never accepted from ordinary session request JSON. */
-      humanCampaignLaunch?: {
-        principal: HumanPrincipal; requestId: string; digest: string;
+      humanCampaignLaunch?: { principal: HumanPrincipal; requestId: string; digest: string } & ({
+        customBudget: import("@wollipog/protocol").CampaignBudgetAuthority;
+        control?: never;
+      } | {
+        customBudget?: never;
         control: Extract<import("@wollipog/protocol").CampaignControl, { mode: "full_control" }>;
         issueScope: import("@wollipog/protocol").CampaignIssueScope;
         /** Project Locations the reviewed launch inspection left out of the boundary (#4117). */
@@ -4292,7 +4298,7 @@ export class SessionsService {
          * owner's first message sets the objective and issue scope before its first turn. Only
          * the limits it derived (no Human override) may grow to fit that message's issues. */
         firstMessage?: { derivedLimits: import("@wollipog/protocol").FullControlDerivedLimits };
-      };
+      });
       /** Internal only (#3368): this session is a review of the requester's pull request. */
       review?: { policy: ReviewLaunchPolicy };
       /** Internal only (#4663): this session backs a Wollipog Assistant thread, so its role is
@@ -4305,6 +4311,9 @@ export class SessionsService {
     // A Wollipog Assistant thread's assistant launches within its thread's limits (#4663): a launch
     // past them is refused, and the new session is capped at what the thread has left to spend.
     const threadLaunch = creationContext?.assistantThread ? null : this.assistantThreadLaunch();
+    if (assistantCallContext.getStore() && creationContext?.humanCampaignLaunch) {
+      return fail(ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL, 409);
+    }
     let threadBudget: ServiceResult<SessionView>["threadBudget"];
     if (threadLaunch && "refusal" in threadLaunch) return fail(threadLaunch.refusal, 409);
     if (threadLaunch) {
@@ -5102,7 +5111,7 @@ export class SessionsService {
     // as `none`, so no later message counts as the first; with no first message yet, the person's
     // first prompt decides (`promptFromHuman`).
     if (orchestratorPolicy && creationContext?.defaultOwnerUserId && !parentSessionId && !snapshotCommand &&
-        !creationContext.humanCampaignLaunch && !inheritedIssueScope && !orchestratorIssueNumbers.length && requestedText) {
+        !creationContext.humanCampaignLaunch?.control && !inheritedIssueScope && !orchestratorIssueNumbers.length && requestedText) {
       orchestratorPolicy.issueScopeSeed = { state: needsCampaignIssueScopeSeed(requestedText) ? "pending" : "none",
         messageDigest: firstMessageDigest(requestedText) };
     }
@@ -5255,6 +5264,11 @@ export class SessionsService {
           effectiveSessionScope?.owner.kind !== "user" || effectiveSessionScope.owner.userId !== humanLaunch.principal.userId) {
         return fail("atomic Human launch requires the exact Human-owned managed root", 409);
       }
+      const allowance = humanLaunch.customBudget ?? humanLaunch.control.boundary.budgetAuthority;
+      const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, allowance?.costUsd !== undefined);
+      if (accountingError) return fail(accountingError, 409);
+    }
+    if (humanLaunch?.control && orchestratorPolicy) {
       const control = structuredClone(humanLaunch.control);
       if (humanLaunch.evidenceAuthority !== undefined) {
         if (!this.evidenceAuthorityDisclosures || !control.boundary.operations.includes("ui_evidence_approval")) {
@@ -5268,10 +5282,6 @@ export class SessionsService {
       const authoritySupport = campaignAuthorityPreflight(control, launch.driver, runner.protocolVersion,
         this.pacedVideoInstallationContract(req.runnerId, req.agentId));
       if (!authoritySupport.supported) return campaignRefusalFail(authoritySupport.requirement ?? authoritySupport.reason ?? "campaign authority is unsupported");
-      // A launch with no cost ceiling still meters cost, but only an explicit ceiling needs it priced.
-      const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model,
-        control.boundary.budgetAuthority?.costUsd !== undefined);
-      if (accountingError) return fail(accountingError, 409);
       const nativeReview = control.boundary.budgetAuthority?.controlledReview;
       if (nativeReview && (!runner.runtime?.campaignReview || controlledReviewCapabilityKey(nativeReview) !== controlledReviewCapabilityKey(runner.runtime.campaignReview))) {
         return fail("the required native reviewer does not match current runner discovery", 409);
@@ -5482,7 +5492,7 @@ export class SessionsService {
           return this.db.getSession(created.id)!;
         });
       } else if (humanLaunch) {
-        const admitted = this.db.createHumanCampaignLaunch(sessionInput, humanLaunch.principal, humanLaunch.requestId, humanLaunch.digest);
+        const admitted = this.db.createHumanCampaignLaunch(sessionInput, humanLaunch.principal, humanLaunch.requestId, humanLaunch.digest, humanLaunch.customBudget);
         if (!admitted.created && !scheduled) return ok(admitted.session);
         session = admitted.session;
         config.costBudgetUsd = session.costBudgetUsd ?? undefined;

@@ -2,6 +2,7 @@
  * assistant; its transcript and composer are the backing `assistant`-role session's own routes.
  * These views never carry a credential value or hash. */
 import type { ProviderAccountSkipReason } from "./provider-account-selection.js";
+import type { OrchestratorCampaignBudgetDefault } from "./index.js";
 
 /** The harnesses a thread can run on. `codex` selects a runner's Codex agent (App Server when
  * installed, otherwise the Codex CLI driver). */
@@ -54,6 +55,8 @@ export interface AssistantThread {
   accountChangeSupported?: true;
   /** Sessions this thread's assistant launched, oldest first. */
   launchedSessionIds: string[];
+  /** Owner-approved independent roots. Their usage and descendants belong to their own campaign. */
+  launchedCampaignIds?: string[];
   /** Additive: the thread's limits and what it has used of them. */
   usage?: AssistantThreadUsage;
   /** Advertises the dedicated owner limits write route. Absent on older control planes. */
@@ -163,12 +166,14 @@ export interface AssistantOwnerConfirmation {
   /** Every argument the approved run uses, without its command ID: `label` is the argument's exact
    * name and `value` its whole value (JSON for a non-string). Never truncated or relabeled. */
   arguments: AssistantOwnerConfirmationDetail[];
+  /** Campaign-only fields. Approval sends the digest of the exact owner-visible launch. */
+  campaign?: { digest: string; budget: OrchestratorCampaignBudgetDefault | null };
   status: AssistantOwnerConfirmationStatus;
   createdAt: number;
   expiresAt: number;
   resolvedAt: number | null;
   /** Present once resolved: the command receipt's status after it ran, or why it did not run. */
-  outcome?: { receiptStatus?: "accepted" | "running" | "succeeded" | "failed" | "uncertain"; reason?: string };
+  outcome?: { receiptStatus?: "accepted" | "running" | "succeeded" | "failed" | "uncertain"; reason?: string; sessionId?: string };
 }
 
 export interface AssistantOwnerConfirmationResponse { confirmation: AssistantOwnerConfirmation; thread: AssistantThread }

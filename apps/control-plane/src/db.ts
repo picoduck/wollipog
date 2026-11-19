@@ -62,7 +62,7 @@ import { genericRequestScreenData, storedCredentialScreenFact } from "./credenti
 import { scopeSettlements } from "./campaign-issue-authority.js";
 import { grantReviewMaxIssues, ownerReviewMaxIssues, proposalMaxIssues, scopeApprovalMaxIssuesIncrease, scopeDerivedFollowUpLimit } from "./scope-grant.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
-import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
+import { validCampaignBudgetAuthority, validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation, type CampaignBudgetAuthority } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
 import { claudeUsageProbeable } from "./subscription-usage.js";
 import { ACCRUED_USAGE_SQL, claudeTurnRunningTotal } from "./claude-running-total.js";
@@ -19287,23 +19287,28 @@ export class ControlPlaneDb {
 
   /** Internal Human admission, never an HTTP/agent-provided grant. All resources and initial
    * reservation commit together; callers may send a provider command only after this returns. */
-  createHumanCampaignLaunch(input: NewSessionInput, principal: HumanPrincipal, requestId: string, digest: string): { session: SessionView; created: boolean } {
+  createHumanCampaignLaunch(input: NewSessionInput, principal: HumanPrincipal, requestId: string, digest: string,
+    customBudget?: CampaignBudgetAuthority): { session: SessionView; created: boolean } {
     const policy = input.orchestratorPolicy;
     const control = policy?.control;
     const boundary = control?.mode === "full_control" ? control.boundary : undefined;
     const scope = policy?.issueScope;
-    if (principal.kind !== "human" || input.parentSessionId || input.creationActor !== "human" || input.role !== "orchestrator" ||
+    const budget = customBudget ?? boundary?.budgetAuthority;
+    if (principal.kind !== "human" || input.parentSessionId || input.creationActor !== "human" || input.role !== "orchestrator" || !policy ||
         input.scope?.owner.kind !== "user" || input.scope.owner.userId !== principal.userId || input.scope.organizationId !== principal.organizationId ||
-        !boundary || !validCampaignControl(control) || !scope || boundary.authorizedByUserId !== principal.userId ||
+        !budget || !validCampaignBudgetAuthority(budget) || budget.concurrency === undefined || budget.acceptedFollowUps === undefined ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(requestId) || !/^[a-f0-9]{64}$/.test(digest)) {
+      throw new Error("Human campaign launch admission is invalid");
+    }
+    if (customBudget ? (control?.mode === "full_control" || Boolean(customBudget.controlledReview))
+      : (!boundary || !validCampaignControl(control) || !scope || boundary.authorizedByUserId !== principal.userId ||
         scope.authorizedByUserId !== principal.userId || scope.repository !== boundary.repository ||
         scope.revision !== 1 || boundary.issueScopeRevision !== 1 || boundary.revision !== 1 ||
-        scope.authorizedAt !== boundary.authorizedAt || !boundary.budgetAuthority ||
+        scope.authorizedAt !== boundary.authorizedAt ||
         !boundary.issueAuthority || scope.issueNumbers.length > boundary.issueAuthority.maxIssues ||
         scope.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) || new Set(scope.issueNumbers).size !== scope.issueNumbers.length ||
-        JSON.stringify(policy?.issueNumbers) !== JSON.stringify(scope.issueNumbers) ||
-        boundary.budgetAuthority.concurrency === undefined || boundary.budgetAuthority.acceptedFollowUps === undefined ||
-        !input.parentControlPolicy || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId) || !/^[a-f0-9]{64}$/.test(digest)) {
-      throw new Error("Human campaign launch admission is invalid");
+        JSON.stringify(policy.issueNumbers) !== JSON.stringify(scope.issueNumbers) || !input.parentControlPolicy)) {
+      throw new Error("Human campaign launch authority is invalid");
     }
     return this.atomic(() => {
       const existing = this.stmt("SELECT digest,session_id FROM human_campaign_launches WHERE user_id=? AND request_id=?")
@@ -19317,7 +19322,7 @@ export class ControlPlaneDb {
       if (input.config.costBudgetUsd !== undefined) this.updateSessionCostBudget(input.id, input.config.costBudgetUsd, input.now);
       if (input.config.maxToolCalls !== undefined) this.updateSessionMaxToolCalls(input.id, input.config.maxToolCalls, input.now);
       if (input.config.costCheckpointsUsd?.length) this.updateSessionCostCheckpoints(input.id, input.config.costCheckpointsUsd, input.now);
-      this.campaignBudgets.authorize(input.id, boundary.budgetAuthority!);
+      this.campaignBudgets.authorize(input.id, budget);
       const allocation = this.campaignBudgets.allocation(input.id)!;
       if (allocation.costUsd !== undefined) this.updateSessionCostBudget(input.id, allocation.costUsd, input.now);
       if (allocation.toolCalls !== undefined) this.updateSessionMaxToolCalls(input.id, allocation.toolCalls, input.now);

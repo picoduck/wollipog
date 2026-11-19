@@ -45,6 +45,12 @@ const uncertainCheck = (message: RunDecisionMessage): ScopeGrantAnswer =>
   scopeCheckAnswer(message, () => ({ value: "cannot_tell", confidence: 0.5, evidence: "The message doesn't say." }));
 import { scopeGrantDigest, scopeReviewKey, selectionProposalView } from "./scope-selection.js";
 import { createHash } from "node:crypto";
+import { createAssistantOperations } from "./assistant-routes.js";
+import { registerAssistantSessionOperations } from "./assistant-session-operations.js";
+import { registerAssistantCampaignStart } from "./assistant-campaign-start.js";
+import { createAssistantOwnerConfirmationService, createAssistantThreads } from "./assistant-threads.js";
+import { registerAssistantThreadRoutes } from "./assistant-thread-routes.js";
+import { hashToken } from "./auth.js";
 
 const proposal: CampaignLaunchProposal = { repository: "owner/repo", issueNumbers: [12], objective: "Deliver #12",
   operations: ["implementation_question", "pr_merge"], delegatablePolicyIds: [],
@@ -181,6 +187,169 @@ async function preflight(server: Awaited<ReturnType<typeof app>>["server"], body
   return { response, preflight: response.statusCode === 200 ? response.json().preflight as CampaignLaunchPreflight : undefined };
 }
 const sessionCount = (f: ReturnType<typeof fixture>) => f.db.raw().prepare("SELECT count(*) AS n FROM sessions").get()!.n;
+
+async function assistantCampaignFixture(protocolVersion = PROTOCOL_VERSION) {
+  const f = fixture({ protocolVersion });
+  const workspace = f.db.createWorkspace("r", { name: "Assistant Test Project", path: "/fixture/assistant-project" }, f.scope);
+  const location = f.db.findProjectLocation("r", workspace.id)!;
+  const operations = createAssistantOperations(f.db);
+  const receipts = registerAssistantSessionOperations(operations, f.db, f.sessions);
+  const reviseCampaign = registerAssistantCampaignStart(operations, { ...f, evidenceDisclosures: f.disclosures }, receipts);
+  const threads = createAssistantThreads(f.db, f.hub, f.sessions);
+  const notices: string[] = [];
+  const confirmations = createAssistantOwnerConfirmationService(f.db, { prompt: (_id, text) => {
+    notices.push(text);
+    return { ok: true };
+  } }, operations);
+  const { server } = await app(f);
+  registerAssistantThreadRoutes(server, { threads, confirmations, reviseCampaign,
+    requestHuman: (req) => req.headers.authorization === "Bearer human" ? f.human : null });
+  const thread = threads.create(f.human, {});
+  const token = `wollipoga_${Buffer.from(randomUUID().replaceAll("-", "").repeat(2), "hex").toString("base64url")}`;
+  assert.equal(threads.registerCredential("r", thread.sessionId, hashToken(token)).accepted, true);
+  const credential = f.db.assistantConnections.authenticate(token)!;
+  const args = { commandId: "campaign-fixture", locationId: location.id, agentId: "claude", mode: "full_control",
+    prompt: "Summarize the current work", model: "claude-opus-5-5", effort: "high",
+    childAgentId: "claude", childModel: "claude-sonnet-5-5", childEffort: "high", issueNumbers: [7] };
+  const call = (value: Record<string, unknown>, name = "campaign_start") => operations.call(credential, name, value);
+  const pending = () => f.db.assistantOwnerConfirmations.pendingForThread(thread.id);
+  const answer = (id: string, resource: string, payload?: object, authorization = "Bearer human") =>
+    server.inject({ method: resource === "campaign-budget" ? "PUT" : "POST", headers: { authorization },
+      url: `/api/assistant-threads/${thread.id}/confirmations/${id}/${resource}`, ...(payload ? { payload } : {}) });
+  return { ...f, operations, receipts, threads, confirmations, thread, notices, server, args, call, pending, answer,
+    close: async () => { await server.close(); f.db.close(); } };
+}
+
+test("an Assistant campaign uses the reviewed New Session settings and its own funded root", async () => {
+  for (const mode of ["full_control", "custom"] as const) {
+    const h = await assistantCampaignFixture();
+    try {
+      const budget = { costUsd: 40, toolCalls: 400 };
+      saveBudget(h, budget);
+      h.threads.setLimits(h.human, h.thread.id, { costUsd: 2, launchedSessions: 1 });
+      const args = { ...h.args, mode, ...(mode === "custom" ? { issueNumbers: undefined } : {}) };
+      const count = sessionCount(h);
+      assert.equal((await h.call(args) as { ownerConfirmationRequired: boolean }).ownerConfirmationRequired, true);
+      const [card] = h.pending();
+      assert.equal(card!.title, "Start Campaign");
+      assert.deepEqual(card!.arguments, [{ label: "First Message", value: args.prompt }]);
+      assert.deepEqual(card!.campaign?.budget, budget);
+      const facts = new Map(card!.impact.map(({ label, value }) => [label, value]));
+      assert.equal(facts.get("Campaign Mode"), mode === "custom" ? "Custom" : "Full Control");
+      assert.equal(facts.get("Orchestrator Model"), args.model);
+      assert.equal(facts.get("Orchestrator Effort"), args.effort);
+      assert.equal(facts.get("Child Model"), args.childModel);
+      assert.equal(facts.get("Child Effort"), args.childEffort);
+      assert.match(card!.target.label, /Assistant Test Project/);
+      assert.equal(sessionCount(h), count);
+      const response = await h.answer(card!.id, "approve-campaign", { digest: card!.campaign!.digest });
+      assert.equal(response.statusCode, 200, response.body);
+      const settled = response.json();
+      assert.equal(settled.confirmation.outcome.receiptStatus, "succeeded", response.body);
+      const id = settled.confirmation.outcome.sessionId;
+      const root = h.db.getSession(id)!;
+      assert.equal(root.parentSessionId, null);
+      assert.equal(root.projectLocationId, args.locationId);
+      assert.equal(root.model, args.model);
+      assert.equal(root.effort, args.effort);
+      assert.equal(root.orchestratorPolicy?.behavior.childHarness?.driver, "claude-code");
+      assert.equal(root.orchestratorPolicy?.behavior.childModel, args.childModel);
+      assert.equal(root.orchestratorPolicy?.behavior.childEffort, args.childEffort);
+      const start = h.starts.find((message) => message.type === "start_session" && message.spec.sessionId === id);
+      assert.equal(start?.type, "start_session");
+      if (start?.type === "start_session") {
+        assert.equal(start.initialPrompt, args.prompt);
+        assert.ok(start.spec.campaignBudgetDispatch);
+      }
+      assert.deepEqual(settled.thread.launchedSessionIds, []);
+      assert.deepEqual(settled.thread.launchedCampaignIds, [id]);
+      assert.deepEqual(settled.thread.usage.launchedSessions, { used: 1, limit: 1 });
+      assert.equal(h.db.assistantThreads.member(id), null);
+      assert.equal(h.db.assistantThreads.costs(h.thread.id).launchedHeldUsd, 0);
+      assert.equal(h.db.getSession(h.thread.sessionId)!.costBudgetUsd, 2);
+      h.db.raw().prepare("UPDATE sessions SET cost_usd=3 WHERE id=?").run(id);
+      assert.equal(h.db.assistantThreads.costs(h.thread.id).spentUsd, 0);
+      assert.equal(h.db.campaignBudgets.view(id)!.authority.costUsd, budget.costUsd);
+      assert.equal(h.db.campaignBudgets.view(id)!.authority.toolCalls, budget.toolCalls);
+      assert.equal((await h.call({ commandId: args.commandId }, "command_get") as { receipt: { resultReference: string } }).receipt.resultReference, id);
+      assert.ok(h.notices.some(notice => notice.includes(id)));
+      assert.equal((await h.answer(card!.id, "approve-campaign", { digest: card!.campaign!.digest })).statusCode, 200);
+      assert.equal(sessionCount(h), Number(count) + 1, "repeating approval does not create another campaign");
+      const control = root.orchestratorPolicy?.control;
+      if (mode === "full_control") {
+        const ordinary = await preflight(h.server, { runnerId: "r", workspaceId: root.workspaceId!, projectId: root.projectId,
+          projectLocationId: args.locationId, task: args.prompt, issueNumbers: [7],
+          overrides: { session: { agentId: args.agentId, config: { model: args.model, effort: args.effort },
+            orchestrator: { behavior: { childHarness: { agentId: "claude", context: { kind: "native" }, driver: "claude-code" },
+              childModel: args.childModel, childEffort: args.childEffort } } } } });
+        assert.equal(ordinary.preflight?.ready, true, ordinary.response.body);
+        const proposal = ordinary.preflight!.advanced.proposal!;
+        assert.equal(control?.mode, "full_control");
+        if (control?.mode !== "full_control") throw new Error("expected Full Control");
+        assert.equal(control.boundary.authorizedByUserId, h.human.userId);
+        assert.equal(control.boundary.objective, proposal.objective);
+        assert.deepEqual(control.boundary.budgetAuthority, proposal.budgetAuthority);
+        assert.deepEqual(control.boundary.operations, proposal.operations);
+        assert.deepEqual(control.boundary.delegatablePolicyIds, []);
+        assert.deepEqual(root.orchestratorPolicy?.issueScope?.issueNumbers, [7]);
+      } else assert.notEqual(control?.mode, "full_control");
+      await assert.rejects(h.call({ ...args, commandId: "past-limit" }), /Thread Limits/);
+      await assert.rejects(h.call({ sessionId: id }, "session_role"), /cannot call|not registered/);
+      await assert.rejects(h.call({ sessionId: id }, "decision_resolve"), /not registered/);
+      h.db.deleteSession(id);
+      await assert.rejects(h.call({ ...args, commandId: "deleted-root-is-still-a-launch" }), /Thread Limits/);
+    } finally { await h.close(); }
+  }
+});
+
+test("campaign confirmation rejects agent approval, forged settings, stale plans, denial and expiry", async () => {
+  const h = await assistantCampaignFixture();
+  try {
+    const count = sessionCount(h);
+    await assert.rejects(h.call({ ...h.args, confirmationId: "owner-approved" }), /Only the owner/);
+    await assert.rejects(h.call({ ...h.args, budget: { costUsd: 1000 } }), /owner sets budgets/);
+    await assert.rejects(h.call({ ...h.args, operations: ["pr_merge"] }), /owner sets budgets/);
+    await h.call(h.args);
+    const [card] = h.pending();
+    assert.equal(card!.campaign?.budget, null);
+    assert.equal((await h.answer(card!.id, "approve")).statusCode, 409, "old web route refuses");
+    assert.equal((await h.answer(card!.id, "approve-campaign", { digest: "f".repeat(64) })).statusCode, 409);
+    assert.equal((await h.answer(card!.id, "approve-campaign", { digest: card!.campaign!.digest })).statusCode, 409, "owner must set a budget");
+    assert.equal((await h.answer(card!.id, "campaign-budget", { digest: card!.campaign!.digest, budget: { costUsd: 10, toolCalls: 100 } }, "Bearer agent")).statusCode, 403);
+    const revised = await h.answer(card!.id, "campaign-budget", { digest: card!.campaign!.digest, budget: { costUsd: 10, toolCalls: 100 } });
+    assert.equal(revised.statusCode, 200, revised.body);
+    const updated = revised.json().confirmation;
+    assert.deepEqual(updated.campaign.budget, { costUsd: 10, toolCalls: 100 });
+    assert.equal((await h.answer(card!.id, "approve-campaign", { digest: card!.campaign!.digest })).statusCode, 409);
+    assert.equal((await h.answer(card!.id, "approve-campaign", { digest: updated.campaign.digest }, "Bearer agent")).statusCode, 403);
+    await assert.rejects(h.call({ ...h.args, confirmationId: "owner-approved" }), /Only the owner/);
+    h.state.inspect = (message) => ({ type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId,
+      ok: true, repository: "owner/changed", issueNumbers: message.issueNumbers, digest: "e".repeat(64) });
+    const refused = await h.answer(card!.id, "approve-campaign", { digest: updated.campaign.digest });
+    assert.equal(refused.json().confirmation.status, "refused", refused.body);
+    await h.call({ ...h.args, commandId: "denied" });
+    const [denied] = h.pending();
+    assert.equal((await h.answer(denied!.id, "deny")).json().confirmation.status, "denied");
+    await h.call({ ...h.args, commandId: "expired" });
+    const [expired] = h.pending();
+    h.db.raw().prepare("UPDATE assistant_owner_confirmations SET expires_at=0 WHERE id=?").run(expired!.id);
+    h.confirmations.expireDue();
+    assert.equal(h.db.assistantOwnerConfirmations.get(expired!.id)?.status, "expired");
+    assert.ok(h.notices.some(notice => /owner denied.*Nothing ran/u.test(notice)));
+    assert.ok(h.notices.some(notice => /expired.*Nothing ran/u.test(notice)));
+    assert.equal(sessionCount(h), count);
+  } finally { await h.close(); }
+});
+
+test("Assistant campaign launches require a compatible runner", async () => {
+  const h = await assistantCampaignFixture(RUNNER_CAPABILITY_MIN_PROTOCOL.assistantCampaignLaunch - 1);
+  try {
+    const count = sessionCount(h);
+    await assert.rejects(h.call(h.args), /runner does not support Assistant campaign launches/);
+    assert.equal(h.pending().length, 0);
+    assert.equal(sessionCount(h), count);
+  } finally { await h.close(); }
+});
 
 test("launch inspection and ordinary session launch use the same authorized dynamic location path (#4090)", async () => {
   const f = fixture();

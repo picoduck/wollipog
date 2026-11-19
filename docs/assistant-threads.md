@@ -99,14 +99,19 @@ deleted. These settings are owner-only.
     cost budget but never raise or clear it.
   - Deleting a session never refunds its spend, whether one at a time or with its Machine: the
     thread keeps the deleted session's final cost inside its own tree.
-- A thread cannot start runs or Orchestrators, whose children it could not count.
-  This holds even when an Orchestrator would come from a saved default. Its connection also
+- An ordinary thread launch cannot select the Orchestrator role, including from a saved default.
+  To propose an independent campaign, use `campaign_start` with a Project Location, a first
+  message and explicit Custom or Full Control mode. Only the thread's owner can start it from
+  the **Start Campaign** confirmation card. The root counts as one launch against the thread's
+  launch limit. The root and its workers spend from their own campaign allowance.
+- A thread cannot start scheduled runs. Its connection also
   cannot call `auto_create`, `auto_update`, `auto_enable`, `auto_test`,
   `session_role`, `session_adopt` or `session_fork`, since scheduled work, a converted role, an
   adopted session or a fork (materialized on the runner without that session creation) would run
   outside these limits. The owner can still do any of these directly.
 - `usage` on the thread view reports both limits and what the thread has used of them.
-  `launchedSessionIds` lists the sessions it launched.
+  `launchedSessionIds` lists the thread-budgeted work, and `launchedCampaignIds` lists its
+  independent campaign roots.
 
 ## The Shared `wollipog` Skill
 
@@ -195,3 +200,27 @@ agrees. A thread's assistant could repeat it alone, so a thread's connection nev
   `none`.
 
 External Assistant connections keep the preview-and-confirm behavior above, unchanged.
+
+### Starting a Campaign
+
+1. The thread uses `project_list` and `runner_list` to select a Location and an Orchestrator
+   installation, then calls `campaign_start`. It can propose the root and child model and effort,
+   and name explicit issue numbers in Full Control. It cannot set a budget, supply a delegation
+   policy, or approve a request.
+2. In the thread, or from **Inbox → Assistant Approvals → Review**, inspect **Start Campaign**.
+   The card shows the first message, Location, mode, root and child settings, budget and scope.
+   Full Control uses the same inspected boundary as New Session, including delegated operations
+   and human-required gates. A Custom campaign uses normal Custom issue admission.
+3. The card starts with the owner's saved campaign budget. If there is no saved budget, choose
+   **Set Budget**. To replace the displayed budget for this launch, choose **Change Budget**.
+   Enter **Cost Budget (USD)** and **Tool Call Limit**, then select **Update Preview**.
+   The revised preview does not change the saved defaults.
+4. **Approve Once** approves those exact settings. If the Location, inspected scope, effective
+   settings or Assistant grant changed, the launch is refused. **Deny** and expiry also leave
+   no campaign. The thread hears the outcome and can read the campaign Session ID in its
+   `command_get` receipt. Open the **Orchestrator Campaign** work card for live status and
+   campaign questions. The thread's existing read access grants no campaign decision authority.
+
+An older control plane has no `campaign_start` operation. The command refuses a Location on a
+runner below protocol v391. An older web client cannot approve a campaign through the legacy
+confirmation endpoint.
