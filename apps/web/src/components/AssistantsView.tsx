@@ -18,8 +18,10 @@ import { statusMeta } from "../status-meta.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { pendingAssistantConfirmations } from "../assistant-confirmations.js";
+import { AccountIdentifier } from "./AccountIdentifier.js";
 import { AssistantConfirmationCard } from "./AssistantConfirmationCard.js";
 import { AssistantWorkCards } from "./AssistantWorkCards.js";
+import { ChangeAssistantThreadAccountDialog } from "./ChangeAssistantThreadAccountDialog.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { AssistantsIcon, BotIcon, PlusIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
@@ -83,6 +85,7 @@ export function AssistantsView({ threadId, rightPanel }: {
   const [creating, setCreating] = useState(false);
   const [renaming, setRenaming] = useState<AssistantThread | null>(null);
   const [archiving, setArchiving] = useState(false);
+  const [changingAccount, setChangingAccount] = useState<AssistantThread | null>(null);
   const generation = useRef(0);
   /** A read is in flight, and whether another was asked for while it was. */
   const reading = useRef(false);
@@ -246,6 +249,7 @@ export function AssistantsView({ threadId, rightPanel }: {
   const threadMenu = (thread: AssistantThread): PageMenuAction[] => [
     { label: "Open Session", onClick: () => navigate({ name: "session", id: thread.sessionId }) },
     ...(thread.status === "archived" ? [] : [
+      ...(thread.accountChangeSupported ? [{ label: "Change Account", onClick: () => setChangingAccount(thread) }] : []),
       { label: "Rename", onClick: () => setRenaming(thread) },
       { label: "Archive", disabled: archiving, onClick: () => void archive(thread) },
     ]),
@@ -327,6 +331,17 @@ export function AssistantsView({ threadId, rightPanel }: {
             setCreating(false);
             replace(thread);
             openThread(thread.id);
+          }}
+        />
+      )}
+      {changingAccount && (
+        <ChangeAssistantThreadAccountDialog
+          thread={changingAccount}
+          onClose={() => setChangingAccount(null)}
+          onChanged={(thread) => {
+            setChangingAccount(null);
+            replace(thread);
+            showToast("Thread account changed.", { tone: "success" });
           }}
         />
       )}
@@ -455,6 +470,13 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
       <ul className="assistant-thread-meta" aria-label="Thread Details">
         <li>{WOLLIPOG_ASSISTANT}</li>
         <li>{assistantThreadHarnessLabel(thread.harness)}</li>
+        {thread.accountChangeSupported && (
+          <li className="assistant-thread-account">
+            Account · {thread.providerAccountLabel
+              ? <AccountIdentifier value={thread.providerAccountLabel} label="Account Email" identity={thread.id} />
+              : "Machine Sign-In"}
+          </li>
+        )}
         <li className="assistant-thread-access">{assistantThreadAccessLabel(thread.access)}</li>
       </ul>
       <AssistantWorkCards

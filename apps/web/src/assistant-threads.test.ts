@@ -142,3 +142,23 @@ test("an open thread streams its backing session, and only while it is open", ()
   assert.deepEqual(uiStreamSubscriptions({ ...base, view: { name: "assistants" } }).sessionIds, []);
   assert.deepEqual(uiStreamSubscriptions({ ...base, view: { name: "automations" } }).sessionIds, []);
 });
+
+test("an older control plane's account refusals never retry a launch or rename with the choice dropped", async () => {
+  const account = "acct:0000000000000001";
+  const requested = { providerAccountRef: account, expectedProviderAccountRef: null };
+  const calls: Array<{ path: string; method?: string; body?: unknown }> = [];
+  const missingRoute = new ApiError("not found", 404);
+  const unknownField = new ApiError("Unsupported thread fields: providerAccountRef.", 400);
+  const routes = assistantThreadRoutes(async (path, init) => {
+    calls.push({ path, method: init?.method ?? "GET", ...(init?.body ? { body: JSON.parse(init.body as string) } : {}) });
+    throw path.endsWith("/account") ? missingRoute : unknownField;
+  });
+  await assert.rejects(routes.createAssistantThread({ providerAccountRef: account }), unknownField);
+  await assert.rejects(routes.assistantThreadAccountChoices("thr_a/b"), missingRoute);
+  await assert.rejects(routes.changeAssistantThreadAccount("thr_a/b", requested), missingRoute);
+  assert.deepEqual(calls, [
+    { path: "/api/assistant-threads", method: "POST", body: { providerAccountRef: account } },
+    { path: "/api/assistant-threads/thr_a%2Fb/account", method: "GET" },
+    { path: "/api/assistant-threads/thr_a%2Fb/account", method: "POST", body: requested },
+  ]);
+});

@@ -12787,6 +12787,12 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   list-style: none;
 }
 .assistant-thread-access { color: var(--text); }
+.assistant-thread-account {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.assistant-thread-account-picker .choice-row-title { overflow-wrap: anywhere; }
+.assistant-thread-account-picker .choice-row-body { gap: var(--space-1); }
 /* AssistantWorkCards.tsx: one scrolling row of cards, so many launches never push the transcript
    off the pane; each card opens its session, and a waiting approval rides on its card. */
 /* Pending requests (#4665) and the work cards share one row when both fit, the work cards keeping at

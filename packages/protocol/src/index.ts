@@ -348,6 +348,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * through a runner-side MCP proxy that holds the thread credential in memory, and refuses it on
    * an unsupported harness. v383 runners launched the role without the proxy. */
   assistantRole: 384,
+  assistantThreadProviderAccount: 388,
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
   indexedHistory: 55,
@@ -11345,6 +11346,12 @@ export interface SwitchSessionProviderAccountMessage {
   requestId: string;
   sessionId: string;
   providerAccountId: string;
+  /** Thread-account handoff. Gate on assistantThreadProviderAccount before sending. */
+  assistantThread?: {
+    threadId: string;
+    expectedProviderAccountId: string | null;
+    freshConversation: boolean;
+  };
 }
 
 export interface SwitchSessionProviderAccountResultMessage {

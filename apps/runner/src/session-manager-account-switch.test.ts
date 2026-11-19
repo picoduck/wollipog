@@ -38,6 +38,7 @@ function makeManager(
   driverFactory: (...args: never[]) => unknown,
   messages: RunnerToControlPlane[],
   useRealTranscripts = false,
+  parkIdle = false,
 ): { manager: SessionManager; store: SessionStore } {
   const store = new SessionStore(join(root, "data", "sessions"));
   const manager = new SessionManager(
@@ -49,6 +50,9 @@ function makeManager(
     driverFactory as never,
     join(root, "data"),
     1,
+    undefined,
+    undefined,
+    parkIdle ? { agentLimits: {}, agentWeights: {}, idleProcessPolicy: "park_when_needed" } : undefined,
   );
   const internals = manager as unknown as {
     resolveProviderAccount: ProviderAccountResolver;
@@ -83,6 +87,13 @@ function launchSpec(root: string, driver: AgentDriverKind, providerAccountId: st
     driver,
     context: { kind: "native" },
   };
+}
+
+function advertiseAssistantAccounts(manager: SessionManager) {
+  (manager as unknown as { providerAccounts: () => ProviderAccountDefinition[] }).providerAccounts = () =>
+    [accounts.claudeWork, accounts.claudePersonal].map((account) => ({
+      id: account.id, label: account.label, provider: account.provider, authStatus: "authenticated", billing: "subscription",
+    }));
 }
 
 test("an idle Codex session switches credential homes, resumes the same thread, and can switch back", async () => {
@@ -144,6 +155,113 @@ test("an idle Codex session switches credential homes, resumes the same thread, 
       event.payload.kind === "provider_account_switched").length, 2);
   } finally {
     manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("changing an Assistant thread's account refuses a racing turn and keeps its visible history", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-assistant-account-switch-"));
+  const launches: Array<{ home?: string; resumeId?: string }> = [];
+  let finishTurn!: () => void;
+  let turnStarted!: () => void;
+  const started = new Promise<void>((resolve) => { turnStarted = resolve; });
+  const finished = new Promise<void>((resolve) => { finishTurn = resolve; });
+  const { manager, store } = makeManager(root, (_driver: unknown, launch: {
+    env: Record<string, string>; resumeId?: string;
+  }) => {
+    launches.push({ home: launch.env.CLAUDE_CONFIG_DIR, resumeId: launch.resumeId });
+    const id = launch.resumeId ?? `claude-conversation-${launches.length}`;
+    return {
+      pid: launches.length, initialize: async () => {}, newSession: async () => {},
+      async prompt() { turnStarted(); await finished; return "end_turn" as const; },
+      cancel: () => {}, dispose: () => {}, setConfig: async () => {}, resolvePermission: () => false,
+      agentSessionId: () => id,
+    };
+  }, []);
+  advertiseAssistantAccounts(manager);
+  try {
+    const spec = launchSpec(root, "claude-code", "claude-work");
+    assert.equal(await manager.start(spec), true);
+    store.patchMeta(spec.sessionId, { assistant: { threadId: "thr_fixture" } });
+    assert.equal(manager.prompt(spec.sessionId, "Keep this in the thread"), true);
+    await started;
+    const change = { threadId: "thr_fixture", expectedProviderAccountId: "claude-work", freshConversation: false };
+    const refused = await manager.changeAssistantThreadAccount(spec.sessionId, "claude-personal", change);
+    assert.equal(refused.ok, false);
+    assert.match(refused.error ?? "", /pending work to finish/);
+    assert.equal(launches.length, 1);
+    finishTurn();
+    await waitFor(() => store.readMeta(spec.sessionId)?.status === "idle", "the turn did not finish");
+    const before = store.readEvents(spec.sessionId);
+    assert.ok(before.some((event) => event.payload.kind === "user_message"));
+
+    const changed = await manager.changeAssistantThreadAccount(spec.sessionId, "claude-personal", change);
+    assert.equal(changed.ok, true, changed.error ?? "");
+    assert.deepEqual(launches[1], { home: "/claude/personal", resumeId: "claude-conversation-1" });
+    assert.equal(store.readMeta(spec.sessionId)?.assistant?.threadId, "thr_fixture");
+
+    const fresh = await manager.changeAssistantThreadAccount(spec.sessionId, "claude-work", {
+      ...change, expectedProviderAccountId: "claude-personal", freshConversation: true,
+    });
+    assert.equal(fresh.ok, true, fresh.error ?? "");
+    assert.deepEqual(launches[2], { home: "/claude/work", resumeId: undefined });
+    assert.deepEqual(store.readEvents(spec.sessionId).slice(0, before.length), before);
+  } finally {
+    finishTurn();
+    manager.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a dormant Assistant thread refuses a capacity wait and reports a failed replacement", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-dormant-assistant-account-switch-"));
+  const launches: Array<{ home?: string; resumeId?: string }> = [];
+  let failLaunch = false;
+  const factory = (_driver: unknown, launch: { env: Record<string, string>; resumeId?: string }) => {
+    launches.push({ home: launch.env.CLAUDE_CONFIG_DIR, resumeId: launch.resumeId });
+    return {
+      initialize: async () => { if (failLaunch) throw new Error("fixture provider refused to start"); },
+      newSession: async () => {}, prompt: async () => "end_turn" as const,
+      close: async () => true, cancel: () => {}, dispose: () => {}, setConfig: async () => {}, resolvePermission: () => false,
+      agentSessionId: () => "claude-conversation",
+    };
+  };
+  const { manager, store } = makeManager(root, factory, [], false, true);
+  advertiseAssistantAccounts(manager);
+  try {
+    const spec = launchSpec(root, "claude-code", "claude-work");
+    assert.equal(await manager.start(spec), true);
+    assert.equal(manager.prompt(spec.sessionId, "Keep the earlier conversation"), true);
+    await waitFor(() => store.readMeta(spec.sessionId)?.status === "idle", "the first turn did not settle");
+    store.patchMeta(spec.sessionId, { assistant: { threadId: "thr_dormant" } });
+    const history = store.readEvents(spec.sessionId);
+    assert.ok(history.some((event) => event.payload.kind === "user_message"));
+
+    const blocker = { ...spec, sessionId: "resident-blocker" };
+    assert.equal(await manager.start(blocker), true);
+    assert.deepEqual(manager.liveSessionIds(), [blocker.sessionId], "capacity pressure parked the idle thread");
+    const request = { threadId: "thr_dormant", expectedProviderAccountId: "claude-work", freshConversation: false };
+    const atCapacity = await manager.changeAssistantThreadAccount(spec.sessionId, "claude-personal", request);
+    assert.equal(atCapacity.ok, false);
+    assert.match(atCapacity.error ?? "", /no available provider process slot/);
+    assert.equal(store.readMeta(spec.sessionId)?.status, "idle");
+    assert.equal(store.readMeta(spec.sessionId)?.providerAccountId, "claude-work");
+    manager.stop(blocker.sessionId);
+    await waitFor(() => manager.capacityState().availableUnits === 1, "the blocker did not release its process slot");
+    assert.equal(launches.length, 2, "freeing the slot did not launch the refused request");
+
+    const changed = await manager.changeAssistantThreadAccount(spec.sessionId, "claude-personal", request);
+    assert.equal(changed.ok, true, changed.error ?? "");
+    assert.deepEqual(launches.at(-1), { home: "/claude/personal", resumeId: "claude-conversation" });
+    failLaunch = true;
+    const failed = await manager.changeAssistantThreadAccount(spec.sessionId, "claude-work", {
+      ...request, expectedProviderAccountId: "claude-personal",
+    });
+    assert.equal(failed.ok, false);
+    assert.equal(store.readMeta(spec.sessionId)?.providerAccountSwitchFailure?.providerAccountId, "claude-work");
+    assert.deepEqual(store.readEvents(spec.sessionId).slice(0, history.length), history);
+  } finally {
+    manager.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
 });

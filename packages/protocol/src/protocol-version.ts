@@ -1514,6 +1514,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 387: Multi-agent runs are retired and their sessions become standalone (Refs #4693).
   387,
   // v388 slot
+  // 388: Owner-selected Assistant thread provider accounts and guarded account handoffs.
+  388,
   // v389 slot
   // v390 slot
   // v391 slot

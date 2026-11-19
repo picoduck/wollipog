@@ -1,6 +1,7 @@
 /** Wollipog Assistant threads (#4663). A thread is the owner's conversation with the built-in
  * assistant; its transcript and composer are the backing `assistant`-role session's own routes.
  * These views never carry a credential value or hash. */
+import type { ProviderAccountSkipReason } from "./provider-account-selection.js";
 
 /** The harnesses a thread can run on. `codex` selects a runner's Codex agent (App Server when
  * installed, otherwise the Codex CLI driver). */
@@ -44,6 +45,10 @@ export interface AssistantThread {
   access: AssistantThreadAccess;
   /** The thread-scoped Assistant connection, once minted. Null until the runner proxy holds one. */
   connectionId: string | null;
+  /** Owner-only label of the currently bound account. */
+  providerAccountLabel?: string;
+  /** An older control plane does not offer account changes. */
+  accountChangeSupported?: true;
   /** Sessions this thread's assistant launched, oldest first. */
   launchedSessionIds: string[];
   /** Additive: the thread's limits and what it has used of them. */
@@ -67,9 +72,27 @@ export interface CreateAssistantThreadRequest {
   runnerId?: string;
   /** A Location on `runnerId`; defaults to the Machine's first one the owner can use. */
   workspaceId?: string;
+  /** Opaque account reference from the selected harness's account choices. */
+  providerAccountRef?: string;
 }
 
 export interface UpdateAssistantThreadRequest { title: string }
+
+export interface AssistantThreadAccountChoices {
+  accounts: { accountRef: string; label: string; reason?: ProviderAccountSkipReason }[];
+  /** The Machine's policy will resolve again when a thread starts without a chosen account. */
+  policyAccountRef?: string;
+  policyRefusal?: string;
+  currentAccountRef?: string;
+  retryCurrentAccount?: boolean;
+  unavailable?: string;
+}
+
+export interface ChangeAssistantThreadAccountRequest {
+  providerAccountRef: string;
+  expectedProviderAccountRef: string | null;
+  freshConversation?: boolean;
+}
 
 export interface AssistantThreadHarnessOption {
   id: AssistantThreadHarness;
@@ -77,6 +100,8 @@ export interface AssistantThreadHarnessOption {
   available: boolean;
   /** Present when unavailable: what the owner can do about it. */
   reason?: string;
+  /** The same Machine and Location creation selects for this harness. */
+  accountSelection?: AssistantThreadAccountChoices & { runnerId: string; workspaceId: string };
 }
 
 export interface AssistantThreadDefaultsResponse {

@@ -8,6 +8,7 @@ import {
   type AgentDefinition,
   type AssistantThread,
   type ControlPlaneToUi,
+  type ProviderAccountDefinition,
   type RunnerMetadata,
   type StartSessionMessage,
 } from "@wollipog/protocol";
@@ -20,6 +21,7 @@ import { registerAssistantThreadRoutes } from "./assistant-thread-routes.js";
 import { isAgentControlApiRouteAllowed } from "./auth.js";
 import { SessionRoleConversions } from "./session-role-conversion.js";
 import type { HumanPrincipal } from "./identity.js";
+import { providerAccountRef } from "./agent-account-view.js";
 
 class Dashboard {
   readonly messages: ControlPlaneToUi[] = [];
@@ -33,12 +35,22 @@ const claude: AgentDefinition = { id: "claude", name: "Claude", driver: "claude-
   capabilities: { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["default"] } };
 const codex: AgentDefinition = { id: "codex", name: "Codex", driver: "codex-app-server", context: { kind: "native" }, command: "codex", args: [], env: {}, available: true,
   capabilities: { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["default"] } };
+const accounts: ProviderAccountDefinition[] = [
+  { id: "work", label: "Work Subscription", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+  { id: "studio", label: "Studio Subscription", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+  { id: "sign-in", label: "Sign-In Needed", provider: "claude", authStatus: "unauthenticated", billing: "subscription" },
+  { id: "incompatible", label: "Other Environment", provider: "claude", authStatus: "authenticated", billing: "subscription" },
+  { id: "credits", label: "Metered Account", provider: "claude", authStatus: "authenticated", billing: "api" },
+  { id: "codex", label: "Codex Subscription", provider: "codex", authStatus: "authenticated", billing: "subscription" },
+];
+const accountRef = (id: string) => providerAccountRef("r", id);
 
-async function harness(options: { protocolVersion?: number; agents?: AgentDefinition[] } = {}) {
+async function harness(options: { protocolVersion?: number; agents?: AgentDefinition[]; accounts?: ProviderAccountDefinition[] } = {}) {
   const db = ControlPlaneDb.open(":memory:"), identity = db.localIdentityContext();
   const owner = db.operatingHumanPrincipal(identity.userId, identity.organizationId)!;
   const metadata: RunnerMetadata = { runnerId: "r", hostname: "fixture", os: "linux", version: "fixture",
-    workspaces: [{ id: "w", name: "Home", path: "/fixture/home" }], agents: options.agents ?? [claude] };
+    workspaces: [{ id: "w", name: "Home", path: "/fixture/home" }], agents: options.agents ?? [claude],
+    providerAccounts: options.accounts };
   db.registerRunner(metadata, Date.now(), options.protocolVersion ?? PROTOCOL_VERSION);
   const hub = new Hub(db), sent: StartSessionMessage[] = [];
   hub.isRunnerOnline = () => true;
@@ -70,7 +82,9 @@ test("a new thread launches an assistant-role session whose every launch carries
     const thread = created.body.thread as AssistantThread;
     assert.match(thread.id, /^thr_/);
     assert.match(thread.connectionId ?? "", /^asst_/);
-    assert.deepEqual({ ...thread, id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined, connectionId: undefined }, {
+    const { accountChangeSupported, ...baseline } = thread;
+    assert.equal(accountChangeSupported, true);
+    assert.deepEqual({ ...baseline, id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined, connectionId: undefined }, {
       id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined, connectionId: undefined,
       assistant: "wollipog", title: "Weekly Cleanup", harness: "claude-code", status: "working",
       access: { level: "full_access", destructive: "ask" }, launchedSessionIds: [], archivedAt: null,
@@ -222,7 +236,8 @@ test("an older runner or a missing harness refuses the thread with guidance and 
     assert.equal(h.sessionCount(), 0);
     const defaults = (await h.call("GET", "/api/assistant-threads/defaults")).body;
     assert.deepEqual(defaults, { harness: "claude-code", harnesses: [
-      { id: "claude-code", label: "Claude Code", available: true },
+      { id: "claude-code", label: "Claude Code", available: true,
+        accountSelection: { runnerId: "r", workspaceId: "w", accounts: [] } },
       { id: "codex", label: "Codex", available: false, reason: "Install Codex on an online Machine to start a thread with it." },
     ] });
   } finally { await h.close(); }
@@ -240,6 +255,100 @@ test("the default harness follows the owner's saved Orchestrator Child Harness",
     assert.equal(h.db.getSession(body.thread.sessionId)!.agentId, "codex");
     const chosen = await h.call("POST", "/api/assistant-threads", { harness: "claude-code" });
     assert.equal(h.db.getSession(chosen.body.thread.sessionId)!.agentId, "claude");
+  } finally { await h.close(); }
+});
+
+test("creation previews the Machine's policy, validates an explicit reference, and keeps the fallback", async () => {
+  const h = await harness({ accounts, agents: [{ ...claude,
+    providerAccountReadiness: { defaultAuthStatus: "authenticated", readyAccountIds: ["work", "studio", "credits"] },
+  }] });
+  try {
+    assert.ok(h.db.setMachineProviderAccountDefault("r", "claude", "work", 0, Date.now()).ok);
+    const defaults = await h.call("GET", "/api/assistant-threads/defaults");
+    const choices = defaults.body.harnesses[0].accountSelection;
+    assert.equal(choices.policyAccountRef, accountRef("work"));
+    assert.deepEqual(choices.accounts.map((account: { reason?: string }) => account.reason),
+      [undefined, undefined, "signed_out", "context_incompatible", "api_billing"]);
+    const chosen = await h.call("POST", "/api/assistant-threads", { providerAccountRef: accountRef("studio") });
+    assert.equal(chosen.status, 200, chosen.raw);
+    assert.equal(chosen.body.thread.providerAccountLabel, "Studio Subscription");
+    assert.equal(h.sent[0]?.spec.providerAccountId, "studio");
+    assert.equal(h.sent[0]?.spec.providerAccountSelection?.revalidateAtLaunch, true);
+    const fallback = await h.call("POST", "/api/assistant-threads", {});
+    assert.equal(fallback.status, 200, fallback.raw);
+    assert.equal(fallback.body.thread.providerAccountLabel, "Work Subscription");
+    assert.equal(h.sent[1]?.spec.providerAccountId, "work");
+    for (const [id, reason] of [
+      ["sign-in", /needs sign-in/], ["incompatible", /environment/], ["credits", /API credits/], ["codex", /not available/],
+    ] as const) {
+      const refusal = await h.call("POST", "/api/assistant-threads", { providerAccountRef: accountRef(id) });
+      assert.equal(refusal.status, 409, refusal.raw);
+      assert.match(refusal.body.error, reason);
+    }
+    assert.equal(h.sessionCount(), 2);
+    assert.equal(h.sent.length, 2);
+  } finally { await h.close(); }
+});
+
+test("thread account changes are owner-only, wait for idle, and address only the existing backing session", async () => {
+  const h = await harness({ accounts });
+  try {
+    const created = await h.call("POST", "/api/assistant-threads", { providerAccountRef: accountRef("work") });
+    const thread = created.body.thread as AssistantThread;
+    const launched = h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", providerAccountId: "work" });
+    assert.ok(launched.ok && launched.data);
+    h.db.assistantThreads.recordLaunch(thread.id, launched.data.id, Date.now());
+    const path = `/api/assistant-threads/${thread.id}/account`;
+    const input = { providerAccountRef: accountRef("studio"), expectedProviderAccountRef: accountRef("work") };
+    let dispatched = 0;
+    h.hub.requestFromRunner = async (_runnerId, requestId, command) => {
+      dispatched++;
+      assert.deepEqual(command, { type: "switch_session_provider_account", requestId,
+        sessionId: thread.sessionId, providerAccountId: "studio",
+        assistantThread: { threadId: thread.id, expectedProviderAccountId: "work", freshConversation: false } });
+      h.db.raw().prepare("UPDATE sessions SET provider_account_id=?,provider_account_label=? WHERE id=?")
+        .run("studio", "Studio Subscription", thread.sessionId);
+      return { type: "switch_session_provider_account_result", requestId, ok: true };
+    };
+    h.as({ ...h.owner, userId: "another-owner" });
+    assert.equal((await h.call("GET", path)).status, 404);
+    assert.equal((await h.call("POST", path, input)).status, 404);
+    h.as(h.owner);
+    assert.equal((await h.call("GET", path)).body.currentAccountRef, accountRef("work"));
+    assert.match((await h.call("POST", path, input)).body.error, /Wait for the current turn/);
+    h.db.updateSessionStatus(thread.sessionId, "idle", Date.now());
+    assert.equal((await h.call("POST", path, { ...input, providerAccountRef: accountRef("credits") })).status, 409);
+    assert.equal((await h.call("POST", path, { ...input, expectedProviderAccountRef: null })).status, 409);
+    assert.equal(dispatched, 0);
+    const changed = await h.call("POST", path, input);
+    assert.equal(changed.status, 200, changed.raw);
+    assert.equal(changed.body.thread.providerAccountLabel, "Studio Subscription");
+    for (const key of ["id", "sessionId", "connectionId"] as const) {
+      assert.deepEqual(changed.body.thread[key], thread[key]);
+    }
+    assert.deepEqual(changed.body.thread.launchedSessionIds, [launched.data.id]);
+    assert.equal(h.db.getSession(launched.data.id)?.providerAccountId, "work");
+    assert.equal(dispatched, 1);
+    assert.equal(h.sessionCount(), 2);
+  } finally { await h.close(); }
+});
+
+test("a runner that supports threads but predates account choices refuses both new account inputs", async () => {
+  const h = await harness({ accounts, protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.assistantThreadProviderAccount - 1 });
+  try {
+    const input = { providerAccountRef: accountRef("studio") };
+    const refused = await h.call("POST", "/api/assistant-threads", input);
+    assert.equal(refused.status, 409, refused.raw);
+    assert.equal(refused.body.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.assistantThreadProviderAccount);
+    assert.equal(h.sessionCount(), 0);
+    const legacy = await h.call("POST", "/api/assistant-threads", {});
+    assert.equal(legacy.status, 200, legacy.raw);
+    const change = await h.call("POST", `/api/assistant-threads/${legacy.body.thread.id}/account`, {
+      ...input, expectedProviderAccountRef: accountRef("work"),
+    });
+    assert.equal(change.status, 409, change.raw);
+    assert.equal(change.body.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.assistantThreadProviderAccount);
+    assert.equal(h.sent.length, 1);
   } finally { await h.close(); }
 });
 

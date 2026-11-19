@@ -3,15 +3,18 @@ import {
   ASSISTANT_THREAD_HARNESSES,
   ASSISTANT_THREAD_LIMITS,
   resolveAgentHarnessRow,
+  isProviderAccountRef,
   runnerCapabilityRequirementError,
   runnerSupportsProtocol,
   type AgentDefinition,
   type AgentDriverKind,
   type AssistantOwnerConfirmation,
   type AssistantThread,
+  type AssistantThreadAccountChoices,
   type AssistantThreadDefaultsResponse,
   type AssistantThreadHarness,
   type AssistantThreadStatus,
+  type ChangeAssistantThreadAccountRequest,
   type CreateSessionRequest,
   type RunnerView,
   type SessionView,
@@ -86,6 +89,9 @@ export interface AssistantThreadDeps {
     { ok: boolean; status: number; data?: SessionView; error?: string; [key: string]: unknown };
   archiveBackingSession(sessionId: string): { ok: boolean; status: number; error?: string };
   broadcast(userId: string, thread: AssistantThread): void;
+  accountChoices(runner: RunnerView, agent: AgentDefinition, session?: SessionView): AssistantThreadAccountChoices;
+  changeAccount(runner: RunnerView, agent: AgentDefinition, session: SessionView, threadId: string, input: ChangeAssistantThreadAccountRequest):
+    ReturnType<SessionsService["changeAssistantThreadAccount"]>;
   /** The thread's owner confirmations waiting for its owner (#4665). */
   pendingConfirmations?(threadId: string): AssistantOwnerConfirmation[];
   now?(): number;
@@ -119,6 +125,8 @@ export class AssistantThreads {
       status: assistantThreadStatus(row.state, session, confirmations.length),
       access: { level: "full_access", destructive: "ask" },
       connectionId: row.connection_id,
+      accountChangeSupported: true,
+      ...(session?.providerAccountLabel ? { providerAccountLabel: session.providerAccountLabel } : {}),
       launchedSessionIds: launched,
       usage: {
         launchedSessions: { used: launched.length, limit: ASSISTANT_THREAD_LIMITS.launchedSessions },
@@ -151,7 +159,16 @@ export class AssistantThreads {
       harness: this.defaultHarness(owner),
       harnesses: ASSISTANT_THREAD_HARNESSES.map((id) => {
         const label = HARNESS_LABELS[id];
-        if (capable.some((runner) => harnessAgent(runner, id))) return { id, label, available: true };
+        const runner = capable.find((candidate) => candidate.workspaces.length > 0 && harnessAgent(candidate, id));
+        if (runner) {
+          const accounts = runnerSupportsProtocol(runner.protocolVersion, "assistantThreadProviderAccount")
+            ? this.deps.accountChoices(runner, harnessAgent(runner, id)!)
+            : { accounts: [], unavailable: "Update this Machine's runner to choose an account." };
+          return { id, label, available: true, accountSelection: { ...accounts, runnerId: runner.runnerId, workspaceId: runner.workspaces[0]!.id } };
+        }
+        if (capable.some((candidate) => harnessAgent(candidate, id))) {
+          return { id, label, available: false, reason: "Add a Location on a Machine with this harness to start a thread." };
+        }
         const reason = online.length === 0 ? "Connect a Machine to start a thread."
           : capable.length === 0 ? "Update a Machine's runner to start Wollipog Assistant threads."
           : `Install ${label} on an online Machine to start a thread with it.`;
@@ -166,7 +183,7 @@ export class AssistantThreads {
   create(owner: HumanPrincipal, body: unknown): AssistantThread {
     const input = (body ?? {}) as Record<string, unknown>;
     if (typeof input !== "object" || Array.isArray(input)) throw new AssistantThreadRefusal("A thread request object is required.", 400);
-    const unknown = Object.keys(input).filter((key) => !["harness", "title", "runnerId", "workspaceId"].includes(key));
+    const unknown = Object.keys(input).filter((key) => !["harness", "title", "runnerId", "workspaceId", "providerAccountRef"].includes(key));
     if (unknown.length) throw new AssistantThreadRefusal(`Unsupported thread fields: ${unknown.join(", ")}.`, 400);
     const harness = input.harness === undefined ? this.defaultHarness(owner) : harnessOf(input.harness);
     const title = input.title === undefined ? null : threadTitle(input.title);
@@ -175,6 +192,10 @@ export class AssistantThreads {
     }
     const runnerId = input.runnerId as string | undefined;
     const workspaceId = input.workspaceId as string | undefined;
+    const accountRef = input.providerAccountRef;
+    if (accountRef !== undefined && (typeof accountRef !== "string" || !isProviderAccountRef(accountRef))) {
+      throw new AssistantThreadRefusal("A valid providerAccountRef is required when choosing an account.", 400);
+    }
     const label = HARNESS_LABELS[harness];
 
     const runners = this.deps.listRunners(owner);
@@ -209,6 +230,10 @@ export class AssistantThreads {
       throw new AssistantThreadRefusal(workspaceId === undefined ? "This Machine has no Location. Add one, or choose another Machine." : "Location not found on this Machine.", workspaceId === undefined ? 409 : 404);
     }
     const agent = harnessAgent(runner, harness)!;
+    if (accountRef && !runnerSupportsProtocol(runner.protocolVersion, "assistantThreadProviderAccount")) {
+      const { error, ...details } = runnerCapabilityRequirementError(runner.protocolVersion, "assistantThreadProviderAccount", "choosing an assistant thread's account");
+      throw new AssistantThreadRefusal(error, 409, details);
+    }
 
     const now = this.now();
     const threadId = this.store.reserve(owner, harness, title, now);
@@ -222,6 +247,7 @@ export class AssistantThreads {
         runnerId: runner.runnerId,
         workspaceId: workspace.id,
         agentId: agent.id,
+        ...(accountRef ? { providerAccountId: accountRef } : {}),
         // Without a title the session names itself from the first message, and the thread follows it.
         ...(title === null ? {} : { title }),
         useWorktree: false,
@@ -249,6 +275,47 @@ export class AssistantThreads {
     const input = (body ?? {}) as { title?: unknown };
     this.store.rename(row.id, threadTitle(input.title), this.now());
     return this.publish(this.store.get(row.id)!);
+  }
+
+  private accountTarget(owner: HumanPrincipal, row: ThreadRow) {
+    const session = row.session_id ? this.deps.getSession(row.session_id) : null;
+    if (row.state !== "active" || !session || session.archived || session.role !== "assistant") {
+      throw new AssistantThreadRefusal("This Assistant thread is no longer active.", 409);
+    }
+    const runner = this.deps.listRunners(owner).find((candidate) => candidate.runnerId === session.runnerId);
+    if (!runner) throw new AssistantThreadRefusal("The thread's Machine is no longer available.", 404);
+    const agent = runner.agents.find((candidate) => candidate.id === session.agentId && candidate.driver === session.driver);
+    if (!agent || (agent.context?.kind ?? "native") !== "native") {
+      throw new AssistantThreadRefusal("The thread's harness is no longer available on this Machine.", 409);
+    }
+    if (!runnerSupportsProtocol(runner.protocolVersion, "assistantThreadProviderAccount")) {
+      const { error, ...details } = runnerCapabilityRequirementError(runner.protocolVersion, "assistantThreadProviderAccount", "changing an assistant thread's account");
+      throw new AssistantThreadRefusal(error, 409, details);
+    }
+    return { session, runner, agent };
+  }
+
+  accountChoices(owner: HumanPrincipal, id: string): AssistantThreadAccountChoices {
+    const { runner, agent, session } = this.accountTarget(owner, this.owned(owner, id));
+    return this.deps.accountChoices(runner, agent, session);
+  }
+
+  async changeAccount(owner: HumanPrincipal, id: string, body: unknown): Promise<AssistantThread> {
+    const { runner, agent, session } = this.accountTarget(owner, this.owned(owner, id));
+    const input = body as Partial<ChangeAssistantThreadAccountRequest> | null;
+    if (!input || typeof input.providerAccountRef !== "string" || !isProviderAccountRef(input.providerAccountRef) ||
+        (input.expectedProviderAccountRef !== null &&
+         (typeof input.expectedProviderAccountRef !== "string" || !isProviderAccountRef(input.expectedProviderAccountRef))) ||
+        (input.freshConversation !== undefined && typeof input.freshConversation !== "boolean")) {
+      throw new AssistantThreadRefusal("Valid account references and an optional fresh conversation choice are required.", 400);
+    }
+    const result = await this.deps.changeAccount(runner, agent, session, id, {
+      providerAccountRef: input.providerAccountRef, expectedProviderAccountRef: input.expectedProviderAccountRef,
+      freshConversation: input.freshConversation,
+    });
+    if (!result.ok) throw new AssistantThreadRefusal(result.error ?? "The thread's account could not be changed.", result.status, failureBody(result));
+    // The runner updates the backing session. The thread retains its session, connection and work.
+    return this.get(owner, id);
   }
 
   /** Records the archive first, so a later failure to archive the session never leaves the thread
@@ -356,6 +423,8 @@ export function createAssistantThreads(db: ControlPlaneDb, hub: Hub, svc: Sessio
     },
     archiveBackingSession: (sessionId) => svc.setArchived(sessionId, true),
     broadcast: (userId, thread) => hub.assistantThreadChanged(userId, thread),
+    accountChoices: (runner, agent, session) => svc.assistantThreadAccountChoices(runner, agent, session),
+    changeAccount: (runner, agent, session, threadId, input) => svc.changeAssistantThreadAccount(runner, agent, session, threadId, input),
     pendingConfirmations: (threadId) => db.assistantOwnerConfirmations.pendingForThread(threadId),
   });
   hub.onAssistantSessionUpsert((view) => threads.sessionChanged(view));

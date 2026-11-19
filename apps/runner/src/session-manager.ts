@@ -47,7 +47,7 @@ import { transferCodexAccountTranscript } from "./codex-account-transcript.js";
 import type { ClaudeLiveUsage } from "./drivers/claude-usage-accounting.js";
 import type { PoisonedProviderHistory } from "./drivers/poisoned-provider-history.js";
 import { UnclassifiedRejectionJournal } from "./drivers/unclassified-rejection-journal.js";
-import { PROVIDER_ACCOUNT_SKIP_TEXT, providerAccountLaunchIneligibility, type ProviderAccountBilling } from "@wollipog/protocol";
+import { PROVIDER_ACCOUNT_SKIP_TEXT, providerAccountExplicitRecord, providerAccountLaunchIneligibility, type ProviderAccountBilling } from "@wollipog/protocol";
 import type {
   AgentCapabilities,
   AgentContext,
@@ -975,7 +975,7 @@ interface ApprovedProviderAuthentication {
 
 type ProviderReplacementResult =
   | { status: "launched"; entry: ActiveSession; queuedWork: boolean }
-  | { status: "not_resumable" | "lock_unavailable" | "retirement_failed" | "launch_failed" | "stopped" | "superseded" }
+  | { status: "not_resumable" | "lock_unavailable" | "capacity_unavailable" | "retirement_failed" | "launch_failed" | "stopped" | "superseded" }
   | { status: "prepare_failed"; error: string };
 
 /** Capability-derived resume gate. ACP must have proven stable resume or load in its last live
@@ -8301,7 +8301,7 @@ export class SessionManager {
     const priorResumeId = prior?.driver === driver ? restartResumeId(prior) ?? null : null;
     // A fresh provider conversation keeps this Wollipog session's corrected lifetime baseline.
     // Clearing it would lose the repair generation and make every subsequent snapshot stale.
-    const retainAccounting = !!priorResumeId || prior?.costReconciliationRevision !== undefined ||
+    const retainAccounting = !!priorResumeId || !!prior?.assistant || prior?.costReconciliationRevision !== undefined ||
       prior?.costReconciliationRepairId !== undefined;
     const priorManagedPiState = prior?.adoptedProviderState?.driver === "pi"
       ? prior.adoptedProviderState
@@ -8410,6 +8410,7 @@ export class SessionManager {
       orchestrator: this.withAppliedIssueGrant(spec.sessionId, launchGeneration, launchOrchestratorMeta(prior?.orchestrator, spec.orchestrator)),
       ...(spec.uiEvidenceReviewer ? { uiEvidenceReviewer: { reviewId: spec.uiEvidenceReviewer.reviewId } } : {}),
       ...(spec.assistant ?? prior?.assistant ? { assistant: { threadId: (spec.assistant ?? prior!.assistant)!.threadId } } : {}),
+      ...(prior?.assistant && prior.handoffPending ? { handoffPending: true } : {}),
       ...(spec.review ? { review: {
         ...spec.review, checkout: repoPath, launchOwner: this.lockOwner,
         ...(this.preparedReviewRounds.has(spec.sessionId) ? { round: this.preparedReviewRounds.get(spec.sessionId)! } : {}),
@@ -9560,7 +9561,7 @@ export class SessionManager {
     return this.latestLaunchGenerations.get(sessionId) ?? 0;
   }
 
-  private acquireAdmission(sessionId: string): Promise<boolean> {
+  private acquireAdmission(sessionId: string, { wait = true } = {}): Promise<boolean> {
     if (this.admitted.has(sessionId)) return Promise.resolve(true);
     // Review sessions take no runner slot and count against no agent limit (#3368).
     if (this.isReviewSession(sessionId)) return Promise.resolve(true);
@@ -9572,6 +9573,10 @@ export class SessionManager {
       this.admissionWaitReasons.delete(sessionId);
       this.reportCapacity();
       return Promise.resolve(true);
+    }
+    if (!wait) {
+      this.boxAdmission.clearFailure(sessionId);
+      return Promise.resolve(false);
     }
     const waiting = new Promise<boolean>((resolve) => this.admissionQueue.push({ request, bypasses: 0, resolve }));
     this.emitAdmissionWait(request);
@@ -14668,7 +14673,7 @@ export class SessionManager {
       !this.reservedPromotionPrecedesQueue(sessionId, entry);
   }
 
-  private providerAccountForSession(meta: SessionMeta, providerAccountId: string): BoundProviderAccount {
+  private providerAccountForSession(meta: SessionMeta, providerAccountId: string, recheckEligibility = false): BoundProviderAccount {
     if (!this.resolveProviderAccount || !meta.agentId) {
       throw new Error("this session does not support provider accounts");
     }
@@ -14681,6 +14686,9 @@ export class SessionManager {
       workspacePath: meta.repoPath,
       agentId: meta.agentId,
       providerAccountId,
+      ...(recheckEligibility ? { providerAccountSelection: {
+        ...providerAccountExplicitRecord(null), revalidateAtLaunch: true,
+      } } : {}),
       command: meta.command,
       args: meta.args,
       env: {},
@@ -14706,8 +14714,8 @@ export class SessionManager {
    * pending binding is authoritative: a re-resolved account that now reports another profile (a
    * re-pointed or re-adopted HOME) refuses the switch, and one that reports none binds the saved id,
    * so the lease's expected id still refuses a replaced HOME. */
-  private pendingProviderAccountTarget(meta: SessionMeta, pending: BoundProviderAccount): BoundProviderAccount {
-    const target = this.providerAccountForSession(meta, pending.id);
+  private pendingProviderAccountTarget(meta: SessionMeta, pending: BoundProviderAccount, recheckEligibility = false): BoundProviderAccount {
+    const target = this.providerAccountForSession(meta, pending.id, recheckEligibility);
     const saved = pending.profileId;
     if (saved === undefined) return target;
     if (target.profileId !== undefined && target.profileId !== saved) {
@@ -14884,6 +14892,85 @@ export class SessionManager {
     }
     await this.rebindSelectedProviderAccount(sessionId, entry);
     return { ok: true, scheduled: false };
+  }
+
+  /** An owner changes the existing backing session at an idle boundary. A queued or racing turn
+   * is refused; retirement fences new prompts until the replacement is ready. */
+  async changeAssistantThreadAccount(
+    sessionId: string,
+    providerAccountId: string,
+    change: NonNullable<import("@wollipog/protocol").SwitchSessionProviderAccountMessage["assistantThread"]>,
+  ): Promise<{ ok: boolean; error?: string; scheduled?: boolean }> {
+    const refuse = (error: string) => ({ ok: false, error });
+    const meta = this.store.readMeta(sessionId);
+    if (!meta?.assistant || meta.assistant.threadId !== change.threadId || !this.sessionCanOpen(sessionId)) {
+      return refuse("This session no longer backs the Assistant thread.");
+    }
+    if ((meta.providerAccountId ?? null) !== change.expectedProviderAccountId) {
+      return refuse("The thread's account changed. Reopen Change Account to see the current account.");
+    }
+    if (meta.providerAccountId === providerAccountId && !meta.providerAccountSwitchFailure) {
+      return refuse("The thread already uses that account.");
+    }
+    const entry = this.active.get(sessionId);
+    if (meta.status === "stopped" || this.launchGenerations.has(sessionId) || this.closing.has(sessionId) ||
+        meta.status === "running" || meta.status === "starting" || meta.status === "queued" ||
+        this.roleConversionPending(sessionId) || meta.pendingProviderAccountId || meta.pendingLocationSwitch ||
+        meta.providerHistoryBlock || (this.hasPendingApproval(sessionId) && !isProviderAuthenticationBlock(meta.pendingApproval)) ||
+        (entry && (entry.queue.length > 0 || !this.providerAccountSwitchCanProceed(sessionId, entry)))) {
+      return refuse("The thread isn't ready to change accounts. Wait for its turn or pending work to finish and try again.");
+    }
+    if (entry) this.captureAgentSessionId(sessionId, entry.client);
+    const current = this.store.readMeta(sessionId)!;
+    if (!change.freshConversation && current.seq > 0 && !current.handoffPending &&
+        (!current.agentSessionId || !canResumeSession(current) || (!current.providerConversationHome && !current.providerCredentialHome))) {
+      return refuse("The provider conversation can't be carried over. Select Start a Fresh Conversation to change accounts and keep the thread's visible history.");
+    }
+    let target: BoundProviderAccount;
+    try {
+      target = this.providerAccountForSession(current, providerAccountId, true);
+    } catch (error) {
+      return refuse(errText(error));
+    }
+    // Resolve the target again after retiring the old provider so a configuration change during
+    // retirement fails closed.
+    const replacement = await this.replaceProviderProcess(sessionId, entry, {
+      freshConversation: change.freshConversation,
+      prepareReplacement: async () => { target = this.pendingProviderAccountTarget(current, target, true); },
+      replacementMeta: () => {
+        const latest = this.store.readMeta(sessionId);
+        if (!latest) return undefined;
+        const updated = this.store.patchMeta(sessionId, {
+          ...this.providerAccountBindingPatch(latest, target),
+          ...(change.freshConversation ? {
+            agentSessionId: null, handoffPending: true, providerConversationHome: undefined,
+            providerUnstartedThreadId: undefined, claudeUsageCheckpoint: undefined, claudeUsageCheckpointSeq: undefined,
+            contextTokensUsed: undefined, contextWindow: undefined,
+          } : {}),
+        });
+        if (updated) this.store.flush(sessionId);
+        return updated ?? undefined;
+      },
+      queueFailureReason: () => "the Assistant thread couldn't start on the selected account",
+      onLaunched: () => {
+        if (change.freshConversation) this.noticeSessionLaunch(sessionId, "The Assistant started a fresh provider conversation. The earlier transcript is still in this thread.");
+        this.emitEvent(sessionId, { kind: "provider_account_switched", providerAccountId: target.id, providerAccountLabel: target.label });
+        const updated = this.store.readMeta(sessionId);
+        if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+      },
+    });
+    if (replacement.status === "launched") {
+      if (!replacement.queuedWork) this.emitStatus(sessionId, "idle");
+      return { ok: true };
+    }
+    if (replacement.status === "capacity_unavailable") {
+      return refuse("This Machine has no available provider process slot. Try changing the account when a slot is free.");
+    }
+    if (replacement.status === "launch_failed") {
+      this.parkProviderAccountSwitchFailure(sessionId, target, "The thread couldn't resume on the selected account. If its conversation can't be carried over, try Start a Fresh Conversation.");
+    }
+    return refuse(replacement.status === "prepare_failed" ? replacement.error
+      : "The thread couldn't start on the selected account. Check the thread before trying again.");
   }
 
   private roleConversionPending(sessionId: string): boolean {
@@ -15481,7 +15568,7 @@ export class SessionManager {
    * a promptable session between retiring the old process and readying its replacement. */
   private async replaceProviderProcess(
     sessionId: string,
-    entry: ActiveSession,
+    entry: ActiveSession | undefined,
     options: {
       replacementMeta: () => SessionMeta | undefined;
       queueFailureReason: () => string;
@@ -15490,12 +15577,15 @@ export class SessionManager {
       /** Runs once the old provider has exited and before replacementMeta. A throw ends the
        * replacement with nothing relaunched and replacementMeta never called. */
       prepareReplacement?: () => Promise<void>;
+      /** Explicit owner consent to keep the visible transcript and start fresh at the provider. */
+      freshConversation?: boolean;
     },
   ): Promise<ProviderReplacementResult> {
-    this.captureAgentSessionId(sessionId, entry.client);
+    if (entry) this.captureAgentSessionId(sessionId, entry.client);
     const resumable = this.store.readMeta(sessionId);
-    const resumeId = resumable?.agentSessionId ?? undefined;
-    const hasConversation = (resumable?.seq ?? 0) > 0;
+    const resumeId = options.freshConversation ? undefined : resumable?.agentSessionId ?? undefined;
+    const freshAssistantHandoff = !!resumable?.assistant && resumable.handoffPending;
+    const hasConversation = !options.freshConversation && !freshAssistantHandoff && (resumable?.seq ?? 0) > 0;
     if (!resumable || (!resumeId && hasConversation) || (resumeId && !canResumeSession(resumable))) {
       return { status: "not_resumable" };
     }
@@ -15508,27 +15598,35 @@ export class SessionManager {
 
     const launchGeneration = this.beginLaunchGeneration(sessionId);
     this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
-    const queued = entry.queue.splice(0);
-    if (queued.length) this.preLaunchQueues.set(sessionId, queued);
-    this.deleteActiveSession(sessionId, entry, false, false);
+    const queued = entry?.queue.splice(0);
+    if (queued?.length) this.preLaunchQueues.set(sessionId, queued);
+    if (entry) this.deleteActiveSession(sessionId, entry, false, false);
     this.emitQueue(sessionId);
     let launched = false;
     let preserveLockForQueue = false;
     let result: ProviderReplacementResult = { status: "launch_failed" };
     try {
+      // The account change is a bounded request. A dormant thread must not queue a switch that
+      // could take effect after the control plane has already reported a timeout.
+      if (!entry && !await this.acquireAdmission(sessionId, { wait: false })) {
+        result = { status: "capacity_unavailable" };
+        return result;
+      }
       try {
-        const retirement = this.beginProviderRetirement(sessionId, entry, {
-          preserveAdmission: true,
-          preserveLock: true,
-          acceptPromptsDuringHandoff: true,
-        });
-        await retirement.promise;
-        if (this.closing.get(sessionId) === retirement) {
-          throw new Error("provider process retirement is unconfirmed");
+        if (entry) {
+          const retirement = this.beginProviderRetirement(sessionId, entry, {
+            preserveAdmission: true,
+            preserveLock: true,
+            acceptPromptsDuringHandoff: true,
+          });
+          await retirement.promise;
+          if (this.closing.get(sessionId) === retirement) {
+            throw new Error("provider process retirement is unconfirmed");
+          }
         }
       } catch (error) {
         const retirement = this.closing.get(sessionId);
-        if (retirement?.client === entry.client) {
+        if (retirement && retirement.client === entry?.client) {
           retirement.preserveAdmission = false;
           retirement.preserveLock = false;
           retirement.acceptPromptsDuringHandoff = false;

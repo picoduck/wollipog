@@ -34,6 +34,109 @@ async function expectEmptyStateAligned(page: Page) {
 const threadsList = (page: Page) => page.getByRole("complementary", { name: "Assistants" });
 const threadRow = (page: Page, title: string) => threadsList(page).getByRole("button", { name: new RegExp(`^${title}`) });
 
+async function captureAccountList(page: Page, dialog: Locator, action: Locator, name: string, accountRows: number) {
+  const body = dialog.locator(".modal-body");
+  const accounts = dialog.getByRole("radiogroup", { name: "Account" });
+  await expect(accounts.getByRole("radio")).toHaveCount(accountRows);
+  await expectNoHorizontalOverflow(dialog, "Thread account dialog");
+  await expectNoHorizontalOverflow(accounts, "Account choices");
+  // The dialog body is the only scroll surface. Its footer remains in view as all nine accounts
+  // are browsed. Verify every whole row is visible in at least one captured scroll position.
+  expect(await accounts.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeLessThanOrEqual(1);
+  const visibleRows = (bottom: boolean) => body.evaluate((element, bottom) => {
+    element.scrollTop = bottom ? element.scrollHeight : 0;
+    const clip = element.getBoundingClientRect();
+    return Array.from(element.querySelectorAll('[aria-labelledby].choice-rows .choice-row'))
+      .map((row, index) => {
+        const rect = row.getBoundingClientRect();
+        return rect.top >= clip.top && rect.bottom <= clip.bottom ? index : -1;
+      }).filter((index) => index >= 0);
+  }, bottom);
+  const visible = await visibleRows(false);
+  await expectFullyInViewport(action, "Thread account dialog primary action");
+  await capture(page, `${name}-top`);
+  const atBottom = await visibleRows(true);
+  expect(new Set([...visible, ...atBottom]).size).toBe(accountRows);
+  await expectFullyInViewport(action, "Thread account dialog primary action after scrolling");
+  if (visible.length < accountRows) await capture(page, `${name}-bottom`);
+}
+
+for (const theme of ["dark", "light"] as const) {
+  for (const device of ["desktop", "phone"] as const) {
+    test.describe(`thread accounts in ${theme} on ${device}`, () => {
+      const phone = device === "phone";
+      test.use({ viewport: phone ? { width: 390, height: 844 } : { width: 1440, height: 900 },
+        hasTouch: phone, isMobile: phone, colorScheme: theme });
+
+      test("chooses an eligible account at creation and changes an existing thread's account", async ({ page }) => {
+        await page.clock.setFixedTime(new Date("2026-11-19T16:00:00Z"));
+        const prefix = `assistant-account-${theme}-${device}`;
+        const path = "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA";
+        const openChange = async () => {
+          await page.getByRole("button", { name: "Thread Actions" }).click();
+          await page.getByRole("menuitem", { name: "Change Account" }).click();
+        };
+        await open(page, theme, "accounts=default");
+        await threadsList(page).getByRole("button", { name: "New Thread" }).click();
+        const create = page.getByRole("dialog", { name: "New Thread" });
+        const start = create.getByRole("button", { name: "Start Thread" });
+        const createOptions = create.getByRole("radiogroup", { name: "Account" });
+        await expect(createOptions.getByRole("radio", { name: "Machine Policy · Studio Subscription" })).toBeChecked();
+        await expectFullyInViewport(start, "Start Thread");
+        await capture(page, `${prefix}-create-default`);
+
+        await open(page, theme, "accounts=choices");
+        await threadsList(page).getByRole("button", { name: "New Thread" }).click();
+        for (const [name, reason] of [
+          ["Field Subscription", "needs sign-in"], ["Remote Subscription", "can't run in this agent's environment"],
+          ["Metered Account", "would spend API credits"], ["Review Subscription", "is at a usage limit"],
+        ]) {
+          const option = createOptions.getByRole("radio", { name });
+          await expect(option).toHaveAttribute("aria-disabled", "true");
+          await expect(option).toHaveAccessibleDescription(`This account ${reason}.`);
+        }
+        await expectNoHorizontalOverflow(create, "New Thread with account reasons");
+        await expectFullyInViewport(start, "Start Thread");
+        await capture(page, `${prefix}-create-choices`);
+
+        await open(page, theme, "accounts=stress");
+        await threadsList(page).getByRole("button", { name: "New Thread" }).click();
+        await createOptions.getByRole("radio", { name: /DesignResearchAndEngineering/ }).check();
+        await captureAccountList(page, create, start, `${prefix}-create-stress`, 10);
+        await start.click();
+        await expect(page.locator("body")).toHaveAttribute("data-created-account", "acct:0000000000000002");
+
+        await open(page, theme, "accounts=default", path);
+        await openChange();
+        const change = page.getByRole("dialog", { name: "Change Account" });
+        const changeButton = change.getByRole("button", { name: "Change Account" });
+        const fresh = change.getByRole("checkbox", { name: "Start a Fresh Conversation" });
+        await expect(fresh).not.toBeChecked();
+        await expect(fresh).toHaveAccessibleDescription(/can't carry the conversation over/);
+        await expectFullyInViewport(changeButton, "Change Account");
+        await capture(page, `${prefix}-change-default`);
+
+        await open(page, theme, "accounts=stress", path);
+        const details = page.getByRole("list", { name: "Thread Details" });
+        await expect(details).toContainText("DesignResearchAndEngineering");
+        await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
+        await expectFullyInViewport(page.locator(".composer"), "Thread composer");
+        await expectPageNoHorizontalOverflow(page);
+        await openChange();
+        const changeOptions = change.getByRole("radiogroup", { name: "Account" });
+        await expect(changeOptions.getByRole("radio", { name: /DesignResearchAndEngineering/ })).toHaveAttribute("aria-disabled", "true");
+        await changeOptions.getByRole("radio", { name: "Studio Subscription" }).check();
+        await captureAccountList(page, change, changeButton, `${prefix}-change-stress`, 9);
+        await changeButton.click();
+        await expect(page.locator("body")).toHaveAttribute("data-changed-account", "acct:0000000000000001");
+        await expect(details).toContainText("Studio Subscription");
+        await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
+        await expect(page.getByRole("region", { name: "Launched Work" }).locator(".assistant-work-card")).toHaveCount(2);
+      });
+    });
+  }
+}
+
 for (const theme of ["dark", "light"] as const) {
   test.describe(`${theme} at 1440×900`, () => {
     test.use({ viewport: { width: 1440, height: 900 }, colorScheme: theme });
