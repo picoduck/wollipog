@@ -1,4 +1,5 @@
 import { CampaignClosureReports } from "./CampaignClosureReports.js";
+import type { AssistantThreadConfirmations } from "../assistant-confirmations.js";
 import { AssistantConfirmationsNotice } from "./AssistantConfirmationCard.js";
 import { lazy, Suspense, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { presentOwnerQuestionRequest, prioritizedPendingRequests, providerSupportsConversationFork, type BoardColumn, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
@@ -165,6 +166,7 @@ export function pageInboxPreview(
 }
 
 export interface InboxViewProps {
+  assistantConfirmations?: readonly AssistantThreadConfirmations[];
   /** The Sessions destination's presentation: the project-grouped list or the status board. */
   viewMode?: SessionsViewMode;
   /** The Sessions tab the URL names (docs/design-system.md §10.1): a split key, null for All, or
@@ -200,6 +202,7 @@ export interface InboxViewProps {
 const InboxSessionDetail = memo(SessionDetail);
 
 export function InboxView({
+  assistantConfirmations = [],
   viewMode = "list",
   routeSplit,
   expandedSessionId = null,
@@ -1859,7 +1862,7 @@ export function InboxView({
         {/* One mounted notice slot: above the list on desktop, below its scroller on a phone so
             asynchronously loaded recommendations cannot move the already rendered top rows. */}
         <div className="inbox-list-notices" ref={listNoticesRef}>
-          <AssistantConfirmationsNotice />
+          <AssistantConfirmationsNotice waiting={assistantConfirmations} />
           <CampaignClosureReports />
           <SessionsListNotices
             signIns={machineProviderLogins}

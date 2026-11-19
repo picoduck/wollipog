@@ -148,7 +148,7 @@ function selectedRailView(view: View): GlobalViewName | null {
 export function Rail({
   view,
   blockedCount,
-
+  assistantAttentionCount = 0,
   machines = NO_MACHINE_ATTENTION,
   onNavigate,
   instanceControl,
@@ -158,6 +158,7 @@ export function Rail({
 }: {
   view: View;
   blockedCount: number;
+  assistantAttentionCount?: number;
   /** Machines that need the user; Connections shows a dot while any does (#1967). */
   machines?: MachineAttention;
   onNavigate: (view: View) => void;
@@ -273,7 +274,7 @@ export function Rail({
   const separatorsBefore = isMobile ? entries.map(() => false) : railSeparatorsBefore(entries.map(entryGroup));
   const descriptionPrefix = useId();
   // A disabled destination draws no attention mark (renderEntry), whatever the counts say.
-  const attentionState = { blocked: blockedCount, machines };
+  const attentionState = { blocked: blockedCount, machines, assistantThreads: assistantAttentionCount };
   // A destination moved into the sheet takes its attention with it, so More has to say so while the
   // sheet is closed, or Sessions waiting behind it goes unnoticed (#2110).
   const moreAttention = overflowAttention(overflowItems, attentionState);

@@ -1,16 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AssistantOwnerConfirmation, AssistantOwnerConfirmationResponse, AssistantThread } from "@wollipog/protocol";
-import { ApiError } from "../api.js";
+import { useState } from "react";
+import type { AssistantOwnerConfirmation, AssistantOwnerConfirmationResponse } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import {
   assistantConfirmationOutcome,
-  assistantThreadPendingKey,
-  onAssistantThreadUpsert,
-  pendingAssistantConfirmationsByThread,
+  type AssistantThreadConfirmations,
 } from "../assistant-confirmations.js";
 import { assistantThreadTitle } from "../assistant-threads.js";
 import { formatClock } from "../format.js";
-import { useStoreActions, useStoreSelector } from "../store.js";
+import { useStoreActions } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
@@ -125,73 +122,9 @@ export function AssistantConfirmationCard({ confirmation, onAnswered }: {
 /** How many threads the Inbox names; the rest wait behind "+N More", in the Assistants section. */
 const NOTICE_THREADS = 3;
 
-/**
- * Every Assistant thread's pending owner confirmations, summed up at the top of the Inbox (#4665):
- * one line for each of at most three threads, with how many requests it has waiting, when the first
- * expires, and Review, which opens the thread, where each request is drawn whole to be answered.
- * However many requests wait, the block keeps the same small bound, so the sessions keep their room.
- *
- * The Thread API's list is the only source of what is shown, and only the answer to the most
- * recently started read is applied. A read starts whenever what is shown may have fallen behind:
- * the connection comes (back) online, or a thread event changes that thread's pending requests (an
- * answer in the thread view publishes one). Each such change therefore has a read that started
- * after it, and an older read's late answer is discarded, so stale state can never replace newer
- * state. A control plane without the Thread API shows nothing.
- */
-export function AssistantConfirmationsNotice() {
-  const api = useApi();
+/** A bounded preview of the owner's pending Assistant confirmations. */
+export function AssistantConfirmationsNotice({ waiting }: { waiting: readonly AssistantThreadConfirmations[] }) {
   const { navigate } = useStoreActions();
-  const online = useStoreSelector((state) => state.conn === "online");
-  const [threads, setThreads] = useState<readonly AssistantThread[]>([]);
-  const [now, setNow] = useState(() => Date.now());
-  const latestRead = useRef(0);
-  const retry = useRef<number | null>(null);
-  const cancelRetry = () => {
-    if (retry.current !== null) window.clearTimeout(retry.current);
-    retry.current = null;
-  };
-  const refresh = useCallback(() => {
-    cancelRetry();
-    const read = ++latestRead.current;
-    // The invariant: only the most recently started read (`latestRead`) may change what is shown or
-    // schedule more work. A newer read or unmounting advances `latestRead`, which retires every
-    // older answer, failure and retry, whatever order they arrive in.
-    // The latest read is retried, backing off to 30 seconds, until it succeeds or is superseded: a
-    // request whose read failed must not stay hidden until it expires. A control plane without the
-    // Thread API answers 404, 405 or 501, and then the Inbox stays as it was.
-    const current = () => read === latestRead.current;
-    const attempt = (delay: number) => void api.assistantConfirmationThreads().then(
-      ({ threads: listed }) => { if (current()) setThreads(listed); },
-      (error: unknown) => {
-        if (!current()) return;
-        if (error instanceof ApiError && [404, 405, 501].includes(error.status)) return;
-        retry.current = window.setTimeout(() => {
-          retry.current = null;
-          if (current()) attempt(Math.min(delay * 2, 30_000));
-        }, delay);
-      },
-    );
-    attempt(2_000);
-  }, [api]);
-  // Unmounting supersedes any read still in flight, so its late answer or failure does nothing.
-  useEffect(() => () => { latestRead.current += 1; cancelRetry(); }, []);
-  // Events are not replayed after a disconnect, so the list is read whenever the connection is up.
-  useEffect(() => { if (online) refresh(); }, [online, refresh]);
-  // Thread events arrive in order, so a thread's latest event names its pending requests as of
-  // then. Activity that leaves them unchanged needs no read.
-  const pendingByThread = useRef(new Map<string, string>());
-  useEffect(() => onAssistantThreadUpsert((thread) => {
-    const key = assistantThreadPendingKey(thread);
-    if (pendingByThread.current.get(thread.id) === key) return;
-    pendingByThread.current.set(thread.id, key);
-    refresh();
-  }), [refresh]);
-  useEffect(() => {
-    // An unanswered request leaves the list when it expires, even without another event.
-    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
-    return () => window.clearInterval(timer);
-  }, []);
-  const waiting = useMemo(() => pendingAssistantConfirmationsByThread(threads, now), [threads, now]);
   if (!waiting.length) return null;
   const more = waiting.length - NOTICE_THREADS;
   return (

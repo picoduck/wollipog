@@ -90,6 +90,7 @@ import { useInstanceScope } from "./instance-scope.js";
 import { sessionsDestination } from "./sessions-view-mode.js";
 import { railViewForDigit, visibleRailViews } from "./rail-preferences.js";
 import { machineAttention } from "./rail-attention.js";
+import { useAssistantAttention } from "./use-assistant-attention.js";
 import { useRailPreferences } from "./use-rail-preferences.js";
 import { useSessionsViewModeMemory } from "./use-sessions-view-mode-memory.js";
 import { recordRecentSession } from "./recent-sessions.js";
@@ -735,6 +736,7 @@ export function Shell() {
       sessionVisibleForReminderMode(session, reminders.get(session.id), "ordinary")),
     [reminders, sessions],
   );
+  const assistantAttention = useAssistantAttention();
   const blockedSessions = useMemo(
     () => activeSessions.filter(isInboxBlocked).length,
     [activeSessions],
@@ -786,6 +788,7 @@ export function Shell() {
       <Rail
         view={view}
         blockedCount={blockedSessions}
+        assistantAttentionCount={assistantAttention.count}
         machines={railMachines}
         onNavigate={navigate}
         {...(isMobile ? {} : {
@@ -856,6 +859,7 @@ export function Shell() {
             /* InboxView draws the Sessions page header, whose controls are its state (#2159). */
             <div className="page full fill">
             <InboxView
+              assistantConfirmations={assistantAttention.confirmations}
               viewMode={view.name === "board" ? "board" : "list"}
               routeSplit={view.name === "inbox" || view.name === "board" ? view.split : undefined}
               expandedSessionId={view.name === "session" ? view.id : null}
