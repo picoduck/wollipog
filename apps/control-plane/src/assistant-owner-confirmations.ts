@@ -244,9 +244,11 @@ export class AssistantOwnerConfirmations {
     let impactJson: string | null = input.campaign ? JSON.stringify(input.campaign) : input.impact === undefined ? null : JSON.stringify(input.impact);
     if (input.campaign && impactJson!.length > ARGUMENTS_LIMIT) throw new AssistantRefusal("This campaign's settings are too large to review. No campaign was started.");
     if (impactJson && impactJson.length > ARGUMENTS_LIMIT) impactJson = JSON.stringify("The preview is too large to show here; open the target to inspect it.");
-    this.db.prepare(`DELETE FROM assistant_owner_confirmations AS c WHERE status NOT IN ('pending','approved') AND resolved_at<?
-      AND NOT EXISTS (SELECT 1 FROM human_campaign_launches h
-        WHERE c.operation=? AND h.user_id=c.owner_user_id AND h.request_id='assistant-'||c.id)`).run(now - RETENTION_MS, ASSISTANT_CAMPAIGN_START);
+    // A launched campaign is also counted against this thread's launch limit. Preserve its card
+    // record, including an executed request whose launch receipt has yet to be reconciled.
+    this.db.prepare(`DELETE FROM assistant_owner_confirmations WHERE status NOT IN ('pending','approved') AND resolved_at<?
+      AND NOT (operation=? AND status='executed' AND (outcome_json IS NULL OR json_extract(outcome_json,'$.sessionId') IS NOT NULL))`)
+      .run(now - RETENTION_MS, ASSISTANT_CAMPAIGN_START);
     const id = `aoc_${randomUUID()}`;
     this.db.prepare(`INSERT INTO assistant_owner_confirmations
       (id,connection_id,thread_id,owner_user_id,organization_id,operation,command_id,binding_json,arguments_json,target_json,target_label,impact_json,status,created_at,expires_at)

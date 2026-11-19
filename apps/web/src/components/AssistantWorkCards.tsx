@@ -79,10 +79,11 @@ function AssistantWorkCard({ sessionId, campaign }: { sessionId: string; campaig
       <button type="button" className="assistant-work-open" onClick={() => open()} title={title}>
         <span className="assistant-work-line">
           <span className="assistant-work-title">{title}</span>
+          {campaign && <StatusBadge label="Campaign" noDot />}
           <StatusBadge meta={signal.meta} />
         </span>
         <span className="assistant-work-meta">
-          {campaign && "Orchestrator Campaign · "}{session.agentName ? `${session.agentName} · ` : ""}{relativeTime(session.updatedAt)}
+          {session.agentName ? `${session.agentName} · ` : ""}{relativeTime(session.updatedAt)}
         </span>
       </button>
       {request && <WorkCardRequest session={session} requestId={request.requestId} onOpen={() => open(request.requestId)} />}

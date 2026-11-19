@@ -7470,6 +7470,7 @@ body.shell-dock-dragging * {
 .assistant-confirmation-summary {
   margin: 0;
   font: var(--type-body);
+  overflow-wrap: anywhere;
 }
 .assistant-confirmation-arguments code {
   overflow-wrap: anywhere;
@@ -7500,20 +7501,26 @@ body.shell-dock-dragging * {
   flex: none;
   overflow: visible;
 }
-.request-card[data-assistant-campaign] > .request-card-body {
-  max-height: min(27vh, 16rem);
-  overflow-y: auto;
+.assistant-campaign-review {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
 }
-.request-card[data-assistant-campaign] .facts dd {
+.assistant-campaign-review .facts dd,
+.assistant-campaign-message > p {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
-.assistant-campaign-budget,
+.assistant-campaign-message > h3 {
+  margin: 0 0 var(--space-2);
+  font: var(--type-label);
+}
+.assistant-campaign-message > p {
+  margin: 0;
+}
 .assistant-inbox-campaigns {
   display: grid;
   gap: var(--space-2);
-}
-.assistant-inbox-campaigns {
   margin: 0;
   padding: 0;
   list-style: none;

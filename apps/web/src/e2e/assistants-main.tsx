@@ -166,7 +166,9 @@ function confirmation(index: number): AssistantOwnerConfirmation {
   if (campaignScenario) return {
     id: `aoc_campaign_${index}`, threadId: "thr_triage", operation: "campaign_start", title: "Start Campaign",
     summary: "Starts an independent Orchestrator campaign with the settings and authority shown here. Its usage is charged to its own campaign allowance.",
-    target: { kind: "project", id: "project-releases", label: "Release Engineering · Build Machine" },
+    target: { kind: "project", id: "project-releases", label: index === 0
+      ? "Release Engineering for Long-Running Cross-Platform Verification and Packaging · Build Machine"
+      : "Release Engineering · Build Machine" },
     impact: [
       { label: "Campaign Mode", value: "Full Control" },
       { label: "Campaign Budget", value: "$20 USD · 150 tool calls" },
@@ -174,16 +176,25 @@ function confirmation(index: number): AssistantOwnerConfirmation {
       { label: "Orchestrator Model", value: "gpt-6.2-sol" },
       { label: "Orchestrator Effort", value: "high" },
       { label: "Child Harness", value: "Claude Code" },
-      { label: "Child Model", value: "claude-opus-5-5" },
+      { label: "Child Model", value: index === 0
+        ? "claude-opus-5-5-release-engineering-long-context-verification-preview-fixture"
+        : "claude-opus-5-5" },
       { label: "Child Effort", value: "high" },
       { label: "Concurrent Children", value: "2" },
+      { label: "Follow-Ups", value: "Recommend Only · 0 accepted follow-ups" },
+      { label: "Completion", value: "Retain" },
+      { label: "Provider Permissions", value: "Harness Default" },
+      { label: "Isolation", value: "Strict Project Isolation off · Integration Isolation off" },
       { label: "Repository Scope", value: "example/release-tools · Release Engineering" },
       { label: "Initial Issues", value: "#38, #41" },
+      { label: "Issue Authority", value: "Up to 2 issues. Related follow-ups require owner admission. Closure reasons: Completed." },
       { label: "Delegated Operations", value: "Issue Closure, Campaign Issue Scope, PR Merge, Merged Branch Deletion, Implementation Question, UI Evidence Approval" },
+      { label: "Review", value: "Regular cross-model review." },
+      { label: "Evidence", value: "The Orchestrator reviews screenshots. For video and external evidence it asks for screenshots." },
       { label: "Human-Required Gates", value: "Authentication and Credentials\nGovernance and Standing Access\nBudget Increases" },
     ],
     arguments: [{ label: "First Message", value: index === 0
-      ? "Plan the release and check issues #38 and #41. Run the existing verification on the disposable Release Engineering project and report the results."
+      ? "Plan the release and check issues #38 and #41. Run the existing verification on the disposable Release Engineering project, then report the checks that passed and any fixes that need review. Match the results against ReleaseEngineeringCrossPlatformPackagingReadinessChecklistWithoutAdditionalSeparators."
       : `Audit the release checklist for issue #38. ${"LongUnbrokenReleaseChecklistIdentifier".repeat(20)}` }],
     campaign: { digest: index.toString(16).repeat(64), budget: { costUsd: 20, toolCalls: 150 } },
     status: "pending", createdAt: NOW - minute + index, expiresAt: NOW + 59 * minute, resolvedAt: null,

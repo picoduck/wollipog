@@ -341,6 +341,29 @@ test("campaign confirmation rejects agent approval, forged settings, stale plans
   } finally { await h.close(); }
 });
 
+test("approving an updated campaign preview funds the root with the owner's revised allowance", async () => {
+  for (const mode of ["full_control", "custom"] as const) {
+    const h = await assistantCampaignFixture();
+    try {
+      saveBudget(h, { costUsd: 40, toolCalls: 400 });
+      await h.call({ ...h.args, mode, ...(mode === "custom" ? { issueNumbers: undefined } : {}) });
+      const [card] = h.pending();
+      const edited = { costUsd: 10, toolCalls: 100 };
+      const revised = await h.answer(card!.id, "campaign-budget", { digest: card!.campaign!.digest, budget: edited });
+      assert.equal(revised.statusCode, 200, revised.body);
+      const digest = revised.json().confirmation.campaign.digest;
+      assert.notEqual(digest, card!.campaign!.digest);
+      const response = await h.answer(card!.id, "approve-campaign", { digest });
+      assert.equal(response.statusCode, 200, response.body);
+      const outcome = response.json().confirmation.outcome;
+      assert.equal(outcome.receiptStatus, "succeeded", response.body);
+      const { costUsd, toolCalls } = h.db.campaignBudgets.view(outcome.sessionId)!.authority;
+      assert.deepEqual({ costUsd, toolCalls }, edited);
+      assert.deepEqual(h.settings.view(h.human).defaults.campaignBudget, { costUsd: 40, toolCalls: 400 });
+    } finally { await h.close(); }
+  }
+});
+
 test("Assistant campaign launches require a compatible runner", async () => {
   const h = await assistantCampaignFixture(RUNNER_CAPABILITY_MIN_PROTOCOL.assistantCampaignLaunch - 1);
   try {

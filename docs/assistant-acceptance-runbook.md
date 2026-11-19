@@ -21,7 +21,7 @@ must not perform it merely to turn an unavailable test green.
 
 | Item | Required Owner Preparation |
 | --- | --- |
-| 1 | Before running these checks, the owner deploys accepted main from outside the hosting stack and records the deployed commit plus control-plane, local/SSH runner and negotiated protocol versions. |
+| 1 | Before running these checks, the owner deploys accepted main from outside the hosting stack and records the deployed commit plus control-plane, local/SSH runner and negotiated protocol versions. This campaign never updates or restarts its hosting stack. |
 | 2 | Create a dedicated OpenClaw profile with model authentication, separate state/workspace and protected secret references. Through supported owner setup, issue Full Access and narrow test connections, exact requester/conversation bindings, and the connector/subscription/signing authority needed for the run. Preserve the baseline profile. |
 | 3 | Configure a dedicated Discord application/account and test conversations, explicit sender/channel allowlists, required intents, read/send permissions and thread membership. Keep tokens and actual destination coordinates in private owner configuration. |
 | 4 | Confirm the SSH Machine's current agent authentication, quota/capacity and compatible harness, plus a safe repository Project Location. Discovery's authenticated/online label alone does not prove execution. Repair authentication only through owner setup if needed. |
@@ -270,9 +270,10 @@ on each selected account.
    unanswered. Verify the thread is **Needs You** and the desktop **Assistants** rail shows **1**.
    Have the same thread request another confirmation and verify the count stays at **1**.
 2. Create a pending owner confirmation from the second thread. Verify the desktop rail shows
-   **2** and the phone **Assistants** tab shows **2**. On the phone, move **Assistants** to
-   **More** using navigation customization. Verify **More** signals waiting work and its
-   **Assistants** row shows **2**.
+   **2** and the phone **Assistants** tab shows **2**. On the phone, open **More → Settings →
+   Appearance → Navigation**. Select **Move Assistants Down** until its row loses the **Tab
+   Bar** label. Open **More** and verify it signals waiting work and its **Assistants** row shows
+   **2**.
 3. From **Inbox → Assistant Approvals → Review**, use **Deny** on the disposable requests in one
    thread. Verify the count stays at **2** until that thread's final request clears, then drops to
    **1**. Resolve the last request and verify the badge clears on desktop, the phone tab, and
@@ -311,19 +312,20 @@ one launch available in the test thread.
 
 1. In the thread, ask it to call `campaign_start` at the disposable Project Location. Specify a
    **Custom** campaign, an available Orchestrator and child harness/model/effort, and the first
-   message “Summarize this test project without making changes.” Open **Start Campaign** and
+   message “Summarize this test project without making changes.” Select **Review Campaign** on
+   **Start Campaign** and
    verify the Location, exact first message, mode, both harness/model/effort choices, and budget.
    Check that no campaign exists yet. Select **Deny**, verify no campaign starts, and verify the
    thread reports the denial.
 2. Ask for a fresh proposal in **Full Control** mode with the same harmless task. In
-   **Inbox → Assistant Approvals**, select **Review**. Verify **Start Campaign** shows the
+   **Inbox → Assistant Approvals**, select **Review**, then **Review Campaign**. Verify **Start Campaign** shows the
    inspected repository scope, initial issues, delegated operations, and human-required gates.
    Check the campaign has not started.
 3. Select **Change Budget** (or **Set Budget** if there are no saved defaults). Enter an owner-chosen
    **Cost Budget (USD)** and **Tool Call Limit**. Select **Update Preview** and verify those
    amounts are shown. Select **Approve Once**. Verify there is exactly one new campaign and the
    thread reports the Session ID from its launch receipt.
-4. Open the **Orchestrator Campaign** work card from the thread. In **Campaign Status**, verify
+4. Open the work card marked **Campaign** from the thread. In **Campaign Status**, verify
    the mode and scope match the card, the campaign has the approved allowance, and its status
    is readable from the thread. Check that campaign usage is separate from the thread's spend.
    The thread's session-launch count advances by one for the campaign root. Any human-owned

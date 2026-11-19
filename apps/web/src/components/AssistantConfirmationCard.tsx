@@ -48,17 +48,14 @@ function useConfirmationAnswer(confirmation: AssistantOwnerConfirmation, onAnswe
 /** The request's exact target, its previewed impact, and every argument the approved run uses. */
 function ConfirmationFacts({ confirmation }: { confirmation: AssistantOwnerConfirmation }) {
   const { target } = confirmation;
-  const lead = confirmation.campaign ? confirmation.impact.slice(0, 2) : [];
-  const remaining = confirmation.campaign ? confirmation.impact.slice(2) : confirmation.impact;
-  const facts = confirmation.campaign ? [...lead, ...confirmation.arguments, ...remaining] : remaining;
   return (
     <>
       <p className="assistant-confirmation-summary">{confirmation.summary}</p>
       <dl className="facts" aria-label="Impact">
         <div><dt>Target</dt><dd>{target.label === target.id ? target.id : `${target.label} (${target.id})`}</dd></div>
-        {facts.map((line, index) => <div key={`${line.label}-${index}`}><dt>{line.label}</dt><dd>{line.value}</dd></div>)}
+        {confirmation.impact.map((line, index) => <div key={`${line.label}-${index}`}><dt>{line.label}</dt><dd>{line.value}</dd></div>)}
       </dl>
-      {!confirmation.campaign && confirmation.arguments.length > 0 && (
+      {confirmation.arguments.length > 0 && (
         // Exactly what runs: each argument by its own name, with its whole value.
         <dl className="facts assistant-confirmation-arguments" aria-label="Arguments">
           {confirmation.arguments.map((line) => <div key={line.label}><dt><code>{line.label}</code></dt><dd><code>{line.value}</code></dd></div>)}
@@ -126,9 +123,12 @@ function CampaignBudgetEditor({ confirmation, onSaved, onCancel }: {
     }
   };
   return (
-    <div className="assistant-campaign-budget">
+    <div className="form">
       <label className="field">Cost Budget (USD)
-        <input type="number" min="0.01" step="any" value={cost} onChange={event => setCost(event.target.value)} disabled={saving} />
+        <span className="input-affix">
+          <span className="input-affix-text" aria-hidden="true">$</span>
+          <input type="number" min="0.01" step="any" value={cost} onChange={event => setCost(event.target.value)} disabled={saving} />
+        </span>
       </label>
       <label className="field">Tool Call Limit
         <input type="number" min="1" step="1" value={calls} onChange={event => setCalls(event.target.value)} disabled={saving} />
@@ -143,6 +143,69 @@ function CampaignBudgetEditor({ confirmation, onSaved, onCancel }: {
   );
 }
 
+function CampaignReviewDialog({ confirmation, onClose, onAnswered }: {
+  confirmation: AssistantOwnerConfirmation;
+  onClose: () => void;
+  onAnswered?: Answered;
+}) {
+  const [editingBudget, setEditingBudget] = useState(false);
+  const [changed, setChanged] = useState<{ previousDigest: string; confirmation: AssistantOwnerConfirmation } | null>(null);
+  const shown = changed && changed.previousDigest === confirmation.campaign?.digest ? changed.confirmation : confirmation;
+  const campaign = shown.campaign;
+  const { busy, answer } = useConfirmationAnswer(shown, (response) => { onClose(); onAnswered?.(response); });
+  if (!campaign) return null;
+  return (
+    <Modal title={editingBudget ? "Campaign Budget" : shown.title}
+      onClose={() => { if (!busy) onClose(); }}
+      size="lg" phoneSheet="full"
+      headerActions={!editingBudget && <button type="button" className="btn sm ghost"
+        disabled={busy !== null} onClick={() => setEditingBudget(true)}>
+        {campaign.budget ? "Change Budget" : "Set Budget"}
+      </button>}
+      footer={!editingBudget && <ConfirmationActions busy={busy} answer={answer} approveDisabled={!campaign.budget} />}>
+      {editingBudget ? (
+        <CampaignBudgetEditor confirmation={{ ...shown, campaign }} onCancel={() => setEditingBudget(false)} onSaved={response => {
+          setChanged({ previousDigest: confirmation.campaign?.digest ?? campaign.digest, confirmation: response.confirmation });
+          setEditingBudget(false);
+        }} />
+      ) : (
+        <div className="assistant-campaign-review">
+          <dl className="facts" aria-label="Campaign Details">
+            <div><dt>Location</dt><dd>{shown.target.label} ({shown.target.id})</dd></div>
+            {shown.impact.map(({ label, value }) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
+          </dl>
+          {shown.arguments.map(({ label, value }) => (
+            <section className="assistant-campaign-message" key={label} aria-label={label}>
+              <h3>{label}</h3>
+              <p>{value}</p>
+            </section>
+          ))}
+          <p className="request-card-reasons">{shown.summary} It runs once if you approve it.</p>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function CampaignApprovalCard({ confirmation, onAnswered }: { confirmation: AssistantOwnerConfirmation; onAnswered?: Answered }) {
+  const [review, setReview] = useState(false);
+  const headingId = `assistant-confirmation-${confirmation.id}`;
+  return (
+    <li className="request-card" aria-labelledby={headingId}>
+      <div className="request-card-head">
+        <span className="request-card-kind">Approval Needed</span>
+        <span className="request-card-meta">Expires {formatClock(confirmation.expiresAt)}</span>
+      </div>
+      <p className="request-card-title" id={headingId}>{confirmation.title}</p>
+      <p className="assistant-confirmation-summary">{confirmation.target.label}</p>
+      <div className="request-card-foot">
+        <button type="button" className="btn sm primary" onClick={() => setReview(true)}>Review Campaign</button>
+      </div>
+      {review && <CampaignReviewDialog confirmation={confirmation} onClose={() => setReview(false)} onAnswered={onAnswered} />}
+    </li>
+  );
+}
+
 /**
  * One owner confirmation of a Wollipog Assistant thread (#4665), drawn whole: the destructive
  * command its assistant asked to run, with its exact target, impact and arguments, and Approve
@@ -153,36 +216,25 @@ export function AssistantConfirmationCard({ confirmation, onAnswered }: {
   confirmation: AssistantOwnerConfirmation;
   onAnswered?: Answered;
 }) {
-  const [editingBudget, setEditingBudget] = useState(false);
-  const [changed, setChanged] = useState<{ previousDigest: string; confirmation: AssistantOwnerConfirmation } | null>(null);
-  const shown = changed && changed.previousDigest === confirmation.campaign?.digest ? changed.confirmation : confirmation;
-  const campaign = shown.campaign;
-  const { busy, answer } = useConfirmationAnswer(shown, onAnswered);
+  return confirmation.campaign
+    ? <CampaignApprovalCard confirmation={confirmation} onAnswered={onAnswered} />
+    : <DestructiveConfirmationCard confirmation={confirmation} onAnswered={onAnswered} />;
+}
+
+function DestructiveConfirmationCard({ confirmation, onAnswered }: { confirmation: AssistantOwnerConfirmation; onAnswered?: Answered }) {
+  const { busy, answer } = useConfirmationAnswer(confirmation, onAnswered);
   const headingId = `assistant-confirmation-${confirmation.id}`;
   return (
-    <li className="request-card" aria-labelledby={headingId} data-assistant-campaign={campaign ? "" : undefined}>
+    <li className="request-card" aria-labelledby={headingId}>
       <div className="request-card-head">
         <span className="request-card-kind">Approval Needed</span>
         <span className="request-card-meta"><span>Expires {formatClock(confirmation.expiresAt)}</span></span>
       </div>
       <p className="request-card-title" id={headingId}>{confirmation.title}</p>
-      <div className="request-card-body" tabIndex={campaign && !editingBudget ? 0 : undefined}
-        aria-label={campaign && !editingBudget ? "Campaign Details" : undefined}
-        role={campaign && !editingBudget ? "region" : undefined}>
-        {editingBudget && campaign ? <CampaignBudgetEditor confirmation={{ ...shown, campaign }}
-          onCancel={() => setEditingBudget(false)} onSaved={(response) => {
-            setChanged({ previousDigest: campaign.digest, confirmation: response.confirmation });
-            setEditingBudget(false);
-          }} /> : <ConfirmationFacts confirmation={shown} />}
-      </div>
+      <div className="request-card-body"><ConfirmationFacts confirmation={confirmation} /></div>
       <div className="request-card-foot">
         <OpenTarget confirmation={confirmation} disabled={busy !== null} />
-        {campaign && !editingBudget && <button type="button" className="btn sm request-card-tertiary"
-          disabled={busy !== null} onClick={() => setEditingBudget(true)}>
-          {campaign.budget ? "Change Budget" : "Set Budget"}
-        </button>}
-        {!editingBudget && <ConfirmationActions busy={busy} answer={answer}
-          approveDisabled={Boolean(campaign && !campaign.budget)} />}
+        <ConfirmationActions busy={busy} answer={answer} />
       </div>
     </li>
   );

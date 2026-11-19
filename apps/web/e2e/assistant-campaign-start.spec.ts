@@ -5,7 +5,8 @@ import { expectPageNoHorizontalOverflow } from "./layout-invariants.js";
 const threadPath = "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA";
 const dir = process.env.ASSISTANT_CAMPAIGN_EVIDENCE_DIR;
 const cards = (page: Page) => page.getByRole("listitem", { name: "Start Campaign", exact: true });
-const details = (card: Locator) => card.getByRole("region", { name: "Campaign Details" });
+const reviewButton = (card: Locator) => card.getByRole("button", { name: "Review Campaign" });
+const reviewDialog = (page: Page) => page.getByRole("dialog", { name: "Start Campaign" });
 
 async function capture(page: Page, name: string) {
   if (!dir) return;
@@ -28,49 +29,65 @@ for (const theme of ["light", "dark"] as const) {
       await open(page, theme, threadPath, 7);
       await expect(cards(page)).toHaveCount(7);
       const first = cards(page).first();
-      const long = cards(page).nth(1);
-      await expect(first).toContainText("First Message");
-      await expect(first).toContainText("Full Control");
-      await expect(first).toContainText("$20 USD · 150 tool calls");
-      const approve = first.getByRole("button", { name: "Approve Once" });
-      await approve.scrollIntoViewIfNeeded();
-      await expect(approve).toBeInViewport({ ratio: 1 });
+      await expect(first.getByRole("button", { name: "Approve Once", exact: true })).toHaveCount(0);
       await expect(page.locator(".composer")).toBeInViewport({ ratio: 1 });
       await expectPageNoHorizontalOverflow(page);
       await capture(page, `thread-${key}`);
-      const longApprove = long.getByRole("button", { name: "Approve Once" });
-      await longApprove.scrollIntoViewIfNeeded();
-      await expect(longApprove).toBeInViewport({ ratio: 1 });
-      await expect(details(long)).toContainText("LongUnbrokenReleaseChecklistIdentifier");
-      expect(await details(long).evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
-      await details(long).evaluate(element => { element.scrollTop = 190; });
-      await capture(page, `long-${key}`);
       for (const card of await cards(page).all()) {
-        const deny = card.getByRole("button", { name: "Deny", exact: true });
-        await deny.scrollIntoViewIfNeeded();
-        await expect(deny).toBeInViewport({ ratio: 1 });
+        const review = reviewButton(card);
+        await review.scrollIntoViewIfNeeded();
+        await expect(review).toBeInViewport({ ratio: 1 });
       }
-      await first.getByRole("button", { name: "Change Budget" }).click();
-      await first.getByRole("spinbutton", { name: "Cost Budget (USD)" }).fill("25");
-      await first.getByRole("spinbutton", { name: "Tool Call Limit" }).fill("200");
-      await first.scrollIntoViewIfNeeded();
-      await expect(first.getByRole("spinbutton", { name: "Cost Budget (USD)" })).toBeInViewport({ ratio: 1 });
+      await reviewButton(first).click();
+      const dialog = reviewDialog(page);
+      const details = dialog.getByLabel("Campaign Details");
+      const body = dialog.locator(".modal-body");
+      const approve = dialog.getByRole("button", { name: "Approve Once", exact: true });
+      await expect(details).toBeVisible();
+      for (const fact of ["Location", "Campaign Mode", "Campaign Budget", "Orchestrator Harness", "Orchestrator Model",
+        "Orchestrator Effort", "Child Harness", "Child Model", "Child Effort", "Repository Scope",
+        "Initial Issues", "Issue Authority", "Delegated Operations", "Human-Required Gates"]) {
+        await expect(details.getByText(fact, { exact: true })).toBeVisible();
+      }
+      await expect(details).toContainText("Release Engineering for Long-Running Cross-Platform Verification and Packaging");
+      await expect(details).toContainText("claude-opus-5-5-release-engineering-long-context-verification-preview-fixture");
+      await expect(dialog.getByRole("region", { name: "First Message" }))
+        .toContainText("ReleaseEngineeringCrossPlatformPackagingReadinessChecklistWithoutAdditionalSeparators.");
+      const nestedScrollers = await body.locator("*").evaluateAll(elements => elements.filter(element => {
+        const style = getComputedStyle(element);
+        return ["auto", "scroll"].includes(style.overflowY) && element.scrollHeight > element.clientHeight + 1;
+      }).length);
+      expect(nestedScrollers).toBe(0);
+      expect(await body.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+      await expect(approve).toBeInViewport({ ratio: 1 });
+      await capture(page, `review-top-${key}`);
+      await body.evaluate(element => { element.scrollTop = element.scrollHeight; });
+      await expect(dialog.getByRole("region", { name: "First Message" })).toBeInViewport({ ratio: 1 });
+      await expect(approve).toBeInViewport({ ratio: 1 });
+      await capture(page, `review-end-${key}`);
+
+      await dialog.getByRole("button", { name: "Change Budget" }).click();
+      const editor = page.getByRole("dialog", { name: "Campaign Budget" });
+      const cost = editor.getByRole("spinbutton", { name: "Cost Budget (USD)" });
+      await expect(cost.locator("..").getByText("$", { exact: true })).toBeVisible();
+      await cost.fill("25");
+      await editor.getByRole("spinbutton", { name: "Tool Call Limit" }).fill("200");
       await capture(page, `budget-${key}`);
-      await first.getByRole("button", { name: "Update Preview" }).click();
-      await expect(first).toContainText("$25 USD · 200 tool calls");
+      await editor.getByRole("button", { name: "Update Preview" }).click();
+      await expect(dialog).toContainText("$25 USD · 200 tool calls");
       await approve.click();
       await expect(cards(page)).toHaveCount(6);
-      for (let remaining = 6; remaining > 0; remaining--) {
-        await cards(page).first().getByRole("button", { name: "Deny", exact: true }).click();
-        await expect(cards(page)).toHaveCount(remaining - 1);
-      }
-      const work = page.getByRole("button", { name: /Plan the Release.*Orchestrator Campaign/ });
+      const work = page.getByRole("button", { name: /Plan the Release.*Campaign/u });
       await work.scrollIntoViewIfNeeded();
       await expect(work).toBeInViewport({ ratio: 1 });
+      await expect(work.getByText("Campaign", { exact: true })).toBeVisible();
       await expect(page.locator(".composer")).toBeInViewport({ ratio: 1 });
-      if (dir) await page.getByRole("button", { name: "Dismiss", exact: true }).all().then(async buttons => {
-        for (const button of buttons.reverse()) await button.click();
-      });
+      const toast = page.getByText("Start Campaign ran once.", { exact: true });
+      await expect(toast).toBeVisible();
+      if (dir) {
+        await page.getByRole("button", { name: "Dismiss Notification", exact: true }).click();
+        await expect(toast).toBeHidden();
+      }
       await capture(page, `launched-${key}`);
       await work.click();
       await expect(page.getByRole("heading", { name: /Plan the Release$/u })).toBeVisible();
@@ -84,12 +101,11 @@ for (const theme of ["light", "dark"] as const) {
       const dialog = page.getByRole("dialog", { name: "Campaign Approvals" });
       await expect(dialog).toBeVisible();
       await expect(dialog.getByRole("listitem", { name: "Start Campaign", exact: true })).toHaveCount(7);
-      const approve = dialog.getByRole("button", { name: "Approve Once" }).first();
-      await approve.scrollIntoViewIfNeeded();
-      await expect(approve).toBeInViewport({ ratio: 1 });
       await expectPageNoHorizontalOverflow(page);
       await capture(page, `inbox-${key}`);
-      await dialog.getByRole("button", { name: "Deny" }).first().click();
+      await dialog.getByRole("button", { name: "Review Campaign", exact: true }).first().click();
+      await expect(reviewDialog(page).getByLabel("Campaign Details")).toBeVisible();
+      await reviewDialog(page).getByRole("button", { name: "Deny", exact: true }).click();
       await expect(dialog.getByRole("listitem", { name: "Start Campaign", exact: true })).toHaveCount(6);
     });
   }

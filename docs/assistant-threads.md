@@ -207,8 +207,9 @@ External Assistant connections keep the preview-and-confirm behavior above, unch
    installation, then calls `campaign_start`. It can propose the root and child model and effort,
    and name explicit issue numbers in Full Control. It cannot set a budget, supply a delegation
    policy, or approve a request.
-2. In the thread, or from **Inbox → Assistant Approvals → Review**, inspect **Start Campaign**.
-   The card shows the first message, Location, mode, root and child settings, budget and scope.
+2. On the **Start Campaign** card, select **Review Campaign**. You can open it from the thread
+   or from **Inbox → Assistant Approvals → Review**. The review shows the first message,
+   Location, mode, root and child settings, budget and scope.
    Full Control uses the same inspected boundary as New Session, including delegated operations
    and human-required gates. A Custom campaign uses normal Custom issue admission.
 3. The card starts with the owner's saved campaign budget. If there is no saved budget, choose
@@ -218,7 +219,7 @@ External Assistant connections keep the preview-and-confirm behavior above, unch
 4. **Approve Once** approves those exact settings. If the Location, inspected scope, effective
    settings or Assistant grant changed, the launch is refused. **Deny** and expiry also leave
    no campaign. The thread hears the outcome and can read the campaign Session ID in its
-   `command_get` receipt. Open the **Orchestrator Campaign** work card for live status and
+   `command_get` receipt. Open the work card marked **Campaign** for live status and
    campaign questions. The thread's existing read access grants no campaign decision authority.
 
 An older control plane has no `campaign_start` operation. The command refuses a Location on a
