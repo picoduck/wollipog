@@ -343,7 +343,7 @@ function initialModel(): FixtureModel {
     if (handoff) child.role = "orchestrator";
     child.status = "input_required";
     child.createdAt = child.updatedAt = child.lastEventAt = Date.now() - 120_000;
-    child.pendingApproval = handoff ? heldHandoff() : heldQuestion();
+    child.pendingApproval = handoff ? heldHandoff(FIXTURE_QUERY.has("handoffStress") ? 8 : 1) : heldQuestion();
     initial.sessions = [child];
   }
   if (SCENARIO === "scope-decisions") {

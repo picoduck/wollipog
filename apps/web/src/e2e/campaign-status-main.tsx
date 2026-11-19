@@ -1147,7 +1147,12 @@ const scopeCompatibility = scopeRequirement ? (({ error, ...versions }) =>
 
 /** `screen=1`: the question screen's checks (#4104), one of them waiting for the owner to classify. */
 const decisionUsage = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0 };
-let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["decisions"] = params.get("screen") === "ask" ? [
+let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["decisions"] = params.get("screen") === "handoff" ? [
+  { occurrenceId: "dec_handoff", kind: "credential_screen", promptVersion: "credential_screen.v4", state: "failed", failureClass: "harness_unavailable",
+    inputDigests: {}, target: DECISION_TARGET, attempts: [1, 2, 3].map(attempt => ({ attempt, errorClass: "harness_unavailable" as const, latencyMs: 0 })),
+    usage: decisionUsage, createdAt: NOW - MINUTE, subject: { sessionId: "s_root", surface: "owner_decision", requestId: "rollout-handoff",
+      classificationPending: !params.has("dismissed") } },
+] : params.get("screen") === "ask" ? [
   { occurrenceId: "dec_config", kind: "credential_screen", promptVersion: "credential_screen.v1", state: "decided", verdict: "ask",
     reason: "The configuration migration design could involve provider sign-in; the owner must classify this question.",
     inputDigests: {}, target: DECISION_TARGET, attempts: [{ attempt: 1, model: "claude-haiku-5-5", latencyMs: 1840 }],

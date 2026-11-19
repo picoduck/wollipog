@@ -226,8 +226,7 @@ export class CampaignRecoveryStore {
       AND request_class=? AND first_occurrence IS NOT ?`).run(campaignId, campaignId, HANDOFF_CREDENTIAL_DECLINE, current).changes > 0;
   }
 
-  /** Older classified handoffs used the root's shared decline row. Clear it only when the one
-   * occurrence it represents has been identified as a superseded handoff. */
+  /** Only a single-occurrence legacy row can be unambiguously attributed to a handoff. */
   singleRootCredentialDecline(campaignId: string, policyRevision: number): string | null {
     const row = this.db.prepare(`SELECT first_occurrence AS occurrenceId FROM campaign_recovery_declines
       WHERE campaign_session_id=? AND subject_session_id=? AND request_class='secrets_and_sign_in' AND declined_count=1 AND policy_revision=?`)
@@ -235,10 +234,16 @@ export class CampaignRecoveryStore {
     return row?.occurrenceId ?? null;
   }
 
-  retireLegacyHandoffDecline(campaignId: string, occurrenceId: string): boolean {
-    return this.db.prepare(`DELETE FROM campaign_recovery_declines WHERE campaign_session_id=? AND subject_session_id=?
-      AND request_class='secrets_and_sign_in' AND first_occurrence=? AND declined_count=1`)
-      .run(campaignId, campaignId, occurrenceId).changes > 0;
+  /** A provable legacy handoff decline stops blocking on supersession but still fences the same
+   * content if it returns. Record the exact content fence in the same transaction. */
+  retireLegacyHandoffDecline(campaignId: string, legacy: string, content: string, policyRevision: number): boolean {
+    return this.atomic(() => {
+      const retired = this.db.prepare(`DELETE FROM campaign_recovery_declines WHERE campaign_session_id=? AND subject_session_id=?
+        AND request_class='secrets_and_sign_in' AND first_occurrence=? AND declined_count=1 AND policy_revision=?`)
+        .run(campaignId, campaignId, legacy, policyRevision).changes > 0;
+      if (retired) this.rememberDecline(campaignId, campaignId, content, policyRevision);
+      return retired;
+    });
   }
 
   /** Declines still shown as blocked work for the current revision. A revocation or newer

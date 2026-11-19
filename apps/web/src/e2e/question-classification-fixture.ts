@@ -17,16 +17,20 @@ export const heldQuestion = (): PendingApproval => ({
   },
 });
 
-export function heldHandoff(): PendingApproval {
+export function heldHandoff(itemCount = 1): PendingApproval {
   const request = heldQuestion();
   const decision = request.workflowDecision!;
   request.title = "Owner Question";
   request.options = [];
   decision.category = "owner_decision";
   decision.resourceKey = CAMPAIGN_HANDOFF_QUESTION_KEY;
+  const items = Array.from({ length: itemCount }, (_, index) => {
+    const title = itemCount === 1 ? "Review Documentation" : `Review Documentation Section ${index + 1}`;
+    return `- ${title} (human)\n  Reason: The rollout notes need your input.\n  Next action: Choose which example should lead.`;
+  });
   decision.resourceSnapshot = { category: "owner_decision", kind: "question",
     question: "This campaign handed work to you. What should happen next?", options: [],
-    material: "- Review Documentation (human)\n  Reason: The rollout notes need your input.\n  Next action: Choose which example should lead.\n\nThis question authorizes nothing. Your answer grants no action authority." };
+    material: `${items.join("\n\n")}\n\nThis question authorizes nothing. Your answer grants no action authority.` };
   decision.authorityEvaluation = { ...decision.authorityEvaluation!, operation: "owner_decision",
     credentialScreen: { occurrenceId: "screen-configuration", state: "review", failureClass: "harness_unavailable" } };
   return request;

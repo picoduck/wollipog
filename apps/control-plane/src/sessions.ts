@@ -7171,11 +7171,14 @@ export class SessionsService {
       if (current !== null && legacy === current) {
         // Old floor and model refusals used the exact same content coordinate but a shared row.
         this.db.campaignRecovery.blockHandoffCredentials(campaignId, current, revision, Date.now());
-        retiredLegacy = this.db.campaignRecovery.retireLegacyHandoffDecline(campaignId, current);
-      } else if (legacy && this.db.campaignDeniedHandoffQuestions(campaignId).some(decision =>
-        recoveryCoordinate(`workflow:${campaignId}:${decision.requestId}`) === legacy &&
-        recoveryCoordinate(`campaign_handoffs:${decision.resourceDigest}`) !== current)) {
-        retiredLegacy = this.db.campaignRecovery.retireLegacyHandoffDecline(campaignId, legacy);
+        retiredLegacy = this.db.campaignRecovery.retireLegacyHandoffDecline(campaignId, current, current, revision);
+      } else if (legacy) {
+        const oldQuestion = this.db.campaignDeniedHandoffQuestions(campaignId).find(decision =>
+          recoveryCoordinate(`workflow:${campaignId}:${decision.requestId}`) === legacy);
+        if (oldQuestion) {
+          const content = recoveryCoordinate(`campaign_handoffs:${oldQuestion.resourceDigest}`);
+          if (content !== current) retiredLegacy = this.db.campaignRecovery.retireLegacyHandoffDecline(campaignId, legacy, content, revision);
+        }
       }
       if (retired || retiredLegacy) this.campaignRecovery.synchronize(root, Date.now());
     };
@@ -7199,10 +7202,6 @@ export class SessionsService {
     const declineCoordinate = recoveryCoordinate(`campaign_handoffs:${digest}`);
     retireSupersededDecline(declineCoordinate);
     const previouslyDeclined = this.db.campaignRecovery.hasDeclinedOccurrence(campaignId, campaignId, declineCoordinate, revision);
-    if (!previouslyDeclined && prior?.resourceDigest === digest && prior.status !== "revoked") return;
-    const projection = this.db.campaignProjection(campaignId);
-    if (prior?.status !== "pending" && projection?.status !== "stuck" && projection?.status !== "complete_needs_cleanup") return;
-    const requestId = prior?.status === "pending" ? prior.requestId : `campaign_handoffs_${digest}_${prior?.occurrenceId ?? "initial"}`;
     const blocked = () => {
       if (prior?.status === "pending") this.revokeWorkflowDecision(prior, { reason: "authority_superseded",
         triggeredBy: { kind: "system", id: "campaign_handoffs" } });
@@ -7210,6 +7209,10 @@ export class SessionsService {
       this.campaignRecovery.synchronize(this.db.getSession(campaignId) ?? root, Date.now());
     };
     if (previouslyDeclined) { blocked(); return; }
+    if (prior?.resourceDigest === digest && prior.status !== "revoked") return;
+    const projection = this.db.campaignProjection(campaignId);
+    if (prior?.status !== "pending" && projection?.status !== "stuck" && projection?.status !== "complete_needs_cleanup") return;
+    const requestId = prior?.status === "pending" ? prior.requestId : `campaign_handoffs_${digest}_${prior?.occurrenceId ?? "initial"}`;
     // Handoff text is agent-written. Server-owned coordinates do not make its content trusted.
     if (credentialFormFloor(snapshot)) { blocked(); return; }
     const screen = await this.screenCredentialText(root, campaignId, "owner_decision", requestId, ownerDecisionScreenData(snapshot), true);

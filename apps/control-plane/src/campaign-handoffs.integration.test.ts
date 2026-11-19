@@ -1157,11 +1157,10 @@ test("a superseded legacy classification retires only an attributable handoff de
     await h.svc.reconcileCampaignHandoffQuestion("root");
     const prior = h.db.campaignHandoffQuestion("root")!;
     const owner = { kind: "human" as const, id: h.db.localIdentityContext().userId };
-    assert.ok(h.svc.classifyCampaignDecision("root", prior.authorityEvaluation!.credentialScreen!.occurrenceId!,
-      { classification: "decline" }, owner).ok);
+    assert.ok(h.db.classifyCampaignDecision(prior.authorityEvaluation!.credentialScreen!.occurrenceId!, "decline", owner.id, Date.now()));
+    assert.ok(h.svc.answerOwnerQuestion("root", prior.occurrenceId, {}, "dismiss", owner, { message: "Legacy credentials decline" }).ok);
     const revision = h.db.getSession("root")!.parentControlPolicy!.revision;
-    // Recreate the shared decline row a control plane before this change wrote for the classification.
-    h.db.campaignRecovery.retireSupersededHandoffDecline("root", null);
+    // Earlier classifications only fenced the workflow request, with no content coordinate.
     const legacy = recoveryCoordinate(`workflow:root:${prior.requestId}`);
     h.db.campaignRecovery.recordDecline("root", "root", "secrets_and_sign_in", legacy, revision, Date.now());
     await h.svc.reconcileCampaignHandoffQuestion("root");
@@ -1170,6 +1169,13 @@ test("a superseded legacy classification retires only an attributable handoff de
     await h.svc.reconcileCampaignHandoffQuestion("root");
     assert.equal(h.db.campaignRecovery.singleRootCredentialDecline("root", revision), null);
     assert.ok(!h.db.campaignRecovery.activeRecords("root").some(record => record.reason === "request_declined" || record.reason === "hard_denial"));
+    const screening = fakeScreenRuntime(h.db, () => ({ verdict: "discusses" }));
+    h.svc.setDecisionRuntime(screening.runtime);
+    assert.ok(handOff(h, h.advisory, "human").ok);
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(screening.calls.length, 0, "returning to the legacy-declined set must not screen it again");
+    assert.equal(h.db.campaignHandoffQuestion("root")!.status, "denied");
+    assert.ok(h.db.campaignRecovery.activeRecords("root").some(record => record.reason === "request_declined" && record.state === "blocked"));
   } finally { h.db.close(); }
 });
 
