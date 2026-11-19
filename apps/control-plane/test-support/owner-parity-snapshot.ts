@@ -137,7 +137,7 @@ if (process.argv.includes("--verify-runtime-identity") || process.argv.includes(
 }
 if (process.argv.includes("--verify-discovery-size")) {
   // Page a Full Access connection's discovery of the production inventory through real MCP and
-  // report each result's size (#4679). Same brand-new fixture DB; never hosting state.
+  // report each JSON-RPC response size, including the escaped result and envelope.
   const {ControlPlaneDb} = await import("../src/db.js");
   const fixture = ControlPlaneDb.open(join(root, "fixture.db"));
   try {
@@ -151,12 +151,15 @@ if (process.argv.includes("--verify-discovery-size")) {
         const result = response.json().result;
         assert.equal(result.isError, undefined, "Discovery must succeed");
         const text = result.content[0].text as string;
-        return {bytes: Buffer.byteLength(text), body: JSON.parse(text)};
+        return {bytes: Buffer.byteLength(response.payload), body: JSON.parse(text)};
       }
       throw new Error("Control plane never became ready");
     };
     const listPages: number[] = [], names: string[] = [];
     let page = await discover({});
+    const skillPage = await discover({skill: true});
+    assert.equal(skillPage.body.skill.name, "wollipog");
+    assert.deepEqual(page.body.skill, skillPage.body.skill, "Full Access keeps the guide on the first page");
     for (;;) {
       listPages.push(page.bytes);
       names.push(...page.body.operations.map((operation: {name: string}) => operation.name));
@@ -181,7 +184,7 @@ if (process.argv.includes("--verify-discovery-size")) {
       pending = [...(result.body.remaining ?? []), ...pending.slice(64)];
     }
     assert.deepEqual(received, names, "Schema requests must return every granted operation");
-    console.log("ASSISTANT_DISCOVERY_SIZE " + JSON.stringify({operations: names.length, listPages, largestSchema: Math.max(...single), schemaPages}));
+    console.log("ASSISTANT_DISCOVERY_SIZE " + JSON.stringify({operations: names.length, listPages, largestSchema: Math.max(...single), schemaPages, skillPage: skillPage.bytes}));
   } catch (error) {
     console.error(error instanceof Error ? error.message : "Assistant discovery size verification failed.");
     process.exitCode = 1;
