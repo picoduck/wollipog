@@ -51,7 +51,7 @@ test("the owner edits future defaults from Settings and an existing thread from 
   await limits.getByRole("button", { name: "Save Limits" }).click();
   await expect(limits).toHaveCount(0);
   await expect(page.getByLabel("Thread Details")).toContainText("$8.13 spent · No Budget");
-  await expect(page.getByLabel("Thread Details")).toContainText("2 of 0 sessions launched");
+  await expect(page.getByLabel("Thread Details")).toContainText("2 launched · Launches Paused");
 });
 
 test("an older control plane shows its fixed limits without offering edits", async ({ page }) => {
@@ -65,22 +65,52 @@ test("an older control plane shows its fixed limits without offering edits", asy
 
 for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 844]] as const) {
   for (const theme of ["light", "dark"] as const) {
+    const capture = async (page: Page, view: string) => {
+      if (!EVIDENCE) return;
+      mkdirSync(EVIDENCE, { recursive: true });
+      await page.screenshot({ path: join(EVIDENCE, `${view}-${layout}-${theme}.png`), animations: "disabled" });
+    };
+
+    test(`a finite limit, a budget refusal, and the paused state are readable on ${layout} in ${theme}`, async ({ page }) => {
+      await page.clock.setFixedTime(new Date("2025-11-19T18:00:00Z"));
+      await page.setViewportSize({ width, height });
+      await open(page, THREAD, theme);
+      const details = page.getByLabel("Thread Details");
+      await expect(details).toContainText("2 of 10 sessions launched");
+      await expectFullyInViewport(page.locator(".composer"), "The thread composer");
+      await expectPageNoHorizontalOverflow(page);
+      await capture(page, "thread-finite-launch-limit");
+
+      const limits = await editThread(page);
+      await limits.getByRole("textbox", { name: "Cost Budget (USD)" }).fill("12");
+      await limits.getByRole("button", { name: "Save Limits" }).click();
+      const refusal = limits.getByRole("alert");
+      await expect(refusal).toHaveText("The thread has already spent or committed $15.00. Choose a budget at least that high.");
+      await expectFullyInViewport(refusal, "The budget refusal");
+      await expectFullyInViewport(limits.getByRole("button", { name: "Save Limits" }), "Save Thread Limits");
+      await expectPageNoHorizontalOverflow(page);
+      await capture(page, "thread-budget-refusal");
+
+      await limits.getByRole("textbox", { name: "Cost Budget (USD)" }).fill("25");
+      await limits.getByRole("textbox", { name: "Session Launch Limit" }).fill("0");
+      await limits.getByRole("button", { name: "Save Limits" }).click();
+      await expect(limits).toHaveCount(0);
+      await expect(details).toContainText("2 launched · Launches Paused");
+      await expectFullyInViewport(page.locator(".composer"), "The thread composer");
+      await capture(page, "thread-launches-paused");
+    });
+
     test(`limits stay usable with long titles and many launches on ${layout} in ${theme}`, async ({ page }) => {
       await page.clock.setFixedTime(new Date("2025-11-19T18:00:00Z"));
       await page.setViewportSize({ width, height });
-      const capture = async (view: string) => {
-        if (!EVIDENCE) return;
-        mkdirSync(EVIDENCE, { recursive: true });
-        await page.screenshot({ path: join(EVIDENCE, `${view}-${layout}-${theme}.png`), animations: "disabled" });
-      };
       await open(page, THREAD, theme, "stress");
       await expect(page.getByLabel("Thread Details")).toContainText("40 launched · No Launch Limit");
       await expectFullyInViewport(page.locator(".composer"), "The thread composer");
       await expectPageNoHorizontalOverflow(page);
-      await capture("thread-usage");
+      await capture(page, "thread-usage");
       const thread = await editThread(page);
       await expectFullyInViewport(thread.getByRole("button", { name: "Save Limits" }), "Save Thread Limits");
-      await capture("thread-limits-edit");
+      await capture(page, "thread-limits-edit");
 
       await open(page, SETTINGS, theme);
       const group = page.getByRole("region", { name: "Assistant Threads" });
@@ -89,10 +119,10 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await expectFullyInViewport(action, "Edit Default Thread Limits");
       await expect(page.getByRole("alert")).toHaveCount(0);
       await expectPageNoHorizontalOverflow(page);
-      await capture("settings-behavior");
+      await capture(page, "settings-behavior");
       const defaults = await editDefaults(page);
       await expectFullyInViewport(defaults.getByRole("button", { name: "Save Limits" }), "Save Default Thread Limits");
-      await capture("default-limits-edit");
+      await capture(page, "default-limits-edit");
     });
   }
 }

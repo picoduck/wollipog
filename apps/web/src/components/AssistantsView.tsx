@@ -456,6 +456,10 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
   // of the work they would unblock.
   const pending = pendingAssistantConfirmations([thread]);
   const usage = thread.usage;
+  const launches = usage?.launchedSessions;
+  const launchSummary = launches?.limit === 0 ? `${launches.used} launched · Launches Paused`
+    : launches?.limit === null ? `${launches.used} launched · No Launch Limit`
+    : launches ? `${launches.used} of ${launches.limit} sessions launched` : null;
   return (
     <div className="assistant-thread-head">
       {!compact && (
@@ -473,9 +477,7 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
           <li>{usage.costUsd.limit === null
             ? `${formatUsd(usage.costUsd.used)} spent · No Budget`
             : `${formatUsd(usage.costUsd.used)} of ${formatUsd(usage.costUsd.limit)} spent`}</li>
-          <li>{usage.launchedSessions.limit === null
-            ? `${usage.launchedSessions.used} launched · No Launch Limit`
-            : `${usage.launchedSessions.used} of ${usage.launchedSessions.limit} sessions launched`}</li>
+          <li>{launchSummary}</li>
         </>}
       </ul>
       <AssistantWorkCards
