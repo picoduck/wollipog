@@ -30,9 +30,10 @@ async function bounded(promise, ms, label) {
   } finally { clearTimeout(timer); }
 }
 // The fixture's own bounds must fire first so its phase diagnostics and owned cleanup run:
-// ten-second readiness, a reporting deadline of at most 58 seconds and a cleanup grace of at
-// most 23 (both scaled by the measured helper call, #3859), then five seconds of forced cleanup.
-const FIXTURE_TIMEOUT_MS = 110_000;
+// up to thirty-second readiness on Windows, a reporting deadline of at most 58 seconds,
+// cleanup grace of at most 23 (both scaled by the measured helper call, #3859), then five
+// seconds of forced cleanup.
+const FIXTURE_TIMEOUT_MS = 130_000;
 async function run() {
   healthy();
   await runFocusedValidation({
