@@ -10,6 +10,29 @@ test("Decline on the session card removes the held question", async ({ page }) =
 });
 
 for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["phone", { width: 390, height: 844 }]] as const) {
+  for (const surface of ["session", "inbox"] as const) {
+    test(`held handoff can be dismissed on ${surface} without a credential decline (${device})`, async ({ page }, testInfo) => {
+      await page.setViewportSize(viewport);
+      const path = surface === "session" ? `&path=${encodeURIComponent(viewPath({ name: "session", id: "session-alpha" }))}` : "";
+      await page.goto(`/command-inbox-projects-e2e.html?scenario=question-classification&handoff=1&fullShell=1&sessionShell=1${path}`);
+      if (surface === "inbox" && device === "phone") {
+        await page.getByText("Rollout Documentation Campaign", { exact: true }).first().click();
+      }
+      const card = page.locator(".request-card").filter({ has: page.getByRole("group", { name: "Question Classification" }) }).first();
+      const actions = card.getByRole("group", { name: "Question Classification" });
+      const dismiss = actions.getByRole("button", { name: "Dismiss", exact: true });
+      await expect(dismiss).toBeVisible();
+      const expand = card.getByRole("button", { name: "Expand Decision", exact: true });
+      if (await expand.count()) await expand.click();
+      await expect(actions.getByRole("button", { name: "Decline Credentials Request", exact: true })).toBeVisible();
+      await expect(dismiss).toBeInViewport();
+      await page.screenshot({ path: testInfo.outputPath(`handoff-${surface}-${device}-before.png`) });
+      await dismiss.click();
+      await expect(actions).toHaveCount(0);
+      await expect(page.locator(".request-card")).toHaveCount(0);
+      await page.screenshot({ path: testInfo.outputPath(`handoff-${surface}-${device}-after.png`) });
+    });
+  }
   test(`held question opened from Campaign Status (${device})`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&screen=ask");

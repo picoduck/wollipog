@@ -1,4 +1,4 @@
-import type { PendingApproval } from "@wollipog/protocol";
+import { CAMPAIGN_HANDOFF_QUESTION_KEY, type PendingApproval } from "@wollipog/protocol";
 
 export const heldQuestion = (): PendingApproval => ({
   requestId: "question-configuration", occurrenceId: "question-configuration", kind: "workflow_decision", title: "Question",
@@ -16,3 +16,18 @@ export const heldQuestion = (): PendingApproval => ({
       credentialScreen: { occurrenceId: "screen-configuration", state: "review" } },
   },
 });
+
+export function heldHandoff(): PendingApproval {
+  const request = heldQuestion();
+  const decision = request.workflowDecision!;
+  request.title = "Owner Question";
+  request.options = [];
+  decision.category = "owner_decision";
+  decision.resourceKey = CAMPAIGN_HANDOFF_QUESTION_KEY;
+  decision.resourceSnapshot = { category: "owner_decision", kind: "question",
+    question: "This campaign handed work to you. What should happen next?", options: [],
+    material: "- Review Documentation (human)\n  Reason: The rollout notes need your input.\n  Next action: Choose which example should lead.\n\nThis question authorizes nothing. Your answer grants no action authority." };
+  decision.authorityEvaluation = { ...decision.authorityEvaluation!, operation: "owner_decision",
+    credentialScreen: { occurrenceId: "screen-configuration", state: "review", failureClass: "harness_unavailable" } };
+  return request;
+}

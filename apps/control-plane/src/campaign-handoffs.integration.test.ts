@@ -9,6 +9,7 @@ import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { fakeScreenRuntime, settleScreens } from "./credential-screen-test-fixture.js";
 import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
+import { recoveryCoordinate } from "./campaign-recovery.js";
 import type { ForgeReadResult } from "./campaign-forge-observations.js";
 
 /** A Full Control campaign over picoduck/wollipog#4070 with two children and two original items.
@@ -1069,9 +1070,106 @@ for (const verdict of ["ask", "uncertain"] as const) test(`handoff text gets the
     if (verdict === "ask") assert.equal(question, null);
     else {
       assert.equal(question!.authorityEvaluation?.reason, "credential_screen_review");
-      assert.equal(h.svc.answerOwnerQuestion("root", question!.occurrenceId, {}, "dismiss",
+      assert.equal(h.svc.answerOwnerQuestion("root", question!.occurrenceId, {}, "submit",
         { kind: "human", id: h.db.localIdentityContext().userId }).ok, false);
     }
+  } finally { h.db.close(); }
+});
+
+for (const available of [true, false]) test(`handoff screening bounds retries when its harness ${available ? "recovers" : "stays unavailable"}`, async () => {
+  const h = fixture();
+  try {
+    finishChildren(h);
+    const screening = fakeScreenRuntime(h.db, (_request, attempt) => available && attempt === 2
+      ? { verdict: "discusses" } : { errorClass: "harness_unavailable" });
+    h.svc.setDecisionRuntime(screening.runtime);
+    assert.ok(handOff(h, h.advisory, "human").ok);
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    const question = h.db.campaignHandoffQuestion("root")!;
+    const occurrenceId = screening.calls[0]!.occurrenceId;
+    const attempts = h.db.listDecisionAttempts(occurrenceId);
+    assert.deepEqual(attempts.map(attempt => attempt.errorClass), available
+      ? ["harness_unavailable", null] : ["harness_unavailable", "harness_unavailable", "harness_unavailable"]);
+    assert.ok(attempts[1]!.startedAt - attempts[0]!.startedAt >= 5_000, "the audit shows a backoff before retry");
+    assert.equal(question.authorityEvaluation?.reason, available ? "owner_kept" : "credential_screen_review");
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(screening.calls.length, attempts.length, "a later tick does not restart the retry budget");
+  } finally { h.db.close(); }
+});
+
+test("the owner can dismiss a held handoff without classifying it as credentials", async () => {
+  const h = fixture();
+  try {
+    finishChildren(h);
+    h.svc.setDecisionRuntime(fakeScreenRuntime(h.db, () => ({ verdict: "uncertain" })).runtime);
+    assert.ok(handOff(h, h.advisory, "human").ok);
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    const question = h.db.campaignHandoffQuestion("root")!;
+    const screenId = question.authorityEvaluation!.credentialScreen!.occurrenceId!;
+    const owner = { kind: "human" as const, id: h.db.localIdentityContext().userId };
+    assert.equal(question.authorityEvaluation?.reason, "credential_screen_review");
+    assert.equal(h.db.campaignDecisionSubject(screenId)?.classificationPending, true);
+    assert.equal(h.svc.answerOwnerQuestion("root", question.occurrenceId, {}, "dismiss", { kind: "agent", id: "root" }).status, 403);
+    assert.ok(h.svc.answerOwnerQuestion("root", question.occurrenceId, {}, "dismiss", owner).ok);
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(h.db.campaignHandoffQuestion("root")?.status, "denied");
+    assert.equal(h.db.campaignDecisionSubject(screenId)?.classification, undefined);
+    assert.equal(h.db.campaignDecisionSubject(screenId)?.classificationPending, false);
+    assert.ok(!h.db.campaignRecovery.activeRecords("root").some(record => record.reason === "request_declined" || record.reason === "hard_denial"));
+  } finally { h.db.close(); }
+});
+
+test("a handoff credential block tracks the current set and preserves other credential declines", async () => {
+  const h = fixture();
+  try {
+    finishChildren(h);
+    const declineCoordinate = "other-credential-decline";
+    h.db.campaignRecovery.recordDecline("root", "root", "secrets_and_sign_in", declineCoordinate,
+      h.db.getSession("root")!.parentControlPolicy!.revision, Date.now());
+    const blocks = () => h.db.campaignRecovery.activeRecords("root").filter(record => record.reason === "request_declined");
+    const update = (reason: string, nextAction: string) => h.svc.updateCampaignWorkItem("root", { workItemId: h.advisory,
+      handoff: { responsibleActor: "human", reason, nextAction } });
+    h.svc.setDecisionRuntime(fakeScreenRuntime(h.db, request => request.material?.includes("Sign in to the test service")
+      ? { verdict: "ask" } : { verdict: "discusses" }).runtime);
+    assert.ok(update("Test service access is missing", "Sign in to the test service").ok);
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(h.db.campaignHandoffQuestion("root"), null, "the real sign-in ask never reaches the owner");
+    assert.equal(blocks().length, 2);
+    assert.ok(update("Documentation needs a decision", "Choose which section to write").ok);
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(h.db.campaignHandoffQuestion("root")?.authorityEvaluation?.reason, "owner_kept");
+    assert.deepEqual(blocks().map(record => record.resource.occurrenceId), [declineCoordinate]);
+    assert.ok(update("Test service access is missing", "Sign in to the test service").ok);
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(blocks().length, 2, "the previously refused set still fails closed when it returns");
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.advisory, handoff: null }).ok);
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.deepEqual(blocks().map(record => record.resource.occurrenceId), [declineCoordinate]);
+  } finally { h.db.close(); }
+});
+
+test("a superseded legacy classification retires only an attributable handoff decline", async () => {
+  const h = fixture();
+  try {
+    finishChildren(h);
+    h.svc.setDecisionRuntime(fakeScreenRuntime(h.db, () => ({ verdict: "uncertain" })).runtime);
+    assert.ok(handOff(h, h.advisory, "human").ok);
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    const prior = h.db.campaignHandoffQuestion("root")!;
+    const owner = { kind: "human" as const, id: h.db.localIdentityContext().userId };
+    assert.ok(h.svc.classifyCampaignDecision("root", prior.authorityEvaluation!.credentialScreen!.occurrenceId!,
+      { classification: "decline" }, owner).ok);
+    const revision = h.db.getSession("root")!.parentControlPolicy!.revision;
+    // Recreate the shared decline row a control plane before this change wrote for the classification.
+    h.db.campaignRecovery.retireSupersededHandoffDecline("root", null);
+    const legacy = recoveryCoordinate(`workflow:root:${prior.requestId}`);
+    h.db.campaignRecovery.recordDecline("root", "root", "secrets_and_sign_in", legacy, revision, Date.now());
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(h.db.campaignRecovery.singleRootCredentialDecline("root", revision), legacy);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.advisory, handoff: null }).ok);
+    await h.svc.reconcileCampaignHandoffQuestion("root");
+    assert.equal(h.db.campaignRecovery.singleRootCredentialDecline("root", revision), null);
+    assert.ok(!h.db.campaignRecovery.activeRecords("root").some(record => record.reason === "request_declined" || record.reason === "hard_denial"));
   } finally { h.db.close(); }
 });
 
@@ -1119,7 +1217,7 @@ test("a denied handoff update is recorded and screened once across later ticks (
     assert.ok(!h.db.campaignRecovery.activeRecords("root").some(item => item.action === "answer_request" &&
       item.resource.kind === "request" && item.resource.occurrenceId === revokedId));
     assert.deepEqual(h.db.campaignRecovery.declines("root", h.db.getSession("root")!.parentControlPolicy!.revision)
-      .map(item => [item.requestClass, item.count]), [["secrets_and_sign_in", 1]]);
+      .map(item => item.count), [1]);
     assert.ok(h.db.campaignRecovery.activeRecords("root").some(item => item.reason === "request_declined"));
   } finally { h.db.close(); }
 });

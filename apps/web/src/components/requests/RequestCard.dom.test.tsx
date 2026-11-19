@@ -119,6 +119,30 @@ test("Decline classifies once and refreshes the authoritative request", async ()
   } finally { await view.unmount(); }
 });
 
+test("a held campaign handoff can be dismissed without classifying it", async () => {
+  const request = heldQuestionCard();
+  request.workflowDecision = { ...request.workflowDecision!, category: "owner_decision", resourceKey: "campaign_handoffs:owner",
+    resourceSnapshot: { category: "owner_decision", kind: "question", question: "What should happen next?", options: [] } };
+  const session = sessionWith(request);
+  const cleared = sessionWith(null);
+  const answers: unknown[] = [];
+  const updates: SessionView[] = [];
+  const view = await render(<RequestCard session={session} request={request} runnerOnline presentation="panel"
+    onSessionUpdate={(updated) => updates.push(updated)} />, {
+    campaignDecisions: async () => ({ campaignSessionId: session.id, canClassify: true, decisions: [],
+      usage: { calls: 0, unpricedCalls: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0 } }),
+    classifyCampaignDecision: async () => { throw new Error("Plain dismissal must not classify the screen"); },
+    answerQuestion: async (...args) => { answers.push(args); return cleared; },
+  });
+  try {
+    const dismiss = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Dismiss");
+    assert.ok(dismiss);
+    await act(async () => { dismiss.click(); dismiss.click(); await tick(); });
+    assert.deepEqual(answers, [[session.id, { requestId: request.requestId, occurrenceId: request.occurrenceId, answers: {}, action: "dismiss" }]]);
+    assert.deepEqual(updates, [cleared]);
+  } finally { await view.unmount(); }
+});
+
 test("an owner-rule question offers Let Me Answer and retries only the read after classification succeeds", async () => {
   const request = heldQuestionCard();
   request.workflowDecision!.ownerRule = { source: "personal instructions", quote: "Keep this question for me." };

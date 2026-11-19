@@ -55,7 +55,7 @@ import {
 } from "../queued-edit-recovery.js";
 import { scopeAudienceContainedForIdentity } from "../access-scopes.js";
 import { api, ApiError, type ApiClient } from "../api.js";
-import { heldQuestion } from "./question-classification-fixture.js";
+import { heldHandoff, heldQuestion } from "./question-classification-fixture.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider, useFeedback, type ToastOptions } from "../components/FeedbackProvider.js";
 import { CommandLineIcon, InfoIcon, PanelRightIcon } from "../components/Icons.js";
@@ -338,10 +338,12 @@ function initialModel(): FixtureModel {
   }
   if (SCENARIO === "question-classification") {
     const child = initial.sessions[0]!;
-    child.title = "Provider Configuration";
+    const handoff = FIXTURE_QUERY.has("handoff");
+    child.title = handoff ? "Rollout Documentation Campaign" : "Provider Configuration";
+    if (handoff) child.role = "orchestrator";
     child.status = "input_required";
     child.createdAt = child.updatedAt = child.lastEventAt = Date.now() - 120_000;
-    child.pendingApproval = heldQuestion();
+    child.pendingApproval = handoff ? heldHandoff() : heldQuestion();
     initial.sessions = [child];
   }
   if (SCENARIO === "scope-decisions") {
@@ -2476,6 +2478,15 @@ const client = {
       }
       pushSession(child);
       return { sessionId: child.id, surface: "implementation_question" as const, requestId: "question-configuration", classification };
+    },
+    answerQuestion: async (id: string, body: Parameters<typeof api.answerQuestion>[1]) => {
+      const root = model.sessions[0]!;
+      if (!FIXTURE_QUERY.has("handoff") || id !== root.id || body.action !== "dismiss" ||
+          body.occurrenceId !== root.pendingApproval?.occurrenceId) throw new Error("Unexpected fixture answer");
+      root.pendingApproval = null;
+      root.status = "idle";
+      pushSession(root);
+      return { ...root };
     },
   } : {}),
   // This synthetic Shell models an older server and must never query a real host.

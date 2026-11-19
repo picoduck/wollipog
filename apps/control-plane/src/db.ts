@@ -397,6 +397,7 @@ import { matchWorkspaceId, matchWorkspaceIds, workspacePathsEqual } from "./work
 import { installMaintenanceIndexes } from "./maintenance-indexes.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { CAMPAIGN_RECOVERY_SCHEMA, CampaignRecoveryStore, type CampaignRecoveryVerifiedReport } from "./campaign-recovery-store.js";
+import { CAMPAIGN_HANDOFF_QUESTION_KEY } from "@wollipog/protocol";
 import {
   CAMPAIGN_FORGE_OBSERVATION_SCHEMA,
   CampaignForgeObservationStore,
@@ -6476,12 +6477,13 @@ export class ControlPlaneDb {
         (status='consumed' AND json_extract(issue_closure_result,'$.outcome')='uncertain'
           AND json_extract(issue_closure_result,'$.reconciliation.acknowledgedAt') IS NULL))
         AND NOT (category='owner_decision' AND request_id GLOB 'issue_closure_recovery_*')
+        AND NOT (category='owner_decision' AND resource_key=?)
         AND NOT EXISTS (SELECT 1 FROM campaign_recovery_denial_settlements settled
           WHERE decision.status='denied' AND settled.campaign_session_id=decision.controlling_session_id
             AND settled.occurrence_id=decision.occurrence_id)
         AND NOT EXISTS (SELECT 1 FROM workflow_decisions newer
           WHERE newer.session_id=decision.session_id AND newer.resource_key=decision.resource_key
-          AND decision.status='denied' AND newer.rowid>decision.rowid)`).all(campaignId) as unknown[])
+          AND decision.status='denied' AND newer.rowid>decision.rowid)`).all(campaignId, CAMPAIGN_HANDOFF_QUESTION_KEY) as unknown[])
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null);
   }
 
@@ -13194,10 +13196,11 @@ export class ControlPlaneDb {
       { campaign_session_id: string; session_id: string; surface: CampaignDecisionSubject["surface"]; request_id: string;
         classification: "decline" | "orchestrator" | null } | undefined;
     if (!row) return null;
-    const decision = row.surface === "implementation_question" ? this.workflowDecisionByRequestId(row.session_id, row.request_id) : null;
+    const workflowScreen = row.surface === "implementation_question" || row.surface === "owner_decision";
+    const decision = workflowScreen ? this.workflowDecisionByRequestId(row.session_id, row.request_id) : null;
     return { campaignSessionId: row.campaign_session_id, sessionId: row.session_id, surface: row.surface,
       requestId: row.request_id, ...(row.classification ? { classification: row.classification } : {}),
-      ...(row.surface === "implementation_question" ? { classificationPending: !row.classification && decision?.status === "pending" &&
+      ...(workflowScreen ? { classificationPending: !row.classification && decision?.status === "pending" &&
         decision.authority === "human" && decision.authorityEvaluation?.reason === "credential_screen_review" &&
         decision.authorityEvaluation.credentialScreen?.occurrenceId === occurrenceId } : {}) };
   }
@@ -24730,14 +24733,21 @@ export class ControlPlaneDb {
   /** The server's informational handoff question, including its last settled set. */
   campaignHandoffQuestion(rootId: string): WorkflowDecisionView | null {
     return workflowDecisionFromRow(this.stmt(`SELECT * FROM workflow_decisions WHERE session_id=?
-      AND resource_key='campaign_handoffs:owner' AND category='owner_decision' ORDER BY rowid DESC LIMIT 1`).get(rootId));
+      AND resource_key=? AND category='owner_decision' ORDER BY rowid DESC LIMIT 1`).get(rootId, CAMPAIGN_HANDOFF_QUESTION_KEY));
+  }
+
+  /** Identifies legacy handoff declines without treating the root's other denials as handoffs. */
+  campaignDeniedHandoffQuestions(rootId: string): Array<{ requestId: string; resourceDigest: string }> {
+    return this.stmt(`SELECT request_id AS requestId,resource_digest AS resourceDigest FROM workflow_decisions WHERE session_id=?
+      AND resource_key=? AND category='owner_decision' AND status='denied'`).all(rootId, CAMPAIGN_HANDOFF_QUESTION_KEY) as
+      Array<{ requestId: string; resourceDigest: string }>;
   }
 
   updateCampaignHandoffQuestion(occurrenceId: string, snapshot: WorkflowDecisionView["resourceSnapshot"], digest: string,
     evaluation: NonNullable<WorkflowDecisionView["authorityEvaluation"]>): boolean {
     return this.stmt(`UPDATE workflow_decisions SET resource_snapshot=?, resource_digest=?, authority_evaluation=? WHERE occurrence_id=?
-      AND resource_key='campaign_handoffs:owner' AND category='owner_decision' AND status='pending'
-      AND json_extract(resource_snapshot, '$.kind')='question'`).run(JSON.stringify(snapshot), digest, JSON.stringify(evaluation), occurrenceId).changes === 1;
+      AND resource_key=? AND category='owner_decision' AND status='pending'
+      AND json_extract(resource_snapshot, '$.kind')='question'`).run(JSON.stringify(snapshot), digest, JSON.stringify(evaluation), occurrenceId, CAMPAIGN_HANDOFF_QUESTION_KEY).changes === 1;
   }
 
   /** Keyset pages keep a consumed/revoked cursor usable without retaining it in the result. */
