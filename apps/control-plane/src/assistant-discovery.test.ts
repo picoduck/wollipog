@@ -67,11 +67,14 @@ test("the guide stays discoverable when it cannot fit beside the connection's gr
 
 test("an oversized saved grant leaves identity and grant-filtered discovery available", async () => {
   const projects = Array.from({ length: 500 }, (_, index) => `project_${String(index).padStart(120, "0")}`);
-  const { connection, discover } = fixture({ operations: ["assistant_discover", "fixture_001"], projects });
+  const { connection, discover } = fixture({
+    operations: ["assistant_discover", "fixture_001"], projects, destructiveConfirmation: "confirm",
+  });
   const first = await discover();
   assert.equal(first.connection.id, connection.id);
   assert.equal(first.connection.revision, connection.revision);
   assert.equal(first.connection.grant, undefined);
+  assert.equal(first.destructiveConfirmation, "confirm");
   assert.match(first.grantNotice, /exact grant exceeds the tool-result limit/u);
   assert.deepEqual(first.operations.map((operation: { name: string }) => operation.name), ["assistant_discover", "fixture_001"]);
 });
@@ -102,6 +105,21 @@ test("a schema larger than the whole page is refused without producing a stuck c
     ownerCanAccess: () => true, execute: () => ({}),
   });
   await assert.rejects(discover({ operations: ["oversized_schema"] }), /schema does not fit/u);
+});
+
+test("a schema that fits by itself can be retried separately from its batch", async () => {
+  const { operations, discover } = fixture();
+  const inputSchema = { type: "object", description: "x".repeat(7_500) };
+  operations.register({
+    name: "large_schema", description: "Fixture with a large schema.", inputSchema,
+    metadata: true, resolveTarget: () => ({ kind: "fixture", id: "large_schema" }),
+    ownerCanAccess: () => true, execute: () => ({}),
+  });
+  const unavailable = Array.from({ length: 62 }, (_, index) => `z${String(index).padStart(31, "0")}`);
+  const batch = await discover({ operations: ["large_schema", "fixture_001", ...unavailable] });
+  assert.deepEqual(batch, { operations: [], unavailable, remaining: ["fixture_001"], requestSeparately: "large_schema" });
+  assert.deepEqual((await discover({ operations: [batch.requestSeparately] })).operations[0].inputSchema, inputSchema);
+  assert.equal((await discover({ operations: batch.remaining })).operations[0].name, "fixture_001");
 });
 
 test("discovery stays filtered by the connection's grant", async () => {

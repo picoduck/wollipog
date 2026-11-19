@@ -62,7 +62,7 @@ export function createAssistantOperations(db: ControlPlaneDb): AssistantOperatio
     description: "Read this installation's identity, connection scope and operation names. Request full input schemas by name or the Assistant guide with skill.",
     inputSchema: { type: "object", properties: {
       operations: {type: "array", items: {type: "string", pattern: ASSISTANT_OPERATION_NAME.source}, minItems: 1, maxItems: ASSISTANT_DISCOVERY_MAX_SCHEMA_NAMES,
-        description: "Granted operation names whose full input schemas to return. Request any listed in `remaining` again."},
+        description: "Granted operation names whose full input schemas to return. Request any listed in `remaining` again. Request `requestSeparately` by itself."},
       cursor: {type: "string", description: "An earlier result's nextCursor, to read the rest of the operation list."},
       skill: {type: "boolean", const: true, description: "Read the full Wollipog Assistant guide. Send this argument by itself."},
     }, additionalProperties: false }, metadata: true,
@@ -84,7 +84,13 @@ export function createAssistantOperations(db: ControlPlaneDb): AssistantOperatio
         const schemas = found.map(name => { const {description, inputSchema} = byName.get(name)!; return {name, description, inputSchema}; });
         const reserve = found.length > 1 ? bytes({remaining: found.slice(1)}) : 0;
         const taken = fill(result, "operations", schemas, reserve);
-        if (!taken && schemas.length) throw new AssistantRefusal("The requested schema does not fit. Request it by itself or use MCP tools/list.");
+        if (!taken && schemas.length) {
+          const [requestSeparately, ...remaining] = found;
+          if (request.operations.length === 1) throw new AssistantRefusal("The requested schema does not fit. Use MCP tools/list.");
+          // The leading schema and batch metadata do not fit together. Keep the rest of the
+          // batch reachable and require a single-name retry to keep the continuation moving.
+          return {...result, requestSeparately, ...(remaining.length ? {remaining} : {})};
+        }
         const remaining = found.slice(taken);
         return remaining.length ? {...result, remaining} : result;
       }
@@ -104,8 +110,9 @@ export function createAssistantOperations(db: ControlPlaneDb): AssistantOperatio
         if (bytes(result) + reserve > ASSISTANT_DISCOVERY_MAX_BYTES) {
           // A selected grant can contain hundreds of IDs. Keep the connection identity and
           // granted-operation paging available without returning a misleading partial grant.
-          const {grant: _grant, ...identity} = context.connection;
+          const {grant, ...identity} = context.connection;
           result.connection = identity;
+          result.destructiveConfirmation = grant.destructiveConfirmation;
           result.grantNotice = "The exact grant exceeds the tool-result limit. The owner can inspect it in Assistant Connections. This operation list is still filtered by the grant.";
         }
         if (bytes({...result, skillHint: undefined, skill: WOLLIPOG_ASSISTANT_SKILL}) + reserve <= ASSISTANT_DISCOVERY_MAX_BYTES) {

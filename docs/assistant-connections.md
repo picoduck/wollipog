@@ -70,13 +70,15 @@ for the MCP envelope under Codex's 10,000-byte fallback for models outside its c
 When discovery returns `nextCursor`, call it again with
 `{"cursor": "<nextCursor>"}` for the rest of the list. Call it with
 `{"operations": ["<name>", ...]}` (up to 64 names) for those operations' full input schemas; names
-the grant does not allow come back in `unavailable`, and schemas that did not fit in `remaining`,
-to request again. `tools/list` still returns every granted tool with its full schema.
+the grant does not allow come back in `unavailable`. Request the names in `remaining` again and
+request any name in `requestSeparately` by itself. `tools/list` still returns every granted tool
+with its full schema.
 
 The first page includes the shared guide in `skill` when it fits. Call `assistant_discover` with
 `{"skill": true}` to get the guide separately. The first page includes `connection.grant` when
-the exact grant fits. Otherwise `grantNotice` explains where the owner can inspect the grant.
-Operation and schema discovery still use the complete grant.
+the exact grant fits. Otherwise `grantNotice` explains where the owner can inspect the grant,
+and the response reports `destructiveConfirmation` at the top level. Operation and schema
+discovery still use the complete grant.
 
 IDs, never editable names or tool prefixes, distinguish connections and installations. The initial
 installation display name is Wollipog and is editable through owner management.
