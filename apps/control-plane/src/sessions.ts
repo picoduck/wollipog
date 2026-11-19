@@ -17933,7 +17933,12 @@ export class SessionsService {
       }
       // A reviewer whose turn or Session ended without a verdict will never submit one.
       const reviewer = this.db.getSession(review.reviewerSessionId);
-      if (!reason && (!reviewer || isTerminal(reviewer.status) || reviewer.status === "idle")) reason = "reviewer_finished_without_verdict";
+      const finished = !reviewer || reviewer.status === "idle" || reviewer.status === "completed" || reviewer.status === "failed" ||
+        reviewer.status === "stopped" && !this.db.hasSessionStopIntent(reviewer.id) &&
+          Boolean(this.db.sessionStopProvenance(reviewer.id)?.confirmation);
+      // Disconnect/startup writes a provisional Stop while the provider may still be working.
+      // A maintenance tick cannot turn that into an ended review before runner reconciliation.
+      if (!reason && finished) reason = "reviewer_finished_without_verdict";
     } else if (review.state === "verdict" && review.verdict) {
       // A verdict rests on its receipts. Once any of them expires the reviewer cannot look again
       // (nothing is delivered after a verdict), so the review is retired for a fresh one (#4074).

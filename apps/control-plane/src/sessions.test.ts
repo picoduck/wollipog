@@ -25871,6 +25871,24 @@ test("#4187 old ended reviewers retire on reconnect; provisional stops never pro
   } finally { h.db.close(); }
 });
 
+test("#4187 a provisional Stop preserves a live review until runner reconciliation", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const decision = h.request(child.id, "disconnect", [h.screenshot(child.id, "disconnect").item]).data!;
+    const review = prepareImageReview(h, child.id, decision.occurrenceId).data!;
+    h.db.updateSessionStatus(review.reviewerSessionId, "stopped", Date.now());
+    h.svc.maintainImageReviewerRetirement(Date.now());
+    assert.equal(h.db.delegatedImageReviews.get(review.reviewId)!.state, "running");
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, undefined);
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, false);
+    h.svc.onSessionStatus(review.reviewerSessionId, "stopped");
+    h.svc.maintainImageReviewerRetirement(Date.now());
+    assert.equal(h.db.delegatedImageReviews.get(review.reviewId)!.state, "ended");
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, true);
+  } finally { h.db.close(); }
+});
+
 test("#4187 failed automatic retirement stays pending and recovers on reconnect", () => {
   const h = uiEvidenceReviewHarness();
   try {
