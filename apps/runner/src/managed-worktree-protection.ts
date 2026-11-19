@@ -2984,9 +2984,13 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
   return { scan: command, parse };
 }
 
+// The boundary checks prevent the repeated quote pattern below from retrying each shorter reading
+// of a parameter name when the closing quote is missing.
+const GUARD_STATE_PLAIN_PARAMETER =
+  /\$(?:[A-Za-z_][A-Za-z0-9_]*(?![A-Za-z0-9_])|[0-9]+(?![0-9])|\{[A-Za-z_][A-Za-z0-9_]*\})/u.source;
+
 /** Ordinary words, pipelines and redirects leave a clear closing delimiter. Compound syntax,
  * shell comments and active nested substitutions require more than this lexical reading. */
-const GUARD_STATE_PLAIN_PARAMETER = /\$(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\})/u.source;
 const GUARD_STATE_SUBSTITUTION_BODY = new RegExp(
   "(?:" +
   [
@@ -3040,10 +3044,9 @@ function guardStateSubstitutionEnd(command: string, start: number, close: ")" | 
  * reading, including the original shell-quote tokens and raw path scan. */
 function quotedGuardStateSubstitutionRefusal(command: string, cwd: string, directory: string): string | null {
   if (!command.includes('"') || (!command.includes("$(") && !command.includes("`"))) return null;
-  // A leading simple command with a single quoted delimiter has a literal body. Skip only
-  // the first complete body in this additional scan, then inspect any following commands.
-  // The original path scan still receives the full source.
-  const heredoc = /^[A-Za-z0-9._/:=,@+%~ \t-]+<<(-)?[ \t]*(['"])([A-Za-z_][A-Za-z0-9_]*)\2[ \t]*\n/u.exec(command);
+  // These specific commands consume a quoted heredoc as data. A shell or another unknown
+  // consumer may execute that input. The original path scan still receives the full source.
+  const heredoc = /^(?::|git commit -F -|gh pr create --body-file -)[ \t]+<<(-)?[ \t]*(['"])([A-Za-z_][A-Za-z0-9_]*)\2[ \t]*\n/u.exec(command);
   const bodyEnd = heredoc === null ? null :
     guardStateHeredocTerminator(command, heredoc[0].length, heredoc[3]!, heredoc[1] !== undefined);
   const arithmetic = /\(\([A-Za-z0-9_$*/%~^&|<>=?:, \t+-]+\)\)/uy;
@@ -3056,8 +3059,8 @@ function quotedGuardStateSubstitutionRefusal(command: string, cwd: string, direc
     }
     if (char === "\\") { i += 1; continue; }
     if (quote === '"' && (char === "`" || (char === "$" && command[i + 1] === "("))) {
-      // Simple arithmetic has no executable expansion. Leave more involved arithmetic
-      // to the uninspectable path rather than treating its opening parenthesis as a body.
+      // This arithmetic subset contains no nested shell expansion syntax. Leave more
+      // involved arithmetic to the uninspectable path.
       if (char === "$" && command[i + 2] === "(") {
         arithmetic.lastIndex = i + 1;
         if (arithmetic.test(command)) { i = arithmetic.lastIndex - 1; continue; }
