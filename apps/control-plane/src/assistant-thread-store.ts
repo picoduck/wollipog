@@ -88,6 +88,8 @@ export class AssistantThreadStore {
     // Fixed historical defaults for rows created before owners could set limits. NULL is unlimited.
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN cost_limit_usd REAL DEFAULT 25"); } catch { /* column already present */ }
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN launch_limit INTEGER DEFAULT 10"); } catch { /* column already present */ }
+    // All earlier launches were subject to a budget, even when their allowance was not recorded.
+    try { db.exec("ALTER TABLE assistant_thread_launches ADD COLUMN uncapped INTEGER NOT NULL DEFAULT 0"); } catch { /* column already present */ }
     // Every launch is a member, with every existing descendant in its tree. Idempotent.
     db.exec(`INSERT OR IGNORE INTO assistant_thread_members (session_id, thread_id, root_session_id)
         SELECT session_id, thread_id, session_id FROM assistant_thread_launches;
@@ -150,7 +152,8 @@ export class AssistantThreadStore {
 
   /** `capUsd` is the launch's cost cap, its allowance (#4671). */
   recordLaunch(threadId: string, sessionId: string, now: number, capUsd: number | null = null): void {
-    this.db.prepare("INSERT OR IGNORE INTO assistant_thread_launches (session_id, thread_id, created_at) VALUES (?, ?, ?)").run(sessionId, threadId, now);
+    this.db.prepare("INSERT OR IGNORE INTO assistant_thread_launches (session_id, thread_id, created_at, uncapped) VALUES (?, ?, ?, ?)")
+      .run(sessionId, threadId, now, capUsd === null ? 1 : 0);
     this.db.prepare("INSERT OR IGNORE INTO assistant_thread_members (session_id, thread_id, root_session_id, allowance_usd) VALUES (?, ?, ?, ?)")
       .run(sessionId, threadId, sessionId, capUsd);
   }
@@ -235,12 +238,19 @@ export class AssistantThreadStore {
     return this.db.prepare(`SELECT 1 FROM assistant_thread_members member
       JOIN sessions session ON session.id=member.session_id
       JOIN assistant_thread_members root ON root.session_id=member.root_session_id
-      WHERE member.thread_id=? AND (session.cost_budget_usd IS NULL OR root.allowance_usd IS NULL) LIMIT 1`)
+      LEFT JOIN assistant_thread_launches launch ON launch.session_id=root.session_id
+      LEFT JOIN sessions root_session ON root_session.id=root.session_id
+      WHERE member.thread_id=? AND (launch.uncapped=1 OR session.cost_budget_usd IS NULL OR
+        COALESCE(root.allowance_usd, root_session.cost_budget_usd, root.retired_cap_usd) IS NULL) LIMIT 1`)
       .get(threadId) !== undefined;
   }
 
   backingCap(threadId: string): number | null {
-    return (this.db.prepare("SELECT backing_cap_usd FROM assistant_threads WHERE id=?").get(threadId) as { backing_cap_usd: number | null } | undefined)?.backing_cap_usd ?? null;
+    const row = this.db.prepare("SELECT backing_cap_usd, cost_limit_usd FROM assistant_threads WHERE id=?")
+      .get(threadId) as { backing_cap_usd: number | null; cost_limit_usd: number | null } | undefined;
+    if (!row || row.cost_limit_usd === null) return row?.backing_cap_usd ?? null;
+    // Older capped rows may predate recording the backing cap. Their initial cap was $25.
+    return row.backing_cap_usd ?? DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd;
   }
 
   setBackingCap(threadId: string, capUsd: number | null): void {

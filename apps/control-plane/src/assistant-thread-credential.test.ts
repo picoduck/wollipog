@@ -305,11 +305,28 @@ test("removing a thread budget removes implicit caps and keeps explicitly reques
     const refused = await h.ownerCall("PUT", edit, { costUsd: 20, launchedSessions: null });
     assert.equal(refused.status, 409);
     assert.match(refused.body.error, /work launched without a cost cap/);
+    // A root capped later can still have descendants launched before it acquired that cap.
+    assert.equal(h.svc.setConfig(unbounded.sessionId, { costBudgetUsd: 5 }).ok, true);
+    assert.equal((await h.ownerCall("PUT", edit, { costUsd: 20, launchedSessions: null })).status, 409);
     h.db.deleteSession(unbounded.sessionId);
+    // A capped launch might predate allowance persistence. Its current cap is still proof.
+    h.db.raw().prepare("UPDATE assistant_thread_members SET allowance_usd=NULL WHERE session_id=?").run(capped.sessionId);
     const restored = await h.ownerCall("PUT", edit, { costUsd: 20, launchedSessions: null });
     assert.equal(restored.status, 200, JSON.stringify(restored.body));
     assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, 12.50);
     assert.equal(restored.body.thread.usage.launchedSessions.used, 2, "deletion does not refund a launch");
+  } finally { await h.close(); }
+});
+
+test("restoring a thread budget preserves the owner's backing session cap", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const edit = `/api/assistant-threads/${thread.id}/limits`;
+    assert.equal((await h.ownerCall("PUT", edit, { costUsd: null, launchedSessions: 10 })).status, 200);
+    assert.equal(h.svc.setConfig(thread.sessionId, { costBudgetUsd: 25 }).ok, true);
+    assert.equal((await h.ownerCall("PUT", edit, { costUsd: 60, launchedSessions: 10 })).status, 200);
+    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, 25);
   } finally { await h.close(); }
 });
 

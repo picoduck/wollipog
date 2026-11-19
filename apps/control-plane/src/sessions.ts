@@ -170,7 +170,6 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   ownerQuestionAnswer,
   type OwnerQuestionSnapshot,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
-  DEFAULT_ASSISTANT_THREAD_LIMITS,
   type AssistantThreadLimits,
   type AgentContext,
   type AgentDriverKind,
@@ -3704,11 +3703,13 @@ export class SessionsService {
     if (!launch.backingSessionId) return { ok: true };
     const backing = this.db.getSession(launch.backingSessionId);
     if (!backing) return { ok: true };
-    const managed = this.db.assistantThreads.backingCap(launch.threadId) ?? DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd;
+    const managed = this.db.assistantThreads.backingCap(launch.threadId);
     const current = backing.costBudgetUsd ?? null;
     // A cap other than the one the thread last set is the owner's: remember it as a ceiling the
     // thread never raises the cap above, even after lowering it further itself.
-    if (current !== null && Math.abs(current - managed) >= 0.005) this.db.assistantThreads.recordBackingOwnerCap(launch.threadId, current);
+    if (current !== null && (managed === null || Math.abs(current - managed) >= 0.005)) {
+      this.db.assistantThreads.recordBackingOwnerCap(launch.threadId, current);
+    }
     const ownerCap = this.db.assistantThreads.backingOwnerCap(launch.threadId);
     const target = limitUsd === null ? ownerCap
       : Math.max(0.01, floorBudgetCents(Math.min(limitUsd - heldUsd, ownerCap ?? Number.POSITIVE_INFINITY)));
