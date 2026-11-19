@@ -13,7 +13,7 @@ import { isPersonalIdentifier, redactPersonalIdentifiers } from "../personal-ide
 import { statusMeta, type StatusMeta } from "../status-meta.js";
 import { subscriptionAccountGroups, type SubscriptionAccountGroup } from "../subscription-account-groups.js";
 import { subscriptionPlanLabel } from "../usage-view-model.js";
-import { usageLeftPercent, usageMeterClass, usageWindowAttention } from "./AccountChoice.js";
+import { usageLeftPercent, usageMeterClass, usageWindowAttention, usageWindowAttentionDetail } from "./AccountChoice.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { AccountIcon, ChevronRightIcon, ComputerIcon, RefreshIcon } from "./Icons.js";
 import { PersonalIdentifierRevealButton, PersonalIdentifierText, usePersonalIdentifierReveal } from "./PersonalIdentifier.js";
@@ -122,7 +122,8 @@ export function useSubscriptionUsage() {
   }, [api, showToast]);
 
   const groups = useMemo(() => subscriptionAccountGroups(data?.sources ?? []), [data]);
-  // The tab's count is exactly the Approaching Limit and Exhausted badges the tab shows.
+  // The tab's count is exactly the window badges the tab shows (Exhausted, Approaching Limit,
+  // On Pace to Run Out, Usage Warning).
   const attention = useMemo(
     () => groups.flatMap((group) => group.account.buckets.map(usageWindowAttention)).filter((badge) => badge !== null),
     [groups],
@@ -213,7 +214,7 @@ function SubscriptionWindow({ bucket, now }: { bucket: SubscriptionUsageBucket; 
     <li className={left === undefined ? "subscription-window unmeasured" : "subscription-window"}>
       <span className="subscription-window-name">
         <span className="subscription-window-label">{bucket.label}</span>
-        {attention && <StatusBadge meta={statusMeta("usage", attention)} />}
+        {attention && <StatusBadge meta={statusMeta("usage", attention)} title={usageWindowAttentionDetail(bucket, now)} />}
       </span>
       {left === undefined ? (
         <span className="subscription-window-left">No percentage reported</span>

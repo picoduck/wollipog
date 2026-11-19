@@ -15,25 +15,74 @@ export function usageLeftPercent(bucket: SubscriptionUsageBucket): number | unde
   return left === undefined ? undefined : Math.round(Math.min(100, Math.max(0, left)));
 }
 
+export type UsageWindowAttention = "exhausted" | "approaching_limit" | "on_pace_to_run_out" | "usage_warning";
+
 /**
  * The badge a usage window needs, if any, in the usage vocabulary (§11.2): Exhausted when nothing is
- * left or the provider says so, Approaching Limit when the provider warns or less than
- * `ACCOUNT_USAGE_WARNING_PERCENT` is left. Switch Account's meters and the Subscriptions tab both
- * read it, so one window never reads differently in the two places.
+ * left or the provider says so, Approaching Limit when less than `ACCOUNT_USAGE_WARNING_PERCENT` is
+ * left. A provider warning on a window with more than that left is about pace, not about the limit:
+ * Claude warns when a window is being used faster than it elapses (25% used a few hours into a
+ * week), so it reads On Pace to Run Out. A warning on a window with no percentage reads Usage
+ * Warning, since nothing says which of the two it is. Switch Account's meters and the Subscriptions
+ * tab both read it, so one window never reads differently in the two places.
  */
-export function usageWindowAttention(bucket: SubscriptionUsageBucket): "exhausted" | "approaching_limit" | null {
+export function usageWindowAttention(bucket: SubscriptionUsageBucket): UsageWindowAttention | null {
   // Exhaustion reads the unrounded share: 0.4% left still has headroom, though it shows "0% left".
   const raw = bucket.remainingPercent ?? (bucket.usedPercent === undefined ? undefined : 100 - bucket.usedPercent);
   if (bucket.status === "exhausted" || (raw !== undefined && raw <= 0)) return "exhausted";
   const left = usageLeftPercent(bucket);
-  if (bucket.status === "warning" || (left !== undefined && left < ACCOUNT_USAGE_WARNING_PERCENT)) return "approaching_limit";
+  if (left !== undefined && left < ACCOUNT_USAGE_WARNING_PERCENT) return "approaching_limit";
+  if (bucket.status === "warning") return left === undefined ? "usage_warning" : "on_pace_to_run_out";
   return null;
 }
 
-/** A usage window's `.meter` class with its tone (§11.6): danger when exhausted, warning when close. */
+/**
+ * A usage window's `.meter` class with its tone (§11.6): danger when exhausted, warning when little
+ * is left. The meter measures what is left, so a fast pace with plenty left keeps the plain meter;
+ * its badge carries the pace.
+ */
 export function usageMeterClass(bucket: SubscriptionUsageBucket): string {
   const attention = usageWindowAttention(bucket);
   return attention === "exhausted" ? "meter t-danger" : attention === "approaching_limit" ? "meter t-warning" : "meter";
+}
+
+/**
+ * How long until a window runs out if it keeps being used at its average rate so far, in
+ * milliseconds, when that comes before it resets. Undefined when it lasts until the reset or the
+ * window's start is unknown (no length or reset time). The rate is measured over the window up to
+ * `now`, so an older reading only understates the pace.
+ */
+export function usageWindowRunsOutIn(bucket: SubscriptionUsageBucket, now: number): number | undefined {
+  const used = bucket.usedPercent ?? (bucket.remainingPercent === undefined ? undefined : 100 - bucket.remainingPercent);
+  if (used === undefined || used <= 0 || used >= 100) return undefined;
+  if (bucket.resetsAt === undefined || bucket.windowDurationMinutes === undefined) return undefined;
+  const untilReset = bucket.resetsAt - now;
+  const elapsed = bucket.windowDurationMinutes * 60_000 - untilReset;
+  if (untilReset <= 0 || elapsed <= 0) return undefined;
+  const runsOutIn = elapsed * (100 - used) / used;
+  return runsOutIn < untilReset ? runsOutIn : undefined;
+}
+
+/** "about 16 hours": a rough span for a projection, never more precise than it can be. */
+function approximateSpan(milliseconds: number): string {
+  const minutes = Math.max(1, Math.round(milliseconds / 60_000));
+  if (minutes < 60) return `about ${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `about ${hours} ${hours === 1 ? "hour" : "hours"}`;
+  return `about ${Math.round(hours / 24)} days`;
+}
+
+/** The sentence behind a window's pace or warning badge: why it is there, as precisely as known. */
+export function usageWindowAttentionDetail(bucket: SubscriptionUsageBucket, now: number): string | undefined {
+  const attention = usageWindowAttention(bucket);
+  if (attention === "on_pace_to_run_out") {
+    const runsOutIn = usageWindowRunsOutIn(bucket, now);
+    return runsOutIn === undefined
+      ? "The provider warned that this window is being used faster than it resets."
+      : `At this pace, this window runs out in ${approximateSpan(runsOutIn)}, before it resets.`;
+  }
+  if (attention === "usage_warning") return "The provider warned about this window's usage.";
+  return undefined;
 }
 
 /**

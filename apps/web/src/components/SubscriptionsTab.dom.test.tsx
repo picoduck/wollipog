@@ -8,7 +8,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode, textBefore } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
-import { AccountUsageMeters } from "./AccountChoice.js";
+import { AccountUsageMeters, usageWindowRunsOutIn } from "./AccountChoice.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { subscriptionFullTime } from "./SubscriptionsTab.js";
 import { UsageView } from "./UsageView.js";
@@ -376,7 +376,8 @@ test("the same windows read the same percentages and tones here and in Switch Ac
       ["58", "meter"],
       ["20", "meter t-warning"],
       ["0", "meter t-danger"],
-      ["60", "meter t-warning"],
+      // A provider warning with plenty left is about pace: the meter of what is left stays plain.
+      ["60", "meter"],
       ["25", "meter"],
       ["0", "meter t-warning"],
     ]);
@@ -391,13 +392,56 @@ test("the same windows read the same percentages and tones here and in Switch Ac
     );
     assert.deepEqual(
       [...view.panel()!.querySelectorAll(".subscription-window")].map((row) => row.querySelector(".status")?.textContent ?? null),
-      [null, "Approaching Limit", "Exhausted", "Approaching Limit", null, "Approaching Limit"],
+      [null, "Approaching Limit", "Exhausted", "On Pace to Run Out", null, "Approaching Limit"],
     );
   } finally {
     await act(async () => metersRoot.unmount());
     meters.remove();
     await view.unmount();
   }
+});
+
+test("a provider warning with plenty left reads On Pace to Run Out, says when it runs out, and is counted", async () => {
+  // A weekly window about a day in with a quarter used: at that rate it is gone in about three days.
+  const fast = window_("seven_day", "Weekly — All Models", 75, { status: "warning", windowDurationMinutes: 7 * 24 * 60 });
+  // The same warning without the window's length cannot project a time, so it says what it knows.
+  const unknownLength = window_("weekly", "Weekly", 75, { status: "warning" });
+  // A warning on a window with no percentage cannot be called a pace or a limit.
+  const unmeasured = window_("five_hour", "Five-Hour Window", undefined, { status: "warning" });
+  // Without a provider warning, plenty left is healthy, whatever the pace.
+  const quiet = window_("seven_day_fable", "Weekly — Fable", 75, { windowDurationMinutes: 7 * 24 * 60 });
+  const view = await renderTab({ subscriptionUsage: async () => response([source({ buckets: [fast, unknownLength, unmeasured, quiet] })]) });
+  try {
+    const rows = [...view.panel()!.querySelectorAll(".subscription-window")];
+    assert.deepEqual(
+      rows.map((row) => row.querySelector(".status")?.textContent ?? null),
+      ["On Pace to Run Out", "On Pace to Run Out", "Usage Warning", null],
+    );
+    assert.deepEqual(rows.map((row) => row.querySelector(".status")?.getAttribute("title") ?? null), [
+      "At this pace, this window runs out in about 3 days, before it resets.",
+      "The provider warned that this window is being used faster than it resets.",
+      "The provider warned about this window's usage.",
+      null,
+    ]);
+    assert.equal(rows[0]!.querySelector(".meter")?.className, "meter");
+    assert.equal(view.tab("subscriptions").querySelector(".count-badge")?.textContent, "3");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("usageWindowRunsOutIn projects only a run-out that comes before the reset", () => {
+  const week = 7 * 24 * 60;
+  const at = (usedPercent: number, elapsedHours: number) => usageWindowRunsOutIn({
+    id: "w", label: "W", usedPercent, windowDurationMinutes: week, resetsAt: NOW + week * 60_000 - elapsedHours * HOUR,
+  }, NOW);
+  // 25% used in 4 hours: the other 75% lasts 12 more hours.
+  assert.equal(at(25, 4), 12 * HOUR);
+  // Half used at half time lasts exactly to the reset, which is not running out.
+  assert.equal(at(50, 84), undefined);
+  assert.equal(at(0, 4), undefined);
+  assert.equal(at(100, 4), undefined);
+  assert.equal(usageWindowRunsOutIn({ id: "w", label: "W", usedPercent: 25, resetsAt: NOW + DAY }, NOW), undefined);
 });
 
 test("a window the provider does not measure says so with its reset, never a bare dash", async () => {

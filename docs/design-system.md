@@ -2453,7 +2453,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Request decision (`requestDecision`: the outcome of every Decision Record and of the settled question row, #2204) | Allowed, Answered, Answered by Policy, Answered by Parent, Rechecked Automatically: success · Rejected, Dismissed, Dismissed by Parent, Ended Early, Replaced, Expired, Resolved by Provider, Another Account Selected, Escalated, Resolved: neutral · Blocked (by a policy, or fail-closed by Wollipog): danger · Timed Out: warning. Always past tense, never a provider's option id. |
 | Campaign work item (`campaignWork`, Campaign Status) | Planned, Queued, Canceled, Scope Removed: neutral · Running: info (pulse) · Waiting: warning · Blocked: danger · Delivered: success. Rendered as the inline badge on work rows. |
 | Provider account | Signed In: success (inline) · Sign-In Required: warning · Signing In: info (pulse) · Signed Out, Status Unknown: neutral · Not Added: neutral (hollow dot; a new account's sign-in ended because the account is already on the machine, #2996) |
-| Usage (provider availability) | Available: success · Approaching Limit: warning · Temporarily Unavailable: danger |
+| Usage (provider availability) | Available: success · Approaching Limit (under 25% of a window left), On Pace to Run Out (the provider warns with 25% or more left), Usage Warning (the provider warns about a window with no percentage): warning · Temporarily Unavailable: danger |
 | Usage daily budget (`usageBudget`, Usage and Cost's By Person, #3013) | Budget Reached: warning, once a person's spend today (settled plus the estimate for their running turns, as the daily-budget gate counts it) is at or over the per-person daily budget. Below it there is no badge; the Today cell's meter shows the level. |
 | Agent on a machine (`agent`, `agentStatus()`, #2990: the machine's agent rows, Agent Details and Set Up This Machine) | Ready: success (inline) · Not Installed: neutral (hollow dot) · Sign-In Required, Update Required, Approval Required: warning · Unavailable: danger · Ready When Last Seen: neutral (hollow dot; a ready agent on a machine that is not online). One per agent, the most limiting first; the machine's Update Required, Approval Required and Sign-In Required roll up from it. |
 | Terminal tab (`shell`, #2864) | Exited: neutral · Reconnecting: info. Rendered as the inline badge after the tab's label; a running shell has none. |
@@ -2710,8 +2710,12 @@ pointers only; its tooltip names the chord.
   context window is warning from 75% and danger from 90%, and its ring takes the same tone classes
   on `.context-control`; below 75% the ring's fill is the neutral `--text-dim` on a `--bg-elev-3`
   track. A subscription window fills by what is left (`usageLeftPercent()`, "N% left"): warning
-  (Approaching Limit) under 25% left or when the provider warns, danger (Exhausted) when nothing is
-  left. Switch Account and Usage's Subscriptions tab read it through one `usageWindowAttention()`,
+  (Approaching Limit) under 25% left, danger (Exhausted) when nothing is left. A provider warning on
+  a window with 25% or more left is about pace (Claude warns when a window is used faster than it
+  elapses), so the window reads On Pace to Run Out with a plain meter, and the badge's tooltip says
+  when the window runs out at its average rate so far (`usageWindowRunsOutIn()`) when its length and
+  reset are known. A warning on a window with no percentage reads Usage Warning. Every window badge
+  counts toward the Subscriptions tab's count. Switch Account and Usage's Subscriptions tab read it through one `usageWindowAttention()`,
   so a window never reads differently in the two (#3014). Usage shows one subscription once, however
   many machines are signed in to it: sources group only by the provider identity's opaque key, each
   meter takes the newest window's most recent reading, and the machines fold into a disclosure.
