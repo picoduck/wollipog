@@ -157,8 +157,10 @@ test("heartbeat activity feeds cards, preview, split counts, and independent rai
   assert.doesNotMatch(detail, /<ActivityStrip\b/, "the preview bar has no activity strip");
   assert.match(app, /sessionVisibleForReminderMode\(session, reminders\.get\(session\.id\), "ordinary"\)[\s\S]*activeSessions\.filter\(isInboxBlocked\)/,
     "the rail's Blocked and Stalled badges must derive from the same Active membership as Sessions");
-  assert.match(rail, /const attentionState = \{ blocked: blockedCount, machines \};/,
-    "the Sessions badge derives from the same Blocked and Stalled counts");
+  assert.match(app, /assistantAttentionCount=\{assistantAttention\.count\}/,
+    "the shell passes an independently derived Assistant thread count to the rail");
+  assert.match(rail, /const attentionState = \{ blocked: blockedCount, machines, assistantThreads: assistantAttentionCount \};/,
+    "Sessions, Connections and Assistants retain their own attention inputs");
   assert.match(css, /prefers-reduced-motion: reduce[\s\S]*activity-strip/);
 });
 
