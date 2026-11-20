@@ -8,9 +8,9 @@ const SETTINGS = "/settings/assistant";
 const OLD_SETTINGS = "/settings/behavior/assistant-threads";
 const EVIDENCE = process.env.ASSISTANT_LIMITS_EVIDENCE_DIR;
 
-async function open(page: Page, path: string, theme: "dark" | "light" = "dark", state = "enabled", delegation = "") {
+async function open(page: Page, path: string, theme: "dark" | "light" = "dark", state = "enabled", delegation = "", evidence = "") {
   await page.emulateMedia({ colorScheme: theme });
-  await page.goto(`/assistants-e2e.html?limits=${state}&accounts=stress&delegation=${delegation}&path=${encodeURIComponent(path)}`);
+  await page.goto(`/assistants-e2e.html?limits=${state}&accounts=stress&delegation=${delegation}&evidence=${evidence}&path=${encodeURIComponent(path)}`);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 }
 
@@ -198,7 +198,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await group.scrollIntoViewIfNeeded();
       await capture(page, "assistant-delegation-empty");
 
-      await open(page, SETTINGS, theme, "enabled", "many");
+      await open(page, SETTINGS, theme, "enabled", "many", "available");
       const active = group.getByRole("button", { name: /^Triage Open Issues Active · Expires / });
       const expired = group.getByRole("button", { name: /^Ship the release notes .* Expired / });
       await expect(group.getByRole("button")).toHaveCount(10);
@@ -213,16 +213,20 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
 
       await expired.click();
       const editor = page.getByRole("dialog", { name: "Decision Delegation" });
+      const approval = editor.getByRole("checkbox", { name: "UI Evidence Approval", exact: true });
       await expect(editor.getByRole("checkbox", { name: "Owner Questions" })).toBeChecked();
       await expect(editor.getByRole("checkbox", { name: "Pull Request Merge" })).toBeChecked();
       await expect(editor.getByRole("checkbox", { checked: true })).toHaveCount(2);
+      await expect(approval).toBeEnabled();
+      await expect(approval).not.toBeChecked();
+      await approval.scrollIntoViewIfNeeded();
       await expectFullyInViewport(editor.getByRole("button", { name: "Revoke Grant" }), "Revoke the existing grant");
       expect(new URL(page.url()).searchParams.get("path")).toMatch(/\/delegation$/);
       await capture(page, "listed-grant-editor");
       await editor.getByRole("button", { name: "Cancel", exact: true }).click();
       await expect(editor).toHaveCount(0);
 
-      await open(page, THREAD, theme, "enabled", "many");
+      await open(page, THREAD, theme, "enabled", "many", "available");
       const threadSettings = await editThread(page);
       const link = threadSettings.getByRole("link", { name: "Decision Delegation", exact: true });
       await expect(link).toHaveAttribute("href", `${THREAD}/delegation`);
@@ -232,6 +236,11 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await link.click();
       await expect(threadSettings).toHaveCount(0);
       await expect(editor.getByRole("checkbox", { checked: true })).toHaveCount(2);
+      await expect(approval).not.toBeChecked();
+      await approval.check();
+      await expect(approval).toHaveAccessibleDescription(/Claude Code.*claude-opus-5-5.*provider may retain/);
+      await expectNoHorizontalOverflow(editor, "Decision Delegation opened from Thread Settings");
+      await expectFullyInViewport(editor.getByRole("button", { name: "Save Grant" }), "Save the selected approval grant");
       await expectFullyInViewport(editor.getByRole("button", { name: "Revoke Grant" }), "Revoke the thread's grant");
       await capture(page, "thread-delegation-editor");
     });
