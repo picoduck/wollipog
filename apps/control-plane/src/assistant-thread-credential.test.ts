@@ -529,15 +529,45 @@ test("removing a thread budget removes implicit caps and keeps explicitly reques
   } finally { await h.close(); }
 });
 
-test("restoring a thread budget preserves the owner's backing session cap", async () => {
+test("raising an exhausted $25 Assistant guardrail updates the thread budget and allows the next launch", async () => {
   const h = await harness();
   try {
     const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
-    const edit = `/api/assistant-threads/${thread.id}/limits`;
-    assert.equal((await h.ownerCall("PUT", edit, { costUsd: null, launchedSessions: 10 })).status, 200);
-    assert.equal(h.svc.setConfig(thread.sessionId, { costBudgetUsd: 25 }).ok, true);
-    assert.equal((await h.ownerCall("PUT", edit, { costUsd: 60, launchedSessions: 10 })).status, 200);
-    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, 25);
+    const env = await h.provision(thread.sessionId);
+    const run = async (id: number) => resultOf((await h.callTools(env, launch(id, h.location.id)))[0]);
+    h.db.raw().prepare("UPDATE sessions SET cost_usd=5 WHERE id=?").run(thread.sessionId);
+    assert.equal((await run(110)).threadBudget.costBudgetUsd, 20);
+    assert.match((await run(111)).error, /whole \$25 budget/);
+    const actor = { kind: "human" as const, id: h.owner.userId };
+    assert.equal(h.svc.setConfig(thread.sessionId, { costBudgetUsd: 250 }, { kind: "agent", id: "child" }).status, 403);
+    const refused = h.svc.setConfig(thread.sessionId, { costBudgetUsd: 24.99, maxToolCalls: 7 }, actor);
+    assert.equal(refused.status, 409);
+    assert.match(refused.error!, /already spent or committed \$25\.00/);
+    assert.equal(h.db.getSession(thread.sessionId)?.maxToolCalls, null);
+    assert.equal(h.threads.get(h.owner, thread.id).usage?.costUsd.limit, 25);
+    const raised = h.svc.setConfig(thread.sessionId, { costBudgetUsd: 250 }, actor);
+    assert.equal(raised.ok, true, raised.error ?? "");
+    assert.equal(raised.data?.assistantThreadBudget?.limitUsd, 250);
+    const next = await run(112);
+    assert.equal(next.receipt.status, "succeeded", JSON.stringify(next));
+    assert.equal(next.threadBudget.costBudgetUsd, 225);
+    assert.equal(h.threads.get(h.owner, thread.id).usage?.costUsd.limit, 250);
+  } finally { await h.close(); }
+});
+
+test("clearing the backing Assistant's guardrail removes the thread budget across later launches", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const env = await h.provision(thread.sessionId);
+    const run = async (id: number) => resultOf((await h.callTools(env, launch(id, h.location.id)))[0]);
+    assert.equal((await run(113)).threadBudget.costBudgetUsd, 25);
+    assert.match((await run(114)).error, /whole \$25 budget/);
+    const cleared = h.svc.setConfig(thread.sessionId, { costBudgetUsd: 0 }, { kind: "human", id: h.owner.userId });
+    assert.equal(cleared.ok, true, cleared.error ?? "");
+    assert.equal((await run(115)).threadBudget.costBudgetUsd, null);
+    assert.equal(h.db.getSession(thread.sessionId)?.costBudgetUsd, null);
+    assert.equal(h.threads.get(h.owner, thread.id).usage?.costUsd.limit, null);
   } finally { await h.close(); }
 });
 
@@ -675,7 +705,7 @@ test("removing a worker's Machine keeps the thread's spend", async () => {
   } finally { await h.close(); }
 });
 
-test("a deleted root keeps its cap held while its tree lives, and the owner's ceiling is never raised", async () => {
+test("a deleted root holds its cap while its tree lives, and released reserves respect the new budget", async () => {
   const h = await harness();
   try {
     const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
@@ -688,11 +718,10 @@ test("a deleted root keeps its cap held while its tree lives, and the owner's ce
     assert.equal(h.svc.delete("s_live_child").ok, true);
     assert.equal(h.db.assistantThreads.costs(thread.id).launchedHeldUsd, 0, "with no member left, only spend is held");
 
-    // The owner sets their own lower ceiling; the thread lowers below it but never raises above it.
-    assert.equal(h.svc.setConfig(thread.sessionId, { costBudgetUsd: 12 }).ok, true);
+    assert.equal(h.svc.setConfig(thread.sessionId, { costBudgetUsd: 12 }, { kind: "human", id: h.owner.userId }).ok, true);
     const small = resultOf((await h.callTools(env, launchWith(52, h.location.id, { config: { costBudgetUsd: 5 } })))[0]);
     assert.equal(h.db.getSession(small.sessionId)!.costBudgetUsd, 5);
-    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, 12, "25 - 5 = 20 would exceed the owner's 12");
+    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, 7, "the new $12 thread budget leaves $7 for the backing session");
     assert.equal(h.svc.delete(small.sessionId).ok, true);
     const next = resultOf((await h.callTools(env, launchWith(53, h.location.id, { config: { costBudgetUsd: 1 } })))[0]);
     assert.equal(next.receipt.status, "succeeded");
@@ -700,17 +729,16 @@ test("a deleted root keeps its cap held while its tree lives, and the owner's ce
   } finally { await h.close(); }
 });
 
-test("round-4 scenario: the owner's $10 ceiling survives two launches, their deletion and an invalid launch", async () => {
+test("the owner's $10 budget survives a launch, its deletion and an invalid launch", async () => {
   const h = await harness();
   try {
     const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
     const env = await h.provision(thread.sessionId);
-    assert.equal(h.svc.setConfig(thread.sessionId, { costBudgetUsd: 10 }).ok, true);
+    assert.equal(h.svc.setConfig(thread.sessionId, { costBudgetUsd: 10 }, { kind: "human", id: h.owner.userId }).ok, true);
     const first = resultOf((await h.callTools(env, launchWith(61, h.location.id, { config: { costBudgetUsd: 10 } })))[0]);
     const second = resultOf((await h.callTools(env, launchWith(62, h.location.id, { config: { costBudgetUsd: 10 } })))[0]);
-    assert.equal(h.db.getSession(thread.sessionId)!.costBudgetUsd, 5);
+    assert.match(second.error, /whole \$10 budget/);
     assert.equal(h.svc.delete(first.sessionId).ok, true);
-    assert.equal(h.svc.delete(second.sessionId).ok, true);
     const invalid = resultOf((await h.callTools(env, launchWith(63, h.location.id, { agentId: "no-such-agent" })))[0]);
     assert.equal(invalid.receipt.status, "failed");
     assert.ok(h.db.getSession(thread.sessionId)!.costBudgetUsd! <= 10, "the owner's ceiling is never exceeded");

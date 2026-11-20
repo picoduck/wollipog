@@ -2219,13 +2219,23 @@ function assistantLaunchPolicy(threadId: string): import("@wollipog/protocol").A
   return { threadId, guide: WOLLIPOG_ASSISTANT_SKILL.content };
 }
 
-function assistantThreadBudgetRefusal(costUsd: number): string {
-  return `This Wollipog Assistant thread has spent or committed its whole $${costUsd} budget, so it cannot launch another session. ` +
-    "Tell your owner they can change the budget in Thread Limits.";
+export function assistantThreadBudgetRefusal(costUsd: number): string {
+  return `This Wollipog Assistant thread has spent or committed its whole $${costUsd} budget, so it cannot launch another session.`;
 }
 
-function floorBudgetCents(usd: number): number {
+export function assistantThreadLaunchLimitMessage(launched: number, limit: number | null): string | null {
+  return limit !== null && launched >= limit
+    ? `This Wollipog Assistant thread has launched ${launched} of the ${limit} sessions it may launch, so it cannot launch another.`
+    : null;
+}
+
+export function floorBudgetCents(usd: number): number {
   return Math.floor(usd * 100 + 1e-8) / 100;
+}
+
+function assistantThreadBackingCap(limitUsd: number | null, heldUsd: number): number | null {
+  // A zero runner threshold means unlimited. Use one cent when launched work holds the remainder.
+  return limitUsd === null ? null : Math.max(0.01, floorBudgetCents(limitUsd - heldUsd));
 }
 
 /** An Orchestrator's children would run outside the thread's launch count. */
@@ -3727,13 +3737,10 @@ export class SessionsService {
     const { backingSpentUsd, launchedHeldUsd } = this.db.assistantThreads.costs(thread.id);
     // A reservation whose launch then failed, or a cap a deleted session no longer holds, goes back
     // to the backing assistant before this launch takes its share.
-    const settled = this.rebalanceAssistantBacking(launch, limitUsd, launchedHeldUsd);
+    const settled = this.rebalanceAssistantBacking(launch.backingSessionId, limitUsd, launchedHeldUsd);
     if (!settled.ok) return { refusal: settled.error ?? "The thread's budget could not be settled." };
-    // A launch takes from what the backing assistant has not spent and launched work does not
-    // hold, and never more than the backing session's own remaining cap. Whole cents, rounded down.
-    const backingCap = thread.session_id ? this.db.getSession(thread.session_id)?.costBudgetUsd ?? null : null;
-    const unheld = limitUsd - launchedHeldUsd - backingSpentUsd;
-    const remainingUsd = floorBudgetCents(Math.min(unheld, backingCap === null ? unheld : backingCap - backingSpentUsd));
+    // A launch takes from what the backing assistant has not spent and launched work does not hold.
+    const remainingUsd = floorBudgetCents(limitUsd - launchedHeldUsd - backingSpentUsd);
     if (remainingUsd < 0.01) return { refusal: assistantThreadBudgetRefusal(limitUsd) };
     return { ...launch, budget: { limitUsd, heldUsd: launchedHeldUsd, remainingUsd } };
   }
@@ -3742,65 +3749,59 @@ export class SessionsService {
     if (limit === null) return null;
     const launched = this.db.assistantThreads.launchedSessionIds(threadId).length +
       this.db.assistantOwnerConfirmations.launchedCampaignIds(threadId).length;
-    return launched >= limit ? `This Wollipog Assistant thread has launched ${launched} of the ${limit} sessions it may launch, ` +
-      "so it cannot launch another. Tell your owner they can change the launch limit in Thread Limits." : null;
+    return assistantThreadLaunchLimitMessage(launched, limit);
   }
 
-  /** The authenticated thread-owner route is the only caller. Existing launch allowances and
-   * spend are senior to a new finite thread budget. */
+  /** Both owner-facing editors write the thread limit. Existing spend and launches take priority. */
   updateAssistantThreadLimits(
-    row: Pick<import("./assistant-thread-store.js").ThreadRow, "id" | "session_id" | "cost_limit_usd">,
+    row: Pick<import("./assistant-thread-store.js").ThreadRow, "id" | "session_id" | "cost_limit_usd" | "launch_limit">,
     limits: AssistantThreadLimits,
-  ): ServiceResult<never> | { ok: true } {
-    if (row.cost_limit_usd !== limits.costUsd) {
-      const { backingSpentUsd, launchedHeldUsd } = this.db.assistantThreads.costs(row.id);
-      if (limits.costUsd !== null) {
-        const committed = backingSpentUsd + launchedHeldUsd;
-        if (floorBudgetCents(limits.costUsd - committed) < 0) {
-          return fail(`The thread has already spent or committed $${(Math.ceil(committed * 100 - 1e-8) / 100).toFixed(2)}. Choose a budget at least that high.`, 409);
-        }
-        if (row.cost_limit_usd === null && this.db.assistantThreads.hasUncappedWork(row.id)) {
-          return fail("This thread still has work launched without a cost cap. Delete those launched sessions and their descendants before setting a budget.", 409);
-        }
+    edit?: { config: SessionConfig; actor: GovernanceActor },
+  ): ServiceResult<SessionView> {
+    const backing = row.session_id ? this.db.getSession(row.session_id) : null;
+    if (!backing || backing.archived) return fail("Limits cannot be changed on an archived thread.", 409);
+    const { backingSpentUsd, launchedHeldUsd } = this.db.assistantThreads.costs(row.id);
+    if (row.cost_limit_usd !== limits.costUsd && limits.costUsd !== null) {
+      const committed = backingSpentUsd + launchedHeldUsd;
+      if (floorBudgetCents(limits.costUsd - committed) < 0) {
+        return fail(`The thread has already spent or committed $${(Math.ceil(committed * 100 - 1e-8) / 100).toFixed(2)}. Choose a budget at least that high.`, 409);
       }
-      return this.db.assistantThreadLimitsTransaction(() => {
-        const updated = this.rebalanceAssistantBacking({ threadId: row.id, backingSessionId: row.session_id },
-          limits.costUsd, launchedHeldUsd);
-        if (!updated.ok) return updated;
-        this.db.assistantThreads.setLimits(row.id, limits);
-        return { ok: true };
-      });
+      if (row.cost_limit_usd === null && this.db.assistantThreads.hasUncappedWork(row.id)) {
+        return fail("This thread still has work launched without a cost cap. Delete those launched sessions and their descendants before setting a budget.", 409);
+      }
     }
-    this.db.assistantThreads.setLimits(row.id, limits);
-    return { ok: true };
+    return this.db.assistantThreadLimitsTransaction(() => {
+      // The session publish reads the thread row. Store the new limits before it and restore on
+      // refusal, so the persisted limits and the runner's derived cap advance together.
+      this.db.assistantThreads.setLimits(row.id, limits);
+      const target = assistantThreadBackingCap(limits.costUsd, launchedHeldUsd);
+      const changed = (backing.costBudgetUsd ?? null) !== target;
+      if (edit || changed) {
+        const { costBudgetUsd: _threadBudget, ...other } = edit?.config ?? {};
+        const result = this.applySessionConfig(backing.id, { ...other, ...(changed ? { costBudgetUsd: target ?? 0 } : {}) }, edit?.actor);
+        if (!result.ok) this.db.assistantThreads.setLimits(row.id, { costUsd: row.cost_limit_usd, launchedSessions: row.launch_limit });
+        return result;
+      }
+      const updated = this.db.getSession(backing.id)!;
+      this.hub.sessionChanged(updated);
+      return ok(updated);
+    });
   }
 
   /** Sets the backing assistant's cost cap to what the thread's budget leaves it while launched
-   * work holds `heldUsd`, so the assistant and its launched sessions together stay within it. A
-   * cap the thread set itself follows the budget both ways; one the owner changed is only lowered. */
+   * work holds `heldUsd`, so the assistant and its launched sessions share one budget. */
   private rebalanceAssistantBacking(
-    launch: { threadId: string; backingSessionId: string | null },
+    backingSessionId: string | null,
     limitUsd: number | null,
     heldUsd: number,
   ): ServiceResult<never> | { ok: true } {
-    if (!launch.backingSessionId) return { ok: true };
-    const backing = this.db.getSession(launch.backingSessionId);
+    if (!backingSessionId) return { ok: true };
+    const backing = this.db.getSession(backingSessionId);
     if (!backing) return { ok: true };
-    const managed = this.db.assistantThreads.backingCap(launch.threadId);
-    const current = backing.costBudgetUsd ?? null;
-    // A cap other than the one the thread last set is the owner's: remember it as a ceiling the
-    // thread never raises the cap above, even after lowering it further itself.
-    if (current !== null && (managed === null || Math.abs(current - managed) >= 0.005)) {
-      this.db.assistantThreads.recordBackingOwnerCap(launch.threadId, current);
-    }
-    const ownerCap = this.db.assistantThreads.backingOwnerCap(launch.threadId);
-    const target = limitUsd === null ? ownerCap
-      : Math.max(0.01, floorBudgetCents(Math.min(limitUsd - heldUsd, ownerCap ?? Number.POSITIVE_INFINITY)));
-    if (current === target) return { ok: true };
-    const updated = this.setConfig(backing.id, { costBudgetUsd: target ?? 0 });
-    if (!updated.ok) return fail(`The backing session's budget could not be updated: ${updated.error ?? "unknown error"}.`, 409);
-    this.db.assistantThreads.setBackingCap(launch.threadId, target);
-    return { ok: true };
+    const target = assistantThreadBackingCap(limitUsd, heldUsd);
+    if ((backing.costBudgetUsd ?? null) === target) return { ok: true };
+    const updated = this.applySessionConfig(backing.id, { costBudgetUsd: target ?? 0 });
+    return updated.ok ? { ok: true } : fail(`The backing session's budget could not be updated: ${updated.error ?? "unknown error"}.`, 409);
   }
 
   /** Sets a member of a thread's launched tree to its allowance less what its children hold, and
@@ -5521,7 +5522,7 @@ export class SessionsService {
       // backing assistant's own cap shrinks by it, so all of the thread's caps together never exceed
       // its budget. Refuse rather than launch unreserved.
       const { limitUsd, heldUsd } = threadLaunch.budget;
-      const reserved = this.rebalanceAssistantBacking(threadLaunch, limitUsd, heldUsd + (config.costBudgetUsd ?? 0));
+      const reserved = this.rebalanceAssistantBacking(threadLaunch.backingSessionId, limitUsd, heldUsd + (config.costBudgetUsd ?? 0));
       if (!reserved.ok) return reserved;
     }
     if (threadMemberParentId) {
@@ -6749,12 +6750,18 @@ export class SessionsService {
     if (isRetiredCodexExec(session)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
     const budgetError = this.db.campaignBudgets.admissionError(sessionId);
     if (budgetError) return fail(budgetError, 409);
-    const requestedConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
+    let requestedConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
     const budgetConfigError = this.campaignBudgetConfigError(session, requestedConfig);
     if (budgetConfigError) return campaignRefusalFail(budgetConfigError);
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before sending a message", 409);
     const configInputError = sessionGuardrailConfigError(requestedConfig);
     if (configInputError) return fail(configInputError, 400);
+    if (session.assistantThreadBudget && requestedConfig?.costBudgetUsd !== undefined) {
+      // Older dashboards repeat the last Guardrails edit with the next prompt. That budget has
+      // already been applied, and must never overwrite the backing session's derived cap.
+      const { costBudgetUsd: _threadBudget, ...other } = requestedConfig;
+      requestedConfig = other;
+    }
     if (!snapshotCommand) {
       const campaignBehaviorError = this.campaignChildBehaviorError(session, requestedConfig);
       if (campaignBehaviorError) return campaignRefusalFail(campaignBehaviorError);
@@ -7795,6 +7802,27 @@ export class SessionsService {
 
   /** Change model/effort/approval mode mid-session (applies to the next turn). */
   setConfig(
+    sessionId: string,
+    config: SessionConfig,
+    actor: GovernanceActor = { kind: "human", id: "local" },
+  ): ServiceResult<SessionView> {
+    const inputError = sessionGuardrailConfigError(config);
+    if (inputError) return fail(inputError, 400);
+    const thread = config.costBudgetUsd === undefined ? null : this.db.assistantThreads.forSession(sessionId);
+    if (!thread) return this.applySessionConfig(sessionId, config, actor);
+    if (actor.kind !== "human" || actor.id !== thread.owner_user_id ||
+        this.db.operatingHumanPrincipal(thread.owner_user_id, thread.organization_id)?.role !== "owner") {
+      return fail("Only the Assistant thread's owner can change its budget.", 403);
+    }
+    const requested = config.costBudgetUsd!;
+    const limit = requested > 0 ? requested : null;
+    if (limit !== null && (!Number.isSafeInteger(Math.round(limit * 100)) || Number(limit.toFixed(2)) !== limit)) {
+      return fail("Enter a thread budget in whole cents.", 400);
+    }
+    return this.updateAssistantThreadLimits(thread, { costUsd: limit, launchedSessions: thread.launch_limit }, { config, actor });
+  }
+
+  private applySessionConfig(
     sessionId: string,
     config: SessionConfig,
     actor: GovernanceActor = { kind: "human", id: "local" },
@@ -20169,6 +20197,9 @@ export class SessionsService {
               ? session.costBudgetUsd
               : Math.max(session.costBudgetUsd, observed) + step;
           }
+          if (session.assistantThreadBudget && nextConfig.costBudgetUsd !== (session.costBudgetUsd ?? null)) {
+            return fail("Change the Assistant thread budget in Thread Settings to continue.", 409);
+          }
         } else {
           const step = session.maxToolCallsStep ?? session.maxToolCalls;
           if (pending.runnerGuardrail && session.maxToolCalls == null) {
@@ -21679,7 +21710,9 @@ export class SessionsService {
     }
     const existing = pending.find((request) =>
       request.kind === message.kind && !request.runnerGuardrail);
-    const title = message.kind === "cost_budget"
+    const threadBudget = message.kind === "cost_budget" && session.assistantThreadBudget;
+    const title = threadBudget ? "The Assistant thread budget has been reached. Change it in Thread Settings to continue."
+      : message.kind === "cost_budget"
       ? `Runner paused at the $${message.threshold.toFixed(2)} cost threshold. Continue with the current guardrails?`
       : `Runner paused at ${message.threshold} distinct tool calls. Continue with the current guardrails?`;
     const runnerGuardrail = {
@@ -21698,7 +21731,7 @@ export class SessionsService {
       kind: message.kind,
       title,
       options: [
-        { optionId: "continue", name: "Continue", kind: "allow_once" },
+        ...(threadBudget ? [] : [{ optionId: "continue", name: "Continue", kind: "allow_once" } as const]),
         { optionId: "cancel", name: "Stop", kind: "reject_once" },
       ],
       runnerGuardrail,
@@ -21881,6 +21914,10 @@ export class SessionsService {
     if (!ask) return false;
     const occupied = pendingRequests(s.pendingApproval);
     const approval = approvalForDecision(ask, sessionId, now);
+    if (ask.rule.kind === "cost_budget" && s.assistantThreadBudget) {
+      approval.title = "The Assistant thread budget has been reached. Change it in Thread Settings to continue.";
+      approval.options = approval.options.filter((option) => option.optionId !== "continue");
+    }
     if (s.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
     // A control-plane-only card must also stop the runner draining queued prompts behind the
     // turn it parks; the runner-owned thresholds already tripped on the runner itself.

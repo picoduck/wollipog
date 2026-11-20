@@ -10,10 +10,11 @@ import { Skeleton } from "./common.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
 
-export function ChangeAssistantThreadAccountDialog({ thread, onClose, onChanged }: {
+export function ChangeAssistantThreadAccountDialog({ thread, onClose, onChanged, inline = false }: {
   thread: AssistantThread;
   onClose: () => void;
   onChanged: (thread: AssistantThread) => void;
+  inline?: boolean;
 }) {
   const api = useApi();
   const [choices, setChoices] = useState<AssistantThreadAccountChoices | null>(null);
@@ -49,17 +50,13 @@ export function ChangeAssistantThreadAccountDialog({ thread, onClose, onChanged 
       setBusy(false);
     }
   };
-  return (
-    <Modal title="Change Account" onClose={busy ? () => {} : onClose}
-      description="Restart this thread on another account. Its existing messages and launched work stay here."
-      footer={(
-        <>
-          <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
-          <BusyButton className="btn primary" busy={busy} disabled={!account}
-            progress="Changing the account…" onClick={() => void change()}>Change Account</BusyButton>
-        </>
-      )}
-    >
+  const description = "Restart this thread on another account. Its existing messages and launched work stay here.";
+  const actions = <>
+    <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
+    <BusyButton className="btn primary" busy={busy} disabled={!account}
+      progress="Changing the account…" onClick={() => void change()}>Change Account</BusyButton>
+  </>;
+  const fields = (
       <div className="form">
         {!choices && !failure && <Skeleton rows={2} announce="Loading accounts…" />}
         {choices && <>
@@ -70,6 +67,12 @@ export function ChangeAssistantThreadAccountDialog({ thread, onClose, onChanged 
         </>}
         {failure && <Notice tone="danger" role="alert">{failure}</Notice>}
       </div>
-    </Modal>
   );
+  return inline ? <div className="form">
+    <p className="muted">{description}</p>
+    {fields}
+    <div className="field-row">{actions}</div>
+  </div> : <Modal title="Change Account" onClose={busy ? () => {} : onClose} description={description} footer={actions}>
+    {fields}
+  </Modal>;
 }

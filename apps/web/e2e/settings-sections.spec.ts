@@ -26,6 +26,7 @@ const SETTLED: Record<SettingsSection, (page: Page) => Locator> = {
   approvals: (page) => page.getByRole("button", { name: /^Review Agent-Created Sessions/ }),
   reviews: (page) => page.getByRole("spinbutton", { name: "Valid Rounds", exact: true }),
   orchestrator: (page) => page.getByRole("radiogroup", { name: "Completion" }),
+  assistant: (page) => page.getByRole("button", { name: /Edit Harness and Account/ }),
   network: (page) => page.getByRole("switch", { name: "Tailnet Access" }),
   // Eligible Now shows once the organization's policy has loaded.
   storage: (page) => page.getByText("128 sessions, about 604,115 events", { exact: true }),

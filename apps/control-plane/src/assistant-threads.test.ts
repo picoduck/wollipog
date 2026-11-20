@@ -342,7 +342,7 @@ test("an older runner or a missing harness refuses the thread with guidance and 
     assert.equal((await h.call("POST", "/api/assistant-threads", { role: "orchestrator" })).status, 400);
     assert.equal(h.sessionCount(), 0);
     const defaults = (await h.call("GET", "/api/assistant-threads/defaults")).body;
-    assert.deepEqual(defaults, { harness: "claude-code", harnesses: [
+    assert.deepEqual(defaults, { harness: "claude-code", launchDefaults: { harness: "claude-code", providerAccount: null }, harnesses: [
       { id: "claude-code", label: "Claude Code", available: true,
         accountSelection: { runnerId: "r", workspaceId: "w", accounts: [] } },
       { id: "codex", label: "Codex", available: false, reason: "Install Codex on an online Machine to start a thread with it." },
@@ -350,18 +350,54 @@ test("an older runner or a missing harness refuses the thread with guidance and 
   } finally { await h.close(); }
 });
 
-test("the default harness follows the owner's saved Orchestrator Child Harness", async () => {
-  const h = await harness({ agents: [claude, codex] });
+test("the former effective harness is migrated once, independently of later Orchestrator changes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-thread-defaults-"));
+  const dbPath = join(dir, "control-plane.sqlite");
+  const first = ControlPlaneDb.open(dbPath);
+  const { userId } = first.localIdentityContext();
+  const defaults = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
+  defaults.behavior.childHarness = { agentId: "codex", driver: "codex-app-server", context: { kind: "native" } };
+  first.setOrchestratorDefaults(userId, defaults);
+  first.raw().prepare("DELETE FROM control_plane_metadata WHERE key='assistant_thread_launch_defaults_migrated'").run();
+  first.close();
+  const h = await harness({ agents: [claude, codex], dbPath });
   try {
-    const defaults = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
-    defaults.behavior.childHarness = { agentId: "codex", driver: "codex-app-server", context: { kind: "native" } };
-    h.db.setOrchestratorDefaults(h.owner.userId, defaults, Date.now());
+    h.db.setOrchestratorDefaults(userId, DEFAULT_ORCHESTRATOR_DEFAULTS);
     assert.equal((await h.call("GET", "/api/assistant-threads/defaults")).body.harness, "codex");
     const { body } = await h.call("POST", "/api/assistant-threads", {});
     assert.equal(body.thread.harness, "codex");
     assert.equal(h.db.getSession(body.thread.sessionId)!.agentId, "codex");
-    const chosen = await h.call("POST", "/api/assistant-threads", { harness: "claude-code" });
+    const settings = "/api/assistant-threads/defaults/launch";
+    h.as(null);
+    assert.equal((await h.call("PUT", settings, { harness: "claude-code", providerAccount: null })).status, 403);
+    assert.equal(isAgentControlApiRouteAllowed("PUT", settings, "assistant"), false);
+    h.as(h.owner);
+    assert.equal((await h.call("PUT", settings, { harness: "claude-code", providerAccount: null })).status, 200);
+    const chosen = await h.call("POST", "/api/assistant-threads", {});
     assert.equal(h.db.getSession(chosen.body.thread.sessionId)!.agentId, "claude");
+    assert.equal(h.db.getSession(body.thread.sessionId)!.agentId, "codex");
+  } finally {
+    await h.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the Assistant default account applies to new threads, with an explicit Machine Policy override", async () => {
+  const h = await harness({ accounts, agents: [{ ...claude,
+    providerAccountReadiness: { defaultAuthStatus: "authenticated", readyAccountIds: ["work", "studio"] },
+  }] });
+  try {
+    assert.ok(h.db.setMachineProviderAccountDefault("r", "claude", "work", 0, Date.now()).ok);
+    const launchDefaults = "/api/assistant-threads/defaults/launch";
+    const chosen = { harness: "claude-code", providerAccount: { runnerId: "r", accountRef: accountRef("studio") } };
+    assert.equal((await h.call("PUT", launchDefaults, { ...chosen, providerAccount: { runnerId: "r", accountRef: accountRef("sign-in") } })).status, 409);
+    const saved = await h.call("PUT", launchDefaults, chosen);
+    assert.equal(saved.status, 200, saved.raw);
+    assert.deepEqual(saved.body.launchDefaults, chosen);
+    const implicit = await h.call("POST", "/api/assistant-threads", {});
+    assert.equal(implicit.body.thread.providerAccountLabel, "Studio Subscription");
+    const policy = await h.call("POST", "/api/assistant-threads", { providerAccountRef: null });
+    assert.equal(policy.body.thread.providerAccountLabel, "Work Subscription");
   } finally { await h.close(); }
 });
 

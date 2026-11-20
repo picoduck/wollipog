@@ -12,7 +12,7 @@ import {
   type AssistantThread,
 } from "../assistant-threads.js";
 import { useReportEntityTitle } from "../entity-title.js";
-import { relativeTime } from "../format.js";
+import { effortLabel, relativeTime, resolvedModelLabel } from "../format.js";
 import { formatUsd } from "../guardrail-values.js";
 import { backLabel, destination } from "../navigation.js";
 import { statusMeta } from "../status-meta.js";
@@ -21,6 +21,7 @@ import { useTimelineClock } from "../timeline-clock.js";
 import { pendingAssistantConfirmations } from "../assistant-confirmations.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
 import { AssistantConfirmationCard } from "./AssistantConfirmationCard.js";
+import { ASSISTANT_DEFAULTS_VIEW, AssistantSettingsLink } from "./AssistantSettingsLink.js";
 import { AssistantThreadLimitsDialog } from "./AssistantThreadLimitsDialog.js";
 import { AssistantDecisionDelegationDialog } from "./AssistantDecisionDelegationDialog.js";
 import { AssistantDecisionHistoryDialog } from "./AssistantDecisionHistory.js";
@@ -72,8 +73,9 @@ function newThreadBlock(list: ListState): { title: string; message: string } | u
  * routes. Every thread comes from the Thread API; a control plane without it (404) shows the empty
  * section and New Thread explains, never a failure.
  */
-export function AssistantsView({ threadId, rightPanel }: {
+export function AssistantsView({ threadId, limits, rightPanel }: {
   threadId?: string;
+  limits?: true;
   /** The shell's session panel (Files, Changes, Subagents), shared with the session page. */
   rightPanel: RightPanelState;
 }) {
@@ -88,7 +90,6 @@ export function AssistantsView({ threadId, rightPanel }: {
   const [missing, setMissing] = useState(false);
   const [creating, setCreating] = useState(false);
   const [renaming, setRenaming] = useState<AssistantThread | null>(null);
-  const [editingLimits, setEditingLimits] = useState<AssistantThread | null>(null);
   const [editingDelegation, setEditingDelegation] = useState<AssistantThread | null>(null);
   const [viewingDelegationHistory, setViewingDelegationHistory] = useState<string | null>(null);
   const [archiving, setArchiving] = useState(false);
@@ -154,6 +155,11 @@ export function AssistantsView({ threadId, rightPanel }: {
   const threads = list.kind === "ready" ? list.threads : [];
   const listed = threadId === undefined ? undefined : threads.find((thread) => thread.id === threadId);
   const selected = listed ?? (extra?.id === threadId ? extra : undefined);
+  const model = useStoreSelector((state) => {
+    const backing = selected ? state.sessions.get(selected.sessionId) : undefined;
+    return backing?.resolvedModel ?? backing?.model;
+  });
+  const effort = useStoreSelector((state) => selected ? state.sessions.get(selected.sessionId)?.effort : undefined);
   // The window title names the open thread.
   useReportEntityTitle(
     threadId === undefined ? { name: "assistants" } : { name: "assistants", threadId },
@@ -269,7 +275,7 @@ export function AssistantsView({ threadId, rightPanel }: {
     ...(thread.status === "archived" ? [] : [
       ...(thread.accountChangeSupported ? [{ label: "Change Account", onClick: () => setChangingAccount(thread) }] : []),
       { label: "Rename", onClick: () => setRenaming(thread) },
-      ...(thread.limitsEditable && thread.usage ? [{ label: "Thread Limits", onClick: () => setEditingLimits(thread) }] : []),
+      ...(thread.limitsEditable && thread.usage ? [{ label: "Thread Limits", onClick: () => navigate({ name: "assistants", threadId: thread.id, limits: true }) }] : []),
       ...(thread.decisionDelegation ? [{ label: "Decision Delegation", onClick: () => setEditingDelegation(thread) }] : []),
       { label: "Archive", disabled: archiving, onClick: () => void archive(thread) },
     ]),
@@ -376,11 +382,20 @@ export function AssistantsView({ threadId, rightPanel }: {
           }}
         />
       )}
-      {editingLimits?.usage && (
+      {limits && selected && (
         <AssistantThreadLimitsDialog
-          limits={{ costUsd: editingLimits.usage.costUsd.limit, launchedSessions: editingLimits.usage.launchedSessions.limit }}
-          onClose={() => setEditingLimits(null)}
-          onSave={async (limits) => replace((await api.setAssistantThreadLimits(editingLimits.id, limits)).thread)}
+          key={selected.id}
+          thread={selected}
+          model={model ? resolvedModelLabel(model) : undefined}
+          effort={effort ? effortLabel(effort) : undefined}
+          limits={selected.usage && { costUsd: selected.usage.costUsd.limit, launchedSessions: selected.usage.launchedSessions.limit }}
+          onClose={() => navigate({ name: "assistants", threadId: selected.id }, { replace: true })}
+          onNewThread={() => {
+            navigate({ name: "assistants", threadId: selected.id }, { replace: true });
+            setCreating(true);
+          }}
+          onAccountChanged={replace}
+          onSave={async (next) => replace((await api.setAssistantThreadLimits(selected.id, next)).thread)}
         />
       )}
       {editingDelegation?.decisionDelegation && <AssistantDecisionDelegationDialog
@@ -498,6 +513,10 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
   const pending = pendingAssistantConfirmations([thread]);
   const usage = thread.usage;
   const launches = usage?.launchedSessions;
+  const launchRefusal = thread.launchLimitRefusal ?? (launches?.limit != null && launches.used >= launches.limit && thread.status !== "archived"
+    ? "This thread has reached its session launch limit." : null);
+  const settings = (className?: string) => <AssistantSettingsLink className={className}
+    view={{ name: "assistants", threadId: thread.id, limits: true }}>Thread Settings</AssistantSettingsLink>;
   const launchSummary = launches?.limit === 0 ? `${launches.used} launched · Launches Paused`
     : launches?.limit === null ? `${launches.used} launched · No Launch Limit`
     : launches ? `${launches.used} of ${launches.limit} sessions launched` : null;
@@ -507,6 +526,7 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
         <div className="assistant-thread-title-row">
           <h2 className="assistant-thread-title" title={assistantThreadTitle(thread)}>{assistantThreadTitle(thread)}</h2>
           <StatusBadge meta={meta} />
+          {!launchRefusal && settings("btn sm ghost")}
           <ActionsMenu label="Thread Actions" items={menu} />
         </div>
       )}
@@ -528,7 +548,12 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
             : `${formatUsd(usage.costUsd.used)} of ${formatUsd(usage.costUsd.limit)} spent`}</li>
           <li>{launchSummary}</li>
         </>}
+        {compact && !launchRefusal && <li>{settings("link")}</li>}
       </ul>
+      {launchRefusal ? <Notice tone="warning" role="status" title="Thread Limit Reached" actions={<>
+        {settings()}
+        <AssistantSettingsLink view={ASSISTANT_DEFAULTS_VIEW}>Assistant Defaults</AssistantSettingsLink>
+      </>}>{launchRefusal}</Notice> : null}
       <AssistantWorkCards
         sessionIds={thread.launchedSessionIds}
         campaignIds={thread.launchedCampaignIds}

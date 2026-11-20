@@ -1175,6 +1175,8 @@ function SessionDetailLoaded({
 }: SessionDetailProps & { session: SessionView }) {
   const privacy = useAccountEmailPrivacy();
   const api = useApi();
+  const guardrailsRoute = useStoreSelector((state) =>
+    state.view.name === "session" && state.view.id === sessionId && state.view.guardrails === true);
   const isMobile = useIsMobile();
   const isMobileRef = useRef(isMobile);
   isMobileRef.current = isMobile;
@@ -6125,9 +6127,10 @@ function SessionDetailLoaded({
     async (patch: Partial<SessionConfig>) => {
       if (configRefusal !== null) throw new Error(configRefusal);
       await api.setConfig(sessionId, patch);
-      pendingConfig.current = { ...pendingConfig.current, ...patch };
+      const { costBudgetUsd: _threadBudget, ...other } = patch;
+      pendingConfig.current = { ...pendingConfig.current, ...(session.assistantThreadBudget ? other : patch) };
     },
-    [api, configRefusal, sessionId],
+    [api, configRefusal, session.assistantThreadBudget, sessionId],
   );
 
   const planActive = session.permissionMode === "plan";
@@ -8285,6 +8288,10 @@ function SessionDetailLoaded({
         >
           {pinnedSummaryContent}
         </Modal>
+      )}
+      {guardrailsRoute && mode === "expanded" && (
+        <GuardrailsDialog session={session} configRefusal={configRefusal} onSave={saveGuardrails}
+          onClose={() => navigate({ name: "session", id: sessionId }, { replace: true })} />
       )}
       {orchestratorControlsOpen && sessionRole(session) === "orchestrator" && (
         <OrchestratorControlsDialog

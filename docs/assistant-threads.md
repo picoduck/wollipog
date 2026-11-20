@@ -13,8 +13,9 @@ owner's own threads; another owner gets 404. Responses never carry a credential 
 | Route | Result |
 | --- | --- |
 | `GET /api/assistant-threads` | `{ threads }`, newest activity first. Archived threads appear only with `?includeArchived=true`. |
-| `GET /api/assistant-threads/defaults` | `{ harness, harnesses: [{ id, label, available, reason? }] }` |
-| `POST /api/assistant-threads` | Body `{ harness?, title?, runnerId?, workspaceId? }`, result `{ thread }`. |
+| `GET /api/assistant-threads/defaults` | The saved launch defaults and the harness and account choices currently available. |
+| `PUT /api/assistant-threads/defaults/launch` | Saves `{ harness, providerAccount }` for new threads. A null account uses Machine Policy. |
+| `POST /api/assistant-threads` | Body `{ harness?, title?, runnerId?, workspaceId?, providerAccountRef? }`, result `{ thread }`. |
 | `GET /api/assistant-threads/:threadId` | `{ thread }` |
 | `PATCH /api/assistant-threads/:threadId` | Body `{ title }`, result `{ thread }`. |
 | `PUT /api/assistant-threads/:threadId/delegation` | Body `{ revision, grant }`, result `{ thread }`. Use the current `decisionDelegation.revision` and set `grant` to null to revoke. |
@@ -23,12 +24,13 @@ owner's own threads; another owner gets 404. Responses never carry a credential 
 | `POST /api/assistant-threads/:threadId/confirmations/:confirmationId/approve` | `{ confirmation, thread }`. Approve Once: runs the bound command, then answers with how it ended. See Owner Confirmations. |
 | `POST /api/assistant-threads/:threadId/confirmations/:confirmationId/deny` | `{ confirmation, thread }`. Refuses the bound command. |
 
-`harness` defaults to the owner's saved Orchestrator Child Harness: Codex when it names a Codex
-driver, otherwise Claude Code. Without `runnerId`, the first online Machine the owner can use that
-supports the role, has the harness installed natively and has a Location is chosen; without
-`workspaceId`, that Machine's first Location. A Machine whose runner predates protocol v383, or one
-without the harness, is refused with HTTP 409 and guidance. Nothing is launched in that case, and
-never an ordinary session in its place.
+`harness` uses the owner's Assistant default. On upgrade, it starts with the former effective
+choice. New owners start with Claude Code. A saved provider account is tied to its Machine and
+harness. An explicit null account uses Machine Policy. Without a saved account or selected Machine,
+Wollipog chooses the first online Machine the owner can use that supports the role, has the harness
+installed natively and has a Location. Without `workspaceId`, it uses that Machine's first Location.
+A Machine whose runner predates protocol v383, or one without the harness, is refused with HTTP 409
+and guidance.
 
 Without a `title`, the thread shows "New Thread" until its session is named by the first message.
 
@@ -59,17 +61,20 @@ Each change is published to the owner's dashboards as the `assistant_thread_upse
 
 ## Thread Limits
 
-Owners can set a default cost budget and session launch limit under **Settings → Behavior →
-Assistant Threads**. The defaults are $25 and 10 launches, and each new thread keeps the limits
-it starts with. Threads created before these settings also keep $25 and 10 launches.
+Owners can set a default harness, provider account, cost budget, and session launch limit under
+**Settings → Assistant → Thread Defaults**. The starting limits are $25 and 10 launches. Each
+thread keeps the limits it starts with, including threads created before limits were editable.
+The same section manages Assistant Connections.
 
-To edit an existing thread, open **Thread Actions → Thread Limits**. The header shows what the
-thread has spent and launched. Clearing a field removes its limit, and a launch limit of zero
-pauses new launches. A budget below spend and outstanding commitments is refused. Setting a
+To edit an existing thread, open **Thread Settings** from its header. The settings show what the
+thread has spent and launched. Choose **No Limit** to remove either limit, or set the launch limit
+to zero to pause new launches. A budget below spend and outstanding commitments is refused. Setting a
 finite budget again requires that any work launched without a cap and its descendants have been
 deleted. These settings are owner-only.
 
-- The backing session starts with the thread budget as its own cost budget, when set.
+- The backing session's **Guardrails** editor reads and updates the same thread budget. Its
+  enforcement threshold is calculated from that budget after subtracting reservations for work
+  the thread has launched.
 - While a thread's Assistant call executes, every session it creates counts as a launch of that
   thread. This covers `session_launch`, side chats and every other operation that passes through
   session creation inside the call. A launch is refused with a message to the
@@ -83,8 +88,7 @@ deleted. These settings are owner-only.
     just before the session is created. The launch is refused if the cap cannot be lowered. All
     of the thread's caps together therefore never exceed its budget.
   - Each admission first settles the backing cap to what launched work holds. A reservation whose
-    launch then failed, or the unspent cap of a deleted launch, goes back to the assistant. A cap
-    the owner changed is only ever lowered.
+    launch then failed, or the unspent cap of a deleted launch, goes back to the assistant.
   - Each launched tree holds the larger of its spend and its root's launch cap (or its current cap,
     if the owner raised it), even after the root's own cap is carved down for its children. A tree
     is the launched session and its children at every depth, recorded when each is created.

@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { DEFAULT_ASSISTANT_THREAD_LIMITS, type AssistantDecisionDelegation, type AssistantDecisionGrant, type AssistantThreadHarness, type AssistantThreadLimits } from "@wollipog/protocol";
+import {
+  DEFAULT_ASSISTANT_THREAD_LIMITS,
+  type AssistantDecisionDelegation,
+  type AssistantDecisionGrant,
+  type AssistantThreadHarness,
+  type AssistantThreadLaunchDefaults,
+  type AssistantThreadLimits,
+} from "@wollipog/protocol";
 import type { HumanPrincipal } from "./identity.js";
 
 /** Stored lifecycle. `creating` covers the window between reserving the id and recording the
@@ -63,6 +70,13 @@ export class AssistantThreadStore {
         organization_id TEXT NOT NULL,
         cost_limit_usd REAL,
         launch_limit INTEGER,
+        PRIMARY KEY (owner_user_id, organization_id));
+      CREATE TABLE IF NOT EXISTS assistant_thread_launch_defaults (
+        owner_user_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        harness TEXT NOT NULL CHECK (harness IN ('claude-code','codex')),
+        runner_id TEXT,
+        account_ref TEXT,
         PRIMARY KEY (owner_user_id, organization_id));
       -- Sessions a thread's assistant launched (#4663): its work cards and its launch limit.
       CREATE TABLE IF NOT EXISTS assistant_thread_launches (
@@ -141,6 +155,22 @@ export class AssistantThreadStore {
       VALUES (?, ?, ?, ?) ON CONFLICT (owner_user_id, organization_id) DO UPDATE
       SET cost_limit_usd=excluded.cost_limit_usd, launch_limit=excluded.launch_limit`)
       .run(owner.userId, owner.organizationId, limits.costUsd, limits.launchedSessions);
+  }
+
+  defaultLaunch(owner: Pick<HumanPrincipal, "userId" | "organizationId">): AssistantThreadLaunchDefaults {
+    const row = this.db.prepare("SELECT harness, runner_id, account_ref FROM assistant_thread_launch_defaults WHERE owner_user_id=? AND organization_id=?")
+      .get(owner.userId, owner.organizationId) as { harness: AssistantThreadHarness; runner_id: string | null; account_ref: string | null } | undefined;
+    return {
+      harness: row?.harness ?? "claude-code",
+      providerAccount: row?.runner_id && row.account_ref ? { runnerId: row.runner_id, accountRef: row.account_ref } : null,
+    };
+  }
+
+  setDefaultLaunch(owner: Pick<HumanPrincipal, "userId" | "organizationId">, defaults: AssistantThreadLaunchDefaults): void {
+    this.db.prepare(`INSERT INTO assistant_thread_launch_defaults (owner_user_id, organization_id, harness, runner_id, account_ref)
+      VALUES (?, ?, ?, ?, ?) ON CONFLICT (owner_user_id, organization_id) DO UPDATE
+      SET harness=excluded.harness, runner_id=excluded.runner_id, account_ref=excluded.account_ref`)
+      .run(owner.userId, owner.organizationId, defaults.harness, defaults.providerAccount?.runnerId ?? null, defaults.providerAccount?.accountRef ?? null);
   }
 
   setLimits(threadId: string, limits: AssistantThreadLimits): void {
@@ -264,27 +294,6 @@ export class AssistantThreadStore {
       WHERE member.thread_id=? AND (launch.uncapped=1 OR session.cost_budget_usd IS NULL OR
         COALESCE(root.allowance_usd, root_session.cost_budget_usd, root.retired_cap_usd) IS NULL) LIMIT 1`)
       .get(threadId) !== undefined;
-  }
-
-  backingCap(threadId: string): number | null {
-    const row = this.db.prepare("SELECT backing_cap_usd, cost_limit_usd FROM assistant_threads WHERE id=?")
-      .get(threadId) as { backing_cap_usd: number | null; cost_limit_usd: number | null } | undefined;
-    if (!row || row.cost_limit_usd === null) return row?.backing_cap_usd ?? null;
-    // Older capped rows may predate recording the backing cap. Their initial cap was $25.
-    return row.backing_cap_usd ?? DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd;
-  }
-
-  setBackingCap(threadId: string, capUsd: number | null): void {
-    this.db.prepare("UPDATE assistant_threads SET backing_cap_usd=? WHERE id=?").run(capUsd, threadId);
-  }
-
-  backingOwnerCap(threadId: string): number | null {
-    return (this.db.prepare("SELECT backing_owner_cap_usd FROM assistant_threads WHERE id=?").get(threadId) as { backing_owner_cap_usd: number | null } | undefined)?.backing_owner_cap_usd ?? null;
-  }
-
-  /** Lowers the owner's recorded ceiling to `capUsd`; it only ever goes down. */
-  recordBackingOwnerCap(threadId: string, capUsd: number): void {
-    this.db.prepare("UPDATE assistant_threads SET backing_owner_cap_usd=MIN(COALESCE(backing_owner_cap_usd, ?), ?) WHERE id=?").run(capUsd, capUsd, threadId);
   }
 
   setConnection(id: string, connectionId: string): void {

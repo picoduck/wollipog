@@ -121,6 +121,8 @@ export interface AssistantThread {
   limitsEditable?: true;
   /** Absent on older control planes. A null grant gives the thread no decision authority. */
   decisionDelegation?: AssistantDecisionDelegation;
+  /** An owner-facing refusal when the current thread cannot launch more work. */
+  launchLimitRefusal?: string;
   /** Additive (#4665): destructive commands of this thread's assistant waiting for the owner, oldest
    * first. While any is listed the thread's status is `needs_you`. */
   confirmations?: AssistantOwnerConfirmation[];
@@ -133,15 +135,15 @@ export interface AssistantThreadListResponse { threads: AssistantThread[] }
 export interface AssistantThreadResponse { thread: AssistantThread }
 
 export interface CreateAssistantThreadRequest {
-  /** Defaults to the owner's saved Orchestrator Child Harness, else Claude Code. */
+  /** Defaults to the owner's Assistant harness, else Claude Code. */
   harness?: AssistantThreadHarness;
   title?: string;
   /** Defaults to an online Machine the owner can use that supports the role and harness. */
   runnerId?: string;
   /** A Location on `runnerId`; defaults to the Machine's first one the owner can use. */
   workspaceId?: string;
-  /** Opaque account reference from the selected harness's account choices. */
-  providerAccountRef?: string;
+  /** Opaque account reference, null for Machine Policy, or absent for the Assistant default. */
+  providerAccountRef?: string | null;
 }
 
 export interface UpdateAssistantThreadRequest { title: string }
@@ -175,6 +177,13 @@ export interface AssistantThreadHarnessOption {
 export interface AssistantThreadDefaultsResponse {
   harness: AssistantThreadHarness;
   harnesses: AssistantThreadHarnessOption[];
+  /** Absent on control planes that use the Orchestrator's harness and the Machine account policy. */
+  launchDefaults?: AssistantThreadLaunchDefaults;
+}
+
+export interface AssistantThreadLaunchDefaults {
+  harness: AssistantThreadHarness;
+  providerAccount: { runnerId: string; accountRef: string } | null;
 }
 
 /** A thread credential authenticates for this long after the runner registers it. The runner

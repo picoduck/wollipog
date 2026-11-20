@@ -137,7 +137,7 @@ const policyNames = { names: new Map([["deny-shell", "Deny Shell Commands"]]), l
  */
 function ApprovalsFixture() {
   const [section, setSection] = useState<SettingsSection>("approvals");
-  const empty = { appearance: null, notifications: null, behavior: null, orchestrator: null, reviews: null, network: null, storage: null, about: null };
+  const empty = { appearance: null, notifications: null, behavior: null, orchestrator: null, assistant: null, reviews: null, network: null, storage: null, about: null };
   return (
     <div className="app">
       <main className="main">

@@ -23,13 +23,13 @@ export type View =
   | { name: "automations"; editor?: AutomationEditorRoute; tab?: AutomationsTab }
   | { name: "automation"; id: string }
   /** The Assistants section (#4664): the Wollipog Assistant's threads, and one open thread. */
-  | { name: "assistants"; threadId?: string }
+  | { name: "assistants"; threadId?: string; limits?: true }
   | { name: "skills"; id?: string; pane?: SkillsPane }
   | { name: "usage"; tab?: UsageTab }
   /** Archive visit intents are memory-only; viewPath deliberately serializes neither field. */
   | { name: "archived"; archiveSearch?: string; browseVisit?: { restore: boolean; activationId: number } }
   | { name: "projects"; id?: string; pane?: ProjectsPane }
-  | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget; artifacts?: ArtifactsTarget; campaign?: true; campaignTarget?: CampaignTarget }
+  | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget; artifacts?: ArtifactsTarget; campaign?: true; campaignTarget?: CampaignTarget; guardrails?: true }
   | { name: "settings"; section?: SettingsSection; policyId?: string; focus?: SettingsFocus }
   | { name: "not-found" };
 /**
@@ -40,7 +40,7 @@ export type View =
  * section is deep-linkable, which is what makes "see Settings → Appearance" a thing you can send
  * someone.
  */
-export type SettingsSection = "appearance" | "notifications" | "behavior" | "approvals" | "reviews" | "orchestrator" | "network" | "storage" | "about";
+export type SettingsSection = "appearance" | "notifications" | "behavior" | "approvals" | "reviews" | "orchestrator" | "assistant" | "network" | "storage" | "about";
 
 /**
  * A control a redirect lands on, so an old link arrives where its setting went (#3023):
@@ -66,6 +66,8 @@ const ROUTE_ALIASES: Readonly<Record<string, View>> = {
   "/settings/session-naming": { name: "settings", section: "behavior" },
   // Keyboard folded into Behavior › Input (#3023): the old section's address lands on its one row.
   "/settings/keyboard": { name: "settings", section: "behavior", focus: { target: "keyboard-shortcuts" } },
+  "/settings/behavior/assistant-threads": { name: "settings", section: "assistant" },
+  "/settings/network/assistant-connections": { name: "settings", section: "assistant" },
   // Subscriptions had its own path while API Usage opened first.
   "/usage/subscriptions": { name: "usage" },
 };
@@ -113,6 +115,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
   // No scope: the panel names where its defaults come from instead, "Your Defaults" or "Wollipog
   // Defaults", once it has loaded them (#3026).
   { id: "orchestrator", title: "Orchestrator", description: "Defaults for sessions that run others." },
+  { id: "assistant", title: "Assistant", description: "Defaults and access for Assistant threads." },
   { id: "network", title: "Network", description: "Reach this machine from other devices." },
   {
     id: "storage",
@@ -529,7 +532,8 @@ export function viewPath(view: View): string {
       : view.editor?.kind === "edit" ? `/automations/~${encodeResourceId(view.editor.automationId)}/edit`
         : view.tab === "outbound" ? "/automations/outbound" : "/automations";
     case "automation": return `/automations/~${encodeResourceId(view.id)}`;
-    case "assistants": return view.threadId !== undefined ? `/assistants/~${encodeResourceId(view.threadId)}` : "/assistants";
+    case "assistants": return view.threadId !== undefined
+      ? `/assistants/~${encodeResourceId(view.threadId)}${view.limits ? "/settings" : ""}` : "/assistants";
     case "skills": return view.id ? `/skills/~${encodeResourceId(view.id)}` : view.pane ? `/skills/${view.pane}` : "/skills";
     case "usage": return view.tab === "api" ? "/usage/api" : "/usage";
     case "archived": return "/archived";
@@ -542,6 +546,8 @@ export function viewPath(view: View): string {
       ? `/sessions/~${encodeResourceId(view.id)}/artifacts${view.artifacts.artifactId === undefined ? "" : `/~${encodeResourceId(view.artifacts.artifactId)}`}`
       : view.attention
       ? `/sessions/~${encodeResourceId(view.id)}/attention${view.attention.requestId === undefined ? "" : `/~${encodeOpaque(view.attention.requestId)}`}?epoch=${view.attention.eventEpoch}`
+      : view.guardrails
+      ? `/sessions/~${encodeResourceId(view.id)}/guardrails`
       : `/sessions/~${encodeResourceId(view.id)}`;
     case "settings": return view.section === "approvals" && view.policyId !== undefined
       ? `/settings/approvals/~${encodeResourceId(view.policyId)}`
@@ -607,10 +613,10 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     return id === null ? null : { name: "automation", id };
   }
   if (path === "/assistants") return { name: "assistants" };
-  const threadMatch = /^\/assistants\/~([^/]+)$/.exec(path);
+  const threadMatch = /^\/assistants\/~([^/]+)(\/settings)?$/.exec(path);
   if (threadMatch) {
     const threadId = decodeResourceId(threadMatch[1]!);
-    return threadId === null ? null : { name: "assistants", threadId };
+    return threadId === null ? null : { name: "assistants", threadId, ...(threadMatch[2] ? { limits: true } : {}) };
   }
   if (path === "/skills") return { name: "skills" };
   const skillsPaneMatch = /^\/skills\/(orphans|overview)$/.exec(path);
@@ -627,8 +633,8 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/settings") return { name: "settings" };
   // Keep old bookmarks useful: a copy, so a caller that annotates the view cannot change the table.
   if (isRouteAlias(path)) return structuredClone(ROUTE_ALIASES[path]!);
-  const settingsMatch = /^\/settings\/(appearance|notifications|behavior|approvals|reviews|orchestrator|network|storage|about)$/.exec(path);
-  if (settingsMatch) return { name: "settings", section: settingsMatch[1] as SettingsSection };
+  const settingsSection = SETTINGS_SECTIONS.find(({ id }) => path === `/settings/${id}`);
+  if (settingsSection) return { name: "settings", section: settingsSection.id };
   const approvalsPolicyMatch = /^\/settings\/approvals\/~([^/]+)$/.exec(path);
   if (approvalsPolicyMatch) {
     const policyId = decodeResourceId(approvalsPolicyMatch[1]!);
@@ -640,6 +646,11 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (projectMatch) {
     const id = decodeResourceId(projectMatch[1]!);
     return id === null ? null : { name: "projects", id };
+  }
+  const guardrailsMatch = /^\/sessions\/~([^/]+)\/guardrails$/.exec(path);
+  if (guardrailsMatch) {
+    const id = decodeResourceId(guardrailsMatch[1]!);
+    return id === null ? null : { name: "session", id, guardrails: true };
   }
   const attentionMatch = /^\/sessions\/~([^/]+)\/attention(?:\/~([^/]+))?$/.exec(path);
   if (attentionMatch) {

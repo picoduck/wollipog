@@ -632,7 +632,7 @@ test("browser history canonicalizes once, preserves state, and never pushes duri
 test("Keyboard folds into Behavior: /settings/keyboard replaces itself and lands on Keyboard Shortcuts (#3023)", () => {
   assert.equal(SETTINGS_SECTIONS.some((section) => section.id === ("keyboard" as never)), false);
   assert.deepEqual(SETTINGS_SECTIONS.map((section) => section.title),
-    ["Appearance", "Notifications", "Behavior", "Approvals", "Reviews", "Orchestrator", "Network", "Storage", "About"]);
+    ["Appearance", "Notifications", "Behavior", "Approvals", "Reviews", "Orchestrator", "Assistant", "Network", "Storage", "About"]);
   const view = viewFromPath("/settings/keyboard");
   assert.deepEqual(view, { name: "settings", section: "behavior", focus: { target: "keyboard-shortcuts" } });
   assert.equal(viewPath(view!), "/settings/behavior", "the focus target is not part of the address");
@@ -654,6 +654,20 @@ test("Keyboard folds into Behavior: /settings/keyboard replaces itself and lands
   };
   assert.deepEqual(new BrowserNavigation(target).current(), view);
   assert.deepEqual(writes, [{ kind: "replace", path: "/settings/behavior" }]);
+});
+
+test("Assistant settings, thread settings and Guardrails have stable addresses", () => {
+  const assistant = { name: "settings", section: "assistant" } as const;
+  assert.deepEqual(viewFromPath("/settings/assistant"), assistant);
+  assert.deepEqual(viewFromPath("/settings/behavior/assistant-threads"), assistant);
+  assert.deepEqual(viewFromPath("/settings/network/assistant-connections"), assistant);
+  assert.deepEqual(viewFromPath("/settings/behavior"), { name: "settings", section: "behavior" });
+  for (const view of [
+    { name: "assistants", threadId: "thr_example", limits: true },
+    { name: "session", id: "sess_example", guardrails: true },
+  ] as const) {
+    assert.deepEqual(viewFromPath(viewPath(view)), view);
+  }
 });
 
 test("unknown browser routes fall back to the canonical Inbox home", () => {
