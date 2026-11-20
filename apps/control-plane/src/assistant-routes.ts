@@ -1,4 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { ASSISTANT_EVIDENCE_INSPECT, ASSISTANT_EVIDENCE_RELAY_ACK, ASSISTANT_EVIDENCE_RELAY_DELIVER } from "@wollipog/protocol";
+import { ASSISTANT_EVIDENCE_ACKNOWLEDGEMENT } from "./assistant-decision-operations.js";
 import { extractBearer } from "./auth.js";
 import { PERSONAL_ORGANIZATION_ID, type HumanPrincipal } from "./identity.js";
 import type { ControlPlaneDb } from "./db.js";
@@ -207,9 +209,12 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: {
     if (req.method !== "POST") return reply.code(405).header("allow", "POST").send();
     const version = req.headers["mcp-protocol-version"];
     if (version && version !== "2025-06-18" && version !== "2025-03-26") return reply.code(400).send({ error: "Unsupported MCP version. Configure Streamable HTTP with MCP 2025-06-18 or 2025-03-26, or upgrade the client." });
-    const message = req.body as {jsonrpc?: unknown; id?: unknown; method?: unknown; params?: {name?: unknown; arguments?: unknown; protocolVersion?: unknown}} | null;
+    const message = req.body as {jsonrpc?: unknown; id?: unknown; method?: unknown; params?: {name?: unknown; arguments?: unknown;
+      protocolVersion?: unknown; acknowledgement?: { receiptId: unknown; sha256: unknown }}} | null;
     if (!message || message.jsonrpc !== "2.0" || typeof message.method !== "string" || (message.id !== undefined && typeof message.id !== "string" && typeof message.id !== "number")) return reply.code(400).send({ error: "Expected a single JSON-RPC 2.0 request. Batches are unsupported." });
     const rpcError = (code: number, text: string) => ({jsonrpc: "2.0", id: message.id ?? null, error: {code, message: text}});
+    const relayDelivery = message.method === ASSISTANT_EVIDENCE_RELAY_DELIVER;
+    const relayAck = message.method === ASSISTANT_EVIDENCE_RELAY_ACK;
     try {
       const connection = store.current(credential);
       const principal = deps.db.operatingHumanPrincipal(connection.ownerUserId, connection.organizationId);
@@ -223,8 +228,21 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: {
         result = { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: {name: "wollipog-assistant", version: "1"}, instructions: "Call assistant_discover to identify this installation and its granted operations. Never send credentials as tool arguments." };
       } else if (message.method === "ping") result = {};
       else if (message.method === "tools/list") result = { tools: deps.operations.list(connection).map(({name, description, inputSchema}) => ({name, description, inputSchema})) };
+      else if (relayDelivery || relayAck) {
+        const args = message.params?.arguments;
+        if (!args || typeof args !== "object" || Array.isArray(args) ||
+            relayAck && (!message.params?.acknowledgement?.receiptId || !message.params.acknowledgement.sha256)) {
+          throw new AssistantRefusal("Invalid evidence relay request.");
+        }
+        const output = await deps.operations.call(credential, ASSISTANT_EVIDENCE_INSPECT, relayAck
+          ? { ...args, [ASSISTANT_EVIDENCE_ACKNOWLEDGEMENT]: message.params!.acknowledgement } : args);
+        return { jsonrpc: "2.0", id: message.id, ...(relayDelivery ? { delivery: output } : { result: output }) };
+      }
       else if (message.method === "tools/call") {
         if (typeof message.params?.name !== "string") return rpcError(-32602, "A registered tool name is required.");
+        if (message.params.name === ASSISTANT_EVIDENCE_INSPECT) {
+          throw new AssistantRefusal("Assistant screenshot inspection requires a compatible Wollipog runner.");
+        }
         const output = await deps.operations.call(credential, message.params.name, message.params.arguments ?? {});
         result = { content: [{type: "text", text: JSON.stringify(output ?? null)}] };
       } else return rpcError(-32601, "Method not supported. Use initialize, ping, tools/list or tools/call with MCP Streamable HTTP.");
@@ -233,7 +251,7 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: {
       // Only explicit application-safe errors may expose text; uncertainty is a failed call in
       // activity, not an authorization refusal or proof that the command had no effects.
       if (error instanceof AssistantRefusal || error instanceof ManagementUncertainOutcome) {
-        if (message.method !== "tools/call") return rpcError(-32001, error.message);
+        if (message.method !== "tools/call" && !relayDelivery && !relayAck) return rpcError(-32001, error.message);
         return {jsonrpc: "2.0", id: message.id ?? null, result: {isError: true, content: [{type: "text", text: error.message}]}};
       }
       req.log.error("Assistant operation failed");

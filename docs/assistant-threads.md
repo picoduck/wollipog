@@ -148,9 +148,9 @@ the ordinary, exact-snapshot checks when the requester acts on it.
 Archiving a thread or its backing session clears the grant.
 
 A grant covers Owner Questions from campaigns, PR merges, merged branch deletions, follow-up issue
-publication, issue closure, review round extensions, and denial of UI evidence. Approval of UI
-evidence still needs a supported inspection path with delivery receipts, which Assistant threads
-do not have. CI reruns and release tag and publish commands have no typed Assistant resolution
+publication, issue closure, review round extensions, and separate UI Evidence Denial and UI
+Evidence Approval categories. Existing denial grants still permit denial. CI reruns and release
+tag and publish commands have no typed Assistant resolution
 path. Generic provider permissions and Assistant command confirmations stay with the owner.
 Credentials, sign-in, governance or policy changes, budgets, persistent permissions, connection
 and delegation changes, and occurrences explicitly kept for a person stay human-only. Campaign
@@ -163,6 +163,24 @@ to `assistant_decision_resolve`, with a reason. For an Owner Question it can sel
 option, give a free-text answer, or dismiss it. Wollipog reads the live grant immediately before
 resolving and uses the normal owner decision path to wake the requester. The Assistant cannot
 change the pending request through a resolution. Its connection restrictions still apply.
+
+UI Evidence Approval requires control plane and runner protocol 397 and a thread whose harness and
+model support image tool results. The owner sees the thread's provider, model and retention disclosure
+when opting in. A provider, model or account change requires a new grant. A capable thread uses
+`assistant_evidence_inspect` to inspect each of the requesting Session's screenshot artifacts.
+Wollipog hashes the exact bytes and counts a receipt after the runner verifies and acknowledges
+delivery. Direct inspection is part of the thread's ordinary usage. Videos and external-only
+evidence continue through the original owner route.
+
+On native Claude Code, a thread can use `assistant_evidence_prepare` to launch a restricted
+reviewer using the same provider, model and account. The reviewer uses the target campaign's
+managed allowance and must acknowledge every image before submitting its verdict. If that
+allowance or exact provider is unavailable, the thread can inspect the screenshots directly.
+Use `assistant_evidence_get` to read the result, then pass its exact `delegatedImageReview`
+reference when approving. Both paths require current proof for every item and bind it to the
+thread, grant revision and exact occurrence. Replacing a grant or decision requires fresh evidence
+review. The decision history and connection activity store references and digests. Providers may
+retain delivered images under the selected account's terms.
 
 The decision record identifies the Assistant thread, grant revision and reason. Open
 **Delegated Decisions** from the thread menu, Inbox's **More Actions** menu or Campaign Status to

@@ -411,6 +411,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
       {delegation && selected && (selected.decisionDelegation && selected.status !== "archived"
         ? <AssistantDecisionDelegationDialog key={selected.id}
             delegation={selected.decisionDelegation}
+            evidenceReview={selected.evidenceReview}
             onClose={() => navigate({ name: "assistants", threadId: selected.id }, { replace: true })}
             onSave={async (next) => replace((await api.setAssistantThreadDelegation(selected.id, next)).thread)}
           />

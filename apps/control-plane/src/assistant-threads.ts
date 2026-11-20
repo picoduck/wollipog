@@ -13,6 +13,7 @@ import {
   type AssistantDecisionCategory,
   type AssistantDecisionDelegation,
   type AssistantDecisionGrant,
+  type AssistantEvidenceReviewAvailability,
   type AssistantThread,
   type AssistantThreadAccountChoices,
   type AssistantThreadDefaultsResponse,
@@ -34,6 +35,7 @@ import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import { assistantThreadBudgetRefusal, assistantThreadLaunchLimitMessage, floorBudgetCents, UNTITLED, type SessionsService } from "./sessions.js";
 import { failureBody } from "./capability-refusal.js";
+import { assistantEvidenceReviewAvailability } from "./assistant-evidence-review.js";
 
 const DEFAULT_THREAD_TITLE = "New Thread";
 export function assistantThreadDisplayTitle(row: Pick<ThreadRow, "title">, session: Pick<SessionView, "title"> | null): string {
@@ -78,6 +80,8 @@ function decisionDelegation(body: unknown, now: number): AssistantDecisionDelega
   return { revision: input.revision!, grant: {
     categories: [...new Set<AssistantDecisionCategory>(categories)],
     projects: scope(grant?.projects), campaigns: scope(grant?.campaigns), expiresAt,
+    ...(categories.includes("ui_evidence_review") && typeof grant?.evidenceDisclosureDigest === "string"
+      ? { evidenceDisclosureDigest: grant.evidenceDisclosureDigest } : {}),
   } };
 }
 
@@ -138,6 +142,7 @@ export interface AssistantThreadDeps {
   listRunners(owner: HumanPrincipal): RunnerView[];
   isRunnerOnline(runnerId: string): boolean;
   getSession(sessionId: string): SessionView | null;
+  evidenceReview?(session: SessionView): AssistantEvidenceReviewAvailability;
   /** Creates the backing session exactly as an owner's New Session would, with the trusted
    * assistant marker. Never accepts the marker from request JSON. */
   createBackingSession(owner: HumanPrincipal, request: CreateSessionRequest, threadId: string):
@@ -200,6 +205,7 @@ export class AssistantThreads {
       ...(launchLimitRefusal ? { launchLimitRefusal } : {}),
       ...(status !== "archived" ? { limitsEditable: true } : {}),
       decisionDelegation: threadDecisionDelegation(row),
+      ...(session && this.deps.evidenceReview ? { evidenceReview: this.deps.evidenceReview(session) } : {}),
       confirmations,
       lastActivityAt: Math.max(row.updated_at, session?.updatedAt ?? 0),
       createdAt: row.created_at,
@@ -237,6 +243,13 @@ export class AssistantThreads {
     if (grant && (row.state !== "active" || !row.session_id || this.deps.getSession(row.session_id)?.archived !== false ||
         !row.connection_id || this.deps.connections.get(row.connection_id)?.revoked !== false)) {
       throw new AssistantThreadRefusal("This thread's connection or backing session is unavailable.", 409);
+    }
+    if (grant?.categories.includes("ui_evidence_review")) {
+      const session = row.session_id ? this.deps.getSession(row.session_id) : null;
+      const availability = session ? this.deps.evidenceReview?.(session) : undefined;
+      if (!availability?.available || availability.disclosureDigest !== grant.evidenceDisclosureDigest) {
+        throw new AssistantThreadRefusal("Reopen Decision Delegation and review this thread’s current provider disclosure before granting UI evidence approval.", 409);
+      }
     }
     if (!this.store.setDecisionGrant(id, revision, grant)) {
       throw new AssistantThreadRefusal("Delegation changed in another window. Reopen it to see the current grant.", 409);
@@ -555,6 +568,7 @@ export function createAssistantThreads(db: ControlPlaneDb, hub: Hub, svc: Sessio
     listRunners: (owner) => db.listRunnersForPrincipal(owner),
     isRunnerOnline: (runnerId) => hub.isRunnerOnline(runnerId),
     getSession: (sessionId) => db.getSession(sessionId),
+    evidenceReview: (session) => assistantEvidenceReviewAvailability(db, session),
     createBackingSession: (owner, request, threadId) => {
       // The owner's New Session launch path, but never in a Project or a shared scope: the session
       // acts with the owner's Assistant authority, so it belongs to the owner alone.

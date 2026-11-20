@@ -15,7 +15,15 @@
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { rmSync } from "node:fs";
-import { ASSISTANT_THREAD_CREDENTIAL_TTL_MS } from "@wollipog/protocol";
+import {
+  ASSISTANT_EVIDENCE_INSPECT,
+  ASSISTANT_EVIDENCE_RELAY_ACK,
+  ASSISTANT_EVIDENCE_RELAY_DELIVER,
+  ASSISTANT_THREAD_CREDENTIAL_TTL_MS,
+  MAX_PROMPT_IMAGE_BYTES,
+  PROMPT_IMAGE_MIME_TYPES,
+  type UiEvidenceReviewDelivery,
+} from "@wollipog/protocol";
 import {
   AgentControlRelaySockets,
   type AgentControlRelayRequest,
@@ -163,20 +171,69 @@ export class AssistantProxies {
     if (request.method !== "POST" || request.path !== ASSISTANT_MCP_PATH || request.body === undefined) {
       throw new Error("The Wollipog Assistant proxy forwards only MCP requests.");
     }
-    const send = async (credential: ThreadCredential) => (this.deps.fetch ?? globalThis.fetch)(new URL(ASSISTANT_MCP_PATH, state.cpUrl), {
+    // Only this trusted proxy may send the internal methods with the memory-held credential.
+    const message = JSON.parse(request.body) as { id?: unknown; method?: unknown; params?: {
+      name?: unknown; arguments?: { occurrenceId?: unknown; evidenceId?: unknown; sessionId?: unknown };
+    } } | null;
+    if (message?.method === ASSISTANT_EVIDENCE_RELAY_ACK || message?.method === ASSISTANT_EVIDENCE_RELAY_DELIVER) {
+      throw new Error("Evidence delivery methods are private to the Wollipog runner.");
+    }
+    const inspect = message?.method === "tools/call" && message.params?.name === ASSISTANT_EVIDENCE_INSPECT;
+    const body = inspect ? JSON.stringify({ ...message, method: ASSISTANT_EVIDENCE_RELAY_DELIVER }) : request.body;
+    const send = async (credential: ThreadCredential, payload: string) => (this.deps.fetch ?? globalThis.fetch)(new URL(ASSISTANT_MCP_PATH, state.cpUrl), {
       method: "POST",
       headers: { authorization: `Bearer ${credential.token}`, "content-type": "application/json", accept: "application/json" },
-      body: request.body,
+      body: payload,
       signal,
     });
-    const credential = await this.ready(sessionId, state, signal);
-    let response = await send(credential);
+    let credential = await this.ready(sessionId, state, signal);
+    let response = await send(credential, body);
     // An expired credential (clock skew, or a long gap) is replaced once; a refusal of the new
     // one reaches the assistant with the control plane's reason.
     if (response.status === 401 && this.states.get(sessionId) === state && state.credential === credential) {
       credential.refusal = "expired";
-      response = await send(await this.ready(sessionId, state, signal));
+      credential = await this.ready(sessionId, state, signal);
+      response = await send(credential, body);
     }
-    return { status: response.status, body: await response.text() };
+    const responseBody = await response.text();
+    if (!inspect || !response.ok || !responseBody) return { status: response.status, body: responseBody };
+
+    const delivered = JSON.parse(responseBody) as { id?: unknown; delivery?: UiEvidenceReviewDelivery };
+    // Older control planes and refusals send an ordinary MCP error.
+    if (!delivered.delivery) return { status: response.status, body: responseBody };
+    const toolResult = (result: object) => ({
+      status: 200, body: JSON.stringify({ jsonrpc: "2.0", id: message.id, result }),
+    });
+    const refuse = (reason: string) => toolResult({ isError: true, content: [{ type: "text", text: reason }] });
+    const { data, mimeType, sizeBytes, receipt } = delivered.delivery;
+    const args = message.params?.arguments;
+    if (delivered.id !== message.id || !receipt || receipt.reviewerSessionId !== sessionId ||
+        receipt.occurrenceId !== args?.occurrenceId || receipt.evidenceId !== args?.evidenceId ||
+        receipt.childSessionId !== args?.sessionId || !receipt.assistantBinding ||
+        !PROMPT_IMAGE_MIME_TYPES.includes(mimeType as (typeof PROMPT_IMAGE_MIME_TYPES)[number]) ||
+        typeof data !== "string" || !(sizeBytes > 0 && sizeBytes <= MAX_PROMPT_IMAGE_BYTES) ||
+        data.length !== Math.ceil(sizeBytes / 3) * 4) {
+      return refuse("Wollipog returned invalid evidence delivery metadata.");
+    }
+    const bytes = Buffer.from(data, "base64");
+    if (bytes.length !== sizeBytes || createHash("sha256").update(bytes).digest("hex") !== receipt.sha256) {
+      return refuse("Delivered evidence does not match the digest bound to this decision.");
+    }
+    if (signal.aborted || state.credential !== credential || !keyMatches(state.relayKey, request.key)) {
+      return refuse("The thread connection changed before the evidence could be delivered.");
+    }
+    const ack = await send(credential, JSON.stringify({ jsonrpc: "2.0", id: message.id,
+      method: ASSISTANT_EVIDENCE_RELAY_ACK, params: { arguments: args,
+        acknowledgement: { receiptId: receipt.receiptId, sha256: receipt.sha256 } } }));
+    const acknowledged = await ack.json() as { result?: { acknowledged?: boolean; isError?: boolean; content?: { text?: string }[] } };
+    if (!ack.ok || acknowledged.result?.acknowledged !== true) {
+      return refuse(acknowledged.result?.isError && acknowledged.result.content?.[0]?.text ||
+        "Wollipog could not record the verified image delivery.");
+    }
+    return toolResult({ content: [
+      { type: "text", text: JSON.stringify({ evidenceId: receipt.evidenceId, artifactId: receipt.artifactId,
+        sha256: receipt.sha256, receiptId: receipt.receiptId, mimeType, sizeBytes }) },
+      { type: "image", data, mimeType },
+    ] });
   }
 }

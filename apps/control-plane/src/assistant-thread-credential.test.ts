@@ -4,6 +4,10 @@ import { PassThrough } from "node:stream";
 import Fastify from "fastify";
 import {
   ASSISTANT_THREAD_CREDENTIAL_TTL_MS,
+  ASSISTANT_EVIDENCE_INSPECT,
+  ASSISTANT_EVIDENCE_PREPARE,
+  ASSISTANT_EVIDENCE_GET,
+  ASSISTANT_EVIDENCE_RELAY_ACK,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   DEFAULT_ASSISTANT_THREAD_LIMITS,
   HUMAN_ONLY_PARENT_CONTROL_POLICY,
@@ -12,11 +16,12 @@ import {
   type AgentDefinition,
   type AssistantDecisionGrant,
   type AssistantThread,
+  type CampaignBudgetAuthority,
   type ControlPlaneToRunner,
 } from "@wollipog/protocol";
 import { AssistantProxies } from "../../runner/src/assistant-proxy.js";
 import { runAssistantMcp } from "../../runner/src/assistant-mcp.js";
-import { ControlPlaneDb } from "./db.js";
+import { ControlPlaneDb, type NewSessionInput } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { createAssistantThreads } from "./assistant-threads.js";
@@ -30,7 +35,8 @@ import type { HumanPrincipal } from "./identity.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 
 const claude: AgentDefinition = { id: "claude", name: "Claude", driver: "claude-code", context: { kind: "native" }, command: "claude", args: [], env: {}, available: true,
-  capabilities: { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["default"] } };
+  capabilities: { models: [{ id: "claude-opus-5-5", displayName: "Opus", default: true }], effortLevels: [], slashCommands: [],
+    supportsImages: true, imageToolResults: true, supportsApprovals: true, permissionModes: ["default"] } };
 
 /** The real thread service, `/assistant/mcp` route and runner proxy, joined by an in-memory socket. */
 async function harness(protocolVersion = PROTOCOL_VERSION) {
@@ -97,17 +103,23 @@ async function harness(protocolVersion = PROTOCOL_VERSION) {
 
 const discover = { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "assistant_discover", arguments: {} } };
 
-function decisionSession(h: Awaited<ReturnType<typeof harness>>, id: string, parentSessionId?: string) {
+function decisionSession(h: Awaited<ReturnType<typeof harness>>, id: string, parentSessionId?: string,
+  budget?: CampaignBudgetAuthority) {
   const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
   policy.issueScope = { repository: "picoduck/wollipog", issueNumbers: [1], revision: 1, authorizedByUserId: h.owner.userId, authorizedAt: 1 };
   policy.issueNumbers = [1];
-  h.db.createSession({ id, runnerId: "r", workspaceId: "w", agentId: "claude", title: id, useWorktree: false,
+  const session: NewSessionInput = { id, runnerId: "r", workspaceId: "w", agentId: "claude", title: id, useWorktree: false,
     driver: "claude-code", now: 1, config: {}, projectId: h.project.id, projectLocationId: h.location.id,
     ...(parentSessionId ? { parentSessionId } : { role: "orchestrator",
       orchestratorPolicy: policy,
       parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
     }),
-  });
+  };
+  if (budget) {
+    h.db.createHumanCampaignLaunch({ ...session, creationActor: "human",
+      scope: { organizationId: h.owner.organizationId, owner: { kind: "user", userId: h.owner.userId } },
+    }, h.owner, "custom-budget", "a".repeat(64), budget);
+  } else h.db.createSession(session);
   h.db.updateSessionStatus(id, "running", 2);
 }
 
@@ -212,7 +224,7 @@ test("the owner grants and revokes exact typed resolution, and Assistant calls n
     const evidenceResolution = { ...resolution, occurrenceId: evidence.data.occurrenceId,
       resourceDigest: evidence.data.resourceDigest, reason: "The supplied evidence could not be verified." };
     const evidenceApproval = await call("assistant_decision_resolve", evidenceResolution);
-    assert.match(evidenceApproval.content[0].text, /supported inspection path with receipts/u);
+    assert.match(evidenceApproval.content[0].text, /outside the thread's decision delegation grant/u);
     assert.equal(h.db.workflowDecisionByOccurrence(evidence.data.occurrenceId)?.status, "pending");
     const evidenceDenial = await call("assistant_decision_resolve", { ...evidenceResolution, outcome: "deny" });
     assert.equal(evidenceDenial.isError, undefined, evidenceDenial.content[0].text);
@@ -222,6 +234,134 @@ test("the owner grants and revokes exact typed resolution, and Assistant calls n
     await assert.rejects(h.operations.call(h.db.assistantConnections.authenticate(outside.token)!, "assistant_decision_resolve", resolution), /requires an explicit grant/u);
   } finally { await h.close(); }
 });
+
+test("Assistant screenshot approval requires exact relay-acknowledged deliveries under the current grant", async () => {
+  const h = await harness();
+  try {
+    const fixture = await assistantUiEvidenceFixture(h);
+    const { call, setGrant, decision, thread, images, resolution } = fixture;
+    const prepare = await call(ASSISTANT_EVIDENCE_PREPARE, { ...fixture.coordinates, brief: "Check both screenshots." });
+    assert.match(prepare.content[0].text, /needs a campaign allowance/u);
+    const inspect = (evidenceId: string) => call(ASSISTANT_EVIDENCE_INSPECT, { ...fixture.coordinates, evidenceId });
+    const approve = () => call("assistant_decision_resolve", resolution);
+    const expectPending = () => assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)?.status, "pending");
+    const refused = await approve();
+    assert.match(refused.content[0].text, /"desktop", "phone"/u);
+    expectPending();
+    const desktop = await inspect("desktop");
+    assert.deepEqual(desktop.content[1], { type: "image", mimeType: "image/png", data: images[0]!.data });
+    const receipt = h.db.validUiEvidenceReviewReceipts(decision.occurrenceId, thread.sessionId, Date.now());
+    assert.equal(receipt.length, 1);
+    assert.equal(receipt[0]?.sha256, images[0]?.sha256);
+    assert.match((await approve()).content[0].text, /receipts for "phone"/u);
+    expectPending();
+    // Even re-saving identical categories advances the grant revision and invalidates old proof.
+    await setGrant(1);
+    const phone = await inspect("phone");
+    assert.equal(phone.isError, undefined, phone.content[0].text);
+    assert.match((await approve()).content[0].text, /receipts for "desktop"/u);
+    const forged = await call(ASSISTANT_EVIDENCE_RELAY_ACK, {}, ASSISTANT_EVIDENCE_RELAY_ACK);
+    assert.match(forged.error.message, /private to the Wollipog runner/u);
+    expectPending();
+    await inspect("desktop");
+    h.svc.onSessionStatus("evidence-child", "idle");
+    const approved = await approve();
+    assert.equal(approved.isError, undefined, approved.content[0].text);
+    assertEvidenceResolution(h, fixture, 2);
+    assert.deepEqual(h.db.validUiEvidenceReviewReceipts(decision.occurrenceId, thread.sessionId, Date.now()), []);
+  } finally { await h.close(); }
+});
+
+test("Assistant verdict approval uses a restricted campaign-accounted reviewer and exact receipt set", async () => {
+  const h = await harness();
+  try {
+    const fixture = await assistantUiEvidenceFixture(h, { version: 1, accounting: "managed_workers_only",
+      unpriced: "stop", concurrency: 2, acceptedFollowUps: 0, toolCalls: 100 });
+    const { call, coordinates, resolution, decision, thread, images } = fixture;
+    const prepare = () => call(ASSISTANT_EVIDENCE_PREPARE, { ...coordinates, brief: "Confirm that all actions fit the two viewports." });
+    const prepared = await prepare();
+    assert.equal(prepared.isError, undefined, prepared.content[0].text);
+    const { reviewId, reviewerSessionId } = JSON.parse(prepared.content[0].text).review;
+    const reviewer = h.db.getSession(reviewerSessionId)!;
+    assert.equal(reviewer.parentSessionId, "evidence-root");
+    assert.equal(reviewer.model, "claude-opus-5-5");
+    assert.equal(reviewer.maxChildSessions, 0);
+    assert.ok(h.db.campaignBudgets.allocation(reviewerSessionId));
+    h.db.updateSessionStatus(reviewerSessionId, "running", Date.now());
+    const get = () => call(ASSISTANT_EVIDENCE_GET, { ...coordinates, reviewId });
+    assert.equal(JSON.parse((await get()).content[0].text).review.delegatedImageReview, undefined);
+    const verdict = { recommendation: "approve", summary: "Both viewports fit.", items: images.map((image) =>
+      ({ evidenceId: image.evidenceId, outcome: "pass", defects: [] })) };
+    assert.match(h.svc.submitDelegatedImageVerdict(reviewerSessionId, verdict, () => true).error!, /"desktop", "phone"/u);
+    for (const image of images) {
+      const delivered = h.svc.reviewDelegatedImageEvidence(reviewerSessionId, image.evidenceId, () => true);
+      assert.ok(delivered.ok && delivered.data, delivered.error ?? "image delivery refused");
+      assert.equal(delivered.data.data, image.data);
+      assert.ok(h.svc.acknowledgeDelegatedImageEvidence(reviewerSessionId, delivered.data.receipt.receiptId,
+        image.sha256, () => true).ok);
+    }
+    assert.ok(h.svc.submitDelegatedImageVerdict(reviewerSessionId, verdict, () => true).ok);
+    const reference = JSON.parse((await get()).content[0].text).review.delegatedImageReview;
+    assert.equal(reference.reviewId, reviewId);
+    assert.match((await call("assistant_decision_resolve", resolution)).content[0].text, /"desktop", "phone"/u);
+    const invalid = await call("assistant_decision_resolve", { ...resolution,
+      delegatedImageReview: { ...reference, verdictId: "other" } });
+    assert.match(invalid.content[0].text, /does not identify an actual reviewer verdict/u);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)?.status, "pending");
+    assert.equal(h.db.validUiEvidenceReviewReceipts(decision.occurrenceId, thread.sessionId, Date.now()).length, 0);
+    h.svc.onSessionStatus("evidence-child", "idle");
+    const approved = await call("assistant_decision_resolve", { ...resolution, delegatedImageReview: reference });
+    assert.equal(approved.isError, undefined, approved.content[0].text);
+    assertEvidenceResolution(h, fixture, 1);
+    assert.equal(h.db.delegatedImageReviews.get(reviewId)?.state, "consumed");
+  } finally { await h.close(); }
+});
+
+async function assistantUiEvidenceFixture(h: Awaited<ReturnType<typeof harness>>, budget?: CampaignBudgetAuthority) {
+  const thread = (await h.ownerCall("POST", "/api/assistant-threads", { title: "Evidence Assistant" })).body.thread as AssistantThread;
+  const env = await h.provision(thread.sessionId);
+  const evidenceReview = thread.evidenceReview;
+  assert.ok(evidenceReview?.available);
+  decisionSession(h, "evidence-root", undefined, budget);
+  decisionSession(h, "evidence-child", "evidence-root");
+  const images = ["desktop", "phone"].map((evidenceId) => {
+    const data = Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), Buffer.from(evidenceId)]).toString("base64");
+    const artifact = h.svc.createArtifact({ sessionId: "evidence-child", kind: "screenshot", name: `${evidenceId}.png`,
+      mimeType: "image/png", encoding: "base64", data }, { kind: "agent", id: "evidence-child" });
+    assert.ok(artifact.ok && artifact.data, artifact.error ?? "screenshot creation refused");
+    return { evidenceId, artifactId: artifact.data.artifactId, sha256: artifact.data.sha256, mediaType: "image/png", data };
+  });
+  const asked = h.svc.createWorkflowDecision("evidence-child", { requestId: "evidence", resourceKey: "screenshots",
+    resourceSnapshot: { category: "ui_evidence_approval", evidence: images.map(({ data: _data, ...item }) => item) } });
+  assert.ok(asked.ok && asked.data, asked.error ?? "evidence decision refused");
+  const decision = asked.data;
+  const coordinates = { sessionId: "evidence-child", occurrenceId: decision.occurrenceId, resourceDigest: decision.resourceDigest };
+  const call = async (name: string, args: object, method = "tools/call") => {
+    const [response] = await h.callTools(env, { jsonrpc: "2.0", id: 1, method, params: { name, arguments: args } });
+    return response.result ?? response;
+  };
+  const grant: AssistantDecisionGrant = { categories: ["ui_evidence_review"], projects: "all", campaigns: "all", expiresAt: null };
+  const path = `/api/assistant-threads/${thread.id}/delegation`;
+  assert.equal((await h.ownerCall("PUT", path, { revision: 0, grant })).status, 409, "the owner must confirm the disclosure");
+  const setGrant = async (revision: number) => {
+    const saved = await h.ownerCall("PUT", path, { revision, grant: { ...grant, evidenceDisclosureDigest: evidenceReview.disclosureDigest } });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  };
+  await setGrant(0);
+  return { thread, images, decision, coordinates, call, setGrant,
+    resolution: { ...coordinates, outcome: "approve", reason: "The screenshots meet the criteria." } };
+}
+
+function assertEvidenceResolution(h: Awaited<ReturnType<typeof harness>>,
+  { thread, decision }: Awaited<ReturnType<typeof assistantUiEvidenceFixture>>, grantRevision: number) {
+  const recorded = h.db.workflowDecisionByOccurrence(decision.occurrenceId)!;
+  assert.equal(recorded.status, "approved");
+  assert.equal(recorded.assistantDelegation?.threadId, thread.id);
+  assert.equal(recorded.assistantDelegation?.grantRevision, grantRevision);
+  assert.ok(decisionPrompts(h, decision.sessionId).some((prompt) => prompt.includes("Evidence Assistant")));
+  const history = h.db.assistantDecisionHistory(h.owner, { campaignId: "evidence-root", threadId: thread.id });
+  assert.deepEqual(history.entries.map((item) => item.delegation), [recorded.assistantDelegation]);
+}
 
 test("a delegated Owner Question returns an option or free text and credential classification and Owner Approvals stay human", async () => {
   const h = await harness();

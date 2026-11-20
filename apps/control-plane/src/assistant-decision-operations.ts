@@ -1,4 +1,8 @@
 import {
+  ASSISTANT_EVIDENCE_INSPECT,
+  ASSISTANT_EVIDENCE_PREPARE,
+  ASSISTANT_EVIDENCE_GET,
+  DELEGATED_IMAGE_REVIEW_BRIEF_MAX_CHARS,
   assistantDecisionCategory,
   isOwnerQuestionSnapshot,
   type AssistantConnection,
@@ -17,6 +21,9 @@ import { isReservedOwnerQuestion, type SessionsService } from "./sessions.js";
 const coordinate = { type: "string", minLength: 1, maxLength: 128 };
 const sessionProperties = { sessionId: coordinate };
 const occurrenceProperties = { ...sessionProperties, occurrenceId: coordinate };
+const reviewReferenceProperties = { reviewId: coordinate, reviewerSessionId: coordinate, verdictId: coordinate };
+const reviewReferenceSchema = { type: "object", additionalProperties: false,
+  properties: reviewReferenceProperties, required: Object.keys(reviewReferenceProperties) };
 const resolutionProperties = {
   ...occurrenceProperties,
   resourceDigest: { type: "string", pattern: "^[a-f0-9]{64}$" },
@@ -24,7 +31,12 @@ const resolutionProperties = {
   reason: { type: "string", minLength: 1, maxLength: 1000 },
   selectedOptionId: coordinate,
   answer: { type: "string", minLength: 1, maxLength: 4000 },
+  delegatedImageReview: reviewReferenceSchema,
 };
+const inspectionProperties = { ...occurrenceProperties,
+  resourceDigest: resolutionProperties.resourceDigest, evidenceId: { ...coordinate, maxLength: 256 } };
+/** Only the runner-facing MCP method can supply acknowledgement parameters. */
+export const ASSISTANT_EVIDENCE_ACKNOWLEDGEMENT = Symbol("runner evidence acknowledgement");
 
 function parseArgs(value: unknown, properties: object): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
@@ -48,8 +60,7 @@ function requiredText(value: unknown, name: string, limit: number): string {
  */
 export function registerAssistantDecisionOperations(operations: AssistantOperations, db: ControlPlaneDb, svc: SessionsService): void {
   const target = (value: unknown) => {
-    const args = parseArgs(value, resolutionProperties);
-    const sessionId = requiredText(args.sessionId, "sessionId", 128);
+    const sessionId = requiredText((value as { sessionId?: unknown } | null)?.sessionId, "sessionId", 128);
     const session = db.getSession(sessionId);
     return { kind: "session" as const, id: sessionId, ...(session?.projectId ? { projectId: session.projectId } : {}) };
   };
@@ -69,10 +80,14 @@ export function registerAssistantDecisionOperations(operations: AssistantOperati
     return { grant, revision, threadId: thread.id, threadTitle: assistantThreadDisplayTitle(thread, session) };
   };
   const check = (decision: WorkflowDecisionView, owner: HumanPrincipal, connection: AssistantConnection,
-    name: string, { grant }: ReturnType<typeof liveGrant>) => {
+    name: string, { grant }: ReturnType<typeof liveGrant>, evidenceOutcome?: "approve" | "deny") => {
     const category = assistantDecisionCategory(decision.resourceSnapshot);
     if (!category) throw new AssistantRefusal("This decision has no supported typed Assistant resolution path. Generic permissions, CI reruns and release commands require the owner.");
-    if (!grant.categories.includes(category)) throw new AssistantRefusal("This category is outside the thread's decision delegation grant.");
+    const mayAct = category === "ui_evidence_approval"
+      ? (evidenceOutcome !== "approve" && grant.categories.includes(category)) ||
+        (evidenceOutcome !== "deny" && grant.categories.includes("ui_evidence_review"))
+      : grant.categories.includes(category);
+    if (!mayAct) throw new AssistantRefusal("This category is outside the thread's decision delegation grant.");
     if (decision.authority !== "human") throw new AssistantRefusal("Only owner-held decisions are eligible for Assistant delegation.");
     if (isReservedOwnerQuestion(decision)) throw new AssistantRefusal("This occurrence requires a direct human response.");
     const controller = db.getSession(decision.controllingSessionId);
@@ -102,6 +117,63 @@ export function registerAssistantDecisionOperations(operations: AssistantOperati
     return { category, campaign };
   };
   const list = "assistant_decisions_list", get = "assistant_decision_get", resolve = "assistant_decision_resolve";
+  operations.register({
+    name: ASSISTANT_EVIDENCE_INSPECT, threadOnly: true,
+    description: "Inspect one private Session screenshot of a pending UI evidence decision. Use the digest from assistant_decision_get. Look at each returned image before approving.",
+    inputSchema: { type: "object", additionalProperties: false, properties: inspectionProperties,
+      required: ["sessionId", "occurrenceId", "resourceDigest", "evidenceId"] },
+    resolveTarget: target, ownerCanAccess,
+    execute(value, { owner, connection }) {
+      const args = parseArgs(value, inspectionProperties) as Record<string, unknown> & {
+        [ASSISTANT_EVIDENCE_ACKNOWLEDGEMENT]?: { receiptId: unknown; sha256: unknown };
+      };
+      const live = liveGrant(owner, connection);
+      const decision = db.workflowDecisionByOccurrence(requiredText(args.occurrenceId, "occurrenceId", 128));
+      if (!decision || decision.sessionId !== args.sessionId || decision.resourceSnapshot.category !== "ui_evidence_approval" ||
+          decision.resourceDigest !== args.resourceDigest) {
+        throw new AssistantRefusal("Read the exact pending UI evidence decision and use its current resource digest.");
+      }
+      check(decision, owner, connection, ASSISTANT_EVIDENCE_INSPECT, live, "approve");
+      const evidenceId = requiredText(args.evidenceId, "evidenceId", 256);
+      const acknowledgement = args[ASSISTANT_EVIDENCE_ACKNOWLEDGEMENT];
+      const result = acknowledgement
+        ? svc.acknowledgeAssistantUiEvidence(decision, live.threadId, evidenceId,
+          requiredText(acknowledgement.receiptId, "receiptId", 128), requiredText(acknowledgement.sha256, "sha256", 64))
+        : svc.deliverAssistantUiEvidence(decision, live.threadId, evidenceId);
+      if (!result.ok) throw new AssistantRefusal(result.error ?? "Wollipog refused the evidence review.");
+      return result.data;
+    },
+  });
+  for (const name of [ASSISTANT_EVIDENCE_PREPARE, ASSISTANT_EVIDENCE_GET]) {
+    const preparing = name === ASSISTANT_EVIDENCE_PREPARE;
+    const properties = preparing
+      ? { ...occurrenceProperties, resourceDigest: resolutionProperties.resourceDigest,
+        brief: { type: "string", minLength: 1, maxLength: DELEGATED_IMAGE_REVIEW_BRIEF_MAX_CHARS } }
+      : { ...occurrenceProperties, resourceDigest: resolutionProperties.resourceDigest, reviewId: coordinate };
+    operations.register({
+      name, threadOnly: true,
+      description: preparing
+        ? "Start a restricted managed reviewer for a pending UI evidence decision on this thread’s authorized provider. Charges the target campaign's allowance. State the UI claims and criteria."
+        : "Read the exact managed screenshot review for this thread and decision. Use its delegatedImageReview reference to approve only when the verdict approves every image.",
+      inputSchema: { type: "object", additionalProperties: false, properties, required: Object.keys(properties) },
+      resolveTarget: target, ownerCanAccess,
+      execute(value, { owner, connection }) {
+        const args = parseArgs(value, properties);
+        const live = liveGrant(owner, connection);
+        const decision = db.workflowDecisionByOccurrence(requiredText(args.occurrenceId, "occurrenceId", 128));
+        if (!decision || decision.sessionId !== args.sessionId || decision.resourceSnapshot.category !== "ui_evidence_approval" ||
+            decision.resourceDigest !== args.resourceDigest) {
+          throw new AssistantRefusal("Read the exact pending UI evidence decision and use its current resource digest.");
+        }
+        check(decision, owner, connection, name, live, "approve");
+        const result = preparing
+          ? svc.prepareAssistantImageEvidenceReview(decision, live.threadId, requiredText(args.brief, "brief", DELEGATED_IMAGE_REVIEW_BRIEF_MAX_CHARS))
+          : svc.assistantImageEvidenceReview(decision, live.threadId, requiredText(args.reviewId, "reviewId", 128));
+        if (!result.ok) throw new AssistantRefusal(result.error ?? "Wollipog refused the managed evidence review.");
+        return { review: result.data };
+      },
+    });
+  }
   operations.register({
     name: list,
     threadOnly: true,
@@ -142,9 +214,10 @@ export function registerAssistantDecisionOperations(operations: AssistantOperati
         if (!decision || decision.sessionId !== args.sessionId) {
           throw new AssistantRefusal("No typed workflow decision matches this occurrence in the session. Generic permissions, CI reruns and release commands require the owner.");
         }
-        const { campaign } = check(decision, owner, connection, name, live);
-        if (!resolving) return { decision: svc.workflowDecision(decision.sessionId, decision.occurrenceId).data };
         const { outcome, resourceDigest } = args;
+        const { campaign } = check(decision, owner, connection, name, live,
+          outcome === "approve" || outcome === "deny" ? outcome : undefined);
+        if (!resolving) return { decision: svc.workflowDecision(decision.sessionId, decision.occurrenceId).data };
         if (outcome !== "approve" && outcome !== "deny") throw new AssistantRefusal("Choose approve or deny.");
         if (resourceDigest !== decision.resourceDigest) throw new AssistantRefusal("The decision snapshot changed. Read the exact occurrence again.");
         const reason = requiredText(args.reason, "reason", 1000).trim();
@@ -152,9 +225,15 @@ export function registerAssistantDecisionOperations(operations: AssistantOperati
           threadId: live.threadId, threadTitle: live.threadTitle, ownerUserId: owner.userId, organizationId: owner.organizationId,
           grantRevision: live.revision, campaignId: campaign, reason,
         };
+        const review = args.delegatedImageReview === undefined ? undefined : parseArgs(args.delegatedImageReview, reviewReferenceProperties);
         const resolution: ResolveWorkflowDecisionRequest = { outcome,
           ...(args.selectedOptionId !== undefined ? { selectedOptionId: requiredText(args.selectedOptionId, "selectedOptionId", 128) } : {}),
           ...(args.answer !== undefined ? { childMessage: requiredText(args.answer, "answer", 4000) } : {}),
+          ...(review ? { delegatedImageReview: {
+            reviewId: requiredText(review.reviewId, "reviewId", 128),
+            reviewerSessionId: requiredText(review.reviewerSessionId, "reviewerSessionId", 128),
+            verdictId: requiredText(review.verdictId, "verdictId", 128),
+          } } : {}),
         };
         const result = svc.resolveAssistantDecision(decision, resolution, delegation, owner);
         if (!result.ok) throw new AssistantRefusal(result.error ?? "Wollipog refused the delegated decision.");

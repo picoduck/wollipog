@@ -1535,6 +1535,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   395,
   // v396 slot
   // v397 slot
+  // 397: Verify and acknowledge Assistant UI evidence image delivery at the runner relay (Refs #4762).
+  397,
   // v398 slot
   // v399 slot
   // v400 slot
