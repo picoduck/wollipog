@@ -8498,6 +8498,8 @@ export interface SessionView {
   /** Current session role. Omitted by control planes predating v160; use `sessionRole()` to read
    * it so the legacy coupled preset in `permissionMode` still resolves to the Orchestrator role. */
   role?: SessionRole;
+  /** The total budget shared by this backing Assistant session and its launched work. */
+  assistantThreadBudget?: { threadId: string; limitUsd: number | null };
   /** v226: immutable session kind. Omitted for ordinary sessions and by older control planes. */
   kind?: import("./review-session.js").SessionKind;
   /** v226: present on a review session (#3368): what it reviews and for whom. */

@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { DEFAULT_ASSISTANT_THREAD_LIMITS, type AssistantDecisionDelegation, type AssistantDecisionGrant, type AssistantThreadHarness, type AssistantThreadLimits } from "@wollipog/protocol";
+import {
+  DEFAULT_ASSISTANT_THREAD_LIMITS,
+  type AssistantDecisionDelegation,
+  type AssistantDecisionGrant,
+  type AssistantThreadHarness,
+  type AssistantThreadLaunchDefaults,
+  type AssistantThreadLimits,
+} from "@wollipog/protocol";
 import type { HumanPrincipal } from "./identity.js";
 
 /** Stored lifecycle. `creating` covers the window between reserving the id and recording the
@@ -64,6 +71,13 @@ export class AssistantThreadStore {
         cost_limit_usd REAL,
         launch_limit INTEGER,
         PRIMARY KEY (owner_user_id, organization_id));
+      CREATE TABLE IF NOT EXISTS assistant_thread_launch_defaults (
+        owner_user_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        harness TEXT NOT NULL CHECK (harness IN ('claude-code','codex')),
+        runner_id TEXT,
+        account_ref TEXT,
+        PRIMARY KEY (owner_user_id, organization_id));
       -- Sessions a thread's assistant launched (#4663): its work cards and its launch limit.
       CREATE TABLE IF NOT EXISTS assistant_thread_launches (
         session_id TEXT PRIMARY KEY,
@@ -117,6 +131,27 @@ export class AssistantThreadStore {
 
   constructor(private readonly db: DatabaseSync) {}
 
+  /** Convert independent legacy ceilings to one budget without granting either surface more. */
+  migrateLegacyBackingBudgets(): void {
+    this.db.prepare(`WITH budgets AS (
+      SELECT thread.id, thread.cost_limit_usd AS thread_limit,
+        thread.backing_owner_cap_usd AS owner_cap,
+        CASE WHEN session.cost_budget_usd > 0 AND (
+          COALESCE(thread.backing_cap_usd, CASE WHEN thread.cost_limit_usd IS NOT NULL THEN ?1 END) IS NULL
+          OR ABS(session.cost_budget_usd - COALESCE(thread.backing_cap_usd, ?1)) >= 0.005
+        ) THEN session.cost_budget_usd END AS edited_cap
+      FROM assistant_threads thread JOIN sessions session ON session.id = thread.session_id
+    ), ceilings AS (
+      SELECT id, owner_cap AS amount FROM budgets
+      UNION ALL SELECT id, edited_cap FROM budgets
+      UNION ALL SELECT id, thread_limit FROM budgets WHERE owner_cap > 0 OR edited_cap > 0
+    ), tightened AS (
+      SELECT id, MIN(amount) AS ceiling FROM ceilings WHERE amount > 0 GROUP BY id
+    )
+    UPDATE assistant_threads SET cost_limit_usd = tightened.ceiling
+    FROM tightened WHERE assistant_threads.id = tightened.id`).run(DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd);
+  }
+
   get(id: string): ThreadRow | null {
     return (this.db.prepare("SELECT * FROM assistant_threads WHERE id=?").get(id) as ThreadRow | undefined) ?? null;
   }
@@ -141,6 +176,22 @@ export class AssistantThreadStore {
       VALUES (?, ?, ?, ?) ON CONFLICT (owner_user_id, organization_id) DO UPDATE
       SET cost_limit_usd=excluded.cost_limit_usd, launch_limit=excluded.launch_limit`)
       .run(owner.userId, owner.organizationId, limits.costUsd, limits.launchedSessions);
+  }
+
+  defaultLaunch(owner: Pick<HumanPrincipal, "userId" | "organizationId">): AssistantThreadLaunchDefaults {
+    const row = this.db.prepare("SELECT harness, runner_id, account_ref FROM assistant_thread_launch_defaults WHERE owner_user_id=? AND organization_id=?")
+      .get(owner.userId, owner.organizationId) as { harness: AssistantThreadHarness; runner_id: string | null; account_ref: string | null } | undefined;
+    return {
+      harness: row?.harness ?? "claude-code",
+      providerAccount: row?.runner_id && row.account_ref ? { runnerId: row.runner_id, accountRef: row.account_ref } : null,
+    };
+  }
+
+  setDefaultLaunch(owner: Pick<HumanPrincipal, "userId" | "organizationId">, defaults: AssistantThreadLaunchDefaults): void {
+    this.db.prepare(`INSERT INTO assistant_thread_launch_defaults (owner_user_id, organization_id, harness, runner_id, account_ref)
+      VALUES (?, ?, ?, ?, ?) ON CONFLICT (owner_user_id, organization_id) DO UPDATE
+      SET harness=excluded.harness, runner_id=excluded.runner_id, account_ref=excluded.account_ref`)
+      .run(owner.userId, owner.organizationId, defaults.harness, defaults.providerAccount?.runnerId ?? null, defaults.providerAccount?.accountRef ?? null);
   }
 
   setLimits(threadId: string, limits: AssistantThreadLimits): void {
@@ -264,27 +315,6 @@ export class AssistantThreadStore {
       WHERE member.thread_id=? AND (launch.uncapped=1 OR session.cost_budget_usd IS NULL OR
         COALESCE(root.allowance_usd, root_session.cost_budget_usd, root.retired_cap_usd) IS NULL) LIMIT 1`)
       .get(threadId) !== undefined;
-  }
-
-  backingCap(threadId: string): number | null {
-    const row = this.db.prepare("SELECT backing_cap_usd, cost_limit_usd FROM assistant_threads WHERE id=?")
-      .get(threadId) as { backing_cap_usd: number | null; cost_limit_usd: number | null } | undefined;
-    if (!row || row.cost_limit_usd === null) return row?.backing_cap_usd ?? null;
-    // Older capped rows may predate recording the backing cap. Their initial cap was $25.
-    return row.backing_cap_usd ?? DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd;
-  }
-
-  setBackingCap(threadId: string, capUsd: number | null): void {
-    this.db.prepare("UPDATE assistant_threads SET backing_cap_usd=? WHERE id=?").run(capUsd, threadId);
-  }
-
-  backingOwnerCap(threadId: string): number | null {
-    return (this.db.prepare("SELECT backing_owner_cap_usd FROM assistant_threads WHERE id=?").get(threadId) as { backing_owner_cap_usd: number | null } | undefined)?.backing_owner_cap_usd ?? null;
-  }
-
-  /** Lowers the owner's recorded ceiling to `capUsd`; it only ever goes down. */
-  recordBackingOwnerCap(threadId: string, capUsd: number): void {
-    this.db.prepare("UPDATE assistant_threads SET backing_owner_cap_usd=MIN(COALESCE(backing_owner_cap_usd, ?), ?) WHERE id=?").run(capUsd, capUsd, threadId);
   }
 
   setConnection(id: string, connectionId: string): void {

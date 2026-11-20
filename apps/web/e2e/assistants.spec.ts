@@ -312,7 +312,7 @@ for (const theme of ["dark", "light"] as const) {
       await capture(page, `assistants-owner-only-${theme}-desktop`);
     });
 
-    test("New Thread preselects the Orchestrator harness, and rename and archive act on the thread", async ({ page }) => {
+    test("New Thread preselects the default harness, and rename and archive act on the thread", async ({ page }) => {
       await open(page, theme);
       await page.getByRole("button", { name: "New Thread" }).first().click();
       const dialog = page.getByRole("dialog", { name: "New Thread" });

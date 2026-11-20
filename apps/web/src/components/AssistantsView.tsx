@@ -12,7 +12,7 @@ import {
   type AssistantThread,
 } from "../assistant-threads.js";
 import { useReportEntityTitle } from "../entity-title.js";
-import { relativeTime } from "../format.js";
+import { effortLabel, relativeTime, resolvedModelLabel } from "../format.js";
 import { formatUsd } from "../guardrail-values.js";
 import { backLabel, destination } from "../navigation.js";
 import { statusMeta } from "../status-meta.js";
@@ -21,13 +21,14 @@ import { useTimelineClock } from "../timeline-clock.js";
 import { pendingAssistantConfirmations } from "../assistant-confirmations.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
 import { AssistantConfirmationCard } from "./AssistantConfirmationCard.js";
+import { ASSISTANT_DEFAULTS_VIEW, AssistantSettingsLink } from "./AssistantSettingsLink.js";
 import { AssistantThreadLimitsDialog } from "./AssistantThreadLimitsDialog.js";
 import { AssistantDecisionDelegationDialog } from "./AssistantDecisionDelegationDialog.js";
 import { AssistantDecisionHistoryDialog } from "./AssistantDecisionHistory.js";
 import { AssistantWorkCards } from "./AssistantWorkCards.js";
 import { ChangeAssistantThreadAccountDialog } from "./ChangeAssistantThreadAccountDialog.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { AssistantsIcon, BotIcon, PlusIcon } from "./Icons.js";
+import { AssistantsIcon, BotIcon, PlusIcon, TuningIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
 import { NewAssistantThreadDialog, THREADS_UNAVAILABLE_MESSAGE } from "./NewAssistantThreadDialog.js";
 import { Notice } from "./Notice.js";
@@ -72,8 +73,10 @@ function newThreadBlock(list: ListState): { title: string; message: string } | u
  * routes. Every thread comes from the Thread API; a control plane without it (404) shows the empty
  * section and New Thread explains, never a failure.
  */
-export function AssistantsView({ threadId, rightPanel }: {
+export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   threadId?: string;
+  limits?: true;
+  delegation?: true;
   /** The shell's session panel (Files, Changes, Subagents), shared with the session page. */
   rightPanel: RightPanelState;
 }) {
@@ -88,8 +91,6 @@ export function AssistantsView({ threadId, rightPanel }: {
   const [missing, setMissing] = useState(false);
   const [creating, setCreating] = useState(false);
   const [renaming, setRenaming] = useState<AssistantThread | null>(null);
-  const [editingLimits, setEditingLimits] = useState<AssistantThread | null>(null);
-  const [editingDelegation, setEditingDelegation] = useState<AssistantThread | null>(null);
   const [viewingDelegationHistory, setViewingDelegationHistory] = useState<string | null>(null);
   const [archiving, setArchiving] = useState(false);
   const [changingAccount, setChangingAccount] = useState<AssistantThread | null>(null);
@@ -154,6 +155,11 @@ export function AssistantsView({ threadId, rightPanel }: {
   const threads = list.kind === "ready" ? list.threads : [];
   const listed = threadId === undefined ? undefined : threads.find((thread) => thread.id === threadId);
   const selected = listed ?? (extra?.id === threadId ? extra : undefined);
+  const model = useStoreSelector((state) => {
+    const backing = selected ? state.sessions.get(selected.sessionId) : undefined;
+    return backing?.resolvedModel ?? backing?.model;
+  });
+  const effort = useStoreSelector((state) => selected ? state.sessions.get(selected.sessionId)?.effort : undefined);
   // The window title names the open thread.
   useReportEntityTitle(
     threadId === undefined ? { name: "assistants" } : { name: "assistants", threadId },
@@ -241,6 +247,7 @@ export function AssistantsView({ threadId, rightPanel }: {
   };
 
   const openThread = (id: string) => navigate({ name: "assistants", threadId: id });
+  const openThreadSettings = (id: string) => navigate({ name: "assistants", threadId: id, limits: true });
   const toList = () => navigate({ name: "assistants" });
 
   const archive = async (thread: AssistantThread) => {
@@ -269,8 +276,10 @@ export function AssistantsView({ threadId, rightPanel }: {
     ...(thread.status === "archived" ? [] : [
       ...(thread.accountChangeSupported ? [{ label: "Change Account", onClick: () => setChangingAccount(thread) }] : []),
       { label: "Rename", onClick: () => setRenaming(thread) },
-      ...(thread.limitsEditable && thread.usage ? [{ label: "Thread Limits", onClick: () => setEditingLimits(thread) }] : []),
-      ...(thread.decisionDelegation ? [{ label: "Decision Delegation", onClick: () => setEditingDelegation(thread) }] : []),
+      ...(thread.limitsEditable && thread.usage ? [{ label: "Thread Limits", onClick: () => openThreadSettings(thread.id) }] : []),
+      ...(thread.decisionDelegation ? [{
+        label: "Decision Delegation", onClick: () => navigate({ name: "assistants", threadId: thread.id, delegation: true }),
+      }] : []),
       { label: "Archive", disabled: archiving, onClick: () => void archive(thread) },
     ]),
   ];
@@ -285,8 +294,15 @@ export function AssistantsView({ threadId, rightPanel }: {
           backLabel={backLabel("assistants")}
           onBack={toList}
           status={selected ? <StatusBadge meta={statusMeta("assistantThread", selected.status)} /> : undefined}
+          secondary={selected ? {
+            label: "Thread Settings",
+            icon: <TuningIcon size={16} />,
+            iconOnPhone: true,
+            onClick: () => openThreadSettings(selected.id),
+          } : undefined}
           menu={selected ? threadMenu(selected) : []}
           menuLabel="Thread Actions"
+          searchInMenu={Boolean(selected)}
         />
       ) : (
         // New Thread belongs to the assistant's Threads list, so the page header offers no second one.
@@ -376,18 +392,31 @@ export function AssistantsView({ threadId, rightPanel }: {
           }}
         />
       )}
-      {editingLimits?.usage && (
+      {limits && selected && (
         <AssistantThreadLimitsDialog
-          limits={{ costUsd: editingLimits.usage.costUsd.limit, launchedSessions: editingLimits.usage.launchedSessions.limit }}
-          onClose={() => setEditingLimits(null)}
-          onSave={async (limits) => replace((await api.setAssistantThreadLimits(editingLimits.id, limits)).thread)}
+          key={selected.id}
+          thread={selected}
+          model={model ? resolvedModelLabel(model) : undefined}
+          effort={effort ? effortLabel(effort) : undefined}
+          limits={selected.usage && { costUsd: selected.usage.costUsd.limit, launchedSessions: selected.usage.launchedSessions.limit }}
+          onClose={() => navigate({ name: "assistants", threadId: selected.id }, { replace: true })}
+          onNewThread={() => {
+            navigate({ name: "assistants", threadId: selected.id }, { replace: true });
+            setCreating(true);
+          }}
+          onAccountChanged={replace}
+          onSave={async (next) => replace((await api.setAssistantThreadLimits(selected.id, next)).thread)}
         />
       )}
-      {editingDelegation?.decisionDelegation && <AssistantDecisionDelegationDialog
-        delegation={editingDelegation.decisionDelegation}
-        onClose={() => setEditingDelegation(null)}
-        onSave={async (delegation) => replace((await api.setAssistantThreadDelegation(editingDelegation.id, delegation)).thread)}
-      />}
+      {delegation && selected && (selected.decisionDelegation && selected.status !== "archived"
+        ? <AssistantDecisionDelegationDialog key={selected.id}
+            delegation={selected.decisionDelegation}
+            onClose={() => navigate({ name: "assistants", threadId: selected.id }, { replace: true })}
+            onSave={async (next) => replace((await api.setAssistantThreadDelegation(selected.id, next)).thread)}
+          />
+        : <Modal title="Decision Delegation" onClose={() => navigate({ name: "assistants", threadId: selected.id }, { replace: true })}>
+            <p>{selected.status === "archived" ? "Archived threads cannot hold delegation grants." : "This control plane does not support decision delegation."}</p>
+          </Modal>)}
       {viewingDelegationHistory && <AssistantDecisionHistoryDialog threadId={viewingDelegationHistory} onClose={() => setViewingDelegationHistory(null)} />}
     </section>
   );
@@ -487,6 +516,7 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
   menu: PageMenuAction[];
   onConfirmationAnswered?: () => void;
 }) {
+  const { navigate } = useStoreActions();
   const meta = statusMeta("assistantThread", thread.status);
   const grant = thread.decisionDelegation?.grant;
   const expiresAt = grant?.expiresAt;
@@ -498,6 +528,9 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
   const pending = pendingAssistantConfirmations([thread]);
   const usage = thread.usage;
   const launches = usage?.launchedSessions;
+  const launchRefusal = thread.launchLimitRefusal ?? (launches?.limit != null && launches.used >= launches.limit && thread.status !== "archived"
+    ? "This thread has reached its session launch limit." : null);
+  const settingsView = { name: "assistants", threadId: thread.id, limits: true } as const;
   const launchSummary = launches?.limit === 0 ? `${launches.used} launched · Launches Paused`
     : launches?.limit === null ? `${launches.used} launched · No Launch Limit`
     : launches ? `${launches.used} of ${launches.limit} sessions launched` : null;
@@ -507,6 +540,7 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
         <div className="assistant-thread-title-row">
           <h2 className="assistant-thread-title" title={assistantThreadTitle(thread)}>{assistantThreadTitle(thread)}</h2>
           <StatusBadge meta={meta} />
+          <button type="button" className="btn sm" onClick={() => navigate(settingsView)}>Thread Settings</button>
           <ActionsMenu label="Thread Actions" items={menu} />
         </div>
       )}
@@ -529,6 +563,10 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
           <li>{launchSummary}</li>
         </>}
       </ul>
+      {launchRefusal ? <Notice tone="warning" role="status" title="Thread Limit Reached" actions={<>
+        <AssistantSettingsLink view={settingsView}>Thread Settings</AssistantSettingsLink>
+        <AssistantSettingsLink view={ASSISTANT_DEFAULTS_VIEW}>Assistant Defaults</AssistantSettingsLink>
+      </>}>{launchRefusal}</Notice> : null}
       <AssistantWorkCards
         sessionIds={thread.launchedSessionIds}
         campaignIds={thread.launchedCampaignIds}

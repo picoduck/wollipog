@@ -33,6 +33,7 @@ export function registerAssistantThreadRoutes(app: FastifyInstance, deps: {
   app.get("/api/assistant-threads", handle((owner, req) =>
     ({ threads: deps.threads.list(owner, (req.query as { includeArchived?: unknown }).includeArchived === "true") })));
   app.get("/api/assistant-threads/defaults", handle((owner) => deps.threads.defaults(owner)));
+  app.put("/api/assistant-threads/defaults/launch", handle((owner, req) => deps.threads.setLaunchDefaults(owner, req.body)));
   // Separate write routes ensure older control planes refuse these inputs instead of silently
   // treating an update as a rename or applying the historic fixed limits.
   app.get("/api/assistant-threads/defaults/limits", handle((owner) => deps.threads.limitDefaults(owner)));

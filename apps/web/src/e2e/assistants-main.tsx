@@ -5,10 +5,12 @@ import {
   type AgentHarnessDefaultsView,
   type AssistantDecisionDelegation,
   type AssistantThreadLimits,
+  type AssistantThreadLaunchDefaults,
   type ControlPlaneToUi,
   type PendingApproval,
   type ProjectView,
   type RunnerView,
+  type SessionConfig,
   type SessionEvent,
   type SessionNamingSettingsView,
   type SessionView,
@@ -233,7 +235,8 @@ function thread(id: string, sessionId: string, overrides: Partial<AssistantThrea
   return {
     id, assistant: "wollipog", title: backing.title, harness: "claude-code", sessionId, status: "done", access,
     connectionId: `conn-${id}`, launchedSessionIds: [], lastActivityAt: backing.updatedAt, createdAt: backing.createdAt,
-    ...(delegationScenario === "stress" ? { decisionDelegation: { revision: 0, grant: null } } : {}),
+    ...(delegationScenario === "stress" || (limitsScenario && limitsScenario !== "old")
+      ? { decisionDelegation: { revision: 0, grant: null } } : {}),
     ...(delegationScenario === "expires" ? { decisionDelegation: { revision: 1, grant: {
       categories: ["owner_question"], campaigns: "all", projects: "all", expiresAt: NOW + minute,
     } } } : {}),
@@ -268,6 +271,19 @@ let threads: AssistantThread[] = scenario === "long" ? [
   thread("thr_retired", "sess-cleanup", { title: "Retire the Old Runner", status: "archived", archivedAt: NOW - 2 * 24 * 60 * minute,
     lastActivityAt: NOW - 3 * 24 * 60 * minute }),
 ] : [];
+if (delegationScenario === "many") {
+  const grant: Omit<NonNullable<AssistantDecisionDelegation["grant"]>, "expiresAt"> = {
+    categories: ["owner_question", "pr_merge"], campaigns: "all", projects: "all",
+  };
+  const future = NOW + 11 * 24 * 60 * minute;
+  threads[0]!.decisionDelegation = { revision: 1, grant: { ...grant, expiresAt: future } };
+  for (let index = 1; index <= 9; index += 1) {
+    threads.push(thread(`thr_grant_${index}`, "sess-release", {
+      title: index === 1 ? longTitle(index + 1) : `Delegated Release Review ${index}`,
+      decisionDelegation: { revision: 1, grant: { ...grant, expiresAt: index % 2 ? NOW - minute : null } },
+    }));
+  }
+}
 for (let index = 2; index < attentionCount; index += 1) {
   const threadId = `thr_attention_${index}`;
   const sessionId = `sess_attention_${index}`;
@@ -294,6 +310,14 @@ if (limitsScenario) {
       launchedSessions: { used: item.launchedSessionIds.length, limit: limitsScenario === "stress" ? null : 10 },
     };
     if (item.status !== "archived" && limitsScenario !== "old") item.limitsEditable = true;
+    if (item.id === "thr_triage" && limitsScenario === "budget") {
+      item.launchLimitRefusal = "This Wollipog Assistant thread has spent or committed its whole $25 budget, so it cannot launch another session.";
+    }
+    const backing = sessions.get(item.sessionId);
+    if (backing && limitsScenario !== "old") {
+      backing.assistantThreadBudget = { threadId: item.id, limitUsd: item.usage.costUsd.limit };
+      backing.costBudgetUsd = 15;
+    }
   }
 }
 
@@ -305,7 +329,8 @@ const defaults: AssistantThreadDefaults = {
     { id: "codex", label: "Codex", available: true },
   ],
 };
-if (accountScenario) {
+if (limitsScenario && limitsScenario !== "old") defaults.launchDefaults = { harness: "claude-code", providerAccount: null };
+if (accountScenario || defaults.launchDefaults) {
   for (const harness of defaults.harnesses) {
     harness.accountSelection = { ...fixtureAccountChoices(harness.id), runnerId: "runner-1", workspaceId: "workspace-1" };
   }
@@ -472,6 +497,22 @@ const client = {
     return { thread: structuredClone(found(threadId)) };
   },
   assistantThreadDefaults: () => refused() ?? Promise.resolve(structuredClone(defaults)),
+  setAssistantThreadLaunchDefaults: async (next: AssistantThreadLaunchDefaults) => {
+    defaults.harness = next.harness;
+    defaults.launchDefaults = next;
+    return structuredClone(defaults);
+  },
+  assistantConnections: async () => ({
+    installation: { id: "fixture-installation", name: "Home Studio", canRename: true },
+    connections: Array.from({ length: limitsScenario === "stress" ? 9 : 1 }, (_, index) => ({
+      id: `asst_${index}`,
+      name: limitsScenario === "stress" ? longTitle(index + 1) : "Release Assistant",
+      ownerUserId: "usr_owner", organizationId: "org_fixture",
+      grant: { operations: "all", projects: "all", destructiveConfirmation: "confirm" },
+      revision: 1, revoked: false,
+    })),
+    operations: [], projects: [],
+  }),
   assistantThreadLimitDefaults: () => refused() ?? (limitsScenario && limitsScenario !== "old"
     ? Promise.resolve(structuredClone(limitDefaults)) : unavailable()),
   setAssistantThreadLimitDefaults: async (limits: AssistantThreadLimits) => {
@@ -480,13 +521,17 @@ const client = {
   },
   setAssistantThreadLimits: async (threadId: string, limits: AssistantThreadLimits) => {
     const current = found(threadId);
-    if (limits.costUsd !== null && limits.costUsd < 15) {
-      throw new ApiError("The thread has already spent or committed $15.00. Choose a budget at least that high.", 409);
+    const committed = limitsScenario === "budget" ? 25 : 15;
+    if (limits.costUsd !== null && limits.costUsd < committed) {
+      throw new ApiError(`The thread has already spent or committed $${committed.toFixed(2)}. Choose a budget at least that high.`, 409);
     }
     current.usage = {
       costUsd: { used: current.usage!.costUsd.used, limit: limits.costUsd },
       launchedSessions: { used: current.usage!.launchedSessions.used, limit: limits.launchedSessions },
     };
+    if (limits.costUsd !== 25) delete current.launchLimitRefusal;
+    const backing = sessions.get(current.sessionId)!;
+    upsert({ ...backing, assistantThreadBudget: { threadId, limitUsd: limits.costUsd }, costBudgetUsd: limits.costUsd });
     publish(current);
     return { thread: structuredClone(current) };
   },
@@ -499,6 +544,16 @@ const client = {
     return { thread: structuredClone(current) };
   },
   assistantDecisionHistory: async (filter: { threadId?: string; before?: string }) => assistantDecisionHistoryFixture("campaign_0", filter.before),
+  setConfig: async (sessionId: string, patch: SessionConfig) => {
+    const current = threads.find((thread) => thread.sessionId === sessionId);
+    if (current?.usage && patch.costBudgetUsd !== undefined) {
+      await client.setAssistantThreadLimits(current.id, {
+        costUsd: patch.costBudgetUsd > 0 ? patch.costBudgetUsd : null,
+        launchedSessions: current.usage.launchedSessions.limit,
+      });
+    }
+    return structuredClone(sessions.get(sessionId)!);
+  },
   createAssistantThread: async (body: CreateAssistantThreadRequest) => {
     const refusal = refused();
     if (refusal) return refusal;
@@ -506,7 +561,9 @@ const client = {
     const sessionId = `sess-new-${threads.length + 1}`;
     const harness = body.harness ?? defaults.harness;
     const choices = fixtureAccountChoices(harness);
-    const accountRef = body.providerAccountRef ?? choices.policyAccountRef;
+    const saved = defaults.launchDefaults?.harness === harness ? defaults.launchDefaults?.providerAccount : null;
+    const accountRef = body.providerAccountRef === undefined ? saved?.accountRef ?? choices.policyAccountRef
+      : body.providerAccountRef ?? choices.policyAccountRef;
     const account = choices.accounts.find((candidate) => candidate.accountRef === accountRef);
     if (accountScenario && account) {
       accountSelections.set(id, account.accountRef);
@@ -678,12 +735,19 @@ const navigation: ViewNavigation = {
   current: () => {
     const path = new URLSearchParams(window.location.search).get("path") ?? "/assistants";
     const url = new URL(path, window.location.origin);
-    return viewFromPath(url.pathname, url.search) ?? { name: "assistants" };
+    const view = viewFromPath(url.pathname, url.search) ?? { name: "assistants" };
+    if (viewPath(view) !== path) navigation.replace?.(view);
+    return view;
   },
   push: (view) => {
     const url = new URL(window.location.href);
     url.searchParams.set("path", viewPath(view));
     window.history.pushState(null, "", url);
+  },
+  replace: (view) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("path", viewPath(view));
+    window.history.replaceState(null, "", url);
   },
   listen: (onView) => {
     const onPop = () => onView(navigation.current());

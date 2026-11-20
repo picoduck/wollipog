@@ -2,6 +2,7 @@ import {
   ASSISTANT_THREAD_CREDENTIAL_TTL_MS,
   ASSISTANT_THREAD_HARNESSES,
   ASSISTANT_DECISION_CATEGORIES,
+  PROVIDER_ACCOUNT_SKIP_TEXT,
   resolveAgentHarnessRow,
   isProviderAccountRef,
   runnerCapabilityRequirementError,
@@ -16,6 +17,7 @@ import {
   type AssistantThreadAccountChoices,
   type AssistantThreadDefaultsResponse,
   type AssistantThreadHarness,
+  type AssistantThreadLaunchDefaults,
   type AssistantThreadLimits,
   type AssistantThreadStatus,
   type ChangeAssistantThreadAccountRequest,
@@ -30,7 +32,7 @@ import { ASSISTANT_CAMPAIGN_START, assistantCampaignLaunchId, AssistantOwnerConf
 import { threadDecisionDelegation, type AssistantThreadStore, type StoredThreadState, type ThreadRow } from "./assistant-thread-store.js";
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
-import { UNTITLED, type SessionsService } from "./sessions.js";
+import { assistantThreadBudgetRefusal, assistantThreadLaunchLimitMessage, floorBudgetCents, UNTITLED, type SessionsService } from "./sessions.js";
 import { failureBody } from "./capability-refusal.js";
 
 const DEFAULT_THREAD_TITLE = "New Thread";
@@ -79,14 +81,14 @@ function decisionDelegation(body: unknown, now: number): AssistantDecisionDelega
   } };
 }
 
-function threadLimits(body: unknown): AssistantThreadLimits {
+function threadLimits(body: unknown, existingBudget?: number | null): AssistantThreadLimits {
   if (!body || typeof body !== "object" || Array.isArray(body) ||
       Object.keys(body).some((key) => key !== "costUsd" && key !== "launchedSessions")) {
     throw new AssistantThreadRefusal("Only costUsd and launchedSessions are accepted.", 400);
   }
   const { costUsd, launchedSessions } = body as Record<string, unknown>;
   if (costUsd !== null && (typeof costUsd !== "number" || costUsd <= 0 ||
-      !Number.isSafeInteger(Math.round(costUsd * 100)) || Number(costUsd.toFixed(2)) !== costUsd)) {
+      (costUsd !== existingBudget && (!Number.isSafeInteger(Math.round(costUsd * 100)) || Number(costUsd.toFixed(2)) !== costUsd)))) {
     throw new AssistantThreadRefusal("The cost budget must be a positive amount in whole cents, or null for no budget.", 400);
   }
   if (launchedSessions !== null && (typeof launchedSessions !== "number" ||
@@ -136,8 +138,6 @@ export interface AssistantThreadDeps {
   listRunners(owner: HumanPrincipal): RunnerView[];
   isRunnerOnline(runnerId: string): boolean;
   getSession(sessionId: string): SessionView | null;
-  /** The owner's saved Orchestrator Child Harness driver, or null for Automatic. */
-  savedChildHarnessDriver(owner: HumanPrincipal): AgentDriverKind | null;
   /** Creates the backing session exactly as an owner's New Session would, with the trusted
    * assistant marker. Never accepts the marker from request JSON. */
   createBackingSession(owner: HumanPrincipal, request: CreateSessionRequest, threadId: string):
@@ -174,6 +174,11 @@ export class AssistantThreads {
     const campaigns = this.deps.launchedCampaignIds?.(row.id) ?? [];
     const confirmations = row.state === "active" ? this.deps.pendingConfirmations?.(row.id) ?? [] : [];
     const status = assistantThreadStatus(row.state, session, confirmations.length);
+    const launchCount = launched.length + campaigns.length;
+    const costs = this.store.costs(row.id);
+    const launchLimitRefusal = status === "archived" ? null : assistantThreadLaunchLimitMessage(launchCount, row.launch_limit)
+      ?? (row.cost_limit_usd !== null && floorBudgetCents(row.cost_limit_usd - costs.launchedHeldUsd - costs.backingSpentUsd) < 0.01
+        ? assistantThreadBudgetRefusal(row.cost_limit_usd) : null);
     return {
       id: row.id,
       assistant: row.assistant,
@@ -189,9 +194,10 @@ export class AssistantThreads {
       launchedSessionIds: launched,
       ...(campaigns.length ? { launchedCampaignIds: campaigns } : {}),
       usage: {
-        launchedSessions: { used: launched.length + campaigns.length, limit: row.launch_limit },
-        costUsd: { used: Math.round(this.store.costs(row.id).spentUsd * 10_000) / 10_000, limit: row.cost_limit_usd },
+        launchedSessions: { used: launchCount, limit: row.launch_limit },
+        costUsd: { used: Math.round(costs.spentUsd * 10_000) / 10_000, limit: row.cost_limit_usd },
       },
+      ...(launchLimitRefusal ? { launchLimitRefusal } : {}),
       ...(status !== "archived" ? { limitsEditable: true } : {}),
       decisionDelegation: threadDecisionDelegation(row),
       confirmations,
@@ -217,7 +223,7 @@ export class AssistantThreads {
     if (row.state !== "active" || !session || session.archived) {
       throw new AssistantThreadRefusal("Limits cannot be changed on an archived thread.", 409);
     }
-    const updated = this.deps.updateLimits(row, threadLimits(body));
+    const updated = this.deps.updateLimits(row, threadLimits(body, row.cost_limit_usd));
     if (!updated.ok) {
       throw new AssistantThreadRefusal(updated.error ?? "The thread limits could not be updated.", updated.status ?? 409);
     }
@@ -246,19 +252,48 @@ export class AssistantThreads {
       .sort((left, right) => right.lastActivityAt - left.lastActivityAt || right.createdAt - left.createdAt);
   }
 
-  defaultHarness(owner: HumanPrincipal): AssistantThreadHarness {
-    const driver = this.deps.savedChildHarnessDriver(owner);
-    return driver === "codex" || driver === "codex-app-server" ? "codex" : "claude-code";
+  setLaunchDefaults(owner: HumanPrincipal, body: unknown): AssistantThreadDefaultsResponse {
+    const input = body as Record<string, unknown> | null;
+    if (!input || typeof input !== "object" || Array.isArray(input) ||
+        Object.keys(input).some((key) => key !== "harness" && key !== "providerAccount")) {
+      throw new AssistantThreadRefusal("A harness and provider account choice are required.", 400);
+    }
+    const harness = harnessOf(input.harness);
+    let providerAccount: AssistantThreadLaunchDefaults["providerAccount"] = null;
+    if (input.providerAccount !== null) {
+      const account = input.providerAccount as Record<string, unknown> | undefined;
+      if (!account || typeof account.runnerId !== "string" || typeof account.accountRef !== "string" ||
+          !isProviderAccountRef(account.accountRef)) {
+        throw new AssistantThreadRefusal("Choose a provider account or Machine Policy.", 400);
+      }
+      const runner = this.deps.listRunners(owner).find((candidate) => candidate.runnerId === account.runnerId);
+      const agent = runner && harnessAgent(runner, harness);
+      if (!runner || !agent || !runner.workspaces.length || !this.deps.isRunnerOnline(runner.runnerId) ||
+          !runnerSupportsProtocol(runner.protocolVersion, "assistantRole") ||
+          !runnerSupportsProtocol(runner.protocolVersion, "assistantThreadProviderAccount")) {
+        throw new AssistantThreadRefusal("The account's Machine cannot currently start this harness. Choose Machine Policy or reconnect the Machine.", 409);
+      }
+      const choice = this.deps.accountChoices(runner, agent).accounts.find((candidate) => candidate.accountRef === account.accountRef);
+      if (!choice) throw new AssistantThreadRefusal("The chosen account is no longer available for this harness.", 409);
+      if (choice.reason) throw new AssistantThreadRefusal(`The chosen account ${PROVIDER_ACCOUNT_SKIP_TEXT[choice.reason]}.`, 409);
+      providerAccount = { runnerId: runner.runnerId, accountRef: choice.accountRef };
+    }
+    this.store.setDefaultLaunch(owner, { harness, providerAccount });
+    return this.defaults(owner);
   }
 
   defaults(owner: HumanPrincipal): AssistantThreadDefaultsResponse {
+    const launchDefaults = this.store.defaultLaunch(owner);
     const online = this.deps.listRunners(owner).filter((runner) => this.deps.isRunnerOnline(runner.runnerId));
     const capable = online.filter((runner) => runnerSupportsProtocol(runner.protocolVersion, "assistantRole"));
     return {
-      harness: this.defaultHarness(owner),
+      harness: launchDefaults.harness,
+      launchDefaults,
       harnesses: ASSISTANT_THREAD_HARNESSES.map((id) => {
         const label = HARNESS_LABELS[id];
-        const runner = capable.find((candidate) => candidate.workspaces.length > 0 && harnessAgent(candidate, id));
+        const usable = capable.filter((candidate) => candidate.workspaces.length > 0 && harnessAgent(candidate, id));
+        const preferredRunnerId = id === launchDefaults.harness ? launchDefaults.providerAccount?.runnerId : undefined;
+        const runner = usable.find((candidate) => candidate.runnerId === preferredRunnerId) ?? usable[0];
         if (runner) {
           const accounts = runnerSupportsProtocol(runner.protocolVersion, "assistantThreadProviderAccount")
             ? this.deps.accountChoices(runner, harnessAgent(runner, id)!)
@@ -284,23 +319,32 @@ export class AssistantThreads {
     if (typeof input !== "object" || Array.isArray(input)) throw new AssistantThreadRefusal("A thread request object is required.", 400);
     const unknown = Object.keys(input).filter((key) => !["harness", "title", "runnerId", "workspaceId", "providerAccountRef"].includes(key));
     if (unknown.length) throw new AssistantThreadRefusal(`Unsupported thread fields: ${unknown.join(", ")}.`, 400);
-    const harness = input.harness === undefined ? this.defaultHarness(owner) : harnessOf(input.harness);
+    const defaults = this.store.defaultLaunch(owner);
+    const harness = input.harness === undefined ? defaults.harness : harnessOf(input.harness);
     const title = input.title === undefined ? null : threadTitle(input.title);
     for (const key of ["runnerId", "workspaceId"] as const) {
       if (input[key] !== undefined && (typeof input[key] !== "string" || !input[key])) throw new AssistantThreadRefusal(`${key} must be a non-empty string.`, 400);
     }
-    const runnerId = input.runnerId as string | undefined;
+    const requestedRunnerId = input.runnerId as string | undefined;
     const workspaceId = input.workspaceId as string | undefined;
-    const accountRef = input.providerAccountRef;
-    if (accountRef !== undefined && (typeof accountRef !== "string" || !isProviderAccountRef(accountRef))) {
+    const requestedAccount = input.providerAccountRef;
+    if (requestedAccount != null && (typeof requestedAccount !== "string" || !isProviderAccountRef(requestedAccount))) {
       throw new AssistantThreadRefusal("A valid providerAccountRef is required when choosing an account.", 400);
     }
+    const defaultAccount = requestedAccount === undefined && harness === defaults.harness ? defaults.providerAccount : null;
+    const runners = this.deps.listRunners(owner);
+    const workspaceRunnerId = workspaceId === undefined ? undefined : runners.find((runner) =>
+      runner.workspaces.some((workspace) => workspace.id === workspaceId))?.runnerId;
+    const runnerId = requestedRunnerId ?? (workspaceId === undefined ? defaultAccount?.runnerId : workspaceRunnerId);
+    const accountRef = defaultAccount && runnerId === defaultAccount.runnerId ? defaultAccount.accountRef : requestedAccount;
     const label = HARNESS_LABELS[harness];
 
-    const runners = this.deps.listRunners(owner);
     let runner: RunnerView;
     if (runnerId !== undefined) {
       const chosen = runners.find((candidate) => candidate.runnerId === runnerId);
+      if (accountRef === defaultAccount?.accountRef && defaultAccount && (!chosen || !this.deps.isRunnerOnline(runnerId))) {
+        throw new AssistantThreadRefusal("The Machine for your default Assistant account is unavailable. Choose another account or use Machine Policy for this thread.", 409);
+      }
       if (!chosen) throw new AssistantThreadRefusal("Machine not found.", 404);
       if (!this.deps.isRunnerOnline(chosen.runnerId)) throw new AssistantThreadRefusal("This Machine is offline. Connect it, or choose another Machine.", 409);
       if (!runnerSupportsProtocol(chosen.protocolVersion, "assistantRole")) {
@@ -511,8 +555,6 @@ export function createAssistantThreads(db: ControlPlaneDb, hub: Hub, svc: Sessio
     listRunners: (owner) => db.listRunnersForPrincipal(owner),
     isRunnerOnline: (runnerId) => hub.isRunnerOnline(runnerId),
     getSession: (sessionId) => db.getSession(sessionId),
-    // Absent saved settings mean the system default, whose Child Harness is Automatic.
-    savedChildHarnessDriver: (owner) => db.getOrchestratorDefaults(owner.userId)?.defaults.behavior.childHarness?.driver ?? null,
     createBackingSession: (owner, request, threadId) => {
       // The owner's New Session launch path, but never in a Project or a shared scope: the session
       // acts with the owner's Assistant authority, so it belongs to the owner alone.

@@ -285,6 +285,7 @@ export function DetailBar({
   secondary,
   menu = [],
   menuLabel,
+  searchInMenu = false,
 }: {
   title: string;
   /** "Back to <Destination>" — the button's accessible name and tooltip. */
@@ -298,10 +299,14 @@ export function DetailBar({
   menu?: PageMenuAction[];
   /** ⋯'s name when it says more than "More Actions" (`ActionsMenu`'s `label`). */
   menuLabel?: string;
+  /** Keep the phone title readable when there is another action that needs a dedicated button. */
+  searchInMenu?: boolean;
 }) {
   const compact = useIsCompact();
   const phone = useIsMobile();
   const onSearch = useContext(AppBarSearchContext);
+  const menuSearch = phone && searchInMenu ? onSearch : undefined;
+  const actions = menuSearch ? [{ label: "Search", icon: <SearchIcon />, onClick: menuSearch }, ...menu] : menu;
   const headingRef = useRef<HTMLDivElement>(null);
   const hasStatus = Boolean(status);
   // Whether the badge is a dot is measured against the full badge, every time, so the answer never
@@ -367,11 +372,11 @@ export function DetailBar({
         <h1 id="page-title" className="detail-bar-title" tabIndex={-1} title={title}>{title}</h1>
         {status && <span className="detail-bar-status">{status}</span>}
       </div>
-      {(onSearch || primary || secondary || menu.length > 0) && (
+      {(onSearch || primary || secondary || actions.length > 0) && (
         <div className="detail-bar-actions">
-          {onSearch && <AppBarSearch onSearch={onSearch} />}
+          {onSearch && !menuSearch && <AppBarSearch onSearch={onSearch} />}
           {secondary && action(secondary, "btn")}
-          {menu.length > 0 && <ActionsMenu overflow="always" label={menuLabel} items={menu} />}
+          {actions.length > 0 && <ActionsMenu overflow="always" label={menuLabel} items={actions} />}
           {primary && action(primary, "btn primary")}
         </div>
       )}

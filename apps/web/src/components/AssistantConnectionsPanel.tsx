@@ -15,7 +15,7 @@ export function AssistantConnectionsPanel() {
 function AssistantConnectionsLauncher() {
   const [open, setOpen] = useState(false);
   return <>
-    <SettingsGroup title="Assistants" scope="This Server">
+    <SettingsGroup title="Assistant Connections" scope="This Server">
       <LinkRow title="Manage Assistant Connections" description="Organization owners can grant, inspect or revoke standing access for external assistants." hasPopup="dialog" onClick={() => setOpen(true)} />
     </SettingsGroup>
     {open && <AssistantConnectionsDialog onClose={() => setOpen(false)} />}

@@ -5975,6 +5975,10 @@ export class ControlPlaneDb {
     }
     this.assistantConnections = new AssistantConnections(db);
     this.assistantThreads = new AssistantThreadStore(db);
+    if (!attached) {
+      this.migrateAssistantThreadLaunchDefaults();
+      this.migrateAssistantThreadBudgets();
+    }
     this.assistantOwnerConfirmations = new AssistantOwnerConfirmations(db);
     this.assistantWork = new AssistantWorkStore(db, this, this.assistantConnections);
     this.providerPublications = new ProviderProfilePublicationStore(db, controlPlaneInstanceId);
@@ -6837,6 +6841,37 @@ export class ControlPlaneDb {
 
   /** Persist a thread's owner limits and the matching backing session cap together. */
   assistantThreadLimitsTransaction<T>(work: () => T): T { return this.atomic(work); }
+
+  private migrateAssistantThreadBudgets(): void {
+    const key = "assistant_thread_budgets_unified";
+    const applied = this.db.prepare("SELECT 1 FROM control_plane_metadata WHERE key=?");
+    if (applied.get(key)) return;
+    this.atomic(() => {
+      if (applied.get(key)) return;
+      this.assistantThreads.migrateLegacyBackingBudgets();
+      this.db.prepare("INSERT INTO control_plane_metadata (key, value) VALUES (?, '1')").run(key);
+    });
+  }
+
+  /** Snapshot the formerly shared harness before Orchestrator settings can change again. */
+  private migrateAssistantThreadLaunchDefaults(): void {
+    const key = "assistant_thread_launch_defaults_migrated";
+    const applied = this.db.prepare("SELECT 1 FROM control_plane_metadata WHERE key=?");
+    if (applied.get(key)) return;
+    this.atomic(() => {
+      if (applied.get(key)) return;
+      const memberships = this.db.prepare(`SELECT m.user_id AS userId, m.organization_id AS organizationId
+        FROM identity_memberships m JOIN orchestrator_settings s ON s.user_id=m.user_id
+        WHERE m.role='owner' AND s.child_harness IS NOT NULL`).all() as Array<{ userId: string; organizationId: string }>;
+      for (const owner of memberships) {
+        const driver = this.getOrchestratorDefaults(owner.userId)?.defaults.behavior.childHarness?.driver;
+        if (driver === "codex" || driver === "codex-app-server") {
+          this.assistantThreads.setDefaultLaunch(owner, { harness: "codex", providerAccount: null });
+        }
+      }
+      this.db.prepare("INSERT INTO control_plane_metadata (key, value) VALUES (?, '1')").run(key);
+    });
+  }
 
   static open(location: string, options: { artifactBlobDir?: string; hostBootId?: string; incrementalVacuum?: boolean } = {}): ControlPlaneDb {
     if (location !== ":memory:") mkdirSync(dirname(location), { recursive: true });
@@ -30651,8 +30686,10 @@ export class ControlPlaneDb {
     // newer runner counters whose cost is not known yet; the detailed `/usage` consumer applies
     // the same processed-token freshness test before accepting its provenance.
     const costSource = this.sessionCostSource(row.id, row.input_tokens + row.output_tokens);
+    const assistantThread = row.assistant_thread_id ? this.assistantThreads.get(row.assistant_thread_id) : null;
     const view: SessionView = {
       id: row.id,
+      ...(assistantThread ? { assistantThreadBudget: { threadId: assistantThread.id, limitUsd: assistantThread.cost_limit_usd } } : {}),
       runnerId: row.runner_id,
       workspaceId: row.workspace_id,
       workspaceName,

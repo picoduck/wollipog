@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { DEFAULT_LIVE_CHILD_LIMIT, type SessionConfig, type SessionView } from "@wollipog/protocol";
 import {
   checkpointAboveThreshold,
@@ -16,11 +16,12 @@ import { FieldError } from "./FieldError.js";
 import { FieldWarning } from "./FieldWarning.js";
 import { CostIcon, CountIcon } from "./Icons.js";
 import { useLiveSession } from "../store.js";
+import { ASSISTANT_DEFAULTS_VIEW, AssistantSettingsLink } from "./AssistantSettingsLink.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
 export type GuardrailsDialogSession = Pick<SessionView,
-  | "id" | "costBudgetUsd" | "costCheckpointsUsd" | "costCheckpointApprovedUsd" | "costUsd" | "liveUsage"
+  | "id" | "assistantThreadBudget" | "costBudgetUsd" | "costCheckpointsUsd" | "costCheckpointApprovedUsd" | "costUsd" | "liveUsage"
   | "maxToolCalls" | "toolCallCount" | "maxChildSessions" | "liveChildCapacity">;
 
 const CHECKPOINT_WARNING = "This checkpoint won't pause separately, because the recurring threshold is lower.";
@@ -52,16 +53,21 @@ export function GuardrailsDialog({
 }) {
   // Spend and tool calls move with every streamed event; the session view does not render for that (#2872).
   const session = useLiveSession(rendered);
+  const threadBudget = session.assistantThreadBudget;
   const idBase = useId();
   const id = (part: string) => `${idBase}-${part}`;
   // The limits as the dialog opened: a change the server reports meanwhile does not move a field
   // the person is reading, and a save compares against what they saw.
-  const [opened] = useState(() => session);
-  const [openedDraft] = useState<GuardrailDraft>(() => guardrailDraft(session));
+  const [opened] = useState(() => threadBudget ? { ...session, costBudgetUsd: threadBudget.limitUsd } : session);
+  const [openedDraft] = useState<GuardrailDraft>(() => guardrailDraft(opened));
   const [draft, setDraft] = useState<GuardrailDraft>(openedDraft);
   const [edited, setEdited] = useState<ReadonlySet<GuardrailField>>(() => new Set());
   const [errors, setErrors] = useState<Partial<Record<GuardrailField, string>>>({});
   const [failure, setFailure] = useState<string | null>(null);
+  const failureRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (failure) failureRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [failure]);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const inputs = useRef<Partial<Record<GuardrailField, HTMLInputElement | null>>>({});
@@ -193,12 +199,18 @@ export function GuardrailsDialog({
           void save();
         }}
       >
-        {field("costBudgetUsd", "Recurring Cost Threshold", <CostIcon size={14} />, "decimal",
-          `Pauses when spend reaches this amount. Continue allows another equal amount. ${spentSoFar(session)}`)}
+        {field("costBudgetUsd", threadBudget ? "Assistant Thread Cost Budget" : "Recurring Cost Threshold", <CostIcon size={14} />, "decimal",
+          threadBudget ? "This budget covers the Assistant thread and the work it launches. Leave it empty for no limit."
+            : `Pauses when spend reaches this amount. Continue allows another equal amount. ${spentSoFar(session)}`,
+          { placeholder: threadBudget ? "No Limit" : undefined })}
+        {threadBudget && <div className="field-row">
+          <AssistantSettingsLink view={{ name: "assistants", threadId: threadBudget.threadId, limits: true }}>Thread Settings</AssistantSettingsLink>
+          <AssistantSettingsLink view={ASSISTANT_DEFAULTS_VIEW}>Assistant Defaults</AssistantSettingsLink>
+        </div>}
         {field("costCheckpointsUsd", "Cost Checkpoints", <CostIcon size={14} />, "decimal",
           "One-time pauses at these totals, separated by commas." +
             (approved != null ? ` Approved through ${formatUsd(approved)}.` : ""),
-          { warning: checkpointAboveThreshold(draft) ? CHECKPOINT_WARNING : null })}
+          { warning: !threadBudget && checkpointAboveThreshold(draft) ? CHECKPOINT_WARNING : null })}
         {field("maxToolCalls", "Tool-Call Threshold", <CountIcon size={14} />, "numeric",
           "Pauses after this many tool calls." +
             (session.maxToolCalls != null && session.toolCallCount != null ? ` ${session.toolCallCount} used.` : ""))}
@@ -206,7 +218,7 @@ export function GuardrailsDialog({
           "How many child sessions can run at once. Set 0 to pause new children." +
             (capacity ? ` ${capacity.occupied} of ${capacity.limit} in use.` : ""),
           { placeholder: String(DEFAULT_LIVE_CHILD_LIMIT) })}
-        {failure && <Notice tone="danger" role="alert" title="Couldn't Save the Guardrails">{failure}</Notice>}
+        {failure && <Notice tone="danger" role="alert" title="Couldn't Save the Guardrails" noticeRef={failureRef}>{failure}</Notice>}
       </form>
     </Modal>
   );

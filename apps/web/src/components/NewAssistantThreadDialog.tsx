@@ -42,7 +42,7 @@ function blockFor(cause: unknown): NewThreadBlock | null {
 }
 
 /**
- * New Thread (#4664): pick Claude Code or Codex, with the saved Orchestrator harness preselected,
+ * New Thread (#4664): pick Claude Code or Codex, with the saved Assistant harness preselected,
  * and optionally name the thread. A harness the control plane can't run says why and can't be
  * chosen; a refusal (409) shows the server's guidance and keeps the dialog open.
  */
@@ -81,8 +81,13 @@ export function NewAssistantThreadDialog({ blocked, onClose, onCreated }: {
   }, [api, initialBlock, attempt]);
 
   const accounts = state.kind === "ready" ? state.defaults.harnesses.find((option) => option.id === harness)?.accountSelection : undefined;
-  const account = chosenAccount ?? (accounts && canUseMachineAccountPolicy(accounts) ? MACHINE_ACCOUNT_POLICY : null);
-  const needsAccount = !!accounts && !accounts.unavailable && account === null;
+  const launchDefaults = state.kind === "ready" ? state.defaults.launchDefaults : undefined;
+  const saved = launchDefaults?.harness === harness ? launchDefaults?.providerAccount : null;
+  const savedChoice = saved && accounts?.runnerId === saved.runnerId
+    ? accounts.accounts.find((candidate) => candidate.accountRef === saved.accountRef && !candidate.reason) : undefined;
+  const account = chosenAccount ?? (saved ? savedChoice?.accountRef ?? null
+    : accounts && canUseMachineAccountPolicy(accounts) ? MACHINE_ACCOUNT_POLICY : null);
+  const needsAccount = account === null && (Boolean(saved) || Boolean(accounts && !accounts.unavailable));
   const create = async () => {
     if (!harness || busy || needsAccount) return;
     setBusy(true);
@@ -92,7 +97,8 @@ export function NewAssistantThreadDialog({ blocked, onClose, onCreated }: {
       const { thread } = await api.createAssistantThread({
         harness, ...(trimmed ? { title: trimmed } : {}),
         ...(accounts && !accounts.unavailable ? { runnerId: accounts.runnerId, workspaceId: accounts.workspaceId } : {}),
-        ...(account && account !== MACHINE_ACCOUNT_POLICY ? { providerAccountRef: account } : {}),
+        ...(account && account !== MACHINE_ACCOUNT_POLICY ? { providerAccountRef: account }
+          : launchDefaults ? { providerAccountRef: null } : {}),
       });
       onCreated(thread);
     } catch (cause) {
@@ -146,14 +152,18 @@ export function NewAssistantThreadDialog({ blocked, onClose, onCreated }: {
             options={state.defaults.harnesses.map((option) => ({
               value: option.id,
               title: option.label || ASSISTANT_THREAD_HARNESS_LABELS[option.id],
-              description: option.id === state.defaults.harness ? "Your Orchestrator harness." : undefined,
+              description: option.id === state.defaults.harness ? "Your default harness." : undefined,
               disabled: !option.available,
               disabledReason: option.available ? undefined : option.reason ?? "Not available on your machines.",
             }))}
           />
           {accounts && (
-            <AssistantThreadAccountField key={harness} choices={accounts} value={account} onChange={setChosenAccount} disabled={busy} creating />
+            <AssistantThreadAccountField key={harness} choices={accounts} value={account} onChange={setChosenAccount} disabled={busy} usePolicy="launch" />
           )}
+          {saved && !savedChoice && <Notice tone="warning"
+            actions={(!accounts || accounts.unavailable) && <button type="button" className="btn sm" onClick={() => setChosenAccount(MACHINE_ACCOUNT_POLICY)}>Use Machine Policy</button>}>
+            Your default account is unavailable. Choose an account for this thread or use Machine Policy.
+          </Notice>}
           <label className="field">
             <span>Title (Optional)</span>
             <input value={title} maxLength={ASSISTANT_THREAD_TITLE_MAX} placeholder="New Thread" onChange={(event) => setTitle(event.target.value)} />

@@ -293,11 +293,11 @@ test("an Assistant campaign uses the reviewed New Session settings and its own f
         assert.deepEqual(control.boundary.delegatablePolicyIds, []);
         assert.deepEqual(root.orchestratorPolicy?.issueScope?.issueNumbers, [7]);
       } else assert.notEqual(control?.mode, "full_control");
-      await assert.rejects(h.call({ ...args, commandId: "past-limit" }), /Thread Limits/);
+      await assert.rejects(h.call({ ...args, commandId: "past-limit" }), /Thread Settings/);
       await assert.rejects(h.call({ sessionId: id }, "session_role"), /cannot call|not registered/);
       await assert.rejects(h.call({ sessionId: id }, "decision_resolve"), /not registered/);
       h.db.deleteSession(id);
-      await assert.rejects(h.call({ ...args, commandId: "deleted-root-is-still-a-launch" }), /Thread Limits/);
+      await assert.rejects(h.call({ ...args, commandId: "deleted-root-is-still-a-launch" }), /Thread Settings/);
     } finally { await h.close(); }
   }
 });

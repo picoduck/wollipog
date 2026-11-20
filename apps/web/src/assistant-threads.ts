@@ -19,6 +19,7 @@ import type {
   AssistantThreadDefaultsResponse,
   AssistantThreadHarness,
   AssistantThreadHarnessOption,
+  AssistantThreadLaunchDefaults,
   AssistantThreadListResponse,
   AssistantThreadLimits,
   AssistantThreadResponse,
@@ -36,7 +37,7 @@ export type {
   AssistantThreadStatus,
   CreateAssistantThreadRequest,
 } from "@wollipog/protocol";
-/** What New Thread reads: the saved Orchestrator harness it preselects, and each harness's state. */
+/** What New Thread reads to preselect the harness and account. */
 export type AssistantThreadDefaults = AssistantThreadDefaultsResponse;
 
 export const ASSISTANT_THREADS_PATH = "/api/assistant-threads";
@@ -58,6 +59,8 @@ export function assistantThreadRoutes(req: JsonRequest) {
     /** One thread, archived ones included: what a link to a thread the list leaves out opens. */
     assistantThread: (threadId: string) => req<AssistantThreadResponse>(threadPath(threadId)),
     assistantThreadDefaults: () => req<AssistantThreadDefaults>(`${ASSISTANT_THREADS_PATH}/defaults`),
+    setAssistantThreadLaunchDefaults: (defaults: AssistantThreadLaunchDefaults) =>
+      req<AssistantThreadDefaults>(`${ASSISTANT_THREADS_PATH}/defaults/launch`, { method: "PUT", body: JSON.stringify(defaults) }),
     assistantThreadLimitDefaults: () => req<AssistantThreadLimits>(`${ASSISTANT_THREADS_PATH}/defaults/limits`),
     setAssistantThreadLimitDefaults: (limits: AssistantThreadLimits) =>
       req<AssistantThreadLimits>(`${ASSISTANT_THREADS_PATH}/defaults/limits`, { method: "PUT", body: JSON.stringify(limits) }),

@@ -19,6 +19,9 @@ import {
   type VideoReviewSettingsStatus,
 } from "@wollipog/protocol";
 import { AgentDefaultsPanel } from "../components/AgentDefaultsPanel.js";
+import { AssistantConnectionsPanel } from "../components/AssistantConnectionsPanel.js";
+import { AssistantDelegationPanel } from "../components/AssistantDelegationPanel.js";
+import { AssistantThreadDefaultsPanel } from "../components/AssistantThreadDefaultsPanel.js";
 import { ArchivedHistoryRetentionPanel } from "../components/ArchivedHistoryRetentionPanel.js";
 import { OrchestratorSettingsPanel } from "../components/OrchestratorSettingsPanel.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
@@ -307,6 +310,13 @@ const harnessDefaultsTransport: ApiTransport = {
   publicOrigin: window.location.origin,
   close() {},
   async request(path, init) {
+    if (path === "/api/assistant-threads") return Response.json({ threads: [] });
+    if (path === "/api/assistant-threads/defaults") return Response.json({
+      harness: "claude-code",
+      launchDefaults: { harness: "claude-code", providerAccount: null },
+      harnesses: [{ id: "claude-code", label: "Claude Code", available: true }, { id: "codex", label: "Codex", available: true }],
+    });
+    if (path === "/api/assistant-threads/defaults/limits") return Response.json({ costUsd: 25, launchedSessions: 10 });
     // Behavior › Evidence (#3023). Unstubbed, the read fell through to the agent defaults below and
     // every Behavior capture showed a load failure. `artifact=save-fails` makes a change fail the way
     // a dropped connection does, for the danger notice and its Retry.
@@ -724,6 +734,11 @@ function Harness() {
                   <ApiProvider client={harnessDefaultsApi}><OrchestratorSettingsPanel /><DecisionModelPanel /></ApiProvider>
                 </FeedbackProvider>
               ),
+              assistant: <FeedbackProvider><ApiProvider client={harnessDefaultsApi}>
+                <AssistantThreadDefaultsPanel onOpenThreads={() => navigate({ name: "assistants" })} />
+                <AssistantConnectionsPanel />
+                <AssistantDelegationPanel onOpenGrant={(threadId) => navigate({ name: "assistants", threadId, delegation: true })} />
+              </ApiProvider></FeedbackProvider>,
               network: (
                 <ApiProvider client={harnessDefaultsApi}><NetworkPanel
                   tailnet={tailnetState === "write-retry" ? {
