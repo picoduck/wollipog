@@ -12151,7 +12151,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   overflow-wrap: anywhere;
 }
 .assistant-decision-history .btn {
-  max-inline-size: 100%;
+  max-width: 100%;
   white-space: normal;
 }
 .assistant-decision-history > li {

@@ -155,8 +155,9 @@ change the pending request through a resolution. Its connection restrictions sti
 
 The decision record identifies the Assistant thread, grant revision and reason. Open
 **Delegated Decisions** from the thread menu, Inbox's **More Actions** menu or Campaign Status to
-see the outcome, thread and reason. The grant and resolution tools are absent on older control
-planes. Outside Assistant connections cannot use a thread grant.
+see the outcome, thread and reason. The control plane advertises `assistantDecisionHistory` in
+the dashboard snapshot for the authenticated owner. The grant and resolution tools are absent on
+older control planes. Outside Assistant connections cannot use a thread grant.
 
 ## Thread Credential and Runner Proxy
 

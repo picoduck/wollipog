@@ -1634,6 +1634,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     stopBeforeArchive: true,
     unarchiveAndRestart: true,
     sessionReminders: true,
+    assistantDecisionHistory: true,
     indefiniteSessionReminders: true,
     worktreeSetupConfig: true,
     renameProjectLocations: true,
@@ -1666,11 +1667,10 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     authenticatedUiUrl(wsBase, operatorToken),
   );
   sockets.add(operatorUi);
-  assert.equal(
-    (await operatorUiInbox.take((message) => message.type === "snapshot")).type,
-    "snapshot",
-    "a paired device can authenticate the real /ui WebSocket route",
-  );
+  const operatorSnapshot = await operatorUiInbox.take((message) => message.type === "snapshot");
+  assert.equal(operatorSnapshot.type, "snapshot", "a paired device can authenticate the real /ui WebSocket route");
+  assert.equal((operatorSnapshot.capabilities as JsonObject)?.assistantDecisionHistory, undefined,
+    "only the owner receives the Assistant decision history capability");
 
   // A dashboard can clear only the exact blocked snapshots it saw, with no provider command.
   const blockedJobs = ["turn-blocked", "unknown"].flatMap((parentTurnId) => [{

@@ -10,7 +10,7 @@ import { useStoreSelector } from "../store.js";
 import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
-import { Checkbox } from "./ui/ChoiceControls.js";
+import { Checkbox, Select } from "./ui/ChoiceControls.js";
 
 type Scope = AssistantDecisionGrant["projects"];
 type ScopeItem = { id: string; title: string };
@@ -31,19 +31,19 @@ function SelectionScope({ name, value, items, onChange }: {
   const currentPage = Math.min(page, Math.max(0, Math.ceil(choices.length / pageSize) - 1));
   const start = currentPage * pageSize;
   const shown = choices.slice(start, start + pageSize);
+  const scopeLabel = name === "Projects" ? "Project Scope" : "Campaign Scope";
   return <fieldset className="assistant-fields form">
     <legend>{name}</legend>
-    <label className="field">
-      <span>{name === "Projects" ? "Project Scope" : "Campaign Scope"}</span>
-      <select value={value === "all" ? "all" : "selected"} onChange={(event) => {
+    <div className="field">
+      <span className="field-label">{scopeLabel}</span>
+      <Select label={scopeLabel} value={value === "all" ? "all" : "selected"} options={[
+        { value: "all", label: `All ${name}` }, { value: "selected", label: `Selected ${name}` },
+      ]} onChange={(next) => {
         setQuery("");
         setPage(0);
-        onChange(event.target.value === "all" ? "all" : []);
-      }}>
-        <option value="all">All {name}</option>
-        <option value="selected">Selected {name}</option>
-      </select>
-    </label>
+        onChange(next === "all" ? "all" : []);
+      }} />
+    </div>
     {value !== "all" && <>
       <label className="field">
         <span>Filter {name}</span>
