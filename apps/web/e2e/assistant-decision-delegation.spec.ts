@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { viewPath } from "../src/navigation.js";
-import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizontalOverflow } from "./layout-invariants.js";
+import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizontalOverflow, expectWithinWidth } from "./layout-invariants.js";
 
 const evidence = process.env.ASSISTANT_DELEGATION_EVIDENCE_DIR;
 const thread = viewPath({ name: "assistants", threadId: "thr_triage" });
@@ -250,7 +250,11 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await expect(job).toHaveAttribute("title", "Job #98765432198765");
     await expect(run).toHaveCSS("white-space", "nowrap");
     await expect(run).toHaveAttribute("title", "#98765432109");
-    expect(await run.evaluate((link) => link.scrollWidth <= link.clientWidth)).toBe(true);
+    await expect(run).toHaveAttribute("href", /\/actions\/runs\/98765432109$/u);
+    // Wider fonts can make the number longer than its column. Keep it in the cell and mark the cut.
+    await expect(run).toHaveCSS("overflow-x", "hidden");
+    await expect(run).toHaveCSS("text-overflow", "ellipsis");
+    await expectWithinWidth(run, run.locator(".."), "Workflow Run ID");
     await expect(commit).toHaveCSS("white-space", "nowrap");
 
     const facts = [
