@@ -247,6 +247,7 @@ test("typed release CLI executes only the matching snapshot and requires a confi
   { skip: process.platform === "win32" && "The fake CLI uses an executable shebang" }, () => {
     const directory = mkdtempSync(join(tmpdir(), "release-cli-test-"));
     const cli = join(directory, "wollipog");
+    const calls = join(directory, "calls");
     const occurrenceId = `workflow_${"f".repeat(32)}`;
     const resourceDigest = "d".repeat(64);
     const resourceSnapshot = { category: "release_publish", commitSha: merge, tag: "v0.35.0" };
@@ -255,8 +256,10 @@ test("typed release CLI executes only the matching snapshot and requires a confi
       process.env.WOLLIPOG_CLI = cli;
       const setReplies = (approval, result) => writeFileSync(cli, `#!/usr/bin/env node
 const assert = require("node:assert/strict");
+const { appendFileSync } = require("node:fs");
 const args = process.argv.slice(2);
 const occurrence = ${JSON.stringify(occurrenceId)};
+appendFileSync(${JSON.stringify(calls)}, args[1] + "\\n");
 if (args[1] === "get") {
   assert.deepEqual(args, ["decision", "get", occurrence, "--json"]);
   console.log(JSON.stringify({ decision: ${JSON.stringify(approval)} }));
@@ -275,6 +278,7 @@ if (args[1] === "get") {
       setReplies({ ...approval, resourceSnapshot: { ...resourceSnapshot, commitSha: base } }, receipt);
       assert.throws(() => typedDecision(occurrenceId, resourceSnapshot), /does not match the current certified commit and exact payload/);
       assert.throws(() => typedDecision("invalid", resourceSnapshot), /Invalid release decision occurrence ID/);
+      assert.deepEqual(readFileSync(calls, "utf8").trimEnd().split("\n"), ["get", "execute", "get", "execute", "get"]);
     } finally {
       if (previousCLI === undefined) delete process.env.WOLLIPOG_CLI;
       else process.env.WOLLIPOG_CLI = previousCLI;
