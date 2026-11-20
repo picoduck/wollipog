@@ -132,6 +132,20 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
             {...(closingReferenceCheck ? { check: closingReferenceCheck } : {})} />
         </dd></div>
       </dl>;
+    case "ci_rerun":
+      return <>
+        <dl className="facts">
+          <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
+          <div><dt>Workflow Run</dt><dd><a href={`https://github.com/${snapshot.repository}/actions/runs/${snapshot.runId}`}
+            target="_blank" rel="noreferrer">#{snapshot.runId}</a></dd></div>
+          {snapshot.jobId !== undefined && <div><dt>Job</dt><dd><a
+            href={`https://github.com/${snapshot.repository}/actions/runs/${snapshot.runId}/job/${snapshot.jobId}`}
+            target="_blank" rel="noreferrer">#{snapshot.jobId}</a></dd></div>}
+          <div><dt>Head Commit</dt><dd><code>{snapshot.headSha}</code></dd></div>
+          <div><dt>Attempt</dt><dd>{snapshot.attempt}</dd></div>
+        </dl>
+        <p>{snapshot.jobId === undefined ? "Approval reruns the entire workflow." : "Approval reruns this job and any jobs that depend on it."}</p>
+      </>;
     case "review_round_extension":
       // What the person is asked to grant: more cross-model review rounds, and why (#3369).
       return <dl className="facts">

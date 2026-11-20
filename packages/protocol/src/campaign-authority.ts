@@ -6,6 +6,7 @@ import { canonicalCampaignIssues } from "./campaign-issue-scope.js";
 import { campaignRepositoryLocation, type CampaignIssueRef } from "./campaign-work-ledger.js";
 import type { CampaignPublicationAdmissionFailure } from "./campaign-issue-publication.js";
 import type { ApprovalContext, GovernancePolicy, ParentControlDecisionPolicy, ParentControlMode, PendingApproval, WorkflowDecisionCategory, WorkflowDecisionResourceSnapshot } from "./index.js";
+import { isRequesterForgeDecisionCategory } from "./forge-decision-action.js";
 
 export type CampaignControlMode = "custom" | "full_control";
 export type CampaignAuthorityOperation = WorkflowDecisionCategory | "question" | "tool_approval" | "policy_ask";
@@ -184,7 +185,8 @@ export function campaignWorkflowOwner(control: CampaignControl | undefined, deci
   // decision its owner kept (#4064). A Location switch widens a session's reach (#4138), and a
   // repository addition widens the campaign's (#4117).
   if (!supported || category === "automation_creation" || category === "campaign_follow_up_admission" ||
-      category === "owner_decision" || category === "location_switch" || category === "campaign_repository_addition") return "human";
+      category === "owner_decision" || category === "location_switch" || category === "campaign_repository_addition" ||
+      isRequesterForgeDecisionCategory(category)) return "human";
   if (category === "issue_closure" || category === "campaign_issue_scope") return control?.mode === "full_control" &&
     validCampaignControl(control) && control.boundary.issueAuthority && control.boundary.operations.includes(category) ? "orchestrator" : "human";
   if (!control || control.mode === "custom") return decisions[category];
@@ -478,6 +480,8 @@ export function resolveCampaignAuthority(input: {
   if (Boolean(request) === Boolean(input.snapshot)) return result("human", "human_required", "unverified_intent");
   // The owner kept this decision (#4064): no mode, boundary or grant makes it an agent's.
   if (category === "owner_decision") return result("human", "human_required", "owner_kept");
+  // These actions can be resolved by an Assistant grant through the owner route only.
+  if (isRequesterForgeDecisionCategory(category)) return result("human", "custom_policy", "custom_owner");
   if (category === "automation_creation" || category === "campaign_follow_up_admission" || category === "location_switch" ||
       category === "campaign_repository_addition") {
     return result("human", "human_required", "protected_request");

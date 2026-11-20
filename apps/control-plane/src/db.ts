@@ -7775,6 +7775,8 @@ export class ControlPlaneDb {
     // An enqueue Wollipog performed is a merge whatever its occurrence's status became meanwhile.
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_forge_merges
       ON workflow_decisions(controlling_session_id) WHERE category='pr_merge' AND forge_action IS NOT NULL`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_ci_reruns
+      ON workflow_decisions(resource_key) WHERE category='ci_rerun' AND forge_action IS NOT NULL`);
     admitCampaignEventKinds(db);
     preserveCampaignFollowUpOrigins(db);
     widenCampaignDecisionSubjects(db);
@@ -26582,6 +26584,13 @@ export class ControlPlaneDb {
     try {
       const row = this.stmt("SELECT status, category, forge_action FROM workflow_decisions WHERE occurrence_id=?")
         .get(occurrenceId) as { status: WorkflowDecisionStatus; category: string; forge_action: string | null } | undefined;
+      // A run attempt is shared by its whole-run and single-job approvals, including approvals
+      // in different sessions. An effect still possible at this attempt blocks a second write.
+      const competingRerun = kind === "ci_rerun" && this.stmt(`SELECT 1 FROM workflow_decisions
+        WHERE category='ci_rerun' AND resource_key=(SELECT resource_key FROM workflow_decisions WHERE occurrence_id=?)
+        AND occurrence_id<>? AND forge_action IS NOT NULL
+        AND json_extract(forge_action,'$.outcome') IN ('in_progress','uncertain','rerun_requested') LIMIT 1`)
+        .get(occurrenceId, occurrenceId);
       let previous = parseJson<NonNullable<WorkflowDecisionView["forgeAction"]>>(row?.forge_action ?? null);
       if (previous?.outcome === "in_progress" && now - previous.updatedAt > staleAfterMs) {
         previous = { ...previous, outcome: "uncertain", updatedAt: now };
@@ -26589,11 +26598,11 @@ export class ControlPlaneDb {
       }
       const eligible = row && (row.status === "approved" ||
         (row.status === "consumed" && row.category === "merged_branch_deletion" && kind === "branch_deletion"));
-      if (!eligible || (previous && previous.kind !== kind) || previous?.outcome === "in_progress" ||
+      if (!eligible || competingRerun || (previous && previous.kind !== kind) || previous?.outcome === "in_progress" ||
           (previous && FORGE_DECISION_ACTION_SUCCESSES.has(previous.outcome)) ||
           // A consumed deletion cannot be revoked, so a stale refusal ends it here instead.
           (previous?.refusal && FORGE_DECISION_ACTION_STALE_REFUSALS.has(previous.refusal.reason)) ||
-          (previous?.outcome === "uncertain" && kind === "pr_merge_enqueue") ||
+          (previous?.outcome === "uncertain" && (kind === "pr_merge_enqueue" || kind === "ci_rerun")) ||
           (previous?.attempts ?? 0) >= FORGE_DECISION_ACTION_MAX_ATTEMPTS) {
         this.db.exec("COMMIT");
         return null;
@@ -26622,6 +26631,14 @@ export class ControlPlaneDb {
           this.retireTemporaryBranchReceipt(snapshot.temporaryReceiptId);
         }
       }
+    });
+  }
+
+  /** Record the confirmed requester forge effect and consume a still-live approval together. */
+  completeRequesterForgeDecision(occurrenceId: string, action: NonNullable<WorkflowDecisionView["forgeAction"]>): WorkflowDecisionView | null {
+    return this.atomic(() => {
+      this.recordWorkflowDecisionForgeAction(occurrenceId, action);
+      return this.consumeWorkflowDecision(occurrenceId, action.updatedAt);
     });
   }
 
@@ -36006,6 +36023,7 @@ function ownerDecisionSummary(snapshot: Exclude<WorkflowDecisionView["resourceSn
       case "owner_decision":
       case "implementation_question": return snapshot.question;
       case "pr_merge": return `Merge ${snapshot.repository}#${snapshot.pullRequest}`;
+      case "ci_rerun": return `Rerun CI for run ${snapshot.runId} in ${snapshot.repository}`;
       case "review_round_extension": return `More review rounds for ${snapshot.repository}#${snapshot.pullRequest}`;
       case "merged_branch_deletion": return `Delete branch ${snapshot.branch} in ${snapshot.repository}`;
       case "issue_closure": return `Close ${snapshot.repository}#${snapshot.issue}`;

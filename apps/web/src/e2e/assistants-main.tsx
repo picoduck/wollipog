@@ -50,6 +50,7 @@ const attentionCount = Number(params.get("attention") ?? 0);
 const limitsScenario = params.get("limits");
 const campaignScenario = params.has("campaign");
 const delegationScenario = params.get("delegation");
+const showDelegation = delegationScenario === "stress" || delegationScenario === "ci-old";
 const evidenceScenario = params.get("evidence");
 const missingEvidenceIds = evidenceScenario === "refused-stress"
   ? Array.from({ length: 16 }, (_, index) => `settings-desktop-dark-preview-${String(index + 1).padStart(2, "0")}`)
@@ -151,6 +152,20 @@ const sessions = new Map<string, SessionView>([
   })],
 ]);
 
+if (params.has("ci-rerun")) {
+  const id = "sess-ci-rerun";
+  const occurrenceId = "workflow_ci_rerun";
+  sessions.set(id, session(id, "Investigate the CI Failure", { status: "input_required", pendingApproval: {
+    requestId: occurrenceId, occurrenceId, kind: "workflow_decision", title: "CI Rerun Approval Required",
+    options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+    workflowDecision: { requestId: occurrenceId, occurrenceId, sessionId: id, controllingSessionId: id,
+      category: "ci_rerun", authority: "human", status: "pending", policyRevision: 0, createdAt: NOW,
+      resourceKey: "ci_rerun:engineering/release-validation:44699507825:2", resourceDigest: "b".repeat(64),
+      resourceSnapshot: { category: "ci_rerun", repository: "engineering/release-validation", runId: 44699507825,
+        jobId: 136164180219, headSha: "2d99e227b73fcad015264f7fe04674953df724b1", attempt: 2 } },
+  } }));
+}
+
 const delegationProjects: ProjectView[] = delegationScenario === "stress" ? Array.from({ length: 36 }, (_, index) => ({
   id: `project_${index}`, name: index === 0 ? "Release Validation and Engineering " + "Dependencies".repeat(10) : `Project ${index}`,
   hidden: false, locations: [], activeSessionCount: 1, unarchivedSessionCount: 1, totalSessionCount: 1,
@@ -239,7 +254,7 @@ function thread(id: string, sessionId: string, overrides: Partial<AssistantThrea
   return {
     id, assistant: "wollipog", title: backing.title, harness: "claude-code", sessionId, status: "done", access,
     connectionId: `conn-${id}`, launchedSessionIds: [], lastActivityAt: backing.updatedAt, createdAt: backing.createdAt,
-    ...(delegationScenario === "stress" || (limitsScenario && limitsScenario !== "old")
+    ...(showDelegation || (limitsScenario && limitsScenario !== "old")
       ? { decisionDelegation: { revision: 0, grant: null } } : {}),
     ...(evidenceScenario === "refused-stress" && id === "thr_triage" ? { decisionDelegation: { revision: 1, grant: {
       categories: ["ui_evidence_review"], campaigns: "all", projects: "all", expiresAt: null, evidenceDisclosureDigest: "a".repeat(64),
@@ -401,7 +416,8 @@ function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false,
-      projects: delegationScenario === "stress", ...(delegationScenario === "stress" ? { assistantDecisionHistory: true as const } : {}) },
+      projects: delegationScenario === "stress", ...(showDelegation ? { assistantDecisionHistory: true as const } : {}),
+      ...(delegationScenario === "stress" ? { assistantCiRerunDecisions: true as const } : {}) },
     projects: delegationProjects,
     runners: [structuredClone(runner)],
     boxes: [],

@@ -133,7 +133,12 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     const details = page.getByLabel("Thread Details");
     await expect(details).toContainText("Decision Delegation Off");
     await expect(settings.getByRole("checkbox", { checked: true })).toHaveCount(0);
-    await expect(settings.getByRole("checkbox", { name: /release|ci rerun|ui evidence approval/i })).toHaveCount(0);
+    await expect(settings.getByRole("checkbox", { name: /release|ui evidence approval/i })).toHaveCount(0);
+    const ciRerun = settings.getByRole("checkbox", { name: "CI Rerun", exact: true });
+    await expect(ciRerun).toBeEnabled();
+    await ciRerun.check();
+    await expectFullyInViewport(ciRerun, "CI Rerun");
+    await capture(page, "ci-rerun-grant");
     await settings.getByRole("checkbox", { name: "Owner Questions", exact: true }).check();
     await settings.getByRole("checkbox", { name: "Pull Request Merge", exact: true }).check();
     await settings.getByRole("button", { name: "Project Scope: All Projects" }).click();
@@ -159,7 +164,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await expect(settings).toHaveCount(0);
     await expect(details).toContainText("Decision Delegation Set");
     await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", JSON.stringify({
-      categories: ["owner_question", "pr_merge"], projects: ["project_0"], campaigns: ["campaign_0"], expiresAt: null,
+      categories: ["ci_rerun", "owner_question", "pr_merge"], projects: ["project_0"], campaigns: ["campaign_0"], expiresAt: null,
     }));
     await threadAction(page, "Decision Delegation");
     const revoke = settings.getByRole("button", { name: "Revoke Grant" });
@@ -177,10 +182,34 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await expect(history).toContainText("under your delegation.");
     await expect(history).toContainText("Triage Open Issues");
     await expect(history.getByRole("listitem")).toHaveCount(5);
-    await history.getByRole("listitem").nth(1).scrollIntoViewIfNeeded();
+    await history.getByText("CI Rerun", { exact: true }).scrollIntoViewIfNeeded();
     await expectNoHorizontalOverflow(history, "Thread Decision History");
     await expectPageNoHorizontalOverflow(page);
     await capture(page, "thread-history");
+  });
+
+  test(`CI rerun category explains an unavailable capability on ${layout}`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await page.goto(`/assistants-e2e.html?delegation=ci-old&path=${encodeURIComponent(thread)}`);
+    await threadAction(page, "Decision Delegation");
+    const settings = page.getByRole("dialog", { name: "Decision Delegation" });
+    await expect(settings.getByRole("checkbox", { name: "CI Rerun", exact: true })).toBeDisabled();
+    const explanation = settings.getByText("Update the control plane to grant CI rerun decisions.");
+    await explanation.scrollIntoViewIfNeeded();
+    await expectFullyInViewport(explanation, "Capability Explanation");
+    await expectNoHorizontalOverflow(settings, "Decision Delegation");
+    await capture(page, "ci-rerun-unavailable");
+  });
+
+  test(`the CI rerun approval shows its exact job and commit on ${layout}`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await page.goto("/assistants-e2e.html?delegation=stress&ci-rerun&path=%2F");
+    if (layout === "phone") await page.getByRole("button", { name: /Investigate the CI Failure/ }).click();
+    await expect(page.getByText("CI Rerun Approval Required", { exact: true })).toBeVisible();
+    await expect(page.getByRole("link", { name: "#136164180219" })).toBeVisible();
+    await expect(page.getByText("2d99e227b73fcad015264f7fe04674953df724b1", { exact: true })).toBeVisible();
+    await expectPageNoHorizontalOverflow(page);
+    await capture(page, "ci-rerun-request");
   });
 
   test(`Inbox and Campaign Status show bounded delegated decisions on ${layout}`, async ({ page }) => {
@@ -193,7 +222,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await expect(history.getByRole("button", { name: "Triage Open Issues" }).first()).toBeVisible();
     await expectNoHorizontalOverflow(history, "Inbox Decision History");
     await expectFullyInViewport(history.getByRole("button", { name: "Close", exact: true }).last(), "Close");
-    await history.getByRole("listitem").nth(1).scrollIntoViewIfNeeded();
+    await history.getByText("CI Rerun", { exact: true }).scrollIntoViewIfNeeded();
     await capture(page, "inbox-history");
     await history.getByRole("button", { name: "Older Decisions" }).click();
     await expect(history.getByRole("listitem")).toHaveCount(5);
@@ -207,7 +236,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     const section = page.locator('[data-campaign-section="Delegated Decisions"]');
     await expect(section.getByText("The required checks passed and the review covered the current head.")).toBeVisible();
     await expect(section.getByRole("listitem")).toHaveCount(5);
-    await section.getByRole("listitem").nth(1).scrollIntoViewIfNeeded();
+    await section.getByText("CI Rerun", { exact: true }).scrollIntoViewIfNeeded();
     await expectNoHorizontalOverflow(page.locator(".campaign-status"), "Campaign Status");
     await expectPageNoHorizontalOverflow(page);
     await capture(page, "campaign-history");

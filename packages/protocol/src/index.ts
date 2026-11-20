@@ -282,6 +282,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * forge observations report the head branch that merged-branch cleanup tracks. Checked against
    * the child's runner, and against the control plane by the runner's tools. */
   forgeDecisionActions: 284,
+  /** v396 adds exact, requester-executed GitHub Actions rerun decisions. */
+  typedCiRerun: 396,
   /** v275 campaign handoffs and recorded delivery (#4070). Gates the `complete_with_handoffs`
    * status for dashboards and the delivery and handoff ledger writes for runner tools. */
   campaignHandoffs: 275,
@@ -2112,7 +2114,8 @@ export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEG
  * server inspects that Location; always the campaign owner's, in Full Control and Custom alike, and
  * the Orchestrator carries out only the exact approved Location. */
 export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope" | "automation_creation" |
-  "campaign_follow_up_admission" | "owner_decision" | "location_switch" | "campaign_repository_addition";
+  "campaign_follow_up_admission" | "owner_decision" | "location_switch" | "campaign_repository_addition" |
+  import("./forge-decision-action.js").RequesterForgeDecisionCategory;
 export type WorkflowDecisionAuthority = "human" | "orchestrator";
 
 export type ParentControlDecisionPolicy = Record<DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority>;
@@ -5226,6 +5229,7 @@ export type WorkflowDecisionResourceSnapshot =
       recommendedOptionId?: string;
     }
   | OwnerDecisionSnapshot
+  | import("./forge-decision-action.js").CiRerunDecisionSnapshot
   | {
       category: "pr_merge";
       /** A GitHub `owner/repo`, or (v239, #3602) a GitLab project with its host and full namespace. */
@@ -12725,6 +12729,8 @@ export interface UiSnapshotMessage {
     sessionReminders?: boolean;
     /** The current owner can read their delegated Assistant decision history. */
     assistantDecisionHistory?: true;
+    /** The owner can grant typed GitHub Actions rerun decisions on this control plane. */
+    assistantCiRerunDecisions?: true;
     /** Session reminders support the explicit no-timer Someday schedule kind. */
     indefiniteSessionReminders?: boolean;
     /** Per-user worktree setup notices and runner-owned generation are available. */

@@ -14,6 +14,7 @@ import {
   HUMAN_ONLY_PARENT_CONTROL_POLICY,
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
+  ciRerunResourceKey,
   type AgentDefinition,
   type AssistantDecisionGrant,
   type AssistantThread,
@@ -45,7 +46,9 @@ async function harness(protocolVersion = PROTOCOL_VERSION) {
   const db = ControlPlaneDb.open(":memory:"), identity = db.localIdentityContext();
   const owner = db.operatingHumanPrincipal(identity.userId, identity.organizationId)!;
   db.registerRunner({ runnerId: "r", hostname: "fixture", os: "linux", version: "fixture",
-    workspaces: [{ id: "w", name: "Home", path: "/fixture/home" }], agents: [claude] }, Date.now(), protocolVersion);
+    workspaces: [{ id: "w", name: "Home", path: "/fixture/home" }], agents: [claude],
+    runtime: { dataDir: "/fixture", worktreeRoot: "/fixture/worktrees", maxConcurrentSessions: 4, campaignLaunchInspection: { version: 3 } },
+  }, Date.now(), protocolVersion);
   const hub = new Hub(db), toRunner: ControlPlaneToRunner[] = [];
   hub.isRunnerOnline = () => true;
   hub.sendToRunner = (_id, message) => { toRunner.push(message); return true; };
@@ -162,7 +165,7 @@ test("the owner grants and revokes exact typed resolution, and Assistant calls n
     const deniedOwnerRoute = await h.app.inject({ method: "PUT", url: path, payload: { revision: 0, grant } });
     assert.equal(deniedOwnerRoute.statusCode, 403);
     for (const category of ["policy_ask", "tool_approval", "authentication", "persistent_permissions", "owner_decision", "campaign_issue_scope",
-      "automation_creation", "location_switch", "campaign_repository_addition", "ci_rerun", "release_publish", "release_tag", "all"]) {
+      "automation_creation", "location_switch", "campaign_repository_addition", "release_publish", "release_tag", "all"]) {
       const invalid = await h.ownerCall("PUT", path, { revision: 0, grant: { ...grant, categories: [category] } });
       assert.equal(invalid.status, 400, category);
       assert.match(invalid.body.error, /no typed Assistant resolution path/u);
@@ -439,6 +442,102 @@ function assertEvidenceResolution(h: Awaited<ReturnType<typeof harness>>,
   const history = h.db.assistantDecisionHistory(h.owner, { campaignId: "evidence-root", threadId: thread.id });
   assert.deepEqual(history.entries.map((item) => item.delegation), [recorded.assistantDelegation]);
 }
+
+test("an explicit Assistant grant approves an exact CI rerun and only the requester can execute it once", async () => {
+  const h = await harness();
+  try {
+    decisionSession(h, "root");
+    decisionSession(h, "child", "root");
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", { title: "CI Assistant" })).body.thread as AssistantThread;
+    const env = await h.provision(thread.sessionId);
+    const snapshot = { category: "ci_rerun" as const, repository: "picoduck/wollipog", runId: 123,
+      attempt: 2, headSha: "a".repeat(40) };
+    const calls: Array<Extract<ControlPlaneToRunner, { type: "forge_decision_action" }>> = [];
+    let result: "rerun_requested" | "refused" | "uncertain" = "rerun_requested";
+    h.hub.requestFromRunner = async (_runnerId, requestId, frame) => {
+      if (frame.type === "campaign_launch_inspect") {
+        return { type: "campaign_launch_inspection_result", requestId, workspaceId: frame.workspaceId,
+          ok: true, repository: snapshot.repository, issueNumbers: [], digest: "0".repeat(64) };
+      }
+      assert.equal(frame.type, "forge_decision_action");
+      calls.push(frame);
+      return { type: "forge_decision_action_result", requestId, sessionId: frame.sessionId, occurrenceId: frame.occurrenceId,
+        outcome: result, ...(result === "refused" ? { refusal: { reason: "ci_target_mismatch",
+          summary: "The approved attempt changed." } } : {}) };
+    };
+    const request = async (sessionId: string, runId: number, requestId: string, jobId?: number) => {
+      const resourceSnapshot = { ...snapshot, runId, ...(jobId === undefined ? {} : { jobId }) };
+      const asked = await h.svc.createWorkflowDecisionWithVideo(sessionId, { requestId,
+        resourceKey: ciRerunResourceKey(resourceSnapshot), resourceSnapshot });
+      assert.ok(asked.ok && asked.data, asked.error ?? "request created");
+      assert.equal(asked.data.authority, "human");
+      return asked.data;
+    };
+    const decide = async (decision: Awaited<ReturnType<typeof request>>, resourceDigest = decision.resourceDigest) => {
+      const [response] = await h.callTools(env, { jsonrpc: "2.0", id: 1, method: "tools/call", params: {
+        name: "assistant_decision_resolve", arguments: { sessionId: decision.sessionId, occurrenceId: decision.occurrenceId,
+          resourceDigest, outcome: "approve", reason: "Approved the exact CI target." },
+      } });
+      return response.result;
+    };
+    const run = await request("child", 123, "rerun");
+    const execute = (decision: typeof run, sessionId = decision.sessionId, resourceDigest = decision.resourceDigest) =>
+      h.svc.executeWorkflowDecision(sessionId, decision.occurrenceId, { resourceDigest });
+    assert.equal((await execute(run)).ok, false);
+    assert.match((await decide(run)).content[0].text, /no decision delegation grant/u);
+    const grant = await h.ownerCall("PUT", `/api/assistant-threads/${thread.id}/delegation`, { revision: 0,
+      grant: { categories: ["ci_rerun"], projects: [h.project.id], campaigns: ["root"], expiresAt: null } });
+    assert.equal(grant.status, 200, JSON.stringify(grant.body));
+    assert.match((await decide(run, "0".repeat(64))).content[0].text, /snapshot changed/u);
+    const approved = await decide(run);
+    assert.equal(approved.isError, undefined, approved.content[0].text);
+    assert.equal((await execute(run, "root")).status, 404);
+    assert.equal((await execute(run, "child", "0".repeat(64))).status, 409);
+    assert.equal((await h.svc.consumeWorkflowDecision("child", run.occurrenceId, { resourceSnapshot: snapshot })).status, 403);
+    assert.equal(calls.length, 0);
+    const performed = await execute(run);
+    assert.equal(performed.data?.status, "consumed", performed.error ?? "request executed");
+    assert.equal(performed.data?.forgeAction?.outcome, "rerun_requested");
+    assert.deepEqual(calls[0]?.action, { kind: "ci_rerun", repository: snapshot.repository, runId: 123, attempt: 2, headSha: snapshot.headSha });
+    assert.equal((await execute(run)).status, 409);
+    const history = await h.ownerCall("GET", `/api/assistant-decision-history?threadId=${thread.id}&campaignId=root`);
+    assert.equal(history.body.entries[0]?.category, "ci_rerun");
+    assert.equal(history.body.entries[0]?.delegation?.threadId, thread.id);
+
+    result = "refused";
+    const stale = await request("child", 124, "stale-target");
+    assert.equal((await decide(stale)).isError, undefined);
+    assert.equal((await execute(stale)).data?.status, "revoked");
+    assert.equal((await execute(stale)).status, 409);
+
+    result = "uncertain";
+    const uncertain = await request("child", 125, "uncertain-target", 200);
+    assert.equal((await decide(uncertain)).isError, undefined);
+    assert.equal((await execute(uncertain)).data?.forgeAction?.outcome, "uncertain");
+    assert.equal((await execute(uncertain)).status, 409);
+    decisionSession(h, "other", "root");
+    const duplicate = await request("other", 125, "same-attempt-different-job", 201);
+    assert.equal((await decide(duplicate)).isError, undefined);
+    assert.equal((await execute(duplicate)).status, 409);
+    assert.equal(calls.length, 3);
+  } finally { await h.close(); }
+});
+
+test("older runners keep CI reruns outside typed decision delegation", async () => {
+  const h = await harness(RUNNER_CAPABILITY_MIN_PROTOCOL.typedCiRerun - 1);
+  try {
+    decisionSession(h, "root");
+    decisionSession(h, "child", "root");
+    const resourceSnapshot = { category: "ci_rerun" as const, repository: "picoduck/wollipog",
+      runId: 123, attempt: 2, headSha: "a".repeat(40) };
+    h.hub.requestFromRunner = async () => { throw new Error("an older runner must not be asked"); };
+    const refused = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "rerun",
+      resourceKey: ciRerunResourceKey(resourceSnapshot), resourceSnapshot });
+    assert.equal(refused.ok, false);
+    assert.match(refused.error ?? "", /typed CI reruns/u);
+    assert.deepEqual(h.db.pendingWorkflowDecisionsForSession("child"), []);
+  } finally { await h.close(); }
+});
 
 test("a delegated Owner Question returns an option or free text and credential classification and Owner Approvals stay human", async () => {
   const h = await harness();

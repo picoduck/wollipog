@@ -301,7 +301,7 @@ export function evaluateCampaignAuthority(
   // A pull request's gates belong to the requester's own repository: a child in one boundary
   // repository's Location never merges, extends or deletes another repository's pull request.
   const pullRequestGate = snapshot?.category === "pr_merge" || snapshot?.category === "merged_branch_deletion" ||
-    snapshot?.category === "review_round_extension";
+    snapshot?.category === "review_round_extension" || snapshot?.category === "ci_rerun";
   const pullRequestBound = !full || !pullRequestGate || placeRepository === snapshot.repository.toLowerCase();
   const issueOperation = snapshot?.category === "campaign_issue_scope" || snapshot?.category === "issue_closure" ||
     snapshot?.category === "follow_up_issue_publication" && full && control.boundary.issueAuthority;

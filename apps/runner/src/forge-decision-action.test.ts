@@ -1,12 +1,70 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { GhOutcome } from "./campaign-forge-status.js";
-import { executeTemporaryBranch, executeBranchDeletion, executePullRequestEnqueue, observePullRequestMerge, observePullRequestRetirement, observeIssuePublication } from "./forge-decision-action.js";
+import { executeTemporaryBranch, executeBranchDeletion, executeCiRerun, executePullRequestEnqueue, observePullRequestMerge, observePullRequestRetirement, observeIssuePublication } from "./forge-decision-action.js";
 
 const HEAD = "a".repeat(40);
 const MERGE = "c".repeat(40);
 const ok = (stdout = ""): GhOutcome => ({ stdout, stderr: "", code: null, timedOut: false });
 const failed = (stderr: string, code: number | string = 1, timedOut = false): GhOutcome => ({ stdout: "", stderr, code, timedOut });
+
+const ciRerun = { kind: "ci_rerun" as const, repository: "picoduck/wollipog", runId: 200, jobId: 300, headSha: HEAD, attempt: 2 };
+const ciRunPath = "repos/picoduck/wollipog/actions/runs/200";
+const ciJobPath = "repos/picoduck/wollipog/actions/jobs/300";
+
+function ciForge({ run, job, written = ok("HTTP/2.0 201 Created\r\n"), fenced = false }: {
+  run?: object; job?: object; written?: GhOutcome; fenced?: boolean;
+} = {}) {
+  const calls: string[] = [];
+  const gh = async (args: string[]) => {
+    const path = args.at(-1)!;
+    assert.ok(args.includes("github.com"));
+    const method = args[args.indexOf("--method") + 1];
+    calls.push(`${method} ${path}`);
+    if (method === "POST") return written;
+    if (path === ciJobPath) return ok(JSON.stringify({ id: 300, run_id: 200, run_attempt: 2, head_sha: HEAD,
+      status: "completed", html_url: "https://github.com/picoduck/wollipog/actions/runs/200/job/300", ...job }));
+    assert.equal(path, ciRunPath);
+    return ok(JSON.stringify({ id: 200, run_attempt: 2, head_sha: HEAD, status: "completed",
+      repository: { full_name: "Picoduck/Wollipog" }, ...run }));
+  };
+  return { gh, calls, fence: { begin: () => {
+    if (fenced) return false;
+    fenced = true;
+    return true;
+  }, release: () => { fenced = false; } } };
+}
+
+test("a CI rerun reads and writes only the approved GitHub run or job", async () => {
+  const job = ciForge();
+  assert.deepEqual(await executeCiRerun(ciRerun, job.gh, job.fence), { outcome: "rerun_requested" });
+  assert.deepEqual(job.calls, [`GET ${ciJobPath}`, `GET ${ciRunPath}`, `POST ${ciJobPath}/rerun`]);
+  const run = ciForge();
+  const { jobId: _jobId, ...wholeRun } = ciRerun;
+  assert.deepEqual(await executeCiRerun(wholeRun, run.gh, run.fence), { outcome: "rerun_requested" });
+  assert.deepEqual(run.calls, [`GET ${ciRunPath}`, `POST ${ciRunPath}/rerun`]);
+});
+
+test("a changed CI run, head, attempt, repository or job membership makes no write", async () => {
+  for (const change of [{ run: { id: 201 } }, { run: { head_sha: MERGE } }, { run: { run_attempt: 3 } },
+    { run: { repository: { full_name: "someone/else" } } }, { job: { id: 301 } }, { job: { run_id: 201 } },
+    { job: { run_attempt: 1 } }, { job: { head_sha: MERGE } }]) {
+    const f = ciForge(change);
+    const result = await executeCiRerun(ciRerun, f.gh, f.fence);
+    assert.equal(result.refusal?.reason, "ci_target_mismatch", JSON.stringify(change));
+    assert.ok(f.calls.every((call) => call.startsWith("GET")));
+  }
+});
+
+test("an ambiguous CI rerun leaves the write fenced and a definite refusal releases it", async () => {
+  const unknown = ciForge({ written: failed("timeout", 1, true) });
+  assert.equal((await executeCiRerun(ciRerun, unknown.gh, unknown.fence)).outcome, "uncertain");
+  assert.equal((await executeCiRerun(ciRerun, unknown.gh, unknown.fence)).outcome, "uncertain");
+  assert.equal(unknown.calls.filter((call) => call.startsWith("POST")).length, 1);
+  const refused = ciForge({ written: { ...failed("HTTP 403"), stdout: "HTTP/2.0 403 Forbidden\r\n" } });
+  assert.equal((await executeCiRerun(ciRerun, refused.gh, refused.fence)).refusal?.reason, "forge_refused");
+  assert.equal(refused.fence.begin(), true);
+});
 
 function temporaryForge(overrides: { tip?: string | null; heads?: number; bases?: number; contained?: boolean;
   mutation?: GhOutcome; freshTip?: string; freshDefault?: string } = {}) {

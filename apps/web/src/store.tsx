@@ -380,6 +380,7 @@ export interface State {
   /** True when the control plane provides durable, user-scoped reminder snapshots and deltas. */
   sessionRemindersSupported: boolean;
   assistantDecisionHistorySupported: boolean;
+  assistantCiRerunDecisionsSupported: boolean;
   /** True when reminder writes may omit a timer and use the explicit Someday schedule kind. */
   indefiniteSessionRemindersSupported: boolean;
   worktreeSetupConfigSupported: boolean;
@@ -1158,6 +1159,7 @@ function reducer(state: State, action: Action): State {
             unarchiveAndRestartSupported: msg.capabilities?.unarchiveAndRestart === true,
             sessionRemindersSupported: msg.capabilities?.sessionReminders === true,
             assistantDecisionHistorySupported: msg.capabilities?.assistantDecisionHistory === true,
+            assistantCiRerunDecisionsSupported: msg.capabilities?.assistantCiRerunDecisions === true,
             indefiniteSessionRemindersSupported: msg.capabilities?.indefiniteSessionReminders === true,
             worktreeSetupConfigSupported: msg.capabilities?.worktreeSetupConfig === true,
             renameProjectLocationsSupported: msg.capabilities?.renameProjectLocations === true,
@@ -1581,6 +1583,7 @@ function initialState(
     unarchiveAndRestartSupported: false,
     sessionRemindersSupported: false,
     assistantDecisionHistorySupported: false,
+    assistantCiRerunDecisionsSupported: false,
     indefiniteSessionRemindersSupported: false,
     worktreeSetupConfigSupported: false,
     renameProjectLocationsSupported: false,

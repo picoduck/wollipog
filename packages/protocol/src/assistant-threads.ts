@@ -47,6 +47,7 @@ export type AssistantEvidenceReviewAvailability =
 export const ASSISTANT_DECISION_CATEGORIES = {
   owner_question: "Owner Questions",
   pr_merge: "Pull Request Merge",
+  ci_rerun: "CI Rerun",
   merged_branch_deletion: "Merged Branch Deletion",
   follow_up_issue_publication: "Follow-Up Issue Publication",
   issue_closure: "Issue Closure",
