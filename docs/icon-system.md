@@ -42,7 +42,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `InboxIcon` | Lucide | `Inbox` | Generic inbox navigation, and the Sessions No Sessions Yet state (#2220); an automation row's session target (#2969). |
 | `ProjectsIcon` | Lucide | `FolderKanban` | Project collection navigation. |
 | `BoardIcon` | Lucide | `Columns3` | Generic board columns. |
-| `ListIcon` | Lucide | `List` | Generic list layout. |
+| `ListIcon` | Lucide | `List` | Generic list layout; the Launched Sessions tool in the Session Tools list and the tool switcher (#4776). |
 | `FilterIcon` | Lucide | `ListFilter` | The phone Board's Filters button, which opens the Filters sheet. |
 | `AlarmClockIcon` | Lucide | `AlarmClock` | Snooze: a snoozed Sessions row's return time (#2209) and the Sessions preview bar's Snooze button (#2210), and the Sessions No Snoozed Sessions and No Active Sessions states (#2220). |
 | `DismissReminderIcon` | Lucide | `AlarmClockOff` | Dismiss Reminder in the Sessions context menu (#2214). |

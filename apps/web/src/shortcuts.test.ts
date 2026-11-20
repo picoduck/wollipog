@@ -521,7 +521,8 @@ test("the Side Panel toggle and every tool have one chord in the reference that 
     .find((group) => group.group === "Session")!;
   for (const tool of SESSION_TOOLS) {
     // Session Tools is the launcher, which the toggle reaches; the issue leaves its own chord optional.
-    if (tool.id !== "launcher") assert.ok(tool.shortcut, `${tool.name} has a chord`);
+    // Launched Sessions exists only on an Assistant thread, whose header toggle opens it (#4776).
+    if (tool.id !== "launcher" && tool.id !== "launched") assert.ok(tool.shortcut, `${tool.name} has a chord`);
   }
   const chords: ShortcutId[] = ["toggle-side-panel", ...SESSION_TOOLS.flatMap((tool) => tool.shortcut ? [tool.shortcut] : [])];
   assert.equal(new Set(chords).size, chords.length, "no two tools share a chord");

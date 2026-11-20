@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useApi } from "../api-context.js";
 import {
   applyAssistantThreadEvents,
@@ -25,7 +25,8 @@ import { ASSISTANT_DEFAULTS_VIEW, AssistantSettingsLink } from "./AssistantSetti
 import { AssistantThreadLimitsDialog } from "./AssistantThreadLimitsDialog.js";
 import { AssistantDecisionDelegationDialog } from "./AssistantDecisionDelegationDialog.js";
 import { AssistantDecisionHistoryDialog } from "./AssistantDecisionHistory.js";
-import { AssistantWorkCards } from "./AssistantWorkCards.js";
+import { AssistantWaitingWork, LaunchedSessionsToggle } from "./AssistantWorkCards.js";
+import { launchedWorkIds, type LaunchedWork } from "../assistant-launched-work.js";
 import { ChangeAssistantThreadAccountDialog } from "./ChangeAssistantThreadAccountDialog.js";
 import { ChangeAssistantThreadHarnessDialog } from "./ChangeAssistantThreadHarnessDialog.js";
 import { AssistantThreadHistory } from "./AssistantThreadHistory.js";
@@ -288,6 +289,14 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   ];
 
   const phoneDetail = isMobile && threadId !== undefined;
+  // The open thread's launched work, for the header's toggle and the side panel's tool (#4776). Kept
+  // the same object while the thread's lists are, so their live counts don't recompute each render.
+  const launchedSessionIds = selected?.launchedSessionIds;
+  const launchedCampaignIds = selected?.launchedCampaignIds;
+  const launchedWork = useMemo<LaunchedWork | undefined>(() => launchedSessionIds
+    ? { sessionIds: launchedSessionIds, ...(launchedCampaignIds ? { campaignIds: launchedCampaignIds } : {}) }
+    : undefined, [launchedSessionIds, launchedCampaignIds]);
+  const launchedPanelOpen = rightPanel.open && rightPanel.mode === "launched";
 
   return (
     <section className="page full fill">
@@ -357,7 +366,16 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
               // The terminal dock belongs to the session page, so a thread opens its session there.
               onOpenTerminal={() => navigate({ name: "session", id: selected.sessionId })}
               onBack={toList}
-              header={<ThreadHeader thread={selected} compact={isMobile} menu={threadMenu(selected)} onConfirmationAnswered={refresh} />}
+              launchedWork={launchedWork}
+              header={<ThreadHeader
+                thread={selected}
+                work={launchedWork!}
+                compact={isMobile}
+                menu={threadMenu(selected)}
+                launchedPanelOpen={launchedPanelOpen}
+                onToggleLaunched={() => rightPanel.openMode("launched")}
+                onConfirmationAnswered={refresh}
+              />}
             />
           )}
         </div>
@@ -518,13 +536,18 @@ function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
 
 /**
  * The open thread's header, in the session bar's place: its title, status, harness and access level,
- * and the sessions it launched as work cards. On a phone the detail bar carries the title and
- * actions, so this keeps only the facts.
+ * the Launched Sessions toggle, and what waits on the owner. The launched sessions themselves are in
+ * the side panel's Launched Sessions tool, hidden until asked for (#4776), so many launches never
+ * push the conversation down; anything waiting on the owner stays here, actionable with the panel
+ * closed. On a phone the detail bar carries the title and actions, so this keeps only the facts.
  */
-function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
+function ThreadHeader({ thread, work, compact, menu, launchedPanelOpen, onToggleLaunched, onConfirmationAnswered }: {
   thread: AssistantThread;
+  work: LaunchedWork;
   compact: boolean;
   menu: PageMenuAction[];
+  launchedPanelOpen: boolean;
+  onToggleLaunched: () => void;
   onConfirmationAnswered?: () => void;
 }) {
   const { navigate } = useStoreActions();
@@ -551,6 +574,7 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
         <div className="assistant-thread-title-row">
           <h2 className="assistant-thread-title" title={assistantThreadTitle(thread)}>{assistantThreadTitle(thread)}</h2>
           <StatusBadge meta={meta} />
+          <LaunchedSessionsToggle work={work} open={launchedPanelOpen} onToggle={onToggleLaunched} />
           <button type="button" className="btn sm" onClick={() => navigate(settingsView)}>Thread Settings</button>
           <ActionsMenu label="Thread Actions" items={menu} />
         </div>
@@ -574,14 +598,17 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
           <li>{launchSummary}</li>
         </>}
       </ul>
+      {compact && launchedWorkIds(work).length > 0 && <div className="assistant-thread-toggle-row">
+        <LaunchedSessionsToggle work={work} open={launchedPanelOpen} onToggle={onToggleLaunched} />
+      </div>}
       {launchRefusal ? <Notice tone="warning" role="status" title="Thread Limit Reached" actions={<>
         <AssistantSettingsLink view={settingsView}>Thread Settings</AssistantSettingsLink>
         <AssistantSettingsLink view={ASSISTANT_DEFAULTS_VIEW}>Assistant Defaults</AssistantSettingsLink>
       </>}>{launchRefusal}</Notice> : null}
       {thread.earlierConversations?.length ? <AssistantThreadHistory entries={thread.earlierConversations} /> : null}
-      <AssistantWorkCards
-        sessionIds={thread.launchedSessionIds}
-        campaignIds={thread.launchedCampaignIds}
+      <AssistantWaitingWork
+        work={work}
+        showSessions={!launchedPanelOpen}
         confirmations={pending.length > 0 ? pending.map(({ confirmation }) => (
           <AssistantConfirmationCard key={confirmation.id} confirmation={confirmation} onAnswered={onConfirmationAnswered} />
         )) : undefined}

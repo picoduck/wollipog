@@ -77,10 +77,6 @@ for (const theme of ["light", "dark"] as const) {
       await expect(dialog).toContainText("$25 USD · 200 tool calls");
       await approve.click();
       await expect(cards(page)).toHaveCount(6);
-      const work = page.getByRole("button", { name: /Plan the Release.*Campaign/u });
-      await work.scrollIntoViewIfNeeded();
-      await expect(work).toBeInViewport({ ratio: 1 });
-      await expect(work.getByText("Campaign", { exact: true })).toBeVisible();
       await expect(page.locator(".composer")).toBeInViewport({ ratio: 1 });
       const toast = page.getByText("Start Campaign ran once.", { exact: true });
       await expect(toast).toBeVisible();
@@ -88,6 +84,12 @@ for (const theme of ["light", "dark"] as const) {
         await page.getByRole("button", { name: "Dismiss Notification", exact: true }).click();
         await expect(toast).toBeHidden();
       }
+      // The launched campaign is in the Launched Sessions panel, which the header's toggle opens (#4776).
+      await page.locator(".assistant-launched-toggle").click();
+      const work = page.locator("#right-panel").getByRole("button", { name: /Plan the Release.*Campaign/u });
+      await work.scrollIntoViewIfNeeded();
+      await expect(work).toBeInViewport({ ratio: 1 });
+      await expect(work.getByText("Campaign", { exact: true })).toBeVisible();
       await capture(page, `launched-${key}`);
       await work.click();
       await expect(page.getByRole("heading", { name: /Plan the Release$/u })).toBeVisible();

@@ -5,8 +5,9 @@ import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizont
 /**
  * The Assistants section (#4664) in a real browser, against `assistants-main.tsx`'s stub of the
  * provisional Thread API: the rail destination, the Wollipog Assistant's threads with New Thread,
- * rename and archive, the open thread's transcript and composer with its access level, launched
- * sessions as live work cards with an inline approval, the unavailable control plane, and a phone.
+ * rename and archive, the open thread's transcript and composer with its access level, the launched
+ * sessions' toggle with a waiting approval inline in the header, the unavailable control plane, and a
+ * phone. The Launched Sessions panel itself is `assistant-launched-sessions.spec.ts` (#4776).
  * With `WOLLIPOG_EVIDENCE_DIR` set, each state is also captured as UI evidence.
  */
 
@@ -131,7 +132,7 @@ for (const theme of ["dark", "light"] as const) {
         await expect(page.locator("body")).toHaveAttribute("data-changed-account", "acct:0000000000000001");
         await expect(details).toContainText("Studio Subscription");
         await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
-        await expect(page.getByRole("region", { name: "Launched Work" }).locator(".assistant-work-card")).toHaveCount(2);
+        await expect(page.locator(".assistant-launched-toggle")).toHaveText("2 Sessions · 1 Needs You");
       });
     });
   }
@@ -156,7 +157,7 @@ for (const theme of ["dark", "light"] as const) {
       await capture(page, `assistants-list-${theme}-desktop`);
     });
 
-    test("an open thread shows its transcript, composer, access level and live work cards", async ({ page }) => {
+    test("an open thread shows its transcript, composer, access level, launched counts and the waiting approval", async ({ page }) => {
       await open(page, theme, "", "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA");
       const head = page.locator(".assistant-thread-head");
       await expect(head.getByRole("heading", { level: 2, name: "Triage Open Issues" })).toBeVisible();
@@ -165,14 +166,12 @@ for (const theme of ["dark", "light"] as const) {
       // The backing session's transcript and composer.
       await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
       await expect(page.locator(".composer")).toBeVisible();
-      // Launched sessions are work cards; the waiting one carries its approval inline.
-      const cards = page.getByRole("region", { name: "Launched Work" }).locator(".assistant-work-card");
-      await expect(cards).toHaveCount(2);
-      // Work waiting on the person comes first.
-      await expect(cards.nth(0)).toContainText("Bump the Vite Group");
-      const flaky = cards.filter({ hasText: "Fix the Flaky Upload Test" });
-      await expect(flaky).toHaveCount(1);
-      await expect(flaky.locator(".status")).toHaveText("Running");
+      // The header counts the launched sessions (#4776); only the one waiting on the person is a card
+      // here, with its approval inline. The running one is in the closed Launched Sessions panel.
+      await expect(head.locator(".assistant-launched-toggle")).toHaveText("2 Sessions · 1 Needs You");
+      const cards = page.getByRole("region", { name: "Waiting for You" }).locator(".assistant-work-card");
+      await expect(cards).toHaveCount(1);
+      await expect(head).not.toContainText("Fix the Flaky Upload Test");
       const waiting = cards.filter({ hasText: "Bump the Vite Group" });
       await expect(waiting).toContainText("Run pnpm install --frozen-lockfile");
       await expect(waiting.getByRole("button", { name: "Approve Once" })).toBeVisible();
@@ -180,33 +179,29 @@ for (const theme of ["dark", "light"] as const) {
       await expect(waiting.getByRole("button", { name: "Open Session" })).toBeVisible();
       await capture(page, `assistants-thread-${theme}-desktop`);
 
-      // Live: the running session finishes and its card follows.
-      await page.evaluate(() => (window as unknown as { assistantsAdvance: () => void }).assistantsAdvance());
-      await expect(flaky.locator(".status")).not.toHaveText("Running");
-
-      // Approve Once answers the exact request with its once-only option.
+      // Approve Once answers the exact request with its once-only option, and the counts follow.
       await waiting.getByRole("button", { name: "Approve Once" }).click();
       await expect(page.locator("body")).toHaveAttribute("data-approved", "sess-deps:req-1:allow");
-      await expect(waiting.getByRole("button", { name: "Approve Once" })).toHaveCount(0);
-
-      // A card opens its session.
-      await flaky.getByRole("button", { name: /Fix the Flaky Upload Test/ }).click();
-      await expect(page).toHaveURL(/path=%2Fsessions%2F(~|%7E)/);
+      await expect(page.getByRole("button", { name: "Approve Once" })).toHaveCount(0);
+      await expect(head.locator(".assistant-launched-toggle")).toHaveText("2 Sessions");
     });
 
     test("a thread change arrives as an event, and one that lands during a list read survives it", async ({ page }) => {
       await open(page, theme, "", "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA");
-      const cards = page.getByRole("region", { name: "Launched Work" }).locator(".assistant-work-card");
-      await expect(cards).toHaveCount(2);
+      const counts = page.locator(".assistant-launched-toggle");
+      await expect(counts).toHaveText("2 Sessions · 1 Needs You");
       // The launched sessions arrive as summaries, without their requests' options: the card reads
       // the detail and still offers the inline approval.
+      const cards = page.getByRole("region", { name: "Waiting for You" }).locator(".assistant-work-card");
       await expect(cards.filter({ hasText: "Bump the Vite Group" }).getByRole("button", { name: "Approve Once" })).toBeVisible();
 
       // Mid-turn the assistant launches more work while its own status stays put. The control plane
-      // republishes the thread, and the card follows from that event alone: well inside the 15s poll.
+      // republishes the thread, and the counts follow from that event alone: well inside the 15s poll.
       await page.evaluate(() => (window as unknown as { assistantsLaunch: () => void }).assistantsLaunch());
-      await expect(cards).toHaveCount(3, { timeout: 2_000 });
-      await expect(cards.filter({ hasText: "Write the Changelog" })).toHaveCount(1);
+      await expect(counts).toHaveText("3 Sessions · 1 Needs You", { timeout: 2_000 });
+      await counts.click();
+      await expect(page.locator("#right-panel .launched-sessions")).toContainText("Write the Changelog");
+      await counts.click();
 
       // A rename starts a list read; hold that read, publish another change to the thread while it
       // is in flight, then let it land. The read began before the change, so the change must stay.
@@ -239,7 +234,9 @@ for (const theme of ["dark", "light"] as const) {
 
     test("work cards share the row's width, so a title is not cut while there is room", async ({ page }) => {
       await open(page, theme, "", "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA");
-      const titles = page.getByRole("region", { name: "Launched Work" }).locator(".assistant-work-title");
+      await expect(page.getByRole("region", { name: "Waiting for You" }).locator(".assistant-work-title")).toHaveCount(1);
+      await page.locator(".assistant-launched-toggle").click();
+      const titles = page.locator("#right-panel .launched-sessions .assistant-work-title");
       await expect(titles).toHaveCount(2);
       for (const title of await titles.all()) {
         expect(await title.evaluate((element) => element.scrollWidth <= element.clientWidth), await title.textContent() ?? "")
@@ -375,7 +372,7 @@ for (const theme of ["dark", "light"] as const) {
       await expect(threadsList(page)).toBeHidden();
       await expect(page.getByRole("list", { name: "Thread Details" })).toContainText("Full Access · Ask Before Destructive");
       await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
-      await expect(page.getByRole("region", { name: "Launched Work" }).getByRole("button", { name: "Approve Once" })).toBeVisible();
+      await expect(page.getByRole("region", { name: "Waiting for You" }).getByRole("button", { name: "Approve Once" })).toBeVisible();
       // The waiting approval is whole on the screen: its title, its command and all three buttons sit
       // inside the phone's width, with no sideways scroll to find them.
       const approval = page.locator(".assistant-work-card", { hasText: "Bump the Vite Group" });

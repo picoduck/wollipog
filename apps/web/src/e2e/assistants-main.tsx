@@ -387,6 +387,20 @@ if (limitsScenario === "stress") {
     current.launchedSessionIds.push(id);
   }
 }
+/** `?launched=many`: the triage thread launched 40 more sessions before its two, most of them
+ * finished, every fifth still running and every seventh failed (#4776). */
+if (params.get("launched") === "many") {
+  const current = threads.find((candidate) => candidate.id === "thr_triage");
+  const tasks = ["Fix the Lint Warnings in", "Update the Snapshot Tests for", "Rerun the Nightly Checks on", "Review the Dependency Bump in"];
+  const earlier: string[] = [];
+  for (let index = 1; index <= 40; index += 1) {
+    const id = `sess-many-${index}`;
+    const status = index % 5 === 0 ? "running" : index % 7 === 0 ? "failed" : "completed";
+    sessions.set(id, session(id, `${tasks[index % tasks.length]} Package ${index}`, { status, updatedAt: NOW - (60 - index) * minute }));
+    earlier.push(id);
+  }
+  if (current) current.launchedSessionIds = [...earlier, ...current.launchedSessionIds];
+}
 if (limitsScenario) {
   for (const item of threads) {
     item.usage = {

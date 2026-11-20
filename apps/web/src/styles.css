@@ -7568,8 +7568,12 @@ body.shell-dock-dragging * {
     overflow: visible;
   }
   .assistant-work-confirmations > .request-card { width: auto; }
-  /* Tall enough to show a whole request and the start of what follows. */
+  /* Tall enough to show a whole request and the start of what follows. The Launched Sessions
+     toggle's row above it (#4776) comes out of the same allowance, so the transcript keeps its room. */
   .assistant-work:has(> .assistant-work-confirmations) { max-height: 60vh; }
+  .assistant-thread-toggle-row ~ .assistant-work:has(> .assistant-work-confirmations) {
+    max-height: calc(60vh - var(--control-h-sm) - var(--space-2));
+  }
   .assistant-work:has(> .assistant-work-confirmations) > .assistant-work-cards {
     max-height: none;
     overflow-y: visible;
@@ -12865,8 +12869,9 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   max-height: 6rem;
   overflow-y: auto;
 }
-/* AssistantWorkCards.tsx: one scrolling row of cards, so many launches never push the transcript
-   off the pane; each card opens its session, and a waiting approval rides on its card. */
+/* AssistantWorkCards.tsx: in the thread header, what waits on the owner as one scrolling row of
+   cards; each card opens its session, and a waiting approval rides on its card. Every other launched
+   session is in the side panel's Launched Sessions tool (#4776). */
 /* Pending requests (#4665) and the work cards share one row when both fit, the work cards keeping at
    least a card's width; otherwise the row wraps and the work cards take the next line. */
 .assistant-work {
@@ -12946,6 +12951,48 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
+}
+/* The header's Launched Sessions toggle (#4776): its counts read whole, never squeezed by the title. */
+.assistant-launched-toggle {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.assistant-thread-toggle-row {
+  display: flex;
+  min-width: 0;
+}
+/* The side panel's Launched Sessions tool (#4776): Needs You, Active, then the folding Finished group,
+   each a column of cards at the panel's width. The panel body is the one scroller. */
+.launched-sessions {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.launched-sessions-group {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.launched-sessions-group > .group-label { padding: 0; }
+.launched-sessions-fold {
+  display: flex;
+  margin: 0;
+  font: inherit;
+}
+.launched-sessions-fold .count {
+  margin-left: var(--space-1);
+  color: var(--text-faint);
+}
+.launched-sessions-cards {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.launched-sessions-cards > .assistant-work-card {
+  min-width: 0;
+  max-width: none;
 }
 @media (max-width: 760px) {
   .assistant-thread-head { padding: var(--space-2) var(--page-gutter); }

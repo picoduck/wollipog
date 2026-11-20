@@ -19,9 +19,10 @@ export const RIGHT_PANEL_KEY_STEP = 16;
  * Panel contents. "launcher" is the empty state listing the other modes. Every entry here owns a
  * body in RightPanel.tsx. "terminal" is the Terminal tool (#2868), which exists only while this
  * device places the terminal in the right panel (`useTerminalPlacement()`); in Bottom Dock placement
- * the panel shows Session Tools in its place.
+ * the panel shows Session Tools in its place. "launched" is an Assistant thread's Launched Sessions
+ * (#4776), which exists only on a thread.
  */
-export const RIGHT_PANEL_MODES = ["launcher", "requests", "campaign", "review", "files", "browser", "terminal", "sidechat", "subagents", "background", "decisions"] as const;
+export const RIGHT_PANEL_MODES = ["launcher", "requests", "campaign", "review", "files", "browser", "terminal", "sidechat", "subagents", "background", "decisions", "launched"] as const;
 export type RightPanelMode = (typeof RIGHT_PANEL_MODES)[number];
 
 /** The least room the chat column keeps beside a docked panel (§15.2); with less the panel overlays. */

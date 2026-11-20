@@ -49,6 +49,8 @@ import { BackgroundWorkPanel, type BackgroundJobPageRequest } from "./Background
 import type { BackgroundParentTurn } from "../background-work.js";
 import { SessionRequestPanel, sessionRequestPanelKey, type DescendantRequestStatus } from "./SessionRequestPanel.js";
 import { CampaignStatusPanel } from "./CampaignStatusPanel.js";
+import { LaunchedSessionsPanel } from "./AssistantWorkCards.js";
+import type { LaunchedWork } from "../assistant-launched-work.js";
 import { useIsCoarsePointer, useIsMobile } from "./useIsMobile.js";
 import type { CampaignStatusAvailability } from "../campaign-status.js";
 import { useAccessibleMenu } from "./interactions.js";
@@ -310,6 +312,7 @@ export function RightPanel({
   campaignAvailability = HIDDEN_CAMPAIGN,
   onOpenSession = () => undefined,
   onOpenSessionRequest,
+  launchedWork,
 }: {
   state: RightPanelState;
   session: SessionView;
@@ -375,6 +378,9 @@ export function RightPanel({
   onOpenSession?: (sessionId: string) => void;
   /** Opens another session at one of its own requests (#4337); without it, the session alone opens. */
   onOpenSessionRequest?: (sessionId: string, requestId: string) => void;
+  /** An Assistant thread's launched sessions, listed by the Launched Sessions tool (#4776). Only a
+   * thread passes it; without it the tool is not listed. */
+  launchedWork?: LaunchedWork;
 }) {
   // The panels show ages that read the clock as they render (requests, decisions, background work),
   // and moved on with every paced upsert while the session view rendered for them (#2872).
@@ -515,7 +521,11 @@ export function RightPanel({
   // Dock from another tab) shows Session Tools, before paint, and the stored mode follows.
   const terminalInPanel = useTerminalPlacement() === "panel";
   const terminalDisplaced = state.mode === "terminal" && !terminalInPanel;
-  const mode: RightPanelMode = terminalDisplaced ? "launcher" : state.mode;
+  // Launched Sessions belongs to an Assistant thread (#4776). A session page opened from one, its
+  // card for example, shows Session Tools in its place, but keeps the stored tool, so going back to
+  // the thread reopens Launched Sessions as it was left.
+  const launchedDisplaced = state.mode === "launched" && launchedWork === undefined;
+  const mode: RightPanelMode = terminalDisplaced || launchedDisplaced ? "launcher" : state.mode;
   useLayoutEffect(() => {
     if (terminalDisplaced) state.setMode("launcher");
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -948,6 +958,8 @@ export function RightPanel({
             onOpenJobHandled={(seq) => setJobPageRequest((current) => current?.seq === seq ? null : current)}
           />
         );
+      case "launched":
+        return launchedWork ? <LaunchedSessionsPanel work={launchedWork} beforeOpen={phone ? state.close : undefined} /> : null;
       default: {
         const unhandled: never = mode;
         throw new Error(`right panel mode without a body: ${String(unhandled)}`);
@@ -960,6 +972,7 @@ export function RightPanel({
     session.backgroundWorkTracking != null || session.backgroundWorkState != null;
   const toolContext: SessionToolContext = {
     filesSupported, filesHint, terminalSupported, terminalHint, backgroundAvailable, campaignAvailability,
+    launchedSessions: launchedWork !== undefined,
   };
   const chooseTool = (tool: SessionToolId, keyboard = false) => {
     // In Bottom Dock placement Terminal opens the dock; in Right Panel placement it is a tool (#2868).
@@ -1111,6 +1124,7 @@ export function RightPanel({
               decisionStatus={decisionHistoryStatus}
               descendantRequests={descendantRequests}
               descendantRequestStatus={descendantRequestStatus}
+              launchedWork={launchedWork}
               onChoose={chooseTool}
             />
           ) : (

@@ -16,6 +16,7 @@ import {
   campaignFact,
   decisionsFact,
   filesFact,
+  launchedSessionsFact,
   requestKindPhrase,
   requestsFact,
   reviewFact,
@@ -40,6 +41,7 @@ test("the tools run Session Tools, then Code, Work and Decisions, in the order t
     [null, "Session Tools"],
     ["Code", "Review"], ["Code", "Files"], ["Code", "Browser"], ["Code", "Terminal"],
     ["Work", "Agents"], ["Work", "Side Chat"], ["Work", "Background Work"], ["Work", "Campaign Status"],
+    ["Work", "Launched Sessions"],
     ["Decisions", "Requests"], ["Decisions", "Decision History"],
   ]);
   // Groups are contiguous, so a group heading never repeats.
@@ -68,12 +70,25 @@ test("an unavailable tool is listed with its reason; Campaign Status is listed o
   }), { listed: true, unavailableReason: "The campaign could not be loaded." });
 });
 
+test("Launched Sessions is listed only on an Assistant thread (#4776)", () => {
+  assert.deepEqual(sessionToolAvailability("launched", CONTEXT), { listed: false });
+  assert.deepEqual(sessionToolAvailability("launched", { ...CONTEXT, launchedSessions: false }), { listed: false });
+  assert.deepEqual(sessionToolAvailability("launched", { ...CONTEXT, launchedSessions: true }), { listed: true, unavailableReason: null });
+});
+
+test("the Launched Sessions row counts the thread's sessions and those waiting for you (#4776)", () => {
+  assert.equal(launchedSessionsFact({ total: 0, needsYou: 0 }), "No sessions launched yet");
+  assert.equal(launchedSessionsFact({ total: 1, needsYou: 0 }), "1 session launched");
+  assert.equal(launchedSessionsFact({ total: 3, needsYou: 1 }), "3 sessions launched, 1 waiting for you");
+});
+
 test("every tool names its chord, for the keycap the switcher and Session Tools show (#2862, #1260)", () => {
   assert.deepEqual(SESSION_TOOLS.map((tool) => [tool.name, tool.shortcut ?? null]), [
     ["Session Tools", null],
     ["Review", "open-review"], ["Files", "open-files"], ["Browser", "open-browser"], ["Terminal", "toggle-terminal"],
     ["Agents", "open-agents"], ["Side Chat", "open-side-chat"], ["Background Work", "open-background-work"],
-    ["Campaign Status", "open-campaign-status"], ["Requests", "open-requests"], ["Decision History", "open-decision-history"],
+    ["Campaign Status", "open-campaign-status"], ["Launched Sessions", null],
+    ["Requests", "open-requests"], ["Decision History", "open-decision-history"],
   ]);
 });
 

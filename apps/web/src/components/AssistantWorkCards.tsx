@@ -1,6 +1,15 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { prioritizedPendingRequests, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import {
+  groupLaunchedWork,
+  launchedSessionsToggleLabel,
+  launchedWorkGroup,
+  launchedWorkIds,
+  type LaunchedWork,
+  type LaunchedWorkGroup,
+  type LaunchedWorkGroups,
+} from "../assistant-launched-work.js";
 import { relativeTime } from "../format.js";
 import { approvalOptionForIntent } from "../inbox.js";
 import { sessionCommandRefusal } from "../session-command-permissions.js";
@@ -8,58 +17,158 @@ import { sessionDisplayTitle } from "../session-title.js";
 import { sessionStatusSignal } from "../status-meta.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
+import { AssistantsIcon, ChevronRightIcon } from "./Icons.js";
+import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
+const GROUP_CODES: Record<LaunchedWorkGroup, string> = { needsYou: "n", active: "a", finished: "f" };
+const GROUP_OF_CODE: Record<string, LaunchedWorkGroup> = { n: "needsYou", a: "active", f: "finished" };
+
 /**
- * The sessions an assistant thread launched, as live work cards (#4664). Each card reads its
- * session from the store, so its status follows the session stream as the work progresses, and
- * opens that session. A launched session waiting on a tool approval carries the approval inline
- * (Approve Once, Deny, Open Session); a question is answered in its session, which Open Session
- * opens on it.
- *
- * `confirmations` is the seam for owner confirmations bound to the thread itself (#4665): they are
- * drawn first, ahead of the work they would unblock, in their own list. Only the work cards scroll,
- * so an owner's action is never left at a scroll edge.
+ * A thread's launched work, grouped live from the store (#4776): each session's group follows its
+ * stream, so the counts and the panel's order change as the work does. The selector returns one code
+ * per id, so a stream update that moves no session between groups re-renders nothing.
  */
-export function AssistantWorkCards({ sessionIds, campaignIds, confirmations }: {
-  sessionIds: readonly string[];
-  campaignIds?: readonly string[];
+export function useLaunchedWorkGroups(work: LaunchedWork): { ids: string[]; groups: LaunchedWorkGroups } {
+  const ids = useMemo(() => launchedWorkIds(work), [work]);
+  const codes = useStoreSelector((state) => ids.map((id) => GROUP_CODES[launchedWorkGroup(state.sessions.get(id))]).join(""));
+  const groups = useMemo(() => groupLaunchedWork(ids, (_id, index) => GROUP_OF_CODE[codes.charAt(index)] ?? "active"), [ids, codes]);
+  return { ids, groups };
+}
+
+/**
+ * What a thread is waiting on its owner for, in the thread header where a closed panel never hides it
+ * (#4665, #4776): the owner confirmations bound to the thread itself first, ahead of the work they
+ * would unblock, then each launched session waiting on an approval or a question, as its work card
+ * with the approval inline. `showSessions` is false while the Launched Sessions panel shows those
+ * cards itself, so the same approval is never offered twice on one screen.
+ */
+export function AssistantWaitingWork({ work, confirmations, showSessions }: {
+  work: LaunchedWork;
   confirmations?: ReactNode;
+  showSessions: boolean;
 }) {
-  const ids = useMemo(() => campaignIds?.length ? [...sessionIds, ...campaignIds] : sessionIds, [sessionIds, campaignIds]);
-  // Work waiting on the person comes first, so its approval is never the card scrolled out of view.
-  const waiting = useStoreSelector((state) => ids.filter((id) => {
-    const session = state.sessions.get(id);
-    return session !== undefined && !session.archived && prioritizedPendingRequests(session.pendingApproval).length > 0;
-  }).join("\n"));
-  const ordered = useMemo(() => {
-    const first = new Set(waiting ? waiting.split("\n") : []);
-    return [...ids.filter((id) => first.has(id)), ...ids.filter((id) => !first.has(id))];
-  }, [ids, waiting]);
-  if (ids.length === 0 && !confirmations) return null;
+  const { groups } = useLaunchedWorkGroups(work);
+  const waiting = showSessions ? groups.needsYou : [];
+  const campaigns = useMemo(() => new Set(work.campaignIds ?? []), [work.campaignIds]);
+  if (waiting.length === 0 && !confirmations) return null;
   return (
-    <section className="assistant-work" aria-label="Launched Work">
+    <section className="assistant-work" aria-label="Waiting for You">
       {confirmations && <ul className="assistant-work-confirmations" aria-label="Approvals Needed">{confirmations}</ul>}
-      {ordered.length > 0 && (
-        <ul className="assistant-work-cards">
-          {ordered.map((sessionId) => <AssistantWorkCard key={sessionId} sessionId={sessionId} campaign={campaignIds?.includes(sessionId)} />)}
+      {waiting.length > 0 && (
+        <ul className="assistant-work-cards" aria-label="Sessions Waiting for You">
+          {waiting.map((sessionId) => <AssistantWorkCard key={sessionId} sessionId={sessionId} campaign={campaigns.has(sessionId)} />)}
         </ul>
       )}
     </section>
   );
 }
 
-function AssistantWorkCard({ sessionId, campaign }: { sessionId: string; campaign?: boolean }) {
+/**
+ * The thread header's Launched Sessions toggle (#4776): the live counts, "3 Sessions · 1 Needs You",
+ * opening and closing the panel. Hidden until the thread has launched something.
+ */
+export function LaunchedSessionsToggle({ work, open, onToggle }: {
+  work: LaunchedWork;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const { ids, groups } = useLaunchedWorkGroups(work);
+  if (ids.length === 0) return null;
+  const needsYou = groups.needsYou.length;
+  return (
+    <button
+      type="button"
+      className="btn sm assistant-launched-toggle"
+      data-needs-you={needsYou > 0 ? "" : undefined}
+      aria-expanded={open}
+      aria-controls={open ? "right-panel" : undefined}
+      title={open ? "Hide Launched Sessions" : "Show Launched Sessions"}
+      onClick={onToggle}
+    >
+      {launchedSessionsToggleLabel({ total: ids.length, needsYou })}
+    </button>
+  );
+}
+
+/**
+ * The side panel's Launched Sessions tool (#4776): every session the thread launched, those waiting
+ * on the owner first, then those still working, then the finished ones in a group that folds away.
+ * The list scrolls inside the panel, so the conversation keeps its height however many there are.
+ * Finished work starts folded while anything else is listed, and open when it is all there is.
+ * `beforeOpen` runs before a card opens its session: a phone closes its sheet, which would otherwise
+ * cover the session it opened.
+ */
+export function LaunchedSessionsPanel({ work, beforeOpen }: { work: LaunchedWork; beforeOpen?: () => void }) {
+  const { ids, groups } = useLaunchedWorkGroups(work);
+  const campaigns = useMemo(() => new Set(work.campaignIds ?? []), [work.campaignIds]);
+  const onlyFinished = groups.needsYou.length === 0 && groups.active.length === 0;
+  const [finishedOpen, setFinishedOpen] = useState<boolean | null>(null);
+  const showFinished = finishedOpen ?? onlyFinished;
+  const finishedId = useId();
+  if (ids.length === 0) {
+    return (
+      <State compact icon={<AssistantsIcon />} title="No Sessions Launched Yet">
+        Sessions the assistant starts for this thread appear here.
+      </State>
+    );
+  }
+  const cards = (list: readonly string[]) => (
+    <ul className="launched-sessions-cards">
+      {list.map((sessionId) => (
+        <AssistantWorkCard key={sessionId} sessionId={sessionId} campaign={campaigns.has(sessionId)} beforeOpen={beforeOpen} />
+      ))}
+    </ul>
+  );
+  return (
+    <div className="launched-sessions">
+      {groups.needsYou.length > 0 && (
+        <section className="launched-sessions-group" aria-label="Needs You">
+          <h3 className="group-label">Needs You<span className="count">{groups.needsYou.length}</span></h3>
+          {cards(groups.needsYou)}
+        </section>
+      )}
+      {groups.active.length > 0 && (
+        <section className="launched-sessions-group" aria-label="Active">
+          <h3 className="group-label">Active<span className="count">{groups.active.length}</span></h3>
+          {cards(groups.active)}
+        </section>
+      )}
+      {groups.finished.length > 0 && (
+        <section className="launched-sessions-group" aria-label="Finished">
+          <h3 className="launched-sessions-fold">
+            <button
+              type="button"
+              className="disclosure-trigger"
+              aria-expanded={showFinished}
+              aria-controls={showFinished ? finishedId : undefined}
+              onClick={() => setFinishedOpen(!showFinished)}
+            >
+              <ChevronRightIcon className="disclosure-chevron" aria-hidden="true" />
+              Finished<span className="count">{groups.finished.length}</span>
+            </button>
+          </h3>
+          {showFinished && <div id={finishedId}>{cards(groups.finished)}</div>}
+        </section>
+      )}
+    </div>
+  );
+}
+
+function AssistantWorkCard({ sessionId, campaign, beforeOpen }: { sessionId: string; campaign?: boolean; beforeOpen?: () => void }) {
   const session = useStoreSelector((state) => state.sessions.get(sessionId));
   const runnerOnline = useStoreSelector((state) => {
     const runnerId = session?.runnerId;
     return runnerId ? state.runners.get(runnerId)?.status === "online" : true;
   });
   const { navigate } = useStoreActions();
-  const open = (requestId?: string) => navigate(requestId && session
-    ? { name: "session", id: sessionId, attention: { eventEpoch: session.eventEpoch ?? 0, requestId } }
-    : { name: "session", id: sessionId });
+  const open = (requestId?: string) => {
+    beforeOpen?.();
+    navigate(requestId && session
+      ? { name: "session", id: sessionId, attention: { eventEpoch: session.eventEpoch ?? 0, requestId } }
+      : { name: "session", id: sessionId });
+  };
   if (!session) {
     // Launched, but not in this dashboard's snapshot yet: it can still be opened by id.
     return (
