@@ -244,7 +244,7 @@ test("required skip provenance preserves every required app restriction", async 
   assert.equal(fake.calls.some((args) => args.some((arg) => arg.includes("/actions/runs"))), false);
 });
 
-test("ordinary check outcomes add no Actions provenance requests", async () => {
+test("ordinary check outcomes only inspect Actions provenance for failures", async () => {
   for (const nodes of [
     [run(AGGREGATOR, "SUCCESS"), run("Optional", "SKIPPED", provenance())],
     [run(AGGREGATOR, "FAILURE"), run("Optional", "SKIPPED", provenance())],
@@ -253,7 +253,8 @@ test("ordinary check outcomes add no Actions provenance requests", async () => {
   ]) {
     const fake = fakeGh([ok(pr(admission(), nodes))]);
     await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1_000 }, { gh: fake.gh, ...clock() });
-    assert.equal(fake.calls.some((args) => args.some((arg) => arg.includes("/actions/runs"))), false);
+    assert.equal(fake.calls.filter((args) => args.some((arg) => arg.includes("/actions/runs"))).length,
+      nodes.some((node) => node.conclusion === "FAILURE") ? 1 : 0);
   }
 });
 
@@ -270,9 +271,9 @@ for (const conclusion of ["SUCCESS", "FAILURE", "SKIPPED"]) {
     const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1_000 }, { gh, ...clock() });
     assert.ok(result.ok, "Actions permissions must never make common PR observations fail");
     assert.equal(result.summary.outcome, conclusion === "SUCCESS" ? "checks_passed" : conclusion === "FAILURE" ? "checks_failed" : "timeout");
-    if (conclusion !== "SKIPPED") {
+    if (conclusion === "SUCCESS") {
       assert.equal(fake.calls.some((args) => args.some((arg) => arg.includes("/actions/"))), false);
-    } else {
+    } else if (conclusion === "SKIPPED") {
       assert.deepEqual(result.summary.checks.required, [{ name: AGGREGATOR, state: "pending", reported: true }]);
     }
   });
@@ -1367,6 +1368,97 @@ function suiteRuns(events = ["pull_request", "pull_request"], head = HEAD) {
     { head_sha: head, check_suite_id: 2, workflow_id: 10, event: events[1], head_branch: "feature", pull_requests: [{ number: 7, base: { ref: "main" } }] },
   ] };
 }
+
+/** Fresh runs can exist before any of their job/check nodes appear in the rollup. */
+function freshWorkflowRuns(status = "in_progress", newer: Record<string, unknown> = {}) {
+  const runs = suiteRuns().workflow_runs;
+  return { total_count: 2, workflow_runs: runs.map((run, index) => ({
+    ...run, id: 20 + index, created_at: index ? "2026-10-12T11:00:00Z" : RUN_AT,
+    status: index ? status : "completed", ...(index ? newer : {}),
+  })) };
+}
+
+for (const status of ["queued", "in_progress"]) {
+  test(`fresh ${status} workflow before its aggregator leaves the superseded failure pending`, async () => {
+    const fake = fakeGh([ok(pr({}, [suiteJob("FAILURE", 100, 1)]))], { runs: ok(freshWorkflowRuns(status)) });
+    const snapshots: string[] = [];
+    const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1, returnOnAnyFailure: true }, {
+      gh: fake.gh, ...clock(), onSnapshot: (snapshot) => snapshots.push(snapshot.checks.required[0]!.state),
+    });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, "timeout");
+    assert.deepEqual(snapshots, ["pending"]);
+    assert.deepEqual(result.summary.checks.failedJobs, []);
+    assert.equal(fake.calls.filter((args) => args.some((arg) => arg.includes("/actions/runs?"))).length, 1);
+  });
+}
+
+for (const conclusion of ["FAILURE", "SUCCESS"]) {
+  test(`fresh workflow aggregator ${conclusion} settles after the pre-aggregator window`, async () => {
+    const old = suiteJob("FAILURE", 100, 1);
+    const fake = fakeGh([ok(pr({}, [old])), ok(pr({}, [old, suiteJob(conclusion, 101, 2)]))]);
+    let reads = 0;
+    const states: string[] = [];
+    const gh: GhRunner = async (args) => args.some((arg) => arg.includes("/actions/runs?"))
+      ? (reads++, ok(freshWorkflowRuns(reads === 1 ? "in_progress" : "completed"))) : fake.gh(args);
+    const result = await waitForPullRequest({ repository: "o/r", number: 7 }, {
+      gh, ...clock(), onSnapshot: (snapshot) => states.push(snapshot.checks.required[0]!.state),
+    });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, conclusion === "SUCCESS" ? "checks_passed" : "checks_failed");
+    assert.deepEqual(states, ["pending", conclusion === "SUCCESS" ? "passed" : "failed"]);
+    assert.equal(reads, 2, "the new suite acquires identity on the next observation");
+  });
+}
+
+for (const newer of [
+  { id: undefined }, { id: 19 }, { created_at: undefined }, { created_at: RUN_AT },
+  { workflow_id: 11 }, { event: "push" }, { head_branch: "other" },
+  { pull_requests: [{ number: 8, base: { ref: "main" } }] },
+  { pull_requests: [{ number: 7, base: { ref: "release" } }] },
+  { status: "completed" },
+]) {
+  test(`unproven or inactive supersession retains the failure (${JSON.stringify(newer)})`, async () => {
+    const fake = fakeGh([ok(pr({}, [suiteJob("FAILURE", 100, 1)]))], { runs: ok(freshWorkflowRuns("in_progress", newer)) });
+    const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, "checks_failed");
+    assert.equal(result.summary.polls, 1);
+  });
+}
+
+test("a failed check in the fresh active run still fails promptly", async () => {
+  const fake = fakeGh([ok(pr({}, [suiteJob("FAILURE", 100, 1), suiteJob("FAILURE", 101, 2)]))], {
+    runs: ok(freshWorkflowRuns()),
+  });
+  const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_failed");
+  assert.equal(result.summary.polls, 1);
+});
+
+test("fresh run completion without an aggregator stops suppressing the old failure", async () => {
+  const fake = fakeGh([ok(pr({}, [suiteJob("FAILURE", 100, 1)]))]);
+  let reads = 0;
+  const gh: GhRunner = async (args) => args.some((arg) => arg.includes("/actions/runs?"))
+    ? (reads++, ok(freshWorkflowRuns(reads === 1 ? "in_progress" : "completed"))) : fake.gh(args);
+  const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_failed");
+  assert.equal(result.summary.polls, 2);
+  assert.equal(reads, 2, "mutable status is not cached");
+});
+
+test("an intermediate active run cannot hide a later completed run", async () => {
+  const runs = freshWorkflowRuns();
+  runs.workflow_runs.push({ ...runs.workflow_runs[1]!, check_suite_id: 3, id: 22,
+    created_at: "2026-10-12T12:00:00Z", status: "completed" });
+  runs.total_count++;
+  const fake = fakeGh([ok(pr({}, [suiteJob("FAILURE", 100, 1)]))], { runs: ok(runs) });
+  const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_failed");
+});
 
 for (const events of [["pull_request", "push"], ["workflow_dispatch", "workflow_dispatch"], ["pull_request", "pull_request"]]) {
   test(`cross-suite supersession needs a matching automatic event (${events})`, async () => {

@@ -732,8 +732,9 @@ async function admittedSkippedRuns(
   return admitted;
 }
 
-/** At most one optional 100-run read per commit observation, only for shared names in distinct
- * suites with uncached identity. Missing, denied, malformed or truncated provenance retains separate suites. No workflow
+/** At most one optional 100-run read per commit observation, for shared names in distinct
+ * suites with uncached identity or failures that a fresh run may supersede before creating jobs.
+ * Missing, denied, malformed or truncated provenance retains separate suites and failures. No workflow
  * name is trusted as identity: different workflows can themselves have the same display name. */
 type WorkflowIdentity = { workflowId: number; workflowEvent: string; workflowContext: string };
 async function workflowChecks(
@@ -742,6 +743,16 @@ async function workflowChecks(
   let retry = false;
   const contexts = record(record(rollup)?.contexts);
   const nodes = Array.isArray(contexts?.nodes) ? contexts.nodes : [];
+  const enrich = (raw: unknown): unknown => {
+    const node = record(raw);
+    const suite = record(node?.checkSuite);
+    const identity = cache.get(suite?.databaseId as number);
+    return !identity ? raw : { ...node, checkSuite: { ...suite, ...identity } };
+  };
+  const failures = latestChecks(nodes.map(enrich)).filter((node) =>
+    node.kind === "CheckRun" && node.state === "failed" && node.suiteId !== undefined);
+  // Status is mutable: re-read it each observation, even when suite identity is cached.
+  const superseded = new Set<number>();
   const suites = new Map<string, Set<number>>();
   for (const raw of nodes) {
     const node = checkNode(raw);
@@ -751,9 +762,9 @@ async function workflowChecks(
     ids.add(node.suiteId);
     suites.set(key, ids);
   }
-  if (!sha || ![...suites.values()].some((ids) => ids.size > 1)) return { rollup, retry: new Set() };
+  if (!sha || (failures.length === 0 && ![...suites.values()].some((ids) => ids.size > 1))) return { rollup, retry: new Set() };
   const missing = [...suites.values()].some((ids) => ids.size > 1 && [...ids].some((id) => !cache.has(id)));
-  if (missing) {
+  if (missing || failures.length > 0) {
     let body: Record<string, unknown> | null = null;
     try {
       const response = await gh(["api", "--hostname", "github.com", `repos/${repository}/actions/runs?head_sha=${sha}&per_page=100`]);
@@ -785,6 +796,24 @@ async function workflowChecks(
             previous.workflowContext !== identity.workflowContext)) { valid = false; break; }
         found.set(run.check_suite_id, identity);
       }
+      if (valid) for (const failed of failures) {
+        const records = runs.map((run) => record(run)!);
+        const current = records.filter((run) => run.check_suite_id === failed.suiteId);
+        if (current.length !== 1) continue;
+        const old = current[0]!;
+        const identity = found.get(failed.suiteId!);
+        if (!identity || !positiveId(old.id) || timestamp(old.created_at) === null) continue;
+        const peers = records.filter((run) =>
+          JSON.stringify(found.get(run.check_suite_id as number)) === JSON.stringify(identity));
+        // Every peer must be orderable. The newest must be active, not an intermediate run
+        // followed by a completed failure. Equal timestamps or missing metadata prove nothing.
+        if (peers.some((run) => !positiveId(run.id) || timestamp(run.created_at) === null)) continue;
+        const latest = peers.reduce((a, b) => (a.id as number) > (b.id as number) ? a : b);
+        if ((latest.id as number) > old.id && timestamp(latest.created_at)! > timestamp(old.created_at)! &&
+            peers.every((run) => run === latest || ((run.id as number) < (latest.id as number) &&
+              timestamp(run.created_at)! < timestamp(latest.created_at)!)) &&
+            ["queued", "in_progress"].includes(String(latest.status))) superseded.add(failed.suiteId!);
+      }
       if (valid) for (const ids of suites.values()) for (const id of ids) {
         // Absence from a list is not immutable evidence: only cache suites actually returned.
         if (!found.has(id)) continue;
@@ -801,8 +830,11 @@ async function workflowChecks(
   return { retry: retryChecks, rollup: { ...record(rollup), contexts: { ...contexts, nodes: nodes.map((raw) => {
     const node = record(raw);
     const suite = record(node?.checkSuite);
-    const identity = cache.get(suite?.databaseId as number);
-    return !identity ? raw : { ...node, checkSuite: { ...suite, ...identity } };
+    const enriched = enrich(raw);
+    // Feed the shared evaluator a pending candidate, so summaries and returnOnAnyFailure
+    // cannot keep exposing the superseded failure. No synthetic passing check is created.
+    return checkNode(raw)?.state === "failed" && superseded.has(suite?.databaseId as number)
+      ? { ...record(enriched), status: "QUEUED", conclusion: null } : enriched;
   }) } } };
 }
 
