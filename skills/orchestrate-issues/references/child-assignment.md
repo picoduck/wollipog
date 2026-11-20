@@ -6,7 +6,8 @@ For UI work, replace the rubric placeholder with the current version verbatim fr
 supplementary campaign notes. Before the first capture it must specify the viewport set, target
 sizes and gaps, numeral size and contrast, ring and demo-hand rules, fill and centring, standard
 exemptions, measured claims in evidence IDs, and the round limit for each PR. The root uses that
-same text verbatim in every UI evidence reviewer brief.
+same text verbatim in every UI evidence reviewer brief. Omit the rubric and re-filing paragraphs
+from assignments without UI evidence.
 
 > Campaign: <campaign ID>. Issue: <repository and issue URL>. Lineage: <initial issue or originating issue and accepted recommendation>. Dependencies: <merged prerequisite URLs or none>.
 >

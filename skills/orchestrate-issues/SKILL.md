@@ -135,10 +135,14 @@ successor approval covers the full set, refer to unchanged items with their exis
 IDs, artifact IDs and digests so the server can reuse exact-byte receipts. In direct review on
 supported peers, inspect only the items for which the server needs fresh delivery. Reuse requires
 the same controlling Orchestrator, reviewer Session, child Session, artifact, verified SHA-256
-and policy revision, with an acknowledged, unexpired receipt. Denial, explicit revocation or a
-failed match requires fresh review. Older peers use per-occurrence review, and video has its own
-rules. A delegated review can reuse the original approving verdict for an identical set and brief
-with eligible receipts. A changed set or brief needs a fresh delegated review.
+and policy revision, with an acknowledged, unexpired receipt. For revision feedback that does not
+require a denial, give the child the defects while the decision is pending so a successor can
+supersede it and reuse eligible receipts. If you deny, the next round needs fresh review for items
+whose only receipts came from the denied round, even when their bytes did not change. Explicitly
+revoked or mismatched receipts also require fresh review. Older peers use per-occurrence review,
+and video has its own rules. A delegated review can reuse the original approving verdict for an
+identical set and brief with eligible receipts. A changed set or brief needs a fresh delegated
+review.
 
 Have children reserve room under their session's artifact count and byte limits for the final
 required set. When the remaining allowance is less than about one review round, or another upload
