@@ -10,7 +10,7 @@ import {
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
 } from "@wollipog/protocol";
-import type { McpFetch } from "./session-management-mcp.js";
+import type { McpDeps, McpFetch } from "./session-management-mcp.js";
 import {
   AGENT_CONTROL_RELAY_ENDPOINT_ENV,
   AGENT_CONTROL_RELAY_KEY_ENV,
@@ -212,11 +212,11 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
     };
     return { gh, calls };
   };
-  const run = async (args: string[], gh: GhRunner, graceMs?: number) => {
+  const run = async (args: string[], gh: GhRunner, graceMs?: number, timing?: Pick<McpDeps, "now" | "sleep">) => {
     let stdout = "";
     let stderr = "";
     const code = await runPullRequestCli(args, true, { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
-      gh, undefined, graceMs);
+      gh, undefined, graceMs, undefined, timing);
     return { code, stdout, stderr };
   };
 
@@ -257,11 +257,24 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
   assert.equal(unreadable.code, 1);
   assert.match(JSON.parse(unreadable.stdout).error, /forge_unauthenticated/u);
 
+  // The retry sleep is capped at the deadline. Real timers can wake before Date.now()
+  // reaches it, allowing another poll; advance a virtual clock by the requested sleep.
+  let degradedTime = 0;
+  let degradedReads = 0;
+  const degradedSleeps: number[] = [];
   const degraded = await run(["pr", "wait", "picoduck/wollipog#7", "--timeout", "100", "--json"],
-    async () => ({ stdout: "", stderr: "gh: HTTP 504", code: 1, timedOut: false }));
+    async () => {
+      degradedReads++;
+      return { stdout: "", stderr: "gh: HTTP 504", code: 1, timedOut: false };
+    }, undefined, {
+      now: () => degradedTime,
+      sleep: async (milliseconds) => { degradedSleeps.push(milliseconds); degradedTime += milliseconds; },
+    });
   assert.equal(degraded.code, 124);
+  assert.equal(degradedReads, 1, "no forge read after the deadline");
+  assert.deepEqual(degradedSleeps, [100], "retry sleep is bounded by the remaining timeout");
   const { waitedMs, ...degradedSummary } = JSON.parse(degraded.stdout);
-  assert.ok(waitedMs >= 100);
+  assert.equal(waitedMs, 100);
   assert.deepEqual(degradedSummary, {
     outcome: "timeout", repository: "picoduck/wollipog", number: 7, observation: null,
     polls: 1, transientErrorCount: 1, forgeDegraded: true,
