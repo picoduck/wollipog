@@ -24892,7 +24892,7 @@ export class ControlPlaneDb {
   }
 
   assistantDecisionHistory(owner: HumanPrincipal, filter: { campaignId?: string; threadId?: string; before?: { at: number; id: string } }): AssistantDecisionHistoryPage {
-    const limit = 20;
+    const limit = 5;
     const time = "json_extract(assistant_delegation, '$.resolvedAt')";
     const rows = this.stmt(`SELECT * FROM workflow_decisions WHERE assistant_delegation IS NOT NULL
       AND json_extract(assistant_delegation, '$.ownerUserId')=? AND json_extract(assistant_delegation, '$.organizationId')=?

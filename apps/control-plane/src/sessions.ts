@@ -1006,7 +1006,7 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
     decision.ownerHandoff !== undefined || decision.ownerRule !== undefined;
   const resolver = decision.withdrawal || decision.authority === "orchestrator" ? "Your Orchestrator"
     : decision.assistantDelegation && (decision.status === "approved" || decision.status === "denied")
-      ? `Assistant thread ${decisionLiteral(decision.assistantDelegation.threadId)} under your owner's delegation`
+      ? assistantDecisionResolver(decision.assistantDelegation)
       : ownerKept && decision.status !== "revoked" ? "Your campaign's owner" : "A human reviewer";
   // A withdrawal's own reason replaces the message an earlier approval left (#3917), and the option
   // that approval chose no longer applies.
@@ -1053,12 +1053,17 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
 
 /** The prompt that brings the owner's answer to an Owner Question back to the root (#4270): the
  * option they chose and their own words, exactly as they wrote them. It grants nothing. */
+function assistantDecisionResolver(delegation: NonNullable<WorkflowDecisionView["assistantDelegation"]>): string {
+  const title = delegation.threadTitle ? `${decisionLiteral(delegation.threadTitle)} (${decisionLiteral(delegation.threadId)})` : decisionLiteral(delegation.threadId);
+  return `Assistant thread ${title} under your owner's delegation`;
+}
+
 function ownerQuestionAnswerPrompt(decision: WorkflowDecisionView, snapshot: OwnerQuestionSnapshot): string {
   const option = decision.selectedOptionId === undefined ? undefined
     : snapshot.options.find((candidate) => candidate.optionId === decision.selectedOptionId);
   const answered = decision.status === "approved" || decision.status === "consumed";
   const resolver = decision.assistantDelegation
-    ? `Assistant thread ${decisionLiteral(decision.assistantDelegation.threadId)} under your owner's delegation`
+    ? assistantDecisionResolver(decision.assistantDelegation)
     : "Your campaign's owner";
   return [
     `[Wollipog Owner Answer — ${decision.occurrenceId}]`,
@@ -1244,6 +1249,22 @@ const PULL_REQUEST_WATCH_OUTCOME_TEXT: Record<PullRequestWatchOutcome, string> =
  * the server: nobody else can stand in for a report, or replace one by asking under its key. */
 export const MERGE_CLOSURE_REPORT_REQUEST_PREFIX = "merge_closure_";
 export const MERGE_CLOSURE_REPORT_RESOURCE_PREFIX = "merge_closure:";
+const ISSUE_CLOSURE_RECOVERY_REQUEST_PREFIX = "issue_closure_recovery_";
+const ISSUE_CLOSURE_RECOVERY_RESOURCE_PREFIX = "issue_closure_recovery:";
+
+function isIssueClosureRecoveryCoordinate({ requestId, resourceKey }: Pick<WorkflowDecisionView, "requestId" | "resourceKey">): boolean {
+  return requestId.startsWith(ISSUE_CLOSURE_RECOVERY_REQUEST_PREFIX) || resourceKey.startsWith(ISSUE_CLOSURE_RECOVERY_RESOURCE_PREFIX);
+}
+
+function isMergeClosureReportCoordinate({ requestId, resourceKey }: Pick<WorkflowDecisionView, "requestId" | "resourceKey">): boolean {
+  return requestId.startsWith(MERGE_CLOSURE_REPORT_REQUEST_PREFIX) || resourceKey.startsWith(MERGE_CLOSURE_REPORT_RESOURCE_PREFIX);
+}
+
+/** Server-generated reports require the owner's own acknowledgement, including a dismissal. */
+export function isReservedOwnerQuestion(decision: WorkflowDecisionView): boolean {
+  return isOwnerQuestionSnapshot(decision.resourceSnapshot) &&
+    (isCampaignHandoffQuestion(decision) || isIssueClosureRecoveryCoordinate(decision) || isMergeClosureReportCoordinate(decision));
+}
 /** Times one report is asked again after its question was revoked unanswered. */
 const MERGE_CLOSURE_REPORT_ATTEMPTS = 20;
 
@@ -14741,18 +14762,18 @@ export class SessionsService {
         }
         // Reserved coordinates make this idempotent even if a restart lost the result update.
         let requestId = result.reconciliation?.ownerDecisionOccurrenceId
-          ? this.db.workflowDecisionByOccurrence(result.reconciliation.ownerDecisionOccurrenceId)?.requestId ?? `issue_closure_recovery_${decision.occurrenceId}`
-          : `issue_closure_recovery_${decision.occurrenceId}`;
+          ? this.db.workflowDecisionByOccurrence(result.reconciliation.ownerDecisionOccurrenceId)?.requestId ?? `${ISSUE_CLOSURE_RECOVERY_REQUEST_PREFIX}${decision.occurrenceId}`
+          : `${ISSUE_CLOSURE_RECOVERY_REQUEST_PREFIX}${decision.occurrenceId}`;
         let question = this.db.workflowDecisionByRequestId(campaignId, requestId);
         // A session stop may revoke an unanswered card. Keep one current request, and never read
         // that revocation as acknowledgement or redispatch the forge read.
         while (question?.status === "revoked") {
-          requestId = `issue_closure_recovery_${decision.occurrenceId}_${question.occurrenceId}`;
+          requestId = `${ISSUE_CLOSURE_RECOVERY_REQUEST_PREFIX}${decision.occurrenceId}_${question.occurrenceId}`;
           question = this.db.workflowDecisionByRequestId(campaignId, requestId);
         }
         if (!question) {
           const created = this.createWorkflowDecision(campaignId, { requestId,
-            resourceKey: `issue_closure_recovery:${decision.occurrenceId}`,
+            resourceKey: `${ISSUE_CLOSURE_RECOVERY_RESOURCE_PREFIX}${decision.occurrenceId}`,
             resourceSnapshot: { category: "owner_decision", kind: "question",
               question: `Review the uncertain closure of ${snapshot.repository}#${snapshot.issue} (occurrence ${decision.occurrenceId}).`,
               material: `Wollipog could not prove the approved state reason and exact closing comment on the forge. Inspect [${snapshot.repository}/issues/${snapshot.issue}](${snapshot.url}). Answer or dismiss this request to acknowledge the uncertainty and clear this recovery record. This does not close the issue, post a comment, or authorize another attempt.`,
@@ -14867,11 +14888,11 @@ export class SessionsService {
     if (!boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
       return fail("requestId and resourceKey are required bounded identifiers", 400);
     }
-    if ((request.requestId.startsWith("issue_closure_recovery_") || request.resourceKey.startsWith("issue_closure_recovery:")) &&
+    if (isIssueClosureRecoveryCoordinate(request) &&
         !internal?.trustedIssueClosureRecovery) return fail("Issue closure recovery coordinates are reserved for the server", 400);
     // #4323: the server's merge closure reports are found again by their request id, so nobody else
     // may claim one and stand in for a report.
-    if ((request.requestId.startsWith(MERGE_CLOSURE_REPORT_REQUEST_PREFIX) || request.resourceKey.startsWith(MERGE_CLOSURE_REPORT_RESOURCE_PREFIX)) &&
+    if (isMergeClosureReportCoordinate(request) &&
         !internal?.trustedMergeClosureReport) {
       return fail(`requestId and resourceKey may not start with ${MERGE_CLOSURE_REPORT_REQUEST_PREFIX} or ${MERGE_CLOSURE_REPORT_RESOURCE_PREFIX}, ` +
         "which Wollipog reserves for its own reports", 400);
@@ -15735,7 +15756,7 @@ export class SessionsService {
     const explicitlyKept = !ownerQuestion && this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, snapshot);
     if (decision.ownerRule || decision.ownerHandoff || explicitlyKept || decision.authorityEvaluation?.disposition ||
         (reason !== "custom_owner" && !(ownerQuestion && reason === "owner_kept") && !customClosure && !evidenceDenial) ||
-        isCampaignHandoffQuestion(decision) || (ownerQuestion && credentialFormFloor(snapshot)) ||
+        isReservedOwnerQuestion(decision) || (ownerQuestion && credentialFormFloor(snapshot)) ||
         (snapshot.category === "merged_branch_deletion" && snapshot.merged === false)) {
       return fail("This occurrence requires a direct human response.", 403);
     }
@@ -16996,7 +17017,7 @@ export class SessionsService {
     if (decision.authority === "human" && PERSON_SETTLED_WORKFLOW_DECISION_CATEGORIES.has(decision.category) && !ownPendingScope) {
       return fail(`a person settles this ${decision.category} decision, so it cannot be withdrawn`, 403);
     }
-    if (decision.requestId.startsWith("issue_closure_recovery_")) return fail("Only the owner can acknowledge issue closure recovery; agents cannot withdraw it", 403);
+    if (isIssueClosureRecoveryCoordinate(decision)) return fail("Only the owner can acknowledge issue closure recovery; agents cannot withdraw it", 403);
     if (!byRequester && decision.authority !== "orchestrator") {
       return fail("only its requester can withdraw a human-owned workflow decision", 403);
     }

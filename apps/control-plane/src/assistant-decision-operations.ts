@@ -8,10 +8,11 @@ import {
 } from "@wollipog/protocol";
 import { AssistantRefusal, type AssistantOperations } from "./assistant-connections.js";
 import { threadDecisionDelegation } from "./assistant-thread-store.js";
+import { assistantThreadDisplayTitle } from "./assistant-threads.js";
 import type { ControlPlaneDb } from "./db.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { HumanPrincipal } from "./identity.js";
-import type { SessionsService } from "./sessions.js";
+import { isReservedOwnerQuestion, type SessionsService } from "./sessions.js";
 
 const coordinate = { type: "string", minLength: 1, maxLength: 128 };
 const sessionProperties = { sessionId: coordinate };
@@ -65,7 +66,7 @@ export function registerAssistantDecisionOperations(operations: AssistantOperati
     const { grant, revision } = threadDecisionDelegation(thread);
     if (!grant) throw new AssistantRefusal("This Assistant thread has no decision delegation grant. Its owner can enable one in the thread menu.");
     if (grant.expiresAt !== null && Date.now() >= grant.expiresAt) throw new AssistantRefusal("This Assistant thread's decision delegation grant has expired.");
-    return { grant, revision, threadId: thread.id };
+    return { grant, revision, threadId: thread.id, threadTitle: assistantThreadDisplayTitle(thread, session) };
   };
   const check = (decision: WorkflowDecisionView, owner: HumanPrincipal, connection: AssistantConnection,
     name: string, { grant }: ReturnType<typeof liveGrant>) => {
@@ -73,6 +74,7 @@ export function registerAssistantDecisionOperations(operations: AssistantOperati
     if (!category) throw new AssistantRefusal("This decision has no supported typed Assistant resolution path. Generic permissions, CI reruns and release commands require the owner.");
     if (!grant.categories.includes(category)) throw new AssistantRefusal("This category is outside the thread's decision delegation grant.");
     if (decision.authority !== "human") throw new AssistantRefusal("Only owner-held decisions are eligible for Assistant delegation.");
+    if (isReservedOwnerQuestion(decision)) throw new AssistantRefusal("This occurrence requires a direct human response.");
     const controller = db.getSession(decision.controllingSessionId);
     const requester = db.getSession(decision.sessionId);
     if (!controller || !requester || !db.campaignOwnerUser(controller.id, owner.userId) ||
@@ -147,7 +149,7 @@ export function registerAssistantDecisionOperations(operations: AssistantOperati
         if (resourceDigest !== decision.resourceDigest) throw new AssistantRefusal("The decision snapshot changed. Read the exact occurrence again.");
         const reason = requiredText(args.reason, "reason", 1000).trim();
         const delegation: AssistantDecisionResolution = {
-          threadId: live.threadId, ownerUserId: owner.userId, organizationId: owner.organizationId,
+          threadId: live.threadId, threadTitle: live.threadTitle, ownerUserId: owner.userId, organizationId: owner.organizationId,
           grantRevision: live.revision, campaignId: campaign, reason,
         };
         const resolution: ResolveWorkflowDecisionRequest = { outcome,

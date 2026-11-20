@@ -133,6 +133,7 @@ threads start without a grant. Select all or specific projects and campaigns, an
 an expiry in your device's local time. When both scopes are limited, the decision must match both.
 **Revoke Grant** immediately stops later resolutions. An already recorded decision still follows
 the ordinary, exact-snapshot checks when the requester acts on it.
+Archiving a thread or its backing session clears the grant.
 
 A grant covers Owner Questions from campaigns, PR merges, merged branch deletions, follow-up issue
 publication, issue closure, review round extensions, and denial of UI evidence. Approval of UI
@@ -141,7 +142,8 @@ do not have. CI reruns and release tag and publish commands have no typed Assist
 path. Generic provider permissions and Assistant command confirmations stay with the owner.
 Credentials, sign-in, governance or policy changes, budgets, persistent permissions, connection
 and delegation changes, and occurrences explicitly kept for a person stay human-only. Campaign
-boundaries and Human Required rules continue to apply.
+boundaries and Human Required rules continue to apply. Wollipog's own handoff and forge recovery
+reports require the owner's direct acknowledgement.
 
 The Assistant lists decisions for a session with `assistant_decisions_list`, reads the exact
 occurrence with `assistant_decision_get`, then supplies that occurrence and its `resourceDigest`

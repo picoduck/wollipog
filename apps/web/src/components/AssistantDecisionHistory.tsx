@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ASSISTANT_DECISION_CATEGORIES, type AssistantDecisionHistoryPage } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { formatRecordedTimestamp } from "../format.js";
+import { formatCalendarTime } from "../format.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { CampaignSection } from "./CampaignSections.js";
 import { Modal } from "./Modal.js";
@@ -41,27 +41,27 @@ function DecisionHistory({ campaignId, threadId, onClose }: { campaignId?: strin
       <button className="btn sm" type="button" onClick={() => setRetry((current) => current + 1)}>Retry</button>
     </Notice>}
     {page?.entries.length === 0 && <p>No delegated decisions yet.</p>}
+    {(before || next) && <div className="assistant-decision-pagination">
+      {before && <button type="button" className="btn sm" disabled={state.kind === "loading"}
+        onClick={() => setCursors((current) => current.slice(0, -1))}>Newer Decisions</button>}
+      {next && <button type="button" className="btn sm" onClick={() => setCursors((current) => [...current, next])}>Older Decisions</button>}
+    </div>}
     {!!page?.entries.length && <ul className="campaign-decision-list assistant-decision-history" aria-label="Delegated Decisions">
       {page.entries.map(({ occurrenceId, category, resourceKey, delegation }) => {
-        const at = formatRecordedTimestamp(delegation.resolvedAt);
+        const title = delegation.threadTitle ?? "Assistant Thread";
         return <li key={occurrenceId} className="campaign-decision-item">
           <strong>{category === "ui_evidence_approval" ? "UI Evidence" : ASSISTANT_DECISION_CATEGORIES[category]}</strong>
           <p className="muted">{resourceKey}</p>
           <p>{delegation.outcome === "approved" ? "Approved" : delegation.outcome === "denied" ? "Denied" : "Answered"} by Assistant thread{" "}
-            {threadId ? delegation.threadId : <button className="btn sm" type="button" onClick={() => {
+            {threadId ? <strong>{title}</strong> : <button className="btn sm" type="button" title={delegation.threadId} onClick={() => {
               onClose?.();
               navigate({ name: "assistants", threadId: delegation.threadId });
-            }}>{delegation.threadId}</button>} under your delegation.</p>
+            }}>{title}</button>} under your delegation.</p>
           <p>{delegation.reason}</p>
-          {at && <p className="muted">{at.label}</p>}
+          <p className="muted"><time dateTime={new Date(delegation.resolvedAt).toISOString()}>{formatCalendarTime(delegation.resolvedAt)}</time></p>
         </li>;
       })}
     </ul>}
-    <div className="assistant-decision-pagination">
-      {before && <button type="button" className="btn sm" disabled={state.kind === "loading"}
-        onClick={() => setCursors((current) => current.slice(0, -1))}>Newer Decisions</button>}
-      {next && <button type="button" className="btn sm" onClick={() => setCursors((current) => [...current, next])}>Older Decisions</button>}
-    </div>
   </>;
 
   return campaignId

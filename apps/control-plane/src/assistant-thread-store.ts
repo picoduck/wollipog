@@ -302,7 +302,8 @@ export class AssistantThreadStore {
 
   /** Idempotent: the first archive time is kept. */
   archive(id: string, now: number): void {
-    this.db.prepare(`UPDATE assistant_threads SET state='archived', archived_at=COALESCE(archived_at, ?), updated_at=?
+    this.db.prepare(`UPDATE assistant_threads SET state='archived', archived_at=COALESCE(archived_at, ?), updated_at=?,
+      decision_grant_revision=decision_grant_revision+(decision_grant IS NOT NULL), decision_grant=NULL
       WHERE id=? AND state='active'`).run(now, now, id);
   }
 }

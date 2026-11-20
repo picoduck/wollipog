@@ -516,6 +516,7 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
           </li>
         )}
         <li className="assistant-thread-access">{assistantThreadAccessLabel(thread.access)}</li>
+        {thread.decisionDelegation && <li>{thread.decisionDelegation.grant ? "Decision Delegation Set" : "Decision Delegation Off"}</li>}
         {usage && <>
           <li>{usage.costUsd.limit === null
             ? `${formatUsd(usage.costUsd.used)} spent · No Budget`

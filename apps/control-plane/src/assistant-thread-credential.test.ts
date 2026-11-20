@@ -120,7 +120,7 @@ function decisionPrompts(h: Awaited<ReturnType<typeof harness>>, sessionId: stri
 test("the owner grants and revokes exact typed resolution, and Assistant calls never grant themselves access", async () => {
   const h = await harness();
   try {
-    const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", { title: "Release Assistant" })).body.thread as AssistantThread;
     assert.deepEqual(thread.decisionDelegation, { revision: 0, grant: null });
     const path = `/api/assistant-threads/${thread.id}/delegation`;
     const env = await h.provision(thread.sessionId);
@@ -181,9 +181,10 @@ test("the owner grants and revokes exact typed resolution, and Assistant calls n
     const recorded = h.db.workflowDecisionByOccurrence(occurrenceId)!;
     assert.equal(recorded.status, "approved");
     assert.equal(recorded.assistantDelegation?.threadId, thread.id);
+    assert.equal(recorded.assistantDelegation?.threadTitle, "Release Assistant");
     assert.equal(recorded.assistantDelegation?.reason, resolution.reason);
     assert.equal(recorded.assistantDelegation?.grantRevision, 5);
-    assert.ok(decisionPrompts(h, "child").some((prompt) => prompt.includes(`Assistant thread "${thread.id}" under your owner's delegation`)));
+    assert.ok(decisionPrompts(h, "child").some((prompt) => prompt.includes(`Assistant thread "Release Assistant" ("${thread.id}") under your owner's delegation`)));
     const audit = h.db.listGovernanceAudit("child").find((entry) => entry.requestId === occurrenceId && entry.outcome === "allowed");
     assert.equal(audit?.actor.kind, "agent");
     assert.equal(audit?.workflowDecision?.assistantDelegation?.threadId, thread.id);
@@ -274,6 +275,20 @@ test("a delegated Owner Question returns an option or free text and credential c
     const ownerApproval = await ask("Authorize the operation?", options, "approval");
     assert.match((await resolve(ownerApproval, { selectedOptionId: "green" })).content[0].text, /no supported typed Assistant resolution path/u);
     assert.equal(h.db.workflowDecisionByOccurrence(ownerApproval.occurrenceId)?.status, "pending");
+    const reports = [
+      { requestId: "issue_closure_recovery_fixture", resourceKey: "issue_closure_recovery:fixture", trustedIssueClosureRecovery: true },
+      { requestId: "merge_closure_fixture", resourceKey: "merge_closure:fixture", trustedMergeClosureReport: true },
+    ];
+    for (const { requestId, resourceKey, ...origin } of reports) {
+      const report = h.svc.createWorkflowDecision("root", { requestId, resourceKey, resourceSnapshot: {
+        category: "owner_decision", kind: "question", question: "Inspect the forge before acknowledging the report.",
+        options: [{ optionId: "acknowledge", label: "Acknowledge Outcome" }],
+      } }, () => true, { trustedOwnerDecision: true, ...origin });
+      assert.ok(report.ok && report.data, report.error ?? "report created");
+      assert.match((await resolve(report.data, { selectedOptionId: "acknowledge" })).content[0].text, /direct human response/u);
+      assert.match((await resolve(report.data, { outcome: "deny" })).content[0].text, /direct human response/u);
+      assert.equal(h.db.workflowDecisionByOccurrence(report.data.occurrenceId)?.status, "pending");
+    }
   } finally { await h.close(); }
 });
 
@@ -348,8 +363,14 @@ test("archiving or deleting a thread revokes its credential, stops the proxy and
     const archived = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
     const env = await h.provision(archived.sessionId);
     assert.equal((await h.callTools(env, discover))[0].result.isError, undefined);
+    const grant = await h.ownerCall("PUT", `/api/assistant-threads/${archived.id}/delegation`, { revision: 0,
+      grant: { categories: ["owner_question"], projects: "all", campaigns: "all", expiresAt: null } });
+    assert.equal(grant.status, 200);
     const before = h.toRunner.length;
-    assert.equal((await h.ownerCall("POST", `/api/assistant-threads/${archived.id}/archive`)).status, 200);
+    assert.ok(h.svc.setArchived(archived.sessionId, true).ok, "archiving the backing session also archives the thread");
+    assert.deepEqual(h.threads.get(h.owner, archived.id).decisionDelegation, { revision: 2, grant: null });
+    assert.ok(h.svc.setArchived(archived.sessionId, false).ok);
+    assert.deepEqual(h.threads.get(h.owner, archived.id).decisionDelegation, { revision: 2, grant: null });
     assert.equal(h.db.assistantConnections.get(archived.connectionId!)!.revoked, true);
     assert.ok(h.toRunner.slice(before).some((message) => message.type === "assistant_credential_revoked" && message.sessionId === archived.sessionId));
     // Even before the runner acts on the message, the control plane refuses the old credential and any new one.

@@ -22,15 +22,24 @@ function SelectionScope({ name, value, items, onChange }: {
   onChange: (value: Scope) => void;
 }) {
   const [query, setQuery] = useState("");
+  const [page, setPage] = useState(0);
   const picked = value === "all" ? [] : value;
   const titles = new Map(items.map(({ id, title }) => [id, title]));
   const choices = [...new Set([...picked, ...titles.keys()])].filter((id) =>
     (titles.get(id) ?? id).toLowerCase().includes(query.trim().toLowerCase()));
+  const pageSize = 5;
+  const currentPage = Math.min(page, Math.max(0, Math.ceil(choices.length / pageSize) - 1));
+  const start = currentPage * pageSize;
+  const shown = choices.slice(start, start + pageSize);
   return <fieldset className="assistant-fields form">
     <legend>{name}</legend>
     <label className="field">
       <span>{name === "Projects" ? "Project Scope" : "Campaign Scope"}</span>
-      <select value={value === "all" ? "all" : "selected"} onChange={(event) => onChange(event.target.value === "all" ? "all" : [])}>
+      <select value={value === "all" ? "all" : "selected"} onChange={(event) => {
+        setQuery("");
+        setPage(0);
+        onChange(event.target.value === "all" ? "all" : []);
+      }}>
         <option value="all">All {name}</option>
         <option value="selected">Selected {name}</option>
       </select>
@@ -38,13 +47,20 @@ function SelectionScope({ name, value, items, onChange }: {
     {value !== "all" && <>
       <label className="field">
         <span>Filter {name}</span>
-        <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} />
+        <input type="search" value={query} onChange={(event) => { setQuery(event.target.value); setPage(0); }} />
       </label>
       <div className="assistant-decision-choices">
         {choices.length === 0 && <p className="muted">No matching {name.toLowerCase()}.</p>}
-        {choices.map((id) => <Checkbox key={id} label={titles.get(id) ?? id}
+        {shown.map((id) => <Checkbox key={id} label={titles.get(id) ?? id}
           checked={picked.includes(id)} onChange={(checked) => onChange(checked ? [...picked, id] : picked.filter((item) => item !== id))} />)}
       </div>
+      {choices.length > pageSize && <>
+        <p className="muted">Showing {start + 1}–{start + shown.length} of {choices.length} {name.toLowerCase()}.</p>
+        <div className="assistant-decision-pagination">
+          <button type="button" className="btn sm" disabled={start === 0} onClick={() => setPage(currentPage - 1)}>Previous {name}</button>
+          <button type="button" className="btn sm" disabled={start + pageSize >= choices.length} onClick={() => setPage(currentPage + 1)}>Next {name}</button>
+        </div>
+      </>}
     </>}
   </fieldset>;
 }
@@ -116,7 +132,7 @@ export function AssistantDecisionDelegationDialog({ delegation, onSave, onClose 
           items={[...sessions.values()].filter((session) => sessionRole(session) === "orchestrator" && !session.parentSessionId)
             .map(({ id, title }) => ({ id, title }))} />
         <label className="field">
-          <span>Expires At (Optional)</span>
+          <span>Expires at (Optional)</span>
           <input type="datetime-local" value={expiry} onChange={(event) => setExpiry(event.target.value)} />
           <span className="muted">Use your device’s local time. An empty field keeps the grant active until revoked.</span>
         </label>

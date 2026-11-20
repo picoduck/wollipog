@@ -63,6 +63,7 @@ export interface AssistantDecisionDelegation {
 /** Attribution is captured with the resolution, independent of the thread's current grant. */
 export interface AssistantDecisionResolution {
   threadId: string;
+  threadTitle?: string;
   ownerUserId: string;
   organizationId: string;
   grantRevision: number;

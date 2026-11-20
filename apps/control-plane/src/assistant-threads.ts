@@ -34,6 +34,9 @@ import { UNTITLED, type SessionsService } from "./sessions.js";
 import { failureBody } from "./capability-refusal.js";
 
 const DEFAULT_THREAD_TITLE = "New Thread";
+export function assistantThreadDisplayTitle(row: Pick<ThreadRow, "title">, session: Pick<SessionView, "title"> | null): string {
+  return row.title ?? (session && session.title !== UNTITLED ? session.title : DEFAULT_THREAD_TITLE);
+}
 const HARNESS_LABELS: Record<AssistantThreadHarness, string> = { "claude-code": "Claude Code", codex: "Codex" };
 /** Codex App Server is preferred where both Codex drivers are installed. */
 const HARNESS_DRIVERS: Record<AssistantThreadHarness, AgentDriverKind[]> = {
@@ -175,7 +178,7 @@ export class AssistantThreads {
       id: row.id,
       assistant: row.assistant,
       // An untitled session is named by its first message; the thread shows that name once it exists.
-      title: row.title ?? (session && session.title !== UNTITLED ? session.title : DEFAULT_THREAD_TITLE),
+      title: assistantThreadDisplayTitle(row, session),
       harness: row.harness,
       sessionId: row.session_id ?? "",
       status,
@@ -225,8 +228,8 @@ export class AssistantThreads {
     const row = this.owned(owner, id);
     if (owner.role !== "owner") throw new AssistantThreadRefusal("Only the thread's owner can change delegation.", 403);
     const { revision, grant } = decisionDelegation(body, this.now());
-    if (row.state !== "active" || !row.session_id || this.deps.getSession(row.session_id)?.archived !== false ||
-        (grant && (!row.connection_id || this.deps.connections.get(row.connection_id)?.revoked !== false))) {
+    if (grant && (row.state !== "active" || !row.session_id || this.deps.getSession(row.session_id)?.archived !== false ||
+        !row.connection_id || this.deps.connections.get(row.connection_id)?.revoked !== false)) {
       throw new AssistantThreadRefusal("This thread's connection or backing session is unavailable.", 409);
     }
     if (!this.store.setDecisionGrant(id, revision, grant)) {
