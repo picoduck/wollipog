@@ -174,8 +174,10 @@ evidence continue through the original owner route.
 
 On native Claude Code, a thread can use `assistant_evidence_prepare` to launch a restricted
 reviewer using the same provider, model and account. The reviewer uses the target campaign's
-managed allowance and must acknowledge every image before submitting its verdict. If that
-allowance or exact provider is unavailable, the thread can inspect the screenshots directly.
+managed allowance and must acknowledge every image before submitting its verdict. For an
+owner-confirmed Custom campaign or Custom schedule, the thread must run on the campaign root's
+Machine and workspace. If that Location, allowance or exact provider is unavailable, the thread
+can inspect the screenshots directly.
 Use `assistant_evidence_get` to read the result, then pass its exact `delegatedImageReview`
 reference when approving. Both paths require current proof for every item and bind it to the
 thread, grant revision and exact occurrence. Replacing a grant or decision requires fresh evidence

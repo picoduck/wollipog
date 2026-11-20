@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import Fastify from "fastify";
@@ -35,7 +36,8 @@ import type { HumanPrincipal } from "./identity.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 
 const claude: AgentDefinition = { id: "claude", name: "Claude", driver: "claude-code", context: { kind: "native" }, command: "claude", args: [], env: {}, available: true,
-  capabilities: { models: [{ id: "claude-opus-5-5", displayName: "Opus", default: true }], effortLevels: [], slashCommands: [],
+  capabilities: { models: [{ id: "claude-opus-5-5", displayName: "Opus", default: true },
+    { id: "claude-sonnet-4-6", displayName: "Sonnet" }], effortLevels: [], slashCommands: [],
     supportsImages: true, imageToolResults: true, supportsApprovals: true, permissionModes: ["default"] } };
 
 /** The real thread service, `/assistant/mcp` route and runner proxy, joined by an in-memory socket. */
@@ -272,11 +274,67 @@ test("Assistant screenshot approval requires exact relay-acknowledged deliveries
   } finally { await h.close(); }
 });
 
+test("Assistant evidence approval fails closed on older runners and on a provider model change", async () => {
+  const old = await harness(RUNNER_CAPABILITY_MIN_PROTOCOL.assistantEvidenceReview - 1);
+  try {
+    const thread = (await old.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    assert.equal(thread.evidenceReview?.available, false);
+    const refused = await old.ownerCall("PUT", `/api/assistant-threads/${thread.id}/delegation`, { revision: 0,
+      grant: { categories: ["ui_evidence_review"], projects: "all", campaigns: "all", expiresAt: null,
+        evidenceDisclosureDigest: "a".repeat(64) } });
+    assert.equal(refused.status, 409);
+    // The old relay sends a normal tools/call RPC. The current control plane withholds bytes.
+    const fixtureCredential = `wollipoga_${"s".repeat(43)}`;
+    assert.ok(old.threads.registerCredential("r", thread.sessionId, createHash("sha256").update(fixtureCredential).digest("hex")).accepted);
+    const response = await old.app.inject({ method: "POST", url: "/assistant/mcp", headers: { authorization: `Bearer ${fixtureCredential}` },
+      payload: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: ASSISTANT_EVIDENCE_INSPECT, arguments: {} } } });
+    const result = response.json().result;
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /requires a compatible Wollipog runner/u);
+    assert.ok(result.content.every((item: { type: string }) => item.type === "text"));
+  } finally { await old.close(); }
+  const h = await harness();
+  try {
+    const { call, coordinates, resolution, thread, decision } = await assistantUiEvidenceFixture(h);
+    for (const evidenceId of ["desktop", "phone"]) {
+      assert.equal((await call(ASSISTANT_EVIDENCE_INSPECT, { ...coordinates, evidenceId })).content[1].type, "image");
+    }
+    h.db.updateSessionConfig(thread.sessionId, { model: "claude-sonnet-4-6" }, Date.now());
+    const refused = await call("assistant_decision_resolve", resolution);
+    assert.match(refused.content[0].text, /provider, model or account changed/u);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)?.status, "pending");
+  } finally { await h.close(); }
+});
+
+test("Assistant approval leaves external and video evidence with the owner", async () => {
+  const h = await harness();
+  try {
+    const { call, resolution } = await assistantUiEvidenceFixture(h);
+    const video = h.svc.attachSessionVideo("evidence-child", { name: "preview.webm", mimeType: "video/webm",
+      data: Buffer.concat([Buffer.from("1a45dfa387428284", "hex"), Buffer.from("webm"), Buffer.alloc(8)]).toString("base64"),
+    }, { kind: "agent", id: "evidence-child" });
+    assert.ok(video.ok && video.data, video.error ?? "video attachment refused");
+    const asked = h.svc.createWorkflowDecision("evidence-child", { requestId: "unsupported", resourceKey: "media",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [
+        { evidenceId: "external", uri: "https://evidence.example/preview.png", sha256: "a".repeat(64) },
+        { evidenceId: "video", mediaType: "video/webm", artifactId: video.data.artifactId, sha256: video.data.sha256 },
+      ] } });
+    assert.ok(asked.ok && asked.data, asked.error ?? "media decision refused");
+    const args = { ...resolution, occurrenceId: asked.data.occurrenceId, resourceDigest: asked.data.resourceDigest };
+    const refused = await call("assistant_decision_resolve", args);
+    assert.match(refused.content[0].text, /cannot inspect evidence "external", "video"/u);
+    assert.equal(h.db.workflowDecisionByOccurrence(args.occurrenceId)?.status, "pending");
+  } finally { await h.close(); }
+});
+
+const assistantEvidenceBudget: CampaignBudgetAuthority = {
+  version: 1, accounting: "managed_workers_only", unpriced: "stop", concurrency: 2, acceptedFollowUps: 0, toolCalls: 100,
+};
+
 test("Assistant verdict approval uses a restricted campaign-accounted reviewer and exact receipt set", async () => {
   const h = await harness();
   try {
-    const fixture = await assistantUiEvidenceFixture(h, { version: 1, accounting: "managed_workers_only",
-      unpriced: "stop", concurrency: 2, acceptedFollowUps: 0, toolCalls: 100 });
+    const fixture = await assistantUiEvidenceFixture(h, assistantEvidenceBudget);
     const { call, coordinates, resolution, decision, thread, images } = fixture;
     const prepare = () => call(ASSISTANT_EVIDENCE_PREPARE, { ...coordinates, brief: "Confirm that all actions fit the two viewports." });
     const prepared = await prepare();
@@ -314,6 +372,25 @@ test("Assistant verdict approval uses a restricted campaign-accounted reviewer a
     assert.equal(approved.isError, undefined, approved.content[0].text);
     assertEvidenceResolution(h, fixture, 1);
     assert.equal(h.db.delegatedImageReviews.get(reviewId)?.state, "consumed");
+  } finally { await h.close(); }
+});
+
+test("a replaced Assistant grant ends the managed review and keeps the reviewer slot until Stop is confirmed", async () => {
+  const h = await harness();
+  try {
+    const { call, coordinates, setGrant, decision } = await assistantUiEvidenceFixture(h, assistantEvidenceBudget);
+    const prepare = () => call(ASSISTANT_EVIDENCE_PREPARE, { ...coordinates, brief: "Confirm that both viewports fit." });
+    const prepared = await prepare();
+    assert.equal(prepared.isError, undefined, prepared.content[0].text);
+    const { reviewId, reviewerSessionId } = JSON.parse(prepared.content[0].text).review;
+    h.db.updateSessionStatus(reviewerSessionId, "running", Date.now());
+    await setGrant(1);
+    const refused = h.svc.reviewDelegatedImageEvidence(reviewerSessionId, "desktop", () => true);
+    assert.match(refused.error!, /assistant_authority_changed/u);
+    assert.ok(h.db.sessionStopIntent(reviewerSessionId));
+    assert.equal(h.db.delegatedImageReviews.get(reviewId)?.state, "ended");
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)?.status, "pending");
+    assert.match((await prepare()).content[0].text, /already has one active image reviewer/u);
   } finally { await h.close(); }
 });
 

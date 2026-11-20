@@ -18334,6 +18334,7 @@ export class SessionsService {
     let reason: string | null = null;
     if ((review.state === "running" || review.state === "verdict") && review.assistant &&
         !this.assistantManagedReviewIsCurrent(review, this.db.workflowDecisionByOccurrence(review.occurrenceId))) {
+      this.stop(review.reviewerSessionId);
       reason = "assistant_authority_changed";
     } else if (review.state === "running") {
       if (now - review.createdAt >= DELEGATED_IMAGE_REVIEW_MAX_DURATION_MS) {
