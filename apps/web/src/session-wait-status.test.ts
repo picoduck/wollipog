@@ -19,7 +19,9 @@ const prWait = (extra: Partial<SessionWaitView> = {}): SessionWaitView => ({
 });
 const watch = (extra: Partial<PullRequestWatchView> = {}): PullRequestWatchView => ({
   watchId: "prw_1", repository: "picoduck/wollipog", number: 1280, headSha: "a".repeat(40),
-  state: "watching", since: 0, continuation: "none", ...extra,
+  state: "watching", since: 0, continuation: "none",
+  progress: { groupSha: null, groupSince: 0, stalled: false, summary: '{"mergeQueue":{"state":"AWAITING_CHECKS"}}' },
+  ...extra,
 });
 
 /** What every surface shows: the header's summary, and a list row's or Board card's badges. */
@@ -99,6 +101,22 @@ test("a healthy wait outranks background work, but not a request", () => {
   const asking = session({ status: "input_required", waits: [childWait()], pendingApproval: question,
     attention: { version: 1, humanActions: [{ requestId: "q", rank: 3, requestedAt: 1 }], meaningfulAt: 1, result: null } } as Partial<SessionView>);
   assert.equal(sessionRowStatus(asking).badge?.meta.label, "Answer Required");
+});
+
+test("a watching PR badge distinguishes branch checks from a known merge-queue entry", () => {
+  for (const [summary, label] of [
+    ['{"mergeQueue":null}', "Waiting on Required Checks"],
+    ['{"mergeQueue":{"state":"AWAITING_CHECKS","checks":null}}', "Waiting on Merge Queue"],
+    ["{}", "Waiting on Pull Request"],
+    ["invalid JSON", "Waiting on Pull Request"],
+    [undefined, "Waiting on Pull Request"],
+  ] as const) {
+    const progress = summary === undefined ? undefined : { groupSha: null, groupSince: 0, stalled: false, summary };
+    const shown = surfaces(session({ status: "idle", pullRequestWatch: watch({ progress }) }));
+    assert.deepEqual(shown.header, ["Awaiting Prompt", label]);
+    assert.deepEqual(shown.row, shown.header);
+    assert.equal(shown.rowAria, "Status: " + label);
+  }
 });
 
 test("a parked merge-queue watch reads Waiting on Merge Queue, then its wake or loss (#4071)", () => {

@@ -215,6 +215,23 @@ test("a pull request in the merge queue with a registered wake keeps an otherwis
   } finally { h.db.close(); }
 });
 
+test("a child's registered PR watch keeps the campaign Active after a follow-up turn", async () => {
+  const h = await fixture({ verify: false });
+  try {
+    h.db.pullRequestWatches.register({ watchId: "watch-1", sessionId: "child", runnerId: "r", repository: "picoduck/wollipog",
+      number: 4200, headSha: "a".repeat(40), now: Date.now() });
+    h.db.appendEvent("child", { kind: "user_message", text: "Confirm the review status." }, Date.now());
+    h.db.appendEvent("child", { kind: "agent_message", text: "Review passed. CI is pending.", final: true }, Date.now());
+
+    const projection = h.db.campaignProjection("root")!;
+    assert.equal(h.db.getSession("child")?.pullRequestWatch?.state, "watching");
+    assert.equal(h.db.campaignChildWait("child", Date.now()), null, "the later report can reach the Orchestrator");
+    assert.equal(projection.status, "active");
+    assert.deepEqual(projection.activity?.live, ["merge_queue_wait"]);
+    assert.equal(projection.stuck, undefined);
+  } finally { h.db.close(); }
+});
+
 test("a running child, an unfinished background job or a pending continuation reads Campaign Active (#4146)", async () => {
   for (const kind of ["child_turn", "background_job", "continuation"] as const) {
     const h = await fixture({ verify: false });

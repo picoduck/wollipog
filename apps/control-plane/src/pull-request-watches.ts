@@ -41,9 +41,8 @@ interface Row {
  * forge observation, read through a Location of the prerequisite's repository, settles it. */
 export const PREREQUISITE_MERGE_WATCH_RUNNER = "wollipog:prerequisite-merge";
 
-/** A watch whose wake is still owed: the session is parked on it, so its turn end owes the
- * Orchestrator nothing yet. */
-const PARKED = "(state='watching' OR (state='fired' AND continuation_state IN ('held','delivering')))";
+/** Live polling, or an outcome whose wake is still being handed to the runner. */
+const LIVE_WATCH = "(state='watching' OR (state='fired' AND continuation_state IN ('held','delivering')))";
 /** What a session view and a campaign show: parked, or ended without a delivered wake. */
 const VISIBLE = "(state='watching' OR continuation_state IN ('held','delivering','uncertain','failed'))";
 const OUTCOMES = new Set<string>(PULL_REQUEST_WATCH_OUTCOMES);
@@ -174,6 +173,13 @@ export class PullRequestWatches {
     return row ? PullRequestWatches.view(row) : undefined;
   }
 
+  /** Watches count as live work even when a later prompt let the session report to its parent. */
+  hasLiveWatch(sessionId: string): boolean {
+    if (this.noneVisible()) return false;
+    return this.stmt(`SELECT 1 FROM pull_request_watches WHERE session_id=? AND ${LIVE_WATCH} LIMIT 1`)
+      .get(sessionId) !== undefined;
+  }
+
   /** True while the session is parked in the turn that parked it: watching, or its wake not yet
    * handed to the runner, and no later turn started (a newer user message). That turn's end then owes
    * a supervising Orchestrator no continuation; a later turn's report, such as one answering a
@@ -181,7 +187,7 @@ export class PullRequestWatches {
   isParked(sessionId: string): boolean {
     // Every parked watch is also visible.
     if (this.noneVisible()) return false;
-    return this.stmt(`SELECT 1 FROM pull_request_watches w WHERE w.session_id=? AND ${PARKED}
+    return this.stmt(`SELECT 1 FROM pull_request_watches w WHERE w.session_id=? AND ${LIVE_WATCH}
       AND NOT EXISTS (SELECT 1 FROM session_events e WHERE e.session_id=w.session_id AND e.kind='user_message'
         AND e.seq>w.parked_turn_seq) LIMIT 1`).get(sessionId) !== undefined;
   }

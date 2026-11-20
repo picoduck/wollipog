@@ -14,6 +14,11 @@ import { waitForSessionPreview } from "./session-readiness.js";
 const MINUTE = 60_000;
 const CAPTURE = process.env.CAPTURE_SESSION_WAITS;
 const ASSERT = CAPTURE !== "before";
+const REQUIRED_CHECKS_WATCH = {
+  watchId: "prw_branch", repository: "picoduck/wollipog", number: 600, headSha: "a".repeat(40),
+  state: "watching", since: 1, continuation: "none",
+  progress: { groupSha: null, groupSince: 1, stalled: false, summary: '{"mergeQueue":null}' },
+};
 
 async function theme(page: Page, colorScheme: "light" | "dark") {
   await page.emulateMedia({ colorScheme });
@@ -33,7 +38,7 @@ async function capture(page: Page, name: string) {
 
 /** Healthy and broken waits on the Board fixture's sessions, as a v298 control plane sends them. */
 async function applyBoardWaits(page: Page) {
-  await page.evaluate((minute) => {
+  await page.evaluate(({ minute, watch }) => {
     const now = Date.now();
     const update = (window as unknown as { __updateSession(id: string, change: object): void }).__updateSession;
     // Its children are all working, so no child request outranks the parent's own wait.
@@ -43,15 +48,13 @@ async function applyBoardWaits(page: Page) {
       waits: [{ waitId: "wait_orchestrator1", kind: "wait_session", target: { kind: "session", child: true },
         since: now - 40 * minute, deadlineAt: now + 20 * minute, health: "healthy" }] });
     // A child waiting on its pull request's CI.
-    update("s-child-600", { waits: [{ waitId: "wait_childpullreq", kind: "wait_pull_request",
-      target: { kind: "pull_request", repository: "picoduck/wollipog", number: 600 },
-      since: now - 25 * minute, deadlineAt: now + 2 * 60 * minute, health: "healthy" }] });
+    update("s-child-600", { waits: undefined, pullRequestWatch: watch });
     // A wait whose polls stopped: its contract broke.
     update("s-running", { status: "running", waits: [{ waitId: "wait_runningstuck", kind: "wait_pull_request",
       target: { kind: "pull_request", repository: "picoduck/wollipog", number: 601 },
       since: now - 50 * minute, deadlineAt: now + 60 * minute, health: "stalled", stalledReason: "progress_lost",
       stalledSince: now - 5 * minute }] });
-  }, MINUTE);
+  }, { minute: MINUTE, watch: REQUIRED_CHECKS_WATCH });
 }
 
 for (const width of [1280, 390]) {
@@ -67,7 +70,7 @@ for (const width of [1280, 390]) {
       if (ASSERT) {
         await expect(card("Ship the usage and cost overhaul").getByLabel("Status: Waiting on Children")).toBeVisible();
         await expect(card("Ship the usage and cost overhaul").getByLabel("Status: Running")).toBeVisible();
-        await expect(card("#600: Add the usage table").getByLabel("Status: Waiting on Pull Request")).toBeVisible();
+        await expect(card("#600: Add the usage table").getByLabel("Status: Waiting on Required Checks")).toBeVisible();
         await expect(card("Running Session").getByLabel("Status: Wait Stalled")).toBeVisible();
         await expect(card("Running Session").locator(".status").filter({ hasText: /^Wait Stalled$/ })).toHaveClass(/t-warning/);
         await expect(page.locator(".board .card .status").filter({ hasText: /^Stalled$/ })).toHaveCount(0);
@@ -83,6 +86,7 @@ for (const width of [1280, 390]) {
       if (ASSERT) {
         await expect(row("Ship the usage and cost overhaul").getByLabel("Status: Waiting on Children")).toBeVisible();
         await expect(row("Running Session").getByLabel("Status: Wait Stalled")).toBeVisible();
+        await expect(row("#600: Add the usage table").getByLabel("Status: Waiting on Required Checks")).toBeVisible();
         expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
       }
       await capture(page, `list-${width}-${colorScheme}`);
@@ -121,11 +125,21 @@ for (const width of [1280, 390]) {
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
           status: "idle", waits: undefined, role: undefined,
           pullRequestWatch: { watchId: "prw_alpha", repository: "picoduck/wollipog", number: 4071, headSha: "a".repeat(40),
-            state: "watching", since: Date.now() - 600_000, continuation: "none" },
+            state: "watching", since: Date.now() - 600_000, continuation: "none",
+            progress: { groupSha: null, groupSince: Date.now(), stalled: false,
+              summary: '{"mergeQueue":{"state":"AWAITING_CHECKS","checks":null}}' } },
         } as never);
       });
       if (ASSERT) await expect(status).toHaveAccessibleName("Session Status: Awaiting Prompt, Waiting on Merge Queue");
       await capture(page, `header-parked-${width}-${colorScheme}`);
+
+      await page.evaluate((watch) => {
+        window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+          pullRequestWatch: watch,
+        } as never);
+      }, REQUIRED_CHECKS_WATCH);
+      if (ASSERT) await expect(status).toHaveAccessibleName("Session Status: Awaiting Prompt, Waiting on Required Checks");
+      await capture(page, `header-required-checks-${width}-${colorScheme}`);
 
       await page.evaluate(() => {
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
