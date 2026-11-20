@@ -100,6 +100,32 @@ for (const theme of ["dark", "light"] as const) {
       await expect(panel(page).locator(".rpanel-switcher-name")).toHaveText("Launched Sessions");
     });
 
+    test("an approval in flight stays in flight when its card moves from the header to the panel", async ({ page }) => {
+      await open(page, theme);
+      await page.evaluate(() => (window as unknown as { assistantsHoldApprovals: () => void }).assistantsHoldApprovals());
+      await waitingInHeader(page).getByRole("button", { name: "Approve Once" }).click();
+      await expect(page.locator("body")).toHaveAttribute("data-approve-count", "1");
+      // The panel draws the same request's card again while the response is still out.
+      await toggle(page).click();
+      const card = group(page, "Needs You").locator(".assistant-work-card");
+      await expect(card.getByRole("button", { name: /Approve Once|Approving/ })).toBeDisabled();
+      await expect(card.getByRole("button", { name: "Deny" })).toBeDisabled();
+      await page.evaluate(() => (window as unknown as { assistantsReleaseApprovals: () => void }).assistantsReleaseApprovals());
+      await expect(group(page, "Needs You")).toHaveCount(0);
+      await expect(page.locator("body")).toHaveAttribute("data-approve-count", "1");
+      await expect(page.locator("body")).toHaveAttribute("data-approved", "sess-deps:req-1:allow");
+    });
+
+    test("answering an approval in the panel keeps focus on that session's card in its new group", async ({ page }) => {
+      await open(page, theme);
+      await toggle(page).click();
+      await group(page, "Needs You").getByRole("button", { name: "Approve Once" }).focus();
+      await page.keyboard.press("Enter");
+      await expect(group(page, "Needs You")).toHaveCount(0);
+      const moved = group(page, "Active").locator('[data-session-id="sess-deps"] .assistant-work-open');
+      await expect(moved).toBeFocused();
+    });
+
     test("the panel's open state is remembered on this device across a reload", async ({ page }) => {
       await open(page, theme);
       await toggle(page).click();
@@ -197,6 +223,35 @@ for (const theme of ["dark", "light"] as const) {
       await expect(last).toBeInViewport();
       await expectPageNoHorizontalOverflow(page);
       await capture(page, `assistant-launched-many-sheet-${theme}-mobile`);
+    });
+
+    test("answering an approval in the sheet keeps focus on that session's card", async ({ page }) => {
+      await open(page, theme);
+      await toggle(page).click();
+      await group(page, "Needs You").getByRole("button", { name: "Approve Once" }).focus();
+      await page.keyboard.press("Enter");
+      await expect(group(page, "Needs You")).toHaveCount(0);
+      const moved = group(page, "Active").locator('[data-session-id="sess-deps"] .assistant-work-open');
+      await expect(moved).toBeFocused();
+      await expect(moved).toBeInViewport();
+    });
+  });
+
+  test.describe(`${theme} at 1000×800`, () => {
+    test.use({ viewport: { width: 1000, height: 800 }, colorScheme: theme, timezoneId: "UTC", locale: "en-US" });
+
+    test("an overlaying panel closes as Open Session opens the request, so nothing covers it", async ({ page }) => {
+      await open(page, theme);
+      await toggle(page).click();
+      await expect(panel(page)).toHaveAttribute("data-presentation", "overlay");
+      await group(page, "Needs You").getByRole("button", { name: "Open Session" }).click();
+      await expect(page).toHaveURL(/path=%2Fsessions%2F(~|%7E)/);
+      await expect(panel(page)).toHaveCount(0);
+      await expect(page.locator(".rpanel-scrim")).toHaveCount(0);
+      // The session's own request is answerable at once, with nothing over it.
+      const approve = page.getByRole("button", { name: /^(Approve Once|Allow Once)$/ }).first();
+      await expect(approve).toBeVisible();
+      await approve.click({ trial: true });
     });
   });
 }

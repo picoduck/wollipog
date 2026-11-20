@@ -959,7 +959,12 @@ export function RightPanel({
           />
         );
       case "launched":
-        return launchedWork ? <LaunchedSessionsPanel work={launchedWork} beforeOpen={phone ? state.close : undefined} /> : null;
+        // A panel that covers the conversation (a phone's sheet, an overlay at a compact width, or
+        // Expand Panel) closes as a card opens its session, so the session and any request it opens
+        // on are not left under Session Tools. A docked panel stays beside it.
+        return launchedWork ? (
+          <LaunchedSessionsPanel work={launchedWork} beforeOpen={phone || overlay || expanded ? state.close : undefined} />
+        ) : null;
       default: {
         const unhandled: never = mode;
         throw new Error(`right panel mode without a body: ${String(unhandled)}`);

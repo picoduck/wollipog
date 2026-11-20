@@ -528,6 +528,8 @@ function upsert(next: SessionView) {
 /** `assistantsHoldNextList()`: the next list read answers with the threads as they were when it
  * began, but only once `assistantsReleaseList()` lets it, as a slow read would. */
 let holdNextList = false;
+let holdApprovals = false;
+const releaseApprovals: (() => void)[] = [];
 let releaseHeldList: (() => void) | null = null;
 let slowListMs = 0;
 
@@ -788,6 +790,10 @@ const client = {
   },
   session: async (id: string) => ({ session: structuredClone(sessions.get(id)!) }),
   approve: async (id: string, body: { requestId: string; optionId: string | null }) => {
+    document.body.dataset.approveCount = String(Number(document.body.dataset.approveCount ?? 0) + 1);
+    // `assistantsHoldApprovals()`: the response waits until `assistantsReleaseApprovals()`, as a slow
+    // control plane's would (#4776).
+    if (holdApprovals) await new Promise<void>((resolve) => { releaseApprovals.push(resolve); });
     const current = sessions.get(id)!;
     const next = { ...current, status: "running" as const, pendingApproval: null, updatedAt: Date.now() };
     document.body.dataset.approved = `${id}:${body.requestId}:${body.optionId}`;
@@ -864,6 +870,11 @@ Object.assign(window, {
     publish(threads.find((candidate) => candidate.id === threadId)!);
   },
   assistantsHoldNextList: () => { holdNextList = true; },
+  assistantsHoldApprovals: () => { holdApprovals = true; },
+  assistantsReleaseApprovals: () => {
+    holdApprovals = false;
+    for (const release of releaseApprovals.splice(0)) release();
+  },
   assistantsSlowLists: (ms: number) => { slowListMs = ms; },
   assistantsReleaseList: () => {
     releaseHeldList?.();

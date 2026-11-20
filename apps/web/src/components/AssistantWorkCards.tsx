@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type FocusEvent, type ReactNode } from "react";
 import { prioritizedPendingRequests, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import {
@@ -52,6 +52,67 @@ export function useLaunchedWorkGroups(work: LaunchedWork): { ids: string[]; grou
 }
 
 /**
+ * Keeps keyboard focus when the control holding it leaves a list of cards (#4776). A card is drawn
+ * again elsewhere when its session changes group, or leaves the header for the panel, which removes
+ * the focused element. After each change named by `changeKey`, if focus was last inside the list and
+ * the page now has none, `recover` gets the session whose card last held focus and the list, and
+ * returns where focus goes. A removed element takes focus without a blur naming where it went, so only a blur to somewhere
+ * else clears the record.
+ */
+function useFocusRecovery<T extends HTMLElement>(
+  changeKey: string,
+  recover: (sessionId: string | null, list: T | null) => HTMLElement | null | undefined,
+) {
+  const ref = useRef<T | null>(null);
+  const within = useRef(false);
+  const lastSession = useRef<string | null>(null);
+  const recoverRef = useRef(recover);
+  recoverRef.current = recover;
+  useLayoutEffect(() => {
+    if (!within.current) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) {
+      if (!ref.current?.contains(active)) within.current = false;
+      return;
+    }
+    within.current = false;
+    recoverRef.current(lastSession.current, ref.current)?.focus();
+  }, [changeKey]);
+  return {
+    ref,
+    onFocus: (event: FocusEvent<T>) => {
+      within.current = true;
+      lastSession.current = event.target.closest("[data-session-id]")?.getAttribute("data-session-id") ?? null;
+    },
+    onBlur: (event: FocusEvent<T>) => {
+      const next = event.relatedTarget;
+      if (next instanceof Node && !event.currentTarget.contains(next)) within.current = false;
+    },
+  };
+}
+
+/**
+ * Approve Once or Deny in flight, by session and request (#4776). A card is a separate mount in the
+ * header and in the panel, so the response a card started outlives the card: the same request's card
+ * elsewhere keeps both actions disabled until it settles, and never sends a second response.
+ */
+type ResponseIntent = "approve" | "deny";
+const respondingTo = new Map<string, ResponseIntent>();
+const respondingListeners = new Set<() => void>();
+function setResponding(key: string, intent: ResponseIntent | null) {
+  if (intent) respondingTo.set(key, intent);
+  else respondingTo.delete(key);
+  for (const listener of respondingListeners) listener();
+}
+function subscribeResponding(listener: () => void) {
+  respondingListeners.add(listener);
+  return () => { respondingListeners.delete(listener); };
+}
+function useResponding(key: string): ResponseIntent | null {
+  return useSyncExternalStore(subscribeResponding, () => respondingTo.get(key) ?? null);
+}
+
+/**
  * What a thread is waiting on its owner for, in the thread header where a closed panel never hides it
  * (#4665, #4776): the owner confirmations bound to the thread itself first, ahead of the work they
  * would unblock, then each launched session waiting on an approval or a question, as its work card
@@ -70,31 +131,11 @@ export function AssistantWaitingWork({ work, confirmations, showSessions }: {
   const { groups } = useLaunchedWorkGroups(work);
   const waiting = showSessions ? groups.needsYou : [];
   const campaigns = useMemo(() => new Set(work.campaignIds ?? []), [work.campaignIds]);
-  const sectionRef = useRef<HTMLElement | null>(null);
-  // Whether focus was last inside this region. A removed element takes focus with it without a blur
-  // that names where focus went, so only a blur to somewhere else clears it.
-  const focusWithin = useRef(false);
-  const waitingKey = waiting.join("\n");
-  useLayoutEffect(() => {
-    if (!focusWithin.current) return;
-    const active = document.activeElement;
-    if (active && active !== document.body && sectionRef.current?.contains(active)) return;
-    focusWithin.current = false;
-    if (active && active !== document.body) return;
-    document.querySelector<HTMLElement>(".assistant-thread-head .assistant-launched-toggle")?.focus();
-  }, [waitingKey]);
+  const focus = useFocusRecovery<HTMLElement>(waiting.join("\n"),
+    () => document.querySelector<HTMLElement>(".assistant-thread-head .assistant-launched-toggle"));
   if (waiting.length === 0 && !confirmations) return null;
   return (
-    <section
-      ref={sectionRef}
-      className="assistant-work"
-      aria-label="Waiting for You"
-      onFocus={() => { focusWithin.current = true; }}
-      onBlur={(event) => {
-        const next = event.relatedTarget;
-        if (next instanceof Node && !event.currentTarget.contains(next)) focusWithin.current = false;
-      }}
-    >
+    <section ref={focus.ref} className="assistant-work" aria-label="Waiting for You" onFocus={focus.onFocus} onBlur={focus.onBlur}>
       {confirmations && <ul className="assistant-work-confirmations" aria-label="Approvals Needed">{confirmations}</ul>}
       {waiting.length > 0 && (
         <ul className="assistant-work-cards" aria-label="Sessions Waiting for You">
@@ -137,8 +178,11 @@ export function LaunchedSessionsToggle({ work, open, onToggle }: {
  * on the owner first, then those still working, then the finished ones in a group that folds away.
  * The list scrolls inside the panel, so the conversation keeps its height however many there are.
  * Finished work starts folded while anything else is listed, and open when it is all there is.
- * `beforeOpen` runs before a card opens its session: a phone closes its sheet, which would otherwise
- * cover the session it opened.
+ * `beforeOpen` runs before a card opens its session: a panel covering the conversation closes, so it
+ * doesn't cover the session it opened.
+ *
+ * When a card changes group, answering its approval for example, focus follows it to its new place;
+ * in a folded Finished group it lands on Finished, and otherwise on the panel's tool switcher.
  */
 export function LaunchedSessionsPanel({ work, beforeOpen }: { work: LaunchedWork; beforeOpen?: () => void }) {
   const { ids, groups } = useLaunchedWorkGroups(work);
@@ -147,6 +191,14 @@ export function LaunchedSessionsPanel({ work, beforeOpen }: { work: LaunchedWork
   const [finishedOpen, setFinishedOpen] = useState<boolean | null>(null);
   const showFinished = finishedOpen ?? onlyFinished;
   const finishedId = useId();
+  const focus = useFocusRecovery<HTMLDivElement>(
+    `${groups.needsYou.join(",")}|${groups.active.join(",")}|${groups.finished.join(",")}|${showFinished}`,
+    (sessionId, list) => {
+      const card = sessionId ? list?.querySelector<HTMLElement>(`[data-session-id="${CSS.escape(sessionId)}"] .assistant-work-open`) : null;
+      return card ?? list?.querySelector<HTMLElement>(".launched-sessions-fold .disclosure-trigger")
+        ?? document.querySelector<HTMLElement>("#right-panel .rpanel-switcher");
+    },
+  );
   if (ids.length === 0) {
     return (
       <State compact icon={<AssistantsIcon />} title="No Sessions Launched Yet">
@@ -162,7 +214,7 @@ export function LaunchedSessionsPanel({ work, beforeOpen }: { work: LaunchedWork
     </ul>
   );
   return (
-    <div className="launched-sessions">
+    <div ref={focus.ref} className="launched-sessions" onFocus={focus.onFocus} onBlur={focus.onBlur}>
       {groups.needsYou.length > 0 && (
         <section className="launched-sessions-group" aria-label="Needs You">
           <h3 className="group-label">Needs You<span className="count">{groups.needsYou.length}</span></h3>
@@ -212,7 +264,7 @@ function AssistantWorkCard({ sessionId, campaign, beforeOpen }: { sessionId: str
   if (!session) {
     // Launched, but not in this dashboard's snapshot yet: it can still be opened by id.
     return (
-      <li className="assistant-work-card">
+      <li className="assistant-work-card" data-session-id={sessionId}>
         <button type="button" className="assistant-work-open" onClick={() => open()}>
           <span className="assistant-work-title">{campaign ? "Launched Campaign" : "Launched Session"}</span>
           <span className="assistant-work-meta">Not loaded yet</span>
@@ -224,7 +276,7 @@ function AssistantWorkCard({ sessionId, campaign, beforeOpen }: { sessionId: str
   const title = sessionDisplayTitle(session.title) || "Untitled Session";
   const request = session.archived ? undefined : prioritizedPendingRequests(session.pendingApproval)[0];
   return (
-    <li className="assistant-work-card" data-needs-you={request ? "" : undefined}>
+    <li className="assistant-work-card" data-session-id={sessionId} data-needs-you={request ? "" : undefined}>
       <button type="button" className="assistant-work-open" onClick={() => open()} title={title}>
         <span className="assistant-work-line">
           <span className="assistant-work-title">{title}</span>
@@ -245,7 +297,7 @@ function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView;
   const api = useApi();
   const { loadSession, beginSessionDetailLoad } = useStoreActions();
   const { showToast } = useFeedback();
-  const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
+  const busy = useResponding(`${session.id}\n${requestId}`);
   const listed = prioritizedPendingRequests(session.pendingApproval).find((candidate) => candidate.requestId === requestId);
   // The live list carries summary sessions, whose requests arrive without their options. The card
   // reads the session's detail once per request and keeps that request's options, so a later
@@ -274,8 +326,9 @@ function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView;
   const refusal = sessionCommandRefusal(session, "respond");
   const decide = async (intent: "approve" | "deny") => {
     const option = intent === "approve" ? approve : deny;
-    if (!option || busy) return;
-    setBusy(intent);
+    const key = `${session.id}\n${request.requestId}`;
+    if (!option || respondingTo.has(key)) return;
+    setResponding(key, intent);
     try {
       loadSession(await api.approve(session.id, { requestId: request.requestId, optionId: option.optionId }));
     } catch (cause) {
@@ -284,7 +337,7 @@ function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView;
         detail: cause instanceof Error ? cause.message : String(cause),
       });
     } finally {
-      setBusy(null);
+      setResponding(key, null);
     }
   };
   return (
