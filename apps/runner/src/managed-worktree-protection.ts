@@ -2492,8 +2492,8 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
  *   included: it learns the directory's shape and size but opens no file (#1334 accepts that).
  * - `find` takes one or more explicit starts and then exactly `-maxdepth N`. The walk is bounded by
  *   the directory it actually starts in, measured under every reading of that start — spelling,
- *   physical path, and the physical landing of a `..` — with the nearest one deciding. Without an
- *   explicit start it walks the working directory, which no operand names, so it is refused.
+ *   physical path, and the physical landing of a `..` — with the nearest one deciding. The
+ *   implicit-root check applies the same bound when the working directory supplies the start.
  *
  * What disqualifies a command, and why each one has to:
  *
@@ -2589,7 +2589,12 @@ function guardStateReadings(text: string): GuardStateReading[] {
  * what the command DOES. `words` is null when the segment carries an unexpanded variable, since one
  * opaque word could be a recursion flag or another operand.
  */
-interface CommandSegment { operands: Array<string | null>; words: string[] | null; redirects: Array<string | null> }
+interface CommandSegment {
+  operands: Array<string | null>;
+  words: string[] | null;
+  redirects: Array<string | null>;
+  walkWords: string[];
+}
 
 /**
  * Split a parsed command into segments, or `null` when it contains a construct this classifier does
@@ -2601,13 +2606,17 @@ function commandSegments(tokens: readonly ShellToken[], allowPipe = false): Comm
   let operands: Array<string | null> = [];
   let words: string[] | null = [];
   let redirects: Array<string | null> = [];
+  let walkWords: string[] = [];
   let redirected = false;
   let previousWord: string | null = null;
+  let previousWasArgument = false;
   for (const token of tokens) {
     const op = operator(token);
     if (op === null) {
       const text = tokenText(token);
       operands.push(text);
+      previousWasArgument = !redirected;
+      if (previousWasArgument) walkWords.push(text ?? "\0");
       if (redirected) { redirects.push(text); redirected = false; }
       else if (words !== null) {
         if (text === null || text.includes("\0")) words = null;
@@ -2617,12 +2626,14 @@ function commandSegments(tokens: readonly ShellToken[], allowPipe = false): Comm
       continue;
     }
     if (SEGMENT_SEPARATORS.has(op) || (allowPipe && op === "|")) {
-      segments.push({ operands, words, redirects });
+      segments.push({ operands, words, redirects, walkWords });
       operands = [];
       words = [];
       redirects = [];
+      walkWords = [];
       redirected = false;
       previousWord = null;
+      previousWasArgument = false;
       continue;
     }
     if (!REDIRECTIONS.has(op)) return null;
@@ -2631,10 +2642,14 @@ function commandSegments(tokens: readonly ShellToken[], allowPipe = false): Comm
     // an ordinary numeric argument.
     if (words !== null && words.length === 1 && previousWord !== null &&
         words[0] === previousWord && /^\d+$/u.test(previousWord)) words.pop();
+    // For the additive walk check, a number immediately before a redirect cannot prove
+    // that the walk has an explicit path. Keep the original reading for inspection bounds.
+    if (previousWasArgument && previousWord !== null && /^\d+$/u.test(previousWord)) walkWords.pop();
     redirected = true;
     previousWord = null;
+    previousWasArgument = false;
   }
-  segments.push({ operands, words, redirects });
+  segments.push({ operands, words, redirects, walkWords });
   return segments;
 }
 
@@ -2645,6 +2660,61 @@ function recursiveListing(word: string): boolean {
     return name.length > 0 && "recursive".startsWith(name);
   }
   return /^-[^-]/u.test(word) && word.includes("R");
+}
+
+/** A positive reading of explicit paths. An unknown option may consume the next word, so
+ * it cannot prove that the command has a path operand. */
+function hasExplicitWalkPath(args: readonly string[], options: RegExp, patterns = 0): boolean {
+  let parsingOptions = true;
+  for (const arg of args) {
+    if (!arg || arg.includes("\0")) return false;
+    if (parsingOptions && arg === "--") {
+      parsingOptions = false;
+    } else if (parsingOptions && arg.startsWith("-") && arg !== "-") {
+      if (!options.test(arg)) return false;
+    } else if (patterns === 0) {
+      return true;
+    } else {
+      patterns -= 1;
+    }
+  }
+  return false;
+}
+
+/** Whether the visible argv can start a recursive walk at its default directory. Only forms
+ * with a provable explicit input path are excluded from the implicit-operand check. */
+function usesImplicitWalkRoot(words: readonly string[]): boolean {
+  const [command, ...args] = words;
+  if (!command) return false;
+  switch (basename(command)) {
+    case "find": {
+      // find reads the first non-control word as a start or as the beginning of its expression.
+      const start = args.find((arg) => !/^-(?:[HLP]|O[0-9]+)$/u.test(arg));
+      return !start || start.includes("\0") || start.startsWith("-") || ["!", "(", ")", ","].includes(start);
+    }
+    case "du":
+      return !hasExplicitWalkPath(args,
+        /^(?:-[abchkmsx]+|--(?:all|apparent-size|bytes|human-readable|one-file-system|si|summarize|total|max-depth=[0-9]+))$/u);
+    case "ls": {
+      const endOfOptions = args.indexOf("--");
+      const options = endOfOptions < 0 ? args : args.slice(0, endOfOptions);
+      return options.some(recursiveListing) &&
+        !hasExplicitWalkPath(args, /^(?:-[1aAbCdFghHilLnopqQrRstux]+|--(?:all|almost-all|recursive))$/u);
+    }
+    case "grep": {
+      const endOfOptions = args.indexOf("--");
+      const options = endOfOptions < 0 ? args : args.slice(0, endOfOptions);
+      return options.some((arg) => recursiveListing(arg) || /^-[^-]*r/u.test(arg) ||
+        (arg.startsWith("--") && arg.length > 2 && "dereference-recursive".startsWith(arg.slice(2)))) &&
+        !hasExplicitWalkPath(args, /^(?:-[EFGHILPRabchilnoqrsvwxz]+|--(?:recursive|dereference-recursive))$/u, 1);
+    }
+    case "rg":
+      return !hasExplicitWalkPath(args, /^-[FHiNPSVchilnosquvwx]+$/u, 1);
+    case "tree":
+      return !hasExplicitWalkPath(args, /^-[aCdfFgilnNpqrstux]+$/u);
+    default:
+      return false;
+  }
 }
 
 /**
@@ -2678,8 +2748,8 @@ function plainDiskUsage(words: readonly string[]): boolean {
  * `N` levels reads the directories above level `N` and only names what sits at it, so it never
  * reads the hook directory when every START holds it at least `N` levels down. Everything else
  * `find` accepts is refused: a leading `-L` follows links out of the tree, a test such as `-empty`
- * opens the directory it names at the bound, and an action acts on it. A walk with no START begins
- * in the working directory, which no operand names, so it is never an inspection here.
+ * opens the directory it names at the bound, and an action acts on it. The implicit-root check
+ * supplies a START of `.` before calling this helper.
  */
 function boundedFind(words: readonly string[], depthBelow: (start: string) => number | null): boolean {
   if (words.length < 4 || words.at(-2) !== "-maxdepth") return false;
@@ -3237,7 +3307,23 @@ export function commandTargetsGuardState(
   // A backtick nests a command the tokenizer does not separate, and a newline would silently join
   // two commands into one; nothing in either is inspectable.
   const pipeline = readOnlyPipelineWhitelisted(command);
-  const segments = /[`\n\r]/u.test(parseText) ? null : commandSegments(tokens, pipeline);
+  const singleLine = !/[`\n\r]/u.test(parseText);
+  const segments = singleLine ? commandSegments(tokens, pipeline) : null;
+  // This additional check never changes the explicit-operand exemptions. A pipeline can
+  // contain a default-root walk even when it is ineligible for the inspection whitelist.
+  // This reading is limited to shell segments the tokenizer can delimit and direct invocations.
+  const walkSegments = segments ?? (!/[`\n\r]/u.test(parseText.trimEnd()) ? commandSegments(tokens, true) : null);
+  if (walkSegments !== null) {
+    for (const { words, walkWords } of walkSegments) {
+      if (!usesImplicitWalkRoot(walkWords)) continue;
+      const relation = relationOf(".");
+      if (relation?.kind === "inside") return GUARD_STATE_REFUSAL;
+      if (relation?.kind === "ancestor" && !(words?.[0] === "find" &&
+          boundedFind(["find", ".", ...words.slice(1)], () => relation.depth))) {
+        return GUARD_STATE_REFUSAL;
+      }
+    }
+  }
   if (segments === null) {
     // Nothing here is an inspection, so any related word refuses. A word INSIDE the hook directory
     // names the guard state itself. One that only encloses it is refused because the command cannot
