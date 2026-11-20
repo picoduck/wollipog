@@ -513,6 +513,7 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
       </ul>
       <AssistantWorkCards
         sessionIds={thread.launchedSessionIds}
+        campaignIds={thread.launchedCampaignIds}
         confirmations={pending.length > 0 ? pending.map(({ confirmation }) => (
           <AssistantConfirmationCard key={confirmation.id} confirmation={confirmation} onAnswered={onConfirmationAnswered} />
         )) : undefined}

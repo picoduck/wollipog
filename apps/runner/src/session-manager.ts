@@ -2046,6 +2046,39 @@ export class SessionManager {
   private readonly claudeInitAwaitingAuthority = new Set<string>();
   /** Async seam covers WSL markerless recovery without blocking runner startup. */
   private discoverClaudeTasksInContext: typeof discoverIncompleteClaudeTasksInContext = discoverIncompleteClaudeTasksInContext;
+  private resolveDetachedClaudeEnvironment: (meta: SessionMeta) => Record<string, string> = () => ({});
+
+  /** Resolve detached task-inspection paths from current runner configuration after restart. */
+  setDetachedClaudeEnvironment(resolveEnvironment: (meta: SessionMeta) => Record<string, string>): void {
+    this.resolveDetachedClaudeEnvironment = resolveEnvironment;
+  }
+
+  private claudeTaskInspectionLocation(meta: SessionMeta): { cwd: string; env: Record<string, string> } | null {
+    try {
+      const active = this.active.get(meta.sessionId);
+      if (active?.launchEnv) return { cwd: active.cwd, env: active.launchEnv };
+      const cwd = this.orchestratorLaunchDirectory(meta);
+      return {
+        cwd,
+        env: {
+          ...this.resolveDetachedClaudeEnvironment(meta),
+          ...this.worktreeSetupEnvironmentFor(meta, meta.worktreePath),
+          ...this.orchestratorTempEnvironment(meta, cwd),
+        },
+      };
+    } catch {
+      // An unavailable configuration must not redirect inspection to a different provider home.
+      this.log(`Could not resolve the Claude task inspection environment for ${boundedSessionIdForLog(meta.sessionId)}`);
+      return null;
+    }
+  }
+
+  private orchestratorTempEnvironment(meta: SessionMeta, cwd: string): Record<string, string> {
+    if (meta.config.permissionMode !== "orchestrator") return {};
+    return meta.context.kind === "native" && process.platform === "win32"
+      ? { TEMP: cwd, TMP: cwd }
+      : { TMPDIR: cwd };
+  }
   private readonly sessionCommandAuthority = new SessionCommandAuthorityRegistry();
   private readonly providerHomeLeases?: AsyncProviderHomeLeaseRegistry;
   /** Provider profiles (#3239): until the runner learns the control plane's grants, a HOME holding
@@ -10332,11 +10365,13 @@ export class SessionManager {
   }
 
   private async launch(
-    meta: SessionMeta,
+    storedMeta: SessionMeta,
     resumeId: string | undefined,
     launchGeneration: number,
     approvedAuthentication?: ApprovedProviderAuthentication,
   ): Promise<boolean> {
+    // A cache hit can expose the store's own object. Prepare only a launch-local copy.
+    const meta = structuredClone(storedMeta);
     // Launch preparation's provider-HOME reference (#3238). A launch that reaches its driver
     // reference settles it there; every path that gives up earlier settles it on the way out.
     const preparationHome = this.launchPreparationProviderHome();
@@ -10513,15 +10548,7 @@ export class SessionManager {
       // Apply them after agent-config refresh so they reach hooks and the provider without ever
       // being persisted in meta.json or projected to the control plane.
       const setupEnvironment = this.worktreeSetupEnvironmentFor(meta, worktree?.path ?? null);
-      meta.env = { ...meta.env, ...setupEnvironment };
-      if (meta.config.permissionMode === "orchestrator") {
-        meta.env = {
-          ...meta.env,
-          ...(meta.context.kind === "native" && process.platform === "win32"
-            ? { TEMP: cwd, TMP: cwd }
-            : { TMPDIR: cwd }),
-        };
-      }
+      meta.env = { ...meta.env, ...setupEnvironment, ...this.orchestratorTempEnvironment(meta, cwd) };
       if (sameSlashCommandCatalog(priorSessionSlashCommands, meta.sessionSlashCommands)) {
         meta.sessionSlashCommands = priorSessionSlashCommands;
       }
@@ -11417,18 +11444,23 @@ export class SessionManager {
    * Project Location writable. Native storage lives under the session row and is removed by
    * SessionStore.remove; Direct WSL uses the launcher's root-owned per-session partition. */
   async prepareOrchestratorScratch(meta: SessionMeta): Promise<string> {
-    if (!this.strictProjectIsolation(meta)) return meta.worktreePath ?? meta.repoPath;
-    if (meta.context.kind === "wsl") {
-      if (!this.runnerOwnerHash) throw new Error("Direct WSL Orchestrator scratch requires an attested runner owner");
-      return `${wslBwrapSessionRoot(this.runnerOwnerHash, providerStateKey(meta.sessionId))}/scratch`;
-    }
-    const scratch = join(this.store.sessionPath(meta.sessionId), "orchestrator-scratch");
+    const scratch = this.orchestratorLaunchDirectory(meta);
+    if (!this.strictProjectIsolation(meta) || meta.context.kind === "wsl") return scratch;
     await mkdir(scratch, { recursive: true, mode: 0o700 });
     if (!this.store.has(meta.sessionId)) {
       await rm(this.store.sessionPath(meta.sessionId), { recursive: true, force: true });
       throw new Error("session disappeared while Orchestrator scratch was being prepared");
     }
     return scratch;
+  }
+
+  private orchestratorLaunchDirectory(meta: SessionMeta): string {
+    if (!this.strictProjectIsolation(meta)) return meta.worktreePath ?? meta.repoPath;
+    if (meta.context.kind === "wsl") {
+      if (!this.runnerOwnerHash) throw new Error("Direct WSL Orchestrator scratch requires an attested runner owner");
+      return `${wslBwrapSessionRoot(this.runnerOwnerHash, providerStateKey(meta.sessionId))}/scratch`;
+    }
+    return join(this.store.sessionPath(meta.sessionId), "orchestrator-scratch");
   }
 
   /** Missing execution policy came from a pre-v144 control plane and must retain the legacy
@@ -23381,10 +23413,12 @@ export class SessionManager {
     const ids = (meta.backgroundJobs ?? []).filter((job) => !job.terminalStatus &&
       job.restartedAt === undefined).map((job) => job.id);
     if (ids.length === 0) return;
+    const location = this.claudeTaskInspectionLocation(meta);
+    if (!location) return;
     const correlationId = randomUUID();
     this.historicalJobInspections.add(meta.sessionId);
-    void inspectClaudeBackgroundWorkInContext(meta.context, meta.worktreePath ?? meta.repoPath,
-      meta.agentSessionId, ids, { env: meta.env, ...(this.executionIsolation.mode === "bwrap" ? {
+    void inspectClaudeBackgroundWorkInContext(meta.context, location.cwd,
+      meta.agentSessionId, ids, { env: location.env, ...(this.executionIsolation.mode === "bwrap" ? {
         projectsRoot: join(this.stateDir, "provider-state", "claude", providerStateKey(meta.sessionId), "projects"),
       } : {}) })
       .then((inspection) => {
@@ -23425,11 +23459,13 @@ export class SessionManager {
   private discoverOrphanedClaudeWork(meta: SessionMeta): SessionMeta {
     if (meta.driver !== "claude-code" || meta.context.kind !== "native" || !meta.agentSessionId ||
         meta.status === "stopped" || meta.orphanedWork || this.active.has(meta.sessionId)) return meta;
-    const cwd = meta.worktreePath ?? meta.repoPath;
     const recovered = new Set(meta.recoveredBackgroundTaskIds ?? []);
+    const location = this.claudeTaskInspectionLocation(meta);
+    if (!location) return meta;
+    const { cwd, env } = location;
     const tasks = this.discoverClaudeTasks(cwd, meta.agentSessionId, {
-      tempRoot: meta.env.TMPDIR ?? meta.env.TEMP ?? meta.env.TMP,
-      claudeHome: meta.env.HOME ? join(meta.env.HOME, ".claude") : undefined,
+      tempRoot: env.TMPDIR ?? env.TEMP ?? env.TMP,
+      claudeHome: env.HOME ? join(env.HOME, ".claude") : undefined,
       ...(this.executionIsolation.mode === "bwrap"
         ? {
             projectsRoot: join(
@@ -23461,12 +23497,14 @@ export class SessionManager {
     if (this.shuttingDown || meta.driver !== "claude-code" || meta.context.kind !== "wsl" ||
         meta.status === "stopped" || !meta.agentSessionId || meta.orphanedWork || this.active.has(meta.sessionId) ||
         this.orphanDiscoveryLaunching.has(meta.sessionId)) return;
+    const location = this.claudeTaskInspectionLocation(meta);
+    if (!location) return;
     this.orphanDiscoveryLaunching.add(meta.sessionId);
     void this.discoverClaudeTasksInContext(
       meta.context,
-      meta.worktreePath ?? meta.repoPath,
+      location.cwd,
       meta.agentSessionId,
-      { env: meta.env },
+      { env: location.env },
     )
       .then((tasks) => {
         if (this.shuttingDown || tasks.length === 0) return;
@@ -24038,16 +24076,18 @@ export class SessionManager {
     // Terminal receipts settle ownership without a paid recovery turn, including while a
     // governance ceiling holds that turn. Keep unknown tasks pending; absence is not proof.
     if (meta.agentSessionId && !this.active.get(sessionId)?.running) {
+      const location = this.claudeTaskInspectionLocation(meta);
+      if (!location) return;
       this.orphanRecoveryLaunching.add(sessionId);
       try {
         const inspection = await inspectClaudeBackgroundWorkInContext(
-          meta.context, meta.worktreePath ?? meta.repoPath, meta.agentSessionId,
+          meta.context, location.cwd, meta.agentSessionId,
           new Set([
             ...(meta.pendingBackgroundTaskIds ?? []), ...meta.orphanedWork.pendingTaskIds,
             ...(meta.backgroundJobs ?? []).filter((job) => !job.terminalStatus && job.restartedAt === undefined)
               .map((job) => job.id),
           ]),
-          { env: meta.env, ...(this.executionIsolation.mode === "bwrap" ? {
+          { env: location.env, ...(this.executionIsolation.mode === "bwrap" ? {
             projectsRoot: join(this.stateDir, "provider-state", "claude", providerStateKey(sessionId), "projects"),
           } : {}) },
         );
@@ -24975,8 +25015,10 @@ export class SessionManager {
     this.providerAuthAutomaticAttempted.add(scopeId);
     // Defer until cancellation and the caller's durable retry bookkeeping have completed.
     const operation = Promise.resolve().then(async () => {
-      const owner = this.providerAuthenticationOwner(scopeId);
-      if (!owner?.providerAuthBlock || !this.providerAuthRecovery || this.shuttingDown) return;
+      const stored = this.providerAuthenticationOwner(scopeId);
+      if (!stored?.providerAuthBlock || !this.providerAuthRecovery || this.shuttingDown) return;
+      const owner = structuredClone(stored);
+      const recoveryId = stored.providerAuthBlock.recoveryId;
       let timedOut = false;
       const preparation = new AbortController();
       const ownerIsCurrent = this.providerAuthenticationPreparationCurrent(owner);
@@ -25018,7 +25060,7 @@ export class SessionManager {
       }
       if (this.shuttingDown || observation.status !== "authenticated" || !observation.identityId) return;
       const current = this.store.readMeta(owner.sessionId);
-      if (!current?.providerAuthBlock || current.providerAuthBlock.recoveryId !== owner.providerAuthBlock.recoveryId ||
+      if (!current?.providerAuthBlock || current.providerAuthBlock.recoveryId !== recoveryId ||
           !compareProviderAuthIdentity(
             current.providerAuthBlock.expectedIdentityId,
             current.providerAuthBlock.expectedIdentityEvidence,
@@ -25129,10 +25171,10 @@ export class SessionManager {
     optionId: string | null,
     decidedBy?: PermissionResolver,
   ): Promise<void> {
-    let meta = this.store.readMeta(sessionId);
-    let block = meta?.providerAuthBlock;
-    if (!meta || meta.pendingApproval?.requestId !== requestId ||
-        meta.pendingApproval.kind !== "authentication") return;
+    const stored = this.store.readMeta(sessionId);
+    if (!stored || stored.pendingApproval?.requestId !== requestId ||
+        stored.pendingApproval.kind !== "authentication") return;
+    let block = stored.providerAuthBlock;
     if (optionId === "auth:dismiss") {
       // An accepted dismissal is completed once the turn settles, never refused and never expired:
       // a caller that answers at most once (Full Control, #2940) must not be left with a parked
@@ -25158,8 +25200,7 @@ export class SessionManager {
           this.store.patchMeta(sessionId, { pendingProviderAuthDismissal: undefined });
           return;
         }
-        meta = this.store.readMeta(sessionId);
-        block = meta?.providerAuthBlock;
+        block = this.store.readMeta(sessionId)?.providerAuthBlock;
       }
       const preparing = block && this.providerAuthPreparations.get(block.credentialScopeId);
       if (preparing && preparing.sessionId === sessionId && preparing.requestId === requestId) {
@@ -25214,16 +25255,17 @@ export class SessionManager {
         preparing.controller.abort();
       }
       controller.cancel(block.credentialScopeId);
-      this.emitProviderAuthenticationCard(meta, block, "The runner-owned sign-in was canceled. No prompt was retried.");
+      this.emitProviderAuthenticationCard(stored, block, "The runner-owned sign-in was canceled. No prompt was retried.");
       return;
     }
     if (!["auth:login", "auth:revalidate", "auth:accept-current"].includes(optionId) ||
         this.providerAuthOperations.has(block.credentialScopeId)) {
-      this.emitProviderAuthenticationCard(meta, block, "An authentication operation is already in progress for this credential scope.");
+      this.emitProviderAuthenticationCard(stored, block, "An authentication operation is already in progress for this credential scope.");
       return;
     }
     this.providerAuthOperations.add(block.credentialScopeId);
     try {
+      const meta = structuredClone(stored);
       const preparation = { sessionId, requestId, controller: new AbortController() };
       const cardIsCurrent = this.providerAuthenticationPreparationCurrent(meta);
       const isCurrent = () => !preparation.controller.signal.aborted && cardIsCurrent();
@@ -25336,8 +25378,9 @@ export class SessionManager {
             observation,
           ).matches);
     for (const candidate of candidates) {
-      let meta = this.store.readMeta(candidate.sessionId);
-      if (!meta) continue;
+      const stored = this.store.readMeta(candidate.sessionId);
+      if (!stored) continue;
+      let meta = stored;
       let block = meta.providerAuthBlock;
       if (!block) continue;
       if (meta.status === "stopped") {
@@ -25355,6 +25398,7 @@ export class SessionManager {
         continue;
       }
       if (meta.sessionId !== targetSessionId) {
+        meta = structuredClone(stored);
         const isCurrent = this.providerAuthenticationPreparationCurrent(meta);
         // Nothing but the preparation runs under this reference; its relaunch takes its own.
         const preparationHome = this.launchPreparationProviderHome();

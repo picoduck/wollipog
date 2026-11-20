@@ -1509,10 +1509,10 @@ test("CLI reconciliation forwards only the original snapshot and preserves the s
   const env = {
     WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "child-token", WOLLIPOG_SESSION_ID: "codex-child",
   };
-  const run = async (): Promise<{ code: number; result: { decision?: unknown; error?: string } }> => {
+  const run = async (...flags: string[]): Promise<{ code: number; result: { decision?: unknown; error?: string } }> => {
     let stdout = "";
     const code = await runWollipogCli(
-      ["node", "cli.js", "--wollipog-cli", "decision", "reconcile", "workflow_1", "--snapshot", JSON.stringify(snapshot), "--json"],
+      ["node", "cli.js", "--wollipog-cli", "decision", "reconcile", "workflow_1", "--snapshot", JSON.stringify(snapshot), ...flags, "--json"],
       env,
       { stdout: (text) => { stdout += text; }, stderr: () => assert.fail("JSON output belongs on stdout") },
       fetch,
@@ -1531,6 +1531,9 @@ test("CLI reconciliation forwards only the original snapshot and preserves the s
     call.headers?.authorization === "Bearer child-token"));
   assert.ok(requests.every((call) => call.body === JSON.stringify({ resourceSnapshot: snapshot })),
     "reconciliation forwards no action or new admission");
+  refused = false;
+  assert.equal((await run("--external-merge")).code, 0);
+  assert.equal(calls.at(-1)?.body, JSON.stringify({ resourceSnapshot: snapshot, externalMerge: true }));
 });
 
 test("CLI typed-decision help is discoverable and malformed or cross-session commands make no request", async () => {
@@ -1561,6 +1564,7 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
     ["decision", "reconcile", "workflow_1", "--snapshot", "[]"],
     ["decision", "reconcile", "workflow_1", "--snapshot", "not-json"],
     ["decision", "reconcile", "workflow_1", "--snapshot", "{}", "--action", "{}"],
+    ["decision", "reconcile", "workflow_1", "--snapshot", "{}", "--external-merge=false"],
     ["decision", "reconcile", "workflow_1", "--session", "other", "--snapshot", "{}"],
     ["decision", "get", "workflow_1", "--session"],
     ["decision", "list", "--limit", "101"],

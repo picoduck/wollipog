@@ -1,4 +1,4 @@
-import type { AssistantOwnerConfirmationResponse, AssistantThreadListResponse } from "@wollipog/protocol";
+import type { AssistantOwnerConfirmationResponse, AssistantThreadListResponse, OrchestratorCampaignBudgetDefault } from "@wollipog/protocol";
 import type { AssistantConnectionsView, AssistantConnection, AssistantGrant, AssistantActivity } from "./assistant-connections.js";
 import { assistantThreadRoutes } from "./assistant-threads.js";
 import type { OrchestratorCampaignBehaviorView, UpdateOrchestratorCampaignBehaviorRequest } from "@wollipog/protocol";
@@ -298,6 +298,13 @@ export function createApiClient(transport: ApiTransport) {
   /** Approve Once: the control plane runs the bound command, then answers with how it ended. */
   approveAssistantConfirmation: (threadId: string, confirmationId: string) => req<AssistantOwnerConfirmationResponse>(
     `/api/assistant-threads/${encodeURIComponent(threadId)}/confirmations/${encodeURIComponent(confirmationId)}/approve`, { method: "POST" }),
+  approveAssistantCampaign: (threadId: string, confirmationId: string, digest: string) => req<AssistantOwnerConfirmationResponse>(
+    `/api/assistant-threads/${encodeURIComponent(threadId)}/confirmations/${encodeURIComponent(confirmationId)}/approve-campaign`,
+    { method: "POST", body: JSON.stringify({ digest }) }),
+  reviseAssistantCampaignBudget: (threadId: string, confirmationId: string, digest: string, budget: OrchestratorCampaignBudgetDefault) =>
+    req<AssistantOwnerConfirmationResponse>(
+      `/api/assistant-threads/${encodeURIComponent(threadId)}/confirmations/${encodeURIComponent(confirmationId)}/campaign-budget`,
+      { method: "PUT", body: JSON.stringify({ digest, budget }) }),
   denyAssistantConfirmation: (threadId: string, confirmationId: string) => req<AssistantOwnerConfirmationResponse>(
     `/api/assistant-threads/${encodeURIComponent(threadId)}/confirmations/${encodeURIComponent(confirmationId)}/deny`, { method: "POST" }),
 

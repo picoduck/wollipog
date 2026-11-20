@@ -10,7 +10,7 @@ import React, {
   type Ref,
 } from "react";
 import type { GovernancePolicy, PendingApproval, PermissionOption, SessionView } from "@wollipog/protocol";
-import { isChildQuestionSnapshot, ownerResourceKeepReason, ownerResourceLabel, ownerResourceNoun } from "@wollipog/protocol";
+import { isCampaignHandoffQuestion, isChildQuestionSnapshot, ownerResourceKeepReason, ownerResourceLabel, ownerResourceNoun } from "@wollipog/protocol";
 import { useApi } from "../../api-context.js";
 import type { ApiClient } from "../../api.js";
 import { titleCaseLabel } from "../../format.js";
@@ -42,7 +42,7 @@ import { CHOOSE_ACCOUNT_COPY, ChooseAccountDialog, type ChooseAccountResult } fr
 import { EvidenceReviewBody, useEvidenceReview } from "./EvidenceReview.js";
 import { OwnerRuleSummary, WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
 import { ReturnOwnerResource } from "../ReturnOwnerResource.js";
-import { QuestionClassification, QUESTION_CLASSIFICATION_REASON } from "./QuestionClassification.js";
+import { HANDOFF_CLASSIFICATION_REASON, QuestionClassification, QUESTION_CLASSIFICATION_REASON } from "./QuestionClassification.js";
 import { LocationSwitchSummary, locationSwitchCardActions, locationSwitchChoices, locationSwitchOptions } from "./LocationSwitchSummary.js";
 import { claimDecision, decisionKey, useDecisionFailure, useDecisionInFlight } from "./request-reveal.js";
 import {
@@ -175,7 +175,8 @@ export function RequestCard({
   // Guardrail pauses and workflow decisions are resolved by the control plane; everything else is
   // answered by the runner, which must be connected to take it.
   const decisionNeedsRunner = request.kind !== "policy_hook" && request.kind !== "workflow_decision";
-  const reason = classificationHeld ? QUESTION_CLASSIFICATION_REASON : responseRefusal ?? (decisionNeedsRunner && !runnerOnline ? REQUEST_CARD_COPY.runnerOffline : null);
+  const classificationReason = isCampaignHandoffQuestion(workflowDecision) ? HANDOFF_CLASSIFICATION_REASON : QUESTION_CLASSIFICATION_REASON;
+  const reason = classificationHeld ? classificationReason : responseRefusal ?? (decisionNeedsRunner && !runnerOnline ? REQUEST_CARD_COPY.runnerOffline : null);
   const signInBlocked = runner?.canManage === false && request.options.some((option) => option.optionId === "auth:login");
   const optionReason = (option: PermissionOption): string | null =>
     option.optionId === "auth:login" && runner?.canManage === false ? signInReasonId

@@ -349,6 +349,7 @@ test("checkpoint adoption preserves a live worktree by retiring its exact stale 
     sessionId: "s_adopt",
     repoPath: repo,
     context: { kind: "native" },
+    env: { TEST_LAUNCH_ENV: "legacy-metadata-fixture" },
     worktreePath,
   })}\n`, { mode: 0o600 });
   const ledger = new CheckpointRefOwnershipLedger(root);
@@ -375,7 +376,9 @@ test("checkpoint adoption preserves a live worktree by retiring its exact stale 
     assert.equal(execFileSync("git", ["-C", repo, "rev-parse",
       `refs/${namespace}/owners/${"a".repeat(64)}/s_adopt/turn-1`], { encoding: "utf8" }).trim(), oid);
   }
-  assert.equal(JSON.parse(readFileSync(join(sessionDir, "meta.json"), "utf8")).checkpointRefVersion, 2);
+  const persisted = JSON.parse(readFileSync(join(sessionDir, "meta.json"), "utf8"));
+  assert.equal(persisted.checkpointRefVersion, 2);
+  assert.deepEqual(persisted.env, {});
 });
 
 test("checkpoint adoption reclaims only exact unarmed retained refs", async (t) => {

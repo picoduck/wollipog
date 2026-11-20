@@ -28,6 +28,7 @@ import {
   WORKFLOW_QUESTION_ANSWER_MAX_CHARS,
   OWNER_DECISION_LIMITS,
   SESSION_WAIT_PROGRESS_REPORT_MS,
+  type RunnerCapacityBlocker,
   type SessionWaitKind,
   type SessionWaitReport,
   type SessionWaitReportTarget,
@@ -741,8 +742,9 @@ async function sessionArtifactFileAttachCompatibilityError(deps: McpDeps, video 
     : controlPlaneUpdateRequired(needsNewerWollipog("Attaching a file needs", "Update Wollipog, then attach again."), required, actual);
 }
 
-async function workflowDecisionReconciliationCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation;
+async function workflowDecisionReconciliationCompatibilityError(deps: McpDeps, externalMerge: boolean): Promise<ToolResult | null> {
+  const required = externalMerge ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionExternalMergeReconciliation
+    : RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation;
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
@@ -1016,8 +1018,21 @@ function unfinishedBackgroundJobs(s: Json): { unfinishedBackgroundJobs?: Json[] 
     : {};
 }
 
+const CAPACITY_RECOVERY_ACTION: Record<RunnerCapacityBlocker["kind"], string> = {
+  runner_capacity: "Wait for enough runner capacity to free up. Admission retries automatically.",
+  agent_quota: "Wait for a provider slot to free up. Admission retries automatically.",
+  target_quota: "Wait for a slot on the execution target to free up. Admission retries automatically.",
+  exclusive_group: "Wait for the session holding the exclusive provider slot to release it.",
+  request_weight: "Ask the Machine owner to adjust the runner capacity or weight for this agent.",
+  queue_order: "Wait for the older admission requests to advance.",
+  capacity_lock: "Wait for the runner to retry after the concurrent capacity update.",
+  active_turn_capacity: "Wait for an active turn to finish. The queued turn retries automatically.",
+  diagnostic_overflow: "Check the Machine's capacity status for more detail.",
+};
+
 /** Field-map a SessionView to the compact shape every session-returning tool shares. */
 function mapSession(s: Json): Json {
+  const capacityWait: RunnerCapacityBlocker | undefined = s?.status === "queued" ? s.capacityWait : undefined;
   return {
     ...(s?.attention ? { attention: s.attention } : {}),
     id: s?.id,
@@ -1050,6 +1065,10 @@ function mapSession(s: Json): Json {
     // What keeps the next turn from starting and the step that clears it (#1650). A held session
     // asks nothing, so a parent otherwise saw only `input_required` with no request behind it.
     ...(Array.isArray(s?.holds) && s.holds.length ? { holds: capArray(s.holds, 8) } : {}),
+    ...(capacityWait ? { capacityWait: {
+      ...capacityWait,
+      recoveryAction: CAPACITY_RECOVERY_ACTION[capacityWait.kind] ?? CAPACITY_RECOVERY_ACTION.diagnostic_overflow,
+    } } : {}),
     // The ids stop_background_job takes (#1780). Finished jobs are omitted: there is nothing to stop.
     ...unfinishedBackgroundJobs(s),
     updatedAt: s?.updatedAt,
@@ -1868,7 +1887,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "list_sessions",
-    description: "List lightweight session summaries with status, title, guardrails, live-child capacity, and any pending approval title. liveUsage is a running Claude turn's usage that no total includes yet. Use get_session for full campaign state and unfinished background-job ids.",
+    description: "List session summaries with status, title, guardrails, live-child capacity, any runner capacity blocker and its recovery action, and any pending approval title. liveUsage is a running Claude turn's usage that no total includes yet. Use get_session for full campaign state and unfinished background-job ids.",
     inputSchema: {
       type: "object",
       properties: { archived: { type: "boolean", description: "Include archived sessions" } },
@@ -1882,7 +1901,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "get_session",
-    description: "Get one session's full metadata by id, including any hold that keeps its next turn from starting and the recovery action that clears it. tokensIn keeps the provider's meaning: Claude Code counts only uncached input while Codex includes cache reads, as tokensInIncludesCachedInput says. providerAccountRef names the session's account as an opaque reference that create_session accepts in providerAccountId.",
+    description: "Get one session's full metadata by id, including any hold or runner capacity blocker that keeps its next turn from starting and the recovery action that clears it. tokensIn keeps the provider's meaning: Claude Code counts only uncached input while Codex includes cache reads, as tokensInIncludesCachedInput says. providerAccountRef names the session's account as an opaque reference that create_session accepts in providerAccountId.",
     inputSchema: {
       type: "object",
       properties: { sessionId: { type: "string" } },
@@ -2909,12 +2928,13 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "reconcile_workflow_decision",
-    description: "Reconcile an already-successful canonical PR merge action without executing it again. For a Codex App Server child the runner must prove one exact successful provider-history command and the forge must report the approved head as merged. A Claude Code child produces no command receipt, so call this once the PR reads MERGED; the forge's merged approved head is its proof. After a same-head re-enqueue, reconcile the latest occurrence: its admission must precede the last successful exact command with no other admission between them, and your other armed occurrences of that command then read superseded. Stale, mismatched, replayed, unavailable, and mixed-version evidence fails closed.",
+    description: "Record a completed PR merge without executing an enqueue. By default, Codex App Server needs the exact provider command receipt and the merged approved head. Claude Code and managed enqueues may use the forge proof alone. After a same-head re-enqueue, reconcile the latest armed occurrence that performed the enqueue. If the replacement was never armed, reconcile the original armed occurrence. When a person ran the enqueue, pass externalMerge: true (control plane v390) to record the forge-observed exact head merged after approval, without an admission or provider receipt. This never grants write authority.",
     inputSchema: {
       type: "object",
       properties: {
         occurrenceId: { type: "string" },
         resourceSnapshot: WORKFLOW_DECISION_RESOURCE_SCHEMA,
+        externalMerge: { const: true, description: "Record a merge completed outside the session using read-only forge proof." },
       },
       required: ["occurrenceId", "resourceSnapshot"],
       additionalProperties: false,
@@ -2929,13 +2949,17 @@ export const TOOLS: McpTool[] = [
       if (args?.resourceSnapshot?.category !== "pr_merge") {
         return errorResult("only PR merge decisions support action reconciliation");
       }
-      const compatibilityError = await workflowDecisionReconciliationCompatibilityError(deps);
+      if (args.externalMerge !== undefined && args.externalMerge !== true) {
+        return errorResult("externalMerge must be true when supplied");
+      }
+      const compatibilityError = await workflowDecisionReconciliationCompatibilityError(deps, args.externalMerge === true);
       if (compatibilityError) return compatibilityError;
       const r = await cpFetch(
         deps,
         "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions/${encodeURIComponent(args.occurrenceId)}/reconcile`,
-        { resourceSnapshot: args.resourceSnapshot },
+        { resourceSnapshot: args.resourceSnapshot, ...(args.externalMerge === true ? { externalMerge: true } : {}) },
+        Math.max(deps.requestTimeoutMs ?? CP_TIMEOUT_MS, MERGE_DECISION_TIMEOUT_MS),
       );
       return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
     },
@@ -3906,7 +3930,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "stop_session",
-    description: "Stop a descendant session's agent process. Subject to session permissions and governance policies.",
+    description: "Stop a descendant session's agent process or the reviewer process for your own terminal review. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: { sessionId: { type: "string" } },
@@ -3983,7 +4007,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "restart_session",
-    description: "Restart a stopped descendant session, subject to its parent's available live-child slots. Subject to session permissions and governance policies.",
+    description: "Restart a stopped descendant session, subject to its parent's available live-child slots. The result can report an initial prompt left behind by Stop. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: { sessionId: { type: "string" } },
@@ -3997,12 +4021,14 @@ export const TOOLS: McpTool[] = [
       }
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/restart`);
       if (!r.ok) return errorResult(r.message);
-      return textResult({ session: mapSession(r.data) });
+      return textResult({ session: mapSession(r.data),
+        ...(typeof r.data?.initialPromptWarning === "string" ? { initialPromptWarning: r.data.initialPromptWarning } : {}),
+      });
     },
   },
   {
     name: "archive_session",
-    description: "Archive a descendant session without deleting its history. Existing stop-before-archive and visibility checks apply.",
+    description: "Archive a descendant session or the reviewer session for your own terminal review. This keeps its history. Existing stop-before-archive and visibility checks apply.",
     inputSchema: {
       type: "object",
       properties: { sessionId: { type: "string" } },

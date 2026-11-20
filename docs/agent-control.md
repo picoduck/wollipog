@@ -1922,6 +1922,16 @@ rollout proof is accepted only when its thread, turn, and command item exactly m
 successful item; a failed, duplicate, partial, fenced, or natively mismatched live item still blocks
 the fallback.
 
+Protocol v390 adds `externalMerge: true` to reconciliation (`wollipog decision reconcile
+--external-merge`). Use it for a merge that a person performed outside the session. The server
+reads the campaign's forge directly and requires the exact approved head in the merged state and
+a forge merge time after approval. It records the observed merge without a provider receipt,
+arming, or enqueueing. Standard Codex command reconciliation still requires provider proof.
+An armed merge superseded by an unarmed same-head request can be reconciled with its original
+proof; the transaction also settles the outstanding unarmed replacement. A later armed occurrence
+retains precedence. When a Claude Code child stops before a merge lands, the server revokes the
+grant and can retry its read for up to 24 hours, independently of the child's lifecycle.
+
 Protocol v166 lets the resolver tell the child why. `resolve_descendant_workflow_decision` accepts
 an optional `childMessage` of at most 2,000 characters, separate from the audit-only `rationale`.
 The rationale is still never retained. The message is: its audience is the child, so it is stored

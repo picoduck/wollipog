@@ -8,36 +8,43 @@ import {ManagementUncertainOutcome} from "./assistant-management-command.js";
 import { WOLLIPOG_ASSISTANT_SKILL } from "./assistant-skill.js";
 export { assistantActivityTargetLabel } from "./assistant-connection-management.js";
 
-/** Most UTF-8 bytes one `assistant_discover` result may serialize to (#4679). Claude Code saves an
- * MCP text result over 50,000 characters to a file and warns past 10,000 tokens; Codex keeps
- * 10,000 tokens (about 40,000 bytes) of a tool result for its catalog models. This stays under all
- * three with room for the MCP envelope. */
-export const ASSISTANT_DISCOVERY_MAX_BYTES = 24_000;
+/** Budget for the escaped MCP text payload. Codex's fallback model metadata limits tool output
+ * to 10,000 bytes (#4727). Leave room for the surrounding MCP envelope and Codex's output header. */
+export const ASSISTANT_DISCOVERY_MAX_BYTES = 9_000;
 /** Most operation names one schema request may name. */
 export const ASSISTANT_DISCOVERY_MAX_SCHEMA_NAMES = 64;
 const SCHEMA_HINT = "Call assistant_discover with {\"operations\": [\"<name>\", ...]} for those operations' full input schemas.";
-const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
+const SKILL_HINT = "Call assistant_discover with {\"skill\": true} for the full Wollipog Assistant guide.";
+// MCP embeds the result JSON in a text string. Count escaping, excluding that string's outer quotes
+// so array entries and reserved object fields can be counted separately.
+const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(JSON.stringify(value))) - 2;
 
-/** Appends items to `base[key]` while the whole result stays within the bound, always at least one.
+/** Appends items to `base[key]` while the whole result stays within the bound.
  * Returns how many were taken. `reserve` holds room for a field the caller adds afterwards. */
 function fill<T>(base: Record<string, unknown>, key: string, items: readonly T[], reserve: number): number {
   const list: T[] = [];
   base[key] = list;
   let size = bytes(base) + reserve;
+  if (size > ASSISTANT_DISCOVERY_MAX_BYTES) throw new AssistantRefusal("Discovery metadata exceeds the tool-result limit.");
   for (const item of items) {
     const next = bytes(item) + (list.length ? 1 : 0);
-    if (list.length && size + next > ASSISTANT_DISCOVERY_MAX_BYTES) break;
+    if (size + next > ASSISTANT_DISCOVERY_MAX_BYTES) break;
     list.push(item);
     size += next;
   }
   return list.length;
 }
 
-function discoveryArguments(args: unknown): {operations?: string[]; cursor?: string} {
+function discoveryArguments(args: unknown): {operations?: string[]; cursor?: string; skill?: true} {
   if (args === undefined || args === null) return {};
   if (typeof args !== "object" || Array.isArray(args)) throw new AssistantRefusal("Supply an object of tool arguments.");
-  const {operations: names, cursor, ...rest} = args as Record<string, unknown>;
-  if (Object.keys(rest).length) throw new AssistantRefusal("assistant_discover accepts only operations or cursor.");
+  const {operations: names, cursor, skill, ...rest} = args as Record<string, unknown>;
+  if (Object.keys(rest).length) throw new AssistantRefusal("assistant_discover accepts only operations, cursor or skill.");
+  if (skill !== undefined) {
+    if (skill !== true) throw new AssistantRefusal("Set skill to true to read the Wollipog Assistant guide.");
+    if (names !== undefined || cursor !== undefined) throw new AssistantRefusal("Send skill by itself.");
+    return {skill};
+  }
   if (names !== undefined && cursor !== undefined) throw new AssistantRefusal("Send operations or cursor, not both.");
   if (cursor !== undefined && (typeof cursor !== "string" || !ASSISTANT_OPERATION_NAME.test(cursor))) throw new AssistantRefusal("cursor must be the nextCursor of an earlier result.");
   // Names are echoed in `unavailable`, so each must have a registered name's bounded shape.
@@ -52,16 +59,22 @@ export function createAssistantOperations(db: ControlPlaneDb): AssistantOperatio
   const operations = new AssistantOperations(db.assistantConnections, (user, organization) => db.operatingHumanPrincipal(user, organization));
   operations.register({
     name: "assistant_discover",
-    description: "Read this installation's identity, connection grant and operation names; name operations for their full input schemas.",
+    description: "Read this installation's identity, connection scope and operation names. Request full input schemas by name or the Assistant guide with skill.",
     inputSchema: { type: "object", properties: {
       operations: {type: "array", items: {type: "string", pattern: ASSISTANT_OPERATION_NAME.source}, minItems: 1, maxItems: ASSISTANT_DISCOVERY_MAX_SCHEMA_NAMES,
-        description: "Granted operation names whose full input schemas to return. Request any listed in `remaining` again."},
+        description: "Granted operation names whose full input schemas to return. Request any listed in `remaining` again. Request `requestSeparately` by itself."},
       cursor: {type: "string", description: "An earlier result's nextCursor, to read the rest of the operation list."},
+      skill: {type: "boolean", const: true, description: "Read the full Wollipog Assistant guide. Send this argument by itself."},
     }, additionalProperties: false }, metadata: true,
     resolveTarget: () => ({ kind: "control_plane", id: db.instanceId() }), ownerCanAccess: () => true,
     // Every form lists only what the connection's grant allows; it is shaped to fit one tool result.
     execute: (args, context) => {
       const request = discoveryArguments(args);
+      if (request.skill) {
+        const result = {skill: WOLLIPOG_ASSISTANT_SKILL};
+        if (bytes(result) > ASSISTANT_DISCOVERY_MAX_BYTES) throw new AssistantRefusal("The Wollipog Assistant guide exceeds the tool-result limit.");
+        return result;
+      }
       const granted = operations.list(context.connection);
       if (request.operations) {
         const byName = new Map(granted.map(operation => [operation.name, operation]));
@@ -69,7 +82,16 @@ export function createAssistantOperations(db: ControlPlaneDb): AssistantOperatio
         const unavailable = request.operations.filter(name => !byName.has(name));
         const result: Record<string, unknown> = unavailable.length ? {unavailable} : {};
         const schemas = found.map(name => { const {description, inputSchema} = byName.get(name)!; return {name, description, inputSchema}; });
-        const remaining = found.slice(fill(result, "operations", schemas, bytes({remaining: found})));
+        const reserve = found.length > 1 ? bytes({remaining: found.slice(1)}) : 0;
+        const taken = fill(result, "operations", schemas, reserve);
+        if (!taken && schemas.length) {
+          const [requestSeparately, ...remaining] = found;
+          if (request.operations.length === 1) throw new AssistantRefusal("The requested schema does not fit. Use MCP tools/list.");
+          // The leading schema and batch metadata do not fit together. Keep the rest of the
+          // batch reachable and require a single-name retry to keep the continuation moving.
+          return {...result, requestSeparately, ...(remaining.length ? {remaining} : {})};
+        }
+        const remaining = found.slice(taken);
         return remaining.length ? {...result, remaining} : result;
       }
       let start = 0;
@@ -77,17 +99,29 @@ export function createAssistantOperations(db: ControlPlaneDb): AssistantOperatio
         start = granted.findIndex(operation => operation.name === request.cursor);
         if (start < 0) throw new AssistantRefusal("The cursor no longer names a granted operation. Call assistant_discover again without a cursor.");
       }
-      const result: Record<string, unknown> = request.cursor ? {} : {
-        controlPlane: { id: db.instanceId(), name: db.assistantConnections.installationName() },
-        connection: context.connection,
-        transport: { endpoint: "/assistant/mcp", protocolVersion: "2025-06-18", authentication: "Bearer" },
-        // The guide every Wollipog Assistant thread follows, shared with outside assistants.
-        skill: WOLLIPOG_ASSISTANT_SKILL,
-      };
-      result.inputSchemas = SCHEMA_HINT;
       const rest = granted.slice(start).map(({name, description}) => ({name, description}));
-      const longestName = Math.max(0, ...rest.map(operation => operation.name.length));
-      const taken = fill(result, "operations", rest, bytes({nextCursor: "x".repeat(longestName)}));
+      const reserve = rest.length ? bytes({nextCursor: "x".repeat(Math.max(...rest.map(operation => operation.name.length)))}) : 0;
+      const result: Record<string, unknown> = {inputSchemas: SCHEMA_HINT, operations: []};
+      if (!request.cursor) {
+        result.controlPlane = {id: db.instanceId(), name: db.assistantConnections.installationName()};
+        result.connection = context.connection;
+        result.transport = {endpoint: "/assistant/mcp", protocolVersion: "2025-06-18", authentication: "Bearer"};
+        result.skillHint = SKILL_HINT;
+        if (bytes(result) + reserve > ASSISTANT_DISCOVERY_MAX_BYTES) {
+          // A selected grant can contain hundreds of IDs. Keep the connection identity and
+          // granted-operation paging available without returning a misleading partial grant.
+          const {grant, ...identity} = context.connection;
+          result.connection = identity;
+          result.destructiveConfirmation = grant.destructiveConfirmation;
+          result.grantNotice = "The exact grant exceeds the tool-result limit. The owner can inspect it in Assistant Connections. This operation list is still filtered by the grant.";
+        }
+        if (bytes({...result, skillHint: undefined, skill: WOLLIPOG_ASSISTANT_SKILL}) + reserve <= ASSISTANT_DISCOVERY_MAX_BYTES) {
+          delete result.skillHint;
+          result.skill = WOLLIPOG_ASSISTANT_SKILL;
+        }
+      }
+      const taken = fill(result, "operations", rest, reserve);
+      if (!taken && rest.length && request.cursor) throw new AssistantRefusal("The next operation description exceeds the tool-result limit. Use MCP tools/list.");
       return taken < rest.length ? {...result, nextCursor: rest[taken]!.name} : result;
     },
   });

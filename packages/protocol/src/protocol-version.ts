@@ -1517,11 +1517,15 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 388: Owner-selected Assistant thread provider accounts and guarded account handoffs.
   388,
   // v389 slot
-  // 389: Bind Add Account profile grants before dispatch with start_provider_login.newAccountId.
-  389,
   // v390 slot
+  // 390: Reconcile an externally completed PR merge using read-only forge evidence.
+  390,
   // v391 slot
+  // 391: Owner-confirmed Assistant campaign launch with a separate campaign allowance.
+  391,
   // v392 slot
+  // 392: Bind Add Account profile grants before dispatch with start_provider_login.newAccountId.
+  392,
   // v393 slot
   // v394 slot
   // v395 slot

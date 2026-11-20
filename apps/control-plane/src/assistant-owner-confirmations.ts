@@ -5,6 +5,7 @@ import {
   type AssistantOwnerConfirmation,
   type AssistantOwnerConfirmationDetail,
   type AssistantOwnerConfirmationStatus,
+  type OrchestratorCampaignBudgetDefault,
 } from "@wollipog/protocol";
 import { AssistantRefusal, type AssistantTarget } from "./assistant-connections.js";
 import type { HumanPrincipal } from "./identity.js";
@@ -22,7 +23,17 @@ export interface OwnerConfirmationRequest {
   /** The arguments the command runs with, without any `confirmationId`. */
   args: Record<string, unknown>;
   target: AssistantTarget;
+  targetLabel?: string;
   impact?: unknown;
+  campaign?: CampaignConfirmationPreview;
+}
+
+export const ASSISTANT_CAMPAIGN_START = "campaign_start";
+export const assistantCampaignLaunchId = (confirmationId: string) => `assistant-${confirmationId}`;
+export interface CampaignConfirmationPreview {
+  facts: AssistantOwnerConfirmationDetail[];
+  budget: OrchestratorCampaignBudgetDefault | null;
+  budgetOverride?: OrchestratorCampaignBudgetDefault;
 }
 
 /** Pending requests one thread may hold at once, so an assistant cannot flood its owner. */
@@ -43,7 +54,7 @@ interface Row {
 /** Title Case label for an operation: `session_archive` reads "Archive Session". */
 const NOUNS: Record<string, string> = { auto: "Automation" };
 const VERBS: Record<string, string> = { review_find_set: "Update Review Finding", campaign_branch_clean: "Clean Campaign Branches",
-  queue_cancel: "Cancel Queued Prompt", session_git: "Discard File Changes" };
+  queue_cancel: "Cancel Queued Prompt", session_git: "Discard File Changes", campaign_start: "Start Campaign" };
 const titleWord = (word: string) => word ? word[0]!.toUpperCase() + word.slice(1) : word;
 export function ownerConfirmationTitle(operation: string): string {
   const parts = operation.split("_");
@@ -58,6 +69,7 @@ export function ownerConfirmationTitle(operation: string): string {
  * only what the operation's service does, including what is kept and what is lost. Every operation
  * the registry marks destructive has one (#4675); the fallback is for an unregistered name. */
 const SUMMARIES: Record<string, string> = {
+  campaign_start: "Starts an independent Orchestrator campaign with the settings and authority shown here. Its usage is charged to its own campaign allowance.",
   // Sessions
   session_stop: "Stops the session and cancels its queued prompts and background jobs. Its transcript and worktree are kept, but it takes no further messages until it is restarted.",
   session_retry_stop: "Sends the session's pending Stop again. It cancels the session's queued prompts and background jobs; its transcript and worktree are kept.",
@@ -208,6 +220,17 @@ export class AssistantOwnerConfirmations {
     const thread = this.threadOf(binding.connectionId);
     if (!thread) throw new Error("Owner confirmation requested for a connection without a thread");
     const bindingJson = JSON.stringify(binding);
+    if (input.campaign) {
+      const prior = this.db.prepare(`SELECT * FROM assistant_owner_confirmations
+        WHERE connection_id=? AND operation=? AND command_id=? AND status IN ('pending','approved') AND expires_at>?`)
+        .get(binding.connectionId, binding.operation, input.commandId, now) as Row | undefined;
+      if (prior) {
+        if ((JSON.parse(prior.binding_json) as OwnerConfirmationBinding).argumentsDigest !== binding.argumentsDigest) {
+          throw new AssistantRefusal("This command ID already belongs to a different campaign proposal.");
+        }
+        return this.view(prior);
+      }
+    }
     const existing = this.db.prepare(`SELECT id FROM assistant_owner_confirmations
       WHERE connection_id=? AND binding_json=? AND status='pending' AND expires_at>?`).get(binding.connectionId, bindingJson, now) as {id: string} | undefined;
     if (existing) return this.view(this.row(existing.id)!);
@@ -218,9 +241,14 @@ export class AssistantOwnerConfirmations {
     }
     const argumentsJson = JSON.stringify(input.args);
     if (argumentsJson.length > ARGUMENTS_LIMIT) throw new AssistantRefusal("This command's arguments are too large to show your owner for approval. Nothing ran. Use smaller arguments.");
-    let impactJson: string | null = input.impact === undefined ? null : JSON.stringify(input.impact);
+    let impactJson: string | null = input.campaign ? JSON.stringify(input.campaign) : input.impact === undefined ? null : JSON.stringify(input.impact);
+    if (input.campaign && impactJson!.length > ARGUMENTS_LIMIT) throw new AssistantRefusal("This campaign's settings are too large to review. No campaign was started.");
     if (impactJson && impactJson.length > ARGUMENTS_LIMIT) impactJson = JSON.stringify("The preview is too large to show here; open the target to inspect it.");
-    this.db.prepare("DELETE FROM assistant_owner_confirmations WHERE status NOT IN ('pending','approved') AND resolved_at<?").run(now - RETENTION_MS);
+    // A launched campaign is also counted against this thread's launch limit. Preserve its card
+    // record, including an executed request whose launch receipt has yet to be reconciled.
+    this.db.prepare(`DELETE FROM assistant_owner_confirmations WHERE status NOT IN ('pending','approved') AND resolved_at<?
+      AND NOT (operation=? AND status='executed' AND (outcome_json IS NULL OR json_extract(outcome_json,'$.sessionId') IS NOT NULL))`)
+      .run(now - RETENTION_MS, ASSISTANT_CAMPAIGN_START);
     const id = `aoc_${randomUUID()}`;
     this.db.prepare(`INSERT INTO assistant_owner_confirmations
       (id,connection_id,thread_id,owner_user_id,organization_id,operation,command_id,binding_json,arguments_json,target_json,target_label,impact_json,status,created_at,expires_at)
@@ -238,10 +266,33 @@ export class AssistantOwnerConfirmations {
 
   /** The stored command, for the control plane's run of an approval. */
   command(id: string): { connectionId: string; threadId: string; ownerUserId: string; organizationId: string; operation: string;
-    commandId: string; args: Record<string, unknown> } | null {
+    commandId: string; args: Record<string, unknown>; campaign?: CampaignConfirmationPreview } | null {
     const row = this.row(id);
     return row ? { connectionId: row.connection_id, threadId: row.thread_id, ownerUserId: row.owner_user_id, organizationId: row.organization_id,
-      operation: row.operation, commandId: row.command_id, args: JSON.parse(row.arguments_json) as Record<string, unknown> } : null;
+      operation: row.operation, commandId: row.command_id, args: JSON.parse(row.arguments_json) as Record<string, unknown>,
+      ...(row.operation === ASSISTANT_CAMPAIGN_START && row.impact_json ? { campaign: JSON.parse(row.impact_json) as CampaignConfirmationPreview } : {}) } : null;
+  }
+
+  reviseCampaign(id: string, expectedDigest: string, binding: OwnerConfirmationBinding, campaign: CampaignConfirmationPreview,
+    targetLabel: string, now = Date.now()): AssistantOwnerConfirmation | null {
+    const row = this.row(id);
+    if (!row || row.operation !== ASSISTANT_CAMPAIGN_START || (JSON.parse(row.binding_json) as OwnerConfirmationBinding).targetDigest !== expectedDigest) return null;
+    const json = JSON.stringify(campaign);
+    if (json.length > ARGUMENTS_LIMIT) throw new AssistantRefusal("This campaign's settings are too large to review. No campaign was started.");
+    const changed = this.db.prepare(`UPDATE assistant_owner_confirmations SET binding_json=?, impact_json=?, target_label=?
+      WHERE id=? AND status='pending' AND expires_at>? AND binding_json=?`)
+      .run(JSON.stringify(binding), json, targetLabel, id, now, row.binding_json).changes;
+    if (!changed) return null;
+    this.changed(row.thread_id);
+    return this.get(id);
+  }
+
+  /** Durable record of independent roots. The Human launch and its identity commit together. */
+  launchedCampaignIds(threadId: string): string[] {
+    return (this.db.prepare(`SELECT h.session_id FROM assistant_owner_confirmations c
+      JOIN human_campaign_launches h ON h.user_id=c.owner_user_id AND h.request_id='assistant-'||c.id
+      WHERE c.thread_id=? AND c.operation=? AND c.status='executed' ORDER BY c.resolved_at, h.session_id`)
+      .all(threadId, ASSISTANT_CAMPAIGN_START) as {session_id: string}[]).map(row => row.session_id);
   }
 
   /** The thread's requests waiting for its owner, oldest first. */
@@ -315,6 +366,8 @@ export class AssistantOwnerConfirmations {
 
   view(row: Row): AssistantOwnerConfirmation {
     const target = JSON.parse(row.target_json) as AssistantTarget;
+    const campaign = row.operation === ASSISTANT_CAMPAIGN_START && row.impact_json ? JSON.parse(row.impact_json) as CampaignConfirmationPreview : undefined;
+    const args = JSON.parse(row.arguments_json) as Record<string, unknown>;
     return {
       id: row.id,
       threadId: row.thread_id,
@@ -322,8 +375,9 @@ export class AssistantOwnerConfirmations {
       title: ownerConfirmationTitle(row.operation),
       summary: ownerConfirmationSummary(row.operation),
       target: { kind: target.kind, id: target.id, label: row.target_label },
-      impact: impactLines(row.impact_json === null ? undefined : JSON.parse(row.impact_json)),
-      arguments: argumentLines(JSON.parse(row.arguments_json) as Record<string, unknown>),
+      impact: campaign?.facts ?? impactLines(row.impact_json === null ? undefined : JSON.parse(row.impact_json)),
+      arguments: campaign ? [{ label: "First Message", value: String(args.prompt) }] : argumentLines(args),
+      ...(campaign ? { campaign: { digest: (JSON.parse(row.binding_json) as OwnerConfirmationBinding).targetDigest, budget: campaign.budget } } : {}),
       status: row.status,
       createdAt: row.created_at,
       expiresAt: row.expires_at,
@@ -345,6 +399,7 @@ export interface AssistantOwnerConfirmationServiceDeps {
   store: AssistantOwnerConfirmations;
   /** The command's receipt status after the approved run. */
   receiptStatus(connectionId: string, commandId: string): NonNullable<AssistantOwnerConfirmation["outcome"]>["receiptStatus"] | undefined;
+  campaignOutcome?(confirmationId: string): AssistantOwnerConfirmation["outcome"];
   /** `AssistantOperations.callOwnerApproved`. */
   run(connectionId: string, operation: string, args: Record<string, unknown>, ownerConfirmationId: string): Promise<unknown>;
   /** Tells the thread's assistant how its request ended, as a message in its own conversation.
@@ -377,8 +432,14 @@ export class AssistantOwnerConfirmationService {
 
   /** Approve Once. Records the approval, then runs the bound command and returns how it ended.
    * Approving a request that already ended returns it unchanged and runs nothing. */
-  async approve(owner: HumanPrincipal, threadId: string, id: string): Promise<AssistantOwnerConfirmation> {
+  async approve(owner: HumanPrincipal, threadId: string, id: string, campaignDigest?: string): Promise<AssistantOwnerConfirmation> {
     const current = this.owned(owner, threadId, id);
+    if (current.campaign?.digest !== campaignDigest || (current.operation === ASSISTANT_CAMPAIGN_START && !current.campaign)) {
+      throw new AssistantOwnerConfirmationRefusal("Review the current campaign settings before approving this launch.", 409);
+    }
+    if (current.campaign && !current.campaign.budget) {
+      throw new AssistantOwnerConfirmationRefusal("Set a campaign budget before approving this launch.", 409);
+    }
     const inFlight = this.running.get(id);
     if (inFlight) return inFlight;
     if (!this.deps.store.approve(id, owner, this.now())) {
@@ -415,7 +476,7 @@ export class AssistantOwnerConfirmationService {
       if (this.running.has(id)) continue;
       const command = this.deps.store.command(id)!;
       const receiptStatus = this.deps.receiptStatus(command.connectionId, command.commandId);
-      this.deps.store.finish(id, "executed", receiptStatus ? { receiptStatus } : {}, this.now());
+      this.deps.store.finish(id, "executed", this.deps.campaignOutcome?.(id) ?? (receiptStatus ? { receiptStatus } : {}), this.now());
     }
     this.deliverNotices();
   }
@@ -454,7 +515,8 @@ export class AssistantOwnerConfirmationService {
     const after = this.deps.store.get(id)!;
     if (after.status === "executed") {
       const receiptStatus = this.deps.receiptStatus(command.connectionId, command.commandId);
-      const view = this.deps.store.finish(id, "executed", { ...(receiptStatus ? { receiptStatus } : {}), ...(reason ? { reason } : {}) }, this.now()) ?? after;
+      const view = this.deps.store.finish(id, "executed", { ...(receiptStatus ? { receiptStatus } : {}),
+        ...this.deps.campaignOutcome?.(id), ...(reason ? { reason } : {}) }, this.now()) ?? after;
       this.deliverNotices();
       return view;
     }
@@ -476,6 +538,7 @@ export class AssistantOwnerConfirmationService {
     const what = `"${view.title}" (${view.operation}) on ${view.target.kind} ${view.target.label} (${view.target.id}), command ${commandId}`;
     return view.status === "executed"
       ? `${NOTICE} Your owner approved ${what}. Wollipog ran it once; its receipt reads ${view.outcome?.receiptStatus ?? "unknown"}.` +
+        `${view.outcome?.sessionId ? ` Campaign Session: ${view.outcome.sessionId}.` : ""}` +
         `${view.outcome?.reason ? ` ${view.outcome.reason}` : ""} Never send that command again: read its receipt and target, then continue.`
       : view.status === "denied"
         ? `${NOTICE} Your owner denied ${what}. Nothing ran. Continue without it, and ask your owner before requesting it again.`

@@ -7470,6 +7470,7 @@ body.shell-dock-dragging * {
 .assistant-confirmation-summary {
   margin: 0;
   font: var(--type-body);
+  overflow-wrap: anywhere;
 }
 .assistant-confirmation-arguments code {
   overflow-wrap: anywhere;
@@ -7499,6 +7500,30 @@ body.shell-dock-dragging * {
 .assistant-work-confirmations > .request-card > .request-card-body {
   flex: none;
   overflow: visible;
+}
+.assistant-campaign-review {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.assistant-campaign-review .facts dd,
+.assistant-campaign-message > p {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.assistant-campaign-message > h3 {
+  margin: 0 0 var(--space-2);
+  font: var(--type-label);
+}
+.assistant-campaign-message > p {
+  margin: 0;
+}
+.assistant-inbox-campaigns {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 /* With requests waiting, the requests and work cards scroll together within a bound at every width,
    wrapped or not, so the transcript and composer always keep their room. A phone (below) allows

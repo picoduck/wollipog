@@ -76,6 +76,7 @@ import { SCOPE_CHECKS_PER_ADDITIONS, scopeCheckAdditionsPrefix, scopeCheckInputD
 import { scopeGrantDigest, scopeReviewInputDigest, scopeReviewInputs, scopeReviewKey } from "./scope-selection.js";
 import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type CampaignScopeOwnerReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
+import { CAMPAIGN_HANDOFF_QUESTION_KEY, isCampaignHandoffQuestion } from "@wollipog/protocol";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision, outstandingDecisionsBearOnScopeRequest, campaignAwaitsInitialScope, campaignScopeIsProposed, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
 import { boundedDecisionString, boundedDecisionStringProblem, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
@@ -297,6 +298,7 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type WorkflowDecisionRevocationReason,
   type CreateWorkflowDecisionRequest,
   type ConsumeWorkflowDecisionRequest,
+  type ReconcileWorkflowDecisionRequest,
   type ResolveWorkflowDecisionRequest,
   type WithdrawWorkflowDecisionRequest,
   type CreateOwnerDecisionRequest,
@@ -337,6 +339,7 @@ import {
   type SessionStopConfirmation,
   type WorkflowDecisionResumeState,
   type DecisionOccurrenceRecord,
+  FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS,
 } from "./db.js";
 import { questionPolicyAnswers } from "./question-policy.js";
 import type { SessionEvent } from "@wollipog/protocol";
@@ -476,6 +479,8 @@ export const GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS = 45_000;
 export const GITLAB_MERGE_CLOSURES_TIMEOUT_MS = 40_000;
 /** #4067: one GraphQL read (30s), an origin check and a push (60s each), or a `gh pr merge` (30s). */
 export const FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS = 120_000;
+const LIFECYCLE_MERGE_RECHECK_MS = 60_000;
+const LIFECYCLE_MERGE_CHECK_WINDOW_MS = 24 * 60 * 60_000;
 
 /** A runner's refusal summary, kept bounded and single-line on the decision. */
 function boundedForgeSummary(value: unknown): string {
@@ -3640,13 +3645,8 @@ export class SessionsService {
     const call = assistantCallContext.getStore();
     const thread = call ? this.db.assistantThreads.forConnection(call.connectionId) : null;
     if (!thread) return null;
-    if (thread.launch_limit !== null) {
-      const launched = this.db.assistantThreads.launchedSessionIds(thread.id).length;
-      if (launched >= thread.launch_limit) {
-        return { refusal: `This Wollipog Assistant thread has launched ${launched} of the ${thread.launch_limit} sessions it may launch, ` +
-          "so it cannot launch another. Tell your owner they can change the launch limit in Thread Limits." };
-      }
-    }
+    const refusal = this.assistantThreadLaunchLimitRefusal(thread.id, thread.launch_limit);
+    if (refusal) return { refusal };
     const launch = { threadId: thread.id, backingSessionId: thread.session_id };
     const limitUsd = thread.cost_limit_usd;
     if (limitUsd === null) return { ...launch, budget: null };
@@ -3662,6 +3662,14 @@ export class SessionsService {
     const remainingUsd = floorBudgetCents(Math.min(unheld, backingCap === null ? unheld : backingCap - backingSpentUsd));
     if (remainingUsd < 0.01) return { refusal: assistantThreadBudgetRefusal(limitUsd) };
     return { ...launch, budget: { limitUsd, heldUsd: launchedHeldUsd, remainingUsd } };
+  }
+
+  assistantThreadLaunchLimitRefusal(threadId: string, limit: number | null): string | null {
+    if (limit === null) return null;
+    const launched = this.db.assistantThreads.launchedSessionIds(threadId).length +
+      this.db.assistantOwnerConfirmations.launchedCampaignIds(threadId).length;
+    return launched >= limit ? `This Wollipog Assistant thread has launched ${launched} of the ${limit} sessions it may launch, ` +
+      "so it cannot launch another. Tell your owner they can change the launch limit in Thread Limits." : null;
   }
 
   /** The authenticated thread-owner route is the only caller. Existing launch allowances and
@@ -4276,8 +4284,11 @@ export class SessionsService {
         tasks: import("@wollipog/protocol").AutomationCampaign["tasks"];
       };
       /** Internal fixture/admission seam; never accepted from ordinary session request JSON. */
-      humanCampaignLaunch?: {
-        principal: HumanPrincipal; requestId: string; digest: string;
+      humanCampaignLaunch?: { principal: HumanPrincipal; requestId: string; digest: string } & ({
+        customBudget: import("@wollipog/protocol").CampaignBudgetAuthority;
+        control?: never;
+      } | {
+        customBudget?: never;
         control: Extract<import("@wollipog/protocol").CampaignControl, { mode: "full_control" }>;
         issueScope: import("@wollipog/protocol").CampaignIssueScope;
         /** Project Locations the reviewed launch inspection left out of the boundary (#4117). */
@@ -4292,7 +4303,7 @@ export class SessionsService {
          * owner's first message sets the objective and issue scope before its first turn. Only
          * the limits it derived (no Human override) may grow to fit that message's issues. */
         firstMessage?: { derivedLimits: import("@wollipog/protocol").FullControlDerivedLimits };
-      };
+      });
       /** Internal only (#3368): this session is a review of the requester's pull request. */
       review?: { policy: ReviewLaunchPolicy };
       /** Internal only (#4663): this session backs a Wollipog Assistant thread, so its role is
@@ -4305,6 +4316,9 @@ export class SessionsService {
     // A Wollipog Assistant thread's assistant launches within its thread's limits (#4663): a launch
     // past them is refused, and the new session is capped at what the thread has left to spend.
     const threadLaunch = creationContext?.assistantThread ? null : this.assistantThreadLaunch();
+    if (assistantCallContext.getStore() && creationContext?.humanCampaignLaunch) {
+      return fail(ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL, 409);
+    }
     let threadBudget: ServiceResult<SessionView>["threadBudget"];
     if (threadLaunch && "refusal" in threadLaunch) return fail(threadLaunch.refusal, 409);
     if (threadLaunch) {
@@ -5102,7 +5116,7 @@ export class SessionsService {
     // as `none`, so no later message counts as the first; with no first message yet, the person's
     // first prompt decides (`promptFromHuman`).
     if (orchestratorPolicy && creationContext?.defaultOwnerUserId && !parentSessionId && !snapshotCommand &&
-        !creationContext.humanCampaignLaunch && !inheritedIssueScope && !orchestratorIssueNumbers.length && requestedText) {
+        !creationContext.humanCampaignLaunch?.control && !inheritedIssueScope && !orchestratorIssueNumbers.length && requestedText) {
       orchestratorPolicy.issueScopeSeed = { state: needsCampaignIssueScopeSeed(requestedText) ? "pending" : "none",
         messageDigest: firstMessageDigest(requestedText) };
     }
@@ -5255,6 +5269,11 @@ export class SessionsService {
           effectiveSessionScope?.owner.kind !== "user" || effectiveSessionScope.owner.userId !== humanLaunch.principal.userId) {
         return fail("atomic Human launch requires the exact Human-owned managed root", 409);
       }
+      const allowance = humanLaunch.customBudget ?? humanLaunch.control.boundary.budgetAuthority;
+      const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, allowance?.costUsd !== undefined);
+      if (accountingError) return fail(accountingError, 409);
+    }
+    if (humanLaunch?.control && orchestratorPolicy) {
       const control = structuredClone(humanLaunch.control);
       if (humanLaunch.evidenceAuthority !== undefined) {
         if (!this.evidenceAuthorityDisclosures || !control.boundary.operations.includes("ui_evidence_approval")) {
@@ -5268,10 +5287,6 @@ export class SessionsService {
       const authoritySupport = campaignAuthorityPreflight(control, launch.driver, runner.protocolVersion,
         this.pacedVideoInstallationContract(req.runnerId, req.agentId));
       if (!authoritySupport.supported) return campaignRefusalFail(authoritySupport.requirement ?? authoritySupport.reason ?? "campaign authority is unsupported");
-      // A launch with no cost ceiling still meters cost, but only an explicit ceiling needs it priced.
-      const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model,
-        control.boundary.budgetAuthority?.costUsd !== undefined);
-      if (accountingError) return fail(accountingError, 409);
       const nativeReview = control.boundary.budgetAuthority?.controlledReview;
       if (nativeReview && (!runner.runtime?.campaignReview || controlledReviewCapabilityKey(nativeReview) !== controlledReviewCapabilityKey(runner.runtime.campaignReview))) {
         return fail("the required native reviewer does not match current runner discovery", 409);
@@ -5392,6 +5407,8 @@ export class SessionsService {
       ...(launcherUserId ? { launcherUserId } : {}),
       campaignBudgetUserLimits,
       reviewRequesterSessionId: creationContext?.review?.policy.requesterSessionId,
+      initialPromptSubmitted: !delivery && !capture && !creationContext?.review && !imageReview &&
+        Boolean(command.type === "start_session" && (command.initialPrompt || images.length)),
       id,
       parentSessionId,
       creationActor: creationContext?.defaultOwnerUserId
@@ -5482,7 +5499,7 @@ export class SessionsService {
           return this.db.getSession(created.id)!;
         });
       } else if (humanLaunch) {
-        const admitted = this.db.createHumanCampaignLaunch(sessionInput, humanLaunch.principal, humanLaunch.requestId, humanLaunch.digest);
+        const admitted = this.db.createHumanCampaignLaunch(sessionInput, humanLaunch.principal, humanLaunch.requestId, humanLaunch.digest, humanLaunch.customBudget);
         if (!admitted.created && !scheduled) return ok(admitted.session);
         session = admitted.session;
         config.costBudgetUsd = session.costBudgetUsd ?? undefined;
@@ -6960,6 +6977,8 @@ export class SessionsService {
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
     this.expireAutomationCreationDecisions(now);
+    void this.retryLifecycleMergeSettlements(now, runnerId).catch((error: unknown) =>
+      this.log.warn(`lifecycle merge observation sweep deferred: ${String(error)}`));
     this.maintainArchivedWorktreeRemoval(now, runnerId);
     for (const campaignId of this.db.listOrchestratorCampaignSessionIds(runnerId)) {
       void this.reconcileUncertainIssueClosures(campaignId).catch(() => this.log.warn(`Issue closure recovery is pending for ${campaignId}`));
@@ -7162,13 +7181,31 @@ export class SessionsService {
         !runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "ownerQuestions")) return;
     const prior = this.db.campaignHandoffQuestion(campaignId);
     const handoffs = this.db.campaignWorkLedger.completionFacts(campaignId).handoffs;
+    const revision = root.parentControlPolicy?.revision ?? 0;
+    const retireSupersededDecline = (current: string | null) => {
+      const retired = this.db.campaignRecovery.retireSupersededHandoffDecline(campaignId, current);
+      const legacy = this.db.campaignRecovery.singleRootCredentialDecline(campaignId, revision);
+      let retiredLegacy = false;
+      if (current !== null && legacy === current) {
+        // Old floor and model refusals used the exact same content coordinate but a shared row.
+        this.db.campaignRecovery.blockHandoffCredentials(campaignId, current, revision, Date.now());
+        retiredLegacy = this.db.campaignRecovery.retireLegacyHandoffDecline(campaignId, current, current, revision);
+      } else if (legacy) {
+        const oldQuestion = this.db.campaignDeniedHandoffQuestions(campaignId).find(decision =>
+          recoveryCoordinate(`workflow:${campaignId}:${decision.requestId}`) === legacy);
+        if (oldQuestion) {
+          const content = recoveryCoordinate(`campaign_handoffs:${oldQuestion.resourceDigest}`);
+          if (content !== current) retiredLegacy = this.db.campaignRecovery.retireLegacyHandoffDecline(campaignId, legacy, content, revision);
+        }
+      }
+      if (retired || retiredLegacy) this.campaignRecovery.synchronize(root, Date.now());
+    };
     if (!handoffs.some(item => item.handoff.responsibleActor === "human")) {
+      retireSupersededDecline(null);
       if (prior?.status === "pending") this.revokeWorkflowDecision(prior, { reason: "authority_superseded",
         triggeredBy: { kind: "system", id: "campaign_handoffs" } });
       return;
     }
-    const projection = this.db.campaignProjection(campaignId);
-    if (prior?.status !== "pending" && projection?.status !== "stuck" && projection?.status !== "complete_needs_cleanup") return;
     const material = [...handoffs].sort((a, b) => a.workItemId.localeCompare(b.workItemId)).map(item => {
       const issue = item.issue ? `${item.issue.repository}#${item.issue.number}: ` : "";
       return `- ${issue}${item.title} (${item.handoff.responsibleActor})\n  Reason: ${item.handoff.reason}\n  Next action: ${item.handoff.nextAction}`;
@@ -7180,26 +7217,23 @@ export class SessionsService {
     const snapshot = normalized.data;
     snapshot.material = material + "\n\nThis question authorizes nothing. Your answer grants no action authority.";
     const digest = workflowDecisionResourceDigest(snapshot);
-    if (prior?.resourceDigest === digest && prior.status !== "revoked") return;
     const declineCoordinate = recoveryCoordinate(`campaign_handoffs:${digest}`);
-    const revision = root.parentControlPolicy?.revision ?? 0;
-    if (this.db.campaignRecovery.hasDeclinedOccurrence(campaignId, campaignId, declineCoordinate, revision)) {
-      if (prior?.status === "pending") this.revokeWorkflowDecision(prior, { reason: "authority_superseded",
-        triggeredBy: { kind: "system", id: "campaign_handoffs" } });
-      this.campaignRecovery.synchronize(this.db.getSession(campaignId) ?? root, Date.now());
-      return;
-    }
-    const requestId = prior?.status === "pending" ? prior.requestId : `campaign_handoffs_${digest}_${prior?.occurrenceId ?? "initial"}`;
+    retireSupersededDecline(declineCoordinate);
+    const previouslyDeclined = this.db.campaignRecovery.hasDeclinedOccurrence(campaignId, campaignId, declineCoordinate, revision);
     const blocked = () => {
       if (prior?.status === "pending") this.revokeWorkflowDecision(prior, { reason: "authority_superseded",
         triggeredBy: { kind: "system", id: "campaign_handoffs" } });
-      this.db.campaignRecovery.recordDecline(campaignId, campaignId, "secrets_and_sign_in",
-        declineCoordinate, revision, Date.now());
+      this.db.campaignRecovery.blockHandoffCredentials(campaignId, declineCoordinate, revision, Date.now());
       this.campaignRecovery.synchronize(this.db.getSession(campaignId) ?? root, Date.now());
     };
+    if (previouslyDeclined) { blocked(); return; }
+    if (prior?.resourceDigest === digest && prior.status !== "revoked") return;
+    const projection = this.db.campaignProjection(campaignId);
+    if (prior?.status !== "pending" && projection?.status !== "stuck" && projection?.status !== "complete_needs_cleanup") return;
+    const requestId = prior?.status === "pending" ? prior.requestId : `campaign_handoffs_${digest}_${prior?.occurrenceId ?? "initial"}`;
     // Handoff text is agent-written. Server-owned coordinates do not make its content trusted.
     if (credentialFormFloor(snapshot)) { blocked(); return; }
-    const screen = await this.screenCredentialText(root, campaignId, "owner_decision", requestId, ownerDecisionScreenData(snapshot));
+    const screen = await this.screenCredentialText(root, campaignId, "owner_decision", requestId, ownerDecisionScreenData(snapshot), true);
     const latest = this.db.getSession(campaignId);
     const current = this.db.campaignHandoffQuestion(campaignId);
     if (!latest || latest.archived || isTerminal(latest.status) || latest.orchestratorPolicy?.control?.mode !== "full_control" ||
@@ -7221,7 +7255,7 @@ export class SessionsService {
       return;
     }
     const result = this.createWorkflowDecision(campaignId, {
-      requestId, resourceKey: "campaign_handoffs:owner", resourceSnapshot: snapshot,
+      requestId, resourceKey: CAMPAIGN_HANDOFF_QUESTION_KEY, resourceSnapshot: snapshot,
     }, () => true, { trustedOwnerDecision: true, trustedCampaignHandoffs: true, credentialScreen: screen });
     if (!result.ok) this.log.warn(`campaign handoff question for ${campaignId} was refused: ${result.error}`);
   }
@@ -9046,7 +9080,7 @@ export class SessionsService {
     /** #3240: wait for a busy provider account instead of failing the launch. */
     waitForProviderHome?: boolean;
     campaignResume?: boolean;
-  } = {}): ServiceResult<SessionView> {
+  } = {}): ServiceResult<SessionView & { initialPromptWarning?: string }> {
     if (this.db.campaignPaused(sessionId) && !options.campaignResume) return fail("The campaign is paused; only its owner or scheduled resume can restart it.", 409);
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "runs once and cannot be restarted");
     if (reviewRefusal) return fail(reviewRefusal, 409);
@@ -9360,7 +9394,12 @@ export class SessionsService {
     this.hub.sessionChangedById(sessionId);
     this.publishCampaignAttentionTransition(campaignBefore);
     this.log.info(unarchived ? `session unarchived and restarted ${sessionId}` : `session restarted ${sessionId}`);
-    return ok(this.db.getSession(sessionId)!);
+    const restarted = this.db.getSession(sessionId)!;
+    if (session.status === "stopped" && this.db.hasInterruptedInitialPrompt(sessionId)) {
+      return ok({ ...restarted,
+        initialPromptWarning: "The initial prompt was not carried into this restart. Resend it if it did not run before Stop." });
+    }
+    return ok(restarted);
   }
 
   setParentControl(sessionId: string, mode: ParentControlMode): ServiceResult<SessionView> {
@@ -14762,7 +14801,7 @@ export class SessionsService {
       return fail(`requestId and resourceKey may not start with ${MERGE_CLOSURE_REPORT_REQUEST_PREFIX} or ${MERGE_CLOSURE_REPORT_RESOURCE_PREFIX}, ` +
         "which Wollipog reserves for its own reports", 400);
     }
-    if ((request.requestId.startsWith("campaign_handoffs_") || request.resourceKey === "campaign_handoffs:owner") &&
+    if ((request.requestId.startsWith("campaign_handoffs_") || request.resourceKey === CAMPAIGN_HANDOFF_QUESTION_KEY) &&
         !internal?.trustedCampaignHandoffs) return fail("Campaign handoff question coordinates are reserved for the server", 400);
     const ownerRule = normalizeWorkflowDecisionOwnerRule(request.ownerRule);
     if (!ownerRule.ok) return fail(ownerRule.message, 400);
@@ -15142,10 +15181,11 @@ export class SessionsService {
     if (decision.authority !== "human" || actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(sessionId, actor.id)) {
       return fail("Only the campaign's owner can answer an owner question", 403);
     }
-    // A question the Decision Model could not screen is classified first, never answered (#4104):
-    // only its owner's Decline, which dismisses it, settles it from there.
+    // A held question cannot be answered. The owner may discard the server's informational
+    // handoff without making a statement about credentials.
     if (credentialScreenDecline && action !== "dismiss") return fail("a declined question cannot be answered", 400);
-    if (decision.authorityEvaluation?.reason === "credential_screen_review" && !credentialScreenDecline) {
+    const plainHandoffDismissal = action === "dismiss" && isCampaignHandoffQuestion(decision);
+    if (decision.authorityEvaluation?.reason === "credential_screen_review" && !credentialScreenDecline && !plainHandoffDismissal) {
       return fail(TYPED_QUESTION_CLASSIFY_FIRST, 409);
     }
     const root = this.db.getSession(sessionId);
@@ -15161,6 +15201,7 @@ export class SessionsService {
     if (!resolved) return fail("this owner question was answered concurrently", 409);
     this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
     this.recordWorkflowDecisionAudit(resolved, answer ? "answered" : "denied", actor, now);
+    if (plainHandoffDismissal) this.campaignRecovery.synchronize(root, now);
     void this.reconcileUncertainIssueClosures(sessionId).catch(() => this.log.warn("Issue closure acknowledgement is pending"));
     this.hub.sessionChangedById(sessionId);
     this.publishCampaignAttentionTransition(root);
@@ -15255,8 +15296,13 @@ export class SessionsService {
             "sign-in or access. Continue without them; the request is recorded as blocked work." },
           "human", actor, canAccess, { credentialScreenDecline: true });
         if (!denied.ok) return failAs(denied);
-        this.db.campaignRecovery.recordDecline(root.id, session.id, "secrets_and_sign_in",
-          recoveryCoordinate(`workflow:${session.id}:${decision.requestId}`), root.parentControlPolicy?.revision ?? 0, now);
+        const revision = root.parentControlPolicy?.revision ?? 0;
+        if (isCampaignHandoffQuestion(decision)) {
+          this.db.campaignRecovery.blockHandoffCredentials(root.id, recoveryCoordinate(`campaign_handoffs:${decision.resourceDigest}`), revision, now);
+        } else {
+          this.db.campaignRecovery.recordDecline(root.id, session.id, "secrets_and_sign_in",
+            recoveryCoordinate(`workflow:${session.id}:${decision.requestId}`), revision, now);
+        }
         this.campaignRecovery.synchronize(root, now);
       } else {
         const control = root.orchestratorPolicy?.control;
@@ -15352,7 +15398,7 @@ export class SessionsService {
    * The runtime is idempotent per occurrence, so a replay joins the recorded outcome and never
    * records a second verdict. A screen that cannot even start is a failure: the owner classifies. */
   private async screenCredentialText(root: SessionView, sessionId: string, surface: CredentialScreenSurface,
-    requestId: string, data: string): Promise<CredentialScreenFact | null> {
+    requestId: string, data: string, retryUnavailableHarness = false): Promise<CredentialScreenFact | null> {
     const organizationId = this.db.sessionScope(root.id)?.organizationId;
     // With no organization there is no audit to hold a failure for its owner to classify, so the
     // caller refuses the request and nobody can answer it.
@@ -15360,7 +15406,8 @@ export class SessionsService {
     try {
       // A screen the runtime cannot finish is recorded as an audited failure the owner classifies.
       return await screenCredentialRequest(this.db, this.decisionRuntime, { organizationId, campaignSessionId: root.id, sessionId,
-        surface, requestId, data, automaticHarness: root.agentId ? { runnerId: root.runnerId, agentId: root.agentId, driver: root.driver } : null });
+        surface, requestId, data, retryUnavailableHarness,
+        automaticHarness: root.agentId ? { runnerId: root.runnerId, agentId: root.agentId, driver: root.driver } : null });
     } catch (error) {
       this.log.warn(`credential screen for ${sessionId} could not be recorded: ${(error as Error).message}`);
       return null;
@@ -16874,18 +16921,24 @@ export class SessionsService {
   async reconcileWorkflowDecision(
     sessionId: string,
     occurrenceId: string,
-    request: Pick<ConsumeWorkflowDecisionRequest, "resourceSnapshot">,
+    request: ReconcileWorkflowDecisionRequest,
     canAccess: (sessionId: string) => boolean = () => true,
   ): Promise<ServiceResult<WorkflowDecisionView>> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
-    if (decision.status === "superseded" && decision.supersededBy) {
+    if (request?.externalMerge !== undefined && request.externalMerge !== true) {
+      return fail("externalMerge must be true when supplied", 400);
+    }
+    const externalMerge = request?.externalMerge === true;
+    const superseded = !externalMerge && decision.status === "superseded" &&
+      this.db.reconcilableSupersededMerge(occurrenceId) !== null;
+    if (decision.status === "superseded" && decision.supersededBy && !superseded) {
       return { ok: false, status: 409, errorDetails: { code: "workflow_decision_superseded", supersededBy: decision.supersededBy },
         error: `workflow decision ${occurrenceId} was superseded by workflow decision ${decision.supersededBy}; ` +
           "it is settled and has nothing left to reconcile" };
     }
-    if (decision.status !== "approved" && decision.status !== "retired" &&
-        !this.db.isRecoverableWorkflowDecisionActionRevocation(sessionId, occurrenceId)) {
+    if (decision.status !== "approved" && (externalMerge || (!superseded && decision.status !== "retired" &&
+        !this.db.isRecoverableWorkflowDecisionActionRevocation(sessionId, occurrenceId)))) {
       return fail(`workflow decision cannot be reconciled from ${decision.status} state`, 409);
     }
     const normalized = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot);
@@ -16915,16 +16968,32 @@ export class SessionsService {
     const command = canonicalPrMergeEnqueueCommand(normalized.data);
     const admission = decision.actionAdmission;
     const action: WorkflowDecisionAction = { kind: "pr_merge_enqueue", command };
-    if (!admission || admission.kind !== action.kind || admission.command !== command ||
+    if (admission && (admission.kind !== action.kind || admission.command !== command ||
         admission.commandDigest !== auditDigest(action) || !Number.isSafeInteger(admission.armedAt) ||
-        admission.armedAt < 1) {
+        admission.armedAt < 1)) {
       return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     }
+    if (externalMerge) {
+      const observation = await this.readMergeSettlementObservation(decision, normalized.data);
+      if (observation?.state !== "merged" || observation.headSha !== normalized.data.headSha ||
+          observation.mergedAt === undefined || decision.resolvedAt === undefined ||
+          observation.mergedAt <= decision.resolvedAt) {
+        return fail("the forge must prove that the approved head merged after the approval", 409);
+      }
+      if (!this.mergeSettlementAuthority(decision, true, canAccess)) {
+        return fail("workflow decision authority or ancestry changed during reconciliation", 409);
+      }
+      const consumed = this.consumeForgeAttestedMerge(decision, normalized.data, { forgeHeadSha: observation.headSha }, true);
+      if (!consumed) return fail("workflow action proof was already used or the decision changed", 409);
+      this.retireResumeConsumedByRequester(consumed, Date.now());
+      return ok(this.withMergeReviewEvidence(consumed));
+    }
+    if (!admission) return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     // An enqueue Wollipog ran itself left no provider receipt in any harness, so the forge settles it.
     if (decision.retirement || child.driver === "claude-code" || this.wollipogMayHaveEnqueued(decision)) {
       const proven = await this.forgeAttestedMergeProof(child, decision, normalized.data);
       if (!proven.ok) return fail(proven.error!, 409);
-      const current = this.forgeAttestedMergeAuthority(decision, true, canAccess);
+      const current = this.mergeSettlementAuthority(decision, true, canAccess);
       if (!current) return fail("workflow decision authority or ancestry changed during reconciliation", 409);
       const consumed = this.consumeForgeAttestedMerge(decision, normalized.data, proven.data!);
       if (!consumed) return fail("workflow action proof was already used or the decision changed", 409);
@@ -17015,6 +17084,7 @@ export class SessionsService {
       admission.commandDigest,
       receiptDigest,
       now,
+      { recoverSuperseded: superseded },
     );
     if (!reconciled) return fail("workflow action proof was already used or the decision changed", 409);
     const consumed = reconciled.decision;
@@ -18229,6 +18299,7 @@ export class SessionsService {
 
   private revokeWorkflowDecision(
     decision: WorkflowDecisionView, cause: WorkflowDecisionRevocationCause, oweRestartNotice = false, rationale?: string,
+    scheduleMergeCheck = false,
   ): void {
     // A caller may hold a decision it read before an await. One that settled meanwhile (withdrawn,
     // consumed or resolved) keeps its own record: a later refusal must not audit or report it again
@@ -18237,9 +18308,14 @@ export class SessionsService {
     if (current?.status !== "pending" && current?.status !== "approved") return;
     const now = Date.now();
     const controllerBefore = this.db.getSession(decision.controllingSessionId);
-    this.db.markWorkflowDecisionRevoked(decision.occurrenceId, now, oweRestartNotice);
+    const mergeCheck = scheduleMergeCheck && current.status === "approved" ? {
+      nextAt: now + LIFECYCLE_MERGE_RECHECK_MS,
+      expiresAt: now + LIFECYCLE_MERGE_CHECK_WINDOW_MS,
+      audit: () => this.recordWorkflowDecisionRevocation(current, cause, now, rationale),
+    } : undefined;
+    this.db.markWorkflowDecisionRevoked(decision.occurrenceId, now, oweRestartNotice, false, mergeCheck);
     this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
-    this.recordWorkflowDecisionRevocation(current, cause, now, rationale);
+    if (!mergeCheck) this.recordWorkflowDecisionRevocation(current, cause, now, rationale);
     this.hub.sessionChangedById(decision.sessionId);
     this.publishCampaignAttentionTransition(controllerBefore);
   }
@@ -18781,11 +18857,12 @@ export class SessionsService {
     if (pause && pause.resumedAt === undefined && pause.stoppedSessionIds.includes(sessionId)) return;
     const child = this.db.getSession(sessionId);
     for (const decision of this.db.unconsumedWorkflowDecisionsForSession(sessionId)) {
-      const settle = child ? this.forgeSettlesArmedMerge(child, decision) : false;
+      const settle = child && decision.authority === "orchestrator" &&
+        FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS.includes(actorId) && this.forgeSettlesArmedMerge(child, decision);
       this.revokeWorkflowDecision(decision, {
         reason: actorId === "session-restarted" ? "session_restarted" : "session_ended", systemId: actorId,
-      }, actorId === "session-restarted");
-      if (settle) void this.settleArmedMergeFromForge(child!, decision);
+      }, actorId === "session-restarted", undefined, Boolean(settle));
+      if (settle) void this.settleArmedMergeFromForge(child, decision);
     }
     // A child that already reads terminal was stopped provisionally, which kept any in-flight
     // resume for the runner's return (#1827). This end is final, so that resume ends too; a live
@@ -18834,7 +18911,7 @@ export class SessionsService {
         WorkflowDecisionResourceSnapshot, { category: "pr_merge" }
       >;
       const proven = await this.forgeAttestedMergeProof(child, decision, snapshot);
-      if (proven.ok && this.forgeAttestedMergeAuthority(decision, false)) {
+      if (proven.ok && this.mergeSettlementAuthority(decision, false)) {
         this.consumeForgeAttestedMerge(decision, snapshot, proven.data!);
       }
     } catch (error) {
@@ -18844,6 +18921,47 @@ export class SessionsService {
     } finally {
       this.forgeMergeSettlements.delete(decision.occurrenceId);
     }
+  }
+
+  private async readMergeSettlementObservation(
+    decision: WorkflowDecisionView, snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
+  ) {
+    const ref = { repository: snapshot.repository, number: snapshot.pullRequest };
+    const campaign = this.db.campaignAncestryRoot(decision.sessionId);
+    if (typeof campaign !== "object" || !campaign.hasPolicy || !this.campaignForgeReadNow) return undefined;
+    const results = await this.campaignForgeReadNow(campaign.id, [ref]);
+    return results?.find((result) => forgeRefKey(result.ref) === forgeRefKey(ref))?.observation;
+  }
+
+  /** Retry a stopped child's read only. The next attempt and deadline survive a restart. */
+  async retryLifecycleMergeSettlements(now = Date.now(), runnerId?: string): Promise<void> {
+    if (!this.campaignForgeReadNow) return;
+    const attempts: Promise<void>[] = [];
+    for (const { occurrenceId, expiresAt } of this.db.dueLifecycleMergeChecks(now, runnerId)) {
+      if (this.forgeMergeSettlements.size >= 16) break;
+      if (this.forgeMergeSettlements.has(occurrenceId) ||
+          !this.db.deferLifecycleMergeCheck(occurrenceId, now, now + LIFECYCLE_MERGE_RECHECK_MS)) continue;
+      const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+      const snapshot = decision?.resourceSnapshot;
+      if (!decision || snapshot?.category !== "pr_merge" || !this.mergeSettlementAuthority(decision, false) ||
+          !this.db.isRecoverableWorkflowDecisionActionRevocation(decision.sessionId, occurrenceId, FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS)) {
+        this.db.finishLifecycleMergeCheck(occurrenceId);
+        continue;
+      }
+      this.forgeMergeSettlements.add(occurrenceId);
+      attempts.push(this.readMergeSettlementObservation(decision, snapshot).then((observation) => {
+        if (!observation) return;
+        if (observation.state !== "open" || observation.headSha !== snapshot.headSha) {
+          if (Date.now() < expiresAt && observation.state === "merged" && observation.headSha === snapshot.headSha &&
+              this.mergeSettlementAuthority(decision, false)) {
+            this.consumeForgeAttestedMerge(decision, snapshot, { forgeHeadSha: observation.headSha });
+          }
+          this.db.finishLifecycleMergeCheck(occurrenceId);
+        }
+      }).catch((error: unknown) => this.log.warn(`lifecycle merge observation for ${occurrenceId} failed: ${String(error)}`))
+        .finally(() => this.forgeMergeSettlements.delete(occurrenceId)));
+    }
+    await Promise.all(attempts);
   }
 
   /** Whether Wollipog itself may have run this armed enqueue (#4067): its own record shows an
@@ -18958,7 +19076,7 @@ export class SessionsService {
       this.evaluateWorkflowDecisionAuthority(parent, policy, decision.sessionId, decision.resourceSnapshot).effectiveOwner === "orchestrator";
   }
 
-  private forgeAttestedMergeAuthority(
+  private mergeSettlementAuthority(
     decision: WorkflowDecisionView,
     requireLive: boolean,
     canAccess: (sessionId: string) => boolean = () => true,
@@ -18966,7 +19084,7 @@ export class SessionsService {
     const child = this.db.getSession(decision.sessionId);
     const parent = this.db.getSession(decision.controllingSessionId);
     const policy = parent?.parentControlPolicy;
-    if (!child || !parent || !policy || (!decision.retirement && child.driver !== "claude-code" && !this.wollipogMayHaveEnqueued(decision)) ||
+    if (!child || !parent || !policy ||
         (requireLive && (isTerminal(child.status) || isTerminal(parent.status))) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
         !this.workflowDecisionRelationship(parent.id, child.id) ||
@@ -18984,6 +19102,7 @@ export class SessionsService {
     decision: WorkflowDecisionView,
     snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
     proof: { forgeHeadSha: string },
+    externalMerge = false,
   ): WorkflowDecisionView | null {
     // One merged head is one action: the same forge fact cannot settle a second occurrence in any
     // session.
@@ -18997,14 +19116,16 @@ export class SessionsService {
     const reconciled = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(
       decision.sessionId,
       decision.occurrenceId,
-      decision.actionAdmission!.commandDigest,
+      decision.actionAdmission?.commandDigest ?? auditDigest({ kind: "pr_merge_enqueue",
+        command: canonicalPrMergeEnqueueCommand(snapshot) })!,
       receiptDigest,
       now,
-      { forgeAttested: true },
+      { forgeAttested: true, externalMerge, recoverSuperseded: decision.status === "superseded" },
     );
     if (!reconciled) return null;
     const consumed = reconciled.decision;
-    const actor: GovernanceActor = { kind: "system", id: "workflow-decision-forge-reconciliation" };
+    const actor: GovernanceActor = { kind: "system", id: externalMerge
+      ? "workflow-decision-external-merge-reconciliation" : "workflow-decision-forge-reconciliation" };
     this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
     this.settleSupersededArmedMerges(reconciled.supersededOccurrenceIds, actor, now);
     this.hub.sessionChangedById(consumed.sessionId);

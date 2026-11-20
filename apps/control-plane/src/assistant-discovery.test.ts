@@ -7,6 +7,7 @@ import { ControlPlaneDb } from "./db.js";
 import type { AssistantGrant } from "./assistant-connections.js";
 import { ASSISTANT_DISCOVERY_MAX_BYTES, createAssistantOperations } from "./assistant-routes.js";
 import { registerAssistantSessionOperations, SESSION_LAUNCH_CONFIG_FIELDS } from "./assistant-session-operations.js";
+import { WOLLIPOG_ASSISTANT_SKILL } from "./assistant-skill.js";
 import type { SessionsService } from "./sessions.js";
 
 /** A connection over a fixture inventory far larger than any real one: 300 operations with long
@@ -27,28 +28,19 @@ function fixture(grant: AssistantGrant = { operations: "all", projects: "all" })
   const credential = db.assistantConnections.authenticate(issued.token)!;
   const discover = async (args: unknown = {}) => {
     const text = JSON.stringify(await operations.call(credential, "assistant_discover", args));
-    assert.ok(Buffer.byteLength(text) <= ASSISTANT_DISCOVERY_MAX_BYTES, `discovery result of ${Buffer.byteLength(text)} bytes`);
+    const escapedBytes = Buffer.byteLength(JSON.stringify(text)) - 2;
+    assert.ok(escapedBytes <= ASSISTANT_DISCOVERY_MAX_BYTES, `discovery result of ${escapedBytes} escaped bytes`);
     return JSON.parse(text);
   };
   return { db, operations, connection: issued.connection, discover };
 }
-
-test("the harnesses' documented limits stay above the discovery bound", () => {
-  // Claude Code saves an MCP text result over 50,000 characters to a file, warns past 10,000
-  // tokens and caps at 25,000 (code.claude.com/docs/en/mcp, "MCP output limits and warnings").
-  // Codex keeps 10,000 tokens of a tool result for every catalog model
-  // (openai/codex codex-rs/models-manager/models.json, `truncation_policy`), about 40,000 bytes at
-  // its 4 bytes per token (codex-rs/utils/output-truncation). JSON runs about 3 bytes per token,
-  // so the bound must also stay under 10,000 tokens at that density.
-  assert.ok(ASSISTANT_DISCOVERY_MAX_BYTES < 50_000);
-  assert.ok(ASSISTANT_DISCOVERY_MAX_BYTES < 10_000 * 3);
-});
 
 test("a Full Access discovery pages names and descriptions within the bound and lists every operation once", async () => {
   const { operations, connection, discover } = fixture();
   const first = await discover();
   assert.equal(first.skill.name, "wollipog");
   assert.equal(first.connection.id, connection.id);
+  assert.deepEqual(first.connection.grant, connection.grant);
   assert.match(first.inputSchemas, /"operations"/u);
   assert.ok(first.operations.every((operation: object) => !("inputSchema" in operation)));
   const names: string[] = first.operations.map((operation: { name: string }) => operation.name);
@@ -61,6 +53,30 @@ test("a Full Access discovery pages names and descriptions within the bound and 
     cursor = page.nextCursor;
   }
   assert.deepEqual(names, operations.list(connection).map(operation => operation.name));
+});
+
+test("the guide stays discoverable when it cannot fit beside the connection's grant", async () => {
+  const projects = Array.from({ length: 45 }, (_, index) => `project_${String(index).padStart(120, "0")}`);
+  const { connection, discover } = fixture({ operations: ["assistant_discover", "fixture_001"], projects });
+  const first = await discover();
+  assert.deepEqual(first.connection, connection);
+  assert.equal(first.skill, undefined);
+  assert.match(first.skillHint, /\{"skill": true\}/u);
+  assert.deepEqual(await discover({ skill: true }), { skill: WOLLIPOG_ASSISTANT_SKILL });
+});
+
+test("an oversized saved grant leaves identity and grant-filtered discovery available", async () => {
+  const projects = Array.from({ length: 500 }, (_, index) => `project_${String(index).padStart(120, "0")}`);
+  const { connection, discover } = fixture({
+    operations: ["assistant_discover", "fixture_001"], projects, destructiveConfirmation: "confirm",
+  });
+  const first = await discover();
+  assert.equal(first.connection.id, connection.id);
+  assert.equal(first.connection.revision, connection.revision);
+  assert.equal(first.connection.grant, undefined);
+  assert.equal(first.destructiveConfirmation, "confirm");
+  assert.match(first.grantNotice, /exact grant exceeds the tool-result limit/u);
+  assert.deepEqual(first.operations.map((operation: { name: string }) => operation.name), ["assistant_discover", "fixture_001"]);
 });
 
 test("any granted operation's full schema is discoverable, in bounded batches", async () => {
@@ -80,6 +96,32 @@ test("any granted operation's full schema is discoverable, in bounded batches", 
   for (const operation of received) assert.deepEqual(operation.inputSchema, expected.get(operation.name));
 });
 
+test("a schema larger than the whole page is refused without producing a stuck continuation", async () => {
+  const { operations, discover } = fixture();
+  operations.register({
+    name: "oversized_schema", description: "Fixture with an oversized schema.",
+    inputSchema: { type: "object", description: '"'.repeat(3_000) },
+    metadata: true, resolveTarget: () => ({ kind: "fixture", id: "oversized_schema" }),
+    ownerCanAccess: () => true, execute: () => ({}),
+  });
+  await assert.rejects(discover({ operations: ["oversized_schema"] }), /schema does not fit/u);
+});
+
+test("a schema that fits by itself can be retried separately from its batch", async () => {
+  const { operations, discover } = fixture();
+  const inputSchema = { type: "object", description: "x".repeat(7_500) };
+  operations.register({
+    name: "large_schema", description: "Fixture with a large schema.", inputSchema,
+    metadata: true, resolveTarget: () => ({ kind: "fixture", id: "large_schema" }),
+    ownerCanAccess: () => true, execute: () => ({}),
+  });
+  const unavailable = Array.from({ length: 62 }, (_, index) => `z${String(index).padStart(31, "0")}`);
+  const batch = await discover({ operations: ["large_schema", "fixture_001", ...unavailable] });
+  assert.deepEqual(batch, { operations: [], unavailable, remaining: ["fixture_001"], requestSeparately: "large_schema" });
+  assert.deepEqual((await discover({ operations: [batch.requestSeparately] })).operations[0].inputSchema, inputSchema);
+  assert.equal((await discover({ operations: batch.remaining })).operations[0].name, "fixture_001");
+});
+
 test("discovery stays filtered by the connection's grant", async () => {
   const { discover } = fixture({ operations: ["assistant_discover", "session_launch", "fixture_001"], projects: "all" });
   const listed = await discover();
@@ -96,7 +138,9 @@ test("discovery refuses malformed arguments", async () => {
   await assert.rejects(discover({ operations: [] }), /1 to 64 operation names/u);
   await assert.rejects(discover({ operations: Array.from({ length: 65 }, (_, index) => `fixture_${index}`) }), /1 to 64/u);
   await assert.rejects(discover({ operations: ["session_launch"], cursor: "session_launch" }), /not both/u);
-  await assert.rejects(discover({ schemas: true }), /only operations or cursor/u);
+  await assert.rejects(discover({ schemas: true }), /only operations, cursor or skill/u);
+  await assert.rejects(discover({ skill: false }), /Set skill to true/u);
+  await assert.rejects(discover({ skill: true, cursor: "session_launch" }), /Send skill by itself/u);
   // Unknown names are echoed in `unavailable`, so a long one is refused rather than returned.
   await assert.rejects(discover({ operations: ["x".repeat(60_000)] }), /at most 32 characters/u);
   await assert.rejects(discover({ operations: ["x".repeat(33)] }), /at most 32 characters/u);
@@ -131,7 +175,11 @@ test("the production inventory's discovery fits the bound in every form", { time
   assert.equal(child.status, 0, "Production discovery verification failed; raw logs withheld.");
   const line = child.stdout.split("\n").find(candidate => candidate.startsWith("ASSISTANT_DISCOVERY_SIZE "));
   assert.ok(line);
-  const size = JSON.parse(line.slice("ASSISTANT_DISCOVERY_SIZE ".length)) as { operations: number; listPages: number[]; largestSchema: number; schemaPages: number[] };
+  const size = JSON.parse(line.slice("ASSISTANT_DISCOVERY_SIZE ".length)) as { operations: number; listPages: number[]; largestSchema: number; schemaPages: number[]; skillPage: number };
   assert.ok(size.operations > 100, "the snapshot must read the full production inventory");
-  for (const bytes of [...size.listPages, size.largestSchema, ...size.schemaPages]) assert.ok(bytes <= ASSISTANT_DISCOVERY_MAX_BYTES, `${bytes} bytes`);
+  // Codex 0.169.1 configures 10,000 bytes for unknown models in models-manager/src/model_info.rs.
+  // Assert on the actual response, including double-escaped schema text and the JSON-RPC wrapper.
+  for (const bytes of [...size.listPages, size.largestSchema, ...size.schemaPages, size.skillPage]) {
+    assert.ok(bytes <= 9_100, `MCP response of ${bytes} bytes must leave room below Codex's 10,000-byte fallback`);
+  }
 });

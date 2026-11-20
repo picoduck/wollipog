@@ -3,6 +3,7 @@ import { withoutProviderAccountNames } from "./agent-account-view.js";
 import { AssistantPromptImages } from "./assistant-prompt-images.js";
 import { createCampaignReviewManagement } from "./campaign-review-management.js";
 import { registerAssistantCampaignManagement } from "./assistant-campaign-management.js";
+import { registerAssistantCampaignStart } from "./assistant-campaign-start.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 import { providerLoginStartFailure } from "./provider-login-start-failure.js";
 import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
@@ -91,6 +92,7 @@ import {
   type DescendantRequestResolution,
   type CreateWorkflowDecisionRequest,
   type ConsumeWorkflowDecisionRequest,
+  type ReconcileWorkflowDecisionRequest,
   type WithdrawWorkflowDecisionRequest,
   type ExecuteWorkflowDecisionRequest,
   type CreateOwnerDecisionRequest,
@@ -774,8 +776,12 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   const sessionId = typeof params.id === "string" && routePath.startsWith("/api/sessions/") ? params.id
     : typeof params.sessionId === "string" ? params.sessionId : null;
   if (sessionId && principal.kind === "agent") {
+    const credentialSessionId = principal.credentialSessionId;
     const credentialTargetError = agentCredentialSessionTargetError(routePath, principal, sessionId,
-      Boolean(principal.credentialSessionId && db.isSessionDescendant(principal.credentialSessionId, sessionId)));
+      Boolean(credentialSessionId && db.isSessionDescendant(credentialSessionId, sessionId)),
+      () => Boolean(credentialSessionId && req.method === "POST" &&
+        (routePath !== "/api/sessions/:id/archive" || (req.body as { archived?: unknown } | null)?.archived === true) &&
+        db.reviewSessions.isTerminalForRequester(sessionId, credentialSessionId)));
     if (credentialTargetError) return { statusCode: 404, error: "session not found" };
   }
   if (sessionId && !db.canAccessSession(principal, sessionId)) {
@@ -2473,6 +2479,9 @@ app.get("/api/onboarding", async (): Promise<OnboardingInfo> => {
 
 registerRunnerCredentialRoutes(app, { db, hub, requestHuman });
 const {operations: assistantOperations, ingress: assistantDiscordIngress, receipts: assistantCommandReceipts} = createAssistantManagement(db, svc);
+const reviseAssistantCampaign = registerAssistantCampaignStart(assistantOperations, { db, hub, sessions: svc,
+  settings: orchestratorSettings, evidenceDisclosures: evidenceAuthorityDisclosures,
+  videoCertification: (runnerId) => videoEvidence.launchCertification(runnerId) }, assistantCommandReceipts);
 export { assistantOperations };
 const assistantManagementMutations = new ManagementMutations(assistantCommandReceipts, db.instanceId(), assistantRequestDigest,
   id => db.assistantConnections.get(id)!, id => db.assistantConnections.destructiveConfirmation(id),
@@ -2487,7 +2496,7 @@ registerAssistantConnectionOperations(assistantOperations, {db, outbound: outbou
 registerAssistantRoutes(app, { db, operations: assistantOperations, requestHuman });
 const assistantThreads = createAssistantThreads(db, hub, svc);
 const assistantOwnerConfirmations = createAssistantOwnerConfirmationService(db, svc, assistantOperations);
-registerAssistantThreadRoutes(app, { threads: assistantThreads, confirmations: assistantOwnerConfirmations, requestHuman });
+registerAssistantThreadRoutes(app, { threads: assistantThreads, confirmations: assistantOwnerConfirmations, requestHuman, reviseCampaign: reviseAssistantCampaign });
 registerAssistantWorkOwnerRoutes(app, { db, outboundEvents, requestHuman });
 registerAssistantDiscordIngress(app, { db, ingress: assistantDiscordIngress, requestHuman });
 
@@ -4243,7 +4252,7 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/reconcile", async (
   return respond(reply, await svc.reconcileWorkflowDecision(
     id,
     occurrenceId,
-    req.body as Pick<ConsumeWorkflowDecisionRequest, "resourceSnapshot">,
+    req.body as ReconcileWorkflowDecisionRequest,
     (sessionId) => db.canAccessSession(principal, sessionId),
   ));
 });

@@ -22,33 +22,35 @@ import { BusyButton } from "./ui/BusyButton.js";
  * drawn first, ahead of the work they would unblock, in their own list. Only the work cards scroll,
  * so an owner's action is never left at a scroll edge.
  */
-export function AssistantWorkCards({ sessionIds, confirmations }: {
+export function AssistantWorkCards({ sessionIds, campaignIds, confirmations }: {
   sessionIds: readonly string[];
+  campaignIds?: readonly string[];
   confirmations?: ReactNode;
 }) {
+  const ids = useMemo(() => campaignIds?.length ? [...sessionIds, ...campaignIds] : sessionIds, [sessionIds, campaignIds]);
   // Work waiting on the person comes first, so its approval is never the card scrolled out of view.
-  const waiting = useStoreSelector((state) => sessionIds.filter((id) => {
+  const waiting = useStoreSelector((state) => ids.filter((id) => {
     const session = state.sessions.get(id);
     return session !== undefined && !session.archived && prioritizedPendingRequests(session.pendingApproval).length > 0;
   }).join("\n"));
   const ordered = useMemo(() => {
     const first = new Set(waiting ? waiting.split("\n") : []);
-    return [...sessionIds.filter((id) => first.has(id)), ...sessionIds.filter((id) => !first.has(id))];
-  }, [sessionIds, waiting]);
-  if (sessionIds.length === 0 && !confirmations) return null;
+    return [...ids.filter((id) => first.has(id)), ...ids.filter((id) => !first.has(id))];
+  }, [ids, waiting]);
+  if (ids.length === 0 && !confirmations) return null;
   return (
     <section className="assistant-work" aria-label="Launched Work">
       {confirmations && <ul className="assistant-work-confirmations" aria-label="Approvals Needed">{confirmations}</ul>}
       {ordered.length > 0 && (
         <ul className="assistant-work-cards">
-          {ordered.map((sessionId) => <AssistantWorkCard key={sessionId} sessionId={sessionId} />)}
+          {ordered.map((sessionId) => <AssistantWorkCard key={sessionId} sessionId={sessionId} campaign={campaignIds?.includes(sessionId)} />)}
         </ul>
       )}
     </section>
   );
 }
 
-function AssistantWorkCard({ sessionId }: { sessionId: string }) {
+function AssistantWorkCard({ sessionId, campaign }: { sessionId: string; campaign?: boolean }) {
   const session = useStoreSelector((state) => state.sessions.get(sessionId));
   const runnerOnline = useStoreSelector((state) => {
     const runnerId = session?.runnerId;
@@ -63,7 +65,7 @@ function AssistantWorkCard({ sessionId }: { sessionId: string }) {
     return (
       <li className="assistant-work-card">
         <button type="button" className="assistant-work-open" onClick={() => open()}>
-          <span className="assistant-work-title">Launched Session</span>
+          <span className="assistant-work-title">{campaign ? "Launched Campaign" : "Launched Session"}</span>
           <span className="assistant-work-meta">Not loaded yet</span>
         </button>
       </li>
@@ -77,6 +79,7 @@ function AssistantWorkCard({ sessionId }: { sessionId: string }) {
       <button type="button" className="assistant-work-open" onClick={() => open()} title={title}>
         <span className="assistant-work-line">
           <span className="assistant-work-title">{title}</span>
+          {campaign && <StatusBadge label="Campaign" noDot />}
           <StatusBadge meta={signal.meta} />
         </span>
         <span className="assistant-work-meta">

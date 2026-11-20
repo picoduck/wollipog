@@ -21,7 +21,7 @@ must not perform it merely to turn an unavailable test green.
 
 | Item | Required Owner Preparation |
 | --- | --- |
-| 1 | An operator outside the hosting stack deploys accepted main and records the deployed commit plus control-plane, local/SSH runner and negotiated protocol versions. This campaign never updates or restarts its hosting stack. |
+| 1 | Before running these checks, the owner deploys accepted main from outside the hosting stack and records the deployed commit plus control-plane, local/SSH runner and negotiated protocol versions. This campaign never updates or restarts its hosting stack. |
 | 2 | Create a dedicated OpenClaw profile with model authentication, separate state/workspace and protected secret references. Through supported owner setup, issue Full Access and narrow test connections, exact requester/conversation bindings, and the connector/subscription/signing authority needed for the run. Preserve the baseline profile. |
 | 3 | Configure a dedicated Discord application/account and test conversations, explicit sender/channel allowlists, required intents, read/send permissions and thread membership. Keep tokens and actual destination coordinates in private owner configuration. |
 | 4 | Confirm the SSH Machine's current agent authentication, quota/capacity and compatible harness, plus a safe repository Project Location. Discovery's authenticated/online label alone does not prove execution. Repair authentication only through owner setup if needed. |
@@ -240,6 +240,133 @@ production registry contains **202 unique tools**; 184 is a route count, not a t
 **Mark REAL (inventory boundary)** when the actual registration gate passes at the recorded
 commit. Deployed/local/remote capability acceptance remains UNVERIFIED until steps 2–3 pass;
 zero audit gaps never proves a live end-to-end workflow.
+
+### J. Assistant Thread Account Selection and Handoff
+
+**Prerequisites:** 1 and two eligible accounts for one harness on the same disposable Machine.
+Use an existing ineligible account for the refusal check. Keep account identifiers private.
+
+1. In **Assistants**, select **New Thread**. Choose the **Harness**, then select an eligible
+   entry under **Account**. Verify an ineligible entry is disabled and explains why. Choose
+   **Start Thread**. Check the thread header shows the chosen account. Send a harmless marker
+   message and wait for the genuine provider response.
+2. Once the thread is idle, open **Thread Actions → Change Account**. Choose the other eligible
+   account, leave **Start a Fresh Conversation** unchecked, and select **Change Account**. Check
+   that the same thread now shows the new account, with earlier messages and launched work still
+   visible. Send a follow-up about the marker and verify the result.
+3. On a disposable thread at an idle boundary, repeat the change with **Start a Fresh
+   Conversation** checked. Verify old messages remain in the dashboard and the new provider
+   conversation starts without their context.
+
+**Observe and capture:** eligible and disabled choices, sanitized before/after account labels,
+and the preserved dashboard transcript. **Mark REAL** after both handoffs and a provider response
+on each selected account.
+
+### K. Assistant Attention Across Navigation
+
+**Prerequisites:** 1 and two live disposable threads.
+
+1. Ask one thread to request confirmation for stopping a disposable session. Leave the request
+   unanswered. Verify the thread is **Needs You** and the desktop **Assistants** rail shows **1**.
+   Have the same thread request another confirmation and verify the count stays at **1**.
+2. Create a pending owner confirmation from the second thread. Verify the desktop rail shows
+   **2** and the phone **Assistants** tab shows **2**. On the phone, open **More → Settings →
+   Appearance → Navigation**. Select **Move Assistants Down** until its row loses the **Tab
+   Bar** label. Open **More** and verify it signals waiting work and its **Assistants** row shows
+   **2**.
+3. From **Inbox → Assistant Approvals → Review**, use **Deny** on the disposable requests in one
+   thread. Verify the count stays at **2** until that thread's final request clears, then drops to
+   **1**. Resolve the last request and verify the badge clears on desktop, the phone tab, and
+   the **More** sheet.
+
+**Observe and capture:** the count on each navigation surface and how it changes after
+resolution. **Mark REAL** after desktop and phone update without a reload.
+
+### L. Assistant Thread Budgets and Launch Limits
+
+**Prerequisites:** 1, an eligible thread harness, and a disposable Location for ordinary sessions.
+
+1. In **Settings → Behavior → Assistant Threads**, select **Edit Limits**. In **Default Thread
+   Limits**, enter a safe **Cost Budget (USD)** and a **Session Launch Limit** of **2**, then select
+   **Save Limits**. Start a new thread. Check its **Thread Details** show those values and another
+   existing thread keeps its previous limits.
+2. In **Thread Actions → Thread Limits**, select **Save Limits** with a **Session Launch Limit** of
+   **0**. Verify **Launches Paused** in the thread header. Ask the thread to launch a harmless
+   ordinary session in the disposable Location. Verify a refusal and no new session.
+3. Set the limit back to **2**. Ask for the same ordinary launch with a requested session budget
+   higher than the thread's remaining budget. Verify one session appears, the launch count advances
+   by one, and the launch response reports the applied cap and why. Verify that cap in the
+   session's settings.
+4. After the thread has recorded positive spend, try to save a positive **Cost Budget (USD)**
+   smaller than the amount already spent. Verify the refusal and the previous budget is retained.
+   Restore the saved defaults you recorded before the check.
+
+**Observe and capture:** default and thread limits, the refused launches and budget edit, and the
+cap disclosed by the successful launch. **Mark REAL** after verifying actual session admission.
+
+### M. Owner-Confirmed Campaign Launch
+
+**Prerequisites:** 1, available Orchestrator and child harnesses and a disposable repository
+Location with a current runner. Have the owner choose an acceptable campaign budget and leave
+one launch available in the test thread.
+
+1. In the thread, ask it to call `campaign_start` at the disposable Project Location. Specify a
+   **Custom** campaign, an available Orchestrator and child harness/model/effort, and the first
+   message “Summarize this test project without making changes.” Select **Review Campaign** on
+   **Start Campaign** and
+   verify the Location, exact first message, mode, both harness/model/effort choices, and budget.
+   Check that no campaign exists yet. Select **Deny**, verify no campaign starts, and verify the
+   thread reports the denial.
+2. Ask for a fresh proposal in **Full Control** mode with the same harmless task. In
+   **Inbox → Assistant Approvals**, select **Review**, then **Review Campaign**. Verify **Start Campaign** shows the
+   inspected repository scope, initial issues, delegated operations, and human-required gates.
+   Check the campaign has not started.
+3. Select **Change Budget** (or **Set Budget** if there are no saved defaults). Enter an owner-chosen
+   **Cost Budget (USD)** and **Tool Call Limit**. Select **Update Preview** and verify those
+   amounts are shown. Select **Approve Once**. Verify there is exactly one new campaign and the
+   thread reports the Session ID from its launch receipt.
+4. Open the work card marked **Campaign** from the thread. In **Campaign Status**, verify
+   the mode and scope match the card, the campaign has the approved allowance, and its status
+   is readable from the thread. Check that campaign usage is separate from the thread's spend.
+   The thread's session-launch count advances by one for the campaign root. Any human-owned
+   question must be answered by the owner in the campaign.
+
+**Observe and capture:** the pending and denied states, the approved card and campaign
+settings, and separate usage recorded for the thread and campaign. **Mark REAL** after a real
+provider turn on the approved campaign.
+
+### N. Review Session Accounting Across a Restart
+
+**Prerequisites:** 1 and a disposable control plane running #4726, with an available cross-model
+reviewer and a disposable open pull request.
+
+1. Have an Assistant thread launch an ordinary session for that PR. From that session, have the
+   agent request a review with `request_review_session` and record the review Session ID. Let the
+   review report nonzero usage. When the thread and its ordinary work are idle, record the
+   thread's spend and launch count in **Thread Details** and the backing session's cost cap.
+2. The owner restarts the disposable control plane and reopens the same thread. Verify the review
+   still appears in the requesting session's review history and remains excluded from the thread's
+   spend, launch count, and backing session cap. Verify spend from the ordinary launched session
+   is still included.
+
+**Observe and capture:** sanitized Session IDs and usage before and after the restart. **Mark REAL**
+after a review with recorded spend survives the database reopen.
+
+### O. Assistant Discovery on a Codex Fallback Model
+
+**Prerequisites:** 1, a Full Access test connection, and a Codex model outside the runner's
+model catalog that uses the default tool-output limit.
+
+1. On that Codex model, call `assistant_discover` with `{}`. Verify it returns the connection
+   identity and operation summaries. Measure the first JSON-RPC response in UTF-8 bytes,
+   including the escaped result text and its envelope. It must be under the 10,000-byte fallback
+   limit, with no truncation marker in the model's tool result.
+2. Follow any returned `nextCursor` until `campaign_start` appears. Call
+   `assistant_discover` with `{"operations":["campaign_start"]}` and verify its full input
+   schema is returned within the same limit. Do this as discovery only.
+
+**Observe and capture:** the model ID, first page byte count, and whether continuation and schema
+lookup worked. **Mark REAL** after verification on the intended Codex model.
 
 ## Completion and Recovery Handoff
 

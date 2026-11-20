@@ -144,7 +144,7 @@ test("each migrated kind is typed: fixed questions, a recorded threshold, a vers
   for (const kind of MIGRATED) {
     const definition = DECISION_KINDS[kind];
     assert.ok(definition.typed, kind);
-    assert.equal(definition.promptVersion, kind === "credential_screen" ? "credential_screen.v3" : `${kind}.v2`);
+    assert.equal(definition.promptVersion, kind === "credential_screen" ? "credential_screen.v4" : `${kind}.v2`);
     assert.equal(definition.typed.confidenceThreshold, KINDS[kind].threshold);
     assert.deepEqual(definition.typed.verdicts, { admit: KINDS[kind].confirm, refuse: KINDS[kind].refuse });
     // The verdicts callers read are unchanged, so every caller and recorded outcome keeps its meaning.
@@ -177,7 +177,7 @@ test("the credential screen asks each kind of ask as its own question, each excl
   }
 });
 
-test("credential_screen.v3 renders the access-grant question with work-only examples and real-grant controls", () => {
+test("credential_screen.v4 renders the access-grant question with work-only examples and real-grant controls", () => {
   const prepared = prepareDecision(DECISION_KINDS.credential_screen, KINDS.credential_screen.inputs("Plan permission work"));
   const renderedQuestion = prepared.rendered.match(/<question id="grants_access"[^>]*>\n([\s\S]*?)\n<\/question>/u)?.[1];
   assert.equal(renderedQuestion,
@@ -245,7 +245,7 @@ for (const kind of MIGRATED) {
         assert.equal(typed.confidenceThreshold, KINDS[kind].threshold, "the audit records the threshold");
         assert.deepEqual(typed.questions.map((question) => question.questionId), KINDS[kind].questions);
         assert.deepEqual(typed.answers.map((answer) => answer.questionId), KINDS[kind].questions);
-        assert.equal(outcome.occurrence.promptVersion, kind === "credential_screen" ? "credential_screen.v3" : `${kind}.v2`);
+        assert.equal(outcome.occurrence.promptVersion, kind === "credential_screen" ? "credential_screen.v4" : `${kind}.v2`);
       } finally { h.db.close(); }
     }
   });

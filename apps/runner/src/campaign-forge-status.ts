@@ -153,7 +153,7 @@ const REQUIREMENTS_MET = new Set(["CLEAN", "HAS_HOOKS", "UNSTABLE"]);
 export function checkRollups(
   rollup: unknown,
   requirementsMet = false,
-): { checks: CampaignForgeCheckRollup; requiredChecks: CampaignForgeCheckRollup } | null {
+): Pick<CampaignForgePullRequestObservation, "checks" | "requiredChecks" | "checkContextsComplete"> | null {
   if (rollup === null) {
     const none: CampaignForgeCheckRollup = { state: "none", passing: 0, failing: 0, pending: 0 };
     return { checks: none, requiredChecks: none };
@@ -192,6 +192,7 @@ export function checkRollups(
   else if (github === "SUCCESS" || explainedFailure && all.passing > 0) overall = "passing";
   else overall = "unknown";
   return {
+    checkContextsComplete: complete,
     checks: { state: overall, passing: all.passing, failing: all.failing, pending: all.pending },
     requiredChecks: {
       state: ((state) => state === "passing" && !requirementsMet ? "unknown" : state)(rollupState(required, complete)),

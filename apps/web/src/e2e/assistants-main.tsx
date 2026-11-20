@@ -16,7 +16,7 @@ import { Shell } from "../App.js";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { AssistantThread, AssistantThreadDefaults, CreateAssistantThreadRequest } from "../assistant-threads.js";
-import type { AssistantOwnerConfirmation, AssistantThreadAccountChoices, ChangeAssistantThreadAccountRequest } from "@wollipog/protocol";
+import type { AssistantOwnerConfirmation, AssistantThreadAccountChoices, ChangeAssistantThreadAccountRequest, OrchestratorCampaignBudgetDefault } from "@wollipog/protocol";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { ThemeProvider } from "../components/ThemeProvider.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
@@ -43,6 +43,7 @@ const params = new URLSearchParams(location.search);
 const scenario = params.get("threads") ?? "some";
 const attentionCount = Number(params.get("attention") ?? 0);
 const limitsScenario = params.get("limits");
+const campaignScenario = params.has("campaign");
 const NOW = Date.now();
 const minute = 60_000;
 const accountScenario = params.get("accounts");
@@ -162,6 +163,42 @@ const access = { level: "full_access", destructive: "ask" } as const;
  * for its owner: stop a session it launched, archive another, then stop a third, and so on round the
  * three. Approve Once and Deny settle one and republish the thread. */
 function confirmation(index: number): AssistantOwnerConfirmation {
+  if (campaignScenario) return {
+    id: `aoc_campaign_${index}`, threadId: "thr_triage", operation: "campaign_start", title: "Start Campaign",
+    summary: "Starts an independent Orchestrator campaign with the settings and authority shown here. Its usage is charged to its own campaign allowance.",
+    target: { kind: "project", id: "project-releases", label: index === 0
+      ? "Release Engineering for Long-Running Cross-Platform Verification and Packaging · Build Machine"
+      : "Release Engineering · Build Machine" },
+    impact: [
+      { label: "Campaign Mode", value: "Full Control" },
+      { label: "Campaign Budget", value: "$20 USD · 150 tool calls" },
+      { label: "Orchestrator Harness", value: "Codex (App Server)" },
+      { label: "Orchestrator Model", value: "gpt-6.2-sol" },
+      { label: "Orchestrator Effort", value: "high" },
+      { label: "Child Harness", value: "Claude Code" },
+      { label: "Child Model", value: index === 0
+        ? "claude-opus-5-5-release-engineering-long-context-verification-preview-fixture"
+        : "claude-opus-5-5" },
+      { label: "Child Effort", value: "high" },
+      { label: "Concurrent Children", value: "2" },
+      { label: "Follow-Ups", value: "Recommend Only · 0 accepted follow-ups" },
+      { label: "Completion", value: "Retain" },
+      { label: "Provider Permissions", value: "Harness Default" },
+      { label: "Isolation", value: "Strict Project Isolation off · Integration Isolation off" },
+      { label: "Repository Scope", value: "example/release-tools · Release Engineering" },
+      { label: "Initial Issues", value: "#38, #41" },
+      { label: "Issue Authority", value: "Up to 2 issues. Related follow-ups require owner admission. Closure reasons: Completed." },
+      { label: "Delegated Operations", value: "Issue Closure, Campaign Issue Scope, PR Merge, Merged Branch Deletion, Implementation Question, UI Evidence Approval" },
+      { label: "Review", value: "Regular cross-model review." },
+      { label: "Evidence", value: "The Orchestrator reviews screenshots. For video and external evidence it asks for screenshots." },
+      { label: "Human-Required Gates", value: "Authentication and Credentials\nGovernance and Standing Access\nBudget Increases" },
+    ],
+    arguments: [{ label: "First Message", value: index === 0
+      ? "Plan the release and check issues #38 and #41. Run the existing verification on the disposable Release Engineering project, then report the checks that passed and any fixes that need review. Match the results against ReleaseEngineeringCrossPlatformPackagingReadinessChecklistWithoutAdditionalSeparators."
+      : `Audit the release checklist for issue #38. ${"LongUnbrokenReleaseChecklistIdentifier".repeat(20)}` }],
+    campaign: { digest: index.toString(16).repeat(64), budget: { costUsd: 20, toolCalls: 150 } },
+    status: "pending", createdAt: NOW - minute + index, expiresAt: NOW + 59 * minute, resolvedAt: null,
+  };
   const stop = index % 3 !== 1;
   const [sessionId, label, worktree] = [["sess-flaky", "Fix the Flaky Upload Test", "flaky-upload"],
     ["sess-deps", "Bump the Vite Group", "bump-vite"], ["sess-release", "Ship the Release Notes", "release-notes"]][index % 3]!;
@@ -356,12 +393,15 @@ const found = (threadId: string) => {
 function settleConfirmation(threadId: string, confirmationId: string, intent: "approve" | "deny") {
   const current = found(threadId);
   const asked = (current.confirmations ?? []).find((candidate) => candidate.id === confirmationId)!;
+  const campaignId = asked.campaign && intent === "approve" ? `session_${asked.id}` : undefined;
   const confirmation: AssistantOwnerConfirmation = intent === "approve"
-    ? { ...asked, status: "executed", resolvedAt: Date.now(), outcome: { receiptStatus: "succeeded" } }
+    ? { ...asked, status: "executed", resolvedAt: Date.now(), outcome: { receiptStatus: "succeeded", sessionId: campaignId } }
     : { ...asked, status: "denied", resolvedAt: Date.now(), outcome: { reason: "The owner denied it." } };
   document.body.dataset.confirmationAnswer = `${confirmationId}:${intent}`;
   const confirmations = (current.confirmations ?? []).filter((candidate) => candidate.id !== confirmationId);
-  const settled = { ...current, status: confirmations.length ? "needs_you" as const : "working" as const, confirmations };
+  if (campaignId) upsert(session(campaignId, "Plan the Release", { role: "orchestrator", status: "running" }));
+  const settled = { ...current, status: confirmations.length ? "needs_you" as const : "working" as const, confirmations,
+    ...(campaignId ? { launchedCampaignIds: [...(current.launchedCampaignIds ?? []), campaignId] } : {}) };
   threads = threads.map((candidate) => candidate.id === threadId ? settled : candidate);
   publish(settled);
   return { confirmation: structuredClone(confirmation), thread: structuredClone(settled) };
@@ -485,6 +525,24 @@ const client = {
   // `?confirm=1`: Approve Once runs the bound command once and Deny refuses it; either way the
   // thread stops listing the request and is republished.
   approveAssistantConfirmation: async (threadId: string, confirmationId: string) => settleConfirmation(threadId, confirmationId, "approve"),
+  approveAssistantCampaign: async (threadId: string, confirmationId: string, digest: string) => {
+    if (found(threadId).confirmations?.find(candidate => candidate.id === confirmationId)?.campaign?.digest !== digest) {
+      throw new Error("Review the campaign again.");
+    }
+    return settleConfirmation(threadId, confirmationId, "approve");
+  },
+  reviseAssistantCampaignBudget: async (threadId: string, confirmationId: string, digest: string, budget: OrchestratorCampaignBudgetDefault) => {
+    const current = found(threadId);
+    const previous = current.confirmations?.find(candidate => candidate.id === confirmationId);
+    if (!previous?.campaign || previous.campaign.digest !== digest) throw new Error("Review the campaign again.");
+    const confirmation = { ...previous, campaign: { digest: "e".repeat(64), budget },
+      impact: previous.impact.map(line => line.label === "Campaign Budget"
+        ? { ...line, value: `$${budget.costUsd} USD · ${budget.toolCalls} tool calls` } : line) };
+    const thread = { ...current, confirmations: current.confirmations!.map(candidate => candidate.id === confirmationId ? confirmation : candidate) };
+    threads = threads.map(candidate => candidate.id === threadId ? thread : candidate);
+    publish(thread);
+    return { confirmation, thread };
+  },
   denyAssistantConfirmation: async (threadId: string, confirmationId: string) => settleConfirmation(threadId, confirmationId, "deny"),
   answerQuestion: async (sessionId: string) => {
     const next = { ...sessions.get(sessionId)!, status: "running" as const, pendingApproval: null, updatedAt: Date.now() };

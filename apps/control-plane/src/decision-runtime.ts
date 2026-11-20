@@ -42,6 +42,7 @@ export const DECISION_TOTAL_BOUND_MS = 90_000;
 export const DECISION_MIN_ATTEMPT_MS = 5_000;
 export const DECISION_BACKOFF_BASE_MS = 1_000;
 export const DECISION_BACKOFF_CAP_MS = 8_000;
+const UNAVAILABLE_HARNESS_BACKOFF_BASE_MS = 5_000;
 
 /** The outcome of one occurrence. A verdict other than `uncertain` is the only outcome a caller
  * may act on, and only to narrow or confirm what it proposed. */
@@ -75,6 +76,8 @@ export interface DecisionRequest {
   occurrenceKey?: string | null;
   /** The campaign runner's own harness, which Automatic uses. */
   automaticHarness?: DecisionAutomaticHarness | null;
+  /** Campaign handoffs can wait briefly for a restarting harness before asking the owner. */
+  retryUnavailableHarness?: boolean;
   /** Create the caller's one typed, person-owned request for an uncertain or failed occurrence and
    * return its id. A compare-and-set claim lets only one call route an occurrence; a throw releases
    * the claim. It must be idempotent per occurrence id: a claim interrupted by a restart is routed
@@ -337,7 +340,6 @@ export class DecisionRuntime {
     request: DecisionRequest,
   ): Promise<void> {
     const { db } = this.options;
-    const { rendered, outputSchema } = prepared;
     // A control plane that restarted mid-occurrence closes the attempts it lost and continues inside
     // the same attempt budget and time bound; it never starts the count again.
     const previous = db.listDecisionAttempts(occurrence.occurrenceId);
@@ -353,86 +355,96 @@ export class DecisionRuntime {
     let lastClass: DecisionErrorClass = previous.at(-1)?.errorClass
       ? knownClass(previous.at(-1)!.errorClass)
       : "timed_out";
-    const resolution = this.options.settings.resolve(occurrence.organizationId, request.automaticHarness ?? null);
-    if (resolution.target) db.recordDecisionTarget(occurrence.occurrenceId, resolution.target);
-    // A typed call goes only to a runner that accepts its schema and output (#4283). An older runner
-    // is non-transient like any other incapable target: it never receives the call.
-    const preflightFailure: DecisionErrorClass | null = !resolution.ok
-      ? resolution.errorClass
-      : prepared.questions && !runnerSupportsProtocol(db.getRunner(resolution.target.runnerId)?.protocolVersion, "typedDecisionQuestions")
-        ? "runner_incapable"
-        : null;
-    if (!resolution.ok || preflightFailure) {
-      // A missing runner, harness, model or credential is non-transient: one audited attempt that
-      // never reached a provider, then the person-owned route. Never a silent pass.
-      attempt++;
-      db.startDecisionAttempt(occurrence.occurrenceId, attempt, `decision_preflight_${randomUUID()}`, this.now());
-      db.finishDecisionAttempt(occurrence.occurrenceId, attempt, { latencyMs: 0, errorClass: preflightFailure!, costUsd: null });
-      this.fail(occurrence.occurrenceId, preflightFailure!);
-      return;
-    }
-    const target: DecisionModelResolvedTarget = resolution.target;
+    const recheckHarness = () => {
+      const resolution = this.options.settings.resolve(occurrence.organizationId, request.automaticHarness ?? null);
+      if (resolution.target) db.recordDecisionTarget(occurrence.occurrenceId, resolution.target);
+      return resolution;
+    };
+    let resolution = recheckHarness();
     while (attempt < DECISION_MAX_ATTEMPTS) {
       const remaining = deadline - this.now();
       if (remaining < DECISION_MIN_ATTEMPT_MS + DECISION_TRANSPORT_MARGIN_MS) break;
       attempt++;
-      const requestId = `decision_${randomUUID()}`;
-      const startedAt = this.now();
-      db.startDecisionAttempt(occurrence.occurrenceId, attempt, requestId, startedAt);
-      // The round trip, including the transport margin, ends inside the occurrence's bound.
-      const timeoutMs = Math.min(DECISION_ATTEMPT_BUDGET_MS + DECISION_TRANSPORT_MARGIN_MS, remaining);
-      const raw = await this.options.transport(target.runnerId, {
-        type: "run_decision",
-        requestId,
-        occurrenceId: occurrence.occurrenceId,
-        attempt,
-        target: { agentId: target.agentId, driver: target.driver, model: target.model, effort: target.effort },
-        instructions: definition.instructions,
-        input: rendered,
-        outputSchema,
-        timeoutMs: timeoutMs - DECISION_TRANSPORT_MARGIN_MS,
-      }, timeoutMs);
-      const result = sanitizeRunDecisionResult(raw) ??
-        { type: "run_decision_result" as const, requestId, ok: false, errorClass: "invalid_output" as const };
-      // An answer after the occurrence's bound is late, whatever it says: it never settles a verdict.
-      const late = this.now() > deadline;
-      const answered = !late && result.ok && result.outputText !== undefined ? result.outputText : null;
-      const validated = answered === null ? null : this.validate(definition, prepared, answered);
-      const errorClass: DecisionErrorClass | null = validated
-        ? null
-        : late ? "timed_out" : result.ok ? "invalid_output" : knownClass(result.errorClass);
-      db.finishDecisionAttempt(occurrence.occurrenceId, attempt, {
-        latencyMs: this.now() - startedAt,
-        errorClass,
-        ...(result.provider ? { provider: result.provider } : {}),
-        ...(result.model ? { model: result.model } : {}),
-        ...(result.usage ? { usage: result.usage } : {}),
-        // The model that answered sets the rate. With none reported, an exact target id can still be
-        // priced, and an alias such as `haiku` can't: the table never prices a bare family name.
-        costUsd: this.cost(result.model ?? target.model, result.usage, result.pricing),
-      });
-      if (validated) {
-        // Compare-and-set: whichever answer settles first is the only verdict. A late or duplicate
-        // answer for this occurrence changes nothing.
-        db.settleDecisionOccurrence(occurrence.occurrenceId, {
-          state: validated.verdict === "uncertain" ? "uncertain" : "decided",
-          verdict: validated.verdict,
-          reason: validated.reason,
-          fields: validated.fields,
-          ...(validated.typedAnswers ? { typedAnswers: validated.typedAnswers } : {}),
-          now: this.now(),
-        });
-        return;
+      let retryAfterMs = 0;
+      // A typed call goes only to a runner that accepts its schema and output (#4283).
+      const preflightFailure = !resolution.ok ? resolution.errorClass : prepared.questions &&
+        !runnerSupportsProtocol(db.getRunner(resolution.target.runnerId)?.protocolVersion, "typedDecisionQuestions") ? "runner_incapable" : null;
+      if (!resolution.ok || preflightFailure) {
+        lastClass = preflightFailure!;
+        db.startDecisionAttempt(occurrence.occurrenceId, attempt, `decision_preflight_${randomUUID()}`, this.now());
+        db.finishDecisionAttempt(occurrence.occurrenceId, attempt, { latencyMs: 0, errorClass: lastClass, costUsd: null });
+      } else {
+        const failure = await this.runAttempt(occurrence, definition, prepared, resolution.target, attempt, remaining, deadline);
+        if (!failure) return;
+        ({ errorClass: lastClass, retryAfterMs } = failure);
       }
-      lastClass = errorClass!;
-      if (!TRANSIENT.has(lastClass) || attempt >= DECISION_MAX_ATTEMPTS) break;
-      const wait = Math.max(this.backoffMs(attempt), result.retryAfterMs ?? 0);
+      const retryHarness = request.retryUnavailableHarness && lastClass === "harness_unavailable";
+      if ((!retryHarness && (preflightFailure || !TRANSIENT.has(lastClass))) || attempt >= DECISION_MAX_ATTEMPTS) break;
+      const backoff = retryHarness ? UNAVAILABLE_HARNESS_BACKOFF_BASE_MS * 2 ** (attempt - 1) : this.backoffMs(attempt);
+      const wait = Math.max(backoff, retryAfterMs);
       // A Retry-After or backoff that would leave no room for another attempt ends the retries.
       if (this.now() + wait + DECISION_MIN_ATTEMPT_MS + DECISION_TRANSPORT_MARGIN_MS > deadline) break;
       await this.sleep(wait);
       if (db.getDecisionOccurrence(occurrence.occurrenceId)?.state !== "pending") return;
+      if (retryHarness) resolution = recheckHarness();
     }
     this.fail(occurrence.occurrenceId, lastClass);
+  }
+
+  private async runAttempt(occurrence: DecisionOccurrenceRecord, definition: DecisionKindDefinition,
+    prepared: PreparedDecision, target: DecisionModelResolvedTarget, attempt: number, remaining: number,
+    deadline: number): Promise<{ errorClass: DecisionErrorClass; retryAfterMs: number } | null> {
+    const { db } = this.options;
+    const { rendered, outputSchema } = prepared;
+    const requestId = `decision_${randomUUID()}`;
+    const startedAt = this.now();
+    db.startDecisionAttempt(occurrence.occurrenceId, attempt, requestId, startedAt);
+    // The round trip, including the transport margin, ends inside the occurrence's bound.
+    const timeoutMs = Math.min(DECISION_ATTEMPT_BUDGET_MS + DECISION_TRANSPORT_MARGIN_MS, remaining);
+    const raw = await this.options.transport(target.runnerId, {
+      type: "run_decision",
+      requestId,
+      occurrenceId: occurrence.occurrenceId,
+      attempt,
+      target: { agentId: target.agentId, driver: target.driver, model: target.model, effort: target.effort },
+      instructions: definition.instructions,
+      input: rendered,
+      outputSchema,
+      timeoutMs: timeoutMs - DECISION_TRANSPORT_MARGIN_MS,
+    }, timeoutMs);
+    const result = sanitizeRunDecisionResult(raw) ??
+      { type: "run_decision_result" as const, requestId, ok: false, errorClass: "invalid_output" as const };
+    // An answer after the occurrence's bound is late, whatever it says: it never settles a verdict.
+    const late = this.now() > deadline;
+    const answered = !late && result.ok && result.outputText !== undefined ? result.outputText : null;
+    const validated = answered === null ? null : this.validate(definition, prepared, answered);
+    const errorClass: DecisionErrorClass | null = validated
+      ? null
+      : late ? "timed_out" : result.ok ? "invalid_output" : knownClass(result.errorClass);
+    db.finishDecisionAttempt(occurrence.occurrenceId, attempt, {
+      latencyMs: this.now() - startedAt,
+      errorClass,
+      ...(result.provider ? { provider: result.provider } : {}),
+      ...(result.model ? { model: result.model } : {}),
+      ...(result.usage ? { usage: result.usage } : {}),
+      // The model that answered sets the rate. With none reported, an exact target id can still be
+      // priced, and an alias such as `haiku` can't: the table never prices a bare family name.
+      costUsd: this.cost(result.model ?? target.model, result.usage, result.pricing),
+    });
+    if (validated) {
+      // Compare-and-set: whichever answer settles first is the only verdict. A late or duplicate
+      // answer for this occurrence changes nothing.
+      db.settleDecisionOccurrence(occurrence.occurrenceId, {
+        state: validated.verdict === "uncertain" ? "uncertain" : "decided",
+        verdict: validated.verdict,
+        reason: validated.reason,
+        fields: validated.fields,
+        ...(validated.typedAnswers ? { typedAnswers: validated.typedAnswers } : {}),
+        now: this.now(),
+      });
+      return null;
+    }
+    return { errorClass: errorClass!, retryAfterMs: result.retryAfterMs ?? 0 };
   }
 
   /** Validate one attempt's output. A typed kind's answers are validated strictly and its verdict is

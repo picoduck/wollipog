@@ -283,7 +283,7 @@ test("Seatbelt attach notices keep the live launch roots after HOME or its trans
     symlinkSync(originalHome, homeLink, "dir");
 
     const store = new SessionStore(join(root, "sessions"));
-    store.create({ ...meta(), repoPath: repo, env: { HOME: homeLink } });
+    store.create({ ...meta(), repoPath: repo });
     const factory = () => ({
       pid: 1, initialize: async () => {}, newSession: async () => "provider-1",
       prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
@@ -305,6 +305,7 @@ test("Seatbelt attach notices keep the live launch roots after HOME or its trans
     );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const internals = manager as any;
+    internals.prepareLaunch = (launch: SessionMeta) => { launch.env = { HOME: homeLink }; };
     assert.equal(await internals.acquireAdmission("s1"), true);
     assert.equal(await internals.launch(store.readMeta("s1")), true);
     rmSync(homeLink);
