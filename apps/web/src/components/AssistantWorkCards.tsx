@@ -53,11 +53,13 @@ export function useLaunchedWorkGroups(work: LaunchedWork): { ids: string[]; grou
 
 /**
  * Keeps keyboard focus when the control holding it leaves a list of cards (#4776). A card is drawn
- * again elsewhere when its session changes group, or leaves the header for the panel, which removes
- * the focused element. After each change named by `changeKey`, if focus was last inside the list and
- * the page now has none, `recover` gets the session whose card last held focus and the list, and
- * returns where focus goes. A removed element takes focus without a blur naming where it went, so only a blur to somewhere
- * else clears the record.
+ * again elsewhere when its session changes group or leaves the header for the panel, and a card's own
+ * request actions leave when that request is answered while another keeps the card waiting. Either
+ * way the focused element is removed. If focus was last inside the list and the page now has none,
+ * `recover` gets the session whose card last held focus and the list, and returns where focus goes.
+ * The check runs after each change named by `changeKey`, which can remove the list itself, and after
+ * any removal inside the list, which a card's own render makes. A removed element takes focus
+ * without a blur naming where it went, so only a blur to somewhere else clears the record.
  */
 function useFocusRecovery<T extends HTMLElement>(
   changeKey: string,
@@ -68,7 +70,7 @@ function useFocusRecovery<T extends HTMLElement>(
   const lastSession = useRef<string | null>(null);
   const recoverRef = useRef(recover);
   recoverRef.current = recover;
-  useLayoutEffect(() => {
+  const check = useRef(() => {
     if (!within.current) return;
     const active = document.activeElement;
     if (active && active !== document.body && active.isConnected) {
@@ -77,7 +79,24 @@ function useFocusRecovery<T extends HTMLElement>(
     }
     within.current = false;
     recoverRef.current(lastSession.current, ref.current)?.focus();
-  }, [changeKey]);
+  }).current;
+  useLayoutEffect(check, [changeKey, check]);
+  // The list element comes and goes (the header's region renders only while something waits), so the
+  // observer follows whichever element the ref holds after each render.
+  const observed = useRef<{ element: T; observer: MutationObserver } | null>(null);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (observed.current?.element === element) return;
+    observed.current?.observer.disconnect();
+    observed.current = null;
+    if (!element) return;
+    const observer = new MutationObserver((records) => {
+      if (records.some((record) => record.removedNodes.length > 0)) check();
+    });
+    observer.observe(element, { childList: true, subtree: true });
+    observed.current = { element, observer };
+  });
+  useEffect(() => () => observed.current?.observer.disconnect(), []);
   return {
     ref,
     onFocus: (event: FocusEvent<T>) => {
@@ -91,10 +110,21 @@ function useFocusRecovery<T extends HTMLElement>(
   };
 }
 
+/** Where focus lands on a session's card in `list`: its request's last action (Open Session) while
+ * it still shows one, else the card itself. */
+function cardFocusTarget(list: HTMLElement | null, sessionId: string | null): HTMLElement | null {
+  if (!list || !sessionId) return null;
+  const card = list.querySelector<HTMLElement>(`[data-session-id="${CSS.escape(sessionId)}"]`);
+  return card?.querySelector<HTMLElement>(".assistant-work-request-actions > button:last-child")
+    ?? card?.querySelector<HTMLElement>(".assistant-work-open") ?? null;
+}
+
 /**
- * Approve Once or Deny in flight, by session and request (#4776). A card is a separate mount in the
- * header and in the panel, so the response a card started outlives the card: the same request's card
- * elsewhere keeps both actions disabled until it settles, and never sends a second response.
+ * Approve Once or Deny in flight, by session and request occurrence (#4776). A card is a separate
+ * mount in the header and in the panel, so the response a card started outlives the card: the same
+ * request's card elsewhere keeps both actions disabled until it settles, and never sends a second
+ * response. A provider may reuse a request id for a new request, so the key is the occurrence, and
+ * the new request is answerable at once.
  */
 type ResponseIntent = "approve" | "deny";
 const respondingTo = new Map<string, ResponseIntent>();
@@ -121,7 +151,7 @@ function useResponding(key: string): ResponseIntent | null {
  *
  * A card leaves once its session stops waiting, Approve Once's own card included. When focus was in
  * one that left, it moves to the header's Launched Sessions toggle, where that session now is,
- * rather than dropping to the page.
+ * rather than dropping to the page; a card that stays, waiting on another request, keeps it.
  */
 export function AssistantWaitingWork({ work, confirmations, showSessions }: {
   work: LaunchedWork;
@@ -131,8 +161,8 @@ export function AssistantWaitingWork({ work, confirmations, showSessions }: {
   const { groups } = useLaunchedWorkGroups(work);
   const waiting = showSessions ? groups.needsYou : [];
   const campaigns = useMemo(() => new Set(work.campaignIds ?? []), [work.campaignIds]);
-  const focus = useFocusRecovery<HTMLElement>(waiting.join("\n"),
-    () => document.querySelector<HTMLElement>(".assistant-thread-head .assistant-launched-toggle"));
+  const focus = useFocusRecovery<HTMLElement>(waiting.join("\n"), (sessionId, list) => cardFocusTarget(list, sessionId)
+    ?? document.querySelector<HTMLElement>(".assistant-thread-head .assistant-launched-toggle"));
   if (waiting.length === 0 && !confirmations) return null;
   return (
     <section ref={focus.ref} className="assistant-work" aria-label="Waiting for You" onFocus={focus.onFocus} onBlur={focus.onBlur}>
@@ -193,11 +223,9 @@ export function LaunchedSessionsPanel({ work, beforeOpen }: { work: LaunchedWork
   const finishedId = useId();
   const focus = useFocusRecovery<HTMLDivElement>(
     `${groups.needsYou.join(",")}|${groups.active.join(",")}|${groups.finished.join(",")}|${showFinished}`,
-    (sessionId, list) => {
-      const card = sessionId ? list?.querySelector<HTMLElement>(`[data-session-id="${CSS.escape(sessionId)}"] .assistant-work-open`) : null;
-      return card ?? list?.querySelector<HTMLElement>(".launched-sessions-fold .disclosure-trigger")
-        ?? document.querySelector<HTMLElement>("#right-panel .rpanel-switcher");
-    },
+    (sessionId, list) => cardFocusTarget(list, sessionId)
+      ?? list?.querySelector<HTMLElement>(".launched-sessions-fold .disclosure-trigger")
+      ?? document.querySelector<HTMLElement>("#right-panel .rpanel-switcher"),
   );
   if (ids.length === 0) {
     return (
@@ -287,7 +315,11 @@ function AssistantWorkCard({ sessionId, campaign, beforeOpen }: { sessionId: str
           {session.agentName ? `${session.agentName} · ` : ""}{relativeTime(session.updatedAt)}
         </span>
       </button>
-      {request && <WorkCardRequest session={session} requestId={request.requestId} onOpen={() => open(request.requestId)} />}
+      {request && (
+        // Keyed by occurrence: a new request reusing the provider's id starts with nothing carried over.
+        <WorkCardRequest key={request.occurrenceId ?? request.requestId} session={session} requestId={request.requestId}
+          onOpen={() => open(request.requestId)} />
+      )}
     </li>
   );
 }
@@ -297,7 +329,6 @@ function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView;
   const api = useApi();
   const { loadSession, beginSessionDetailLoad } = useStoreActions();
   const { showToast } = useFeedback();
-  const busy = useResponding(`${session.id}\n${requestId}`);
   const listed = prioritizedPendingRequests(session.pendingApproval).find((candidate) => candidate.requestId === requestId);
   // The live list carries summary sessions, whose requests arrive without their options. The card
   // reads the session's detail once per request and keeps that request's options, so a later
@@ -318,6 +349,8 @@ function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView;
     return () => { current = false; };
   }, [api, beginSessionDetailLoad, needsDetail, requestId, session.id]);
   const request = listed && listed.options.length === 0 && hydrated?.requestId === requestId ? hydrated : listed;
+  const respondingKey = `${session.id}\n${listed?.occurrenceId ?? requestId}`;
+  const busy = useResponding(respondingKey);
   if (!request) return null;
   // Only a request with exactly one once-only option per intent is decided from the card; anything
   // richer (a question, a choice of scopes) is answered in the session, where its context is.
@@ -326,7 +359,7 @@ function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView;
   const refusal = sessionCommandRefusal(session, "respond");
   const decide = async (intent: "approve" | "deny") => {
     const option = intent === "approve" ? approve : deny;
-    const key = `${session.id}\n${request.requestId}`;
+    const key = respondingKey;
     if (!option || respondingTo.has(key)) return;
     setResponding(key, intent);
     try {

@@ -126,6 +126,33 @@ for (const theme of ["dark", "light"] as const) {
       await expect(moved).toBeFocused();
     });
 
+    test("a new approval that reuses the provider's request id is answerable while the first answer is out", async ({ page }) => {
+      await open(page, theme);
+      await page.evaluate(() => (window as unknown as { assistantsHoldApprovals: () => void }).assistantsHoldApprovals());
+      await waitingInHeader(page).getByRole("button", { name: "Approve Once" }).click();
+      await expect(page.locator("body")).toHaveAttribute("data-approve-count", "1");
+      await page.evaluate(() => (window as unknown as { assistantsReraiseDeps: () => void }).assistantsReraiseDeps());
+      await toggle(page).click();
+      const card = group(page, "Needs You").locator(".assistant-work-card");
+      await expect(card.getByRole("button", { name: "Approve Once" })).toBeEnabled();
+      await expect(card.getByRole("button", { name: "Deny" })).toBeEnabled();
+      await page.evaluate(() => (window as unknown as { assistantsReleaseApprovals: () => void }).assistantsReleaseApprovals());
+    });
+
+    for (const surface of ["panel", "header"] as const) {
+      test(`answering one of two requests in the ${surface} keeps focus on the card that still waits`, async ({ page }) => {
+        await open(page, theme, "deps=question");
+        if (surface === "panel") await toggle(page).click();
+        const list = surface === "panel" ? group(page, "Needs You") : waitingInHeader(page);
+        await list.getByRole("button", { name: "Approve Once" }).focus();
+        await page.keyboard.press("Enter");
+        await expect(page.locator("body")).toHaveAttribute("data-approved", "sess-deps:req-1:allow");
+        const card = list.locator('[data-session-id="sess-deps"]');
+        await expect(card).toContainText("Which lockfile should I keep?");
+        await expect(card.getByRole("button", { name: "Open Session" })).toBeFocused();
+      });
+    }
+
     test("the panel's open state is remembered on this device across a reload", async ({ page }) => {
       await open(page, theme);
       await toggle(page).click();

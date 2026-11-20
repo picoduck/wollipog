@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import {
   PROTOCOL_VERSION,
+  removePendingRequest,
   type AgentHarnessDefaultsView,
   type AssistantDecisionDelegation,
   type AssistantThreadLimits,
@@ -138,6 +139,26 @@ function session(id: string, title: string, overrides: Partial<SessionView> = {}
   } as SessionView;
 }
 
+/** The Vite bump's install approval. `?deps=question` adds a nonblocking question beside it, which the
+ * card shows once the approval is answered (#4776). A re-raised approval keeps the provider's request
+ * id under a new occurrence id. */
+function depsApproval(occurrenceId: string): PendingApproval {
+  return {
+    requestId: "req-1",
+    occurrenceId,
+    title: "Run pnpm install --frozen-lockfile",
+    options: [
+      { optionId: "allow", name: "Allow Once", kind: "allow_once" },
+      { optionId: "reject", name: "Deny", kind: "reject_once" },
+    ],
+    kind: "permission",
+    ...(params.get("deps") === "question" ? { additionalRequests: [{
+      requestId: "req-lockfile", occurrenceId: "occ-lockfile", kind: "question", async: true,
+      title: "Which lockfile should I keep?", options: [],
+    } as PendingApproval] } : {}),
+  } as PendingApproval;
+}
+
 const sessions = new Map<string, SessionView>([
   ["sess-triage", session("sess-triage", "Triage Open Issues", { status: "idle" })],
   ["sess-release", session("sess-release", "Ship the Release Notes", { status: "running", agentId: "codex", agentName: "Codex", driver: "codex-app-server" })],
@@ -145,15 +166,7 @@ const sessions = new Map<string, SessionView>([
   ["sess-flaky", session("sess-flaky", "Fix the Flaky Upload Test", { status: "running", updatedAt: NOW - minute })],
   ["sess-deps", session("sess-deps", "Bump the Vite Group", {
     status: "input_required",
-    pendingApproval: {
-      requestId: "req-1",
-      title: "Run pnpm install --frozen-lockfile",
-      options: [
-        { optionId: "allow", name: "Allow Once", kind: "allow_once" },
-        { optionId: "reject", name: "Deny", kind: "reject_once" },
-      ],
-      kind: "permission",
-    },
+    pendingApproval: depsApproval("occ-deps-1"),
   })],
 ]);
 
@@ -795,7 +808,9 @@ const client = {
     // control plane's would (#4776).
     if (holdApprovals) await new Promise<void>((resolve) => { releaseApprovals.push(resolve); });
     const current = sessions.get(id)!;
-    const next = { ...current, status: "running" as const, pendingApproval: null, updatedAt: Date.now() };
+    // Only the answered request leaves; another one waiting beside it stays.
+    const remaining = removePendingRequest(current.pendingApproval, body.requestId);
+    const next = { ...current, status: remaining ? current.status : "running" as const, pendingApproval: remaining, updatedAt: Date.now() };
     document.body.dataset.approved = `${id}:${body.requestId}:${body.optionId}`;
     upsert(next);
     // The thread no longer waits on anyone once its only approval is answered.
@@ -871,6 +886,9 @@ Object.assign(window, {
   },
   assistantsHoldNextList: () => { holdNextList = true; },
   assistantsHoldApprovals: () => { holdApprovals = true; },
+  /** The runner raises the install approval again under the same provider request id, as a new
+   * occurrence, while the first answer is still on its way back. */
+  assistantsReraiseDeps: () => upsert({ ...sessions.get("sess-deps")!, status: "input_required", pendingApproval: depsApproval("occ-deps-2") }),
   assistantsReleaseApprovals: () => {
     holdApprovals = false;
     for (const release of releaseApprovals.splice(0)) release();
