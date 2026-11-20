@@ -1473,6 +1473,10 @@ test("MCP cancellation promptly interrupts a long wait_session request", async (
 
 test("wait_pull_request reads GitHub through gh, never the control plane, and returns a bounded summary", async () => {
   const { deps, calls } = makeDeps();
+  // Advance the deadline only when the waiter sleeps after a complete observation.
+  let now = 0;
+  deps.now = () => now;
+  deps.sleep = async (milliseconds) => { now += milliseconds; };
   const head = "44579c6c25235598f1a28f8ccb0449cb8dbbc810";
   const ghCalls: string[][] = [];
   let conclusion = "SUCCESS";
@@ -1527,6 +1531,7 @@ test("wait_pull_request reads GitHub through gh, never the control plane, and re
     pullRequest: "picoduck/wollipog#7", headSha: head, timeoutMs: 1,
   }));
   assert.equal(skipped.outcome, "timeout", "an old skipped draft check cannot certify newly admitted CI");
+  assert.equal(skipped.polls, 1);
   assert.deepEqual(skipped.checks.required, [{ name: "Typecheck, Test & Sidecar Bundle", state: "pending", reported: true }]);
   assert.equal(calls.length, 0);
 
