@@ -1368,6 +1368,13 @@ app.register(async (instance) => {
         send(socket, { type: "runner_processing_ack", barrierId: msg.barrierId });
         break;
       }
+      case "registered_location_switch_lookup": {
+        if (!runnerId || !runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "registeredLocationSwitch") ||
+            typeof msg.requestId !== "string" || !/^[a-f0-9-]{36}$/u.test(msg.requestId)) break;
+        send(socket, { type: "registered_location_switch_lookup_result", requestId: msg.requestId,
+          workspacePath: locationSwitchService.lookupRegisteredSwitch(runnerId, msg) });
+        break;
+      }
       case "register": {
         if (runnerId) {
           send(socket, { type: "register_rejected", reason: "socket is already registered" });
@@ -4168,7 +4175,7 @@ registerCampaignRepositoryAdditionRoutes(app, { requestPrincipal, additions: new
   // The same verified-Location inspection as a launch (#4117), on a runner that can hold the boundary.
   inspect: (locationId, options) => inspectProjectLocation({ db, hub }, locationId, { ...options, requireProtocol: "campaignRepositoryBoundary" }),
   synchronize: (rootId) => svc.synchronizeCampaignIssueScope(rootId) }) });
-registerLocationSwitchRoutes(app, { requestPrincipal, service: new LocationSwitchService(db, svc, hub, {
+const locationSwitchService = new LocationSwitchService(db, svc, hub, {
   // The shared verified-Location inspection (#4117): by Location id, in the Location's own path.
   inspect: (locationId, options) => inspectProjectLocation({ db, hub }, locationId, options),
   // The approving owner creates the session, under the ordinary creation route's ownership rules.
@@ -4185,7 +4192,8 @@ registerLocationSwitchRoutes(app, { requestPrincipal, service: new LocationSwitc
     }
     return { ok: reply.ok, ...(reply.error ? { error: reply.error } : {}) };
   },
-}) });
+});
+registerLocationSwitchRoutes(app, { requestPrincipal, service: locationSwitchService });
 
 app.post("/api/sessions/:id/github-issue-closures", async (req, reply) => {
   const { id } = req.params as { id: string };

@@ -1393,6 +1393,26 @@ sessions.setDetachedClaudeEnvironment(sessionAgentEnvironment);
 const sharedDirectoryForbiddenRoots = [parsed.configPath, providerAccountsConfigPath,
   ...(tokenFile ? [tokenFile] : []), ...config.providerAccounts.map((account) => account.directory)];
 sessions.configureSharedDirectories(config.workspaces, sharedDirectoryForbiddenRoots);
+const registeredLocationSwitchLookups = new Map<string, (path: string | null | undefined) => void>();
+sessions.setRegisteredLocationSwitchLookup((sessionId, { occurrenceId, workspaceId, repository }, phase) => {
+  const socket = ws;
+  if (!socket || socket.readyState !== WebSocket.OPEN || !registered) return Promise.resolve(undefined);
+  if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "registeredLocationSwitch")) return Promise.resolve(null);
+  const requestId = randomUUID();
+  return new Promise<string | null | undefined>((resolve) => {
+    const finish = (path: string | null | undefined) => {
+      clearTimeout(timer);
+      registeredLocationSwitchLookups.delete(requestId);
+      resolve(path);
+    };
+    const timer = setTimeout(() => finish(undefined), 10_000);
+    timer.unref();
+    registeredLocationSwitchLookups.set(requestId, finish);
+    // A lookup belongs to this connection alone. Never queue it for replay on reconnect.
+    const message: RunnerToControlPlane = { type: "registered_location_switch_lookup", requestId, sessionId, occurrenceId, workspaceId, repository, phase };
+    try { socket.send(JSON.stringify(message)); } catch { finish(undefined); }
+  });
+});
 sessions.configureProviderProfiles({
   access: () => providerProfileGrants.access(),
   expectedProfileIdForHome: (home) => providerProfileGrants.expectedProfileIdForHome(home),
@@ -3702,6 +3722,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         ),
       );
       break;
+    case "registered_location_switch_lookup_result":
+      if (typeof msg.workspacePath === "string" || msg.workspacePath === null) {
+        registeredLocationSwitchLookups.get(msg.requestId)?.(msg.workspacePath);
+      }
+      break;
     case "prepare_session_role":
       runCommandTask("prepare_session_role", sessions.prepareSessionRole(msg, () => {
         removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
@@ -4599,6 +4624,7 @@ function connect(): void {
     stopHeartbeat();
     registered = false;
     forgetAgentControlRegistrationAnswers();
+    for (const finish of registeredLocationSwitchLookups.values()) finish(undefined);
     controlPlaneProtocolVersion = null;
     automaticAccountSwitchConfigurationSynchronized = false;
     sessions.setAutomaticAccountSwitchAuthorityReady(false);

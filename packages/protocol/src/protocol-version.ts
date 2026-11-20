@@ -1531,6 +1531,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 394: Bind Add Account profile grants before dispatch with start_provider_login.newAccountId.
   394,
   // v395 slot
+  // 395: Revalidate a control-plane-registered Location before accepting and applying a live switch (Refs #4557).
+  395,
   // v396 slot
   // v397 slot
   // v398 slot
