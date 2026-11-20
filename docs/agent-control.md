@@ -214,8 +214,8 @@ check runs (every such app must report), and the newest run of a name (by check 
 Check contexts are read in pages of 100, up to ten pages per commit; past that, a pass also needs
 GitHub's `mergeStateStatus` to confirm it, because an unseen context could still fail. A required check with no reported run is `pending`
 (`reported: false`), never passing, and a base whose rules require nothing returns
-`no_required_checks` at once. An unreadable base is an error, never an empty requirement, and a
-GraphQL answer carrying any error is retried rather than trusted. A queue
+`no_required_checks` at once. A failed rules read cannot prove that a base has no required
+checks. GraphQL answers carrying errors cannot establish a verdict. A queue
 entry that disappears without a merge is reported as `queue_ejected` only once it has stayed missing
 for 10 seconds. The same query reads the latest merge-queue timeline event and the latest force push
 (#3712), so a call that starts after GitHub removed the entry also reports `queue_ejected`, confirmed
@@ -228,10 +228,15 @@ event, so a delayed or re-run job cannot move it. A pull request never enqueued,
 a commit already tested on another branch) keeps reporting its own checks. A failed merge-group check alone never ends the wait (#3121): when an entry ahead
 caused it, GitHub drops that entry and rebuilds this one's group on a new commit, so the wait keeps
 reading until GitHub itself gives up on the entry or it merges; `--any-failure` applies to the head's
-checks only. Timeouts are clamped to 1 ms–3 hours (default 4 minutes); reads share that budget, so no read
-starts more than 20 seconds past it and one still in flight then is abandoned. Resolving a bare
-number's repository is one of those reads, so `--timeout 1` still returns one snapshot. Polling is clamped to
-10 seconds–10 minutes (default 30 seconds); lists are capped at 30 required checks and 20 failed jobs.
+checks only. GitHub waits and CLI repository lookup share a deadline of 1 ms to 3 hours
+(default 4 minutes). The runner aborts reads still in flight at the deadline. Each transient
+failure that prevents a complete observation increments `transientErrorCount`. The runner retries
+with jittered backoff until the deadline. Authentication, permission and missing-resource errors
+end the wait immediately. A timeout during an outage sets `forgeDegraded` and includes the last
+complete observation, or `observation: null` if none completed. An in-flight read cancelled at the
+deadline does not count as a forge error. The last observation can predate the deadline by a
+polling interval. Polling intervals range from
+10 seconds to 10 minutes (default 30 seconds). Lists are capped at 30 required checks and 20 failed jobs.
 
 MCP `park_on_pull_request` (#4071, protocol 272) lets a session stop waiting inside a turn. The
 session names its own enqueued GitHub pull request and exact head, gets a watch back, and ends its
@@ -244,8 +249,8 @@ plane accepts only the first report from the watch's runner, then wakes the sess
 session receives one durable `[Wollipog Pull Request Watch — <id>]` prompt with the outcome and the
 bounded wait summary (at most 16 KiB, on one line), carried exactly like a review continuation.
 Every runner registration resends the watches still watching on it, so a runner restart resumes
-them. A runner that cannot watch any more (an older version), or one that could not read GitHub
-for about half an hour, reports the watch `lost`, and the wake says so. Parking again replaces the
+them. The watch shares the wait's transient retry behavior, and stale observations do not renew
+its 10-minute lease. A permanent error or an expired lease reports the watch `lost`. Parking again replaces the
 watch; an ended or archived session's watch is cancelled and owes no wake. `get_session` shows the
 watch as `pullRequestWatch`, and `get_campaign` lists parked children as `parkedChildren`. While a
 child is parked (watching, or its wake not yet started), its turn end is no `child_ready`

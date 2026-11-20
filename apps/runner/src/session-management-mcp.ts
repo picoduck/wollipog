@@ -133,7 +133,7 @@ export interface McpDeps {
   gh?: GhRunner;
   /** Read-only `glab` for a GitLab `wait_pull_request` (#3602); defaults to this process's own login. */
   glab?: GlabRunner;
-  /** `wait_pull_request`'s read grace when a caller already spent part of it (CLI repository discovery). */
+  /** Read grace for the GitLab merge-request waiter. */
   pullRequestReadGraceMs?: number;
 }
 
@@ -3254,7 +3254,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "wait_pull_request",
-    description: "Wait, without model turns, until a GitHub pull request's required checks pass or fail, GitHub marks its merge-queue entry UNMERGEABLE or it leaves the queue, it merges or closes, its head moves, or the timeout expires; then return one bounded summary (head SHA, each required check, merge-queue position and state, failed jobs with run links, merged). Outcome \"queue_ejected\" also covers an entry GitHub removed before this call started: when the pull request's latest merge-queue event removed its current head and it is still open, mergeQueueRemoval carries GitHub's reason (for example checks_timed_out, failed_checks, manual) and time. It never re-enqueues. Required checks come from the base branch's rules; one not reported yet is pending, never passing. Reads only, through this runner's gh login. A GitLab merge request (a merge request URL, or <gitlab-host>/group/project!iid) is read through this runner's glab login instead: it returns when its head pipeline (the merged-results pipeline where the project runs them) or its merge-train pipeline finishes, it leaves the train, merges, closes, or its head moves; only a successful pipeline passes, and a skipped or manual one returns \"checks_blocked\". Keep timeoutMs plus 20 seconds inside your harness's tool-call limit and call again on outcome \"timeout\". Through this runner's wollipog MCP server, Claude Code and Codex allow one call 3 hours 1 minute, so any timeoutMs up to the maximum fits; on an older runner, Claude Code aborts a call that stays silent for 30 minutes.",
+    description: "Wait, without model turns, until a GitHub pull request's required checks pass or fail, GitHub marks its merge-queue entry UNMERGEABLE or it leaves the queue, it merges or closes, its head moves, or the timeout expires; then return one bounded summary (head SHA, each required check, merge-queue position and state, failed jobs with run links, merged). Outcome \"queue_ejected\" also covers an entry GitHub removed before this call started: when the pull request's latest merge-queue event removed its current head and it is still open, mergeQueueRemoval carries GitHub's reason (for example checks_timed_out, failed_checks, manual) and time. For GitHub, the runner retries transient errors within the caller's deadline. A timeout reports the last complete observation, if any, and whether the forge was degraded. Summaries include transientErrorCount. It never re-enqueues. Required checks come from the base branch's rules; one not reported yet is pending, never passing. Reads only, through this runner's gh login. A GitLab merge request (a merge request URL, or <gitlab-host>/group/project!iid) is read through this runner's glab login instead: it returns when its head pipeline (the merged-results pipeline where the project runs them) or its merge-train pipeline finishes, it leaves the train, merges, closes, or its head moves; only a successful pipeline passes, and a skipped or manual one returns \"checks_blocked\". Allow up to 20 extra seconds for GitLab reads when choosing a harness timeout and call again on outcome \"timeout\". Through this runner's wollipog MCP server, Claude Code and Codex allow one call 3 hours 1 minute, so any timeoutMs up to the maximum fits; on an older runner, Claude Code aborts a call that stays silent for 30 minutes.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3288,15 +3288,16 @@ export const TOOLS: McpTool[] = [
       // The waiter's own clamps, so the reported deadline and progress bound match the call (#1280).
       const integer = (value: unknown, fallback: number, min: number, max: number) =>
         Math.min(max, Math.max(min, typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback));
+      const gitlab = campaignRepositoryLocation(ref.repository)?.forge === "gitlab";
       const reporter = waitProgressReporter(deps, "wait_pull_request",
         { kind: "pull_request", repository: ref.repository, number: ref.number },
         integer(args?.timeoutMs, PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, 1, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS) +
-          (deps.pullRequestReadGraceMs ?? PULL_REQUEST_WAIT_READ_GRACE_MS),
+          (gitlab ? deps.pullRequestReadGraceMs ?? PULL_REQUEST_WAIT_READ_GRACE_MS : 0),
         integer(args?.intervalMs, PULL_REQUEST_WAIT_DEFAULT_INTERVAL_MS, PULL_REQUEST_WAIT_MIN_INTERVAL_MS,
           PULL_REQUEST_WAIT_MAX_INTERVAL_MS));
       const onObservation = () => reporter.poll();
       try {
-        if (campaignRepositoryLocation(ref.repository)?.forge === "gitlab") {
+        if (gitlab) {
           const waited = await waitForMergeRequest({
             ...ref,
             ...(typeof args?.headSha === "string" ? { headSha: args.headSha.trim().toLowerCase() } : {}),
@@ -3323,10 +3324,13 @@ export const TOOLS: McpTool[] = [
           ...(deps.now ? { now: deps.now } : {}),
           ...(deps.sleep ? { sleep: deps.sleep } : {}),
           ...(deps.signal ? { signal: deps.signal } : {}),
-          ...(deps.pullRequestReadGraceMs !== undefined ? { readGraceMs: deps.pullRequestReadGraceMs } : {}),
           onObservation,
         });
-        return result.ok ? textResult(result.summary) : errorResult(result.error);
+        if (result.ok) return textResult(result.summary);
+        if (result.timeout) return textResult(result.timeout);
+        return result.transientErrorCount === undefined
+          ? errorResult(result.error)
+          : { ...textResult({ error: result.error, transientErrorCount: result.transientErrorCount }), isError: true };
       } finally {
         await reporter.end();
       }

@@ -34,11 +34,10 @@ const MAX_LISTED_CHECKS = 30;
 const MAX_FAILED_JOBS = 20;
 const MAX_NAME = 120;
 const MAX_URL = 300;
-/** Consecutive transient `gh` failures (rate limit, network) tolerated before giving up. */
-const MAX_TRANSIENT_FAILURES = 3;
+const MAX_RETRY_DELAY_MS = 120_000;
 /** Pause before confirming that a queue entry which vanished without a merge was really ejected. */
 const EJECTION_CONFIRM_MS = 10_000;
-/** How far past the timeout one in-flight observation may run; no read starts after it. */
+/** Read grace for the merge gate's one-shot GitHub snapshot and the GitLab waiter. */
 export const PULL_REQUEST_WAIT_READ_GRACE_MS = 20_000;
 const BUDGET_SPENT: GhOutcome = { stdout: "", stderr: "the wait's time budget is spent", code: "ETIMEDOUT", timedOut: true };
 
@@ -108,6 +107,10 @@ export interface PullRequestWaitSummary {
   mergeQueueRemoval: null | { reason: string | null; removedAt: string };
   waitedMs: number;
   polls: number;
+  /** Number of polls that could not complete because of a retryable forge read. */
+  transientErrorCount: number;
+  /** The wait timed out before a fresh observation could resolve the outage. */
+  forgeDegraded: boolean;
 }
 
 export interface PullRequestWaitInput {
@@ -127,7 +130,8 @@ export interface PullRequestWaitDeps {
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
   signal?: AbortSignal;
-  /** PULL_REQUEST_WAIT_READ_GRACE_MS, or what remains of it after a caller's own read. */
+  random?: () => number;
+  /** Allow the merge-readiness gate's one-shot observation to finish without polling again. */
   readGraceMs?: number;
   /** Called after each complete, successful observation: the wait's progress signal (#1280). */
   onObservation?: () => void;
@@ -137,7 +141,18 @@ export interface PullRequestWaitDeps {
 
 export type PullRequestWaitResult =
   | { ok: true; summary: PullRequestWaitSummary }
-  | { ok: false; error: string };
+  | { ok: false; error: string; transientErrorCount?: number; timeout?: PullRequestWaitWithoutObservation };
+
+interface PullRequestWaitWithoutObservation {
+  outcome: "timeout";
+  repository: string;
+  number: number;
+  observation: null;
+  waitedMs: number;
+  polls: number;
+  transientErrorCount: number;
+  forgeDegraded: boolean;
+}
 
 const SHA = /^[0-9a-f]{40}$/u;
 /** `mergeStateStatus` values under which GitHub has every required check reported and passing. */
@@ -200,11 +215,13 @@ export function parsePullRequestRef(
  * read as a missing `gh`, so a status code is classified first. GitHub also answers a rate limit
  * with 403, so its wording is checked before the status. */
 function failureReason(outcome: GhOutcome): string {
-  const status = /\(HTTP (\d{3})\)/u.exec(outcome.stderr)?.[1];
-  if (/rate limit/iu.test(outcome.stderr) || status === "429") return "forge_rate_limited";
+  const status = /\bHTTP (\d{3})\b/u.exec(outcome.stderr)?.[1];
   if (status === "401") return "forge_unauthenticated";
+  if (status === "429" || ((!status || status === "403") && /rate limit/iu.test(outcome.stderr))) return "forge_rate_limited";
   if (status?.startsWith("5")) return "forge_unreachable";
   if (status) return `http_${status}`;
+  if (outcome.code === "ETIMEDOUT" || outcome.code === "ECONNRESET" ||
+      /connection timed out|read timed out|unexpected EOF|Client\.Timeout/iu.test(outcome.stderr)) return "forge_unreachable";
   return classifyGhFailure(outcome);
 }
 
@@ -799,9 +816,16 @@ async function graphqlRead<T>(gh: GhRunner, args: string[], what: string, parse:
   const response = record(parseJson(outcome.stdout));
   const errors = Array.isArray(response?.errors) ? response.errors.map(record) : [];
   const value = parse(response?.data);
-  if (value !== null && errors.length === 0) return { ok: true, value };
-  const retryable = errors.some((error) => error?.type === "RATE_LIMITED") || value !== null ||
-    (outcome.code !== null && transient(outcome));
+  if (outcome.code === null && !outcome.timedOut && value !== null && errors.length === 0) return { ok: true, value };
+  const reason = failureReason(outcome);
+  const rateLimited = errors.some((error) => error?.type === "RATE_LIMITED");
+  const executionFailed = errors.some((error) => error?.type === "INTERNAL" ||
+    (typeof error?.message === "string" && /went wrong while executing your query|result of a timeout/iu.test(error.message)));
+  const permanent = reason === "forge_unauthenticated" || reason === "forge_cli_missing" ||
+    (reason.startsWith("http_") && !(reason === "http_403" && rateLimited)) ||
+    errors.some((error) => error?.type === "NOT_FOUND" || error?.type === "FORBIDDEN" ||
+      error?.type === "UNAUTHORIZED" || error?.type === "VALIDATION");
+  const retryable = !permanent && (rateLimited || executionFailed || (value !== null && errors.length > 0) || transient(outcome));
   const message = errors.map((error) => typeof error?.message === "string" ? error.message : "").find(Boolean);
   return {
     ok: false,
@@ -816,7 +840,8 @@ function clampInteger(value: unknown, fallback: number, min: number, max: number
 }
 
 export async function cancellableSleep(deps: Pick<PullRequestWaitDeps, "sleep" | "signal">, milliseconds: number): Promise<boolean> {
-  const sleep = deps.sleep ?? ((duration: number) => new Promise<void>((resolve) => setTimeout(resolve, duration)));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const sleep = deps.sleep ?? ((duration: number) => new Promise<void>((resolve) => { timer = setTimeout(resolve, duration); }));
   const signal = deps.signal;
   if (!signal) {
     await sleep(milliseconds);
@@ -831,6 +856,7 @@ export async function cancellableSleep(deps: Pick<PullRequestWaitDeps, "sleep" |
   try {
     return await Promise.race([sleep(milliseconds).then(() => true), cancelled]);
   } finally {
+    clearTimeout(timer);
     signal.removeEventListener("abort", onAbort);
   }
 }
@@ -840,7 +866,9 @@ export async function cancellableSleep(deps: Pick<PullRequestWaitDeps, "sleep" |
 export async function waitForPullRequest(input: PullRequestWaitInput, deps: PullRequestWaitDeps): Promise<PullRequestWaitResult> {
   const repo = githubRepository({ repository: input.repository, number: input.number });
   const ref = repo ? { ...repo, number: input.number } : null;
-  if (!ref) return { ok: false, error: "a valid GitHub repository and pull request number are required" };
+  if (!ref || !Number.isSafeInteger(ref.number) || ref.number < 1) {
+    return { ok: false, error: "a valid GitHub repository and pull request number are required" };
+  }
   if (input.headSha !== undefined && !SHA.test(input.headSha)) return { ok: false, error: "headSha must be a full 40-character commit SHA" };
   const timeoutMs = clampInteger(input.timeoutMs, PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, 1, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS);
   const intervalMs = clampInteger(input.intervalMs, PULL_REQUEST_WAIT_DEFAULT_INTERVAL_MS,
@@ -856,11 +884,15 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
   let vanishedAt: number | null = null;
   /** The removal `vanishedAt` is confirming; a different one restarts the interval. */
   let confirming: string | null = null;
-  let transientFailures = 0;
+  const maxRetryDelayMs = Math.max(intervalMs, MAX_RETRY_DELAY_MS);
+  let retryDelayMs = intervalMs;
+  let forgeDegraded = false;
+  let transientErrorCount = 0;
   let polls = 0;
+  let last: PullRequestWaitSummary | null = null;
+  let lastError = "the wait expired before GitHub returned an observation";
   // Immutable suite identities, local to this wait and bounded across changing queue heads.
   const workflowCache = new Map<number, WorkflowIdentity | null>();
-  let workflowTransientFailures = 0;
 
   const summarize = (outcome: PullRequestWaitOutcome, seen: Observation): PullRequestWaitSummary => ({
     outcome,
@@ -890,41 +922,69 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     mergeQueueRemoval: seen.removal ?? null,
     waitedMs: Math.max(0, now() - started),
     polls,
+    transientErrorCount,
+    forgeDegraded: false,
   });
 
-  // Sleep until the next poll; false when cancelled. A transient failure retries on the same pace.
+  const failure = (error: string): PullRequestWaitResult => ({
+    ok: false, error, ...(transientErrorCount > 0 ? { transientErrorCount } : {}),
+  });
+
+  const timedOut = (): PullRequestWaitResult => {
+    const waitedMs = Math.max(0, now() - started);
+    return last
+      ? { ok: true, summary: { ...last, waitedMs, polls, transientErrorCount, forgeDegraded } }
+      : { ok: false, error: lastError, transientErrorCount, timeout: {
+          outcome: "timeout", repository, number: ref.number, observation: null,
+          waitedMs, polls, transientErrorCount, forgeDegraded,
+        } };
+  };
+
+  // Sleep until the next poll; false when cancelled.
   const pause = async (milliseconds: number): Promise<boolean> => {
     const remaining = deadline - now();
     if (remaining <= 0) return true;
     return cancellableSleep(deps, Math.min(milliseconds, remaining));
   };
 
-  // Every read shares one budget, so the call returns within the timeout plus one read's grace: no
-  // read starts once it is spent, and one still in flight then is killed (reads have no effects).
-  const stopAt = deadline + (deps.readGraceMs ?? PULL_REQUEST_WAIT_READ_GRACE_MS);
+  const retry = (error: string): Promise<boolean> => {
+    lastError = error;
+    transientErrorCount++;
+    forgeDegraded = true;
+    const jitter = (deps.random ?? Math.random)();
+    const delay = Math.round(retryDelayMs * (0.75 + 0.25 * jitter));
+    retryDelayMs = Math.min(retryDelayMs * 2, maxRetryDelayMs);
+    return pause(delay);
+  };
+
+  // Every read shares one deadline. Only the merge gate's one-shot snapshot has read grace.
+  const stopAt = deadline + (deps.readGraceMs ?? 0);
+  let readCutOff = false;
+  const cutOff = (): GhOutcome => {
+    readCutOff = true;
+    return BUDGET_SPENT;
+  };
   const gh: GhRunner = async (args) => {
     const budget = stopAt - now();
-    if (deps.signal?.aborted || budget <= 0) return BUDGET_SPENT;
+    if (deps.signal?.aborted || budget <= 0) return cutOff();
     const read = new AbortController();
-    const cancel = () => read.abort();
-    deps.signal?.addEventListener("abort", cancel, { once: true });
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let stop!: () => void;
     const spent = new Promise<GhOutcome>((resolve) => {
-      timer = setTimeout(() => {
+      stop = () => {
+        resolve(cutOff());
         read.abort();
-        resolve(BUDGET_SPENT);
-      }, budget);
-      timer.unref?.();
+      };
     });
+    const timer = setTimeout(stop, budget);
+    deps.signal?.addEventListener("abort", stop, { once: true });
     try {
-      return await Promise.race([deps.gh(args, read.signal), spent]);
+      const outcome = await Promise.race([deps.gh(args, read.signal), spent]);
+      return now() >= stopAt ? cutOff() : outcome;
     } finally {
       clearTimeout(timer);
-      deps.signal?.removeEventListener("abort", cancel);
+      deps.signal?.removeEventListener("abort", stop);
     }
   };
-  /** The latest complete observation, reported if a read fails once the timeout has passed. */
-  let last: Observation | null = null;
   const what = `could not read ${repository}#${ref.number}`;
   const variables = ["-f", `owner=${ref.owner}`, "-f", `name=${ref.name}`, "-F", `number=${ref.number}`];
 
@@ -968,16 +1028,15 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
 
   for (;;) {
     if (deps.signal?.aborted) return { ok: false, error: "request cancelled" };
+    if (now() >= deadline && (polls > 0 || deps.readGraceMs === undefined)) return timedOut();
     polls++;
     const result = await read();
     if (deps.signal?.aborted) return { ok: false, error: "request cancelled" };
+    if (readCutOff) return timedOut();
     if (!result.ok) {
-      if (result.retryable && ++transientFailures <= MAX_TRANSIENT_FAILURES && now() < deadline) {
-        if (!await pause(intervalMs)) return { ok: false, error: "request cancelled" };
-        continue;
-      }
-      if (last && now() >= deadline) return { ok: true, summary: summarize("timeout", last) };
-      return { ok: false, error: result.error };
+      if (!result.retryable) return failure(result.error);
+      if (!await retry(result.error)) return { ok: false, error: "request cancelled" };
+      continue;
     }
     const seen = result.value;
 
@@ -989,24 +1048,24 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     if (!required || required.base !== seen.baseRef) {
       const names = await requiredCheckNames(gh, repository, seen.baseRef, deps.signal);
       if (deps.signal?.aborted) return { ok: false, error: "request cancelled" };
+      if (readCutOff) return timedOut();
       if (!names.ok) {
-        if (names.transient && ++transientFailures <= MAX_TRANSIENT_FAILURES && now() < deadline) {
-          if (!await pause(intervalMs)) return { ok: false, error: "request cancelled" };
-          continue;
-        }
-        if (last && now() >= deadline) return { ok: true, summary: summarize("timeout", last) };
-        return { ok: false, error: names.error };
+        if (!names.transient) return failure(names.error);
+        if (!await retry(names.error)) return { ok: false, error: "request cancelled" };
+        continue;
       }
       required = { base: seen.baseRef, names: names.names, apps: names.apps };
     }
-    // Only a complete observation, rules included, resets the transient-failure budget.
-    transientFailures = 0;
-    last = seen;
-    deps.onObservation?.();
-
     seen.removal = headRemoval(seen);
-    deps.onSnapshot?.(summarize("timeout", seen));
+    const observed = () => {
+      retryDelayMs = intervalMs;
+      forgeDegraded = false;
+      last = summarize("timeout", seen);
+      deps.onObservation?.();
+      deps.onSnapshot?.(last);
+    };
     if (seen.queue) {
+      observed();
       sawQueue = true;
       vanishedAt = null;
       confirming = null;
@@ -1015,6 +1074,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
       // the wait: the entry reads UNMERGEABLE, or it leaves the queue unmerged (confirmed below).
       if (seen.queue.state === "UNMERGEABLE") return { ok: true, summary: summarize("queue_failed", seen) };
     } else if (sawQueue || seen.removal) {
+      observed();
       // GitHub can drop the entry a moment before the pull request reads MERGED, so an ejection
       // stands only once the entry has stayed missing for the whole confirmation interval. A removal
       // this call did not see happen (#3712) is confirmed the same way, from its first observation.
@@ -1034,14 +1094,20 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
       vanishedAt = null;
       confirming = null;
       const initial = evaluateCommitChecks(seen.headSha, seen.rollup, required.names, required.apps, seen.mergeStateStatus);
+      let skipReadFailed = false;
       if (initial.requiredState === "pending" && initial.complete &&
           !(input.returnOnAnyFailure && initial.summary.failedJobs.length > 0)) {
-        seen.admittedSkippedRuns = await admittedSkippedRuns(gh, repository, seen, required);
+        seen.admittedSkippedRuns = await admittedSkippedRuns(async (args) => {
+          const response = await gh(args);
+          if (response.code !== null && transient(response)) skipReadFailed = true;
+          return response;
+        }, repository, seen, required);
         if (deps.signal?.aborted) return { ok: false, error: "request cancelled" };
+        if (readCutOff) return timedOut();
       }
       const checks = evaluateCommitChecks(seen.headSha, seen.rollup, required.names, required.apps, seen.mergeStateStatus, seen.admittedSkippedRuns);
-      // Retry only classified transient optional reads, within a fixed budget. A denied read still
-      // retains observed failures; an unresolved transient at the deadline reports timeout.
+      // Optional provenance can make a failure ambiguous. A definitive independent failure can
+      // still end the wait immediately.
       const unresolved = seen.workflowRetry ?? new Set<string>();
       const contexts = record(record(seen.rollup)?.contexts);
       const independent = unresolved.size > 0 ? evaluateCommitChecks(seen.headSha, {
@@ -1055,15 +1121,15 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
         (input.returnOnAnyFailure && independent.summary.failedJobs.length > 0);
       const observedFailure = checks.requiredState === "failed" ||
         (input.returnOnAnyFailure && checks.summary.failedJobs.length > 0);
-      const retryIdentity = observedFailure && unresolved.size > 0 && !independentFailure &&
-        ++workflowTransientFailures <= MAX_TRANSIENT_FAILURES;
-      if (unresolved.size === 0) workflowTransientFailures = 0;
-      if (retryIdentity) {
-        // A retry must bypass every terminal success outcome, including optional-only waits.
-        if (now() >= deadline) return { ok: true, summary: summarize("timeout", seen) };
-        if (!await pause(intervalMs)) return { ok: false, error: "request cancelled" };
+      if (skipReadFailed && checks.requiredState === "pending") {
+        if (!await retry("GitHub could not confirm skipped required checks")) return { ok: false, error: "request cancelled" };
         continue;
       }
+      if (observedFailure && unresolved.size > 0 && !independentFailure) {
+        if (!await retry("GitHub could not confirm workflow identities")) return { ok: false, error: "request cancelled" };
+        continue;
+      }
+      observed();
       if (checks.requiredState === "failed" || (input.returnOnAnyFailure && checks.summary.failedJobs.length > 0)) {
         return { ok: true, summary: summarize("checks_failed", seen) };
       }
@@ -1075,8 +1141,6 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
       }
     }
 
-    if (now() >= deadline) return { ok: true, summary: summarize("timeout", seen) };
-    // The read after the final pause lands at the deadline, so a timeout summary is current.
     if (!await pause(intervalMs)) return { ok: false, error: "request cancelled" };
   }
 }

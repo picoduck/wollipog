@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PULL_REQUEST_WATCH_SUMMARY_LIMIT_BYTES, type PullRequestWatchUpdate } from "@wollipog/protocol";
 import type { PullRequestWaitInput, PullRequestWaitResult, PullRequestWaitSummary } from "./pull-request-wait.js";
-import { PULL_REQUEST_WATCH_MAX_FAILURES, PullRequestWatcher, serializedWatchSummary } from "./pull-request-watches.js";
+import { PullRequestWatcher, serializedWatchSummary } from "./pull-request-watches.js";
 
 const HEAD = "c".repeat(40);
 const START = { type: "pull_request_watch_start" as const, watchId: "prw_1", sessionId: "s1",
@@ -37,7 +37,7 @@ function summary(outcome: PullRequestWaitSummary["outcome"], extra: Partial<Pull
     headSha: HEAD, baseRef: "main", defaultBranch: "main", mergeStateStatus: "CLEAN", requiredCheckNames: ["required"],
     checks: { sha: HEAD, required: [], other: { passed: 0, failed: 0, pending: 0 }, failedJobs: [] },
     mergeQueue: { state: "QUEUED", position: 4, enqueuedAt: null, checks: null }, mergeQueueRemoval: null,
-    waitedMs: 1, polls: 1, ...extra,
+    waitedMs: 1, polls: 1, forgeDegraded: false, transientErrorCount: 0, ...extra,
   };
 }
 
@@ -75,7 +75,7 @@ test("a watch keeps waiting through timeouts and reports its first outcome once,
   await h.settled;
   assert.equal(h.inputs.length, 3, "a duplicate start does not watch twice; timeouts only re-arm the wait");
   assert.deepEqual(h.inputs.map((input) => input.headSha), [HEAD, HEAD, HEAD], "every wait pins the parked head");
-  assert.equal(h.updates.filter(u => u.state === "progress").length, 2);
+  assert.equal(h.updates.filter(u => u.state === "progress").length, 0, "a timeout never replays the last snapshot");
   const terminal = h.updates.filter(u => u.state !== "progress");
   assert.equal(terminal.length, 1);
   const [update] = terminal;
@@ -88,7 +88,38 @@ test("a watch keeps waiting through timeouts and reports its first outcome once,
   // without another read.
   h.watcher.start(START);
   assert.equal(h.inputs.length, 3);
-  assert.deepEqual(h.updates.slice(3), [update]);
+  assert.deepEqual(h.updates.slice(1), [update]);
+});
+
+test("a parked watch retries a prolonged forge outage and reports the count with its merge outcome", async () => {
+  let now = 0;
+  let polls = 0;
+  const updates: PullRequestWatchUpdate[] = [];
+  const ok = (value: unknown) => ({ stdout: JSON.stringify(value), stderr: "", code: null, timedOut: false });
+  const watcher = new PullRequestWatcher({
+    now: () => now,
+    sleep: async (ms) => { now += ms; },
+    send: (update) => updates.push(update),
+    gh: async (args) => {
+      if (!args.includes("graphql")) return ok(args.some((arg) => arg.includes("/rules/")) ? [] : {});
+      if (++polls === 2) {
+        const message = "Something went wrong while executing your query. This may be the result of a timeout";
+        return { stdout: JSON.stringify({ data: null, errors: [{ message }] }), stderr: `gh: ${message}`, code: 1, timedOut: false };
+      }
+      if (polls > 2 && polls <= 6) return { stdout: "", stderr: "gh: HTTP 504", code: 1, timedOut: false };
+      const merged = polls > 6;
+      return ok({ data: { repository: { defaultBranchRef: { name: "main" }, pullRequest: {
+        state: merged ? "MERGED" : "OPEN", headRefOid: HEAD, baseRefName: "main", isDraft: false,
+        url: "https://github.com/picoduck/wollipog/pull/4071", mergeQueueEntry: merged ? null : { state: "QUEUED", position: 1 },
+      } } } });
+    },
+  });
+  watcher.start(START);
+  await new Promise(resolve => setImmediate(resolve));
+  watcher.stopAll();
+  assert.deepEqual(updates.map(update => update.state), ["progress", "fired"]);
+  assert.equal(updates[1]!.outcome, "merged");
+  assert.equal(JSON.parse(updates[1]!.summary!).transientErrorCount, 5);
 });
 
 test("every outcome but a timeout ends the watch, including a pull request that is not queued", async () => {
@@ -100,26 +131,29 @@ test("every outcome but a timeout ends the watch, including a pull request that 
   }
 });
 
-test("an unreadable pull request is retried, then reported lost rather than left silent", async () => {
-  const failures = Array.from({ length: PULL_REQUEST_WATCH_MAX_FAILURES },
-    (): PullRequestWaitResult => ({ ok: false, error: "could not read picoduck/wollipog#4071: HTTP 502" }));
-  const h = scripted(failures);
+test("a watch reports a permanent error immediately with the preceding transient count", async () => {
+  const h = scripted([{ ok: false, error: "could not read picoduck/wollipog#4071: HTTP 404", transientErrorCount: 2 }]);
   h.watcher.start(START);
   await h.settled;
-  assert.equal(h.inputs.length, PULL_REQUEST_WATCH_MAX_FAILURES);
-  assert.equal(h.sleeps.length, PULL_REQUEST_WATCH_MAX_FAILURES - 1, "it pauses between attempts");
+  assert.equal(h.inputs.length, 1);
+  assert.deepEqual(h.sleeps, []);
   assert.equal(h.updates.length, 1);
   assert.equal(h.updates[0]!.state, "lost");
-  assert.match(h.updates[0]!.reason!, /^GitHub could not be read: .*HTTP 502/u);
+  assert.match(h.updates[0]!.reason!, /^GitHub could not be read after 2 transient forge errors: .*HTTP 404/u);
 });
 
-test("a success between failures resets the retry budget", async () => {
-  const bad: PullRequestWaitResult = { ok: false, error: "transport" };
-  const h = scripted([bad, bad, { ok: true, summary: summary("timeout") }, ...Array(PULL_REQUEST_WATCH_MAX_FAILURES - 1).fill(bad),
+test("degraded timeouts preserve the count without refreshing the observation lease", async () => {
+  const h = scripted([
+    { ok: true, summary: summary("timeout", { forgeDegraded: true, transientErrorCount: 8 }) },
+    { ok: false, error: "HTTP 504", transientErrorCount: 10, timeout: {
+      outcome: "timeout", repository: START.repository, number: START.number, observation: null,
+      waitedMs: 10_800_000, polls: 10, forgeDegraded: true, transientErrorCount: 10,
+    } },
     { ok: true, summary: summary("queue_ejected") }]);
   h.watcher.start(START);
   await h.settled;
-  assert.deepEqual(h.updates.filter(u => u.state !== "progress").map((update) => update.state), ["fired"]);
+  assert.deepEqual(h.updates.map((update) => update.state), ["fired"]);
+  assert.equal(JSON.parse(h.updates[0]!.summary!).transientErrorCount, 18);
 });
 
 test("a cancelled watch stops polling and reports nothing", async () => {
