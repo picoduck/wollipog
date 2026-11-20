@@ -107,6 +107,7 @@ test("a watching PR badge distinguishes branch checks from a known merge-queue e
   for (const [summary, label] of [
     ['{"mergeQueue":null}', "Waiting on Required Checks"],
     ['{"mergeQueue":{"state":"AWAITING_CHECKS","checks":null}}', "Waiting on Merge Queue"],
+    ['{"mergeQueue":null,"mergeQueueRemoval":{"reason":"manual"}}', "Waiting on Pull Request"],
     ["{}", "Waiting on Pull Request"],
     ["invalid JSON", "Waiting on Pull Request"],
     [undefined, "Waiting on Pull Request"],

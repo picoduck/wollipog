@@ -49,8 +49,8 @@ function plural(count: number, one: string, many: string): string {
 function observedWatchStage(summary: string | undefined): "checks" | "queue" | undefined {
   if (!summary) return undefined;
   try {
-    const snapshot = JSON.parse(summary) as { mergeQueue?: { state?: string } | null } | null;
-    if (snapshot?.mergeQueue === null) return "checks";
+    const snapshot = JSON.parse(summary) as { mergeQueue?: { state?: string } | null; mergeQueueRemoval?: unknown } | null;
+    if (snapshot?.mergeQueue === null && snapshot.mergeQueueRemoval == null) return "checks";
     if (typeof snapshot?.mergeQueue?.state === "string") return "queue";
   } catch {
     // An unreadable observation leaves the wait stage unknown.
