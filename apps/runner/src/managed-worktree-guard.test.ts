@@ -1126,6 +1126,37 @@ test("a command with no operand is judged against the directory it would run in"
   assert.equal(commandTargetsGuardState(`ls ${home}; ls`, home, directory), null);
 });
 
+test("recursive commands are checked against their implicit working directory", (t) => {
+  const { home, data, directory, project } = guardLayout(t);
+  const cases = [
+    ["find -maxdepth 3", [true, true, false, true]],
+    ["find -maxdepth 3\n", [true, true, false, true]],
+    ["find . -maxdepth 3", [true, true, false, true]],
+    ["find -maxdepth 2", [false, true, false, true]],
+    ["find -maxdepth 1", [false, false, false, true]],
+    ["du -a", [true, true, false, true]],
+    ["du --max-depth=1", [true, true, false, true]],
+    ["grep -r example", [true, true, false, true]],
+    ["grep -r example .", [true, true, false, true]],
+    ["rg example", [true, true, false, true]],
+    ["ls -R", [true, true, false, true]],
+    ["tree", [true, true, false, true]],
+    ["du -a | wc -l", [true, true, false, true]],
+    ["ls", [false, false, false, true]],
+    ["stat .", [false, false, false, true]],
+  ] as const;
+  for (const [command, expected] of cases) {
+    for (const [index, cwd] of [home, data, project, directory].entries()) {
+      assert.equal(commandTargetsGuardState(command, cwd, directory) !== null, expected[index],
+        `${command} from fixture directory ${index}`);
+    }
+  }
+  for (const command of ["find ./project -maxdepth 3", "du -a ./project", "grep -r example ./project",
+    "rg example ./project", "ls -R ./project", "tree ./project"]) {
+    assert.equal(commandTargetsGuardState(command, home, directory), null, command);
+  }
+});
+
 test("the reported home-directory listings are allowed while the file tools stay closed", () => {
   const directory = join(homedir(), ".wollipog-test-data", "hooks");
   for (const command of ["ls ~", "ls -la ~/", "ls /", "stat ~", "du -sh ~", "find ~ -maxdepth 1"]) {
