@@ -1207,7 +1207,7 @@ CREATE TABLE IF NOT EXISTS workflow_decision_action_receipts (
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
--- One row per evidence item actually delivered to the reviewing Orchestrator. Identifiers and
+-- One row per evidence item delivered to a reviewer. Identifiers and
 -- digests only: evidence bytes and storage credentials never reach this table. A redelivery
 -- replaces the row, so a receipt id observed earlier cannot be replayed.
 CREATE TABLE IF NOT EXISTS ui_evidence_review_receipts (
@@ -1221,6 +1221,7 @@ CREATE TABLE IF NOT EXISTS ui_evidence_review_receipts (
   sha256              TEXT NOT NULL,
   delivered_at        INTEGER NOT NULL,
   delivery_order      INTEGER,
+  assistant_binding   TEXT,
   video_source_artifact_id TEXT,
   video_source_sha256 TEXT,
   video_manifest_sha256 TEXT,
@@ -3109,6 +3110,7 @@ CREATE TABLE IF NOT EXISTS human_campaign_launches (
   session_id TEXT NOT NULL UNIQUE,
   dispatch_state TEXT NOT NULL CHECK (dispatch_state IN ('committed','uncertain','sent','unsent')),
   created_at INTEGER NOT NULL,
+  custom_budget INTEGER CHECK (custom_budget IN (0,1)),
   PRIMARY KEY (user_id, request_id)
 );
 
@@ -6911,16 +6913,21 @@ export class ControlPlaneDb {
         db.exec(`ALTER TABLE ${table} ADD COLUMN revision INTEGER NOT NULL DEFAULT ${defaultValue}`);
       }
     }
-    const videoReceiptColumns = new Set((db.prepare("PRAGMA table_info(ui_evidence_review_receipts)")
+    const evidenceReceiptColumns = new Set((db.prepare("PRAGMA table_info(ui_evidence_review_receipts)")
       .all() as unknown as Array<{ name: string }>).map((column) => column.name));
     for (const [name, type] of [
       ["delivery_order", "INTEGER"], ["video_source_artifact_id", "TEXT"],
       ["video_source_sha256", "TEXT"], ["video_manifest_sha256", "TEXT"],
       ["video_frame_index", "INTEGER"], ["video_frame_pts_ms", "INTEGER"],
+      ["assistant_binding", "TEXT"],
     ] as const) {
-      if (!videoReceiptColumns.has(name)) {
+      if (!evidenceReceiptColumns.has(name)) {
         db.exec(`ALTER TABLE ui_evidence_review_receipts ADD COLUMN ${name} ${type}`);
       }
+    }
+    const launchColumns = db.prepare("PRAGMA table_info(human_campaign_launches)").all() as unknown as Array<{ name: string }>;
+    if (!launchColumns.some((column) => column.name === "custom_budget")) {
+      db.exec("ALTER TABLE human_campaign_launches ADD COLUMN custom_budget INTEGER CHECK (custom_budget IN (0,1))");
     }
     const reminderColumns = db.prepare("PRAGMA table_info(session_reminders)")
       .all() as unknown as Array<{ name: string }>;
@@ -19344,6 +19351,15 @@ export class ControlPlaneDb {
     return row ? { digest: row.digest, sessionId: row.session_id } : null;
   }
 
+  hasHumanCustomCampaignLaunch(sessionId: string, userId: string): boolean {
+    // A legacy launch has no explicit budget kind. Use its exact retained owner confirmation.
+    return Boolean(this.stmt(`SELECT 1 FROM human_campaign_launches h WHERE h.session_id=? AND h.user_id=?
+      AND (h.custom_budget=1 OR h.custom_budget IS NULL AND EXISTS (
+        SELECT 1 FROM assistant_owner_confirmations c WHERE h.request_id='assistant-'||c.id
+          AND c.owner_user_id=h.user_id AND c.operation='campaign_start' AND c.status IN ('approved','executed')
+          AND json_extract(c.arguments_json,'$.mode')='custom'))`).get(sessionId, userId));
+  }
+
   /** Internal Human admission, never an HTTP/agent-provided grant. All resources and initial
    * reservation commit together; callers may send a provider command only after this returns. */
   createHumanCampaignLaunch(input: NewSessionInput, principal: HumanPrincipal, requestId: string, digest: string,
@@ -19385,8 +19401,9 @@ export class ControlPlaneDb {
       const allocation = this.campaignBudgets.allocation(input.id)!;
       if (allocation.costUsd !== undefined) this.updateSessionCostBudget(input.id, allocation.costUsd, input.now);
       if (allocation.toolCalls !== undefined) this.updateSessionMaxToolCalls(input.id, allocation.toolCalls, input.now);
-      this.stmt("INSERT INTO human_campaign_launches VALUES (?,?,?,?, 'committed',?)")
-        .run(principal.userId, requestId, digest, input.id, input.now);
+      this.stmt(`INSERT INTO human_campaign_launches
+        (user_id, request_id, digest, session_id, dispatch_state, created_at, custom_budget) VALUES (?,?,?,?,'committed',?,?)`)
+        .run(principal.userId, requestId, digest, input.id, input.now, customBudget ? 1 : 0);
       return { session: this.getSession(input.id)!, created: true };
     });
   }
@@ -26146,14 +26163,15 @@ export class ControlPlaneDb {
     this.stmt(
       `INSERT INTO ui_evidence_review_receipts
        (receipt_id, occurrence_id, reviewer_session_id, child_session_id, policy_revision, evidence_id,
-        artifact_id, sha256, delivered_at, delivery_order, video_source_artifact_id,
+        artifact_id, sha256, delivered_at, delivery_order, assistant_binding, video_source_artifact_id,
         video_source_sha256, video_manifest_sha256, video_frame_index, video_frame_pts_ms, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(occurrence_id, reviewer_session_id, evidence_id) DO UPDATE SET
          receipt_id=excluded.receipt_id, child_session_id=excluded.child_session_id,
          policy_revision=excluded.policy_revision, artifact_id=excluded.artifact_id,
          sha256=excluded.sha256, delivered_at=excluded.delivered_at,
          delivery_order=excluded.delivery_order,
+         assistant_binding=excluded.assistant_binding,
          video_source_artifact_id=excluded.video_source_artifact_id,
          video_source_sha256=excluded.video_source_sha256,
          video_manifest_sha256=excluded.video_manifest_sha256,
@@ -26164,7 +26182,7 @@ export class ControlPlaneDb {
     ).run(
       receipt.receiptId, receipt.occurrenceId, receipt.reviewerSessionId, receipt.childSessionId,
       receipt.policyRevision, receipt.evidenceId, receipt.artifactId, receipt.sha256,
-      receipt.deliveredAt, video ? deliveryOrder : null, video?.sourceArtifactId ?? null,
+      receipt.deliveredAt, video ? deliveryOrder : null, receipt.assistantBinding ?? null, video?.sourceArtifactId ?? null,
       video?.sourceSha256 ?? null, video?.manifestSha256 ?? null,
       video?.index ?? null, video?.ptsMs ?? null, expiresAt,
     );
@@ -26178,12 +26196,13 @@ export class ControlPlaneDb {
     reviewerSessionId: string,
     sha256: string,
     now: number,
+    assistantBinding?: string,
   ): boolean {
     return Number(this.stmt(
       `UPDATE ui_evidence_review_receipts SET acknowledged_at=COALESCE(acknowledged_at, ?)
-       WHERE receipt_id=? AND reviewer_session_id=? AND sha256=? AND consumed_at IS NULL
+       WHERE receipt_id=? AND reviewer_session_id=? AND sha256=? AND assistant_binding IS ? AND consumed_at IS NULL
          AND revoked_at IS NULL AND expires_at>?`,
-    ).run(now, receiptId, reviewerSessionId, sha256, now).changes) === 1;
+    ).run(now, receiptId, reviewerSessionId, sha256, assistantBinding ?? null, now).changes) === 1;
   }
 
   /** Receipts still able to support an approval: acknowledged, unexpired, unconsumed, unrevoked. */
@@ -26203,7 +26222,7 @@ export class ControlPlaneDb {
     return (rows as Array<{
       receipt_id: string; occurrence_id: string; reviewer_session_id: string; child_session_id: string;
       policy_revision: number; evidence_id: string; artifact_id: string; sha256: string; delivered_at: number;
-      delivery_order: number | null; video_source_artifact_id: string | null;
+      delivery_order: number | null; assistant_binding: string | null; video_source_artifact_id: string | null;
       video_source_sha256: string | null; video_manifest_sha256: string | null;
       video_frame_index: number | null; video_frame_pts_ms: number | null;
     }>).map((row) => ({
@@ -26216,6 +26235,7 @@ export class ControlPlaneDb {
       artifactId: row.artifact_id,
       sha256: row.sha256,
       deliveredAt: row.delivered_at,
+      ...(row.assistant_binding ? { assistantBinding: row.assistant_binding } : {}),
       ...(row.delivery_order == null ? {} : { deliveryOrder: row.delivery_order }),
       ...(row.video_source_artifact_id && row.video_source_sha256 && row.video_manifest_sha256 &&
           row.video_frame_index != null && row.video_frame_pts_ms != null ? { videoFrame: {

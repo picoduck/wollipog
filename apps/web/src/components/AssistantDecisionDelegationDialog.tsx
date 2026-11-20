@@ -1,10 +1,12 @@
 import { useId, useState } from "react";
 import {
   ASSISTANT_DECISION_CATEGORIES,
+  ASSISTANT_EVIDENCE_RETENTION_DISCLOSURE,
   sessionRole,
   type AssistantDecisionCategory,
   type AssistantDecisionDelegation,
   type AssistantDecisionGrant,
+  type AssistantEvidenceReviewAvailability,
 } from "@wollipog/protocol";
 import { useStoreSelector } from "../store.js";
 import { Modal } from "./Modal.js";
@@ -71,8 +73,9 @@ function localDateTime(timestamp: number | null | undefined): string {
   return new Date(timestamp - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }
 
-export function AssistantDecisionDelegationDialog({ delegation, onSave, onClose }: {
+export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, onSave, onClose }: {
   delegation: AssistantDecisionDelegation;
+  evidenceReview?: AssistantEvidenceReviewAvailability;
   onSave: (value: AssistantDecisionDelegation) => Promise<void>;
   onClose: () => void;
 }) {
@@ -85,12 +88,14 @@ export function AssistantDecisionDelegationDialog({ delegation, onSave, onClose 
   const [expiry, setExpiry] = useState(localDateTime(delegation.grant?.expiresAt));
   const [busy, setBusy] = useState<"save" | "revoke" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const evidenceSelected = categories.includes("ui_evidence_review");
 
   const save = async (mode: "save" | "revoke") => {
     if (busy) return;
     const expiresAt = expiry ? new Date(expiry).getTime() : null;
     if (mode === "save") {
       if (!categories.length) return setError("Select at least one decision category.");
+      if (evidenceSelected && !evidenceReview?.available) return setError("Remove UI Evidence Approval to save this grant.");
       if (!projectScope.length || !campaignScope.length) return setError("Select at least one project and campaign, or choose All.");
       if (expiresAt !== null && (!Number.isFinite(expiresAt) || expiresAt <= Date.now())) return setError("Choose a future expiration time.");
     }
@@ -98,7 +103,8 @@ export function AssistantDecisionDelegationDialog({ delegation, onSave, onClose 
     setBusy(mode);
     try {
       await onSave({ revision: delegation.revision,
-        grant: mode === "revoke" ? null : { categories, projects: projectScope, campaigns: campaignScope, expiresAt } });
+        grant: mode === "revoke" ? null : { categories, projects: projectScope, campaigns: campaignScope, expiresAt,
+          ...(evidenceSelected && evidenceReview?.available ? { evidenceDisclosureDigest: evidenceReview.disclosureDigest } : {}) } });
       onClose();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not update decision delegation.");
@@ -122,6 +128,15 @@ export function AssistantDecisionDelegationDialog({ delegation, onSave, onClose 
           <legend>Decision Categories</legend>
           {Object.entries(ASSISTANT_DECISION_CATEGORIES).map(([id, label]) => {
             const category = id as AssistantDecisionCategory;
+            if (category === "ui_evidence_review") {
+              if (!evidenceReview) return null;
+              return <Checkbox key={category} label={label} checked={evidenceSelected}
+                disabled={!evidenceReview.available && !evidenceSelected}
+                helper={evidenceReview.available
+                  ? evidenceSelected && `${evidenceReview.provider} · ${evidenceReview.model}. ${ASSISTANT_EVIDENCE_RETENTION_DISCLOSURE}`
+                  : evidenceReview.reason}
+                onChange={(checked) => setCategories((current) => checked ? [...current, category] : current.filter((item) => item !== category))} />;
+            }
             return <Checkbox key={category} label={label} checked={categories.includes(category)}
               onChange={(checked) => setCategories((current) => checked ? [...current, category] : current.filter((item) => item !== category))} />;
           })}

@@ -2,6 +2,9 @@ import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } fro
 import { personalRuleDelegation } from "./personal-rule-delegation.js";
 import { scheduledAssistantOwner, type AssistantAutomationAuthorization } from "./assistant-automation-authority.js";
 import { AssistantRefusal, assistantCallContext } from "./assistant-connections.js";
+import { assistantEvidenceReviewAvailability } from "./assistant-evidence-review.js";
+import { threadDecisionDelegation } from "./assistant-thread-store.js";
+import { ASSISTANT_EVIDENCE_INSPECT, ASSISTANT_EVIDENCE_PREPARE, campaignEvidenceAuthorityBound } from "@wollipog/protocol";
 import { WOLLIPOG_ASSISTANT_SKILL } from "./assistant-skill.js";
 import { normalizeDeliveryVerificationFailure, publishedIssueFailure, type PublishedIssueFailure } from "@wollipog/protocol";
 import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
@@ -4389,6 +4392,7 @@ export class SessionsService {
       assistantThread?: { threadId: string };
       /** Internal only (#4074): this session is the delegated image reviewer of one decision. */
       [DELEGATED_IMAGE_REVIEW]?: NewDelegatedImageReview;
+      assistantImageReviewAccount?: string | null;
     },
   ): ServiceResult<SessionView> {
     // A Wollipog Assistant thread's assistant launches within its thread's limits (#4663): a launch
@@ -4433,7 +4437,7 @@ export class SessionsService {
     const parentSessionId = creationContext?.parentSessionId;
     /** A thread-tree parent, whose own cap gives up this child's just before it exists (#4671). */
     let threadMemberParentId: string | null = null;
-    // Only prepareDescendantImageEvidenceReview holds this module-private symbol. Request JSON
+    // Only the server's image reviewer launch holds this module-private symbol. Request JSON
     // cannot opt into the exemption. Keep all cost/tool guards and campaign budget admission.
     if (parentSessionId) {
       if (this.db.delegatedImageReviews.isReviewer(parentSessionId)) return fail(DELEGATED_IMAGE_REVIEWER_ERROR, 409);
@@ -4481,7 +4485,8 @@ export class SessionsService {
       if (this.db.roleConversionBlocksSession(parentSessionId)) return fail("wait for the session role change to finish before creating children", 409);
       const parent = this.db.getSession(parentSessionId);
       if (this.db.campaignPaused(parentSessionId)) return fail("The campaign is paused; resume it before starting children.", 409);
-      if (!parent || !["starting", "running", "input_required"].includes(parent.status)) {
+      if (!parent || !(["starting", "running", "input_required"].includes(parent.status) ||
+          imageReview?.assistant && parent.status === "idle")) {
         return fail("the creating parent session is no longer active", 409);
       }
       parentSession = parent;
@@ -4679,6 +4684,9 @@ export class SessionsService {
     });
     if (!launchAccount.ok || !launchAccount.data) return failAs(launchAccount);
     const { providerAccount, selection: providerAccountSelection } = launchAccount.data;
+    if (imageReview?.assistant && creationContext?.assistantImageReviewAccount !== (providerAccount?.id ?? null)) {
+      return fail("The managed reviewer could not use the Assistant thread’s authorized provider account.", 409);
+    }
     const acpSessionContext = snapshotSpec?.acpSessionContext ?? req.acpSessionContext;
     if ((executionTarget.adapter === "container" || executionTarget.adapter === "cloud") &&
         ((acpSessionContext?.additionalDirectories?.length ?? 0) > 0 || (acpSessionContext?.mcpServers?.length ?? 0) > 0)) {
@@ -12274,15 +12282,19 @@ export class SessionsService {
     const origin = this.db.raw().prepare("SELECT execution_id FROM automation_session_origins WHERE session_id=?").get(rootId) as { execution_id: string } | undefined;
     const scheduled = origin ? this.db.getAutomationExecution(origin.execution_id)?.specSnapshot : undefined;
     const customSchedule = scheduled?.action.kind === "create_session" && scheduled.action.request.campaign?.controlMode === "custom";
-    if (customSchedule && controller && !control) {
-      // An approved Custom schedule grants an aggregate allowance, never Full Control decisions.
-      // Its children stay in the inspected root Location; broader repository authority still
-      // requires the existing human-owned scope and control operations.
+    const rootAudience = controller ? this.db.sessionScope(controller.id) : null;
+    const customLaunch = !control && rootAudience?.owner.kind === "user" &&
+      this.db.hasHumanCustomCampaignLaunch(rootId, rootAudience.owner.userId);
+    if ((customSchedule || customLaunch) && controller && !control) {
+      // Owner-confirmed Custom launches and schedules grant only an aggregate allowance at the
+      // inspected root Location. An explicit control record supersedes that launch authority.
       const target = placement ?? session;
       if (controller.runnerId !== target.runnerId || controller.workspaceId !== target.workspaceId ||
-          !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "campaignBudgetAdmission") ||
-          view.authority.costUsd !== scheduled!.limits.maxCostUsd || view.authority.toolCalls !== scheduled!.limits.maxToolCalls) {
-        return "scheduled campaign allowance requires its approved limits and root Location";
+          !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "campaignBudgetAdmission")) {
+        return "Custom campaign allowance requires its approved root Location and accounting support";
+      }
+      if (customSchedule && (view.authority.costUsd !== scheduled.limits.maxCostUsd || view.authority.toolCalls !== scheduled.limits.maxToolCalls)) {
+        return "scheduled campaign allowance requires its approved limits";
       }
     } else {
       if (!controller || control?.mode !== "full_control" || !campaignBoundaryCurrent(controller)) return "campaign allowance boundary is stale or revoked";
@@ -15784,18 +15796,14 @@ export class SessionsService {
   ): ServiceResult<WorkflowDecisionView> {
     const snapshot = decision.resourceSnapshot;
     const ownerQuestion = isOwnerQuestionSnapshot(snapshot);
-    if (snapshot.category === "ui_evidence_approval" && resolution.outcome === "approve") {
-      return fail("Approving evidence requires a supported inspection path with receipts. This thread can only deny it.", 403);
-    }
     const reason = decision.authorityEvaluation?.reason;
     const controller = this.db.getSession(decision.controllingSessionId);
     const customClosure = snapshot.category === "issue_closure" && reason === "protected_request" &&
       controller?.orchestratorPolicy?.control?.mode !== "full_control";
-    const evidenceDenial = snapshot.category === "ui_evidence_approval" && reason === "evidence_review_unavailable" &&
-      resolution.outcome === "deny";
+    const evidenceFallback = snapshot.category === "ui_evidence_approval" && reason === "evidence_review_unavailable";
     const explicitlyKept = !ownerQuestion && this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, snapshot);
     if (decision.ownerRule || decision.ownerHandoff || explicitlyKept || decision.authorityEvaluation?.disposition ||
-        (reason !== "custom_owner" && !(ownerQuestion && reason === "owner_kept") && !customClosure && !evidenceDenial) ||
+        (reason !== "custom_owner" && !(ownerQuestion && reason === "owner_kept") && !customClosure && !evidenceFallback) ||
         isReservedOwnerQuestion(decision) || (ownerQuestion && credentialFormFloor(snapshot)) ||
         (snapshot.category === "merged_branch_deletion" && snapshot.merged === false)) {
       return fail("This occurrence requires a direct human response.", 403);
@@ -15823,7 +15831,10 @@ export class SessionsService {
       return result.ok ? ok(this.db.workflowDecisionByOccurrence(decision.occurrenceId)!) : failAs(result);
     }
     return this.resolveWorkflowDecision(decision.controllingSessionId, decision.sessionId, decision.occurrenceId,
-      { ...resolution, rationale: assistantDelegation.reason }, "human", actor,
+      { ...resolution, rationale: assistantDelegation.reason,
+        ...(snapshot.category === "ui_evidence_approval" && resolution.outcome === "approve"
+          ? { evidenceReviewed: snapshot.evidence.map((item) => item.evidenceId) } : {}),
+      }, "human", actor,
       (sessionId) => this.db.canAccessSession(owner, sessionId), { assistantDelegation });
   }
 
@@ -16043,8 +16054,8 @@ export class SessionsService {
     if (resolution?.delegatedVideoEvidence !== undefined && (authority !== "orchestrator" || !this.workflowVideoApprovals)) {
       return fail("Delegated video approval requires an admitted current managed-media runtime and Orchestrator owner", 403);
     }
-    if (resolution?.delegatedImageReview !== undefined && authority !== "orchestrator") {
-      return fail("Delegated image approval requires the Orchestrator owner", 403);
+    if (resolution?.delegatedImageReview !== undefined && authority !== "orchestrator" && !internal?.assistantDelegation) {
+      return fail("Delegated image approval requires the Orchestrator or a granted Assistant thread", 403);
     }
     if (decision.resourceSnapshot.category === "review_round_extension" && resolution?.outcome === "approve") {
       const refused = this.reviewRoundExtensionRefusal(currentChild, decision.resourceKey, decision.resourceSnapshot);
@@ -16064,9 +16075,15 @@ export class SessionsService {
     // Repeating evidence identifiers proves nothing. An Orchestrator approval is backed only by
     // receipts the server itself recorded when it delivered each exact artifact to this reviewer.
     let reviewReceipts: UiEvidenceReviewReceipt[] = [];
+    const delegatedImage = normalizedResolution.delegatedImageReview;
+    if (internal?.assistantDelegation && decision.resourceSnapshot.category === "ui_evidence_approval" &&
+        normalizedResolution.outcome === "approve") {
+      const proof = this.assistantEvidenceApprovalReceipts(decision, internal.assistantDelegation.threadId, now, delegatedImage);
+      if (!proof.ok || !proof.data) return failAs(proof);
+      reviewReceipts = proof.data;
+    }
     // A delegated image approval (#4074) rests on the reviewer's receipts instead, and only once the
     // server's own records prove that reviewer's approving verdict for this exact occurrence.
-    const delegatedImage = normalizedResolution.delegatedImageReview;
     if (decision.resourceSnapshot.category === "ui_evidence_approval" && authority === "orchestrator") {
       if (delegatedImage) {
         const refused = this.delegatedImageApprovalRefusal(decision, delegatedImage, now);
@@ -17806,6 +17823,148 @@ export class SessionsService {
       .effectiveOwner === "orchestrator";
   }
 
+  /** The same live authority check backs Assistant delivery, receipt acknowledgement and approval. */
+  private assistantEvidenceReviewContext(
+    decision: WorkflowDecisionView,
+    threadId: string,
+    operation: string,
+  ): ServiceResult<{ session: SessionView; binding: string; model: string; snapshot: Extract<WorkflowDecisionResourceSnapshot,
+    { category: "ui_evidence_approval" }> }> {
+    const snapshot = decision.resourceSnapshot;
+    const thread = this.db.assistantThreads.get(threadId);
+    const session = thread?.session_id ? this.db.getSession(thread.session_id) : null;
+    const connection = thread?.connection_id ? this.db.assistantConnections.get(thread.connection_id) : null;
+    if (thread?.state !== "active" || !session || session.archived || session.role !== "assistant" ||
+        connection?.threadId !== threadId || connection.revoked) {
+      return fail("This Assistant thread or its connection is unavailable.", 403);
+    }
+    const { grant, revision } = threadDecisionDelegation(thread);
+    if (!grant?.categories.includes("ui_evidence_review") || grant.expiresAt !== null && Date.now() >= grant.expiresAt) {
+      return fail("The thread needs a current UI Evidence Approval grant. The owner can change it in Decision Delegation.", 403);
+    }
+    const owner = this.db.operatingHumanPrincipal(thread.owner_user_id, thread.organization_id);
+    const controller = this.db.getSession(decision.controllingSessionId);
+    const requester = this.db.getSession(decision.sessionId);
+    const policy = controller?.parentControlPolicy;
+    if (snapshot.category !== "ui_evidence_approval" || decision.status !== "pending" || decision.authority !== "human" ||
+        !controller || !requester || !policy || policy.revision !== decision.policyRevision ||
+        isTerminal(controller.status) || controller.archived || this.workflowDecisionChildEnded(requester) ||
+        !this.workflowDecisionRelationship(controller.id, requester.id) ||
+        !this.workflowDecisionAuthorityCurrent(controller, policy, decision) ||
+        decision.ownerRule || decision.ownerHandoff || decision.authorityEvaluation?.disposition ||
+        this.ownerKept(controller.id, decision.category, decision.resourceKey, snapshot) ||
+        !["custom_owner", "evidence_review_unavailable"].includes(decision.authorityEvaluation?.reason ?? "")) {
+      return fail("This occurrence is no longer eligible for Assistant UI evidence review.", 409);
+    }
+    const campaign = this.db.campaignRootForMember(requester.id) ?? controller.id;
+    if (owner?.role !== "owner" || !this.db.campaignOwnerUser(controller.id, owner.userId) ||
+        (grant.campaigns !== "all" && !grant.campaigns.includes(campaign)) ||
+        (connection.grant.operations !== "all" && !connection.grant.operations.includes(operation)) ||
+        [controller, requester].some((target) => target.id === session.id ||
+          !this.db.canAccessSession(owner, target.id) || !this.db.isSessionOwner(owner, target.id) ||
+          (grant.projects !== "all" && (!target.projectId || !grant.projects.includes(target.projectId))) ||
+          (connection.grant.projects !== "all" && (!target.projectId || !connection.grant.projects.includes(target.projectId))))) {
+      return fail("This decision is outside the Assistant thread’s current scope.", 403);
+    }
+    const sessionScope = this.db.sessionScope(session.id);
+    const requesterScope = this.db.sessionScope(requester.id);
+    if (!sessionScope || !requesterScope || !this.db.scopeAudienceContainedWithMembership(sessionScope, requesterScope)) {
+      return fail("This thread’s audience is outside the evidence audience.", 403);
+    }
+    const availability = assistantEvidenceReviewAvailability(this.db, session);
+    if (!availability.available) return fail(availability.reason, 409);
+    if (grant.evidenceDisclosureDigest !== availability.disclosureDigest) {
+      return fail("The thread’s provider, model or account changed. The owner needs to renew its UI Evidence Approval grant.", 409);
+    }
+    const control = controller.orchestratorPolicy?.control;
+    const boundary = control?.mode === "full_control" ? control.boundary : undefined;
+    const authority = boundary?.evidenceAuthority;
+    if (authority && (!campaignEvidenceAuthorityBound(authority, boundary!) ||
+        !campaignEvidenceDisclosuresCurrent(authority, this.evidenceAuthorityDisclosures) ||
+        !authority.providers.some((provider) => provider.providerId === session.driver && provider.reviewers.some((reviewer) =>
+          reviewer.driver === session.driver && reviewer.modelId === availability.model)))) {
+      return fail("The campaign’s current evidence disclosure does not cover this thread’s provider and model.", 403);
+    }
+    const unsupported = snapshot.evidence.filter((item) => snapshot.videoReview ||
+      evaluateUiEvidenceItems(session.driver, requester.id, [item], (id) => this.db.artifactExportPreflight(id)?.artifact ?? null)
+        .effectiveOwner !== "orchestrator");
+    if (unsupported.length) {
+      return fail(`The Assistant cannot inspect evidence ${unsupported.map((item) => JSON.stringify(item.evidenceId)).join(", ")}. Ask for screenshots attached as Session artifacts, or leave the approval to the owner.`, 409);
+    }
+    const binding = auditDigest([threadId, session.id, connection.id, connection.revision, revision,
+      availability.disclosureDigest, decision.occurrenceId, decision.resourceDigest])!;
+    return ok({ session, binding, model: availability.model, snapshot });
+  }
+
+  private assistantEvidenceBytes(artifactId: string, sha256: string): Buffer | null {
+    let bytes: Buffer | null;
+    try { bytes = this.db.readArtifactBytes(artifactId); } catch { return null; }
+    return bytes && bytes.byteLength <= MAX_UI_EVIDENCE_REVIEW_BYTES &&
+      createHash("sha256").update(bytes).digest("hex") === sha256 ? bytes : null;
+  }
+
+  deliverAssistantUiEvidence(
+    decision: WorkflowDecisionView,
+    threadId: string,
+    evidenceId: string,
+  ): ServiceResult<UiEvidenceReviewDelivery> {
+    const context = this.assistantEvidenceReviewContext(decision, threadId, ASSISTANT_EVIDENCE_INSPECT);
+    if (!context.ok || !context.data) return failAs(context);
+    const { session, snapshot, binding } = context.data;
+    const item = snapshot.evidence.find((candidate) => candidate.evidenceId === evidenceId);
+    if (!item?.artifactId) return fail("Evidence item not found on this workflow decision.", 404);
+    const bytes = this.assistantEvidenceBytes(item.artifactId, item.sha256);
+    if (!bytes) return fail("Evidence content no longer matches the digest bound to this decision.", 409);
+    const now = Date.now();
+    const receipt = this.db.recordUiEvidenceReviewReceipt({
+      receiptId: `uireceipt_${randomUUID().replace(/-/gu, "")}`,
+      occurrenceId: decision.occurrenceId, reviewerSessionId: session.id,
+      childSessionId: decision.sessionId, policyRevision: decision.policyRevision, evidenceId,
+      artifactId: item.artifactId, sha256: item.sha256, deliveredAt: now, assistantBinding: binding,
+    }, now + UI_EVIDENCE_REVIEW_RECEIPT_TTL_MS);
+    this.recordWorkflowDecisionAudit(decision, "answered", { kind: "agent", id: threadId }, now,
+      undefined, [receipt.receiptId], "review");
+    return ok({ receipt, mimeType: item.mediaType!, sizeBytes: bytes.length, data: bytes.toString("base64") });
+  }
+
+  acknowledgeAssistantUiEvidence(decision: WorkflowDecisionView, threadId: string, evidenceId: string,
+    receiptId: string, sha256: string): ServiceResult<{ acknowledged: true }> {
+    const context = this.assistantEvidenceReviewContext(decision, threadId, ASSISTANT_EVIDENCE_INSPECT);
+    if (!context.ok || !context.data) return failAs(context);
+    const { session, binding, snapshot } = context.data;
+    const item = snapshot.evidence.find((candidate) => candidate.evidenceId === evidenceId);
+    if (!item?.artifactId || item.sha256 !== sha256 || !this.assistantEvidenceBytes(item.artifactId, sha256)) {
+      return fail("Evidence content no longer matches the digest bound to this decision.", 409);
+    }
+    return this.db.acknowledgeUiEvidenceReviewReceipt(receiptId, session.id, sha256, Date.now(), binding)
+      ? ok({ acknowledged: true }) : fail("The image delivery receipt was replaced, expired, or revoked.", 409);
+  }
+
+  private assistantEvidenceApprovalReceipts(
+    decision: WorkflowDecisionView,
+    threadId: string,
+    now: number,
+    reference?: DelegatedImageReviewReference,
+  ): ServiceResult<UiEvidenceReviewReceipt[]> {
+    const context = this.assistantEvidenceReviewContext(decision, threadId, reference ? ASSISTANT_EVIDENCE_PREPARE : ASSISTANT_EVIDENCE_INSPECT);
+    if (!context.ok || !context.data) return failAs(context);
+    const { session, binding, snapshot } = context.data;
+    if (reference) {
+      const refused = this.delegatedImageApprovalRefusal(decision, reference, now, binding);
+      if (refused) return fail(refused, 409);
+    }
+    const verdict = reference ? this.db.delegatedImageReviews.get(reference.reviewId)?.verdict : undefined;
+    const receipts = this.db.validUiEvidenceReviewReceipts(decision.occurrenceId, reference?.reviewerSessionId ?? session.id, now)
+      .filter((receipt) => (reference ? verdict?.receiptIds.includes(receipt.receiptId) : receipt.assistantBinding === binding) &&
+        receipt.policyRevision === decision.policyRevision &&
+        receipt.childSessionId === decision.sessionId);
+    const missing = snapshot.evidence.filter((item) => !item.artifactId ||
+      !receipts.some((receipt) => receipt.evidenceId === item.evidenceId && receipt.artifactId === item.artifactId &&
+        receipt.sha256 === item.sha256) || !this.assistantEvidenceBytes(item.artifactId, item.sha256));
+    return missing.length ? fail(`UI evidence approval requires current review receipts for ${missing.map((item) =>
+      JSON.stringify(item.evidenceId)).join(", ")}. Inspect those items with ${ASSISTANT_EVIDENCE_INSPECT}, ask for Session screenshots, or deny the claim if your grant permits it.`, 409) : ok(receipts);
+  }
+
   /** Deliver one exact evidence artifact of a pending descendant decision to the Orchestrator that
    * owns it, and record the receipt an approval will later require. Every gate that guards
    * resolution guards delivery too, so evidence is never readable more widely than it is decidable. */
@@ -17997,7 +18156,7 @@ export class SessionsService {
     const briefSha256 = createHash("sha256").update(brief).digest("hex");
     this.db.delegatedImageReviews.clearReuse(occurrenceId);
     for (const prior of this.db.delegatedImageReviews.forChild(parentSessionId, childSessionId)) {
-      if (prior.occurrenceId === occurrenceId || !prior.verdict || prior.briefSha256 !== briefSha256) continue;
+      if (prior.assistant || prior.occurrenceId === occurrenceId || !prior.verdict || prior.briefSha256 !== briefSha256) continue;
       const reference = { reviewId: prior.reviewId, verdictId: prior.verdict.verdictId, reviewerSessionId: prior.reviewerSessionId };
       this.db.delegatedImageReviews.prepareReuse(occurrenceId, prior.reviewId, briefSha256, decision.resourceDigest);
       if (!this.delegatedImageApprovalRefusal(decision, reference, now)) {
@@ -18006,12 +18165,69 @@ export class SessionsService {
       }
       this.db.delegatedImageReviews.clearReuse(occurrenceId);
     }
+    return this.launchDelegatedImageReview(parent, child, decision, snapshot, brief, parent);
+  }
+
+  prepareAssistantImageEvidenceReview(decision: WorkflowDecisionView, threadId: string,
+    brief: string): ServiceResult<DelegatedImageReviewView> {
+    if (!brief.trim() || brief.length > DELEGATED_IMAGE_REVIEW_BRIEF_MAX_CHARS) {
+      return fail(`State the claims and criteria in at most ${DELEGATED_IMAGE_REVIEW_BRIEF_MAX_CHARS} characters.`, 400);
+    }
+    const context = this.assistantEvidenceReviewContext(decision, threadId, ASSISTANT_EVIDENCE_PREPARE);
+    if (!context.ok || !context.data) return failAs(context);
+    const { session, model, binding, snapshot } = context.data;
+    const parent = this.db.getSession(decision.controllingSessionId)!;
+    const child = this.db.getSession(decision.sessionId)!;
+    if (!this.db.campaignBudgets.governingRoot(parent.id)) {
+      return fail("A managed Assistant image reviewer needs a campaign allowance. Inspect the screenshots directly.", 409);
+    }
+    const runner = this.db.getRunner(session.runnerId);
+    const agent = runner?.agents.find((candidate) => candidate.id === session.agentId && candidate.available);
+    if (!runnerSupportsProtocol(runner?.protocolVersion, "delegatedImageEvidenceReview") ||
+        session.driver !== "claude-code" || agent?.driver !== "claude-code" ||
+        (agent.context?.kind ?? "native") !== "native" || session.executionTarget && session.executionTarget.adapter !== "host" ||
+        !this.hub.isRunnerOnline(session.runnerId)) {
+      return fail("This thread cannot launch a restricted native Claude Code reviewer on its authorized provider. Inspect the screenshots directly.", 409);
+    }
+    const scope = this.db.sessionScope(session.id);
+    const parentScope = this.db.sessionScope(parent.id);
+    if (!scope || !parentScope || !this.db.scopeAudienceContainedWithMembership(scope, parentScope)) {
+      return fail("This thread’s audience is outside the campaign’s audience.", 403);
+    }
+    return this.launchDelegatedImageReview(parent, child, decision, snapshot, brief, session, { threadId, binding, model });
+  }
+
+  assistantImageEvidenceReview(decision: WorkflowDecisionView, threadId: string, reviewId: string): ServiceResult<DelegatedImageReviewView> {
+    const context = this.assistantEvidenceReviewContext(decision, threadId, ASSISTANT_EVIDENCE_PREPARE);
+    if (!context.ok || !context.data) return failAs(context);
+    const review = this.db.delegatedImageReviews.get(reviewId);
+    if (review?.assistant?.threadId !== threadId || review.assistant.binding !== context.data.binding ||
+        review.occurrenceId !== decision.occurrenceId) {
+      return fail("No managed image review matches this grant and decision.", 404);
+    }
+    return ok(this.delegatedImageReviewViewOf(review, decision));
+  }
+
+  private launchDelegatedImageReview(
+    parent: SessionView,
+    child: SessionView,
+    decision: WorkflowDecisionView,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "ui_evidence_approval" }>,
+    brief: string,
+    launcher: SessionView,
+    assistant?: { threadId: string; binding: string; model: string },
+  ): ServiceResult<DelegatedImageReviewView> {
+    const now = Date.now();
+    const { occurrenceId } = decision;
+    const direct = assistant ? "Inspect screenshots directly with assistant_evidence_inspect."
+      : "Use review_descendant_ui_evidence to inspect the images directly.";
     // A live review is returned as it is. One that can no longer back an approval (its reviewer ended
     // without a verdict, or its verdict's receipts expired) is retired, and a fresh reviewer replaces it.
     const live = this.db.delegatedImageReviews.liveForOccurrence(occurrenceId);
     if (live) {
       const settled = this.settleDelegatedImageReview(live, now);
       if (settled.state === "running" || settled.state === "verdict") {
+        if (settled.assistant?.binding !== assistant?.binding) return fail("Another reviewer is already reviewing this occurrence.", 409);
         return ok(this.delegatedImageReviewViewOf(settled, decision));
       }
     }
@@ -18019,12 +18235,13 @@ export class SessionsService {
     const review: NewDelegatedImageReview = {
       reviewId: `uiimgreview_${randomUUID().replace(/-/gu, "")}`,
       occurrenceId,
-      rootSessionId: parentSessionId,
-      childSessionId,
+      rootSessionId: parent.id,
+      childSessionId: child.id,
       policyRevision: decision.policyRevision,
       resourceDigest: decision.resourceDigest,
       evidence,
       briefSha256: createHash("sha256").update(brief).digest("hex"),
+      ...(assistant ? { assistant: { threadId: assistant.threadId, binding: assistant.binding } } : {}),
     };
     for (const active of this.db.delegatedImageReviews.activeForRoot(parent.id)) {
       // A stalled reviewer must not hold the separate slot indefinitely. Stopping is idempotent;
@@ -18032,13 +18249,15 @@ export class SessionsService {
       if (now - active.createdAt >= DELEGATED_IMAGE_REVIEW_MAX_DURATION_MS) this.stop(active.reviewerSessionId);
       return fail(`This Orchestrator already has one active image reviewer (the separate review limit is 1). Wait for it or stop that reviewer Session. ${direct}`, 409);
     }
-    const workspacePath = parent.workspaceId ? undefined : this.db.getAdHocWorkspacePath(parent.id) ?? undefined;
+    const workspacePath = launcher.workspaceId ? undefined : this.db.getAdHocWorkspacePath(launcher.id) ?? undefined;
+    const launchModel = assistant?.model ?? launcher.model;
     const created = this.createSession({
-      runnerId: parent.runnerId,
-      workspaceId: parent.workspaceId ?? "",
+      runnerId: launcher.runnerId,
+      workspaceId: launcher.workspaceId ?? "",
       ...(workspacePath ? { workspacePath } : {}),
-      agentId: parent.agentId,
-      ...(parent.executionTarget ? { executionTargetId: parent.executionTarget.id } : {}),
+      agentId: launcher.agentId!,
+      ...(launcher.executionTarget ? { executionTargetId: launcher.executionTarget.id } : {}),
+      ...(assistant && launcher.providerAccountId ? { providerAccountId: launcher.providerAccountId } : {}),
       title: `UI Evidence Review of ${child.title}`.slice(0, 120),
       prompt: delegatedImageReviewPrompt(evidence.map((item) => item.evidenceId), brief),
       useWorktree: false,
@@ -18046,23 +18265,24 @@ export class SessionsService {
       // (no built-in tools, only the two review tools, never asking), whatever the installation offers.
       config: {
         maxChildSessions: 0,
-        ...(parent.model ? { model: parent.model } : {}),
-        ...(parent.effort ? { effort: parent.effort } : {}),
+        ...(launchModel ? { model: launchModel } : {}),
+        ...(launcher.effort ? { effort: launcher.effort } : {}),
         // A bounded review: one delivery per image, one verdict, and a little room to retry.
         costBudgetUsd: DELEGATED_IMAGE_REVIEW_COST_BUDGET_USD,
         maxToolCalls: evidence.length * 2 + 8,
       },
-    }, undefined, this.db.sessionScope(parent.id) ?? undefined, true, false, true,
-    { parentSessionId: parent.id, [DELEGATED_IMAGE_REVIEW]: review });
+    }, undefined, this.db.sessionScope(launcher.id) ?? undefined, true, false, true,
+    { parentSessionId: parent.id, [DELEGATED_IMAGE_REVIEW]: review,
+      ...(assistant ? { assistantImageReviewAccount: launcher.providerAccountId ?? null } : {}) });
     if (!created.ok || !created.data) {
       return { ...failAs<DelegatedImageReviewView>(created),
         error: `The image reviewer could not be started: ${created.error ?? "unknown reason"}. ${direct}` };
     }
     // A "review" stage entry, so it never displaces the child's request as the card's provenance.
-    this.recordWorkflowDecisionAudit(decision, "answered", { kind: "agent", id: parentSessionId }, now, undefined, undefined, "review");
-    this.log.info(JSON.stringify({ event: "delegated_image_review_prepared", sessionId: parentSessionId, childSessionId,
+    this.recordWorkflowDecisionAudit(decision, "answered", { kind: "agent", id: assistant?.threadId ?? parent.id }, now, undefined, undefined, "review");
+    this.log.info(JSON.stringify({ event: "delegated_image_review_prepared", sessionId: parent.id, childSessionId: child.id,
       occurrenceId, reviewId: review.reviewId, reviewerSessionId: created.data.id, evidenceCount: evidence.length }));
-    this.hub.sessionChangedById(parentSessionId);
+    this.hub.sessionChangedById(parent.id);
     return ok(this.delegatedImageReviewViewOf(this.db.delegatedImageReviews.get(review.reviewId)!, decision), 201);
   }
 
@@ -18074,7 +18294,7 @@ export class SessionsService {
     canAccess: (sessionId: string) => boolean,
   ): ServiceResult<DelegatedImageReviewView> {
     const review = typeof reviewId === "string" ? this.db.delegatedImageReviews.get(reviewId) : null;
-    if (!review || review.rootSessionId !== parentSessionId || !canAccess(parentSessionId) ||
+    if (!review || review.assistant || review.rootSessionId !== parentSessionId || !canAccess(parentSessionId) ||
         !canAccess(review.childSessionId)) {
       return fail("delegated image review not found", 404);
     }
@@ -18112,7 +18332,11 @@ export class SessionsService {
   /** Ends a live review that can never back an approval, and returns its current record. */
   private settleDelegatedImageReview(review: DelegatedImageReviewRecord, now: number): DelegatedImageReviewRecord {
     let reason: string | null = null;
-    if (review.state === "running") {
+    if ((review.state === "running" || review.state === "verdict") && review.assistant &&
+        !this.assistantManagedReviewIsCurrent(review, this.db.workflowDecisionByOccurrence(review.occurrenceId))) {
+      this.stop(review.reviewerSessionId);
+      reason = "assistant_authority_changed";
+    } else if (review.state === "running") {
       if (now - review.createdAt >= DELEGATED_IMAGE_REVIEW_MAX_DURATION_MS) {
         this.stop(review.reviewerSessionId);
         reason = "reviewer_deadline_expired";
@@ -18143,7 +18367,7 @@ export class SessionsService {
     const approvable = current.state === "verdict" && current.verdict?.recommendation === "approve" && decision !== null &&
       this.delegatedImageApprovalRefusal(decision, {
         reviewId: current.reviewId, verdictId: current.verdict.verdictId, reviewerSessionId: current.reviewerSessionId,
-      }, Date.now()) === null;
+      }, Date.now(), current.assistant?.binding) === null;
     return this.db.delegatedImageReviews.view(current, approvable);
   }
 
@@ -18154,20 +18378,25 @@ export class SessionsService {
     decision: WorkflowDecisionView,
     reference: DelegatedImageReviewReference,
     now: number,
+    assistantBinding?: string,
   ): string | null {
     const snapshot = decision.resourceSnapshot;
-    if (snapshot.category !== "ui_evidence_approval" || decision.authority !== "orchestrator" || decision.status !== "pending") {
-      return "a delegated image review backs only a pending Orchestrator-owned UI evidence decision";
+    if (snapshot.category !== "ui_evidence_approval" || decision.authority !== (assistantBinding ? "human" : "orchestrator") ||
+        decision.status !== "pending") {
+      return "a delegated image review backs only an eligible pending UI evidence decision";
     }
     const review = this.db.delegatedImageReviews.get(reference.reviewId);
     const verdict = review?.verdict;
-    if (!review || !verdict ||
+    if (!review || !verdict || review.assistant?.binding !== assistantBinding ||
         review.rootSessionId !== decision.controllingSessionId || review.childSessionId !== decision.sessionId ||
         review.reviewerSessionId !== reference.reviewerSessionId || verdict.reviewerSessionId !== reference.reviewerSessionId ||
         verdict.verdictId !== reference.verdictId) {
       return "the delegated image review does not identify an actual reviewer verdict for this decision";
     }
     const reuse = review.occurrenceId !== decision.occurrenceId;
+    if (review.assistant && (reuse || !this.assistantManagedReviewIsCurrent(review, decision))) {
+      return "the managed image review is no longer bound to this decision and the thread’s current grant and provider";
+    }
     if (reuse && !this.db.delegatedImageReviews.reusePrepared(decision.occurrenceId, review.reviewId,
       review.briefSha256, decision.resourceDigest)) return "prepare this occurrence with the same claims and criteria before reusing a delegated verdict";
     if (!reuse && review.state !== "verdict") return `the delegated image review is ${review.state}${review.endedReason ? ` (${review.endedReason})` : ""}`;
@@ -18199,6 +18428,17 @@ export class SessionsService {
         "receipts expire after an hour, so prepare a fresh review";
     }
     return null;
+  }
+
+  private assistantManagedReviewIsCurrent(review: DelegatedImageReviewRecord, decision: WorkflowDecisionView | null): boolean {
+    if (!decision || !review.assistant || decision.occurrenceId !== review.occurrenceId ||
+        decision.resourceDigest !== review.resourceDigest || !this.db.campaignBudgets.governingRoot(review.rootSessionId)) return false;
+    const authority = this.assistantEvidenceReviewContext(decision, review.assistant.threadId, ASSISTANT_EVIDENCE_PREPARE);
+    const reviewer = this.db.getSession(review.reviewerSessionId);
+    const launcher = authority.data?.session;
+    return Boolean(authority.ok && authority.data?.binding === review.assistant.binding && launcher && reviewer &&
+      reviewer.runnerId === launcher.runnerId && reviewer.agentId === launcher.agentId && reviewer.driver === launcher.driver &&
+      reviewer.model === authority.data.model && reviewer.providerAccountId === launcher.providerAccountId);
   }
 
   private delegatedImageReviewerAudienceCurrent(review: DelegatedImageReviewRecord,
@@ -18234,7 +18474,7 @@ export class SessionsService {
     const snapshot = decision.resourceSnapshot;
     if (snapshot.category !== "ui_evidence_approval" || decision.resourceDigest !== review.resourceDigest ||
         decision.policyRevision !== review.policyRevision || decision.controllingSessionId !== review.rootSessionId ||
-        decision.sessionId !== review.childSessionId || decision.authority !== "orchestrator") {
+        decision.sessionId !== review.childSessionId || decision.authority !== (review.assistant ? "human" : "orchestrator")) {
       return end("decision_changed", "the decision changed after this review was prepared");
     }
     const reviewer = this.db.getSession(reviewerSessionId);
@@ -18257,7 +18497,7 @@ export class SessionsService {
       this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: reviewerSessionId } });
       return fail("workflow decision authority was revoked or superseded", 409);
     }
-    if (this.directWorkflowDecisionAuthority(root, policy, child.id, snapshot).effectiveOwner !== "orchestrator") {
+    if (!review.assistant && this.directWorkflowDecisionAuthority(root, policy, child.id, snapshot).effectiveOwner !== "orchestrator") {
       return end("route_unavailable", "the decision's owner can no longer inspect this evidence, so neither can its reviewer");
     }
     return ok({ review, decision: decision as WorkflowDecisionView & { resourceSnapshot: typeof snapshot } });
@@ -18494,7 +18734,7 @@ export class SessionsService {
           return fail("Original video approval requires separate actual-worker provenance", 400);
         }
         const image = resolution.delegatedImageReview;
-        if (image !== undefined && (decision.authority !== "orchestrator" || snapshot.videoReview || delegated !== undefined ||
+        if (image !== undefined && (snapshot.videoReview || delegated !== undefined ||
           !image || typeof image !== "object" || Array.isArray(image) ||
           Object.keys(image).sort().join(",") !== "reviewId,reviewerSessionId,verdictId" ||
           Object.values(image).some((value) => !boundedDecisionString(value, 256)))) {

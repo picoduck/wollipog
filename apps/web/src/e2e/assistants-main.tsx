@@ -50,6 +50,10 @@ const attentionCount = Number(params.get("attention") ?? 0);
 const limitsScenario = params.get("limits");
 const campaignScenario = params.has("campaign");
 const delegationScenario = params.get("delegation");
+const evidenceScenario = params.get("evidence");
+const missingEvidenceIds = evidenceScenario === "refused-stress"
+  ? Array.from({ length: 16 }, (_, index) => `settings-desktop-dark-preview-${String(index + 1).padStart(2, "0")}`)
+  : ["desktop-dark", "desktop-light", "phone-dark", "phone-light"];
 const NOW = Date.now();
 const minute = 60_000;
 const accountScenario = params.get("accounts");
@@ -237,6 +241,13 @@ function thread(id: string, sessionId: string, overrides: Partial<AssistantThrea
     connectionId: `conn-${id}`, launchedSessionIds: [], lastActivityAt: backing.updatedAt, createdAt: backing.createdAt,
     ...(delegationScenario === "stress" || (limitsScenario && limitsScenario !== "old")
       ? { decisionDelegation: { revision: 0, grant: null } } : {}),
+    ...(evidenceScenario === "refused-stress" && id === "thr_triage" ? { decisionDelegation: { revision: 1, grant: {
+      categories: ["ui_evidence_review"], campaigns: "all", projects: "all", expiresAt: null, evidenceDisclosureDigest: "a".repeat(64),
+    } } } : {}),
+    ...(evidenceScenario === "available" ? { evidenceReview: { available: true, provider: "Claude Code",
+      model: "claude-opus-5-5", disclosureDigest: "a".repeat(64) } } : {}),
+    ...(evidenceScenario === "unavailable" ? { evidenceReview: { available: false,
+      reason: "Update this Machine’s runner to enable Assistant UI evidence approval." } } : {}),
     ...(delegationScenario === "expires" ? { decisionDelegation: { revision: 1, grant: {
       categories: ["owner_question"], campaigns: "all", projects: "all", expiresAt: NOW + minute,
     } } } : {}),
@@ -355,6 +366,13 @@ const events: Record<string, SessionEvent[]> = {
       costUsd: 0.21, durationMs: 118_000, model: "claude-opus-5-5",
     } as SessionEvent["payload"]),
     event("sess-triage", NOW - 28 * minute, { kind: "conversation_checkpoint", turn: 1 } as SessionEvent["payload"]),
+    ...(evidenceScenario === "refused" || evidenceScenario === "refused-stress" ? [
+      event("sess-triage", NOW - 2 * minute, { kind: "user_message", text: "Approve the UI evidence for the release settings.", images: [] }),
+      event("sess-triage", NOW - minute, { kind: "tool_call", toolCallId: "evidence-approval", title: "Resolve UI Evidence",
+        status: "failed", text: `UI evidence approval requires current review receipts for ${missingEvidenceIds.map((id) => JSON.stringify(id)).join(", ")}. Inspect those items with assistant_evidence_inspect, ask for Session screenshots, or deny the claim if your grant permits it.` }),
+      event("sess-triage", NOW - 30_000, { kind: "agent_message",
+        text: `The evidence decision is still pending. I need to inspect ${missingEvidenceIds.length} screenshots before I can approve it.`, final: true }),
+    ] : []),
   ],
 };
 

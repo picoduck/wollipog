@@ -11,6 +11,90 @@ async function openAssistantFixture(page: Page, path: string, supported = true) 
   await page.goto(`/assistants-e2e.html?delegation=${supported ? "stress" : "old"}&path=${encodeURIComponent(path)}`);
 }
 
+for (const theme of ["light", "dark"] as const) {
+  for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 844]] as const) {
+    test(`Assistant evidence approval in ${theme} on ${layout}`, async ({ page }) => {
+      await page.setViewportSize({ width, height });
+      await page.emulateMedia({ colorScheme: theme });
+      const scenario = (state: string) => page.goto(
+        `/assistants-e2e.html?theme=${theme}&delegation=stress&evidence=${state}&path=${encodeURIComponent(thread)}`,
+      );
+      const screenshot = async (state: string) => {
+        if (!evidence) return;
+        mkdirSync(evidence, { recursive: true });
+        await page.screenshot({ path: join(evidence, `assistant-evidence-${state}-${theme}-${layout}.png`), animations: "disabled" });
+      };
+      const dialog = page.getByRole("dialog", { name: "Decision Delegation" });
+      const approval = dialog.getByRole("checkbox", { name: "UI Evidence Approval", exact: true });
+      const denial = dialog.getByRole("checkbox", { name: "UI Evidence Denial", exact: true });
+      const save = dialog.getByRole("button", { name: "Save Grant" });
+      const openGrant = async (state: string) => {
+        await scenario(state);
+        await threadAction(page, "Decision Delegation");
+        await expectNoHorizontalOverflow(dialog, "Decision Delegation");
+        await expectFullyInViewport(save, "Save Grant");
+        await expect(denial).toBeEnabled();
+      };
+
+      await openGrant("legacy");
+      await expect(approval).toHaveCount(0);
+      await screenshot("before");
+      await openGrant("unavailable");
+      await expect(approval).toBeDisabled();
+      await expect(approval).toHaveAccessibleDescription(/Update this Machine’s runner/);
+      await approval.scrollIntoViewIfNeeded();
+      await screenshot("unavailable");
+      await openGrant("available");
+      await expect(approval).toBeEnabled();
+      await expect(approval).not.toBeChecked();
+      await expect(approval).not.toHaveAccessibleDescription(/provider may retain/);
+      await approval.focus();
+      await approval.scrollIntoViewIfNeeded();
+      await screenshot("available-default");
+      await approval.check();
+      await expect(approval).toHaveAccessibleDescription(/Claude Code.*claude-opus-5-5.*provider may retain/);
+      await dialog.getByRole("button", { name: "Project Scope: All Projects" }).click();
+      await page.getByRole("option", { name: "Selected Projects" }).click();
+      await dialog.getByRole("checkbox", { name: /Release Validation and Engineering/ }).check();
+      await expect(dialog).toContainText("Showing 1–5 of 36 projects");
+      await approval.scrollIntoViewIfNeeded();
+      await expectNoHorizontalOverflow(dialog, "Grant with provider disclosure and scoped projects");
+      await expectFullyInViewport(save, "Save Grant after selecting a project");
+      await screenshot("available");
+      await save.click();
+      await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", JSON.stringify({
+        categories: ["ui_evidence_review"], projects: ["project_0"], campaigns: "all", expiresAt: null,
+        evidenceDisclosureDigest: "a".repeat(64),
+      }));
+      await scenario("refused");
+      await page.getByRole("button", { name: /Worked.*1 Failed/ }).click();
+      await page.getByLabel("Resolve UI Evidence · Failed", { exact: true }).click();
+      const message = page.getByText(/UI evidence approval requires current review receipts/);
+      await expect(message).toBeVisible();
+      await expectPageNoHorizontalOverflow(page);
+      await screenshot("refused");
+      if (theme === "dark" && layout === "phone") {
+        await scenario("refused-stress");
+        await page.getByRole("button", { name: /Worked.*1 Failed/ }).click();
+        await page.getByLabel("Resolve UI Evidence · Failed", { exact: true }).click();
+        await expect(message).toContainText("settings-desktop-dark-preview-01");
+        await expect(message).toContainText("settings-desktop-dark-preview-16");
+        const output = page.locator("pre.tl-step-output").filter({ hasText: "settings-desktop-dark-preview-16" });
+        await expectNoHorizontalOverflow(output, "Long missing-receipt refusal");
+        await expectPageNoHorizontalOverflow(page);
+        await output.scrollIntoViewIfNeeded();
+        await screenshot("refused-stress");
+        const scrolled = await output.evaluate((element) => {
+          element.scrollTop = element.scrollHeight;
+          return element.scrollTop;
+        });
+        expect(scrolled).toBeGreaterThan(0);
+        await screenshot("refused-stress-scrolled");
+      }
+    });
+  }
+}
+
 async function threadAction(page: Page, name: string) {
   await page.getByRole("button", { name: "Thread Actions", exact: true }).click();
   await page.getByRole("menuitem", { name, exact: true }).click();

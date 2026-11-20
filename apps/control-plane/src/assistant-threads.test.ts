@@ -93,6 +93,7 @@ test("a new thread launches an assistant-role session whose every launch carries
       access: { level: "full_access", destructive: "ask" }, launchedSessionIds: [], archivedAt: null,
       usage: { launchedSessions: { used: 0, limit: 10 }, costUsd: { used: 0, limit: 25 } }, limitsEditable: true, confirmations: [],
       decisionDelegation: { revision: 0, grant: null },
+      evidenceReview: { available: false, reason: "This thread’s harness or model cannot receive verified evidence images." },
     });
     const session = h.db.getSession(thread.sessionId)!;
     assert.equal(session.role, "assistant");

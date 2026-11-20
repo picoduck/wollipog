@@ -31,6 +31,19 @@ export interface AssistantThreadLimits {
 /** Saved on creation, so changing the owner's defaults never changes an existing thread. */
 export const DEFAULT_ASSISTANT_THREAD_LIMITS = { launchedSessions: 10, costUsd: 25 } as const;
 
+export const ASSISTANT_EVIDENCE_INSPECT = "assistant_evidence_inspect";
+export const ASSISTANT_EVIDENCE_PREPARE = "assistant_evidence_prepare";
+export const ASSISTANT_EVIDENCE_GET = "assistant_evidence_get";
+/** Private to the authenticated runner proxy. The stdio adapter may only call the public tool. */
+export const ASSISTANT_EVIDENCE_RELAY_DELIVER = "wollipog/evidence-deliver";
+export const ASSISTANT_EVIDENCE_RELAY_ACK = "wollipog/evidence-acknowledge";
+export const ASSISTANT_EVIDENCE_RETENTION_DISCLOSURE =
+  "Wollipog sends screenshots to the provider and model shown here. The provider may retain them under the selected account’s terms. Wollipog records evidence references, digests, and receipts in its decision audit.";
+
+export type AssistantEvidenceReviewAvailability =
+  | { available: true; provider: string; model: string; disclosureDigest: string }
+  | { available: false; reason: string };
+
 export const ASSISTANT_DECISION_CATEGORIES = {
   owner_question: "Owner Questions",
   pr_merge: "Pull Request Merge",
@@ -38,6 +51,7 @@ export const ASSISTANT_DECISION_CATEGORIES = {
   follow_up_issue_publication: "Follow-Up Issue Publication",
   issue_closure: "Issue Closure",
   ui_evidence_approval: "UI Evidence Denial",
+  ui_evidence_review: "UI Evidence Approval",
   review_round_extension: "Review Round Extension",
 } as const;
 
@@ -53,6 +67,8 @@ export interface AssistantDecisionGrant {
   projects: "all" | string[];
   campaigns: "all" | string[];
   expiresAt: number | null;
+  /** Owner-confirmed disclosure for the backing session's current provider, model and account. */
+  evidenceDisclosureDigest?: string;
 }
 
 export interface AssistantDecisionDelegation {
@@ -96,6 +112,8 @@ export interface AssistantThreadUsage {
 }
 
 export interface AssistantThread {
+  /** Absent on control planes that support denial only. */
+  evidenceReview?: AssistantEvidenceReviewAvailability;
   /** `thr_…` */
   id: string;
   assistant: AssistantThreadAssistant;

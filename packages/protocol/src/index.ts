@@ -349,6 +349,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * an unsupported harness. v383 runners launched the role without the proxy. */
   assistantRole: 384,
   assistantThreadProviderAccount: 388,
+  assistantEvidenceReview: 397,
   assistantCampaignLaunch: 391,
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
@@ -2508,6 +2509,8 @@ export interface UiEvidenceReviewReceipt {
   artifactId: string;
   sha256: string;
   deliveredAt: number;
+  /** Present for a delivery scoped to one Assistant grant and occurrence. */
+  assistantBinding?: string;
   /** Server-assigned order for a video-frame delivery within this occurrence, including redeliveries. */
   deliveryOrder?: number;
   /** Present only for a trusted, complete source-video manifest frame. */
