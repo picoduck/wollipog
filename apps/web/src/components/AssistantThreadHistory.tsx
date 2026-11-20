@@ -12,7 +12,8 @@ import { BusyButton } from "./ui/BusyButton.js";
 export function AssistantThreadHistory({ entries }: { entries: AssistantThreadHistoryEntry[] }) {
   const [open, setOpen] = useState<AssistantThreadHistoryEntry | null>(null);
   return <>
-    <div className="form">
+    <div className="form assistant-thread-history" role="region" aria-label="Earlier Conversations"
+      tabIndex={entries.length > 1 ? 0 : undefined}>
       {entries.map((entry) => <div key={entry.sessionId}>
         <p className="muted">
           Switched from {assistantThreadHarnessLabel(entry.harness)} to {assistantThreadHarnessLabel(entry.nextHarness)}

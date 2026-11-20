@@ -639,6 +639,8 @@ for (const ready of [true, false]) {
       assert.equal(h.sessionCount(), 2, "opening choices initiates no migration");
 
       const send = h.hub.sendToRunner;
+      h.hub.removeUiClient(h.dashboard);
+      h.hub.removeUiClient(h.stranger);
       let targetId = "";
       h.hub.sendToRunner = (runnerId, message) => {
         if (message.type === "start_session" && message.spec.assistant?.threadId === thread.id) {
@@ -648,7 +650,10 @@ for (const ready of [true, false]) {
           assert.equal(message.spec.providerAccountId, "codex");
           assert.ok(h.threads.registerCredential("r", targetId, hash(token("b"))).accepted);
           assert.equal(h.db.assistantConnections.authenticate(token("b")), null, "the target credential stays inactive");
-          h.db.updateSessionStatus(targetId, ready ? "idle" : "failed", Date.now());
+          setImmediate(() => {
+            h.db.updateSessionStatus(targetId, ready ? "idle" : "failed", Date.now());
+            h.hub.sessionChangedById(targetId);
+          });
         }
         return send(runnerId, message);
       };

@@ -8,7 +8,7 @@ const evidenceDir = process.env.ASSISTANT_HARNESS_EVIDENCE_DIR;
 const captureStates = process.env.ASSISTANT_HARNESS_EVIDENCE_STATES?.split(",");
 const accountName = "Engineering Shared Subscription With a Long Account Display Name 1";
 
-async function open(page: Page, theme: "dark" | "light", scenario: "ready" | "fail" | "old") {
+async function open(page: Page, theme: "dark" | "light", scenario: "ready" | "fail" | "old" | "history-stress") {
   await page.emulateMedia({ colorScheme: theme });
   await page.goto(`/assistants-e2e.html?harness-change=${scenario}&limits=enabled&path=${encodeURIComponent(threadPath)}`);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
@@ -49,6 +49,21 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       mkdirSync(evidenceDir, { recursive: true });
       await page.screenshot({ path: join(evidenceDir, `${layout}-${theme}-${state}.png`), animations: "disabled" });
     };
+    test(`many earlier conversations keep the composer and history reachable on ${layout} in ${theme}`, async ({ page }) => {
+      await page.clock.setFixedTime(new Date("2025-11-19T18:00:00Z"));
+      await page.setViewportSize({ width, height });
+      await open(page, theme, "history-stress");
+      await chooseHarness(page);
+      const confirmation = await confirmChange(page);
+      await confirmation.getByRole("button", { name: "Change Harness", exact: true }).click();
+      await expect(confirmation.getByText(/The original conversation is kept until/)).toBeVisible();
+      await page.evaluate(() => Reflect.get(window, "finishAssistantHarnessChange")());
+      const history = page.getByRole("region", { name: "Earlier Conversations" });
+      await expect(history.getByRole("button")).toHaveCount(20);
+      expect(await history.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+      await expectFullyInViewport(page.locator(".composer"), "The composer with 20 earlier conversations");
+      await capture(page, "history-stress");
+    });
     test(`changes harness and keeps the conversation history on ${layout} in ${theme}`, async ({ page }) => {
       await page.clock.setFixedTime(new Date("2025-11-19T18:00:00Z"));
       await page.setViewportSize({ width, height });

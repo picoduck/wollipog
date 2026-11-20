@@ -700,7 +700,10 @@ const client = {
       agentId: "codex", driver: "codex-app-server", agentName: "Codex" }));
     const changed: AssistantThread = {
       ...current, sessionId, harness: "codex", providerAccountLabel: `${stressAccountLabel} 1`,
-      earlierConversations: [{ sessionId: current.sessionId, harness: current.harness, nextHarness: "codex", switchedAt: NOW }],
+      earlierConversations: Array.from({ length: migrationScenario === "history-stress" ? 20 : 1 }, (_, index) => ({
+        sessionId: index === 0 ? current.sessionId : `earlier-session-${index}`,
+        harness: current.harness, nextHarness: "codex", switchedAt: NOW - index * minute,
+      })),
       decisionDelegation: { revision: 2, grant: { categories: ["owner_question", "ui_evidence_review"], projects: "all",
         campaigns: "all", expiresAt: null } },
       evidenceReview: { available: true, provider: "Codex App Server", model: "gpt-6.2-sol", disclosureDigest: "b".repeat(64) },
