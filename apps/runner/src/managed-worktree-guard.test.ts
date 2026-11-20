@@ -1360,6 +1360,44 @@ test("a ${...} the tokenizer cannot parse is refused as a documented residual, n
 
 const REFUSED_IN_1696 = new URL("./fixtures/guard-refusals-1632/", import.meta.url);
 
+test("quoted command substitutions are checked for guard-state operands", async (t) => {
+  const { project, directory } = guardLayout(t);
+  const relative = "../.wollipog-data/hooks/fixture.txt";
+  const absolute = join(directory, "fixture.txt").replaceAll("\\", "/");
+  // The inner builtin receives a path operand without opening it or producing output.
+  const cases = [
+    ["relative dollar form", `echo "$( : ${relative} )"`, true],
+    ["relative backtick form", `echo "\` : ${relative} \`"`, true],
+    ["absolute dollar form", `echo "$( : '${absolute}' )"`, true],
+    ["absolute backtick form", `echo "\` : '${absolute}' \`"`, true],
+    ["nested form", `echo "$( : "$( : ${relative} )" )"`, true],
+    ["destructive command argument", `rm -rf -- "$( : ${relative} )"`, true],
+    ["unquoted form", `echo $( : ${relative} )`, true],
+    ["unrelated dollar form", 'echo "$(date)"', false],
+    ["unrelated backtick form", 'echo "`date`"', false],
+    ["ordinary quoted arguments", `echo "$(printf '%s' hello)"`, false],
+    ["ordinary quoted escape", `echo "$(printf '%s\\n' hello)"`, false],
+    ["ordinary pipeline", 'echo "$(git ls-files | wc -l)"', false],
+    ["ordinary redirect", 'REV="$(git rev-parse HEAD 2>/dev/null)"', false],
+    ["ordinary quoted variable", 'echo "$(dirname "$0")"', false],
+    ["ordinary adjacent parameter names", 'echo "$(printf "%s" "$firstName${lastName}")"', false],
+    ["ordinary arithmetic", 'echo "$((n + 1))"', false],
+    ["literal heredoc body", `git commit -F - <<'EOF'\nUse "$(a | b)"\nEOF`, false],
+    ["substitution following a literal heredoc", `: <<'EOF'\nIt's literal.\nEOF\necho "$( : ${relative} )"`, true],
+    ["substitution in shell input", `bash <<'EOF'\necho "$( : ${relative} )"\nEOF`, true],
+    ["independent substitutions in one argument", `echo "$(date)$( : ${relative} )"`, true],
+    ["single-quoted literal", "echo '$(date)'", false],
+    ["escaped literal", 'echo "\\$(date)"', false],
+  ] as const;
+  for (const [name, command, refused] of cases) {
+    await t.test(name, () => {
+      const result = commandTargetsGuardState(command, project, directory);
+      if (refused) assertGuardRefused(result, command);
+      else assert.equal(result, null);
+    });
+  }
+});
+
 test("a single-command cat heredoc writing a worktree file is allowed; #1696 multi-command wrappers stay refused (#1734)", (t) => {
   const { project, directory } = guardLayout(t);
   // The core #1734 allow: one `cat > file <<'EOF'` whose quoted body holds `/`, `//`, and `${...}`

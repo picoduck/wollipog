@@ -1524,10 +1524,10 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 391: Owner-confirmed Assistant campaign launch with a separate campaign allowance.
   391,
   // v392 slot
-  // 392: Bind Add Account profile grants before dispatch with start_provider_login.newAccountId.
-  392,
   // v393 slot
   // v394 slot
+  // 394: Bind Add Account profile grants before dispatch with start_provider_login.newAccountId.
+  394,
   // v395 slot
   // v396 slot
   // v397 slot

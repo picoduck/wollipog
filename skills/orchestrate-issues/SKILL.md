@@ -20,7 +20,7 @@ If the current session is restricted by the Orchestrator permission preset and c
 ## Inputs and Setup
 
 - `count`: any positive integer, the number of initial issues to select. Infer it from the request; if omitted, use 5 and state that assumption. An explicit issue list replaces priority selection and determines the count.
-- `concurrency`: optional ceiling, independent of count. Default to the smallest of count, the policy's `maximumConcurrentChildren`, and available live-child capacity. Queue excess issues; never raise platform limits to fit the count.
+- `concurrency`: optional ceiling, independent of count. Choose a dispatch target within the request, issue count, policy's `maximumConcurrentChildren`, any campaign budget concurrency limit, and available live-child capacity. Queue excess issues. See [Choose Dispatch Concurrency](#choose-dispatch-concurrency).
 - Child harness, model, and effort come from the campaign's Wollipog Orchestrator policy (`childHarness`, `childModel`, `childEffort` in `get_campaign.behavior`); this skill has no defaults of its own. Each value is either fixed or Automatic (`null`). See [Resolve Child Model and Effort](#resolve-child-model-and-effort).
 - Reviewers retain the model specified by the repository's review workflow.
 - Optional user-specified cost, time, total-issue, or follow-up-depth limits. Preserve inherited guardrails. Do not invent budget values or an arbitrary successful stopping round.
@@ -28,6 +28,14 @@ If the current session is restricted by the Orchestrator permission preset and c
 Read `using-wollipog`, the repository instructions, and any issue workflow, review, and issue-reporting skills or policies the repository or user provides. Only `using-wollipog` is required; when the repository defines no issue workflow, children follow its contribution guidelines and the gates in this skill. Children must have the same skills available in their execution environment. Resolve skill paths from that environment's catalog; do not assume this machine's home paths exist elsewhere. Read the repository's issue-reporting policy before preparing publication payloads.
 
 Discover the current runner, repository/workspace, available worker harnesses and model/effort capabilities, child capacity, and supported session tools. Select a harness advertising the chosen model; do not assume every model belongs to Codex. Inspect the current session and live child list before creating anything. Use only allowed Orchestrator operations; project writes and implementation belong in children. Keep the campaign ledger in persistent session artifacts or permitted scratch, never in the primary checkout. Summarize its latest state in conversation before yielding or compaction.
+
+### Choose Dispatch Concurrency
+
+For subscription-limited accounts, start below the policy maximum when there is room, for example
+with two or three children. Use one if the cap is two, or if dependencies or overlap leave only one
+issue ready. Increase the dispatch target within the existing limits only while merges are flowing
+and usage and reviewer capacity can support more work. Keep the target low when work queues up at
+review or merge. Adjust how many slots you fill without changing any caps or settings.
 
 ### Resolve Child Model and Effort
 
@@ -72,13 +80,15 @@ server-established authority permitted by repository policy. Custom preserves ex
 requirements. A changed policy must pass its own explicitly authorized contribution workflow.
 Under Full Control, which launches with no form or question, the root makes this record visible
 after launch in one first report before its first child; the reference says what it names. The
-report asks nothing and waits for nobody.
+report asks nothing and waits for nobody. When the budget is unlimited or accounting is unpriced,
+include the [campaign usage disclosure](../using-wollipog/references/campaign-authority.md#first-report)
+in that report. In Custom, put the disclosure in the first selection or status report before dispatch.
 
 Carry forward the user's actual campaign authorization and repository rules. Routine claims, isolated worktrees, testing, pushing, opening PRs, and required reviews need no repeated permission. Repository rules, installed third-party skills and Human Required rules retain their approval requirements. Do not silently convert a request for this workflow into a waiver of those gates.
 
 Read the authoritative current campaign state and server-derived policy with `get_campaign` before dispatch and again before resolving a workflow decision; do not rely on a prompt copy when the server state is available. For typed action decisions such as `pr_merge`, `merged_branch_deletion`, `follow_up_issue_publication`, `ui_evidence_approval`, and `review_round_extension`, the child must use `request_workflow_decision`, `get_workflow_decision`, and `consume_workflow_decision` for the exact occurrence immediately before the matching action. The parent must not create or consume a child's gate on its behalf. Discover pending occurrences with `list_descendant_requests` and resolve only a currently Orchestrator-owned exact occurrence with `resolve_descendant_workflow_decision`. A child's clarification or design choice uses `implementation_question` with `kind: "question"` (protocol v332): a normal question with suggested options and free text, never a consumable action approval. Answer an owned occurrence with `resolve_descendant_workflow_decision`, putting free text in `childMessage`, optionally with `selectedOptionId`; `outcome: "approve"` delivers an answer, not authority. Legacy implementation requests without `kind` retain their fixed-choice approval behavior. Use `answer_descendant_question` and `resolve_descendant_approval` only for applicable non-workflow requests; they never substitute for a typed workflow gate. An ordinary prompt, a stale approval, or Parent Control availability is not authorization for a typed gate.
 
-When you own a `ui_evidence_approval` decision with several images, prefer `prepare_descendant_ui_evidence_review`. It hands every image to a managed reviewer Session with a fresh context, so the images never enter your own conversation. Write its brief from the child's stated claims and the issue's UI acceptance criteria. While the reviewer works, end your turn or wait on its session instead of polling, then read the verdict with `get_descendant_ui_evidence_review`. Approve only with the exact `delegatedImageReview` reference it returns, listing every evidence id in `evidenceReviewed`. On a deny recommendation, deny with a `childMessage` that names the observed defects. Keep `review_descendant_ui_evidence` for a decision with one image, or for a targeted look at one image when the verdict leaves something unclear. Where the reviewer path is unavailable, it refuses with the reason; review directly instead. A reviewer is a campaign child like any other: verify its report and include it in cleanup.
+When you own a `ui_evidence_approval` decision with several images, prefer `prepare_descendant_ui_evidence_review`. It hands every image to a managed reviewer Session with a fresh context, so the images never enter your own conversation. Write its brief from the child's stated claims and the issue's UI acceptance criteria. While the reviewer works, end your turn or wait on its session instead of polling, then read the verdict with `get_descendant_ui_evidence_review`. Approve only with the exact `delegatedImageReview` reference it returns, listing every evidence id in `evidenceReviewed`. On a deny recommendation, deny with a `childMessage` that names the observed defects. Keep `review_descendant_ui_evidence` for a decision with one image, or for a targeted look at one image when the verdict leaves something unclear. Where the reviewer path is unavailable, it refuses with the reason; review directly instead. Wollipog automatically stops and archives the reviewer after its review is consumed or ended; do not verify its report or archive it yourself. Live reviews still block campaign completion. Unconfirmed retirement appears as pending cleanup, and its cost and review record remain available.
 
 Whoever reviews UI evidence, you or a reviewer, check more than the child's tidy screenshot. Require a stress state (many items, long text) for anything that can grow, and a capture of every existing view the change adds content to, at desktop and narrow widths. Deny evidence that shows sideways scrolling, a primary action out of view, or new content crowding out a view's existing primary content. Deny evidence that leaves those states unshown.
 
@@ -157,7 +167,7 @@ reviewed through an authorized route, report the evidence gate as blocked.
 ## Select and Schedule
 
 1. Read the repository's priority conventions and enough paginated open-issue data to identify the highest priorities. Inspect candidate bodies, acceptance criteria, assignments, linked PRs, and dependencies. Use explicit priority first, then severity/user impact and dependency-unblocking value; break remaining ties by age and issue number. Label inferred priorities as judgments.
-2. Publish a concise selection table with issue links, priority rationale, dependencies, and planned order. Record skipped claimed or blocked issues and reasons. If fewer than `count` eligible issues exist, report the shortfall rather than invent work. A specifically requested contested issue requires direction; for open-ended selection, choose the next eligible issue and disclose the substitution.
+2. Publish a concise selection table with issue links, priority rationale, dependencies, and planned order. State the chosen campaign concurrency and why in the table. Record skipped claimed or blocked issues and reasons. If fewer than `count` eligible issues exist, report the shortfall rather than invent work. A specifically requested contested issue requires direction; for open-ended selection, choose the next eligible issue and disclose the substitution.
 3. Check active sessions, claims, worktrees, and overlapping open PRs. Assignment to the same GitHub account is not proof that this campaign owns an issue. Let exactly one child claim each issue after rechecking ownership immediately before work.
 4. Schedule independent issues concurrently within the available cap. Preserve high-priority selection even when overlapping files require serial execution. Do not duplicate claims or skip a selected blocker merely to fill slots. Start dependents after their prerequisites land unless a deliberate stack is justified.
 
@@ -191,6 +201,38 @@ Continue safe work in other children while one child waits at a human-owned gate
 `idle`, `completed`, and a successful enqueue are not issue completion. Independently verify the PR is merged into its intended base, the acceptance criteria are delivered, tracker updates are present, and cleanup is accounted for. If a slice leaves acceptance criteria incomplete, schedule the remaining work under that issue; do not hide it as optional follow-up work. Keep the exact review, check, and authorization snapshot rules from the repository's issue workflow.
 
 For failures, inspect evidence and resume from the last verified step. Retry transient provider failures with backoff; stop repeating identical non-transient failures and report the specific blocker. Do not replace children while their ownership or mutation outcome is uncertain. A guardrail or required decision pauses affected work; it is not success or a reason to archive unfinished sessions.
+
+### Report and Bound Usage
+
+Include a usage summary in the root's status after each confirmed merge, after every three
+actionable continuations without a merge, and in the final report. Read `get_campaign` for current
+limits and budget accounting, and the work ledger (`get_campaign_work_items`) for campaign totals
+and attempt costs grouped by child session. Include finished items and prior attempts. Show
+campaign cost, cost per child, coordination cost when reported, and the main observed drivers
+since the last summary. Distinguish estimates from settled usage and unpriced or unavailable
+amounts from zero. For subscription accounts, label any API-equivalent estimates and report
+provider quota usage only when the provider supplies it.
+
+Watch for repeated evidence re-captures, reviewer sessions, and review rounds beyond the initial
+cap. Use the UI evidence guidance above to keep re-captures focused. Check the evidence or review
+brief for completeness before starting a reviewer session. Adjudicate findings together, use a
+delta review after material changes, and stop at an upvote on the current head. Extra rounds need
+the existing exact extension decision and a concrete unresolved blocker. Preserve mandatory
+evidence coverage and review gates.
+
+### Respond to a Provider Usage Limit
+
+If the provider reports a usage limit for the root or any child, stop dispatching new or replacement
+work as soon as you can act. Record the dispatch hold in the ledger so it survives continuations.
+Report the affected work, the provider's reason, and its reset time with time zone if supplied.
+If the provider gives no reset time, say it is unknown. Ask the owner a typed question about whether
+to pause the campaign or resume dispatch once the limit clears. In Custom, use the harness's
+structured question tool. In Full Control, use
+[`request_owner_decision` with `kind: "question"`](../using-wollipog/references/campaign-authority.md#decisions-the-owner-kept)
+because ordinary root questions are dismissed. If the typed route is unavailable, record a handoff
+with the reason and next action. Keep dispatch stopped pending the owner's direction and available
+provider capacity. An answer grants no new authority. Never switch accounts or change caps to
+recover from the limit.
 
 ## Review and Execute Follow-Ups
 

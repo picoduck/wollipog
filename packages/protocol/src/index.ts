@@ -403,7 +403,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * must also report `runtime.providerCredentialImport`, which only supported hosts do. */
   providerCredentialImport: 260,
   /** Add Account accepts a control-plane-chosen new-account id. */
-  providerLoginNewAccountId: 392,
+  providerLoginNewAccountId: 394,
   /** Session-scoped assertion that Restart retains an established provider conversation (#2515). */
   sessionRestartResume: 263,
   /** v255 runner continues a session's own mid-turn worktree switch after its relaunch (#3810). */

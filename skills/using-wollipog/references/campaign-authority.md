@@ -32,6 +32,8 @@ through its normal review and merge gates. A committed policy change does not ch
 session's higher-priority instructions or installed skills. Continue independent work while a
 required decision is pending.
 
+## First Report
+
 Full Control launches with zero overhead: no form, budget, preflight panel or question comes before
 the first message. The root Orchestrator (no parent session) therefore makes this preflight visible
 after launch, in one user-visible first report posted after `get_campaign` and before its first
@@ -50,9 +52,21 @@ after launch, in one user-visible first report posted after `get_campaign` and b
   its exact source file and quoted requirement, and that each such gate will reach the owner typed
   as described below, never only in prose.
 
-The report is not a question: it asks nothing, waits for nobody, and the root continues in the same
-turn. A nested Orchestrator does not repeat it. The always-injected Orchestrator preset carries the
-same requirement.
+The always-injected Orchestrator preset carries this Full Control authority preflight. A nested
+Orchestrator does not repeat it.
+
+When running `orchestrate-issues`, disclose usage risk if the campaign has no cost ceiling or
+accounting is unpriced. Include it in the Full Control first report or in the Custom root's first
+selection or status report before dispatch. Read the campaign-wide ceiling from
+`budget.authority.costUsd` in `get_campaign`. The `limits.costBudgetUsd` field covers only the root
+session. State how many children you plan to run at once, the applicable concurrency ceiling, and
+the fixed child model and effort from `get_campaign.behavior`.
+For Automatic dimensions, give the planned values if known and confirm the choices in the selection
+table. Warn that parallel work and reviews can exhaust a provider subscription allowance. Suggest
+a concrete conservative concurrency the owner could set, or a cost ceiling when accounting is
+priced. Keep existing settings and guardrails.
+
+Post the report and continue in the same turn, without asking for an answer.
 
 When the owner's first message started the campaign, the server reads no scope from it: the root's
 first campaign action, right after the report, is proposing the initial scope with
@@ -70,6 +84,8 @@ message asks for, each `owner_named` (or none). The constraint check always runs
 epic the person approves (one issue with members) or makes the issues the campaign's issue numbers
 with no person step, and an uncertain or failed check leaves the scope to the person, who approves it
 or chooses Continue Without an Epic.
+
+## Decisions the Owner Kept
 
 When such a rule keeps a gate for a person, the gate reaches the owner as a typed request, never
 only as prose:
