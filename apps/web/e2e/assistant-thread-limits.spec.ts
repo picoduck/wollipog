@@ -161,6 +161,18 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await expectNoHorizontalOverflow(connections, "Assistant Connections");
       await expectPageNoHorizontalOverflow(page);
       if (theme === "dark") await capture(page, "assistant-connections-stress");
+
+      if (layout === "phone") {
+        await open(page, "/settings", theme);
+        const index = page.getByRole("navigation", { name: "Settings Sections" });
+        const assistant = index.getByRole("link", { name: /^Assistant\b/ });
+        await expect(assistant).toContainText("Thread defaults and connections.");
+        await assistant.scrollIntoViewIfNeeded();
+        await expectFullyInViewport(assistant, "The Assistant settings row");
+        await capture(page, "assistant-settings-index");
+        await assistant.click();
+        await expect(page.getByRole("region", { name: "Thread Defaults" })).toBeVisible();
+      }
     });
 
     test(`budget warnings and editors link to one another on ${layout} in ${theme}`, async ({ page }) => {

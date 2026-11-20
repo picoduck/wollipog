@@ -3749,7 +3749,8 @@ export class SessionsService {
     if (limit === null) return null;
     const launched = this.db.assistantThreads.launchedSessionIds(threadId).length +
       this.db.assistantOwnerConfirmations.launchedCampaignIds(threadId).length;
-    return assistantThreadLaunchLimitMessage(launched, limit);
+    const message = assistantThreadLaunchLimitMessage(launched, limit);
+    return message ? `${message} The owner can change the launch limit in Thread Settings.` : null;
   }
 
   /** Both owner-facing editors write the thread limit. Existing spend and launches take priority. */

@@ -115,7 +115,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
   // No scope: the panel names where its defaults come from instead, "Your Defaults" or "Wollipog
   // Defaults", once it has loaded them (#3026).
   { id: "orchestrator", title: "Orchestrator", description: "Defaults for sessions that run others." },
-  { id: "assistant", title: "Assistant", description: "Defaults and access for Assistant threads." },
+  { id: "assistant", title: "Assistant", description: "Thread defaults and connections." },
   { id: "network", title: "Network", description: "Reach this machine from other devices." },
   {
     id: "storage",
