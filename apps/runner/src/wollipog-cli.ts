@@ -192,6 +192,7 @@ export async function runPullRequestCli(
   graceMs = PULL_REQUEST_WAIT_READ_GRACE_MS,
   /** `glab` for a GitLab merge request (#3602); defaults to this machine's own login. */
   glab?: GlabRunner,
+  timing: Pick<McpDeps, "now" | "sleep"> = {},
 ): Promise<number> {
   const fail = (message: string, code: number): number => {
     const details = code === 124 ? { outcome: "timeout", observation: null, transientErrorCount: 0, forgeDegraded: false } : {};
@@ -213,7 +214,7 @@ export async function runPullRequestCli(
   if (!repository && /^#?\d+$/u.test(words[2]!)) {
     // A bare number requires a GitHub repository lookup within the same deadline as the wait.
     const budgetMs = Math.min(PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, Math.max(1, Math.floor(timeoutMs ?? PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS)));
-    const startedAt = Date.now();
+    const startedAt = (timing.now ?? Date.now)();
     if (signal?.aborted) return fail("request cancelled", 1);
     const lookup = new AbortController();
     let stop!: () => void;
@@ -227,7 +228,7 @@ export async function runPullRequestCli(
         gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], lookup.signal), stopped,
       ]);
       if (signal?.aborted) return fail("request cancelled", 1);
-      remainingMs = budgetMs - (Date.now() - startedAt);
+      remainingMs = budgetMs - ((timing.now ?? Date.now)() - startedAt);
       if (remainingMs <= 0 || !resolved) {
         return fail("resolving the repository used the whole timeout; pass --repo <owner/name>", 124);
       }
@@ -250,6 +251,7 @@ export async function runPullRequestCli(
     ...(glab ? { glab } : {}),
     ...(signal ? { signal } : {}),
     pullRequestReadGraceMs: graceMs,
+    ...timing,
   });
   const data = payload(result);
   io.stdout(json ? `${JSON.stringify(data)}\n` : `${JSON.stringify(data, null, 2)}\n`);
