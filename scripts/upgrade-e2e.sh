@@ -67,9 +67,11 @@ wait_until() { # wait_until <seconds> <description> <command...>
   done
 }
 healthy() { curl -fsS --max-time 3 "http://127.0.0.1:$port/healthz" 2>/dev/null | jq -e '.ok == true' >/dev/null; }
-admin_status() { "$cli" admin status --json; }
+# The local admin credential is owned by the system service account, not root.
+admin_status() { sudo -u wollipog -H "$cli" admin status --json; }
 runner_online() { admin_status 2>/dev/null | jq -e '.runners.items | any(.status == "online")' >/dev/null; }
-version_of() { "$1" --version | tr -d '\r' | head -n1; }
+# Runner output includes the protocol after the version; keep the full semantic-version token.
+version_of() { "$1" --version | tr -d '\r' | awk 'NR == 1 { print $1 }'; }
 digest_of() { sha256sum "$1" | awk '{print $1}'; }
 as_user() { sudo -u "$install_user" -H env "PATH=$PATH" ${GH_TOKEN:+GH_TOKEN="$GH_TOKEN"} "$@"; }
 
