@@ -127,7 +127,7 @@ export function providerProfileSessionRefusal(
   return revoked && inScope(revoked) ? { error: PROVIDER_PROFILE_REVOKED_FOR_SESSION } : null;
 }
 
-/** The account key of an Add Account grant until the runner names the new account. `:` is not
+/** The account key for older runners until the runner names the new account. `:` is not
  * valid in an account id, so it can never match a reported account. */
 function createdGrantPlaceholder(grantId: string): string {
   return `login:${grantId}`;
@@ -137,31 +137,35 @@ function createdGrantPlaceholder(grantId: string): string {
  * Add Account's automatic grant (#3239): the control plane that creates an account on a v225
  * runner is granted its new managed profile. The pending row records the creating person and their
  * organization role (any role that can manage the Machine); its id goes to the runner in
- * `start_provider_login`, which writes it into the new HOME's marker. Undefined (the account keeps
- * today's HOME) for an older runner, a non-human caller, or a runner without a recorded scope.
+ * `start_provider_login`, which writes it into the new HOME's marker. Name the account before
+ * dispatch when supported so its inventory report can complete the grant independently of the
+ * start reply. Undefined for runners without profile support, non-human callers, or missing scope.
  */
 export function authorizeCreatedProviderProfileGrant(
   db: ControlPlaneDb,
-  runner: { runnerId: string; protocolVersion?: number | null },
+  runner: { runnerId: string; protocolVersion?: number | null; providerAccounts?: readonly ProviderAccountDefinition[] },
   principal: AuthPrincipal | null,
   provider: "claude" | "codex",
   now: number,
   requestId: string,
-): string | undefined {
+): { profileGrantId: string; newAccountId?: string } | undefined {
   if (!runnerSupportsProtocol(runner.protocolVersion, "providerProfiles") || principal?.kind !== "human") return undefined;
   const grantId = randomUUID();
+  let newAccountId: string | undefined;
+  if (runnerSupportsProtocol(runner.protocolVersion, "providerLoginNewAccountId")) {
+    do newAccountId = `login-${randomUUID().slice(0, 8)}`;
+    while (runner.providerAccounts?.some((account) => account.id === newAccountId));
+  }
   const authorized = db.authorizeAndEnrollProviderProfileDispatch({
-    grantId, runnerId: runner.runnerId, providerAccountId: createdGrantPlaceholder(grantId), provider, origin: "created",
+    grantId, runnerId: runner.runnerId, providerAccountId: newAccountId ?? createdGrantPlaceholder(grantId), provider, origin: "created",
     grantedBy: principal.userId, grantedRole: principal.role, now, requestId, kind: "login",
   });
-  return authorized?.grant.grantId;
+  return authorized ? { profileGrantId: authorized.grant.grantId, ...(newAccountId ? { newAccountId } : {}) } : undefined;
 }
 
 /**
- * The start reply for an Add Account grant: a started sign-in names the new account, which the
- * pending grant is bound to so the account report completes it (`reconcileProviderProfileGrants`);
- * a refused start spends it. A lost reply leaves it pending and unbound: the account then reports
- * `pending` access until an Owner or Admin adopts it, which supersedes this grant in the marker.
+ * An explicit refusal spends the grant. A successful start on a legacy runner names the account
+ * so its pending grant can be bound before an account report completes it.
  */
 export function settleCreatedProviderProfileGrantStart(
   db: ControlPlaneDb,

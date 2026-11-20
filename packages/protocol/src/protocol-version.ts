@@ -1528,6 +1528,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 393: Forward content-safe provider refusals of approved forge actions.
   393,
   // v394 slot
+  // 394: Bind Add Account profile grants before dispatch with start_provider_login.newAccountId.
+  394,
   // v395 slot
   // v396 slot
   // v397 slot

@@ -500,6 +500,81 @@ function runnerRegistration(runnerId: string, token: string) {
   };
 }
 
+test("Add Account completes its profile grant after the start reply is lost", { timeout: 45_000 }, async (t) => {
+  const port = await reservePort();
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-add-account-"));
+  const databasePath = join(temp, "control-plane.db");
+  const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
+  const runnerId = "runner-add-account";
+  const token = `wollipogr_${"a".repeat(43)}`;
+  const registration = { ...runnerRegistration(runnerId, token), providerProfileIds: [] };
+  const seed = ControlPlaneDb.open(databasePath);
+  const identity = seed.localIdentityContext();
+  seed.issueRunnerCredential({
+    credentialId: "rcred_11111111111111111111111111111111",
+    runnerId, organizationId: identity.organizationId,
+    ownerKind: "organization", ownerId: identity.organizationId,
+    label: "Add Account Fixture", tokenHash: hashToken(token), createdByUserId: identity.userId,
+    now: Date.now(), expiresAt: Date.now() + 60_000,
+  });
+  seed.close();
+  const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
+    cwd: REPO_ROOT,
+    env: { ...process.env, CONTROL_PLANE_HOST: "127.0.0.1", CONTROL_PLANE_PORT: String(port),
+      CONTROL_PLANE_DB: databasePath, CONTROL_PLANE_TOKEN, CONTROL_PLANE_USAGE_PRICING_URL: "off" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  const capture = (chunk: unknown) => { output = (output + String(chunk)).slice(-32_768); };
+  child.stdout?.on("data", capture);
+  child.stderr?.on("data", capture);
+  t.after(async () => { await stopChild(child); rmSync(temp, { recursive: true, force: true }); });
+  const httpBase = `http://127.0.0.1:${port}`;
+  await waitForHealth(httpBase, child, () => output);
+  const { socket, inbox } = await openSocketWithInbox(`ws://127.0.0.1:${port}/runner`);
+  t.after(() => socket.close());
+  socket.send(JSON.stringify(registration));
+  await inbox.take((message) => message.type === "registered");
+
+  const startLogin = () => fetchWithBearer(`${httpBase}/api/runners/${runnerId}/provider-logins`, ownerToken, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "claude", label: "Work" }),
+  });
+  const db = ControlPlaneDb.attach(databasePath);
+  t.after(() => db.close());
+  const start = startLogin();
+  const command = await inbox.take((message) => message.type === "start_provider_login");
+  const grantId = String(command.profileGrantId);
+  assert.equal(command.accountId, undefined, "Add Account sends no repair target");
+  const accountId = String(command.newAccountId);
+  assert.match(accountId, /^login-[0-9a-f]{8}$/u);
+  const enrolledGrant = db.getProviderProfileGrant(grantId);
+  assert.equal(enrolledGrant?.providerAccountId, accountId, "the grant is bound before RPC delivery");
+  assert.equal(enrolledGrant?.status, "pending");
+  // The fixture runner receives the command and loses its start reply. Its later inventory still arrives.
+  const response = await start;
+  assert.equal(response.status, 504, await response.clone().text());
+  assert.deepEqual(await response.json(), { error: "runner did not respond in time" });
+  const profileId = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
+  socket.send(JSON.stringify({ type: "agents_updated", runnerId, agents: [],
+    providerAccounts: [{ id: accountId, label: "Work", provider: "claude", authStatus: "authenticated",
+      profile: { id: profileId, access: "pending" } }] }));
+  await waitForValue(() => output, (log) => log.includes(`runner ${runnerId} agents: []`), "account report reconciliation");
+  const grant = db.getProviderProfileGrant(grantId);
+  assert.deepEqual(
+    { status: grant?.status, accountId: grant?.providerAccountId, profileId: grant?.profileId },
+    { status: "active", accountId, profileId },
+  );
+
+  const refused = startLogin();
+  const refusedCommand = await inbox.take((message) => message.type === "start_provider_login");
+  const refusedGrantId = String(refusedCommand.profileGrantId);
+  assert.equal(db.getProviderProfileGrant(refusedGrantId)?.providerAccountId, refusedCommand.newAccountId);
+  socket.send(JSON.stringify({ type: "provider_login_result", requestId: refusedCommand.requestId,
+    action: "start", ok: false, error: "The new account's id is unavailable on this Machine." }));
+  assert.equal((await refused).status, 409);
+  assert.equal(db.getProviderProfileGrant(refusedGrantId)?.status, "revoked", "an explicit id refusal spends the grant");
+});
+
 test("real /ui route advertises and acknowledges targeted bounded subscriptions", { timeout: 45_000 }, async (t) => {
   const port = await reservePort();
   const temp = mkdtempSync(join(tmpdir(), "wollipog-ui-route-"));
@@ -754,7 +829,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   runner.send(JSON.stringify({
     type: "register",
     token: runnerUiToken,
-    protocolVersion: PROTOCOL_VERSION,
+    protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.providerLoginNewAccountId - 1,
     runner: {
       runnerId: "runner-ui-route",
       hostname: "integration-host",
@@ -920,6 +995,10 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   assert.match(loginTicket.ticket, /^[a-f0-9]{64}$/u);
   assert.equal(providerLoginCommand.provider, "claude");
   assert.equal(providerLoginCommand.label, "Work");
+  assert.equal(providerLoginCommand.newAccountId, undefined, "a legacy runner receives no proposed id");
+  const grantAccountId = () => (publications.prepare("SELECT provider_account_id FROM provider_profile_grants WHERE grant_id=?")
+    .get(loginTicket.grantId) as { provider_account_id: string }).provider_account_id;
+  assert.equal(grantAccountId(), `login:${loginTicket.grantId}`);
   assert.match(String(providerLoginCommand.profileGrantId), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
     "a v225 runner creates the new account as a managed profile granted to this control plane (#3239)");
   const providerLogin = {
@@ -941,6 +1020,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   }));
   const startedProviderLogin = await providerLoginResponse;
   assert.equal(startedProviderLogin.status, 201, await startedProviderLogin.clone().text());
+  assert.equal(grantAccountId(), providerLogin.accountId, "the reply binds the legacy placeholder");
 
   const submitCodeResponse = fetchWithBearer(
     `${httpBase}/api/runners/runner-ui-route/provider-logins/${providerLogin.operationId}/code`,

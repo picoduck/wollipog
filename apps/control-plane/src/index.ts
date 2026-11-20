@@ -2880,9 +2880,9 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
   const requestId = `provider_login_${randomUUID()}`;
   // #3239: the control plane that creates an account on a v225 runner is granted its new managed
   // provider profile; adoption and revocation stay Owner/Admin only.
-  let profileGrantId: string | undefined;
+  let profileGrant: ReturnType<typeof authorizeCreatedProviderProfileGrant>;
   try {
-    profileGrantId = hasAccountId ? undefined
+    profileGrant = hasAccountId ? undefined
       : authorizeCreatedProviderProfileGrant(db, runner, principal, body.provider as "claude" | "codex", Date.now(), requestId);
   } catch (error) {
     // Only unsupported peers/non-human/no-scope callers get the existing no-grant compatibility
@@ -2892,7 +2892,7 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
     return reply.code(503).send({ error: error.message, code: error.code });
   }
   const observe = (observation: PublicationObservation) => {
-    if (!profileGrantId) return;
+    if (!profileGrant) return;
     try { db.observeProviderProfileDispatch(requestId, observation); }
     catch {
       app.log.warn({ event: "provider_publication_observation_unavailable", entryPoint: "add_account", requestId },
@@ -2900,8 +2900,8 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
     }
   };
   const settleProfileGrant = (outcome: Parameters<typeof settleCreatedProviderProfileGrantStart>[2]) => {
-    if (profileGrantId && principal.kind === "human") {
-      settleCreatedProviderProfileGrantStart(db, profileGrantId, outcome, principal, Date.now());
+    if (profileGrant && principal.kind === "human" && (!outcome.started || !profileGrant.newAccountId)) {
+      settleCreatedProviderProfileGrantStart(db, profileGrant.profileGrantId, outcome, principal, Date.now());
     }
   };
   try {
@@ -2916,7 +2916,7 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
       ...(hasAccountId
         ? { accountId: body.accountId as string }
         : { provider: body.provider as "claude" | "codex", label: (body.label as string).trim(),
-          ...(profileGrantId ? { profileGrantId } : {}) }),
+          ...profileGrant }),
     });
     observe("reply");
     if (result.type !== "provider_login_result" || result.action !== "start") {
@@ -2926,6 +2926,10 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
     if (!result.ok || !result.login) {
       settleProfileGrant({ started: false });
       return reply.code(409).send(providerLoginStartFailure(result));
+    }
+    if (profileGrant?.newAccountId && result.login.accountId !== profileGrant.newAccountId) {
+      // The report of the bound account decides whether the grant can complete.
+      return reply.code(502).send({ error: "unexpected runner reply" });
     }
     settleProfileGrant({ started: true, accountId: result.login.accountId });
     return reply.code(201).send({ login: result.login });

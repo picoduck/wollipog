@@ -1300,7 +1300,9 @@ test("uncertain removal never retires grants, deletes credentials or reports acc
 
 test("Add Account with this control plane's grant creates a managed profile HOME whose marker grants it", posixOnly, async (t) => {
   const p = profileFixture(t);
-  const started = await p.fx.supervisor.startAccount({ provider: "claude", label: "Work", profileGrantId: GRANT });
+  const newAccountId = "login-1234abcd";
+  const started = await p.fx.supervisor.startAccount({ provider: "claude", label: "Work", profileGrantId: GRANT, newAccountId });
+  assert.equal(started.accountId, newAccountId, "the runner honors the exact id bound to the grant");
   const home = p.fx.spawns[0]!.cwd as string;
   const profileId = basename(home);
   assert.equal(dirname(home), p.root, "the HOME is at the SSH-account-level root, outside the runner's data directory");
@@ -1319,14 +1321,32 @@ test("Add Account with this control plane's grant creates a managed profile HOME
   p.fx.children[0]!.close(0);
   await eventually(() => p.settled.length === 1 && p.fx.supervisor.views()[0]?.status === "succeeded", "the sign-in completes");
   assert.deepEqual(p.fx.accounts, [{ id: started.accountId, label: "Work", provider: "claude", directory: home, profileId }]);
-  const saved = JSON.parse(readFileSync(p.fx.configPath, "utf8")) as { providerAccounts: Array<{ directory: string; profileId?: string }> };
-  assert.deepEqual(saved.providerAccounts.map((account) => [account.directory, account.profileId]), [[home, profileId]],
-    "the configuration records the profile id");
+  const saved = JSON.parse(readFileSync(p.fx.configPath, "utf8")) as { providerAccounts: Array<{ id: string; directory: string; profileId?: string }> };
+  assert.deepEqual(saved.providerAccounts.map((account) => [account.id, account.directory, account.profileId]), [[newAccountId, home, profileId]],
+    "the configuration records the bound account and profile ids");
   assert.equal(p.settled[0]?.recorded, true);
   assert.deepEqual(p.grants.accountProfile(p.fx.accounts[0]!), { id: profileId, access: "granted" },
     "the account report carries the profile, which completes the control plane's pending grant");
   assert.equal(existsSync(join(p.fx.root, "provider-accounts")), false, "nothing is created under the data directory");
 });
+
+for (const [reason, newAccountId] of [["taken", "login-1234abcd"], ["malformed", "login-1234abcg"]] as const) {
+  test(`Add Account refuses a ${reason} new-account id before creating a HOME, marker or process`, posixOnly, async (t) => {
+    let markerWrites = 0;
+    const p = profileFixture(t, { create: async () => { markerWrites++; } });
+    if (reason === "taken") {
+      p.fx.accounts.push({ id: newAccountId, label: "Other", provider: "codex", directory: join(p.fx.root, "retained") });
+    }
+    await assert.rejects(
+      p.fx.supervisor.startAccount({ provider: "claude", label: "Work", profileGrantId: GRANT, newAccountId }),
+      /new account's id is unavailable/u,
+    );
+    assert.equal(existsSync(p.root), false, "no managed profile root or HOME was created");
+    assert.equal(existsSync(join(p.fx.root, "provider-accounts")), false, "no legacy HOME was created");
+    assert.equal(markerWrites, 0);
+    assert.equal(p.fx.spawns.length, 0);
+  });
+}
 
 test("profile settlement does not claim an externally moved HOME was removed", posixOnly, async () => {
   let moved!: string;
@@ -1482,8 +1502,12 @@ test("an overlapping managed Add Account with the same label is refused before i
       p.grants.recordCreated(profileId, grantId);
     },
   });
-  const first = p.fx.supervisor.startAccount({ provider: "claude", label: "Work", profileGrantId: GRANT });
+  const newAccountId = "login-1234abcd";
+  const first = p.fx.supervisor.startAccount({ provider: "claude", label: "Work", profileGrantId: GRANT, newAccountId });
   assert.equal(created.length, 1, "the first Add Account is creating its profile");
+  const sameId = p.fx.supervisor.startAccount({ provider: "claude", label: "Other", profileGrantId: GRANT, newAccountId });
+  assert.equal(created.length, 1, "a second request for the reserved id creates no profile");
+  await assert.rejects(sameId, /new account's id is unavailable/u);
   const overlapping = p.fx.supervisor.startAccount({ provider: "claude", label: "  WORK ", profileGrantId: GRANT });
   // Checked before awaiting the refusal: an admitted request would wait on its own creation gate.
   assert.equal(created.length, 1, "the overlapping request creates no profile");
