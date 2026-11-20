@@ -88,6 +88,72 @@ Never change campaign control settings, approve a human-owned request, impersona
 
 For unattended campaigns, explain up front which gates still need the user. A user may explicitly delegate eligible decisions for a campaign, subject to higher-priority and platform restrictions; record the exact scope and exceptions. Do not modify standing policies as part of execution.
 
+## UI Evidence Rubric
+
+Before dispatching UI work, write one versioned rubric in the root's supplementary campaign
+notes so it survives turn changes. Set it before the first capture and copy the current text
+verbatim into every UI child assignment and every brief for a reviewer evaluating that UI
+evidence. Use the repository's requirements and the issue's acceptance criteria to set the
+values. Mark criteria that do not apply to a surface.
+
+- List the viewports by width, height and orientation, the surfaces and states to capture,
+  and the stress cases above.
+- Specify minimum interactive target sizes and gaps, minimum numeral size and contrast ratio,
+  and which elements each measurement covers.
+- Define how to count, place and space invitation rings and a demonstration hand where present.
+  State the fill and centring expectations for the content within its available area and how to
+  measure them.
+- Include these standard exemptions in every reviewer brief as part of the rubric. A demo
+  hand may touch the control it invites. The contrast threshold for enabled controls does not
+  apply to disabled controls. A button's normal outline does not count as an extra invitation
+  ring. Picture-only cells without an action are exempt from tap-target sizing.
+- Set a convention for measured claims in evidence IDs. Identify the surface, viewport and
+  state, then name each claimed measurement with its value and unit, for example
+  `picker-360x640-dense-target44csspx-gap8csspx`. Give the measurement method in the brief,
+  including whether sizes come from layout measurements or image pixels.
+
+Children raise any conflict between the rubric and the task's constraints at claim time through
+an `implementation_question` with `kind: "question"`. Settle the conflict before capture. When a
+criterion changes, record the new version, what changed and why in the campaign notes, and give
+affected children the updated text before their next capture. Apply the change going forward. If
+a denial reverses an earlier pass, name the item, its earlier pass and the reason for the
+reversal explicitly in the denial.
+
+### Evidence Rounds
+
+Set a per-pull-request evidence round limit in the rubric (default three). Count each submitted
+set for review, including preliminary sets staged in a worktree. Track the round and the
+rubric version used for each pull request in the campaign notes. Review from the child's stated
+claims, the issue's UI acceptance criteria and the verbatim rubric. At the limit, stop the
+routine re-file loop. Consolidate all remaining disagreements, the rubric clauses at issue and
+the choice to settle into one question to the child, or one typed Owner Question when the owner
+kept the decision. Record the resolution and the agreed remaining captures before asking for
+another capture. Keep the gate pending or deny it if the disagreement is unresolved.
+
+Have the child submit only changed images as new captures and mark the rest unchanged. When a
+successor approval covers the full set, refer to unchanged items with their existing evidence
+IDs, artifact IDs and digests so the server can reuse exact-byte receipts. In direct review on
+supported peers, inspect only the items for which the server needs fresh delivery. Reuse requires
+the same controlling Orchestrator, reviewer Session, child Session, artifact, verified SHA-256
+and policy revision, with an acknowledged, unexpired receipt. For revision feedback that does not
+require a denial, give the child the defects while the decision is pending so a successor can
+supersede it and reuse eligible receipts. If you deny, the next round needs fresh review for items
+whose only receipts came from the denied round, even when their bytes did not change. Explicitly
+revoked or mismatched receipts also require fresh review. Older peers use per-occurrence review,
+and video has its own rules. A delegated review can reuse the original approving verdict for an
+identical set and brief with eligible receipts. A changed set or brief needs a fresh delegated
+review.
+
+Have children reserve room under their session's artifact count and byte limits for the final
+required set. When the remaining allowance is less than about one review round, or another upload
+would eat into that reserve, stage preliminary captures privately in the child's worktree with a
+manifest of evidence IDs, relative paths and SHA-256 checksums. Use staged captures for local
+checks and for preliminary feedback only where the reviewer already has authorized access. Keep
+the files out of commits and attach only the final passing set through the normal evidence route,
+checking that the returned digests match the staged files. Staging cannot supply exact-byte
+delivery receipts or a verdict for a typed approval. If the final set cannot be attached and
+reviewed through an authorized route, report the evidence gate as blocked.
+
 ## Select and Schedule
 
 1. Read the repository's priority conventions and enough paginated open-issue data to identify the highest priorities. Inspect candidate bodies, acceptance criteria, assignments, linked PRs, and dependencies. Use explicit priority first, then severity/user impact and dependency-unblocking value; break remaining ties by age and issue number. Label inferred priorities as judgments.
