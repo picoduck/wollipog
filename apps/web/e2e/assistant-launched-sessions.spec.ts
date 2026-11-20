@@ -176,6 +176,25 @@ for (const theme of ["dark", "light"] as const) {
       await expect(card.getByRole("button", { name: "Deny" })).toBeEnabled();
     });
 
+    test("a sign-in Retry stays disabled until the runner reports, then can be retried", async ({ page }) => {
+      await open(page, theme, "deps=auth");
+      await page.evaluate(() => (window as unknown as { assistantsHoldApprovals: (mode: string) => void }).assistantsHoldApprovals("response"));
+      const card = waitingInHeader(page).locator('[data-session-id="sess-deps"]');
+      await card.getByRole("button", { name: "Approve Once" }).click();
+      await expect(page.locator("body")).toHaveAttribute("data-approve-count", "1");
+      // The response arrives while the runner is still checking, before any session update.
+      await page.evaluate(() => (window as unknown as { assistantsReleaseApprovals: () => void }).assistantsReleaseApprovals());
+      await page.waitForTimeout(300);
+      await expect(card.getByRole("button", { name: "Approve Once" })).toBeDisabled();
+      await expect(card.getByRole("button", { name: "Deny" })).toBeDisabled();
+      await expect(page.locator("body")).toHaveAttribute("data-approve-count", "1");
+      // The Retry fails and the runner raises the card again: it can be retried.
+      await page.evaluate(() => (window as unknown as { assistantsRepublishAuth: () => void }).assistantsRepublishAuth());
+      await expect(card.getByRole("button", { name: "Approve Once" })).toBeEnabled();
+      await card.getByRole("button", { name: "Approve Once" }).click();
+      await expect(page.locator("body")).toHaveAttribute("data-approve-count", "2");
+    });
+
     for (const surface of ["panel", "header"] as const) {
       test(`answering one of two requests in the ${surface} keeps focus on the card that still waits`, async ({ page }) => {
         await open(page, theme, "deps=question");

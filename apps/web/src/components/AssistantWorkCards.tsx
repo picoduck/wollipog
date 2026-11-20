@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type FocusEvent, type ReactNode } from "react";
-import { pendingRequests, prioritizedPendingRequests, type PendingApproval, type SessionView } from "@wollipog/protocol";
+import { prioritizedPendingRequests, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import {
   groupLaunchedWork,
@@ -135,12 +135,13 @@ function cardFocusTarget(list: HTMLElement | null, sessionId: string | null): HT
  * later than another change can't be ordered against the stream and could hide a newer request or
  * restore an answered one.
  *
- * The response only decides whether the actions stay disabled meanwhile. They do when it no longer
- * lists the request and the store still holds the session exactly as it was when the answer was
- * clicked (`against`): the stream hasn't caught up, and its next session is the answer's own. Any
- * later session is the stream's word, and whatever it lists is answerable. A response that still
- * lists the request (an authentication Retry, which the runner may raise again under the same id)
- * leaves it answerable at once. An answer is kept only while some card shows its request, so the
+ * After an accepted answer the actions stay disabled while the store still holds the session exactly
+ * as it was when the answer was clicked (`against`): nothing has reported the answer's outcome yet,
+ * whether the control plane's answered session or, for an authentication Retry the runner checks on
+ * its own, the runner's result. The next session the stream publishes is that outcome or newer, and
+ * whatever it lists is answerable, a Retry raised again under the same id included. One that arrived
+ * before the response leaves the request answerable at once. An answer is kept only while some card
+ * shows its request, so the
  * record never outlives the cards. A provider may reuse a request id for a new request, so the key
  * is the occurrence where there is one.
  */
@@ -412,11 +413,10 @@ function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView;
     const clicked = session;
     setResponding(key, { state: intent });
     try {
-      const updated = await api.approve(session.id, { requestId: request.requestId, optionId: option.optionId });
-      const cleared = !pendingRequests(updated.pendingApproval).some((candidate) => requestKey(session.id, candidate) === key);
+      await api.approve(session.id, { requestId: request.requestId, optionId: option.optionId });
       // The stream brings the answered session. Until then, with nothing newer in the store, the
       // request stays answered; otherwise it is the stream's to show (see `ResponseState`).
-      const behind = cleared && getSession(session.id) === clicked && respondingReaders.has(key);
+      const behind = getSession(session.id) === clicked && respondingReaders.has(key);
       setResponding(key, behind ? { state: "answered", against: clicked } : null);
     } catch (cause) {
       setResponding(key, null);
