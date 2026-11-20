@@ -5,6 +5,8 @@ import { useInstanceScope } from "../instance-scope.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { LinkRow, SettingsGroup, StaticRow } from "./ui/SettingsRows.js";
 
+const grantDate = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
+
 export function AssistantDelegationPanel({ onOpenGrant }: { onOpenGrant: (threadId: string) => void }) {
   return <DelegationGroup key={useInstanceScope()} onOpenGrant={onOpenGrant} />;
 }
@@ -47,8 +49,10 @@ function DelegationGroup({ onOpenGrant }: { onOpenGrant: (threadId: string) => v
       && <StaticRow title="No Delegation Grants" description="Open a thread's settings to grant access." />}
     {threads.map((thread) => {
       const expiresAt = thread.decisionDelegation?.grant?.expiresAt;
+      const date = expiresAt == null ? null : new Date(expiresAt);
+      const status = expiresAt == null ? "Active" : expiresAt <= now ? "Expired" : "Active · Expires";
       return <LinkRow key={thread.id} title={assistantThreadTitle(thread)}
-        trailing={expiresAt != null && expiresAt <= now ? "Expired" : "Active"}
+        description={date ? <>{status} <time dateTime={date.toISOString()}>{grantDate.format(date)}</time></> : status}
         onClick={() => onOpenGrant(thread.id)} />;
     })}
   </SettingsGroup>;

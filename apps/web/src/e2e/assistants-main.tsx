@@ -272,12 +272,15 @@ let threads: AssistantThread[] = scenario === "long" ? [
     lastActivityAt: NOW - 3 * 24 * 60 * minute }),
 ] : [];
 if (delegationScenario === "many") {
-  const grant = { categories: ["owner_question"] as const, campaigns: "all" as const, projects: "all" as const };
-  threads[0]!.decisionDelegation = { revision: 1, grant: { ...grant, categories: [...grant.categories], expiresAt: null } };
+  const grant: Omit<NonNullable<AssistantDecisionDelegation["grant"]>, "expiresAt"> = {
+    categories: ["owner_question", "pr_merge"], campaigns: "all", projects: "all",
+  };
+  const future = NOW + 11 * 24 * 60 * minute;
+  threads[0]!.decisionDelegation = { revision: 1, grant: { ...grant, expiresAt: future } };
   for (let index = 1; index <= 9; index += 1) {
     threads.push(thread(`thr_grant_${index}`, "sess-release", {
       title: index === 1 ? longTitle(index + 1) : `Delegated Release Review ${index}`,
-      decisionDelegation: { revision: 1, grant: { ...grant, categories: [...grant.categories], expiresAt: index % 2 ? NOW - minute : NOW + minute } },
+      decisionDelegation: { revision: 1, grant: { ...grant, expiresAt: index % 2 ? NOW - minute : null } },
     }));
   }
 }
