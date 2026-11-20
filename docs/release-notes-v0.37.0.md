@@ -34,6 +34,8 @@ The runner protocol moves from **v332** in v0.36.1 to **v395** in v0.37.0. Upgra
 
 **Priority Order** requires runner protocol v334 or later. **Wollipog Assistant** threads require runner protocol v384 or later. Creating a thread on the v0.36.1 runner returned “This machine needs a newer runner for Wollipog assistant threads. Update and restart the runner.” **Switch and Continue** to a control-plane-registered Location requires v395 on both sides. Retired APIs and features remain unavailable on the upgraded control plane. Keep mixed versions temporary and update both components before relying on new features.
 
+The control plane advertises the `wollipog-control-plane` service identity. Desktop v0.15.0 and later accept both the current and legacy identities. If an older desktop client reports `The address is not a Wollipog control plane.`, update the client before connecting.
+
 - Existing machine provider defaults migrate to **Default Account**. Choose **Priority Order** to opt in. Older dashboards cannot overwrite a Priority Order policy through the old default-account setting. A config-less runner now keeps its provider-account inventory in `provider-accounts.json` in its own data directory. Runners with an existing config file continue to use it. [#4364](https://github.com/picoduck/wollipog/pull/4364), [#4656](https://github.com/picoduck/wollipog/pull/4656)
 - On the first upgraded runner start, Wollipog clears legacy launch environment values from readable session `meta.json` files and removes leftover temporary files from recognized metadata writers. Future metadata writes keep the environment empty, and launches resolve it from current runner-local configuration. The startup scrub does not clean older backup copies. Protect those copies and review any credentials that may have been exposed. [#4734](https://github.com/picoduck/wollipog/pull/4734), [#3339](https://github.com/picoduck/wollipog/issues/3339)
 - Archived-history retention continues to apply where enabled. Capable runners can trim full logs after completed control-plane pruning, including for previously pruned sessions. Off remains off. Back up runner data or disable the policy before upgrading if you need to retain full logs. **Reprocess** cannot restore trimmed logs, and runners that predate manifest format 2 require the pre-upgrade runner data for rollback. [Archived-history retention](https://github.com/picoduck/wollipog/blob/v0.37.0/docs/archived-history-retention.md#runner-logs-and-upgrades)
@@ -82,6 +84,13 @@ v0.36.1 exits at startup with `no such column: run_id` when pointed at a databas
 
 ## Packaging and Dependencies
 
-The release workflow builds all six supported native targets. It verifies the complete 47-asset signed-tag inventory, including desktop bundles, standalone runners and their compatibility aliases, headless control planes, the web bundle, `SHA256SUMS`, and updater signatures and manifest. Tauri CLI 2.12.5 fixes the RPM version format for prerelease builds. Runtime dependencies are refreshed, including Fastify packages and WebSocket support. The desktop build includes the rustix update for the informational advisory RUSTSEC-2026-0486.
+The release workflow builds all six supported native targets. Its base draft holds exactly 34 assets:
+14 desktop bundles, 12 runner names, 6 headless `wollipog-control-plane-<triple>` executables, the
+`wollipog-web.tar.gz` dashboard bundle, and `SHA256SUMS`. A signed tag run adds 12 updater signatures
+and `latest.json` for exactly 47 assets. The workflow verifies the full inventory, signatures,
+byte-identical compatibility copies, and publisher digests. Publishing the verified draft remains a
+manual operator step.
+
+Tauri CLI 2.12.5 fixes the RPM version format for prerelease builds. Runtime dependencies are refreshed, including Fastify packages and WebSocket support. The desktop build includes the rustix update for the informational advisory RUSTSEC-2026-0486.
 
 [Full changelog](https://github.com/picoduck/wollipog/compare/v0.36.1...v0.37.0)
