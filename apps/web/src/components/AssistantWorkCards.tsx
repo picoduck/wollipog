@@ -2,7 +2,6 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncEx
 import { prioritizedPendingRequests, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import {
-  approvalResponseIsStale,
   groupLaunchedWork,
   launchedSessionsToggleLabel,
   launchedWorkGroup,
@@ -126,17 +125,27 @@ function cardFocusTarget(list: HTMLElement | null, sessionId: string | null): HT
 }
 
 /**
- * Approve Once or Deny in flight, by session and request occurrence (#4776). A card is a separate
- * mount in the header and in the panel, so the response a card started outlives the card: the same
- * request's card elsewhere keeps both actions disabled until it settles, and never sends a second
- * response. A provider may reuse a request id for a new request, so the key is the occurrence, and
- * the new request is answerable at once.
+ * A card's answer to a request, by session and request occurrence (#4776): Approve Once or Deny in
+ * flight, then `answered` once the control plane accepted it. A card is a separate mount in the
+ * header and in the panel, so the answer outlives the card: the same request's card elsewhere keeps
+ * both actions disabled and never sends a second answer.
+ *
+ * The card never applies the answer's response. The control plane publishes the answered session on
+ * the session stream, which the cards follow for everything else, while a response read earlier or
+ * later than another change can't be ordered against the stream and could hide a newer request or
+ * restore an answered one. An answered request keeps its actions disabled only while the store
+ * still holds the session as it was when the answer was accepted (`against`): the control plane
+ * publishes the answered session as it answers, so the stream's next session is the answer's own or
+ * newer, and whatever it still lists is waiting and answerable. A provider may reuse a request id for
+ * a new request, so the key is the occurrence where there is one.
  */
-type ResponseIntent = "approve" | "deny";
-const respondingTo = new Map<string, ResponseIntent>();
+type ResponseState =
+  | { state: "approve" | "deny" }
+  | { state: "answered"; against: SessionView | undefined };
+const respondingTo = new Map<string, ResponseState>();
 const respondingListeners = new Set<() => void>();
-function setResponding(key: string, intent: ResponseIntent | null) {
-  if (intent) respondingTo.set(key, intent);
+function setResponding(key: string, state: ResponseState | null) {
+  if (state) respondingTo.set(key, state);
   else respondingTo.delete(key);
   for (const listener of respondingListeners) listener();
 }
@@ -144,8 +153,17 @@ function subscribeResponding(listener: () => void) {
   respondingListeners.add(listener);
   return () => { respondingListeners.delete(listener); };
 }
-function useResponding(key: string): ResponseIntent | null {
+function useResponding(key: string): ResponseState | null {
   return useSyncExternalStore(subscribeResponding, () => respondingTo.get(key) ?? null);
+}
+function requestKey(sessionId: string, request: Pick<PendingApproval, "requestId" | "occurrenceId">): string {
+  return `${sessionId}\n${request.occurrenceId ?? request.requestId}`;
+}
+/** Clears a session's answers the stream has moved past: it published the session since. */
+function forgetAnswered(session: SessionView) {
+  for (const [key, entry] of respondingTo) {
+    if (entry.state === "answered" && key.startsWith(`${session.id}\n`) && entry.against !== session) setResponding(key, null);
+  }
 }
 
 /**
@@ -289,6 +307,7 @@ function AssistantWorkCard({ sessionId, campaign, beforeOpen }: { sessionId: str
     return runnerId ? state.runners.get(runnerId)?.status === "online" : true;
   });
   const { navigate } = useStoreActions();
+  useEffect(() => { if (session) forgetAnswered(session); }, [session]);
   const open = (requestId?: string) => {
     beforeOpen?.();
     navigate(requestId && session
@@ -333,7 +352,7 @@ function AssistantWorkCard({ sessionId, campaign, beforeOpen }: { sessionId: str
 /** A launched session's waiting request, inline on its card: Approve Once / Deny / Open Session. */
 function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView; requestId: string; onOpen: () => void }) {
   const api = useApi();
-  const { loadSession, beginSessionDetailLoad, getSession } = useStoreActions();
+  const { beginSessionDetailLoad, getSession } = useStoreActions();
   const { showToast } = useFeedback();
   const listed = prioritizedPendingRequests(session.pendingApproval).find((candidate) => candidate.requestId === requestId);
   // The live list carries summary sessions, whose requests arrive without their options. The card
@@ -355,8 +374,10 @@ function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView;
     return () => { current = false; };
   }, [api, beginSessionDetailLoad, needsDetail, requestId, session.id]);
   const request = listed && listed.options.length === 0 && hydrated?.requestId === requestId ? hydrated : listed;
-  const respondingKey = `${session.id}\n${listed?.occurrenceId ?? requestId}`;
-  const busy = useResponding(respondingKey);
+  const respondingKey = requestKey(session.id, listed ?? { requestId });
+  const entry = useResponding(respondingKey);
+  // An answer the stream has moved past no longer holds the request (see `ResponseState`).
+  const answer = entry?.state === "answered" && entry.against !== session ? null : entry?.state ?? null;
   if (!request) return null;
   // Only a request with exactly one once-only option per intent is decided from the card; anything
   // richer (a question, a choice of scopes) is answered in the session, where its context is.
@@ -367,18 +388,17 @@ function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView;
     const option = intent === "approve" ? approve : deny;
     const key = respondingKey;
     if (!option || respondingTo.has(key)) return;
-    setResponding(key, intent);
+    setResponding(key, { state: intent });
     try {
-      const updated = await api.approve(session.id, { requestId: request.requestId, optionId: option.optionId });
-      // A response the stream has already moved past would hide a newer request; the stream wins.
-      if (!approvalResponseIsStale(getSession(session.id), updated, request)) loadSession(updated);
+      await api.approve(session.id, { requestId: request.requestId, optionId: option.optionId });
+      // The stream brings the answered session; until it publishes the session again, it stays answered.
+      setResponding(key, { state: "answered", against: getSession(session.id) });
     } catch (cause) {
+      setResponding(key, null);
       showToast(intent === "approve" ? "Couldn't approve the request." : "Couldn't deny the request.", {
         tone: "error",
         detail: cause instanceof Error ? cause.message : String(cause),
       });
-    } finally {
-      setResponding(key, null);
     }
   };
   return (
@@ -387,13 +407,13 @@ function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView;
       <div className="assistant-work-request-actions">
         {approve && deny && (
           <>
-            <BusyButton className="btn sm primary" busy={busy === "approve"} progress="Approving…"
-              disabled={busy !== null || refusal !== null} title={refusal ?? undefined}
+            <BusyButton className="btn sm primary" busy={answer === "approve"} progress="Approving…"
+              disabled={answer !== null || refusal !== null} title={refusal ?? undefined}
               onClick={() => void decide("approve")}>
               Approve Once
             </BusyButton>
-            <BusyButton className="btn sm" busy={busy === "deny"} progress="Denying…"
-              disabled={busy !== null || refusal !== null} title={refusal ?? undefined}
+            <BusyButton className="btn sm" busy={answer === "deny"} progress="Denying…"
+              disabled={answer !== null || refusal !== null} title={refusal ?? undefined}
               onClick={() => void decide("deny")}>
               Deny
             </BusyButton>

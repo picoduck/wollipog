@@ -146,6 +146,22 @@ for (const theme of ["dark", "light"] as const) {
       await expect(group(page, "Needs You")).toHaveCount(0);
     });
 
+    test("a late approval response never puts back a request the stream has since cleared", async ({ page }) => {
+      await open(page, theme, "deps=question");
+      await page.evaluate(() => (window as unknown as { assistantsHoldApprovals: (mode: string) => void }).assistantsHoldApprovals("response"));
+      await toggle(page).click();
+      await group(page, "Needs You").getByRole("button", { name: "Approve Once" }).click();
+      // The control plane answered the approval; its response, which still lists the question, is late.
+      await expect(group(page, "Needs You")).toContainText("Which lockfile should I keep?");
+      // The question is answered in another tab, and the stream clears it.
+      await page.evaluate(() => (window as unknown as { assistantsClearDepsElsewhere: () => void }).assistantsClearDepsElsewhere());
+      await expect(group(page, "Needs You")).toHaveCount(0);
+      await page.evaluate(() => (window as unknown as { assistantsReleaseApprovals: () => void }).assistantsReleaseApprovals());
+      await page.waitForTimeout(300);
+      await expect(group(page, "Needs You")).toHaveCount(0);
+      await expect(toggle(page)).toHaveText("2 Sessions");
+    });
+
     for (const surface of ["panel", "header"] as const) {
       test(`answering one of two requests in the ${surface} keeps focus on the card that still waits`, async ({ page }) => {
         await open(page, theme, "deps=question");

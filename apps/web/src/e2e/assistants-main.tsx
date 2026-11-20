@@ -893,6 +893,8 @@ Object.assign(window, {
   assistantsHoldApprovals: (mode: "request" | "response" = "request") => { holdApprovals = mode; },
   /** The runner raises the install approval again under the same provider request id, as a new
    * occurrence, while the first answer is still on its way back. */
+  /** Every request on the Vite bump is answered elsewhere (another tab), and the stream says so. */
+  assistantsClearDepsElsewhere: () => upsert({ ...sessions.get("sess-deps")!, status: "running", pendingApproval: null, updatedAt: Date.now() }),
   assistantsReraiseDeps: () => upsert({ ...sessions.get("sess-deps")!, status: "input_required", pendingApproval: depsApproval("occ-deps-2") }),
   assistantsReleaseApprovals: () => {
     holdApprovals = null;

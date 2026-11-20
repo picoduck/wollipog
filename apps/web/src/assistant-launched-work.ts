@@ -1,4 +1,4 @@
-import { pendingRequests, prioritizedPendingRequests, type PendingApproval, type SessionView } from "@wollipog/protocol";
+import { prioritizedPendingRequests, type SessionView } from "@wollipog/protocol";
 
 /** The sessions and campaigns an Assistant thread launched (#4664), in launch order. */
 export interface LaunchedWork {
@@ -52,32 +52,6 @@ export function groupLaunchedWork(
   const groups: LaunchedWorkGroups = { needsYou: [], active: [], finished: [] };
   for (const entry of entries) groups[groupOf(entry.id, entry.index)].push(entry.id);
   return groups;
-}
-
-/**
- * Whether a card's approval response is older than what the session stream already shows (#4776):
- * the store holds a pending request the response doesn't, other than the one just answered. The
- * response was read before that request was raised, so applying it would hide a request the control
- * plane still waits on; the stream carries the newer state instead. Requests are told apart by
- * occurrence. Without occurrences a request reusing the answered provider id can't be told from the
- * answered one, and the response applies as it always has.
- */
-export function approvalResponseIsStale(
-  current: Pick<SessionView, "pendingApproval"> | undefined,
-  response: Pick<SessionView, "pendingApproval">,
-  answered: Pick<PendingApproval, "requestId" | "occurrenceId">,
-): boolean {
-  if (!current) return false;
-  const identity = (request: Pick<PendingApproval, "requestId" | "occurrenceId">) =>
-    request.occurrenceId === undefined ? `request:${request.requestId}` : `occurrence:${request.occurrenceId}`;
-  const known = new Set(pendingRequests(response.pendingApproval).map(identity));
-  const answeredIdentity = identity(answered);
-  return pendingRequests(current.pendingApproval).some((request) => {
-    const id = identity(request);
-    if (known.has(id) || id === answeredIdentity) return false;
-    // An occurrence-less copy of the answered request is the answered request as far as we can tell.
-    return !(request.occurrenceId === undefined && request.requestId === answered.requestId);
-  });
 }
 
 /**
