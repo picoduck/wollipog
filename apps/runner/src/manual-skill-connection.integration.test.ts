@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { test, type TestContext } from "node:test";
@@ -6,7 +7,7 @@ import { runInNewContext } from "node:vm";
 import { transformSync } from "esbuild";
 import {
   PROTOCOL_VERSION, parseMessage, runnerSupportsProtocol, reviewRetirementPeerRefusal,
-  type PendingSkillReportRequest, type RegisteredMessage, type SkillsStateMessage,
+  type PendingSkillReportRequest, type RegisteredLocationSwitchLookupMessage, type RegisteredMessage, type SkillsStateMessage,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "../../control-plane/src/db.js";
 import { Hub, type Socket } from "../../control-plane/src/hub.js";
@@ -40,6 +41,7 @@ function fixture(t: TestContext) {
   // Deliberately unrelated epochs: only within-process elapsed time is compared.
   const hub = new Hub(db, { skillRequestNow: () => 70 + elapsed });
   const messages: SkillsStateMessage[] = [], commands: string[] = [], logs: string[] = [];
+  const lookups: RegisteredLocationSwitchLookupMessage[] = [];
   const sockets: InertSocket[] = [];
   let reconnects = 0, heartbeatStops = 0, forgotten = 0, persisted = 0;
   const originalPersist = db.setRunnerSkillState.bind(db);
@@ -58,6 +60,7 @@ function fixture(t: TestContext) {
       if (this.failSend) throw new Error("Fixture handoff refused");
       const message = JSON.parse(data);
       if (message.type === "register") return;
+      if (message.type === "registered_location_switch_lookup") { lookups.push(message); return; }
       messages.push(message);
       const receiveScope = { hub, db, runnerId: "fixture", runnerClient: this.server, runnerSupportsProtocol,
         Date, app: { log: { warn() {} } } };
@@ -72,13 +75,15 @@ function fixture(t: TestContext) {
     ws: null, republishWindow: null, registered: true, controlPlanePeerRefused: false, controlPlaneProtocolVersion: PROTOCOL_VERSION,
     automaticAccountSwitchConfigurationSynchronized: true,
     heartbeatPongObserved: false, missedHeartbeatPongs: 3,
-    sessions: { setAutomaticAccountSwitchAuthorityReady() {}, reconcileRunnerRestartRecovery() {}, liveSessionIds: () => [] },
+    sessions: { setAutomaticAccountSwitchAuthorityReady() {}, reconcileRunnerRestartRecovery() {}, liveSessionIds: () => [],
+      setRegisteredLocationSwitchLookup(lookup: unknown) { scope.lookupRegisteredLocation = lookup; } },
     chunkedSkillsSync: { reset() {} },
     config: { runnerId: "fixture", controlPlaneUrl: "inert", token: "", providerAccounts: [] }, metadata: { agents: [] },
     WebSocket: InertSocket, validateControlPlaneUrl: (url: string) => url, allowInsecureTransport: false,
     agentsForControlPlane: () => [], providerAccountsForControlPlane: () => [], registrationSessionSnapshots: () => [],
     providerProfileGrants: { reportedProfileIds: () => [] },
     PROTOCOL_VERSION, parseMessage, runnerSupportsProtocol, reviewRetirementPeerRefusal,
+    randomUUID, setTimeout, clearTimeout,
     projectMessageForCurrentProtocol: (message: SkillsStateMessage) => message,
     stagedRunnerCredential: { promote() {} }, backoff: 99, INITIAL_BACKOFF_MS: 1,
     log: (message: string) => logs.push(message), errText: (error: Error) => error.message,
@@ -90,10 +95,14 @@ function fixture(t: TestContext) {
   scope.skillStateReporter = reporter;
   const registrationPrefix = slice(runnerSource, '    case "registered":', "      harnessInstallationChoices =");
   install(`function applyRegistered(msg) { switch(msg.type) { ${registrationPrefix} break; } } }`, scope);
+  install(slice(runnerSource, "const registeredLocationSwitchLookups =", "sessions.configureProviderProfiles("), scope);
+  const lookupResult = slice(runnerSource, '    case "registered_location_switch_lookup_result":', '    case "prepare_session_role":');
+  install(`function applyLocationLookupResult(msg) { switch(msg.type) { ${lookupResult} } }`, scope);
   scope.handleCommand = (message: { type: string; requestId?: string }) => {
     commands.push(message.type);
     if (message.type === "registered") scope.applyRegistered(message);
     if (message.type === "skills_sync") reporter.request(message.requestId);
+    if (message.type === "registered_location_switch_lookup_result") scope.applyLocationLookupResult(message);
   };
   install(slice(runnerSource, "function connect():", "function shutdown("), scope);
   function register(socket: InertSocket, protocolVersion = PROTOCOL_VERSION): RegisteredMessage {
@@ -127,11 +136,44 @@ function fixture(t: TestContext) {
     for (const socket of sockets) hub.detachRunner("fixture", socket.server);
     reporter.resetRequests(); db.close();
   });
-  return { db, hub, reporter, scope, messages, logs, commands, initial, sockets, register, start, request,
+  return { db, hub, reporter, scope, messages, logs, commands, initial, sockets, register, start, request, lookups,
     counts: () => ({ reconnects, heartbeatStops, forgotten, persisted }),
     advance(ms: number) { elapsed += ms; t.mock.timers.tick(ms); },
   };
 }
+
+test("registered Location lookup keeps timeouts and socket loss distinct from a correlated refusal", async t => {
+  const f = fixture(t);
+  const target = { occurrenceId: "switch", workspaceId: "registered", repository: "owner/docs" };
+  const lookup = (): Promise<string | null | undefined> => f.scope.lookupRegisteredLocation("session", target, "apply");
+  const reply = (requestId: string, workspacePath: string | null) => f.initial.socket.emit("message", Buffer.from(JSON.stringify({
+    type: "registered_location_switch_lookup_result", requestId, workspacePath,
+  })));
+
+  const allowed = lookup();
+  const request = f.lookups.at(-1)!;
+  assert.deepEqual(request, { type: "registered_location_switch_lookup", requestId: request.requestId,
+    sessionId: "session", ...target, phase: "apply" });
+  reply(randomUUID(), null);
+  reply(request.requestId, "/work/docs");
+  assert.equal(await allowed, "/work/docs", "an unrelated reply cannot settle the lookup");
+
+  const refused = lookup();
+  reply(f.lookups.at(-1)!.requestId, null);
+  assert.equal(await refused, null);
+
+  f.initial.socket.failSend = true;
+  assert.equal(await lookup(), undefined);
+  f.initial.socket.failSend = false;
+
+  const expired = lookup();
+  f.advance(10_000);
+  assert.equal(await expired, undefined);
+  const disconnected = lookup();
+  f.initial.socket.terminate();
+  assert.equal(await disconnected, undefined);
+  assert.equal(await lookup(), undefined);
+});
 
 for (const result of [observed(), { ...empty(), error: "Fixture current error" }, empty()]) {
   test(`replacement resumption settles exactly once with current ${result.error ? "error" : result.deployed.length ? "inventory" : "empty"}`, async t => {
