@@ -736,6 +736,16 @@ test("a permanent failure after a transient error ends the wait immediately", as
   }
 });
 
+test("a GraphQL execution timeout with null data is retried", async () => {
+  const message = "Something went wrong while executing your query. This may be the result of a timeout";
+  const timeout = { ...failed(`gh: ${message}`), stdout: JSON.stringify({ data: null, errors: [{ message }] }) };
+  const fake = fakeGh([timeout, ok(pr({ state: "MERGED", mergeCommit: { oid: MERGE } }))]);
+  const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "merged");
+  assert.equal(result.summary.transientErrorCount, 1);
+});
+
 test("the polling interval and timeout are clamped", async () => {
   const time = clock();
   const result = await waitForPullRequest({ repository: "o/r", number: 7, intervalMs: 1, timeoutMs: 25_000 },
@@ -1173,10 +1183,25 @@ test("a read hung past the budget is killed on the real clock", async () => {
   });
   const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 50 }, { gh: hung });
   assert.ok(!result.ok && result.timeout);
-  assert.equal(result.timeout.forgeDegraded, true);
-  assert.equal(result.timeout.transientErrorCount, 1);
+  assert.equal(result.timeout.forgeDegraded, false);
+  assert.equal(result.timeout.transientErrorCount, 0);
   assert.ok(Date.now() - startedAt < 2_000);
   assert.equal(killed, true, "the read's process is told to stop, not merely abandoned");
+});
+
+test("the caller's deadline cutting off a healthy read does not count as a forge error", async () => {
+  const fake = fakeGh([ok(pr({}, [run(AGGREGATOR, null)])), ok(pr({ state: "MERGED" }))]);
+  const time = clock();
+  const gh: GhRunner = async (args, signal) => {
+    if (args.includes("graphql")) await time.sleep(2_000);
+    return fake.gh(args, signal);
+  };
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 33_000 }, { gh, ...time });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "timeout");
+  assert.equal(result.summary.state, "open");
+  assert.equal(result.summary.transientErrorCount, 0);
+  assert.equal(result.summary.forgeDegraded, false);
 });
 
 test("aborting a context command kills its process", async () => {

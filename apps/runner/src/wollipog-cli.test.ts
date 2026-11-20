@@ -156,6 +156,7 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
     ["decision", ["decision request", "decision get", "decision consume", "decision reconcile", "request_workflow_decision", "--snapshot"]],
     ["init", ["wollipog init", ".wollipog.json", "does not run", "never overwritten"]],
     ["pr", ["pr wait", "--repo", "--head", "--timeout", "--interval", "--any-failure", "pending, never passing", "124 timeout", "needs no control plane",
+      "GitHub reads stop at the deadline", "transientErrorCount", "forgeDegraded",
       "pr closures", "--intended", "--file", "does not close #N", "Refs #N", "intendedClosures"]],
   ];
   for (const [topic, expected] of topics) {
@@ -283,6 +284,8 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
   const slow = await run(["pr", "wait", "7", "--timeout", "100", "--json"], hungDiscovery, 500);
   assert.equal(slow.code, 124);
   assert.match(JSON.parse(slow.stdout).error, /pass --repo/u);
+  assert.equal(JSON.parse(slow.stdout).outcome, "timeout");
+  assert.equal(JSON.parse(slow.stdout).forgeDegraded, false);
   assert.equal(discoveryKilled, true);
   const slowMs = Date.now() - startedAt;
   assert.ok(slowMs >= 90 && slowMs < 500, `discovery should end at the deadline: ${slowMs} ms`);

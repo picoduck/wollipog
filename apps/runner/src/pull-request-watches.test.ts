@@ -75,7 +75,7 @@ test("a watch keeps waiting through timeouts and reports its first outcome once,
   await h.settled;
   assert.equal(h.inputs.length, 3, "a duplicate start does not watch twice; timeouts only re-arm the wait");
   assert.deepEqual(h.inputs.map((input) => input.headSha), [HEAD, HEAD, HEAD], "every wait pins the parked head");
-  assert.equal(h.updates.filter(u => u.state === "progress").length, 2);
+  assert.equal(h.updates.filter(u => u.state === "progress").length, 0, "a timeout never replays the last snapshot");
   const terminal = h.updates.filter(u => u.state !== "progress");
   assert.equal(terminal.length, 1);
   const [update] = terminal;
@@ -88,7 +88,7 @@ test("a watch keeps waiting through timeouts and reports its first outcome once,
   // without another read.
   h.watcher.start(START);
   assert.equal(h.inputs.length, 3);
-  assert.deepEqual(h.updates.slice(3), [update]);
+  assert.deepEqual(h.updates.slice(1), [update]);
 });
 
 test("a parked watch retries a prolonged forge outage and reports the count with its merge outcome", async () => {
@@ -102,7 +102,11 @@ test("a parked watch retries a prolonged forge outage and reports the count with
     send: (update) => updates.push(update),
     gh: async (args) => {
       if (!args.includes("graphql")) return ok(args.some((arg) => arg.includes("/rules/")) ? [] : {});
-      if (++polls > 1 && polls <= 6) return { stdout: "", stderr: "gh: HTTP 504", code: 1, timedOut: false };
+      if (++polls === 2) {
+        const message = "Something went wrong while executing your query. This may be the result of a timeout";
+        return { stdout: JSON.stringify({ data: null, errors: [{ message }] }), stderr: `gh: ${message}`, code: 1, timedOut: false };
+      }
+      if (polls > 2 && polls <= 6) return { stdout: "", stderr: "gh: HTTP 504", code: 1, timedOut: false };
       const merged = polls > 6;
       return ok({ data: { repository: { defaultBranchRef: { name: "main" }, pullRequest: {
         state: merged ? "MERGED" : "OPEN", headRefOid: HEAD, baseRefName: "main", isDraft: false,

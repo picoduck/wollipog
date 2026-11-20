@@ -130,8 +130,7 @@ export class PullRequestWatcher {
       if (signal.aborted) return;
       if (result.ok) {
         if (result.summary.outcome === "timeout") {
-          // Failed reads must never renew the control plane's observation lease.
-          if (!result.summary.forgeDegraded) progress(result.summary);
+          // Only onSnapshot reports observations. Replaying the last summary would renew the lease.
           priorTransientErrors += result.summary.transientErrorCount;
           continue;
         }

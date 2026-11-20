@@ -194,7 +194,8 @@ export async function runPullRequestCli(
   glab?: GlabRunner,
 ): Promise<number> {
   const fail = (message: string, code: number): number => {
-    (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
+    const details = code === 124 ? { outcome: "timeout", observation: null, transientErrorCount: 0, forgeDegraded: false } : {};
+    (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message, ...details })}\n` : `${message}\n`);
     return code;
   };
   const words = positional(args, ["--repo", "--head", "--file", "--intended"]);

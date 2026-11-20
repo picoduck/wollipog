@@ -233,7 +233,9 @@ checks only. GitHub waits and CLI repository lookup share a deadline of 1 ms to 
 failure that prevents a complete observation increments `transientErrorCount`. The runner retries
 with jittered backoff until the deadline. Authentication, permission and missing-resource errors
 end the wait immediately. A timeout during an outage sets `forgeDegraded` and includes the last
-complete observation, or `observation: null` if none completed. Polling intervals range from
+complete observation, or `observation: null` if none completed. An in-flight read cancelled at the
+deadline does not count as a forge error. The last observation can predate the deadline by a
+polling interval. Polling intervals range from
 10 seconds to 10 minutes (default 30 seconds). Lists are capped at 30 required checks and 20 failed jobs.
 
 MCP `park_on_pull_request` (#4071, protocol 272) lets a session stop waiting inside a turn. The

@@ -151,7 +151,7 @@ interface PullRequestWaitWithoutObservation {
   waitedMs: number;
   polls: number;
   transientErrorCount: number;
-  forgeDegraded: true;
+  forgeDegraded: boolean;
 }
 
 const SHA = /^[0-9a-f]{40}$/u;
@@ -819,11 +819,13 @@ async function graphqlRead<T>(gh: GhRunner, args: string[], what: string, parse:
   if (outcome.code === null && !outcome.timedOut && value !== null && errors.length === 0) return { ok: true, value };
   const reason = failureReason(outcome);
   const rateLimited = errors.some((error) => error?.type === "RATE_LIMITED");
+  const executionFailed = errors.some((error) => error?.type === "INTERNAL" ||
+    (typeof error?.message === "string" && /went wrong while executing your query|result of a timeout/iu.test(error.message)));
   const permanent = reason === "forge_unauthenticated" || reason === "forge_cli_missing" ||
     (reason.startsWith("http_") && !(reason === "http_403" && rateLimited)) ||
     errors.some((error) => error?.type === "NOT_FOUND" || error?.type === "FORBIDDEN" ||
       error?.type === "UNAUTHORIZED" || error?.type === "VALIDATION");
-  const retryable = !permanent && (rateLimited || (value !== null && errors.length > 0) || transient(outcome));
+  const retryable = !permanent && (rateLimited || executionFailed || (value !== null && errors.length > 0) || transient(outcome));
   const message = errors.map((error) => typeof error?.message === "string" ? error.message : "").find(Boolean);
   return {
     ok: false,
@@ -934,7 +936,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
       ? { ok: true, summary: { ...last, waitedMs, polls, transientErrorCount, forgeDegraded } }
       : { ok: false, error: lastError, transientErrorCount, timeout: {
           outcome: "timeout", repository, number: ref.number, observation: null,
-          waitedMs, polls, transientErrorCount, forgeDegraded: true,
+          waitedMs, polls, transientErrorCount, forgeDegraded,
         } };
   };
 
@@ -957,14 +959,19 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
 
   // Every read shares one deadline. Only the merge gate's one-shot snapshot has read grace.
   const stopAt = deadline + (deps.readGraceMs ?? 0);
+  let readCutOff = false;
+  const cutOff = (): GhOutcome => {
+    readCutOff = true;
+    return BUDGET_SPENT;
+  };
   const gh: GhRunner = async (args) => {
     const budget = stopAt - now();
-    if (deps.signal?.aborted || budget <= 0) return BUDGET_SPENT;
+    if (deps.signal?.aborted || budget <= 0) return cutOff();
     const read = new AbortController();
     let stop!: () => void;
     const spent = new Promise<GhOutcome>((resolve) => {
       stop = () => {
-        resolve(BUDGET_SPENT);
+        resolve(cutOff());
         read.abort();
       };
     });
@@ -972,7 +979,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     deps.signal?.addEventListener("abort", stop, { once: true });
     try {
       const outcome = await Promise.race([deps.gh(args, read.signal), spent]);
-      return now() >= stopAt ? BUDGET_SPENT : outcome;
+      return now() >= stopAt ? cutOff() : outcome;
     } finally {
       clearTimeout(timer);
       deps.signal?.removeEventListener("abort", stop);
@@ -1025,6 +1032,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     polls++;
     const result = await read();
     if (deps.signal?.aborted) return { ok: false, error: "request cancelled" };
+    if (readCutOff) return timedOut();
     if (!result.ok) {
       if (!result.retryable) return failure(result.error);
       if (!await retry(result.error)) return { ok: false, error: "request cancelled" };
@@ -1040,6 +1048,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     if (!required || required.base !== seen.baseRef) {
       const names = await requiredCheckNames(gh, repository, seen.baseRef, deps.signal);
       if (deps.signal?.aborted) return { ok: false, error: "request cancelled" };
+      if (readCutOff) return timedOut();
       if (!names.ok) {
         if (!names.transient) return failure(names.error);
         if (!await retry(names.error)) return { ok: false, error: "request cancelled" };
@@ -1094,6 +1103,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
           return response;
         }, repository, seen, required);
         if (deps.signal?.aborted) return { ok: false, error: "request cancelled" };
+        if (readCutOff) return timedOut();
       }
       const checks = evaluateCommitChecks(seen.headSha, seen.rollup, required.names, required.apps, seen.mergeStateStatus, seen.admittedSkippedRuns);
       // Optional provenance can make a failure ambiguous. A definitive independent failure can
