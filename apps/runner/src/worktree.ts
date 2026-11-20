@@ -111,6 +111,8 @@ export interface WorktreeHandle {
   /** The ref a newly created worktree started from when it was not the primary checkout's HEAD:
    * the fetched remote default branch, because HEAD was strictly behind it (#4288). */
   baseRef?: string;
+  /** Safe explanation when the remote check failed and this worktree started at HEAD. */
+  baseFallbackWarning?: string;
 }
 
 /** A session-requested worktree keeps its user-selected Git identity instead of deriving either
@@ -1255,6 +1257,13 @@ async function reuseRecoveredBranchWorktree(
     reusedInPlace: uncommittedChanges === undefined ? {} : { uncommittedChanges } };
 }
 
+class RemoteDefaultBaseError extends Error {
+  constructor(readonly step: string, attempts: number, cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`Failed ${step} after ${attempts} attempt${attempts === 1 ? "" : "s"}. Retry, or pass an explicit base ref to skip remote default-branch lookup and fetch. Git error: ${detail}`, { cause });
+  }
+}
+
 /** Resolve and fetch the remote's advertised default branch. No primary-checkout HEAD or current
  * branch participates in the result. */
 export async function fetchRemoteDefaultBase(
@@ -1280,8 +1289,7 @@ export async function fetchRemoteDefaultBase(
         lastError = error;
         const backoffMs = 500 * (attempt + 1);
         if (attempt >= budget.attempts - 1 || deadline - performance.now() <= backoffMs) {
-          const detail = error instanceof Error ? error.message : String(error);
-          throw new Error(`Failed ${step} after ${attempt + 1} attempt${attempt === 0 ? "" : "s"}. Retry, or pass an explicit base ref to skip remote default-branch lookup and fetch. Git error: ${detail}`, { cause: error });
+          throw new RemoteDefaultBaseError(step, attempt + 1, error);
         }
         await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
       }
@@ -1780,8 +1788,8 @@ export async function createWorktree(repoPath: string, sessionId: string, option
     // exact session root, so clear it before `git worktree add` rather than failing every restart.
     await removeExternalDirectory(context, repoPath, path, options);
   }
-  const fresher = await staleHeadRemoteBase(repoPath, options);
-  const target = fresher?.commit ?? "HEAD";
+  const base = await staleHeadRemoteBase(repoPath, options);
+  const target = base?.kind === "remote" ? base.commit : "HEAD";
   // `-B` moves an existing branch. That loses nothing only when the branch's commits are all in what
   // it moves to. Otherwise this session's earlier commits are on it, reachable after a reset only
   // through the reflog, so the worktree goes on that branch as it stands (#4209).
@@ -1793,7 +1801,34 @@ export async function createWorktree(repoPath: string, sessionId: string, option
     return { path, branch, created: true, branchPreexisted: true };
   }
   await command(context, repoPath, ["worktree", "add", "-B", branch, path, target], 120_000);
-  return { path, branch, created: true, ...(fresher ? { baseRef: fresher.ref } : {}) };
+  return {
+    path, branch, created: true,
+    ...(base?.kind === "remote" ? { baseRef: base.ref } : {}),
+    ...(base?.kind === "fallback" ? { baseFallbackWarning: base.message } : {}),
+  };
+}
+
+/** Git stderr can contain credentialed URLs, paths, or arbitrary remote output. Classify known
+ * errors with fixed text and report only the exit code or signal for unrecognized diagnostics. */
+function safeBaseCheckGitError(error: unknown): string {
+  if (!(error instanceof Error)) return "Git did not provide a diagnostic.";
+  const processError = (error.cause ?? error) as { code?: unknown; signal?: unknown; killed?: boolean };
+  const stderr = (error as { stderr?: string }).stderr ?? "";
+  if (processError.killed || /timed out|timeout/iu.test(stderr)) return "The Git command timed out.";
+  if (/could not resolve host|could not resolve hostname/iu.test(stderr)) return "Could not resolve the remote host.";
+  if (/connection refused|failed to connect/iu.test(stderr)) return "Could not connect to the remote host.";
+  if (/host key verification failed/iu.test(stderr)) return "SSH host key verification failed.";
+  if (/certificate (?:verification|problem)|unable to get local issuer certificate/iu.test(stderr)) return "TLS certificate verification failed.";
+  if (/authentication failed|permission denied|could not read username|access denied/iu.test(stderr)) return "Authentication or access was denied.";
+  if (/cannot lock ref|could not lock ref/iu.test(stderr)) return "Could not lock a ref.";
+  if (/not (?:appear to be )?a git repository/iu.test(stderr)) return "The destination is not a Git repository.";
+  if (error.message === "remote origin did not advertise a default branch") return "The remote did not advertise a default branch.";
+  if (processError.code === "ENOENT") return "Git could not be started.";
+  if (typeof processError.code === "number") return `Git exited with code ${processError.code}.`;
+  if (typeof processError.signal === "string" && /^SIG[A-Z]+$/u.test(processError.signal)) {
+    return `Git was stopped by ${processError.signal}.`;
+  }
+  return "Git did not provide a diagnostic that could be displayed safely.";
 }
 
 /**
@@ -1807,25 +1842,35 @@ export async function createWorktree(repoPath: string, sessionId: string, option
 async function staleHeadRemoteBase(
   repoPath: string,
   options: WorktreeOptions,
-): Promise<{ ref: string; commit: string } | null> {
+): Promise<{ kind: "remote"; ref: string; commit: string } | { kind: "fallback"; message: string } | null> {
   const context = options.context ?? nativeContext;
+  let step = "checking for the origin remote";
   try {
     // A repository without an origin knows of nothing fresher; skip the network entirely.
-    await command(context, repoPath, ["remote", "get-url", "origin"]);
-  } catch {
-    return null;
-  }
-  try {
+    const remotes = await command(context, repoPath, ["remote"]);
+    if (!remotes.trim().split(/\r?\n/u).includes("origin")) return null;
+    step = "resolving the remote default branch";
     const remote = await fetchRemoteDefaultBase(repoPath, options, "origin", { attempts: 2, stepMs: 30_000 });
+    step = "comparing local HEAD with the remote default branch";
     const head = (await command(context, repoPath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim();
     const tip = (await command(context, repoPath,
       ["rev-parse", "--verify", "--end-of-options", `refs/remotes/${remote.ref}^{commit}`])).trim();
-    if (!/^[a-f0-9]{40,64}$/u.test(head) || !/^[a-f0-9]{40,64}$/u.test(tip) || head === tip) return null;
-    // Exits non-zero (and so falls back to HEAD) unless HEAD is an ancestor of the remote tip.
-    await command(context, repoPath, ["merge-base", "--is-ancestor", head, tip]);
-    return { ref: remote.ref, commit: tip };
-  } catch {
-    return null;
+    if (!/^[a-f0-9]{40,64}$/u.test(head) || !/^[a-f0-9]{40,64}$/u.test(tip)) {
+      throw new Error("Git did not return a commit ID");
+    }
+    if (head === tip) return null;
+    try {
+      await command(context, repoPath, ["merge-base", "--is-ancestor", head, tip]);
+    } catch (error) {
+      // Git uses exit 1 for a proven non-ancestor. Other failures leave the relation unknown.
+      if ((error as { code?: unknown }).code === 1) return null;
+      throw error;
+    }
+    return { kind: "remote", ref: remote.ref, commit: tip };
+  } catch (error) {
+    const failedStep = error instanceof RemoteDefaultBaseError ? error.step : step;
+    const diagnostic = safeBaseCheckGitError(error instanceof RemoteDefaultBaseError ? error.cause : error);
+    return { kind: "fallback", message: `The worktree started at local HEAD, which may be behind the remote. Git error while ${failedStep}. ${diagnostic}` };
   }
 }
 

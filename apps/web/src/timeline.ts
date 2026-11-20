@@ -177,7 +177,7 @@ export type TimelineItem =
       parentToolUseId?: string;
     }
   | { kind: "file_edit"; id: number; path: string; diff?: string; diffRefs?: EventPayloadReference[]; parentToolUseId?: string }
-  | { kind: "error"; id: number; message: string; nonFatal?: true }
+  | { kind: "error"; id: number; message: string; nonFatal?: true; source?: "worktree_base_fallback" }
   | {
       kind: "turn_interrupted";
       id: number;
@@ -1468,7 +1468,7 @@ export class TimelineBuilder {
         // same X on its own; the turn failed once, so the second merges into the first, keeping
         // the provider's own wording.
         const previous = this.lastErrorIndex == null ? undefined : this.items[this.lastErrorIndex];
-        if (previous?.kind === "error" && !previous.nonFatal === !p.nonFatal &&
+        if (previous?.kind === "error" && !previous.nonFatal === !p.nonFatal && previous.source === p.source &&
             withoutPromptFailedPrefix(previous.message) === withoutPromptFailedPrefix(p.message)) {
           const message = withoutPromptFailedPrefix(p.message);
           if (previous.message !== message) {
@@ -1479,6 +1479,7 @@ export class TimelineBuilder {
         }
         this.lastErrorIndex = this.items.push({
           kind: "error", id: ev.seq, message: p.message, ...(p.nonFatal ? { nonFatal: true as const } : {}),
+          ...(p.source ? { source: p.source } : {}),
         }) - 1;
         this.markDirty(this.lastErrorIndex);
         break;

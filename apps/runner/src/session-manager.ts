@@ -8770,6 +8770,7 @@ export class SessionManager {
               ...worktreeIdentity,
               baseRef: worktree.baseRef ?? "HEAD",
               baseCommit: await worktreeHead(worktree.path, worktreeOptions),
+              ...(worktree.baseFallbackWarning ? { baseFallback: "remote_check_failed" as const } : {}),
             };
           }
           try {
@@ -8786,6 +8787,11 @@ export class SessionManager {
             }
             worktree = null;
             throw claimError;
+          }
+          if (worktree.baseFallbackWarning && this.launchIsCurrent(spec.sessionId, launchGeneration)) {
+            this.emitEvent(spec.sessionId, {
+              kind: "error", nonFatal: true, source: "worktree_base_fallback", message: worktree.baseFallbackWarning,
+            });
           }
           if (worktreeIdentity) {
             const setup = await this.prepareWorktreeSetup(

@@ -2567,6 +2567,9 @@ function TimelineRowContent({
     case "stderr":
       return <AgentLogStep item={item} open={disclosureOpen} onToggle={onDisclosureToggle} />;
     case "error":
+      if (item.source === "worktree_base_fallback") return (
+        <Notice tone="warning" title="Worktree Base Fallback"><p>{item.message}</p></Notice>
+      );
       if (item.nonFatal) return <TurnProblemNotice message={item.message} />;
       return isAutomaticTurnsHeld(item.message)
         ? <AutomaticTurnsHeldNotice message={item.message} />
