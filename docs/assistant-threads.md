@@ -131,6 +131,7 @@ assistant acting through Assistant tools, not coding agents in ordinary sessions
 Open **Thread Actions → Decision Delegation** to grant categories to one thread. New and existing
 threads start without a grant. Select all or specific projects and campaigns, and optionally set
 an expiry in your device's local time. When both scopes are limited, the decision must match both.
+All Campaigns includes future campaigns, including those the owner confirms from this thread.
 **Revoke Grant** immediately stops later resolutions. An already recorded decision still follows
 the ordinary, exact-snapshot checks when the requester acts on it.
 Archiving a thread or its backing session clears the grant.

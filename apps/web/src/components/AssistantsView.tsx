@@ -488,6 +488,11 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
   onConfirmationAnswered?: () => void;
 }) {
   const meta = statusMeta("assistantThread", thread.status);
+  const grant = thread.decisionDelegation?.grant;
+  const expiresAt = grant?.expiresAt;
+  const now = useTimelineClock(expiresAt != null);
+  const delegationLabel = !grant ? "Decision Delegation Off"
+    : expiresAt != null && expiresAt <= now ? "Decision Delegation Expired" : "Decision Delegation Set";
   // Destructive commands this thread's assistant is waiting on the owner for (#4665), drawn ahead
   // of the work they would unblock.
   const pending = pendingAssistantConfirmations([thread]);
@@ -516,7 +521,7 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
           </li>
         )}
         <li className="assistant-thread-access">{assistantThreadAccessLabel(thread.access)}</li>
-        {thread.decisionDelegation && <li>{thread.decisionDelegation.grant ? "Decision Delegation Set" : "Decision Delegation Off"}</li>}
+        {thread.decisionDelegation && <li>{delegationLabel}</li>}
         {usage && <>
           <li>{usage.costUsd.limit === null
             ? `${formatUsd(usage.costUsd.used)} spent · No Budget`

@@ -234,6 +234,9 @@ function thread(id: string, sessionId: string, overrides: Partial<AssistantThrea
     id, assistant: "wollipog", title: backing.title, harness: "claude-code", sessionId, status: "done", access,
     connectionId: `conn-${id}`, launchedSessionIds: [], lastActivityAt: backing.updatedAt, createdAt: backing.createdAt,
     ...(delegationScenario === "stress" ? { decisionDelegation: { revision: 0, grant: null } } : {}),
+    ...(delegationScenario === "expires" ? { decisionDelegation: { revision: 1, grant: {
+      categories: ["owner_question"], campaigns: "all", projects: "all", expiresAt: NOW + minute,
+    } } } : {}),
     archivedAt: null, ...overrides,
   };
 }

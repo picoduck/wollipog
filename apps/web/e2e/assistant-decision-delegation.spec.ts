@@ -29,6 +29,17 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     mkdirSync(evidence, { recursive: true });
     await page.screenshot({ path: join(evidence, `${view}-${layout}.png`), animations: "disabled" });
   };
+  test(`a grant that expires is shown as expired on ${layout}`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await page.clock.install({ time: new Date("2026-11-19T16:00:00Z") });
+    await page.goto(`/assistants-e2e.html?delegation=expires&path=${encodeURIComponent(thread)}`);
+    const details = page.getByLabel("Thread Details");
+    await expect(details).toContainText("Decision Delegation Set");
+    await page.clock.fastForward(61_000);
+    await expect(details).toContainText("Decision Delegation Expired");
+    await expectPageNoHorizontalOverflow(page);
+    await capture(page, "thread-grant-expired");
+  });
   test(`a thread's grant and decision history stay usable on ${layout}`, async ({ page }) => {
     await page.setViewportSize({ width, height });
     await openAssistantFixture(page, thread);
