@@ -233,7 +233,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
   });
 
   if (layout === "phone") test("the CI rerun approval wraps long names and keeps actions reachable on phone", async ({ page }) => {
-    await page.setViewportSize({ width, height: 724 });
+    await page.setViewportSize({ width, height });
     await page.goto("/assistants-e2e.html?delegation=stress&ci-rerun=long&path=%2F");
     await page.getByRole("button", { name: /Investigate the CI Failure/ }).click();
     const target = page.getByLabel("CI Rerun Target");
@@ -243,11 +243,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     const job = target.getByRole("link", { name: `${jobName} (#98765432198765)`, exact: true });
     const approve = card.getByRole("button", { name: "Approve", exact: true });
     const deny = card.getByRole("button", { name: "Deny", exact: true });
-    await approve.click({ trial: true });
-    await deny.click({ trial: true });
-    // Expand to read every fact at once in the compact, scrollable dock.
-    await card.getByRole("button", { name: "Expand Decision", exact: true }).click();
-    await expect(card.getByRole("button", { name: "Collapse Decision", exact: true })).toHaveAttribute("aria-expanded", "true");
+    await target.scrollIntoViewIfNeeded();
     await expectFullyInViewport(target, "CI Rerun Target");
     await expectFullyInViewport(repository, "Long Repository Name");
     await expect(job).toHaveText(jobName);
@@ -263,7 +259,18 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await deny.click({ trial: true });
     await expectNoHorizontalOverflow(card, "CI Rerun Approval Card");
     await expectPageNoHorizontalOverflow(page);
+    await expectFullyInViewport(page.getByText("Start the Conversation", { exact: true }), "Session Content");
+    await expectFullyInViewport(page.getByRole("button", { name: "Browse Files", exact: true }), "Browse Files");
     await capture(page, "ci-rerun-request-long-values");
+
+    await page.setViewportSize({ width, height: 724 });
+    // At shorter heights the dock scrolls. Both names and actions must still be reachable.
+    await repository.scrollIntoViewIfNeeded();
+    await expectFullyInViewport(repository, "Long Repository Name");
+    await job.scrollIntoViewIfNeeded();
+    await expectFullyInViewport(job, "Long Job Name");
+    await approve.click({ trial: true });
+    await deny.click({ trial: true });
   });
 
   test(`Inbox and Campaign Status show bounded delegated decisions on ${layout}`, async ({ page }) => {
