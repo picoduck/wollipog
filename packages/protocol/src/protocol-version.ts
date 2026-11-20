@@ -1524,8 +1524,6 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 391: Owner-confirmed Assistant campaign launch with a separate campaign allowance.
   391,
   // v392 slot
-  // 392: Revalidate a control-plane-registered Location before accepting and applying a live switch (Refs #4557).
-  392,
   // v393 slot
   // 393: Forward content-safe provider refusals of approved forge actions.
   393,
@@ -1533,6 +1531,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 394: Bind Add Account profile grants before dispatch with start_provider_login.newAccountId.
   394,
   // v395 slot
+  // 395: Revalidate a control-plane-registered Location before accepting and applying a live switch (Refs #4557).
+  395,
   // v396 slot
   // v397 slot
   // v398 slot

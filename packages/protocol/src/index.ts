@@ -507,7 +507,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * at its next turn boundary and resumes the same conversation in the target repository. */
   sessionLocationSwitchLive: 289,
   /** The runner can check the live registration of an approved destination absent from its config. */
-  registeredLocationSwitch: 392,
+  registeredLocationSwitch: 395,
   /** v239 runner answers `gitlab_merge_preflight`, which a GitLab `pr_merge` consume requires (#3602). */
   gitlabMergeDecisions: 239,
   /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
