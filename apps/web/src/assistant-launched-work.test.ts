@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { PendingApproval, SessionView } from "@wollipog/protocol";
 import {
+  approvalResponseIsStale,
   groupLaunchedWork,
   launchedSessionsToggleLabel,
   launchedWorkGroup,
@@ -63,6 +64,25 @@ test("launch time orders sessions and campaigns together; an unloaded launch lea
   const ids = ["s-old", "s-new", "c-mid", "s-unloaded"];
   const at: Record<string, number | undefined> = { "s-old": 100, "s-new": 300, "c-mid": 200, "s-unloaded": undefined };
   assert.deepEqual(groupLaunchedWork(ids, () => "active", (id) => at[id]).active, ["s-unloaded", "s-new", "c-mid", "s-old"]);
+});
+
+test("an approval response older than the stream's newer request is stale; one that knows it is not (#4776)", () => {
+  const answered = { requestId: "req-1", occurrenceId: "occ-1" };
+  const replacement = { ...request, requestId: "req-1", occurrenceId: "occ-2" } as PendingApproval;
+  const cleared = { pendingApproval: null };
+  // The stream already shows a new occurrence reusing the provider id; the response predates it.
+  assert.equal(approvalResponseIsStale({ pendingApproval: replacement }, cleared, answered), true);
+  // A response that already lists it is current.
+  assert.equal(approvalResponseIsStale({ pendingApproval: replacement }, { pendingApproval: replacement }, answered), false);
+  // The stream still showing the answered request itself is just behind: the response applies.
+  assert.equal(approvalResponseIsStale({ pendingApproval: { ...request, ...answered } as PendingApproval }, cleared, answered), false);
+  assert.equal(approvalResponseIsStale(undefined, cleared, answered), false);
+  // Without occurrences a request reusing the id can't be told from the answered one.
+  assert.equal(approvalResponseIsStale({ pendingApproval: { ...request, requestId: "req-1" } as PendingApproval }, cleared,
+    { requestId: "req-1" }), false);
+  // Another request with its own id, raised after the response was read, is newer.
+  assert.equal(approvalResponseIsStale({ pendingApproval: { ...request, requestId: "req-2" } as PendingApproval }, cleared,
+    { requestId: "req-1" }), true);
 });
 
 test("the header toggle names the sessions, and those needing you only while there are some (#4776)", () => {

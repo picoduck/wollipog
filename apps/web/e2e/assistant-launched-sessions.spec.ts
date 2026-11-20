@@ -126,17 +126,24 @@ for (const theme of ["dark", "light"] as const) {
       await expect(moved).toBeFocused();
     });
 
-    test("a new approval that reuses the provider's request id is answerable while the first answer is out", async ({ page }) => {
+    test("a new approval that reuses the provider's request id is answerable, and the first answer's late response keeps it", async ({ page }) => {
       await open(page, theme);
-      await page.evaluate(() => (window as unknown as { assistantsHoldApprovals: () => void }).assistantsHoldApprovals());
+      // The control plane applies the first answer at once; only its response to this page is late.
+      await page.evaluate(() => (window as unknown as { assistantsHoldApprovals: (mode: string) => void }).assistantsHoldApprovals("response"));
       await waitingInHeader(page).getByRole("button", { name: "Approve Once" }).click();
-      await expect(page.locator("body")).toHaveAttribute("data-approve-count", "1");
+      await expect(page.locator("body")).toHaveAttribute("data-approved", "sess-deps:req-1:allow");
       await page.evaluate(() => (window as unknown as { assistantsReraiseDeps: () => void }).assistantsReraiseDeps());
       await toggle(page).click();
       const card = group(page, "Needs You").locator(".assistant-work-card");
       await expect(card.getByRole("button", { name: "Approve Once" })).toBeEnabled();
       await expect(card.getByRole("button", { name: "Deny" })).toBeEnabled();
+      // The first answer's response, read before the new approval, arrives and must not hide it.
       await page.evaluate(() => (window as unknown as { assistantsReleaseApprovals: () => void }).assistantsReleaseApprovals());
+      await page.waitForTimeout(300);
+      await expect(card.getByRole("button", { name: "Approve Once" })).toBeEnabled();
+      await card.getByRole("button", { name: "Approve Once" }).click();
+      await expect(page.locator("body")).toHaveAttribute("data-approve-count", "2");
+      await expect(group(page, "Needs You")).toHaveCount(0);
     });
 
     for (const surface of ["panel", "header"] as const) {

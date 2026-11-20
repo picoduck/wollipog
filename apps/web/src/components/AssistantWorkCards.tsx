@@ -2,6 +2,7 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncEx
 import { prioritizedPendingRequests, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import {
+  approvalResponseIsStale,
   groupLaunchedWork,
   launchedSessionsToggleLabel,
   launchedWorkGroup,
@@ -96,7 +97,12 @@ function useFocusRecovery<T extends HTMLElement>(
     observer.observe(element, { childList: true, subtree: true });
     observed.current = { element, observer };
   });
-  useEffect(() => () => observed.current?.observer.disconnect(), []);
+  // Cleared as well as disconnected, so a remount of the same element (Strict Mode replays effects)
+  // observes it again rather than finding it already recorded.
+  useEffect(() => () => {
+    observed.current?.observer.disconnect();
+    observed.current = null;
+  }, []);
   return {
     ref,
     onFocus: (event: FocusEvent<T>) => {
@@ -327,7 +333,7 @@ function AssistantWorkCard({ sessionId, campaign, beforeOpen }: { sessionId: str
 /** A launched session's waiting request, inline on its card: Approve Once / Deny / Open Session. */
 function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView; requestId: string; onOpen: () => void }) {
   const api = useApi();
-  const { loadSession, beginSessionDetailLoad } = useStoreActions();
+  const { loadSession, beginSessionDetailLoad, getSession } = useStoreActions();
   const { showToast } = useFeedback();
   const listed = prioritizedPendingRequests(session.pendingApproval).find((candidate) => candidate.requestId === requestId);
   // The live list carries summary sessions, whose requests arrive without their options. The card
@@ -363,7 +369,9 @@ function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView;
     if (!option || respondingTo.has(key)) return;
     setResponding(key, intent);
     try {
-      loadSession(await api.approve(session.id, { requestId: request.requestId, optionId: option.optionId }));
+      const updated = await api.approve(session.id, { requestId: request.requestId, optionId: option.optionId });
+      // A response the stream has already moved past would hide a newer request; the stream wins.
+      if (!approvalResponseIsStale(getSession(session.id), updated, request)) loadSession(updated);
     } catch (cause) {
       showToast(intent === "approve" ? "Couldn't approve the request." : "Couldn't deny the request.", {
         tone: "error",

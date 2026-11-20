@@ -541,7 +541,9 @@ function upsert(next: SessionView) {
 /** `assistantsHoldNextList()`: the next list read answers with the threads as they were when it
  * began, but only once `assistantsReleaseList()` lets it, as a slow read would. */
 let holdNextList = false;
-let holdApprovals = false;
+/** "request": the decision waits before the control plane applies it; "response": it applies at once,
+ * and only its response back to the page waits. */
+let holdApprovals: "request" | "response" | null = null;
 const releaseApprovals: (() => void)[] = [];
 let releaseHeldList: (() => void) | null = null;
 let slowListMs = 0;
@@ -804,9 +806,10 @@ const client = {
   session: async (id: string) => ({ session: structuredClone(sessions.get(id)!) }),
   approve: async (id: string, body: { requestId: string; optionId: string | null }) => {
     document.body.dataset.approveCount = String(Number(document.body.dataset.approveCount ?? 0) + 1);
-    // `assistantsHoldApprovals()`: the response waits until `assistantsReleaseApprovals()`, as a slow
-    // control plane's would (#4776).
-    if (holdApprovals) await new Promise<void>((resolve) => { releaseApprovals.push(resolve); });
+    // `assistantsHoldApprovals(mode)`: the approval waits until `assistantsReleaseApprovals()`, as a
+    // slow control plane's would (#4776): before it is applied, or with only its response held back.
+    const hold = holdApprovals;
+    if (hold === "request") await new Promise<void>((resolve) => { releaseApprovals.push(resolve); });
     const current = sessions.get(id)!;
     // Only the answered request leaves; another one waiting beside it stays.
     const remaining = removePendingRequest(current.pendingApproval, body.requestId);
@@ -816,7 +819,9 @@ const client = {
     // The thread no longer waits on anyone once its only approval is answered.
     threads = threads.map((candidate) => candidate.launchedSessionIds.includes(id) ? { ...candidate, status: "working" } : candidate);
     for (const changed of threads.filter((candidate) => candidate.launchedSessionIds.includes(id))) publish(changed);
-    return structuredClone(next);
+    const response = structuredClone(next);
+    if (hold === "response") await new Promise<void>((resolve) => { releaseApprovals.push(resolve); });
+    return response;
   },
   getSessionEventPage: () => new Promise<never>(() => {}),
   getSessionEventTailPage: (id: string, _before: number | undefined, eventEpoch: number) => Promise.resolve({
@@ -885,12 +890,12 @@ Object.assign(window, {
     publish(threads.find((candidate) => candidate.id === threadId)!);
   },
   assistantsHoldNextList: () => { holdNextList = true; },
-  assistantsHoldApprovals: () => { holdApprovals = true; },
+  assistantsHoldApprovals: (mode: "request" | "response" = "request") => { holdApprovals = mode; },
   /** The runner raises the install approval again under the same provider request id, as a new
    * occurrence, while the first answer is still on its way back. */
   assistantsReraiseDeps: () => upsert({ ...sessions.get("sess-deps")!, status: "input_required", pendingApproval: depsApproval("occ-deps-2") }),
   assistantsReleaseApprovals: () => {
-    holdApprovals = false;
+    holdApprovals = null;
     for (const release of releaseApprovals.splice(0)) release();
   },
   assistantsSlowLists: (ms: number) => { slowListMs = ms; },
@@ -929,6 +934,8 @@ const navigation: ViewNavigation = {
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root element");
 createRoot(root).render(
+  // As the app's own entry point renders it, so effects run twice on mount here too.
+  <React.StrictMode>
   <InstanceScopeProvider instanceScope={SCOPE}>
     <ApiProvider client={client}>
       <FeedbackProvider>
@@ -937,5 +944,6 @@ createRoot(root).render(
         </StoreProvider>
       </FeedbackProvider>
     </ApiProvider>
-  </InstanceScopeProvider>,
+  </InstanceScopeProvider>
+  </React.StrictMode>,
 );
