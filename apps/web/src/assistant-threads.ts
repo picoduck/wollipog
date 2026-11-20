@@ -11,6 +11,8 @@
  * are ones the control plane returned.
  */
 import type {
+  AssistantDecisionDelegation,
+  AssistantDecisionHistoryPage,
   AssistantThread,
   AssistantThreadAccess,
   AssistantThreadAccountChoices,
@@ -61,6 +63,10 @@ export function assistantThreadRoutes(req: JsonRequest) {
       req<AssistantThreadLimits>(`${ASSISTANT_THREADS_PATH}/defaults/limits`, { method: "PUT", body: JSON.stringify(limits) }),
     setAssistantThreadLimits: (threadId: string, limits: AssistantThreadLimits) =>
       req<AssistantThreadResponse>(`${threadPath(threadId)}/limits`, { method: "PUT", body: JSON.stringify(limits) }),
+    setAssistantThreadDelegation: (threadId: string, delegation: AssistantDecisionDelegation) =>
+      req<AssistantThreadResponse>(`${threadPath(threadId)}/delegation`, { method: "PUT", body: JSON.stringify(delegation) }),
+    assistantDecisionHistory: (filter: { campaignId?: string; threadId?: string; before?: string } = {}, signal?: AbortSignal) =>
+      req<AssistantDecisionHistoryPage>(`/api/assistant-decision-history?${new URLSearchParams(filter)}`, { signal }),
     /** An unsupported runner or harness is refused with 409 and the server's guidance. */
     createAssistantThread: (body: CreateAssistantThreadRequest) =>
       req<AssistantThreadResponse>(ASSISTANT_THREADS_PATH, { method: "POST", body: JSON.stringify(body) }),

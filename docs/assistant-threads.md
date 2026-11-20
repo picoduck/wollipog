@@ -17,6 +17,8 @@ owner's own threads; another owner gets 404. Responses never carry a credential 
 | `POST /api/assistant-threads` | Body `{ harness?, title?, runnerId?, workspaceId? }`, result `{ thread }`. |
 | `GET /api/assistant-threads/:threadId` | `{ thread }` |
 | `PATCH /api/assistant-threads/:threadId` | Body `{ title }`, result `{ thread }`. |
+| `PUT /api/assistant-threads/:threadId/delegation` | Body `{ revision, grant }`, result `{ thread }`. Use the current `decisionDelegation.revision` and set `grant` to null to revoke. |
+| `GET /api/assistant-decision-history` | The owner's delegated decisions. Accepts `threadId`, `campaignId` and the previous page's `nextBefore` as `before`. |
 | `POST /api/assistant-threads/:threadId/archive` | `{ thread }`. Archives the backing session through the ordinary session archive. |
 | `POST /api/assistant-threads/:threadId/confirmations/:confirmationId/approve` | `{ confirmation, thread }`. Approve Once: runs the bound command, then answers with how it ended. See Owner Confirmations. |
 | `POST /api/assistant-threads/:threadId/confirmations/:confirmationId/deny` | `{ confirmation, thread }`. Refuses the bound command. |
@@ -120,9 +122,42 @@ deleted. These settings are owner-only.
 
 Every thread's session receives the shared `wollipog` assistant skill with its role instructions,
 through `SessionLaunchSpec.assistant.guide`. It covers discovery, command IDs and receipts,
-reporting, and never confirming or approving on the owner's behalf. Outside assistants read the
+reporting, and when to use a thread's explicit Decision Delegation grant. Outside assistants read the
 same text from `assistant_discover` (`skill`). It is not a Skill Library entry: it guides an
 assistant acting through Assistant tools, not coding agents in ordinary sessions.
+
+## Decision Delegation
+
+Open **Thread Actions → Decision Delegation** to grant categories to one thread. New and existing
+threads start without a grant. Select all or specific projects and campaigns, and optionally set
+an expiry in your device's local time. When both scopes are limited, the decision must match both.
+All Campaigns includes future campaigns, including those the owner confirms from this thread.
+**Revoke Grant** immediately stops later resolutions. An already recorded decision still follows
+the ordinary, exact-snapshot checks when the requester acts on it.
+Archiving a thread or its backing session clears the grant.
+
+A grant covers Owner Questions from campaigns, PR merges, merged branch deletions, follow-up issue
+publication, issue closure, review round extensions, and denial of UI evidence. Approval of UI
+evidence still needs a supported inspection path with delivery receipts, which Assistant threads
+do not have. CI reruns and release tag and publish commands have no typed Assistant resolution
+path. Generic provider permissions and Assistant command confirmations stay with the owner.
+Credentials, sign-in, governance or policy changes, budgets, persistent permissions, connection
+and delegation changes, and occurrences explicitly kept for a person stay human-only. Campaign
+boundaries and Human Required rules continue to apply. Wollipog's own handoff and forge recovery
+reports require the owner's direct acknowledgement.
+
+The Assistant lists decisions for a session with `assistant_decisions_list`, reads the exact
+occurrence with `assistant_decision_get`, then supplies that occurrence and its `resourceDigest`
+to `assistant_decision_resolve`, with a reason. For an Owner Question it can select an offered
+option, give a free-text answer, or dismiss it. Wollipog reads the live grant immediately before
+resolving and uses the normal owner decision path to wake the requester. The Assistant cannot
+change the pending request through a resolution. Its connection restrictions still apply.
+
+The decision record identifies the Assistant thread, grant revision and reason. Open
+**Delegated Decisions** from the thread menu, Inbox's **More Actions** menu or Campaign Status to
+see the outcome, thread and reason. The control plane advertises `assistantDecisionHistory` in
+the dashboard snapshot for the authenticated owner. The grant and resolution tools are absent on
+older control planes. Outside Assistant connections cannot use a thread grant.
 
 ## Thread Credential and Runner Proxy
 
@@ -223,7 +258,7 @@ External Assistant connections keep the preview-and-confirm behavior above, unch
    settings or Assistant grant changed, the launch is refused. **Deny** and expiry also leave
    no campaign. The thread hears the outcome and can read the campaign Session ID in its
    `command_get` receipt. Open the work card marked **Campaign** for live status and
-   campaign questions. The thread's existing read access grants no campaign decision authority.
+   campaign questions. Answering on the owner's behalf requires a separate Decision Delegation grant.
 
 An older control plane has no `campaign_start` operation. The command refuses a Location on a
 runner below protocol v391. An older web client cannot approve a campaign through the legacy

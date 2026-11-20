@@ -4,10 +4,13 @@ import { PassThrough } from "node:stream";
 import Fastify from "fastify";
 import {
   ASSISTANT_THREAD_CREDENTIAL_TTL_MS,
+  DEFAULT_ORCHESTRATOR_DEFAULTS,
   DEFAULT_ASSISTANT_THREAD_LIMITS,
+  HUMAN_ONLY_PARENT_CONTROL_POLICY,
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   type AgentDefinition,
+  type AssistantDecisionGrant,
   type AssistantThread,
   type ControlPlaneToRunner,
 } from "@wollipog/protocol";
@@ -21,7 +24,10 @@ import { registerAssistantThreadRoutes } from "./assistant-thread-routes.js";
 import { createAssistantOperations, registerAssistantRoutes } from "./assistant-routes.js";
 import { registerAssistantSessionOperations } from "./assistant-session-operations.js";
 import { assistantCallContext } from "./assistant-connections.js";
+import { registerAssistantDecisionOperations, registerAssistantDecisionHistory } from "./assistant-decision-operations.js";
+import { fakeScreenRuntime } from "./credential-screen-test-fixture.js";
 import type { HumanPrincipal } from "./identity.js";
+import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 
 const claude: AgentDefinition = { id: "claude", name: "Claude", driver: "claude-code", context: { kind: "native" }, command: "claude", args: [], env: {}, available: true,
   capabilities: { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["default"] } };
@@ -40,6 +46,7 @@ async function harness(protocolVersion = PROTOCOL_VERSION) {
   const app = Fastify();
   const operations = createAssistantOperations(db);
   registerAssistantSessionOperations(operations, db, svc);
+  registerAssistantDecisionOperations(operations, db, svc);
   // Operations a thread may not call; registered here only to reach the gate.
   for (const name of ["auto_create", "session_role", "session_adopt", "session_fork"]) {
     operations.register({ name, description: "fixture", inputSchema: { type: "object" }, metadata: true,
@@ -47,8 +54,10 @@ async function harness(protocolVersion = PROTOCOL_VERSION) {
   }
   const project = db.createProject({ name: "Work" });
   const location = db.addProjectLocation(project.id, { runnerId: "r", workspaceId: "w" });
-  registerAssistantRoutes(app, { db, operations, requestHuman: (req) => req.headers.authorization === "Bearer owner" ? owner : null });
-  registerAssistantThreadRoutes(app, { threads, requestHuman: (req) => req.headers.authorization === "Bearer owner" ? owner : null });
+  const requestHuman = (req: import("fastify").FastifyRequest) => req.headers.authorization === "Bearer owner" ? owner : null;
+  registerAssistantRoutes(app, { db, operations, requestHuman });
+  registerAssistantThreadRoutes(app, { threads, requestHuman });
+  registerAssistantDecisionHistory(app, db, requestHuman);
   await app.ready();
   const ownerCall = async (method: "GET" | "POST" | "PUT", url: string, payload?: object) => {
     const response = await app.inject({ method, url, headers: { authorization: "Bearer owner" }, ...(payload ? { payload } : {}) });
@@ -82,11 +91,206 @@ async function harness(protocolVersion = PROTOCOL_VERSION) {
     const relay = await proxies.provision(sessionId, "http://control-plane.invalid");
     return { WOLLIPOG_ASSISTANT_RELAY_ENDPOINT: relay.endpoint, WOLLIPOG_ASSISTANT_RELAY_KEY: relay.relayKey };
   };
-  return { db, owner, svc, threads, toRunner, ownerCall, proxies, provision, callTools, location, operations, setRunner: (id: string) => { runnerId = id; },
+  return { app, db, hub, owner, svc, threads, toRunner, ownerCall, proxies, provision, callTools, project, location, operations, setRunner: (id: string) => { runnerId = id; },
     close: async () => { await proxies.closeAll(); await app.close(); db.close(); } };
 }
 
 const discover = { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "assistant_discover", arguments: {} } };
+
+function decisionSession(h: Awaited<ReturnType<typeof harness>>, id: string, parentSessionId?: string) {
+  const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+  policy.issueScope = { repository: "picoduck/wollipog", issueNumbers: [1], revision: 1, authorizedByUserId: h.owner.userId, authorizedAt: 1 };
+  policy.issueNumbers = [1];
+  h.db.createSession({ id, runnerId: "r", workspaceId: "w", agentId: "claude", title: id, useWorktree: false,
+    driver: "claude-code", now: 1, config: {}, projectId: h.project.id, projectLocationId: h.location.id,
+    ...(parentSessionId ? { parentSessionId } : { role: "orchestrator",
+      orchestratorPolicy: policy,
+      parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
+    }),
+  });
+  h.db.updateSessionStatus(id, "running", 2);
+}
+
+function decisionPrompts(h: Awaited<ReturnType<typeof harness>>, sessionId: string): string[] {
+  const durable = h.db.raw().prepare("SELECT payload_json FROM session_prompt_commands WHERE session_id=?").all(sessionId) as Array<{ payload_json: string }>;
+  return [...durable.map((row) => (JSON.parse(row.payload_json) as { text: string }).text),
+    ...h.toRunner.flatMap((message) => message.type === "prompt_session" && message.sessionId === sessionId ? [message.text] : [])];
+}
+
+test("the owner grants and revokes exact typed resolution, and Assistant calls never grant themselves access", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", { title: "Release Assistant" })).body.thread as AssistantThread;
+    assert.deepEqual(thread.decisionDelegation, { revision: 0, grant: null });
+    const path = `/api/assistant-threads/${thread.id}/delegation`;
+    const env = await h.provision(thread.sessionId);
+    decisionSession(h, "root");
+    decisionSession(h, "child", "root");
+    const snapshot = { category: "merged_branch_deletion" as const, repository: "picoduck/wollipog", branch: "agent/test",
+      merged: true as const, mergeCommitSha: "a".repeat(40), dependentPullRequests: { checkedAt: 20, open: [] } };
+    const asked = h.svc.createWorkflowDecision("child", { requestId: "request", resourceKey: "branch", resourceSnapshot: snapshot });
+    assert.ok(asked.ok && asked.data, asked.error ?? "request created");
+    const { occurrenceId, resourceDigest } = asked.data;
+    const call = async (name: string, args: object) => {
+      const [response] = await h.callTools(env, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
+      return response.result;
+    };
+    const resolution = { sessionId: "child", occurrenceId, resourceDigest, outcome: "approve", reason: "The branch has merged." };
+    const refuse = async (pattern: RegExp, args = resolution) => {
+      const result = await call("assistant_decision_resolve", args);
+      assert.equal(result.isError, true, result.content[0].text);
+      assert.match(result.content[0].text, pattern);
+      assert.equal(h.db.workflowDecisionByOccurrence(occurrenceId)?.status, "pending");
+    };
+    await refuse(/no decision delegation grant/u);
+    const grant: AssistantDecisionGrant = { categories: ["merged_branch_deletion", "ui_evidence_approval"],
+      projects: [h.project.id], campaigns: ["root"], expiresAt: null };
+    const deniedOwnerRoute = await h.app.inject({ method: "PUT", url: path, payload: { revision: 0, grant } });
+    assert.equal(deniedOwnerRoute.statusCode, 403);
+    for (const category of ["policy_ask", "tool_approval", "authentication", "persistent_permissions", "owner_decision", "campaign_issue_scope",
+      "automation_creation", "location_switch", "campaign_repository_addition", "ci_rerun", "release_publish", "release_tag", "all"]) {
+      const invalid = await h.ownerCall("PUT", path, { revision: 0, grant: { ...grant, categories: [category] } });
+      assert.equal(invalid.status, 400, category);
+      assert.match(invalid.body.error, /no typed Assistant resolution path/u);
+    }
+    const setGrant = async (revision: number, next: AssistantDecisionGrant | null) => {
+      const saved = await h.ownerCall("PUT", path, { revision, grant: next });
+      assert.equal(saved.status, 200, JSON.stringify(saved.body));
+      assert.equal(saved.body.thread.decisionDelegation.revision, revision + 1);
+    };
+    await setGrant(0, { ...grant, categories: ["owner_question"] });
+    await refuse(/outside the thread's decision delegation grant/u);
+    await setGrant(1, { ...grant, campaigns: ["different-root"] });
+    await refuse(/campaign is outside/u);
+    await setGrant(2, { ...grant, projects: ["different-project"] });
+    await refuse(/project is outside/u);
+    assert.equal((await h.ownerCall("PUT", path, { revision: 3, grant: { ...grant, expiresAt: 1 } })).status, 400);
+    await setGrant(3, grant);
+    h.db.raw().prepare("UPDATE assistant_threads SET decision_grant=json_set(decision_grant,'$.expiresAt',1) WHERE id=?").run(thread.id);
+    await refuse(/grant has expired/u);
+    await setGrant(4, grant);
+    await refuse(/snapshot changed/u, { ...resolution, resourceDigest: "b".repeat(64) });
+    assert.equal((await h.ownerCall("PUT", path, { revision: 4, grant: null })).status, 409, "stale settings cannot overwrite the current grant");
+    const listed = await call("assistant_decisions_list", { sessionId: "child" });
+    assert.deepEqual(JSON.parse(listed.content[0].text).decisions.map((item: { occurrenceId: string }) => item.occurrenceId), [occurrenceId]);
+    const read = await call("assistant_decision_get", { sessionId: "child", occurrenceId });
+    assert.equal(JSON.parse(read.content[0].text).decision.resourceDigest, resourceDigest);
+    h.svc.onSessionStatus("child", "idle");
+    const approved = await call("assistant_decision_resolve", resolution);
+    assert.equal(approved.isError, undefined, approved.content[0].text);
+    const recorded = h.db.workflowDecisionByOccurrence(occurrenceId)!;
+    assert.equal(recorded.status, "approved");
+    assert.equal(recorded.assistantDelegation?.threadId, thread.id);
+    assert.equal(recorded.assistantDelegation?.threadTitle, "Release Assistant");
+    assert.equal(recorded.assistantDelegation?.reason, resolution.reason);
+    assert.equal(recorded.assistantDelegation?.grantRevision, 5);
+    assert.ok(decisionPrompts(h, "child").some((prompt) => prompt.includes(`Assistant thread "Release Assistant" ("${thread.id}") under your owner's delegation`)));
+    const audit = h.db.listGovernanceAudit("child").find((entry) => entry.requestId === occurrenceId && entry.outcome === "allowed");
+    assert.equal(audit?.actor.kind, "agent");
+    assert.equal(audit?.workflowDecision?.assistantDelegation?.threadId, thread.id);
+    assert.ok(audit?.workflowDecision?.rationaleDigest);
+    const repeated = await call("assistant_decision_resolve", resolution);
+    assert.match(repeated.content[0].text, /stale or already resolved/u);
+    await setGrant(5, null);
+    const revoked = await call("assistant_decision_resolve", resolution);
+    assert.match(revoked.content[0].text, /no decision delegation grant/u);
+    const badConsume = await h.svc.consumeWorkflowDecision("child", occurrenceId, {
+      resourceSnapshot: { ...snapshot, mergeCommitSha: "b".repeat(40) },
+    });
+    assert.equal(badConsume.status, 409);
+    assert.equal(h.db.workflowDecisionByOccurrence(occurrenceId)?.status, "revoked");
+    const history = await h.ownerCall("GET", `/api/assistant-decision-history?threadId=${thread.id}&campaignId=root`);
+    assert.equal(history.status, 200);
+    assert.deepEqual(history.body.entries.map((item: { delegation: unknown }) => item.delegation), [recorded.assistantDelegation]);
+    const otherOwnerHistory = h.db.assistantDecisionHistory({ ...h.owner, userId: "other-owner" }, {});
+    assert.deepEqual(otherOwnerHistory.entries, []);
+    await setGrant(6, grant);
+    const evidence = h.svc.createWorkflowDecision("child", { requestId: "evidence", resourceKey: "screenshots",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [{ evidenceId: "preview",
+        uri: "https://evidence.example/preview.png", sha256: "b".repeat(64) }] } });
+    assert.ok(evidence.ok && evidence.data, evidence.error ?? "evidence requested");
+    const evidenceResolution = { ...resolution, occurrenceId: evidence.data.occurrenceId,
+      resourceDigest: evidence.data.resourceDigest, reason: "The supplied evidence could not be verified." };
+    const evidenceApproval = await call("assistant_decision_resolve", evidenceResolution);
+    assert.match(evidenceApproval.content[0].text, /supported inspection path with receipts/u);
+    assert.equal(h.db.workflowDecisionByOccurrence(evidence.data.occurrenceId)?.status, "pending");
+    const evidenceDenial = await call("assistant_decision_resolve", { ...evidenceResolution, outcome: "deny" });
+    assert.equal(evidenceDenial.isError, undefined, evidenceDenial.content[0].text);
+    assert.equal(h.db.workflowDecisionByOccurrence(evidence.data.occurrenceId)?.assistantDelegation?.outcome, "denied");
+    const outside = h.db.assistantConnections.create(h.owner, "Outside Assistant", { operations: "all", projects: "all" });
+    assert.equal(h.operations.list(outside.connection).some((op) => op.name === "assistant_decision_resolve"), false);
+    await assert.rejects(h.operations.call(h.db.assistantConnections.authenticate(outside.token)!, "assistant_decision_resolve", resolution), /requires an explicit grant/u);
+  } finally { await h.close(); }
+});
+
+test("a delegated Owner Question returns an option or free text and credential classification and Owner Approvals stay human", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const env = await h.provision(thread.sessionId);
+    decisionSession(h, "root");
+    h.hub.requestFromRunner = async (_runner, requestId, message) => {
+      if (message.type !== "campaign_issue_scope" || message.operation !== "synchronize") throw new Error("Unexpected fixture command.");
+      return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true,
+        repository: "picoduck/wollipog", revision: message.scope.revision };
+    };
+    h.svc.setDecisionRuntime(fakeScreenRuntime(h.db, (request) =>
+      JSON.stringify(request).includes("Uncertain question") ? { verdict: "uncertain" } : { verdict: "discusses" }).runtime);
+    const enabled = h.svc.setCampaignControl("root", {
+      mode: "full_control", objective: "Implement #1", operations: ["question"], delegatablePolicyIds: [],
+    }, 1, h.owner);
+    assert.ok(enabled.ok, enabled.error ?? "Full Control enabled");
+    const saved = await h.ownerCall("PUT", `/api/assistant-threads/${thread.id}/delegation`, { revision: 0,
+      grant: { categories: ["owner_question"], projects: [h.project.id], campaigns: ["root"], expiresAt: null } });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    const ask = async (requestId: string, options: Array<{ optionId: string; label: string }>, kind: "question" | "approval" = "question") => {
+      const result = await h.svc.createOwnerDecision("root", {
+        requestId, resourceKey: requestId, kind, question: requestId, options,
+      });
+      assert.ok(result.ok && result.data, result.error ?? "question created");
+      return result.data;
+    };
+    const resolve = async (decision: Awaited<ReturnType<typeof ask>>, fields: object = {}) => {
+      const [response] = await h.callTools(env, { jsonrpc: "2.0", id: 1, method: "tools/call", params: {
+        name: "assistant_decision_resolve", arguments: { sessionId: "root", occurrenceId: decision.occurrenceId,
+          resourceDigest: decision.resourceDigest, outcome: "approve", reason: "This is consistent with the plan.", ...fields },
+      } });
+      return response.result;
+    };
+    const options = [{ optionId: "green", label: "Green" }, { optionId: "blue", label: "Blue" }];
+    const optionQuestion = await ask("Which queue should we use?", options);
+    const option = await resolve(optionQuestion, { selectedOptionId: "green", answer: "Proceed after the required checks." });
+    assert.equal(option.isError, undefined, option.content[0].text);
+    assert.equal(h.db.workflowDecisionByOccurrence(optionQuestion.occurrenceId)?.selectedOptionId, "green");
+    const freeQuestion = await ask("What should the summary cover?", []);
+    const text = await resolve(freeQuestion, { answer: "Mention the test result." });
+    assert.equal(text.isError, undefined, text.content[0].text);
+    const recorded = h.db.workflowDecisionByOccurrence(freeQuestion.occurrenceId)!;
+    assert.equal(recorded.childMessage, "Mention the test result.");
+    assert.equal(recorded.assistantDelegation?.outcome, "answered");
+    assert.ok(decisionPrompts(h, "root").some((prompt) => prompt.includes("Mention the test result.") && prompt.includes(thread.id)));
+    const uncertain = await ask("Uncertain question", options);
+    assert.match((await resolve(uncertain, { selectedOptionId: "green" })).content[0].text, /direct human response/u);
+    assert.equal(h.db.workflowDecisionByOccurrence(uncertain.occurrenceId)?.status, "pending");
+    const ownerApproval = await ask("Authorize the operation?", options, "approval");
+    assert.match((await resolve(ownerApproval, { selectedOptionId: "green" })).content[0].text, /no supported typed Assistant resolution path/u);
+    assert.equal(h.db.workflowDecisionByOccurrence(ownerApproval.occurrenceId)?.status, "pending");
+    const reports = [
+      { requestId: "issue_closure_recovery_fixture", resourceKey: "issue_closure_recovery:fixture", trustedIssueClosureRecovery: true },
+      { requestId: "merge_closure_fixture", resourceKey: "merge_closure:fixture", trustedMergeClosureReport: true },
+    ];
+    for (const { requestId, resourceKey, ...origin } of reports) {
+      const report = h.svc.createWorkflowDecision("root", { requestId, resourceKey, resourceSnapshot: {
+        category: "owner_decision", kind: "question", question: "Inspect the forge before acknowledging the report.",
+        options: [{ optionId: "acknowledge", label: "Acknowledge Outcome" }],
+      } }, () => true, { trustedOwnerDecision: true, ...origin });
+      assert.ok(report.ok && report.data, report.error ?? "report created");
+      assert.match((await resolve(report.data, { selectedOptionId: "acknowledge" })).content[0].text, /direct human response/u);
+      assert.match((await resolve(report.data, { outcome: "deny" })).content[0].text, /direct human response/u);
+      assert.equal(h.db.workflowDecisionByOccurrence(report.data.occurrenceId)?.status, "pending");
+    }
+  } finally { await h.close(); }
+});
 
 test("a thread's session calls its granted tools, authorized live and audited against its own connection", async () => {
   const h = await harness();
@@ -110,7 +314,8 @@ test("a thread's session calls its granted tools, authorized live and audited ag
     assert.equal(result.connection.threadId, thread.id);
     // Outside assistants read the same guide the thread's session was launched with.
     assert.equal(result.skill.name, "wollipog");
-    assert.match(result.skill.content, /Never approve, confirm, answer or dismiss anything on the owner's behalf/u);
+    assert.match(result.skill.content, /explicit Decision Delegation grant/u);
+    assert.match(result.skill.content, /Generic permissions and confirmations stay with the owner/u);
     const activity = h.db.assistantConnections.activity(thread.connectionId!);
     assert.deepEqual(activity.map((row) => [row.operation, row.outcome]), [["assistant_discover", "succeeded"]]);
 
@@ -158,8 +363,14 @@ test("archiving or deleting a thread revokes its credential, stops the proxy and
     const archived = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
     const env = await h.provision(archived.sessionId);
     assert.equal((await h.callTools(env, discover))[0].result.isError, undefined);
+    const grant = await h.ownerCall("PUT", `/api/assistant-threads/${archived.id}/delegation`, { revision: 0,
+      grant: { categories: ["owner_question"], projects: "all", campaigns: "all", expiresAt: null } });
+    assert.equal(grant.status, 200);
     const before = h.toRunner.length;
-    assert.equal((await h.ownerCall("POST", `/api/assistant-threads/${archived.id}/archive`)).status, 200);
+    assert.ok(h.svc.setArchived(archived.sessionId, true).ok, "archiving the backing session also archives the thread");
+    assert.deepEqual(h.threads.get(h.owner, archived.id).decisionDelegation, { revision: 2, grant: null });
+    assert.ok(h.svc.setArchived(archived.sessionId, false).ok);
+    assert.deepEqual(h.threads.get(h.owner, archived.id).decisionDelegation, { revision: 2, grant: null });
     assert.equal(h.db.assistantConnections.get(archived.connectionId!)!.revoked, true);
     assert.ok(h.toRunner.slice(before).some((message) => message.type === "assistant_credential_revoked" && message.sessionId === archived.sessionId));
     // Even before the runner acts on the message, the control plane refuses the old credential and any new one.

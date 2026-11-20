@@ -2,7 +2,7 @@
  * assistant; its transcript and composer are the backing `assistant`-role session's own routes.
  * These views never carry a credential value or hash. */
 import type { ProviderAccountSkipReason } from "./provider-account-selection.js";
-import type { OrchestratorCampaignBudgetDefault } from "./index.js";
+import type { OrchestratorCampaignBudgetDefault, WorkflowDecisionResourceSnapshot } from "./index.js";
 
 /** The harnesses a thread can run on. `codex` selects a runner's Codex agent (App Server when
  * installed, otherwise the Codex CLI driver). */
@@ -30,6 +30,64 @@ export interface AssistantThreadLimits {
 
 /** Saved on creation, so changing the owner's defaults never changes an existing thread. */
 export const DEFAULT_ASSISTANT_THREAD_LIMITS = { launchedSessions: 10, costUsd: 25 } as const;
+
+export const ASSISTANT_DECISION_CATEGORIES = {
+  owner_question: "Owner Questions",
+  pr_merge: "Pull Request Merge",
+  merged_branch_deletion: "Merged Branch Deletion",
+  follow_up_issue_publication: "Follow-Up Issue Publication",
+  issue_closure: "Issue Closure",
+  ui_evidence_approval: "UI Evidence Denial",
+  review_round_extension: "Review Round Extension",
+} as const;
+
+export type AssistantDecisionCategory = keyof typeof ASSISTANT_DECISION_CATEGORIES;
+
+export function assistantDecisionCategory(snapshot: WorkflowDecisionResourceSnapshot): AssistantDecisionCategory | null {
+  if (snapshot.category === "owner_decision") return snapshot.kind === "question" ? "owner_question" : null;
+  return Object.hasOwn(ASSISTANT_DECISION_CATEGORIES, snapshot.category) ? snapshot.category as AssistantDecisionCategory : null;
+}
+
+export interface AssistantDecisionGrant {
+  categories: AssistantDecisionCategory[];
+  projects: "all" | string[];
+  campaigns: "all" | string[];
+  expiresAt: number | null;
+}
+
+export interface AssistantDecisionDelegation {
+  revision: number;
+  grant: AssistantDecisionGrant | null;
+}
+
+/** Attribution is captured with the resolution, independent of the thread's current grant. */
+export interface AssistantDecisionResolution {
+  threadId: string;
+  threadTitle?: string;
+  ownerUserId: string;
+  organizationId: string;
+  grantRevision: number;
+  campaignId: string;
+  reason: string;
+}
+
+export interface RecordedAssistantDecisionResolution extends AssistantDecisionResolution {
+  outcome: "approved" | "denied" | "answered";
+  resolvedAt: number;
+}
+
+export interface AssistantDecisionHistoryEntry {
+  occurrenceId: string;
+  sessionId: string;
+  category: AssistantDecisionCategory;
+  resourceKey: string;
+  delegation: RecordedAssistantDecisionResolution;
+}
+
+export interface AssistantDecisionHistoryPage {
+  entries: AssistantDecisionHistoryEntry[];
+  nextBefore?: string;
+}
 
 export interface AssistantThreadUsage {
   launchedSessions: { used: number; limit: number | null };
@@ -61,6 +119,8 @@ export interface AssistantThread {
   usage?: AssistantThreadUsage;
   /** Advertises the dedicated owner limits write route. Absent on older control planes. */
   limitsEditable?: true;
+  /** Absent on older control planes. A null grant gives the thread no decision authority. */
+  decisionDelegation?: AssistantDecisionDelegation;
   /** Additive (#4665): destructive commands of this thread's assistant waiting for the owner, oldest
    * first. While any is listed the thread's status is `needs_you`. */
   confirmations?: AssistantOwnerConfirmation[];

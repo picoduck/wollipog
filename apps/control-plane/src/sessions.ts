@@ -167,6 +167,7 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   isOwnerQuestionSnapshot,
   isChildQuestionSnapshot,
   OWNER_QUESTION_ANSWER_ID,
+  OWNER_QUESTION_NOTE_ID,
   WORKFLOW_QUESTION_ANSWER_MAX_CHARS,
   ownerQuestionAgentQuestions,
   ownerQuestionAnswer,
@@ -1004,7 +1005,9 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
   const ownerKept = decision.category === "owner_decision" || decision.category === "campaign_repository_addition" ||
     decision.ownerHandoff !== undefined || decision.ownerRule !== undefined;
   const resolver = decision.withdrawal || decision.authority === "orchestrator" ? "Your Orchestrator"
-    : ownerKept && decision.status !== "revoked" ? "Your campaign's owner" : "A human reviewer";
+    : decision.assistantDelegation && (decision.status === "approved" || decision.status === "denied")
+      ? assistantDecisionResolver(decision.assistantDelegation)
+      : ownerKept && decision.status !== "revoked" ? "Your campaign's owner" : "A human reviewer";
   // A withdrawal's own reason replaces the message an earlier approval left (#3917), and the option
   // that approval chose no longer applies.
   const message = decision.withdrawal ? decision.withdrawal.reason : decision.childMessage;
@@ -1050,16 +1053,24 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
 
 /** The prompt that brings the owner's answer to an Owner Question back to the root (#4270): the
  * option they chose and their own words, exactly as they wrote them. It grants nothing. */
+function assistantDecisionResolver(delegation: NonNullable<WorkflowDecisionView["assistantDelegation"]>): string {
+  const title = delegation.threadTitle ? `${decisionLiteral(delegation.threadTitle)} (${decisionLiteral(delegation.threadId)})` : decisionLiteral(delegation.threadId);
+  return `Assistant thread ${title} under your owner's delegation`;
+}
+
 function ownerQuestionAnswerPrompt(decision: WorkflowDecisionView, snapshot: OwnerQuestionSnapshot): string {
   const option = decision.selectedOptionId === undefined ? undefined
     : snapshot.options.find((candidate) => candidate.optionId === decision.selectedOptionId);
   const answered = decision.status === "approved" || decision.status === "consumed";
+  const resolver = decision.assistantDelegation
+    ? assistantDecisionResolver(decision.assistantDelegation)
+    : "Your campaign's owner";
   return [
     `[Wollipog Owner Answer — ${decision.occurrenceId}]`,
     answered
-      ? `Your campaign's owner answered your owner question ${decision.occurrenceId} (resource ${decisionLiteral(decision.resourceKey)}).`
+      ? `${resolver} answered your owner question ${decision.occurrenceId} (resource ${decisionLiteral(decision.resourceKey)}).`
       : decision.status === "denied"
-        ? `Your campaign's owner dismissed your owner question ${decision.occurrenceId} (resource ${decisionLiteral(decision.resourceKey)}) without answering it.`
+        ? `${resolver} dismissed your owner question ${decision.occurrenceId} (resource ${decisionLiteral(decision.resourceKey)}) without answering it.`
         : `Your owner question ${decision.occurrenceId} (resource ${decisionLiteral(decision.resourceKey)}) ended unanswered.`,
     ...(answered && option ? [`They chose option ${decisionLiteral(option.optionId)}: ${decisionLiteral(option.label)}.`] : []),
     ...(answered && decision.childMessage ? [option ? "They added, in their own words:" : "Their answer, in their own words:",
@@ -1238,6 +1249,22 @@ const PULL_REQUEST_WATCH_OUTCOME_TEXT: Record<PullRequestWatchOutcome, string> =
  * the server: nobody else can stand in for a report, or replace one by asking under its key. */
 export const MERGE_CLOSURE_REPORT_REQUEST_PREFIX = "merge_closure_";
 export const MERGE_CLOSURE_REPORT_RESOURCE_PREFIX = "merge_closure:";
+const ISSUE_CLOSURE_RECOVERY_REQUEST_PREFIX = "issue_closure_recovery_";
+const ISSUE_CLOSURE_RECOVERY_RESOURCE_PREFIX = "issue_closure_recovery:";
+
+function isIssueClosureRecoveryCoordinate({ requestId, resourceKey }: Pick<WorkflowDecisionView, "requestId" | "resourceKey">): boolean {
+  return requestId.startsWith(ISSUE_CLOSURE_RECOVERY_REQUEST_PREFIX) || resourceKey.startsWith(ISSUE_CLOSURE_RECOVERY_RESOURCE_PREFIX);
+}
+
+function isMergeClosureReportCoordinate({ requestId, resourceKey }: Pick<WorkflowDecisionView, "requestId" | "resourceKey">): boolean {
+  return requestId.startsWith(MERGE_CLOSURE_REPORT_REQUEST_PREFIX) || resourceKey.startsWith(MERGE_CLOSURE_REPORT_RESOURCE_PREFIX);
+}
+
+/** Server-generated reports require the owner's own acknowledgement, including a dismissal. */
+export function isReservedOwnerQuestion(decision: WorkflowDecisionView): boolean {
+  return isOwnerQuestionSnapshot(decision.resourceSnapshot) &&
+    (isCampaignHandoffQuestion(decision) || isIssueClosureRecoveryCoordinate(decision) || isMergeClosureReportCoordinate(decision));
+}
 /** Times one report is asked again after its question was revoked unanswered. */
 const MERGE_CLOSURE_REPORT_ATTEMPTS = 20;
 
@@ -14735,18 +14762,18 @@ export class SessionsService {
         }
         // Reserved coordinates make this idempotent even if a restart lost the result update.
         let requestId = result.reconciliation?.ownerDecisionOccurrenceId
-          ? this.db.workflowDecisionByOccurrence(result.reconciliation.ownerDecisionOccurrenceId)?.requestId ?? `issue_closure_recovery_${decision.occurrenceId}`
-          : `issue_closure_recovery_${decision.occurrenceId}`;
+          ? this.db.workflowDecisionByOccurrence(result.reconciliation.ownerDecisionOccurrenceId)?.requestId ?? `${ISSUE_CLOSURE_RECOVERY_REQUEST_PREFIX}${decision.occurrenceId}`
+          : `${ISSUE_CLOSURE_RECOVERY_REQUEST_PREFIX}${decision.occurrenceId}`;
         let question = this.db.workflowDecisionByRequestId(campaignId, requestId);
         // A session stop may revoke an unanswered card. Keep one current request, and never read
         // that revocation as acknowledgement or redispatch the forge read.
         while (question?.status === "revoked") {
-          requestId = `issue_closure_recovery_${decision.occurrenceId}_${question.occurrenceId}`;
+          requestId = `${ISSUE_CLOSURE_RECOVERY_REQUEST_PREFIX}${decision.occurrenceId}_${question.occurrenceId}`;
           question = this.db.workflowDecisionByRequestId(campaignId, requestId);
         }
         if (!question) {
           const created = this.createWorkflowDecision(campaignId, { requestId,
-            resourceKey: `issue_closure_recovery:${decision.occurrenceId}`,
+            resourceKey: `${ISSUE_CLOSURE_RECOVERY_RESOURCE_PREFIX}${decision.occurrenceId}`,
             resourceSnapshot: { category: "owner_decision", kind: "question",
               question: `Review the uncertain closure of ${snapshot.repository}#${snapshot.issue} (occurrence ${decision.occurrenceId}).`,
               material: `Wollipog could not prove the approved state reason and exact closing comment on the forge. Inspect [${snapshot.repository}/issues/${snapshot.issue}](${snapshot.url}). Answer or dismiss this request to acknowledge the uncertainty and clear this recovery record. This does not close the issue, post a comment, or authorize another attempt.`,
@@ -14861,11 +14888,11 @@ export class SessionsService {
     if (!boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
       return fail("requestId and resourceKey are required bounded identifiers", 400);
     }
-    if ((request.requestId.startsWith("issue_closure_recovery_") || request.resourceKey.startsWith("issue_closure_recovery:")) &&
+    if (isIssueClosureRecoveryCoordinate(request) &&
         !internal?.trustedIssueClosureRecovery) return fail("Issue closure recovery coordinates are reserved for the server", 400);
     // #4323: the server's merge closure reports are found again by their request id, so nobody else
     // may claim one and stand in for a report.
-    if ((request.requestId.startsWith(MERGE_CLOSURE_REPORT_REQUEST_PREFIX) || request.resourceKey.startsWith(MERGE_CLOSURE_REPORT_RESOURCE_PREFIX)) &&
+    if (isMergeClosureReportCoordinate(request) &&
         !internal?.trustedMergeClosureReport) {
       return fail(`requestId and resourceKey may not start with ${MERGE_CLOSURE_REPORT_REQUEST_PREFIX} or ${MERGE_CLOSURE_REPORT_RESOURCE_PREFIX}, ` +
         "which Wollipog reserves for its own reports", 400);
@@ -15170,9 +15197,9 @@ export class SessionsService {
     return ok(session);
   }
 
-  /** A Full Control root asks its campaign's owner a decision the owner kept (#4064). The decision
-   * is always the person's: no agent can answer, approve or resolve it. Its card waits on the root
-   * without parking it, and the owner's choice comes back as the decision's resume prompt. */
+  /** A Full Control root asks for its campaign owner's decision (#4064). An Owner Question may
+   * also be answered through the owner's scoped Assistant grant. Its card waits on the root
+   * without parking it, and the choice comes back as the decision's resume prompt. */
   async createOwnerDecision(sessionId: string, request: CreateOwnerDecisionRequest,
     canAccess: (sessionId: string) => boolean = () => true): Promise<ServiceResult<WorkflowDecisionView>> {
     const root = this.ownerDecisionRoot(this.db.getSession(sessionId));
@@ -15231,7 +15258,7 @@ export class SessionsService {
   /**
    * The campaign owner's answer to an Owner Question (#4270): the option they chose, their own words,
    * or both, from the question form (`ownerQuestionAgentQuestions`); or, with `dismiss`, no answer.
-   * Only that person answers it, never an agent. It grants nothing, so unlike an approval it is not
+   * Only that person or their explicitly delegated Assistant answers it. It grants nothing, so it is not
    * bound to the policy revision it was asked under: a scope, boundary or policy change since leaves
    * it answerable. The answer reaches the root as its prompt, exactly as typed.
    */
@@ -15239,7 +15266,8 @@ export class SessionsService {
     action: "submit" | "dismiss", actor: GovernanceActor,
     /** #4104: the owner's Decline classification of a question the Decision Model could not screen,
      * which dismisses it with this message. */
-    credentialScreenDecline?: { message: string }): ServiceResult<SessionView> {
+    credentialScreenDecline?: { message: string },
+    assistantDelegation?: import("@wollipog/protocol").AssistantDecisionResolution): ServiceResult<SessionView> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId || decision.controllingSessionId !== sessionId ||
         !isOwnerQuestionSnapshot(decision.resourceSnapshot)) return fail("owner question not found", 404);
@@ -15266,10 +15294,13 @@ export class SessionsService {
     const now = Date.now();
     const oweResume = this.workflowDecisionResumeOwed(root);
     const resolved = this.db.resolveWorkflowDecision(occurrenceId, "human", answer ? "approved" : "denied", now,
-      answer?.selectedOptionId, undefined, undefined, answer?.text ?? credentialScreenDecline?.message, oweResume);
+      answer?.selectedOptionId, undefined, auditDigest(assistantDelegation?.reason), answer?.text ?? credentialScreenDecline?.message,
+      oweResume, undefined, undefined, undefined, assistantDelegation && {
+        ...assistantDelegation, resolvedAt: now, outcome: answer ? "answered" : "denied",
+      });
     if (!resolved) return fail("this owner question was answered concurrently", 409);
     this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
-    this.recordWorkflowDecisionAudit(resolved, answer ? "answered" : "denied", actor, now);
+    this.recordWorkflowDecisionAudit(resolved, answer ? "answered" : "denied", actor, now, assistantDelegation?.reason);
     if (plainHandoffDismissal) this.campaignRecovery.synchronize(root, now);
     void this.reconcileUncertainIssueClosures(sessionId).catch(() => this.log.warn("Issue closure acknowledgement is pending"));
     this.hub.sessionChangedById(sessionId);
@@ -15703,6 +15734,59 @@ export class SessionsService {
     return ok({ decisions, ...(rows.length > limit ? { nextCursor: decisions.at(-1)!.occurrenceId } : {}) });
   }
 
+  /** The Assistant operation has verified its live credential, grant, occurrence digest, and
+   * both sessions' placement. Reuse the owner's resolution and consumption rules. */
+  resolveAssistantDecision(
+    decision: WorkflowDecisionView,
+    resolution: ResolveWorkflowDecisionRequest,
+    assistantDelegation: import("@wollipog/protocol").AssistantDecisionResolution,
+    owner: HumanPrincipal,
+  ): ServiceResult<WorkflowDecisionView> {
+    const snapshot = decision.resourceSnapshot;
+    const ownerQuestion = isOwnerQuestionSnapshot(snapshot);
+    if (snapshot.category === "ui_evidence_approval" && resolution.outcome === "approve") {
+      return fail("Approving evidence requires a supported inspection path with receipts. This thread can only deny it.", 403);
+    }
+    const reason = decision.authorityEvaluation?.reason;
+    const controller = this.db.getSession(decision.controllingSessionId);
+    const customClosure = snapshot.category === "issue_closure" && reason === "protected_request" &&
+      controller?.orchestratorPolicy?.control?.mode !== "full_control";
+    const evidenceDenial = snapshot.category === "ui_evidence_approval" && reason === "evidence_review_unavailable" &&
+      resolution.outcome === "deny";
+    const explicitlyKept = !ownerQuestion && this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, snapshot);
+    if (decision.ownerRule || decision.ownerHandoff || explicitlyKept || decision.authorityEvaluation?.disposition ||
+        (reason !== "custom_owner" && !(ownerQuestion && reason === "owner_kept") && !customClosure && !evidenceDenial) ||
+        isReservedOwnerQuestion(decision) || (ownerQuestion && credentialFormFloor(snapshot)) ||
+        (snapshot.category === "merged_branch_deletion" && snapshot.merged === false)) {
+      return fail("This occurrence requires a direct human response.", 403);
+    }
+    if (resolution.childMessage !== undefined && (!ownerQuestion || resolution.outcome !== "approve")) {
+      return fail("An answer is only valid when answering a question.", 400);
+    }
+    if (credentialFormFloor({ question: assistantDelegation.reason, options: [], material: resolution.childMessage })) {
+      return fail("Delegated decisions cannot carry credentials or credential-store locations.", 403);
+    }
+    const actor = { kind: "human", id: owner.userId } as const;
+    if (ownerQuestion) {
+      if (resolution.outcome === "deny" && resolution.selectedOptionId !== undefined) return fail("Dismissing a question cannot select an option.", 400);
+      const selected = resolution.selectedOptionId === undefined ? -1 :
+        snapshot.options.findIndex((option) => option.optionId === resolution.selectedOptionId);
+      if (resolution.selectedOptionId !== undefined && selected < 0) return fail("Choose one of the offered options.", 400);
+      const answers = {
+        ...(selected >= 0
+          ? { [OWNER_QUESTION_ANSWER_ID]: ownerQuestionAgentQuestions(snapshot)[0]!.options[selected]!.label,
+              ...(resolution.childMessage ? { [OWNER_QUESTION_NOTE_ID]: resolution.childMessage } : {}) }
+          : resolution.childMessage ? { [OWNER_QUESTION_ANSWER_ID]: resolution.childMessage } : {}),
+      };
+      const result = this.answerOwnerQuestion(decision.sessionId, decision.occurrenceId, answers,
+        resolution.outcome === "approve" ? "submit" : "dismiss", actor, undefined, assistantDelegation);
+      return result.ok ? ok(this.db.workflowDecisionByOccurrence(decision.occurrenceId)!) : failAs(result);
+    }
+    return this.resolveWorkflowDecision(decision.controllingSessionId, decision.sessionId, decision.occurrenceId,
+      { ...resolution, rationale: assistantDelegation.reason }, "human", actor,
+      (sessionId) => this.db.canAccessSession(owner, sessionId), { assistantDelegation });
+  }
+
   resolveWorkflowDecision(
     parentSessionId: string,
     childSessionId: string,
@@ -15712,7 +15796,7 @@ export class SessionsService {
     actor: GovernanceActor,
     canAccess: (sessionId: string) => boolean,
     /** #4104: the owner's Decline classification of a question the Decision Model could not screen. */
-    internal?: { credentialScreenDecline?: boolean },
+    internal?: { credentialScreenDecline?: boolean; assistantDelegation?: import("@wollipog/protocol").AssistantDecisionResolution },
   ): ServiceResult<WorkflowDecisionView> {
     if (canAccess(childSessionId)) this.expireAutomationCreationDecisions(Date.now(), childSessionId);
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
@@ -16123,7 +16207,11 @@ export class SessionsService {
       oweResume,
       normalizedResolution.delegatedVideoEvidence,
       delegatedImage,
-      actor,
+      internal?.assistantDelegation ? { kind: "agent", id: internal.assistantDelegation.threadId } : actor,
+      internal?.assistantDelegation && {
+        ...internal.assistantDelegation, resolvedAt: now,
+        outcome: normalizedResolution.outcome === "deny" ? "denied" : "approved",
+      },
     );
     let resolved: WorkflowDecisionView | null;
     try {
@@ -16929,7 +17017,7 @@ export class SessionsService {
     if (decision.authority === "human" && PERSON_SETTLED_WORKFLOW_DECISION_CATEGORIES.has(decision.category) && !ownPendingScope) {
       return fail(`a person settles this ${decision.category} decision, so it cannot be withdrawn`, 403);
     }
-    if (decision.requestId.startsWith("issue_closure_recovery_")) return fail("Only the owner can acknowledge issue closure recovery; agents cannot withdraw it", 403);
+    if (isIssueClosureRecoveryCoordinate(decision)) return fail("Only the owner can acknowledge issue closure recovery; agents cannot withdraw it", 403);
     if (!byRequester && decision.authority !== "orchestrator") {
       return fail("only its requester can withdraw a human-owned workflow decision", 403);
     }
@@ -19281,7 +19369,7 @@ export class SessionsService {
     // A person's approval of a follow-up publication records the issue boundary it was made under
     // (#2940), from the controller's current boundary, so a later same-author, same-objective
     // re-mint can still prove that approval's objective when its issue is admitted to scope.
-    const controller = decision.category === "follow_up_issue_publication" && decision.authority === "human" &&
+    const controller = !decision.assistantDelegation && decision.category === "follow_up_issue_publication" && decision.authority === "human" &&
       outcome === "allowed" && stage === "resolution" && actor.kind === "human" ? this.db.getSession(decision.controllingSessionId) : null;
     const approvalBoundary = controller ? issueBoundary(controller) : null;
     const publicationAuthority = approvalBoundary
@@ -19301,11 +19389,16 @@ export class SessionsService {
       approvalKind: "workflow_decision",
       stage,
       outcome,
-      actor,
+      actor: resolvingRecord && decision.assistantDelegation ? { kind: "agent", id: decision.assistantDelegation.threadId } : actor,
       scope: approvalScope(child, {}),
       contentDigest: decision.resourceDigest,
       optionId: decision.selectedOptionId,
       workflowDecision: {
+        ...(resolvingRecord && decision.assistantDelegation ? { assistantDelegation: {
+          threadId: decision.assistantDelegation.threadId,
+          ownerUserId: decision.assistantDelegation.ownerUserId,
+          grantRevision: decision.assistantDelegation.grantRevision,
+        } } : {}),
         ...(decision.withdrawal ? { withdrawal: { reasonDigest: auditDigest(decision.withdrawal.reason)! } } : {}),
         occurrenceId: decision.occurrenceId,
         parentSessionId: decision.controllingSessionId,

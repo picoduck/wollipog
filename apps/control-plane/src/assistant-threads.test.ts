@@ -92,6 +92,7 @@ test("a new thread launches an assistant-role session whose every launch carries
       assistant: "wollipog", title: "Weekly Cleanup", harness: "claude-code", status: "working",
       access: { level: "full_access", destructive: "ask" }, launchedSessionIds: [], archivedAt: null,
       usage: { launchedSessions: { used: 0, limit: 10 }, costUsd: { used: 0, limit: 25 } }, limitsEditable: true, confirmations: [],
+      decisionDelegation: { revision: 0, grant: null },
     });
     const session = h.db.getSession(thread.sessionId)!;
     assert.equal(session.role, "assistant");

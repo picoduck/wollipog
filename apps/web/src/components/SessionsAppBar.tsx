@@ -65,6 +65,7 @@ export interface SessionsAppBarProps {
   /** Why New Project is unavailable, or null when it is. */
   newProjectUnavailableReason: string | null;
   onNewProject: () => void;
+  onDelegatedDecisions?: () => void;
   /** The current group's project actions (#2199), or null for All and No Project. */
   projectActions: ProjectSplitActionsProps | null;
   /** The `+`; absent while the page's state offers New Session instead (§12.1, #2220). */
@@ -137,8 +138,8 @@ function GroupPicker({ splits, labels, activeKey, snoozed, onSelectGroup }: Pick
 
 /** ⋯: View, Show, New Project… and the current project's actions under its name (§9.1). */
 function MoreSheet({ open, setOpen, actions, viewMode, onViewModeChange, reminders, snoozed,
-  newProjectUnavailableReason, onNewProject }: Pick<SessionsAppBarProps,
-  "viewMode" | "onViewModeChange" | "reminders" | "snoozed" | "newProjectUnavailableReason" | "onNewProject"> & {
+  newProjectUnavailableReason, onNewProject, onDelegatedDecisions }: Pick<SessionsAppBarProps,
+  "viewMode" | "onViewModeChange" | "reminders" | "snoozed" | "newProjectUnavailableReason" | "onNewProject" | "onDelegatedDecisions"> & {
   open: boolean;
   setOpen: React.Dispatch<React.SetStateAction<boolean>>;
   actions: ProjectSplitActions | null;
@@ -224,6 +225,7 @@ function MoreSheet({ open, setOpen, actions, viewMode, onViewModeChange, reminde
           >
             New Project…
           </MenuItem>
+          {onDelegatedDecisions && <MenuItem onClick={() => choose(onDelegatedDecisions)}>Delegated Decisions</MenuItem>}
           {actions && (
             <>
               <MenuSeparator />
@@ -253,6 +255,7 @@ export function SessionsAppBar({
   reminders,
   newProjectUnavailableReason,
   onNewProject,
+  onDelegatedDecisions,
   projectActions,
   onNewSession,
   newSessionShortcut,
@@ -298,6 +301,7 @@ export function SessionsAppBar({
       snoozed={snoozed}
       newProjectUnavailableReason={newProjectUnavailableReason}
       onNewProject={onNewProject}
+      onDelegatedDecisions={onDelegatedDecisions}
     />
   );
   const bar = search.open ? (

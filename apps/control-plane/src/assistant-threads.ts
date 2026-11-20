@@ -1,6 +1,7 @@
 import {
   ASSISTANT_THREAD_CREDENTIAL_TTL_MS,
   ASSISTANT_THREAD_HARNESSES,
+  ASSISTANT_DECISION_CATEGORIES,
   resolveAgentHarnessRow,
   isProviderAccountRef,
   runnerCapabilityRequirementError,
@@ -8,6 +9,9 @@ import {
   type AgentDefinition,
   type AgentDriverKind,
   type AssistantOwnerConfirmation,
+  type AssistantDecisionCategory,
+  type AssistantDecisionDelegation,
+  type AssistantDecisionGrant,
   type AssistantThread,
   type AssistantThreadAccountChoices,
   type AssistantThreadDefaultsResponse,
@@ -23,13 +27,16 @@ import type { HumanPrincipal } from "./identity.js";
 import type { AssistantConnections, AssistantOperations } from "./assistant-connections.js";
 import { AssistantCommandReceipts } from "./assistant-command-receipts.js";
 import { ASSISTANT_CAMPAIGN_START, assistantCampaignLaunchId, AssistantOwnerConfirmationService } from "./assistant-owner-confirmations.js";
-import type { AssistantThreadStore, StoredThreadState, ThreadRow } from "./assistant-thread-store.js";
+import { threadDecisionDelegation, type AssistantThreadStore, type StoredThreadState, type ThreadRow } from "./assistant-thread-store.js";
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import { UNTITLED, type SessionsService } from "./sessions.js";
 import { failureBody } from "./capability-refusal.js";
 
 const DEFAULT_THREAD_TITLE = "New Thread";
+export function assistantThreadDisplayTitle(row: Pick<ThreadRow, "title">, session: Pick<SessionView, "title"> | null): string {
+  return row.title ?? (session && session.title !== UNTITLED ? session.title : DEFAULT_THREAD_TITLE);
+}
 const HARNESS_LABELS: Record<AssistantThreadHarness, string> = { "claude-code": "Claude Code", codex: "Codex" };
 /** Codex App Server is preferred where both Codex drivers are installed. */
 const HARNESS_DRIVERS: Record<AssistantThreadHarness, AgentDriverKind[]> = {
@@ -39,6 +46,37 @@ const HARNESS_DRIVERS: Record<AssistantThreadHarness, AgentDriverKind[]> = {
 
 export class AssistantThreadRefusal extends Error {
   constructor(message: string, readonly status: number, readonly details: Record<string, unknown> = {}) { super(message); }
+}
+
+function decisionDelegation(body: unknown, now: number): AssistantDecisionDelegation {
+  const input = body as Partial<AssistantDecisionDelegation> | null;
+  if (!input || !Number.isSafeInteger(input.revision) || input.revision! < 0) {
+    throw new AssistantThreadRefusal("The current delegation revision is required.", 400);
+  }
+  if (input.grant === null) return { revision: input.revision!, grant: null };
+  const grant = input.grant as Partial<AssistantDecisionGrant> | undefined;
+  const categories = grant?.categories;
+  if (!Array.isArray(categories) || categories.length === 0 || categories.length > Object.keys(ASSISTANT_DECISION_CATEGORIES).length ||
+      categories.some((category) => typeof category !== "string" || !Object.hasOwn(ASSISTANT_DECISION_CATEGORIES, category))) {
+    throw new AssistantThreadRefusal("Select at least one supported decision category. Generic permissions, CI reruns and release commands have no typed Assistant resolution path.", 400);
+  }
+  const scope = (value: unknown): "all" | string[] => {
+    if (value === "all") return value;
+    if (!Array.isArray(value) || value.length === 0 || value.length > 100 ||
+        value.some((id) => typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/u.test(id))) {
+      throw new AssistantThreadRefusal("Select all or up to 100 exact project or campaign IDs.", 400);
+    }
+    return [...new Set<string>(value)];
+  };
+  const expiresAt = grant?.expiresAt;
+  if (expiresAt !== null && (typeof expiresAt !== "number" || !Number.isSafeInteger(expiresAt) ||
+      expiresAt <= now || expiresAt > 8_640_000_000_000_000)) {
+    throw new AssistantThreadRefusal("The expiration must be a future date.", 400);
+  }
+  return { revision: input.revision!, grant: {
+    categories: [...new Set<AssistantDecisionCategory>(categories)],
+    projects: scope(grant?.projects), campaigns: scope(grant?.campaigns), expiresAt,
+  } };
 }
 
 function threadLimits(body: unknown): AssistantThreadLimits {
@@ -140,7 +178,7 @@ export class AssistantThreads {
       id: row.id,
       assistant: row.assistant,
       // An untitled session is named by its first message; the thread shows that name once it exists.
-      title: row.title ?? (session && session.title !== UNTITLED ? session.title : DEFAULT_THREAD_TITLE),
+      title: assistantThreadDisplayTitle(row, session),
       harness: row.harness,
       sessionId: row.session_id ?? "",
       status,
@@ -155,6 +193,7 @@ export class AssistantThreads {
         costUsd: { used: Math.round(this.store.costs(row.id).spentUsd * 10_000) / 10_000, limit: row.cost_limit_usd },
       },
       ...(status !== "archived" ? { limitsEditable: true } : {}),
+      decisionDelegation: threadDecisionDelegation(row),
       confirmations,
       lastActivityAt: Math.max(row.updated_at, session?.updatedAt ?? 0),
       createdAt: row.created_at,
@@ -181,6 +220,20 @@ export class AssistantThreads {
     const updated = this.deps.updateLimits(row, threadLimits(body));
     if (!updated.ok) {
       throw new AssistantThreadRefusal(updated.error ?? "The thread limits could not be updated.", updated.status ?? 409);
+    }
+    return this.publish(this.store.get(id)!);
+  }
+
+  setDecisionDelegation(owner: HumanPrincipal, id: string, body: unknown): AssistantThread {
+    const row = this.owned(owner, id);
+    if (owner.role !== "owner") throw new AssistantThreadRefusal("Only the thread's owner can change delegation.", 403);
+    const { revision, grant } = decisionDelegation(body, this.now());
+    if (grant && (row.state !== "active" || !row.session_id || this.deps.getSession(row.session_id)?.archived !== false ||
+        !row.connection_id || this.deps.connections.get(row.connection_id)?.revoked !== false)) {
+      throw new AssistantThreadRefusal("This thread's connection or backing session is unavailable.", 409);
+    }
+    if (!this.store.setDecisionGrant(id, revision, grant)) {
+      throw new AssistantThreadRefusal("Delegation changed in another window. Reopen it to see the current grant.", 409);
     }
     return this.publish(this.store.get(id)!);
   }

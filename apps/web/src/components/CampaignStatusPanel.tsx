@@ -73,6 +73,7 @@ import { CampaignCleanup, CampaignStuck } from "./CampaignCleanup.js";
 import { CampaignHeldSlots } from "./CampaignHeldSlots.js";
 import { useStoreSelector } from "../store.js";
 import { CampaignDecisions } from "./CampaignDecisions.js";
+import { CampaignAssistantDecisions } from "./AssistantDecisionHistory.js";
 import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
 import { OwnerRuleFactRows } from "./requests/WorkflowDecisionSummary.js";
 import { ReturnOwnerResource } from "./ReturnOwnerResource.js";
@@ -444,6 +445,7 @@ function AvailableCampaignStatus({
                 policyRevision={availability.role === "campaign" ? data.summary.campaign?.policyRevision : undefined}
                 boundaryShown={data.summary.campaign?.control?.mode === "full_control"} />
               <CampaignDecisions campaignId={availability.campaignSessionId} />
+              <CampaignAssistantDecisions campaignId={availability.campaignSessionId} />
 
             </div></CampaignSections>
           </StaleContent>

@@ -3,9 +3,11 @@ import { createRoot } from "react-dom/client";
 import {
   PROTOCOL_VERSION,
   type AgentHarnessDefaultsView,
+  type AssistantDecisionDelegation,
   type AssistantThreadLimits,
   type ControlPlaneToUi,
   type PendingApproval,
+  type ProjectView,
   type RunnerView,
   type SessionEvent,
   type SessionNamingSettingsView,
@@ -18,6 +20,7 @@ import { ApiProvider } from "../api-context.js";
 import type { AssistantThread, AssistantThreadDefaults, CreateAssistantThreadRequest } from "../assistant-threads.js";
 import type { AssistantOwnerConfirmation, AssistantThreadAccountChoices, ChangeAssistantThreadAccountRequest, OrchestratorCampaignBudgetDefault } from "@wollipog/protocol";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
+import { assistantDecisionHistoryFixture } from "./assistant-decision-fixture.js";
 import { ThemeProvider } from "../components/ThemeProvider.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
 import { viewFromPath, viewPath, type ViewNavigation } from "../navigation.js";
@@ -44,6 +47,7 @@ const scenario = params.get("threads") ?? "some";
 const attentionCount = Number(params.get("attention") ?? 0);
 const limitsScenario = params.get("limits");
 const campaignScenario = params.has("campaign");
+const delegationScenario = params.get("delegation");
 const NOW = Date.now();
 const minute = 60_000;
 const accountScenario = params.get("accounts");
@@ -141,6 +145,16 @@ const sessions = new Map<string, SessionView>([
   })],
 ]);
 
+const delegationProjects: ProjectView[] = delegationScenario === "stress" ? Array.from({ length: 36 }, (_, index) => ({
+  id: `project_${index}`, name: index === 0 ? "Release Validation and Engineering " + "Dependencies".repeat(10) : `Project ${index}`,
+  hidden: false, locations: [], activeSessionCount: 1, unarchivedSessionCount: 1, totalSessionCount: 1,
+  createdAt: NOW, updatedAt: NOW,
+})) : [];
+for (const [index, project] of delegationProjects.entries()) {
+  const id = `campaign_${index}`;
+  sessions.set(id, session(id, `Release Campaign ${index}`, { role: "orchestrator", projectId: project.id }));
+}
+
 const question: PendingApproval = {
   kind: "question", requestId: "ask-release", title: "Release Scope", options: [],
   questions: [{ id: "scope", question: "Which release should I write up?", options: [{ label: "Next Release" }, { label: "Last Release" }] }],
@@ -219,6 +233,10 @@ function thread(id: string, sessionId: string, overrides: Partial<AssistantThrea
   return {
     id, assistant: "wollipog", title: backing.title, harness: "claude-code", sessionId, status: "done", access,
     connectionId: `conn-${id}`, launchedSessionIds: [], lastActivityAt: backing.updatedAt, createdAt: backing.createdAt,
+    ...(delegationScenario === "stress" ? { decisionDelegation: { revision: 0, grant: null } } : {}),
+    ...(delegationScenario === "expires" ? { decisionDelegation: { revision: 1, grant: {
+      categories: ["owner_question"], campaigns: "all", projects: "all", expiresAt: NOW + minute,
+    } } } : {}),
     archivedAt: null, ...overrides,
   };
 }
@@ -339,7 +357,9 @@ function summary(full: SessionView): SessionView {
 function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
-    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+    capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false,
+      projects: delegationScenario === "stress", ...(delegationScenario === "stress" ? { assistantDecisionHistory: true as const } : {}) },
+    projects: delegationProjects,
     runners: [structuredClone(runner)],
     boxes: [],
     // The launched sessions arrive as summaries; the backing sessions in full.
@@ -470,6 +490,15 @@ const client = {
     publish(current);
     return { thread: structuredClone(current) };
   },
+  setAssistantThreadDelegation: async (threadId: string, delegation: AssistantDecisionDelegation) => {
+    const current = found(threadId);
+    if (current.decisionDelegation?.revision !== delegation.revision) throw new ApiError("Delegation changed in another window.", 409);
+    current.decisionDelegation = { revision: delegation.revision + 1, grant: delegation.grant };
+    document.body.dataset.delegationGrant = JSON.stringify(delegation.grant);
+    publish(current);
+    return { thread: structuredClone(current) };
+  },
+  assistantDecisionHistory: async (filter: { threadId?: string; before?: string }) => assistantDecisionHistoryFixture("campaign_0", filter.before),
   createAssistantThread: async (body: CreateAssistantThreadRequest) => {
     const refusal = refused();
     if (refusal) return refusal;

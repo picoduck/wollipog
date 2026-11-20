@@ -22,6 +22,8 @@ import { pendingAssistantConfirmations } from "../assistant-confirmations.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
 import { AssistantConfirmationCard } from "./AssistantConfirmationCard.js";
 import { AssistantThreadLimitsDialog } from "./AssistantThreadLimitsDialog.js";
+import { AssistantDecisionDelegationDialog } from "./AssistantDecisionDelegationDialog.js";
+import { AssistantDecisionHistoryDialog } from "./AssistantDecisionHistory.js";
 import { AssistantWorkCards } from "./AssistantWorkCards.js";
 import { ChangeAssistantThreadAccountDialog } from "./ChangeAssistantThreadAccountDialog.js";
 import { useFeedback } from "./FeedbackProvider.js";
@@ -87,6 +89,8 @@ export function AssistantsView({ threadId, rightPanel }: {
   const [creating, setCreating] = useState(false);
   const [renaming, setRenaming] = useState<AssistantThread | null>(null);
   const [editingLimits, setEditingLimits] = useState<AssistantThread | null>(null);
+  const [editingDelegation, setEditingDelegation] = useState<AssistantThread | null>(null);
+  const [viewingDelegationHistory, setViewingDelegationHistory] = useState<string | null>(null);
   const [archiving, setArchiving] = useState(false);
   const [changingAccount, setChangingAccount] = useState<AssistantThread | null>(null);
   const generation = useRef(0);
@@ -261,10 +265,12 @@ export function AssistantsView({ threadId, rightPanel }: {
 
   const threadMenu = (thread: AssistantThread): PageMenuAction[] => [
     { label: "Open Session", onClick: () => navigate({ name: "session", id: thread.sessionId }) },
+    ...(thread.decisionDelegation ? [{ label: "Delegated Decisions", onClick: () => setViewingDelegationHistory(thread.id) }] : []),
     ...(thread.status === "archived" ? [] : [
       ...(thread.accountChangeSupported ? [{ label: "Change Account", onClick: () => setChangingAccount(thread) }] : []),
       { label: "Rename", onClick: () => setRenaming(thread) },
       ...(thread.limitsEditable && thread.usage ? [{ label: "Thread Limits", onClick: () => setEditingLimits(thread) }] : []),
+      ...(thread.decisionDelegation ? [{ label: "Decision Delegation", onClick: () => setEditingDelegation(thread) }] : []),
       { label: "Archive", disabled: archiving, onClick: () => void archive(thread) },
     ]),
   ];
@@ -377,6 +383,12 @@ export function AssistantsView({ threadId, rightPanel }: {
           onSave={async (limits) => replace((await api.setAssistantThreadLimits(editingLimits.id, limits)).thread)}
         />
       )}
+      {editingDelegation?.decisionDelegation && <AssistantDecisionDelegationDialog
+        delegation={editingDelegation.decisionDelegation}
+        onClose={() => setEditingDelegation(null)}
+        onSave={async (delegation) => replace((await api.setAssistantThreadDelegation(editingDelegation.id, delegation)).thread)}
+      />}
+      {viewingDelegationHistory && <AssistantDecisionHistoryDialog threadId={viewingDelegationHistory} onClose={() => setViewingDelegationHistory(null)} />}
     </section>
   );
 }
@@ -476,6 +488,11 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
   onConfirmationAnswered?: () => void;
 }) {
   const meta = statusMeta("assistantThread", thread.status);
+  const grant = thread.decisionDelegation?.grant;
+  const expiresAt = grant?.expiresAt;
+  const now = useTimelineClock(expiresAt != null);
+  const delegationLabel = !grant ? "Decision Delegation Off"
+    : expiresAt != null && expiresAt <= now ? "Decision Delegation Expired" : "Decision Delegation Set";
   // Destructive commands this thread's assistant is waiting on the owner for (#4665), drawn ahead
   // of the work they would unblock.
   const pending = pendingAssistantConfirmations([thread]);
@@ -504,6 +521,7 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
           </li>
         )}
         <li className="assistant-thread-access">{assistantThreadAccessLabel(thread.access)}</li>
+        {thread.decisionDelegation && <li>{delegationLabel}</li>}
         {usage && <>
           <li>{usage.costUsd.limit === null
             ? `${formatUsd(usage.costUsd.used)} spent · No Budget`

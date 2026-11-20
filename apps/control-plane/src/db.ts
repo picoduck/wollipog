@@ -1,5 +1,6 @@
 import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS, issueClosureDeliveryGap, knownProviderCommandHomeWriteSeparation } from "@wollipog/protocol";
 import { validCampaignLaunchDisclosure, ownerResourceLabel, campaignPublicationTitle } from "@wollipog/protocol";
+import { assistantDecisionCategory, type AssistantDecisionHistoryPage } from "@wollipog/protocol";
 import { withoutProviderAccountNames } from "./agent-account-view.js";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, CAMPAIGN_PENDING_CAUSES, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
@@ -1121,6 +1122,7 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
   evidence_reviewed     TEXT,
   delegated_video_evidence TEXT,
   delegated_image_review TEXT,
+  assistant_delegation   TEXT,
   rationale_digest      TEXT,
   human_fallback        TEXT,
   authority_evaluation  TEXT,
@@ -7659,6 +7661,7 @@ export class ControlPlaneDb {
       "delegated_video_evidence TEXT",
       // #4074: the delegated image reviewer whose verdict backed an Orchestrator approval.
       "delegated_image_review TEXT",
+      "assistant_delegation TEXT",
       "human_fallback TEXT",
       "authority_evaluation TEXT",
       "issue_closure_result TEXT",
@@ -7692,6 +7695,10 @@ export class ControlPlaneDb {
     ]) {
       try { db.exec(`ALTER TABLE workflow_decisions ADD COLUMN ${column}`); } catch { /* already present */ }
     }
+    db.exec(`CREATE INDEX IF NOT EXISTS workflow_assistant_decision_history ON workflow_decisions (
+      json_extract(assistant_delegation, '$.ownerUserId'), json_extract(assistant_delegation, '$.organizationId'),
+      json_extract(assistant_delegation, '$.resolvedAt') DESC, occurrence_id DESC
+    ) WHERE assistant_delegation IS NOT NULL`);
     // #4323: a consumed merge's closure watch. Merges consumed before it existed are not watched:
     // marked once, when the column is added, so none of them is read or reported afterwards.
     let closureWatchAdded = false;
@@ -24884,6 +24891,28 @@ export class ControlPlaneDb {
     );
   }
 
+  assistantDecisionHistory(owner: HumanPrincipal, filter: { campaignId?: string; threadId?: string; before?: { at: number; id: string } }): AssistantDecisionHistoryPage {
+    const limit = 5;
+    const time = "json_extract(assistant_delegation, '$.resolvedAt')";
+    const rows = this.stmt(`SELECT * FROM workflow_decisions WHERE assistant_delegation IS NOT NULL
+      AND json_extract(assistant_delegation, '$.ownerUserId')=? AND json_extract(assistant_delegation, '$.organizationId')=?
+      ${filter.campaignId ? "AND json_extract(assistant_delegation, '$.campaignId')=?" : ""}
+      ${filter.threadId ? "AND json_extract(assistant_delegation, '$.threadId')=?" : ""}
+      ${filter.before ? `AND (${time}, occurrence_id) < (?, ?)` : ""}
+      ORDER BY ${time} DESC, occurrence_id DESC LIMIT ?`).all(owner.userId, owner.organizationId,
+        ...(filter.campaignId ? [filter.campaignId] : []), ...(filter.threadId ? [filter.threadId] : []),
+        ...(filter.before ? [filter.before.at, filter.before.id] : []), limit + 1);
+    const entries = rows.slice(0, limit).flatMap((row) => {
+      const decision = workflowDecisionFromRow(row);
+      const category = decision && assistantDecisionCategory(decision.resourceSnapshot);
+      if (!decision?.assistantDelegation || !category) return [];
+      return [{ occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, category, resourceKey: decision.resourceKey,
+        delegation: decision.assistantDelegation }];
+    });
+    const last = entries.at(-1);
+    return { entries, ...(rows.length > limit && last ? { nextBefore: `${last.delegation.resolvedAt}:${last.occurrenceId}` } : {}) };
+  }
+
   pendingWorkflowDecisionsForSession(sessionId: string): WorkflowDecisionView[] {
     return (this.stmt(
       `SELECT * FROM workflow_decisions WHERE session_id=? AND status='pending'
@@ -25098,21 +25127,32 @@ export class ControlPlaneDb {
     delegatedVideoEvidence?: WorkflowDecisionView["delegatedVideoEvidence"],
     delegatedImageReview?: WorkflowDecisionView["delegatedImageReview"],
     actor?: GovernanceActor,
+    assistantDelegation?: WorkflowDecisionView["assistantDelegation"],
   ): WorkflowDecisionView | null {
     const owed = oweResume ? ", resume_state='held', resume_command_id=NULL, resume_updated_at=?" : "";
     const snapshot = this.workflowDecisionByOccurrence(occurrenceId)?.resourceSnapshot;
     const questionAnswer = outcome === "approved" && (isChildQuestionSnapshot(snapshot) ||
       (snapshot?.category === "owner_decision" && snapshot.ruleDelegation !== undefined));
+    // The write itself fences revocation and expiry, including a call arriving at its deadline.
+    const delegated = assistantDelegation ? `AND EXISTS (
+      SELECT 1 FROM assistant_threads thread JOIN assistant_connections connection ON connection.id=thread.connection_id
+      WHERE thread.id=? AND thread.owner_user_id=? AND thread.organization_id=? AND thread.state='active'
+        AND thread.decision_grant_revision=? AND thread.decision_grant IS NOT NULL
+        AND connection.revoked=0 AND connection.expires_at>?
+        AND (json_extract(thread.decision_grant, '$.expiresAt') IS NULL OR json_extract(thread.decision_grant, '$.expiresAt')>?)
+    )` : "";
     const result = this.stmt(
       `UPDATE workflow_decisions SET status=?, consumed_at=?, selected_option_id=?, evidence_reviewed=?,
-       rationale_digest=?, child_message=?, delegated_video_evidence=?, delegated_image_review=?, resolved_at=?,
+       rationale_digest=?, child_message=?, delegated_video_evidence=?, delegated_image_review=?, assistant_delegation=?, resolved_at=?,
        closure_approval=CASE WHEN category IN ('issue_closure','owner_decision') AND ?='approved' THEN ? ELSE closure_approval END${owed}
-       WHERE occurrence_id=? AND status='pending' AND authority=?`,
+       WHERE occurrence_id=? AND status='pending' AND authority=? ${delegated}`,
     ).run(
       questionAnswer ? "consumed" : outcome, questionAnswer ? now : null, selectedOptionId ?? null, evidenceReviewed ? JSON.stringify(evidenceReviewed) : null,
       rationaleDigest ?? null, childMessage ?? null, delegatedVideoEvidence ? JSON.stringify(delegatedVideoEvidence) : null,
-      delegatedImageReview ? JSON.stringify(delegatedImageReview) : null, now,
+      delegatedImageReview ? JSON.stringify(delegatedImageReview) : null, assistantDelegation ? JSON.stringify(assistantDelegation) : null, now,
       outcome, actor ? JSON.stringify({ actor, at: now }) : null, ...(oweResume ? [now] : []), occurrenceId, expectedAuthority,
+      ...(assistantDelegation ? [assistantDelegation.threadId, assistantDelegation.ownerUserId, assistantDelegation.organizationId,
+        assistantDelegation.grantRevision, now, now] : []),
     );
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
@@ -35777,6 +35817,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     evidence_reviewed?: string | null;
     delegated_video_evidence?: string | null;
     delegated_image_review?: string | null;
+    assistant_delegation?: string | null;
     human_fallback?: string | null;
     authority_evaluation?: string | null;
     created_at?: number;
@@ -35816,6 +35857,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
   const evidenceReviewed = parseJson<string[]>(row.evidence_reviewed ?? null);
   const delegatedVideoEvidence = parseJson<NonNullable<WorkflowDecisionView["delegatedVideoEvidence"]>>(row.delegated_video_evidence ?? null);
   const delegatedImageReview = parseJson<NonNullable<WorkflowDecisionView["delegatedImageReview"]>>(row.delegated_image_review ?? null);
+  const assistantDelegation = parseJson<NonNullable<WorkflowDecisionView["assistantDelegation"]>>(row.assistant_delegation ?? null);
   const humanFallback = parseJson<NonNullable<WorkflowDecisionView["humanFallback"]>>(row.human_fallback ?? null);
   const closingReferenceCheck = parseJson<NonNullable<WorkflowDecisionView["closingReferenceCheck"]>>(row.closing_reference_check ?? null);
   const forgeAction = parseJson<NonNullable<WorkflowDecisionView["forgeAction"]>>(row.forge_action ?? null);
@@ -35850,6 +35892,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     ...(evidenceReviewed ? { evidenceReviewed } : {}),
     ...(delegatedVideoEvidence ? { delegatedVideoEvidence } : {}),
     ...(delegatedImageReview ? { delegatedImageReview } : {}),
+    ...(assistantDelegation ? { assistantDelegation } : {}),
     createdAt: row.created_at!,
     ...(row.resolved_at != null ? { resolvedAt: row.resolved_at } : {}),
     ...(row.consumed_at != null ? { consumedAt: row.consumed_at } : {}),

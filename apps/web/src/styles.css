@@ -12146,6 +12146,24 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: 0;
   font: var(--type-section);
 }
+.assistant-decision-choices,
+.assistant-decision-history {
+  overflow-wrap: anywhere;
+}
+.assistant-decision-history .btn {
+  max-width: 100%;
+  white-space: normal;
+}
+.assistant-decision-history > li {
+  display: grid;
+  gap: var(--space-2);
+}
+.assistant-decision-history p { margin: 0; }
+.assistant-decision-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
 @media (max-width: 760px) {
   /* Grant restrictions must remain readable in full, including operation inventory details. */
   .assistant-fields .choice-row-desc {

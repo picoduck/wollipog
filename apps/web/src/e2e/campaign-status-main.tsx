@@ -68,6 +68,7 @@ import { MINUTE, campaignProjection, forgeObservation, itemDetail, itemSummary, 
 import "../styles.css";
 import { campaignRecoveryFixture } from "./campaign-recovery-fixtures.js";
 import { epicTrackingFixture } from "./epic-tracking-fixture.js";
+import { assistantDecisionHistoryFixture } from "./assistant-decision-fixture.js";
 import {
   campaignDecisionsFixture,
   DECISION_TARGET,
@@ -1260,6 +1261,8 @@ if (params.get("typed") === "1") {
 
 const client = {
   ...api,
+  assistantDecisionHistory: async (filter: { campaignId: string; before?: string }) =>
+    assistantDecisionHistoryFixture(filter.campaignId, filter.before),
   ...(params.get("screen") === "ask" ? { session: async (id: string) => ({
     session: { ...sessionsFor(revision).find((candidate) => candidate.id === id)!, pendingApproval: classificationRequest },
   }) } : {}),
@@ -1436,7 +1439,8 @@ class FixtureSocket implements UiSocket {
       this.onopen?.();
       pushToStore?.({
         type: "snapshot",
-        capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false },
+        capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false,
+          ...(params.has("delegation") ? { assistantDecisionHistory: true } : {}) },
         runners: [], boxes: [], projects: [], sessions: sessionsFor(revision),
       });
     }, 0);

@@ -41,6 +41,8 @@ export function registerAssistantThreadRoutes(app: FastifyInstance, deps: {
   app.get("/api/assistant-threads/:threadId", handle((owner, req) => ({ thread: deps.threads.get(owner, threadId(req)) })));
   app.patch("/api/assistant-threads/:threadId", handle((owner, req) => ({ thread: deps.threads.rename(owner, threadId(req), req.body) })));
   app.put("/api/assistant-threads/:threadId/limits", handle((owner, req) => ({ thread: deps.threads.setLimits(owner, threadId(req), req.body) })));
+  app.put("/api/assistant-threads/:threadId/delegation", handle((owner, req) =>
+    ({ thread: deps.threads.setDecisionDelegation(owner, threadId(req), req.body) })));
   app.post("/api/assistant-threads/:threadId/archive", handle((owner, req) => ({ thread: deps.threads.archive(owner, threadId(req)) })));
   app.get("/api/assistant-threads/:threadId/account", handle((owner, req) => deps.threads.accountChoices(owner, threadId(req))));
   app.post("/api/assistant-threads/:threadId/account", handle(async (owner, req) =>
