@@ -132,6 +132,29 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
             {...(closingReferenceCheck ? { check: closingReferenceCheck } : {})} />
         </dd></div>
       </dl>;
+    case "ci_rerun": {
+      const runUrl = `https://github.com/${snapshot.repository}/actions/runs/${snapshot.runId}`;
+      const runNumber = `#${snapshot.runId}`;
+      return <dl className="facts ci-rerun-target" aria-label="CI Rerun Target">
+        <div className="ci-rerun-repository"><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
+        <div><dt>Workflow Run</dt><dd><a className="ci-rerun-token" href={runUrl} title={runNumber}
+          target="_blank" rel="noreferrer">{runNumber}</a></dd></div>
+        <div><dt>Attempt</dt><dd>{snapshot.attempt}</dd></div>
+        <div className="ci-rerun-phone-wide"><dt>Head Commit</dt><dd><a className="ci-rerun-token"
+          href={`https://github.com/${snapshot.repository}/commit/${snapshot.headSha}`}
+          title={snapshot.headSha} aria-label={`Head Commit ${snapshot.headSha}`} target="_blank" rel="noreferrer">
+          <code>{snapshot.headSha.slice(0, 10)}</code>
+        </a></dd></div>
+        <div className="ci-rerun-phone-wide"><dt>{snapshot.jobId === undefined ? "Job" : "Job and Dependents"}</dt>
+          <dd>{snapshot.jobId === undefined ? "Entire Run" :
+          <a className={snapshot.jobName ? undefined : "ci-rerun-token"}
+            href={`${runUrl}/job/${snapshot.jobId}`} target="_blank" rel="noreferrer"
+            title={`Job #${snapshot.jobId}`}
+            aria-label={snapshot.jobName ? `${snapshot.jobName} (#${snapshot.jobId})` : undefined}>
+            {snapshot.jobName ?? `#${snapshot.jobId}`}
+          </a>}</dd></div>
+      </dl>;
+    }
     case "review_round_extension":
       // What the person is asked to grant: more cross-model review rounds, and why (#3369).
       return <dl className="facts">

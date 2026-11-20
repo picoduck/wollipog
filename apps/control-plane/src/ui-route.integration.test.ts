@@ -1635,6 +1635,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     unarchiveAndRestart: true,
     sessionReminders: true,
     assistantDecisionHistory: true,
+    assistantCiRerunDecisions: true,
     indefiniteSessionReminders: true,
     worktreeSetupConfig: true,
     renameProjectLocations: true,

@@ -16,6 +16,23 @@ const text = (snapshot: WorkflowDecisionResourceSnapshot, check?: PullRequestClo
   renderToStaticMarkup(<WorkflowDecisionSummary snapshot={snapshot} authority={authority} authorityReason={reason} {...(check ? { closingReferenceCheck: check } : {})} />)
     .replace(/<[^>]+>/gu, " ").replace(/\s+/gu, " ").trim();
 
+test("a whole CI rerun shows all target fields and exposes the exact commit", () => {
+  const headSha = "ab".repeat(20);
+  const snapshot = { category: "ci_rerun" as const, repository: "owner/repo", runId: 123, headSha, attempt: 2 };
+  const html = renderToStaticMarkup(<WorkflowDecisionSummary snapshot={snapshot} />);
+  assert.match(text(snapshot), /Repository owner\/repo Workflow Run #123 Attempt 2 Head Commit ababababab Job Entire Run/u);
+  assert.ok(html.includes(`title="${headSha}"`));
+});
+
+test("a CI job rerun shows the named job and visibly discloses the dependent jobs it includes", () => {
+  const snapshot = { category: "ci_rerun" as const, repository: "owner/repo", runId: 123, headSha: "ab".repeat(20),
+    attempt: 2, jobId: 987, jobName: "Build and Bundle" };
+  const html = renderToStaticMarkup(<WorkflowDecisionSummary snapshot={snapshot} />);
+  assert.match(text(snapshot), /Job and Dependents Build and Bundle/u);
+  assert.match(html, /title="Job #987"/u);
+  assert.match(text({ ...snapshot, jobName: undefined }), /Job and Dependents #987/u);
+});
+
 test("temporary deletion shows its exact tip and receipt without claiming a merged pull request (#4535)", () => {
   const snapshot = { category: "merged_branch_deletion" as const, merged: false as const, repository: "picoduck/wollipog",
     branch: "temporary/check", headSha: "a".repeat(40), temporaryReceiptId: "tbr_receipt", dependentPullRequests: { checkedAt: 1, open: [] },

@@ -1539,6 +1539,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   397,
   // v398 slot
   // v399 slot
+  // 399: Execute an approved, exact GitHub Actions rerun through the requesting runner (Refs #4761).
+  399,
   // v400 slot
   // v401 slot
   // v402 slot

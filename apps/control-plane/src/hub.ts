@@ -947,7 +947,8 @@ export class Hub {
         stopFailureRecovery: true,
         unarchiveAndRestart: true,
         sessionReminders: true,
-        ...(!info.principal || info.principal.kind === "human" && info.principal.role === "owner" ? { assistantDecisionHistory: true } : {}),
+        ...(!info.principal || info.principal.kind === "human" && info.principal.role === "owner"
+          ? { assistantDecisionHistory: true, assistantCiRerunDecisions: true } : {}),
         indefiniteSessionReminders: true,
         worktreeSetupConfig: true,
         renameProjectLocations: true,

@@ -14,9 +14,9 @@ import { executeGithubIssueClosure, inspectGithubIssueClosure, reconcileGithubIs
 import type { GithubIssueClosureLocation, GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, GitLabMergeClosuresMessage, GitLabMergeClosuresResultMessage, ForgeDecisionAction, ForgeDecisionActionMessage, ForgeDecisionActionOutcome, ForgeDecisionActionRefusalReason, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
-import { sameForgeMergeQueueFacts } from "@wollipog/protocol";
+import { ciRerunResourceKey, sameForgeMergeQueueFacts } from "@wollipog/protocol";
 import { githubMergeQueueFacts } from "./pull-request-queue.js";
-import { executeBranchDeletion, executeTemporaryBranch, executeIssuePublication, executePullRequestEnqueue, observeIssuePublication, observePullRequestMerge, observePullRequestRetirement } from "./forge-decision-action.js";
+import { executeBranchDeletion, executeCiRerun, inspectCiRerunJob, executeTemporaryBranch, executeIssuePublication, executePullRequestEnqueue, observeIssuePublication, observePullRequestMerge, observePullRequestRetirement } from "./forge-decision-action.js";
 import { githubSlug } from "./git-ops.js";
 import { proveWorktreePatchDelivery, type CampaignDeliveredPullRequest, type WorktreePatchDeliveryResult } from "./worktree-patch-delivery.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
@@ -22420,6 +22420,33 @@ export class SessionManager {
       const agentEnv = options.agentEnv?.(meta) ?? {};
       const neutral = meta.context?.kind === "wsl" ? "/" : parsePath(tmpdir()).root;
       const gh = options.gh ?? contextGhRunner(meta.context, neutral, agentEnv);
+      if (message.action?.kind === "ci_rerun" || message.action?.kind === "ci_rerun_inspect_job") {
+        const action = message.action;
+        let origin: string | undefined | null;
+        try {
+          const run = issueClosureRun(meta.context, meta.repoPath, agentEnv);
+          origin = githubSlug((await run("git", ["config", "--local", "--get", "remote.origin.url"])).trim());
+        } catch {
+          return { ...base, outcome: "refused", refusal: { reason: "forge_unavailable",
+            summary: "The session's repository origin could not be read." } };
+        }
+        if (!meta.workspaceId || origin?.toLowerCase() !== action.repository) {
+          return { ...base, outcome: "refused", refusal: { reason: "ci_target_mismatch",
+            summary: "The session's repository no longer matches the approved GitHub repository." } };
+        }
+        if (action.kind === "ci_rerun_inspect_job") return { ...base, ...await inspectCiRerunJob(action, gh) };
+        const key = ciRerunResourceKey({ ...action, category: "ci_rerun" });
+        const directory = "workflow-ci-reruns";
+        const digest = createHash("sha256").update(JSON.stringify(action)).digest("hex");
+        const result = await executeCiRerun(action, gh, {
+          begin: () => this.beginLocationAttempt(directory, key, digest),
+          release: () => this.releaseLocationAttempt(directory, key),
+        });
+        this.log(JSON.stringify({ event: "forge_decision_action_result", sessionId: message.sessionId,
+          occurrenceId: message.occurrenceId, kind: action.kind, outcome: result.outcome,
+          ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
+        return { ...base, ...result };
+      }
       const result = message.action?.kind === "temporary_branch_create" || message.action?.kind === "temporary_branch_deletion"
         ? await executeTemporaryBranch(message.action, gh)
         : message.action?.kind === "branch_deletion"

@@ -147,11 +147,10 @@ All Campaigns includes future campaigns, including those the owner confirms from
 the ordinary, exact-snapshot checks when the requester acts on it.
 Archiving a thread or its backing session clears the grant.
 
-A grant covers Owner Questions from campaigns, PR merges, merged branch deletions, follow-up issue
-publication, issue closure, review round extensions, and separate UI Evidence Denial and UI
-Evidence Approval categories. Existing denial grants still permit denial. CI reruns and release
-tag and publish commands have no typed Assistant resolution
-path. Generic provider permissions and Assistant command confirmations stay with the owner.
+A grant covers Owner Questions from campaigns, PR merges, typed CI reruns, merged branch deletions,
+follow-up issue publication, issue closure, review round extensions, and separate UI Evidence Denial
+and UI Evidence Approval categories. Existing denial grants still permit denial. Generic provider
+permissions, Assistant command confirmations, and release tag and publish commands stay with the owner.
 Credentials, sign-in, governance or policy changes, budgets, persistent permissions, connection
 and delegation changes, and occurrences explicitly kept for a person stay human-only. Campaign
 boundaries and Human Required rules continue to apply. Wollipog's own handoff and forge recovery
@@ -189,6 +188,29 @@ The decision record identifies the Assistant thread, grant revision and reason. 
 see the outcome, thread and reason. The control plane advertises `assistantDecisionHistory` in
 the dashboard snapshot for the authenticated owner. The grant and resolution tools are absent on
 older control planes. Outside Assistant connections cannot use a thread grant.
+
+### CI Reruns
+
+Typed GitHub Actions reruns require control-plane and runner protocol 399 or later. Start from a
+session in the repository's registered Project Location. Read the workflow run's ID, head SHA
+and current attempt in GitHub before requesting a decision. Include the job ID to rerun a job and
+its dependent jobs. Omitting the job ID reruns the entire workflow.
+
+Use `request_workflow_decision` (CLI `wollipog decision request`) with a unique request ID, the
+resource key `ci_rerun:owner/repo:runId:attempt` using a lowercase repository, and the snapshot
+`{ "category": "ci_rerun", "repository": "owner/repo", "runId": 123, "headSha": "<40 hex characters>", "attempt": 2, "jobId": 456 }`.
+The decision belongs to the owner. An Assistant thread with the **CI Rerun** grant can resolve
+it within the grant's scope.
+
+The requesting session calls `execute_workflow_decision` (CLI `wollipog decision execute`) with
+the approved occurrence ID and resource digest. Wollipog rechecks the repository, run, commit,
+current attempt and optional job before asking GitHub to rerun it. An accepted rerun consumes the
+approval. If the target changed, request a new approval for the updated target. If the outcome
+is uncertain, inspect the GitHub run before proceeding. Wollipog blocks another typed write for
+the same attempt across sessions on the installation. If GitHub confirms it never started,
+the owner can rerun it manually. GitHub's rerun API accepts a run or job ID and has no attempt precondition, so an
+external rerun racing the final check can still affect the result. Older peers keep the manual
+owner approval path.
 
 ## Thread Credential and Runner Proxy
 

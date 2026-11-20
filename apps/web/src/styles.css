@@ -2926,6 +2926,23 @@ button.status { cursor: pointer; }
   color: var(--text);
   overflow-wrap: anywhere;
 }
+.ci-rerun-target {
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: var(--space-1);
+}
+.ci-rerun-target .ci-rerun-repository dd { grid-column: span 3; }
+@media (max-width: 760px) {
+  .ci-rerun-target { grid-template-columns: auto minmax(0, 2fr) auto minmax(0, 1fr); }
+  .ci-rerun-target .ci-rerun-phone-wide dd { grid-column: span 3; }
+}
+.ci-rerun-token {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
 .facts.strip {
   grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 0;
