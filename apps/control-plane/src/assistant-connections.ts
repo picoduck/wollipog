@@ -199,6 +199,8 @@ export interface AssistantOperation {
   inputSchema: Record<string, unknown>;
   /** Explicit metadata-only operations may run with a selected-project grant and no target. */
   metadata?: boolean;
+  /** Only built-in Assistant thread connections can call this operation. */
+  threadOnly?: boolean;
   /** Can ask for destructive confirmation (for some arguments, at least). Each such operation's
    * owner confirmation card needs its own impact sentence (#4675). */
   destructive?: boolean;
@@ -220,7 +222,8 @@ export class AssistantOperations {
     this.operations.set(operation.name, operation);
   }
   list(connection: AssistantConnection): AssistantOperation[] {
-    return [...this.operations.values()].filter(o => connection.grant.operations === "all" || connection.grant.operations.includes(o.name));
+    return [...this.operations.values()].filter((operation) => (!operation.threadOnly || connection.threadId) &&
+      (connection.grant.operations === "all" || connection.grant.operations.includes(operation.name)));
   }
   inventory(): { name: string; description: string }[] {
     return [...this.operations.values()].map(({name, description}) => ({name, description}));
@@ -236,6 +239,9 @@ export class AssistantOperations {
     if (!connection || connection.revoked) throw new AssistantRefusal("Assistant connection is revoked. The owner must create a new connection.");
     const operation = this.operations.get(name);
     if (!operation) throw new AssistantRefusal("Operation is not registered. Upgrade the control plane or select a registered operation.");
+    if (operation.threadOnly && !connection.threadId) {
+      throw new AssistantRefusal("This operation requires an explicit grant to a Wollipog Assistant thread.");
+    }
     const owner = this.ownerPrincipal(connection.ownerUserId, connection.organizationId);
     if (!owner || owner.role !== "owner") throw new AssistantRefusal("The granting owner is no longer an active owner. An active owner must recreate this connection.");
     if (connection.grant.operations !== "all" && !connection.grant.operations.includes(name)) throw new AssistantRefusal(`Operation ${name} is excluded. The owner can allow it in Assistant Connections.`);

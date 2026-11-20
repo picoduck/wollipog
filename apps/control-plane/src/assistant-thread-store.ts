@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { DEFAULT_ASSISTANT_THREAD_LIMITS, type AssistantThreadHarness, type AssistantThreadLimits } from "@wollipog/protocol";
+import { DEFAULT_ASSISTANT_THREAD_LIMITS, type AssistantDecisionDelegation, type AssistantDecisionGrant, type AssistantThreadHarness, type AssistantThreadLimits } from "@wollipog/protocol";
 import type { HumanPrincipal } from "./identity.js";
 
 /** Stored lifecycle. `creating` covers the window between reserving the id and recording the
@@ -22,6 +22,15 @@ export interface ThreadRow {
   archived_at: number | null;
   cost_limit_usd: number | null;
   launch_limit: number | null;
+  decision_grant: string | null;
+  decision_grant_revision: number;
+}
+
+export function threadDecisionDelegation(row: ThreadRow): AssistantDecisionDelegation {
+  return {
+    revision: row.decision_grant_revision,
+    grant: row.decision_grant === null ? null : JSON.parse(row.decision_grant) as AssistantDecisionGrant,
+  };
 }
 
 /** What a launched tree's root commits of the thread's budget: the cap it was launched with, which
@@ -88,6 +97,8 @@ export class AssistantThreadStore {
     // Fixed historical defaults for rows created before owners could set limits. NULL is unlimited.
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN cost_limit_usd REAL DEFAULT 25"); } catch { /* column already present */ }
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN launch_limit INTEGER DEFAULT 10"); } catch { /* column already present */ }
+    try { db.exec("ALTER TABLE assistant_threads ADD COLUMN decision_grant TEXT"); } catch { /* column already present */ }
+    try { db.exec("ALTER TABLE assistant_threads ADD COLUMN decision_grant_revision INTEGER NOT NULL DEFAULT 0"); } catch { /* column already present */ }
     // All earlier launches were subject to a budget, even when their allowance was not recorded.
     try { db.exec("ALTER TABLE assistant_thread_launches ADD COLUMN uncapped INTEGER NOT NULL DEFAULT 0"); } catch { /* column already present */ }
     // A cross-model review's parent is for display only. Remove memberships an older backfill
@@ -135,6 +146,12 @@ export class AssistantThreadStore {
   setLimits(threadId: string, limits: AssistantThreadLimits): void {
     this.db.prepare("UPDATE assistant_threads SET cost_limit_usd=?, launch_limit=? WHERE id=?")
       .run(limits.costUsd, limits.launchedSessions, threadId);
+  }
+
+  setDecisionGrant(threadId: string, expectedRevision: number, grant: AssistantDecisionGrant | null): boolean {
+    return this.db.prepare(`UPDATE assistant_threads SET decision_grant=?, decision_grant_revision=decision_grant_revision+1
+      WHERE id=? AND state='active' AND decision_grant_revision=?`)
+      .run(grant === null ? null : JSON.stringify(grant), threadId, expectedRevision).changes === 1;
   }
 
   reserve(owner: HumanPrincipal, harness: AssistantThreadHarness, title: string | null, now: number, limits = this.defaultLimits(owner)): string {

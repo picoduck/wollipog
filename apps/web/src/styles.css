@@ -12146,6 +12146,18 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: 0;
   font: var(--type-section);
 }
+.assistant-decision-choices,
+.assistant-decision-history {
+  max-block-size: 18rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+}
+.assistant-decision-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
 @media (max-width: 760px) {
   /* Grant restrictions must remain readable in full, including operation inventory details. */
   .assistant-fields .choice-row-desc {

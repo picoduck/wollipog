@@ -5427,6 +5427,8 @@ export interface WorkflowDecisionView {
   delegatedImageReview?: import("./delegated-image-review.js").DelegatedImageReviewReference;
   createdAt: number;
   resolvedAt?: number;
+  /** Present when an Assistant thread resolved the occurrence under an explicit owner grant. */
+  assistantDelegation?: import("./assistant-threads.js").RecordedAssistantDecisionResolution;
   /** v329 (#4301): durable issue-closure approval provenance; informational, never a grant. */
   approval?: { actor: GovernanceActor; at: number };
   /** (#4332) An applied scope change: exactly the decisions it revoked, which a person's Full Control
@@ -5874,6 +5876,8 @@ export interface GovernanceAuditEntry {
   optionId?: string;
   /** Typed workflow provenance. Resource content and rationale are represented only by digests. */
   workflowDecision?: {
+    /** An Assistant resolved on the owner's behalf. The raw reason stays on the decision. */
+    assistantDelegation?: Pick<import("./assistant-threads.js").AssistantDecisionResolution, "threadId" | "ownerUserId" | "grantRevision">;
     /** Explicit withdrawal, distinct from a server revocation; raw reason stays on the decision. */
     withdrawal?: { reasonDigest: string };
     /** Additive in v142 so a matching action audit identifies the exact authorizing occurrence. */
@@ -12714,6 +12718,8 @@ export interface UiSnapshotMessage {
     unarchiveAndRestart?: boolean;
     /** Per-user durable session reminders and scoped live reminder events are available. */
     sessionReminders?: boolean;
+    /** The current owner can read their delegated Assistant decision history. */
+    assistantDecisionHistory?: true;
     /** Session reminders support the explicit no-timer Someday schedule kind. */
     indefiniteSessionReminders?: boolean;
     /** Per-user worktree setup notices and runner-owned generation are available. */

@@ -1,6 +1,7 @@
 import { CampaignClosureReports } from "./CampaignClosureReports.js";
 import type { AssistantThreadConfirmations } from "../assistant-confirmations.js";
 import { AssistantConfirmationsNotice } from "./AssistantConfirmationCard.js";
+import { AssistantDecisionHistoryDialog } from "./AssistantDecisionHistory.js";
 import { lazy, Suspense, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { presentOwnerQuestionRequest, prioritizedPendingRequests, providerSupportsConversationFork, type BoardColumn, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
 import { archiveAndStopMessage, archiveResultMessage, archiveResultTone, sessionArchiveRequiresStop } from "../archive-actions.js";
@@ -231,6 +232,8 @@ export function InboxView({
   const allProjects = useMemo(() => [...projects.values()], [projects]);
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const sessionRemindersSupported = useStoreSelector((state) => state.sessionRemindersSupported);
+  const assistantDecisionHistorySupported = useStoreSelector((state) => state.assistantDecisionHistorySupported);
+  const [delegatedDecisionsOpen, setDelegatedDecisionsOpen] = useState(false);
   const indefiniteSessionRemindersSupported = useStoreSelector((state) => state.indefiniteSessionRemindersSupported);
   const reminders = useStoreSelector((state) => state.reminders);
   const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
@@ -1735,6 +1738,7 @@ export function InboxView({
         reminders={sessionRemindersSupported ? { snoozedCount, onModeChange: setReminderMode } : null}
         newProjectUnavailableReason={projectsSupported ? null : "New Project is unavailable on this connection."}
         onNewProject={() => setCreatingProject(true)}
+        onDelegatedDecisions={assistantDecisionHistorySupported ? () => setDelegatedDecisionsOpen(true) : undefined}
         projectActions={activeSplit && activeSplit.project !== null ? projectActionsFor(activeSplit) : null}
         // While the page's state offers New Session, the bar does not (§12.1, #2220).
         onNewSession={stateOffersNewSession ? undefined : newSession}
@@ -1791,6 +1795,7 @@ export function InboxView({
             onClick: () => setCreatingProject(true),
           },
           ...(onOpenShortcuts ? [{ label: "Keyboard Shortcuts", onClick: () => onOpenShortcuts() }] : []),
+          ...(assistantDecisionHistorySupported ? [{ label: "Delegated Decisions", onClick: () => setDelegatedDecisionsOpen(true) }] : []),
         ]}
         primary={stateOffersNewSession ? undefined : { label: "New Session", shortcut: shortcutDisplay("new-session"), onClick: newSession }}
         tabs={(
@@ -2065,6 +2070,7 @@ export function InboxView({
           {...(renameSession.returnFocusRef ? { returnFocusRef: renameSession.returnFocusRef } : {})}
         />
       )}
+      {delegatedDecisionsOpen && assistantDecisionHistorySupported && <AssistantDecisionHistoryDialog onClose={() => setDelegatedDecisionsOpen(false)} />}
       {snoozeSessionId && sessionRemindersSupported && (
         <SnoozeDialog
           key={snoozeSessionId}
