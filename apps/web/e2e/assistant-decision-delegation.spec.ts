@@ -241,36 +241,43 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     const repository = target.getByText("some-organization-name/an-unusually-long-repository-name", { exact: true });
     const jobName = "Build, Typecheck and Bundle the Desktop Sidecar for Linux arm64";
     const job = target.getByRole("link", { name: `${jobName} (#98765432198765)`, exact: true });
+    const run = target.getByRole("link", { name: "#98765432109", exact: true });
+    const commit = target.getByRole("link", { name: /Head Commit/ });
+    const attempt = target.getByText("12", { exact: true });
     const approve = card.getByRole("button", { name: "Approve", exact: true });
     const deny = card.getByRole("button", { name: "Deny", exact: true });
-    await target.scrollIntoViewIfNeeded();
-    await expectFullyInViewport(target, "CI Rerun Target");
-    await expectFullyInViewport(repository, "Long Repository Name");
     await expect(job).toHaveText(jobName);
-    await expectFullyInViewport(job, "Long Job Name");
     await expect(job).toHaveAttribute("title", "Job #98765432198765");
-    await expectFullyInViewport(target.getByText("Job and Dependents", { exact: true }), "Job and Dependents");
-    const run = target.getByRole("link", { name: "#98765432109", exact: true });
     await expect(run).toHaveCSS("white-space", "nowrap");
     await expect(run).toHaveAttribute("title", "#98765432109");
     expect(await run.evaluate((link) => link.scrollWidth <= link.clientWidth)).toBe(true);
-    await expect(target.getByRole("link", { name: /Head Commit/ })).toHaveCSS("white-space", "nowrap");
-    await approve.click({ trial: true });
-    await deny.click({ trial: true });
-    await expectNoHorizontalOverflow(card, "CI Rerun Approval Card");
-    await expectPageNoHorizontalOverflow(page);
-    await expectFullyInViewport(page.getByText("Start the Conversation", { exact: true }), "Session Content");
-    await expectFullyInViewport(page.getByRole("button", { name: "Browse Files", exact: true }), "Browse Files");
-    await capture(page, "ci-rerun-request-long-values");
+    await expect(commit).toHaveCSS("white-space", "nowrap");
 
-    await page.setViewportSize({ width, height: 724 });
-    // At shorter heights the dock scrolls. Both names and actions must still be reachable.
-    await repository.scrollIntoViewIfNeeded();
-    await expectFullyInViewport(repository, "Long Repository Name");
-    await job.scrollIntoViewIfNeeded();
-    await expectFullyInViewport(job, "Long Job Name");
-    await approve.click({ trial: true });
-    await deny.click({ trial: true });
+    const facts = [
+      [repository, "Long Repository Name"],
+      [run, "Workflow Run ID"],
+      [attempt, "Attempt Number"],
+      [commit, "Head Commit"],
+      [target.getByText("Job and Dependents", { exact: true }), "Job and Dependents"],
+      [job, "Long Job Name"],
+    ] as const;
+    for (const viewportHeight of [height, 724]) {
+      await page.setViewportSize({ width, height: viewportHeight });
+      // The dock can scroll when long names wrap. Every fact must be readable in compact mode.
+      for (const [fact, label] of facts) {
+        await fact.scrollIntoViewIfNeeded();
+        await expectFullyInViewport(fact, label);
+      }
+      await approve.click({ trial: true });
+      await deny.click({ trial: true });
+      await expectNoHorizontalOverflow(card, "CI Rerun Approval Card");
+      await expectPageNoHorizontalOverflow(page);
+      if (viewportHeight === height) {
+        await expectFullyInViewport(page.getByText("Start the Conversation", { exact: true }), "Session Content");
+        await expectFullyInViewport(page.getByRole("button", { name: "Browse Files", exact: true }), "Browse Files");
+        await capture(page, "ci-rerun-request-long-values");
+      }
+    }
   });
 
   test(`Inbox and Campaign Status show bounded delegated decisions on ${layout}`, async ({ page }) => {
