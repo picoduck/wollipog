@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type FocusEvent, type ReactNode } from "react";
-import { prioritizedPendingRequests, type PendingApproval, type SessionView } from "@wollipog/protocol";
+import { pendingRequests, prioritizedPendingRequests, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import {
   groupLaunchedWork,
@@ -133,11 +133,16 @@ function cardFocusTarget(list: HTMLElement | null, sessionId: string | null): HT
  * The card never applies the answer's response. The control plane publishes the answered session on
  * the session stream, which the cards follow for everything else, while a response read earlier or
  * later than another change can't be ordered against the stream and could hide a newer request or
- * restore an answered one. An answered request keeps its actions disabled only while the store
- * still holds the session as it was when the answer was accepted (`against`): the control plane
- * publishes the answered session as it answers, so the stream's next session is the answer's own or
- * newer, and whatever it still lists is waiting and answerable. A provider may reuse a request id for
- * a new request, so the key is the occurrence where there is one.
+ * restore an answered one.
+ *
+ * The response only decides whether the actions stay disabled meanwhile. They do when it no longer
+ * lists the request and the store still holds the session exactly as it was when the answer was
+ * clicked (`against`): the stream hasn't caught up, and its next session is the answer's own. Any
+ * later session is the stream's word, and whatever it lists is answerable. A response that still
+ * lists the request (an authentication Retry, which the runner may raise again under the same id)
+ * leaves it answerable at once. An answer is kept only while some card shows its request, so the
+ * record never outlives the cards. A provider may reuse a request id for a new request, so the key
+ * is the occurrence where there is one.
  */
 type ResponseState =
   | { state: "approve" | "deny" }
@@ -153,17 +158,29 @@ function subscribeResponding(listener: () => void) {
   respondingListeners.add(listener);
   return () => { respondingListeners.delete(listener); };
 }
+/** How many mounted cards show each request. */
+const respondingReaders = new Map<string, number>();
 function useResponding(key: string): ResponseState | null {
+  useEffect(() => {
+    respondingReaders.set(key, (respondingReaders.get(key) ?? 0) + 1);
+    return () => {
+      const left = (respondingReaders.get(key) ?? 1) - 1;
+      if (left > 0) {
+        respondingReaders.set(key, left);
+        return;
+      }
+      respondingReaders.delete(key);
+      // A card moving between the header and the panel unmounts and mounts in one commit; only an
+      // answer no card picked up again is dropped. One still in flight settles on its own.
+      queueMicrotask(() => {
+        if (!respondingReaders.has(key) && respondingTo.get(key)?.state === "answered") setResponding(key, null);
+      });
+    };
+  }, [key]);
   return useSyncExternalStore(subscribeResponding, () => respondingTo.get(key) ?? null);
 }
 function requestKey(sessionId: string, request: Pick<PendingApproval, "requestId" | "occurrenceId">): string {
   return `${sessionId}\n${request.occurrenceId ?? request.requestId}`;
-}
-/** Clears a session's answers the stream has moved past: it published the session since. */
-function forgetAnswered(session: SessionView) {
-  for (const [key, entry] of respondingTo) {
-    if (entry.state === "answered" && key.startsWith(`${session.id}\n`) && entry.against !== session) setResponding(key, null);
-  }
 }
 
 /**
@@ -307,7 +324,6 @@ function AssistantWorkCard({ sessionId, campaign, beforeOpen }: { sessionId: str
     return runnerId ? state.runners.get(runnerId)?.status === "online" : true;
   });
   const { navigate } = useStoreActions();
-  useEffect(() => { if (session) forgetAnswered(session); }, [session]);
   const open = (requestId?: string) => {
     beforeOpen?.();
     navigate(requestId && session
@@ -376,6 +392,11 @@ function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView;
   const request = listed && listed.options.length === 0 && hydrated?.requestId === requestId ? hydrated : listed;
   const respondingKey = requestKey(session.id, listed ?? { requestId });
   const entry = useResponding(respondingKey);
+  // Drop an answer the stream has moved past, now that it no longer holds anything.
+  useEffect(() => {
+    const current = respondingTo.get(respondingKey);
+    if (current?.state === "answered" && current.against !== session) setResponding(respondingKey, null);
+  }, [respondingKey, session]);
   // An answer the stream has moved past no longer holds the request (see `ResponseState`).
   const answer = entry?.state === "answered" && entry.against !== session ? null : entry?.state ?? null;
   if (!request) return null;
@@ -388,11 +409,15 @@ function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView;
     const option = intent === "approve" ? approve : deny;
     const key = respondingKey;
     if (!option || respondingTo.has(key)) return;
+    const clicked = session;
     setResponding(key, { state: intent });
     try {
-      await api.approve(session.id, { requestId: request.requestId, optionId: option.optionId });
-      // The stream brings the answered session; until it publishes the session again, it stays answered.
-      setResponding(key, { state: "answered", against: getSession(session.id) });
+      const updated = await api.approve(session.id, { requestId: request.requestId, optionId: option.optionId });
+      const cleared = !pendingRequests(updated.pendingApproval).some((candidate) => requestKey(session.id, candidate) === key);
+      // The stream brings the answered session. Until then, with nothing newer in the store, the
+      // request stays answered; otherwise it is the stream's to show (see `ResponseState`).
+      const behind = cleared && getSession(session.id) === clicked && respondingReaders.has(key);
+      setResponding(key, behind ? { state: "answered", against: clicked } : null);
     } catch (cause) {
       setResponding(key, null);
       showToast(intent === "approve" ? "Couldn't approve the request." : "Couldn't deny the request.", {

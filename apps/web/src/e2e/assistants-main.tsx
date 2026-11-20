@@ -143,6 +143,17 @@ function session(id: string, title: string, overrides: Partial<SessionView> = {}
  * card shows once the approval is answered (#4776). A re-raised approval keeps the provider's request
  * id under a new occurrence id. */
 function depsApproval(occurrenceId: string): PendingApproval {
+  // `?deps=auth`: the session lost its sign-in instead. The runner's recovery card offers Retry and
+  // Dismiss Recovery and carries no occurrence id, so a failed Retry raises it again under its id.
+  if (params.get("deps") === "auth") return {
+    requestId: "req-auth",
+    title: "Claude Code needs you to sign in again",
+    options: [
+      { optionId: "auth:revalidate", name: "Retry", kind: "allow_once" },
+      { optionId: "auth:dismiss", name: "Dismiss Recovery", kind: "reject_once" },
+    ],
+    kind: "authentication",
+  } as PendingApproval;
   return {
     requestId: "req-1",
     occurrenceId,
@@ -811,6 +822,13 @@ const client = {
     const hold = holdApprovals;
     if (hold === "request") await new Promise<void>((resolve) => { releaseApprovals.push(resolve); });
     const current = sessions.get(id)!;
+    // The control plane hands an authentication answer to the runner and leaves its card in place.
+    if (current.pendingApproval?.kind === "authentication") {
+      document.body.dataset.approved = `${id}:${body.requestId}:${body.optionId}`;
+      const unchanged = structuredClone(current);
+      if (hold === "response") await new Promise<void>((resolve) => { releaseApprovals.push(resolve); });
+      return unchanged;
+    }
     // Only the answered request leaves; another one waiting beside it stays.
     const remaining = removePendingRequest(current.pendingApproval, body.requestId);
     const next = { ...current, status: remaining ? current.status : "running" as const, pendingApproval: remaining, updatedAt: Date.now() };
@@ -895,6 +913,8 @@ Object.assign(window, {
    * occurrence, while the first answer is still on its way back. */
   /** Every request on the Vite bump is answered elsewhere (another tab), and the stream says so. */
   assistantsClearDepsElsewhere: () => upsert({ ...sessions.get("sess-deps")!, status: "running", pendingApproval: null, updatedAt: Date.now() }),
+  /** The runner's Retry still can't authenticate, and it raises the recovery card again. */
+  assistantsRepublishAuth: () => upsert({ ...sessions.get("sess-deps")!, pendingApproval: depsApproval(""), updatedAt: Date.now() }),
   assistantsReraiseDeps: () => upsert({ ...sessions.get("sess-deps")!, status: "input_required", pendingApproval: depsApproval("occ-deps-2") }),
   assistantsReleaseApprovals: () => {
     holdApprovals = null;

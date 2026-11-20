@@ -162,6 +162,20 @@ for (const theme of ["dark", "light"] as const) {
       await expect(toggle(page)).toHaveText("2 Sessions");
     });
 
+    test("a sign-in Retry raised again before its response arrives stays answerable", async ({ page }) => {
+      await open(page, theme, "deps=auth");
+      await page.evaluate(() => (window as unknown as { assistantsHoldApprovals: (mode: string) => void }).assistantsHoldApprovals("response"));
+      const card = waitingInHeader(page).locator('[data-session-id="sess-deps"]');
+      await card.getByRole("button", { name: "Approve Once" }).click();
+      await expect(page.locator("body")).toHaveAttribute("data-approved", "sess-deps:req-auth:auth:revalidate");
+      // The Retry fails and the runner raises the card again under the same id, before the response.
+      await page.evaluate(() => (window as unknown as { assistantsRepublishAuth: () => void }).assistantsRepublishAuth());
+      await page.evaluate(() => (window as unknown as { assistantsReleaseApprovals: () => void }).assistantsReleaseApprovals());
+      // No further session update comes; the card is answerable again all the same.
+      await expect(card.getByRole("button", { name: "Approve Once" })).toBeEnabled();
+      await expect(card.getByRole("button", { name: "Deny" })).toBeEnabled();
+    });
+
     for (const surface of ["panel", "header"] as const) {
       test(`answering one of two requests in the ${surface} keeps focus on the card that still waits`, async ({ page }) => {
         await open(page, theme, "deps=question");
