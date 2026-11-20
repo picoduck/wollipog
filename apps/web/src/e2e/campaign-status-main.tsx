@@ -550,7 +550,15 @@ function activityProjection(state: "active" | "cleanup" | "complete" | "stuck"):
     limits: { maximumConcurrentChildren: 4, occupied: state === "active" ? 1 : 0, remaining: state === "active" ? 3 : 4, costBudgetUsd: 40, maxToolCalls: null },
     heldChildren: [],
     ...(activityLegacy ? {} : { activity: state === "active" ? { live: ["child_turn" as const, "merge_queue_wait" as const] } : { live: [], ...(state === "complete" ? {} : { repair }) } }),
-    ...(state === "cleanup" && !activityLegacy ? { cleanup: { total: 3, items: [
+    ...(state === "cleanup" && !activityLegacy ? { cleanup: { total: params.has("imageReviewers") ? 11 : 3, items: [
+      ...(params.has("imageReviewers") ? Array.from({ length: 8 }, (_, i) => ({
+        kind: "image_reviewer" as const, sessionId: `s_reviewer_${i}`,
+        reason: params.has("failedReviewer") ? "The image reviewer's Stop failed; archival is still pending."
+          : "The finished image reviewer is waiting for confirmed stop and archival.",
+        action: params.has("failedReviewer")
+          ? { kind: "person" as const, text: "Open the reviewer session and choose Retry Stop, or reconnect its runner." }
+          : { kind: "automatic" as const, text: "Wollipog stops and archives the reviewer when its runner confirms release." },
+      })) : []),
       { kind: "merged_branch" as const, sessionId: "s_child", repository: "picoduck/wollipog", pullRequest: 4217, branch: "agent/s_9d2f41c07a11",
         state: "pending" as const, reason: "The merged branch is still on the remote.",
         action: { kind: "command" as const, command: "gh api -X DELETE 'repos/picoduck/wollipog/git/refs/heads/agent/s_9d2f41c07a11'" } },

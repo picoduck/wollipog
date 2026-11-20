@@ -592,6 +592,7 @@ function campaignIdleLeftovers(cleanup: readonly CampaignCleanupItem[], stuck: r
       ? { kind: item.kind, repository: item.repository, pullRequest: item.pullRequest, state: item.state,
         ...(item.branch ? { branch: boundedCampaignEventText(item.branch) } : {}) }
       : item.kind === "worktree" ? { kind: item.kind, sessionId: item.sessionId, status: item.status }
+      : item.kind === "image_reviewer" ? { kind: item.kind, sessionId: item.sessionId }
       : { kind: item.kind, workItemId: item.workItemId, responsibleActor: item.responsibleActor }),
   ];
 }
@@ -6979,6 +6980,7 @@ export class SessionsService {
     this.expireAutomationCreationDecisions(now);
     void this.retryLifecycleMergeSettlements(now, runnerId).catch((error: unknown) =>
       this.log.warn(`lifecycle merge observation sweep deferred: ${String(error)}`));
+    this.maintainImageReviewerRetirement(now, runnerId);
     this.maintainArchivedWorktreeRemoval(now, runnerId);
     for (const campaignId of this.db.listOrchestratorCampaignSessionIds(runnerId)) {
       void this.reconcileUncertainIssueClosures(campaignId).catch(() => this.log.warn(`Issue closure recovery is pending for ${campaignId}`));
@@ -9639,6 +9641,10 @@ export class SessionsService {
         boundedDecisionString(request?.childSessionId, 256) &&
         this.db.isSessionDescendant(campaignSessionId, request.childSessionId) &&
         canAccess(campaignSessionId) && canAccess(request.childSessionId)) {
+      const helper = this.db.delegatedImageReviews.byReviewer(request.childSessionId);
+      if (helper && (helper.state === "consumed" || helper.state === "ended")) {
+        return this.verifyCampaignChild(campaignSessionId, request, canAccess);
+      }
       await this.hydrateHistory(request.childSessionId);
       // Registration inventories can advertise seq=0 without inspecting the stored log. A
       // complete cursor is not proof that the exact requested report is absent from the runner.
@@ -9739,6 +9745,14 @@ export class SessionsService {
     if (!root?.orchestratorPolicy) return fail("Orchestrator campaign not found", 404);
     const completion = root.orchestratorPolicy.behavior.completion;
     if (this.db.campaignPaused(root.id)) return fail("The campaign is paused; paused children cannot be verified.", 409);
+    const imageReview = this.db.delegatedImageReviews.byReviewer(child.id);
+    if (imageReview && (imageReview.state === "consumed" || imageReview.state === "ended") && !workItem) {
+      if (!checkOnly) {
+        const archived = this.setArchived(child.id, true);
+        if (!archived.ok) return failAs(archived, "reviewer archive failed");
+      }
+      return ok({ campaign: this.db.campaignProjection(root.id)!, child: this.db.getSession(child.id)! });
+    }
     // A requested stop, a guardrail Stop, a runner disconnect, and startup settlement all write
     // `stopped` before the runner confirms anything, so that row is not yet proof the child's last
     // report is final. Only a recorded confirmation is (#1466): it survives the runner going
@@ -17884,6 +17898,34 @@ export class SessionsService {
     return ok(this.delegatedImageReviewViewOf(review, this.db.workflowDecisionByOccurrence(review.occurrenceId)));
   }
 
+  private readonly imageReviewerSweepCursors = new Map<string, string>();
+
+  /** Runs on reconnect and the durable prompt maintenance tick; never trusts agent reports. */
+  maintainImageReviewerRetirement(now: number, runnerId?: string): void {
+    const key = runnerId ?? "*";
+    const reviews = this.db.delegatedImageReviews.unsettled(runnerId, this.imageReviewerSweepCursors.get(key));
+    this.imageReviewerSweepCursors.set(key, reviews.length === 64 ? reviews.at(-1)!.reviewId : "");
+    for (const review of reviews) {
+      const current = this.settleDelegatedImageReview(review, now);
+      if (current.state !== "consumed" && current.state !== "ended") continue;
+      const session = this.db.getSession(current.reviewerSessionId);
+      // A failed Stop keeps its bounded retry policy. Only a reconnect explicitly rearms it.
+      if (runnerId && session?.archiveStatus === "stop_failed" && this.hub.isRunnerOnline(runnerId)) {
+        this.retryStop(session.id);
+      }
+      // Existing durable intents own retries; do not resend a Stop on every maintenance tick.
+      if (this.db.sessionStopIntent(current.reviewerSessionId)?.archiveAfterStop) continue;
+      const result = this.setArchived(current.reviewerSessionId, true, false);
+      if (result.ok && (result.data?.archived !== session?.archived || result.data?.archiveStatus !== session?.archiveStatus)) {
+        this.log.info(JSON.stringify({ event: "delegated_image_reviewer_retirement", reviewId: current.reviewId,
+          reviewerSessionId: current.reviewerSessionId, rootSessionId: current.rootSessionId,
+          entryPoint: runnerId ? "runner_reconnect" : "maintenance", reviewState: current.state,
+          archived: result.data?.archived, archiveStatus: result.data?.archiveStatus ?? null }));
+        this.campaignViewsChanged(current.rootSessionId, current.reviewerSessionId);
+      }
+    }
+  }
+
   /** Ends a live review that can never back an approval, and returns its current record. */
   private settleDelegatedImageReview(review: DelegatedImageReviewRecord, now: number): DelegatedImageReviewRecord {
     let reason: string | null = null;
@@ -17894,7 +17936,12 @@ export class SessionsService {
       }
       // A reviewer whose turn or Session ended without a verdict will never submit one.
       const reviewer = this.db.getSession(review.reviewerSessionId);
-      if (!reason && (!reviewer || isTerminal(reviewer.status) || reviewer.status === "idle")) reason = "reviewer_finished_without_verdict";
+      const finished = !reviewer || reviewer.status === "idle" || reviewer.status === "completed" || reviewer.status === "failed" ||
+        reviewer.status === "stopped" && !this.db.hasSessionStopIntent(reviewer.id) &&
+          Boolean(this.db.sessionStopProvenance(reviewer.id)?.confirmation);
+      // Disconnect/startup writes a provisional Stop while the provider may still be working.
+      // A maintenance tick cannot turn that into an ended review before runner reconciliation.
+      if (!reason && finished) reason = "reviewer_finished_without_verdict";
     } else if (review.state === "verdict" && review.verdict) {
       // A verdict rests on its receipts. Once any of them expires the reviewer cannot look again
       // (nothing is delivered after a verdict), so the review is retired for a fresh one (#4074).
@@ -20465,10 +20512,11 @@ export class SessionsService {
       return fail("An active media review Session cannot be archived yet: Stop it and let authenticated reconciliation " +
         "settle it first; capacity is retained.", 409);
     }
-    // A disconnected side chat is already hidden and provisionally stopped. An explicit
-    // Archive must still record a durable Stop, rather than becoming a visibility-only no-op.
-    const stoppedSideChat = session.status === "stopped" && this.db.sideChatParent(sessionId) !== null;
-    if (archiveRequiresStop(session.status) || this.db.hasSessionStopIntent(sessionId) || stoppedSideChat) {
+    // A provisionally stopped auxiliary session has not proved provider release. Archive
+    // must still record a durable Stop, rather than becoming a visibility-only no-op.
+    const stoppedAuxiliarySession = session.status === "stopped" && (this.db.sideChatParent(sessionId) !== null ||
+      this.db.delegatedImageReviews.isReviewer(sessionId) && !this.db.sessionStopProvenance(sessionId)?.confirmation);
+    if (archiveRequiresStop(session.status) || this.db.hasSessionStopIntent(sessionId) || stoppedAuxiliarySession) {
       const media = this.mediaSessionPurposes.owns(session.id);
       // A dedicated media Stop records no archive intent and settles nothing, so archival cannot be
       // scheduled for an active or ambiguous media Session (#3365). Refuse before any effect rather
