@@ -5,7 +5,7 @@ import type { StatusMeta } from "./status-meta.js";
  * What a session is deliberately waiting on (#1280, #4249), as conditions beside its lifecycle:
  * - a `wait_session` or `wait_pull_request` call in progress, as the control plane classified it
  *   (`SessionView.waits`): Waiting while its liveness contract holds, Wait Stalled once it breaks;
- * - a merge-queue watch the session is parked on (#4071, `SessionView.pullRequestWatch`).
+ * - a pull request watch the session is parked on (#4071, `SessionView.pullRequestWatch`).
  *
  * Nothing here compares clocks: a wait reads Stalled only when the server says its contract broke.
  * A Stalled wait is a warning but not a request, so it adds to no attention count.
@@ -45,6 +45,19 @@ function plural(count: number, one: string, many: string): string {
   return count === 1 ? one : many;
 }
 
+/** A watch may start before its first observation, and older runners omit progress. */
+function observedWatchStage(summary: string | undefined): "checks" | "queue" | undefined {
+  if (!summary) return undefined;
+  try {
+    const snapshot = JSON.parse(summary) as { mergeQueue?: { state?: string } | null; mergeQueueRemoval?: unknown } | null;
+    if (snapshot?.mergeQueue === null && snapshot.mergeQueueRemoval == null) return "checks";
+    if (typeof snapshot?.mergeQueue?.state === "string") return "queue";
+  } catch {
+    // An unreadable observation leaves the wait stage unknown.
+  }
+  return undefined;
+}
+
 /** The session's wait conditions: at most one Wait Stalled and one Waiting, so one healthy wait
  * never hides another that is stuck, and a parked merge-queue watch. */
 export function sessionWaitConditions(session: WaitSource): SessionWaitCondition[] {
@@ -77,11 +90,15 @@ export function sessionWaitConditions(session: WaitSource): SessionWaitCondition
   if (watch) {
     const target = `pull request ${watch.repository}#${watch.number}`;
     if (watch.state === "watching") {
-      conditions.push({
-        meta: { label: "Waiting on Merge Queue", tone: "info", pulse: false },
-        description: `The session is parked on ${target} in the merge queue. It wakes when the pull request merges, leaves the queue, or its head moves.`,
-        broken: false,
-      });
+      const stage = observedWatchStage(watch.progress?.summary);
+      const label = stage === "checks" ? "Waiting on Required Checks"
+        : stage === "queue" ? "Waiting on Merge Queue" : "Waiting on Pull Request";
+      const description = stage === "checks"
+        ? `The session is waiting for required checks on ${target}. It wakes when the checks finish or the pull request changes.`
+        : stage === "queue"
+          ? `The session is parked on ${target} in the merge queue. It wakes when the pull request merges, leaves the queue, or its head moves.`
+          : `The session is watching ${target}. It wakes when the watch reaches an outcome.`;
+      conditions.push({ meta: { label, tone: "info", pulse: false }, description, broken: false });
     } else if (watch.state === "lost") {
       conditions.push({
         meta: { label: "Merge Queue Watch Lost", tone: "warning", pulse: false },

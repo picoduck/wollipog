@@ -23852,7 +23852,7 @@ export class ControlPlaneDb {
     if (rows.some((child) => child.archived !== 1 && CAMPAIGN_LIVE_SESSION_STATUSES.has(child.status))) liveKinds.add("child_turn");
     if (this.sessionsWithLiveBackgroundJobs(members, now).size > 0) liveKinds.add("background_job");
     if (continuation.continuation?.state === "pending" || continuation.continuation?.state === "running") liveKinds.add("continuation");
-    if (members.some((id) => this.pullRequestWatches.isParked(id))) liveKinds.add("merge_queue_wait");
+    if (members.some((id) => this.pullRequestWatches.hasLiveWatch(id))) liveKinds.add("merge_queue_wait");
     const repair = this.campaignRepairView(resolvedCampaignId, now);
     if (repair?.state === "running" || worktreesRetiring || this.campaignBranchDeletionInFlight(members, now)) {
       liveKinds.add("server_repair");
