@@ -173,11 +173,11 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
               target="_blank" rel="noreferrer">Run {snapshot.releasePayload.workflow.runId}, attempt {snapshot.releasePayload.workflow.attempt}</a>
           </dd></div>}
           <div><dt>Previous Stable Release</dt><dd>{snapshot.releasePayload.previousStable?.tag ?? "None"}</dd></div>
-          <div><dt>Release Notes</dt><dd><details>
+          <div className="release-payload-detail"><dt>Release Notes</dt><dd><details>
             <summary>Show Release Notes</summary>
             <div className="code-well"><pre>{snapshot.releasePayload.body}</pre></div>
           </details></dd></div>
-          <div><dt>Assets</dt><dd><details>
+          <div className="release-payload-detail"><dt>Assets</dt><dd><details>
             <summary>Show Assets ({snapshot.releasePayload.assets.length})</summary>
             <ul>{snapshot.releasePayload.assets.map((asset) => <li key={asset.id}>{asset.name} · #{asset.id} · {asset.size} bytes
               <br /><code>{asset.digest}</code>

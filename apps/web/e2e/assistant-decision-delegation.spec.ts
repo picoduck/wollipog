@@ -291,7 +291,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
         await capture(page, "release-publish-notes");
         await target.getByText("Show Assets (1)", { exact: true }).click();
         const asset = target.getByText(/wollipog-arm64-linux.tar.gz/);
-        await asset.scrollIntoViewIfNeeded();
+        await asset.evaluate((element) => element.scrollIntoView({ block: "center" }));
         await expectFullyInViewport(asset, "Release Asset");
         await expectNoHorizontalOverflow(card, "Expanded Release Payload");
         await capture(page, "release-publish-assets");

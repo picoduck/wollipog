@@ -2943,6 +2943,9 @@ button.status { cursor: pointer; }
   vertical-align: bottom;
   white-space: nowrap;
 }
+@media (max-width: 760px) {
+  .release-payload-detail > :is(dt, dd) { grid-column: 1 / -1; }
+}
 .facts.strip {
   grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 0;
