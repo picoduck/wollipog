@@ -225,6 +225,97 @@ test("reopening the database rebuilds Assistant thread membership without review
   }
 });
 
+test("upgrade unifies owner-set backing caps without widening them or adopting an ordinary runtime reservation", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-thread-budgets-"));
+  const dbPath = join(dir, "control-plane.sqlite");
+  const cases = [
+    { threadLimit: null, recordedCap: 10, sessionCap: 10, managedCap: 10, expected: 10 },
+    { threadLimit: 25, recordedCap: null, sessionCap: 12.125, managedCap: 25, expected: 12.125 },
+    { threadLimit: 25, recordedCap: null, sessionCap: 15, managedCap: 15, expected: 25 },
+    { threadLimit: 25, recordedCap: null, sessionCap: 250, managedCap: 25, expected: 25 },
+  ];
+  const ids: AssistantThread[] = [];
+  try {
+    const before = await harness({ dbPath });
+    try {
+      for (const legacy of cases) {
+        const { body } = await before.call("POST", "/api/assistant-threads", {});
+        const thread = body.thread as AssistantThread;
+        ids.push(thread);
+        before.db.raw().prepare(`UPDATE assistant_threads
+          SET cost_limit_usd=?, backing_owner_cap_usd=?, backing_cap_usd=? WHERE id=?`)
+          .run(legacy.threadLimit, legacy.recordedCap, legacy.managedCap, thread.id);
+        before.db.raw().prepare("UPDATE sessions SET cost_budget_usd=? WHERE id=?").run(legacy.sessionCap, thread.sessionId);
+      }
+      before.db.raw().exec("DELETE FROM control_plane_metadata WHERE key='assistant_thread_budgets_unified'");
+    } finally { await before.close(); }
+
+    const after = await harness({ dbPath });
+    try {
+      for (const [index, legacy] of cases.entries()) {
+        const thread = ids[index]!;
+        const current = after.db.getSession(thread.sessionId)!;
+        assert.equal(current.assistantThreadBudget?.limitUsd, legacy.expected);
+        const edit = await after.call("PUT", `/api/assistant-threads/${thread.id}/limits`, {
+          costUsd: legacy.expected, launchedSessions: 5,
+        });
+        assert.equal(edit.status, 200, edit.raw);
+        assert.equal(after.db.getSession(thread.sessionId)?.costBudgetUsd, legacy.sessionCap);
+      }
+      const cleared = after.svc.setConfig(ids[0]!.sessionId, { costBudgetUsd: 0 }, { kind: "human", id: after.owner.userId });
+      assert.ok(cleared.ok, cleared.error ?? "");
+    } finally { await after.close(); }
+
+    const reopened = ControlPlaneDb.open(dbPath);
+    try {
+      assert.equal(reopened.getSession(ids[0]!.sessionId)?.assistantThreadBudget?.limitUsd, null);
+    } finally { reopened.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a launch-limit edit stays available while the backing runner is offline", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.call("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const path = `/api/assistant-threads/${thread.id}/limits`;
+    h.db.raw().prepare("UPDATE sessions SET cost_budget_usd=15 WHERE id=?").run(thread.sessionId);
+    h.hub.isRunnerOnline = () => false;
+    h.hub.sendToRunner = () => false;
+    const paused = await h.call("PUT", path, { costUsd: 25, launchedSessions: 0 });
+    assert.equal(paused.status, 200, paused.raw);
+    assert.equal(paused.body.thread.usage.launchedSessions.limit, 0);
+    assert.equal(h.db.getSession(thread.sessionId)?.costBudgetUsd, 15);
+    const refused = await h.call("PUT", path, { costUsd: 250, launchedSessions: 1 });
+    assert.equal(refused.status, 409, refused.raw);
+    assert.equal(h.db.assistantThreads.get(thread.id)?.launch_limit, 0);
+    assert.equal(h.db.assistantThreads.get(thread.id)?.cost_limit_usd, 25);
+  } finally { await h.close(); }
+});
+
+test("the backing Assistant's budget rejects stale prompt config and cannot advance through Continue", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.call("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const { sessionId } = thread;
+    h.db.updateSessionStatus(sessionId, "idle", Date.now());
+    h.db.raw().prepare("UPDATE sessions SET cost_budget_usd=250 WHERE id=?").run(sessionId);
+    const prompt = h.svc.prompt(sessionId, "Review the release notes.", [], undefined, { costBudgetUsd: 999 });
+    assert.ok(prompt.ok, prompt.error ?? "");
+    assert.equal(h.db.getSession(sessionId)?.costBudgetUsd, 25);
+    h.db.updateSessionStatus(sessionId, "running", Date.now());
+    assert.equal(h.svc.onGovernanceTripped("r", {
+      type: "governance_tripped", sessionId, tripId: "thread-cost", kind: "cost_budget", threshold: 25, observed: 25,
+    }), true);
+    const card = h.db.getSession(sessionId)?.pendingApproval;
+    assert.match(card?.title ?? "", /Thread Settings/);
+    assert.deepEqual(card?.options.map(({ optionId }) => optionId), ["cancel"]);
+    const continued = h.svc.approve(sessionId, card!.requestId, "continue", { kind: "human", id: h.owner.userId });
+    assert.equal(continued.status, 409);
+    assert.match(continued.error ?? "", /Thread Settings/);
+    assert.equal(h.db.getSession(sessionId)?.costBudgetUsd, 25);
+  } finally { await h.close(); }
+});
+
 test("an assistant session takes no agent-control routes and keeps its role", async () => {
   const h = await harness();
   try {
@@ -398,6 +489,20 @@ test("the Assistant default account applies to new threads, with an explicit Mac
     assert.equal(implicit.body.thread.providerAccountLabel, "Studio Subscription");
     const policy = await h.call("POST", "/api/assistant-threads", { providerAccountRef: null });
     assert.equal(policy.body.thread.providerAccountLabel, "Work Subscription");
+    const original = h.db.getRunner("r")!;
+    h.db.registerRunner({
+      runnerId: "fallback", hostname: "other machine", os: "linux", version: "fixture",
+      workspaces: [{ id: "fallback-workspace", name: "Home", path: "/fixture/other" }],
+      agents: original.agents, providerAccounts: accounts,
+    }, Date.now(), PROTOCOL_VERSION);
+    assert.ok(h.db.setMachineProviderAccountDefault("fallback", "claude", "work", 0, Date.now()).ok);
+    h.hub.isRunnerOnline = (runnerId) => runnerId === "fallback";
+    const offline = await h.call("POST", "/api/assistant-threads", {});
+    assert.equal(offline.status, 409);
+    assert.match(offline.body.error, /default Assistant account is unavailable/);
+    const fallback = await h.call("POST", "/api/assistant-threads", { providerAccountRef: null });
+    assert.equal(fallback.status, 200, fallback.raw);
+    assert.equal(h.db.getSession(fallback.body.thread.sessionId)?.runnerId, "fallback");
   } finally { await h.close(); }
 });
 

@@ -28,7 +28,7 @@ import { AssistantDecisionHistoryDialog } from "./AssistantDecisionHistory.js";
 import { AssistantWorkCards } from "./AssistantWorkCards.js";
 import { ChangeAssistantThreadAccountDialog } from "./ChangeAssistantThreadAccountDialog.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { AssistantsIcon, BotIcon, PlusIcon } from "./Icons.js";
+import { AssistantsIcon, BotIcon, PlusIcon, TuningIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
 import { NewAssistantThreadDialog, THREADS_UNAVAILABLE_MESSAGE } from "./NewAssistantThreadDialog.js";
 import { Notice } from "./Notice.js";
@@ -247,6 +247,7 @@ export function AssistantsView({ threadId, limits, rightPanel }: {
   };
 
   const openThread = (id: string) => navigate({ name: "assistants", threadId: id });
+  const openThreadSettings = (id: string) => navigate({ name: "assistants", threadId: id, limits: true });
   const toList = () => navigate({ name: "assistants" });
 
   const archive = async (thread: AssistantThread) => {
@@ -275,7 +276,7 @@ export function AssistantsView({ threadId, limits, rightPanel }: {
     ...(thread.status === "archived" ? [] : [
       ...(thread.accountChangeSupported ? [{ label: "Change Account", onClick: () => setChangingAccount(thread) }] : []),
       { label: "Rename", onClick: () => setRenaming(thread) },
-      ...(thread.limitsEditable && thread.usage ? [{ label: "Thread Limits", onClick: () => navigate({ name: "assistants", threadId: thread.id, limits: true }) }] : []),
+      ...(thread.limitsEditable && thread.usage ? [{ label: "Thread Limits", onClick: () => openThreadSettings(thread.id) }] : []),
       ...(thread.decisionDelegation ? [{ label: "Decision Delegation", onClick: () => setEditingDelegation(thread) }] : []),
       { label: "Archive", disabled: archiving, onClick: () => void archive(thread) },
     ]),
@@ -291,6 +292,12 @@ export function AssistantsView({ threadId, limits, rightPanel }: {
           backLabel={backLabel("assistants")}
           onBack={toList}
           status={selected ? <StatusBadge meta={statusMeta("assistantThread", selected.status)} /> : undefined}
+          secondary={selected ? {
+            label: "Thread Settings",
+            icon: <TuningIcon size={16} />,
+            iconOnPhone: true,
+            onClick: () => openThreadSettings(selected.id),
+          } : undefined}
           menu={selected ? threadMenu(selected) : []}
           menuLabel="Thread Actions"
         />
@@ -502,6 +509,7 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
   menu: PageMenuAction[];
   onConfirmationAnswered?: () => void;
 }) {
+  const { navigate } = useStoreActions();
   const meta = statusMeta("assistantThread", thread.status);
   const grant = thread.decisionDelegation?.grant;
   const expiresAt = grant?.expiresAt;
@@ -515,8 +523,7 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
   const launches = usage?.launchedSessions;
   const launchRefusal = thread.launchLimitRefusal ?? (launches?.limit != null && launches.used >= launches.limit && thread.status !== "archived"
     ? "This thread has reached its session launch limit." : null);
-  const settings = (className?: string) => <AssistantSettingsLink className={className}
-    view={{ name: "assistants", threadId: thread.id, limits: true }}>Thread Settings</AssistantSettingsLink>;
+  const settingsView = { name: "assistants", threadId: thread.id, limits: true } as const;
   const launchSummary = launches?.limit === 0 ? `${launches.used} launched · Launches Paused`
     : launches?.limit === null ? `${launches.used} launched · No Launch Limit`
     : launches ? `${launches.used} of ${launches.limit} sessions launched` : null;
@@ -526,7 +533,7 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
         <div className="assistant-thread-title-row">
           <h2 className="assistant-thread-title" title={assistantThreadTitle(thread)}>{assistantThreadTitle(thread)}</h2>
           <StatusBadge meta={meta} />
-          {!launchRefusal && settings("btn sm ghost")}
+          <button type="button" className="btn sm" onClick={() => navigate(settingsView)}>Thread Settings</button>
           <ActionsMenu label="Thread Actions" items={menu} />
         </div>
       )}
@@ -548,10 +555,9 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
             : `${formatUsd(usage.costUsd.used)} of ${formatUsd(usage.costUsd.limit)} spent`}</li>
           <li>{launchSummary}</li>
         </>}
-        {compact && !launchRefusal && <li>{settings("link")}</li>}
       </ul>
       {launchRefusal ? <Notice tone="warning" role="status" title="Thread Limit Reached" actions={<>
-        {settings()}
+        <AssistantSettingsLink view={settingsView}>Thread Settings</AssistantSettingsLink>
         <AssistantSettingsLink view={ASSISTANT_DEFAULTS_VIEW}>Assistant Defaults</AssistantSettingsLink>
       </>}>{launchRefusal}</Notice> : null}
       <AssistantWorkCards

@@ -15,7 +15,7 @@ async function open(page: Page, path: string, theme: "dark" | "light" = "dark", 
 }
 
 async function editThread(page: Page) {
-  await page.getByRole("link", { name: "Thread Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Thread Settings", exact: true }).click();
   return page.getByRole("dialog", { name: "Thread Settings", exact: true });
 }
 
@@ -72,7 +72,7 @@ test("a new thread uses the saved harness, provider account and both unlimited d
   await limits.getByRole("checkbox", { name: "No Limit" }).last().check();
   await limits.getByRole("button", { name: "Save Limits" }).click();
   await expect(page.getByRole("region", { name: "Thread Defaults" })).toContainText("No Budget · No Launch Limit");
-  await page.getByRole("link", { name: "Existing Threads" }).click();
+  await page.getByRole("button", { name: /^Existing Threads/ }).click();
   await page.getByRole("button", { name: "New Thread" }).first().click();
   const newThread = page.getByRole("dialog", { name: "New Thread" });
   await expect(newThread.getByRole("radio", { name: /^Codex$/, exact: true })).toBeChecked();
@@ -96,8 +96,10 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await open(page, THREAD, theme);
       const details = page.getByLabel("Thread Details");
       await expect(details).toContainText("2 of 10 sessions launched");
+      await expectFullyInViewport(page.getByRole("button", { name: "Thread Settings", exact: true }), "The Thread Settings header action");
       await expectFullyInViewport(page.locator(".composer"), "The thread composer");
       await expectPageNoHorizontalOverflow(page);
+      await capture(page, "thread-header");
 
       const limits = await editThread(page);
       await expect(limits).toContainText("This thread's conversation belongs to this harness.");
@@ -167,7 +169,8 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       const warning = page.getByRole("status").filter({ hasText: "whole $25 budget" });
       await expect(warning.getByRole("link", { name: "Assistant Defaults" })).toHaveAttribute("href", SETTINGS);
       if (theme === "dark") await capture(page, "thread-limit-warning");
-      const thread = await editThread(page);
+      await warning.getByRole("link", { name: "Thread Settings", exact: true }).click();
+      const thread = page.getByRole("dialog", { name: "Thread Settings", exact: true });
       await expect(thread.getByRole("textbox", { name: "Cost Budget (USD)" })).toHaveValue("25");
       if (theme === "dark") await capture(page, "one-click-remove-budget");
       await thread.getByRole("link", { name: "Session Guardrails" }).click();

@@ -5975,7 +5975,10 @@ export class ControlPlaneDb {
     }
     this.assistantConnections = new AssistantConnections(db);
     this.assistantThreads = new AssistantThreadStore(db);
-    if (!attached) this.migrateAssistantThreadLaunchDefaults();
+    if (!attached) {
+      this.migrateAssistantThreadLaunchDefaults();
+      this.migrateAssistantThreadBudgets();
+    }
     this.assistantOwnerConfirmations = new AssistantOwnerConfirmations(db);
     this.assistantWork = new AssistantWorkStore(db, this, this.assistantConnections);
     this.providerPublications = new ProviderProfilePublicationStore(db, controlPlaneInstanceId);
@@ -6838,6 +6841,17 @@ export class ControlPlaneDb {
 
   /** Persist a thread's owner limits and the matching backing session cap together. */
   assistantThreadLimitsTransaction<T>(work: () => T): T { return this.atomic(work); }
+
+  private migrateAssistantThreadBudgets(): void {
+    const key = "assistant_thread_budgets_unified";
+    const applied = this.db.prepare("SELECT 1 FROM control_plane_metadata WHERE key=?");
+    if (applied.get(key)) return;
+    this.atomic(() => {
+      if (applied.get(key)) return;
+      this.assistantThreads.migrateLegacyBackingBudgets();
+      this.db.prepare("INSERT INTO control_plane_metadata (key, value) VALUES (?, '1')").run(key);
+    });
+  }
 
   /** Snapshot the formerly shared harness before Orchestrator settings can change again. */
   private migrateAssistantThreadLaunchDefaults(): void {

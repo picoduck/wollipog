@@ -131,6 +131,27 @@ export class AssistantThreadStore {
 
   constructor(private readonly db: DatabaseSync) {}
 
+  /** Convert independent legacy ceilings to one budget without granting either surface more. */
+  migrateLegacyBackingBudgets(): void {
+    this.db.prepare(`WITH budgets AS (
+      SELECT thread.id, thread.cost_limit_usd AS thread_limit,
+        thread.backing_owner_cap_usd AS owner_cap,
+        CASE WHEN session.cost_budget_usd > 0 AND (
+          COALESCE(thread.backing_cap_usd, CASE WHEN thread.cost_limit_usd IS NOT NULL THEN ?1 END) IS NULL
+          OR ABS(session.cost_budget_usd - COALESCE(thread.backing_cap_usd, ?1)) >= 0.005
+        ) THEN session.cost_budget_usd END AS edited_cap
+      FROM assistant_threads thread JOIN sessions session ON session.id = thread.session_id
+    ), ceilings AS (
+      SELECT id, owner_cap AS amount FROM budgets
+      UNION ALL SELECT id, edited_cap FROM budgets
+      UNION ALL SELECT id, thread_limit FROM budgets WHERE owner_cap > 0 OR edited_cap > 0
+    ), tightened AS (
+      SELECT id, MIN(amount) AS ceiling FROM ceilings WHERE amount > 0 GROUP BY id
+    )
+    UPDATE assistant_threads SET cost_limit_usd = tightened.ceiling
+    FROM tightened WHERE assistant_threads.id = tightened.id`).run(DEFAULT_ASSISTANT_THREAD_LIMITS.costUsd);
+  }
+
   get(id: string): ThreadRow | null {
     return (this.db.prepare("SELECT * FROM assistant_threads WHERE id=?").get(id) as ThreadRow | undefined) ?? null;
   }

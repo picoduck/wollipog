@@ -953,7 +953,7 @@ export function Shell() {
                 ),
                 approvals: <ApprovalsPanel policyId={view.policyId} />,
                 orchestrator: <><OrchestratorSettingsPanel discoveryRevision={runners} /><DecisionModelPanel /></>,
-                assistant: <><AssistantThreadDefaultsPanel /><AssistantConnectionsPanel /></>,
+                assistant: <><AssistantThreadDefaultsPanel onOpenThreads={() => navigate({ name: "assistants" })} /><AssistantConnectionsPanel /></>,
                 reviews: <ReviewSettingsPanel />,
                 network: <NetworkPanel tailnet={tailnet} onNavigate={navigate} />,
                 storage: <ArchivedHistoryRetentionPanel />,

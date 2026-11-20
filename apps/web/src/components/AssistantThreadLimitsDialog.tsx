@@ -61,7 +61,7 @@ export function AssistantThreadLimitsDialog({ defaults, limits, thread, model, e
     const budget = parseUsd(noCostLimit ? "" : cost);
     const count = parseCount(noLaunchLimit ? "" : launches, Number.POSITIVE_INFINITY);
     if (!budget.ok) return setError(budget.error);
-    if (budget.value !== null && (!Number.isSafeInteger(Math.round(budget.value * 100)) ||
+    if (budget.value !== null && budget.value !== limits?.costUsd && (!Number.isSafeInteger(Math.round(budget.value * 100)) ||
         Number(budget.value.toFixed(2)) !== budget.value)) {
       return setError("Enter a cost budget in whole cents, such as 2.50.");
     }
@@ -98,9 +98,12 @@ export function AssistantThreadLimitsDialog({ defaults, limits, thread, model, e
         </SettingsGroup>
         {editingAccount && <ChangeAssistantThreadAccountDialog inline thread={thread} onClose={() => setEditingAccount(false)}
           onChanged={(next) => { setEditingAccount(false); onAccountChanged?.(next); }} />}
-        <div className="field-row">
-          <AssistantSettingsLink view={{ name: "session", id: thread.sessionId, guardrails: true }}>Session Guardrails</AssistantSettingsLink>
-          <AssistantSettingsLink view={ASSISTANT_DEFAULTS_VIEW}>Assistant Defaults</AssistantSettingsLink>
+        <div className="field">
+          <p className="field-helper">You can edit this budget in Session Guardrails. Use Assistant Defaults for new threads.</p>
+          <div className="notice-actions">
+            <AssistantSettingsLink view={{ name: "session", id: thread.sessionId, guardrails: true }}>Session Guardrails</AssistantSettingsLink>
+            <AssistantSettingsLink view={ASSISTANT_DEFAULTS_VIEW}>Assistant Defaults</AssistantSettingsLink>
+          </div>
         </div>
         {readOnly && <Notice tone="neutral" role="status">{readOnly}</Notice>}
       </>}

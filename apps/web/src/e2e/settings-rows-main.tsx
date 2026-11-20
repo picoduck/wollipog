@@ -733,7 +733,7 @@ function Harness() {
                 </FeedbackProvider>
               ),
               assistant: <FeedbackProvider><ApiProvider client={harnessDefaultsApi}>
-                <AssistantThreadDefaultsPanel /><AssistantConnectionsPanel />
+                <AssistantThreadDefaultsPanel onOpenThreads={() => navigate({ name: "assistants" })} /><AssistantConnectionsPanel />
               </ApiProvider></FeedbackProvider>,
               network: (
                 <ApiProvider client={harnessDefaultsApi}><NetworkPanel

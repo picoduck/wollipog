@@ -31,6 +31,8 @@ Wollipog chooses the first online Machine the owner can use that supports the ro
 installed natively and has a Location. Without `workspaceId`, it uses that Machine's first Location.
 A Machine whose runner predates protocol v383, or one without the harness, is refused with HTTP 409
 and guidance.
+If the saved account's Machine is unavailable, choose an account on another Machine or explicitly
+use Machine Policy for that thread.
 
 Without a `title`, the thread shows "New Thread" until its session is named by the first message.
 
@@ -75,6 +77,9 @@ deleted. These settings are owner-only.
 - The backing session's **Guardrails** editor reads and updates the same thread budget. Its
   enforcement threshold is calculated from that budget after subtracting reservations for work
   the thread has launched.
+- On upgrade, a previously set backing-session cost ceiling folds into the thread budget. The
+  smaller finite value wins. Existing work keeps its reservations, so an already committed thread
+  can require an explicit budget increase before another launch.
 - While a thread's Assistant call executes, every session it creates counts as a launch of that
   thread. This covers `session_launch`, side chats and every other operation that passes through
   session creation inside the call. A launch is refused with a message to the

@@ -5,20 +5,19 @@ import { assistantThreadHarnessLabel, assistantThreadsOwnerOnly, assistantThread
 import { formatUsd } from "../guardrail-values.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { AssistantThreadLimitsDialog } from "./AssistantThreadLimitsDialog.js";
-import { AssistantSettingsLink } from "./AssistantSettingsLink.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
 import { AssistantThreadAccountField, MACHINE_ACCOUNT_POLICY } from "./AssistantThreadAccountField.js";
 import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { ChoiceRows } from "./ui/ChoiceControls.js";
-import { ActionRow, SettingsGroup } from "./ui/SettingsRows.js";
+import { ActionRow, LinkRow, SettingsGroup } from "./ui/SettingsRows.js";
 
-export function AssistantThreadDefaultsPanel() {
-  return <AssistantThreadDefaultsGroup key={useInstanceScope()} />;
+export function AssistantThreadDefaultsPanel({ onOpenThreads }: { onOpenThreads: () => void }) {
+  return <AssistantThreadDefaultsGroup key={useInstanceScope()} onOpenThreads={onOpenThreads} />;
 }
 
-function AssistantThreadDefaultsGroup() {
+function AssistantThreadDefaultsGroup({ onOpenThreads }: { onOpenThreads: () => void }) {
   const api = useApi();
   const [limits, setLimits] = useState<AssistantThreadLimits | null>(null);
   const [launch, setLaunch] = useState<AssistantThreadDefaults | null>(null);
@@ -44,8 +43,7 @@ function AssistantThreadDefaultsGroup() {
   const choices = launch?.harnesses.find((option) => option.id === launch.harness)?.accountSelection;
   const account = choices?.accounts.find((choice) => !choice.reason && choice.accountRef === saved?.accountRef);
   return (
-    <SettingsGroup title="Thread Defaults" scope="Your Account" intro="These settings apply to new threads."
-      foot={<AssistantSettingsLink view={{ name: "assistants" }} className="btn sm ghost">Existing Threads</AssistantSettingsLink>}>
+    <SettingsGroup title="Thread Defaults" scope="Your Account" intro="These defaults apply to new threads.">
       {error && <Notice tone="danger" role="alert" title="Couldn't Load Thread Defaults"
         actions={<button type="button" className="btn sm" onClick={() => { setError(null); setAttempt(attempt + 1); }}>Retry</button>}>
         {error}
@@ -72,6 +70,8 @@ function AssistantThreadDefaultsGroup() {
         {editing === "limits" && <AssistantThreadLimitsDialog defaults limits={limits} onClose={close}
           onSave={async (next) => setLimits(await api.setAssistantThreadLimitDefaults(next))} />}
       </>}
+      {(limits || launch?.launchDefaults) && <LinkRow title="Existing Threads"
+        description="To change a budget for an existing thread, open its Thread Settings." onClick={onOpenThreads} />}
     </SettingsGroup>
   );
 }

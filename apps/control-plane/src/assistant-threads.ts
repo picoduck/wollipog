@@ -81,14 +81,14 @@ function decisionDelegation(body: unknown, now: number): AssistantDecisionDelega
   } };
 }
 
-function threadLimits(body: unknown): AssistantThreadLimits {
+function threadLimits(body: unknown, existingBudget?: number | null): AssistantThreadLimits {
   if (!body || typeof body !== "object" || Array.isArray(body) ||
       Object.keys(body).some((key) => key !== "costUsd" && key !== "launchedSessions")) {
     throw new AssistantThreadRefusal("Only costUsd and launchedSessions are accepted.", 400);
   }
   const { costUsd, launchedSessions } = body as Record<string, unknown>;
   if (costUsd !== null && (typeof costUsd !== "number" || costUsd <= 0 ||
-      !Number.isSafeInteger(Math.round(costUsd * 100)) || Number(costUsd.toFixed(2)) !== costUsd)) {
+      (costUsd !== existingBudget && (!Number.isSafeInteger(Math.round(costUsd * 100)) || Number(costUsd.toFixed(2)) !== costUsd)))) {
     throw new AssistantThreadRefusal("The cost budget must be a positive amount in whole cents, or null for no budget.", 400);
   }
   if (launchedSessions !== null && (typeof launchedSessions !== "number" ||
@@ -223,7 +223,7 @@ export class AssistantThreads {
     if (row.state !== "active" || !session || session.archived) {
       throw new AssistantThreadRefusal("Limits cannot be changed on an archived thread.", 409);
     }
-    const updated = this.deps.updateLimits(row, threadLimits(body));
+    const updated = this.deps.updateLimits(row, threadLimits(body, row.cost_limit_usd));
     if (!updated.ok) {
       throw new AssistantThreadRefusal(updated.error ?? "The thread limits could not be updated.", updated.status ?? 409);
     }
@@ -342,6 +342,9 @@ export class AssistantThreads {
     let runner: RunnerView;
     if (runnerId !== undefined) {
       const chosen = runners.find((candidate) => candidate.runnerId === runnerId);
+      if (accountRef === defaultAccount?.accountRef && defaultAccount && (!chosen || !this.deps.isRunnerOnline(runnerId))) {
+        throw new AssistantThreadRefusal("The Machine for your default Assistant account is unavailable. Choose another account or use Machine Policy for this thread.", 409);
+      }
       if (!chosen) throw new AssistantThreadRefusal("Machine not found.", 404);
       if (!this.deps.isRunnerOnline(chosen.runnerId)) throw new AssistantThreadRefusal("This Machine is offline. Connect it, or choose another Machine.", 409);
       if (!runnerSupportsProtocol(chosen.protocolVersion, "assistantRole")) {

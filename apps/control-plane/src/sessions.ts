@@ -2235,7 +2235,7 @@ export function floorBudgetCents(usd: number): number {
 
 function assistantThreadBackingCap(limitUsd: number | null, heldUsd: number): number | null {
   // A zero runner threshold means unlimited. Use one cent when launched work holds the remainder.
-  return limitUsd === null ? null : Math.max(0.01, floorBudgetCents(limitUsd - heldUsd));
+  return limitUsd === null ? null : Math.max(Math.min(0.01, limitUsd), floorBudgetCents(limitUsd - heldUsd));
 }
 
 /** An Orchestrator's children would run outside the thread's launch count. */
@@ -3760,8 +3760,10 @@ export class SessionsService {
   ): ServiceResult<SessionView> {
     const backing = row.session_id ? this.db.getSession(row.session_id) : null;
     if (!backing || backing.archived) return fail("Limits cannot be changed on an archived thread.", 409);
-    const { backingSpentUsd, launchedHeldUsd } = this.db.assistantThreads.costs(row.id);
-    if (row.cost_limit_usd !== limits.costUsd && limits.costUsd !== null) {
+    const budgetChanged = row.cost_limit_usd !== limits.costUsd;
+    const { backingSpentUsd, launchedHeldUsd } = budgetChanged || edit
+      ? this.db.assistantThreads.costs(row.id) : { backingSpentUsd: 0, launchedHeldUsd: 0 };
+    if (budgetChanged && limits.costUsd !== null) {
       const committed = backingSpentUsd + launchedHeldUsd;
       if (floorBudgetCents(limits.costUsd - committed) < 0) {
         return fail(`The thread has already spent or committed $${(Math.ceil(committed * 100 - 1e-8) / 100).toFixed(2)}. Choose a budget at least that high.`, 409);
@@ -3775,7 +3777,7 @@ export class SessionsService {
       // refusal, so the persisted limits and the runner's derived cap advance together.
       this.db.assistantThreads.setLimits(row.id, limits);
       const target = assistantThreadBackingCap(limits.costUsd, launchedHeldUsd);
-      const changed = (backing.costBudgetUsd ?? null) !== target;
+      const changed = Boolean(budgetChanged || edit) && (backing.costBudgetUsd ?? null) !== target;
       if (edit || changed) {
         const { costBudgetUsd: _threadBudget, ...other } = edit?.config ?? {};
         const result = this.applySessionConfig(backing.id, { ...other, ...(changed ? { costBudgetUsd: target ?? 0 } : {}) }, edit?.actor);
@@ -6735,7 +6737,7 @@ export class SessionsService {
           snapshotCommand.sessionId !== sessionId)) {
       return fail("pre-staged prompt command snapshot is malformed", 409);
     }
-    const session = this.db.getSession(sessionId);
+    let session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     // Only its owner's first message can start a Full Control campaign launched without a task
     // (#2940); nothing an agent or automation sends may reach it first.
@@ -6768,6 +6770,15 @@ export class SessionsService {
     }
     const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, requestedConfig);
     if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
+    if (!snapshotCommand && session.assistantThreadBudget) {
+      // A migration or a released reservation can leave the previous runner threshold behind.
+      // Settle it before admitting the next turn, including when no launch happens during it.
+      const { threadId, limitUsd } = session.assistantThreadBudget;
+      const held = limitUsd === null ? 0 : this.db.assistantThreads.costs(threadId).launchedHeldUsd;
+      const settled = this.rebalanceAssistantBacking(sessionId, limitUsd, held);
+      if (!settled.ok) return settled;
+      session = this.db.getSession(sessionId)!;
+    }
     const pendingInputBarrier = session.status === "input_required" || awaitsPendingInput(session.pendingApproval);
     const incomingMode = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config?.permissionMode : config?.permissionMode;
     if (incomingMode !== undefined && (incomingMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
