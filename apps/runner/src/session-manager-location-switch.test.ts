@@ -239,6 +239,22 @@ test("the runner refuses a registered Location whose on-disk origin differs from
   }, { registeredDestination: true });
 });
 
+test("a lost registration lookup leaves the accepted switch pending and retries without another approval", async () => {
+  await withSession("registered-lookup-retry", async (h) => {
+    await establishConversation(h);
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    let missedLookup = false;
+    h.manager.setRegisteredLocationSwitchLookup(async () => { missedLookup = true; return undefined; });
+    await waitFor(() => missedLookup, "the turn-boundary lookup did not run");
+    assert.equal(h.store.readMeta(h.sessionId)?.pendingLocationSwitch?.occurrenceId, "occurrence-1");
+    assert.equal(h.store.readMeta(h.sessionId)?.locationSwitchFailure, undefined);
+    assert.equal(h.fake.launches(), 1);
+    h.manager.setRegisteredLocationSwitchLookup(async () => h.docs);
+    await waitFor(() => h.fake.prompts.length === 2, "the switch did not retry after the lookup returned");
+    assert.equal(h.store.readMeta(h.sessionId)?.repoPath, h.docs);
+  }, { registeredDestination: true });
+});
+
 test("the runner refuses unauthorized IDs, changed paths and subdirectories for a registered switch", async () => {
   await withSession("registered-wrong-path", async (h) => {
     const refuse = async (overrides: Partial<SessionLocationSwitchMessage>, message: string) =>

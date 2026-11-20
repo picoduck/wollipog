@@ -340,14 +340,16 @@ export class LocationSwitchService {
    * checks the checkout. A claim counts before acceptance so the runner can verify it before ack. */
   lookupRegisteredSwitch(runnerId: string, message: RegisteredLocationSwitchLookupMessage, now = Date.now()): string | null {
     if (![message.sessionId, message.occurrenceId, message.workspaceId].every((id) => bounded(id, 256)) ||
-        !bounded(message.repository, LOCATION_SWITCH_LIMITS.repository)) return null;
+        !bounded(message.repository, LOCATION_SWITCH_LIMITS.repository) ||
+        (message.phase !== "accept" && message.phase !== "apply")) return null;
     const session = this.db.getSession(message.sessionId);
     if (!session || session.runnerId !== runnerId || session.archived || isTerminal(session.status) ||
         locationSwitchRole({ role: sessionRole(session), parentSessionId: session.parentSessionId }) !== "offer") return null;
     const decision = this.db.workflowDecisionByOccurrence(message.occurrenceId);
     const snapshot = decision?.resourceSnapshot;
     if (!decision || decision.sessionId !== session.id || snapshot?.category !== "location_switch" ||
-        !decision.resolvedAt || now >= snapshot.expiresAt || now >= decision.resolvedAt + LOCATION_SWITCH_APPROVAL_TTL_MS ||
+        !decision.resolvedAt ||
+        (message.phase === "accept" && (now >= snapshot.expiresAt || now >= decision.resolvedAt + LOCATION_SWITCH_APPROVAL_TTL_MS)) ||
         session.projectId !== snapshot.projectId || session.projectLocationId !== snapshot.current.locationId ||
         session.workspaceId !== snapshot.current.workspaceId) return null;
     const choice = parseLocationSwitchOption(decision.selectedOptionId);

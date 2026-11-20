@@ -214,7 +214,7 @@ test("a registered Location is dispatched and rechecked only for the exact appro
     const target = h.locations.docs;
     const decision = (await h.request()).data!;
     const lookup: RegisteredLocationSwitchLookupMessage = { type: "registered_location_switch_lookup", requestId: "lookup",
-      sessionId: "self", occurrenceId: decision.occurrenceId, workspaceId: target.workspaceId, repository: "acme/docs" };
+      sessionId: "self", occurrenceId: decision.occurrenceId, workspaceId: target.workspaceId, repository: "acme/docs", phase: "apply" };
     const read = (overrides: Partial<RegisteredLocationSwitchLookupMessage> = {}, runnerId = "runner", now = Date.now()) =>
       h.service.lookupRegisteredSwitch(runnerId, { ...lookup, ...overrides }, now);
 
@@ -222,7 +222,10 @@ test("a registered Location is dispatched and rechecked only for the exact appro
     const approved = h.db.workflowDecisionByOccurrence(decision.occurrenceId)!;
     assert.equal(read(), null, "approval alone has not dispatched the move");
     let pathAtDispatch: string | null | undefined;
-    h.onSwitchDispatch(() => { pathAtDispatch = read(); });
+    h.onSwitchDispatch(() => {
+      pathAtDispatch = read({ phase: "accept" });
+      assert.equal(read({ phase: "accept" }, "runner", approved.resolvedAt! + 60 * 60_000), null, "stale approval cannot accept a switch");
+    });
     const executed = await h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
     assert.equal(executed.status, 201, executed.error ?? "");
     assert.equal(h.switches[0]?.message.registeredWorkspace, true);
@@ -232,7 +235,7 @@ test("a registered Location is dispatched and rechecked only for the exact appro
     assert.equal(read({ repository: "acme/other" }), null);
     assert.equal(read({ sessionId: "other" }), null);
     assert.equal(read({}, "laptop"), null);
-    assert.equal(read({}, "runner", approved.resolvedAt! + 60 * 60_000), null, "the approval is stale");
+    assert.equal(read({}, "runner", approved.resolvedAt! + 60 * 60_000), "/src/docs", "the accepted switch can outlast its dispatch window");
     h.db.raw().prepare("UPDATE identity_memberships SET role='viewer' WHERE user_id=?").run(h.owner);
     assert.equal(read(), null, "revoked access is checked after acceptance");
     h.db.raw().prepare("UPDATE identity_memberships SET role='owner' WHERE user_id=?").run(h.owner);

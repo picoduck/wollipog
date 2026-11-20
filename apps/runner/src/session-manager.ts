@@ -922,6 +922,7 @@ interface ActiveSession {
   /** (#4138) The durable `pendingLocationSwitch` this process must carry out once its turn settles,
    * by occurrence; the metadata stays the source of truth. */
   pendingLocationSwitch?: string;
+  locationSwitchLookupRetry?: ReturnType<typeof setTimeout>;
   /** Structured exhausted-window observation from this exact provider turn. */
   usageWindowRejection?: UsageWindowRejection;
   /** Exact canonical roots rendered into this live process's Seatbelt profile at launch. */
@@ -2133,8 +2134,10 @@ export class SessionManager {
   }>();
 
   private sharedDirectoryWorkspaces: readonly RunnerConfigWorkspace[] = [];
+  /** Undefined means the transport could not confirm the lookup; null is an authoritative refusal. */
   private registeredLocationSwitchLookup?: (sessionId: string,
-    target: Pick<PendingLocationSwitch, "occurrenceId" | "workspaceId" | "repository">) => Promise<string | null>;
+    target: Pick<PendingLocationSwitch, "occurrenceId" | "workspaceId" | "repository">,
+    phase: "accept" | "apply") => Promise<string | null | undefined>;
   /** (#4138) Existing worktrees a Location switch has chosen to continue in, by path, until its
    * metadata records them: the window between the holder check and the move. */
   private readonly reusedWorktreeClaims = new Map<string, string>();
@@ -15863,8 +15866,9 @@ export class SessionManager {
         if (!entry) throw new Error("the session is not running; send it a message and ask again");
         if ((meta.seq ?? 0) > 0 && (!meta.agentSessionId || !canResumeSession(meta))) throw new LocationSwitchRefusal("not_resumable");
         const registeredPath = msg.registeredWorkspace === true
-          ? await this.registeredLocationSwitchLookup?.(sessionId, msg) ?? null
+          ? await this.registeredLocationSwitchLookup?.(sessionId, msg, "accept")
           : undefined;
+        if (msg.registeredWorkspace === true && registeredPath === undefined) throw new LocationSwitchRefusal("lookup_unavailable");
         const repoPath = await verifyLocationSwitchTarget(meta.context, this.sharedDirectoryWorkspaces, msg, registeredPath);
         const current = await realpath(meta.repoPath).catch(() => meta.repoPath);
         if (current === repoPath) throw new LocationSwitchRefusal("same_repository");
@@ -15894,6 +15898,7 @@ export class SessionManager {
 
   /** Provider replacements share one lane: a Location switch and an account switch never overlap. */
   private switchLocation(sessionId: string, entry: ActiveSession): Promise<void> {
+    if (entry.locationSwitchLookupRetry) return Promise.resolve();
     const current = this.providerAccountSwitches.get(sessionId);
     if (current) return current.promise;
     let promise: Promise<void>;
@@ -15906,13 +15911,26 @@ export class SessionManager {
 
   private async verifyPendingLocationSwitch(meta: SessionMeta, pending: PendingLocationSwitch): Promise<string> {
     const registeredPath = pending.registeredWorkspacePath !== undefined
-      ? await this.registeredLocationSwitchLookup?.(meta.sessionId, pending) ?? null
+      ? await this.registeredLocationSwitchLookup?.(meta.sessionId, pending, "apply")
       : undefined;
+    if (pending.registeredWorkspacePath !== undefined && registeredPath === undefined) {
+      throw new LocationSwitchRefusal("lookup_unavailable");
+    }
     const repoPath = await verifyLocationSwitchTarget(meta.context, this.sharedDirectoryWorkspaces,
       { workspaceId: pending.workspaceId, workspacePath: pending.registeredWorkspacePath ?? pending.repoPath,
         repository: pending.repository }, registeredPath);
     if (repoPath !== pending.repoPath) throw new LocationSwitchRefusal("path_changed");
     return repoPath;
+  }
+
+  private deferLocationSwitchLookup(sessionId: string, entry: ActiveSession, occurrenceId: string): void {
+    if (this.shuttingDown) return;
+    // A missed reply is not a denial. Keep the accepted switch and retry it ahead of queued turns.
+    entry.locationSwitchLookupRetry = setTimeout(() => {
+      entry.locationSwitchLookupRetry = undefined;
+      if (this.active.get(sessionId) === entry && entry.pendingLocationSwitch === occurrenceId) this.scheduleDrain(sessionId);
+    }, 5_000);
+    entry.locationSwitchLookupRetry.unref();
   }
 
   /** The Claude projects roots this session's conversation may live in, most specific first. */
@@ -16263,6 +16281,11 @@ export class SessionManager {
         };
     } catch (error) {
       const kept = await release({ beforeSetup: true });
+      if (error instanceof LocationSwitchRefusal && error.failure === "lookup_unavailable") {
+        reportKept(kept);
+        this.deferLocationSwitchLookup(sessionId, entry, pending.occurrenceId);
+        return;
+      }
       this.failLocationSwitch(sessionId, entry, pending, error instanceof LocationSwitchRefusal ? error.message
         : `the target worktree could not be prepared: ${errText(error)}`, kept);
       return;
@@ -16290,7 +16313,12 @@ export class SessionManager {
         await this.verifyPendingLocationSwitch(meta, pending);
       } catch (error) {
         const kept = await release();
-        if (!this.shuttingDown) this.failLocationSwitch(sessionId, entry, pending, errText(error), kept);
+        if (error instanceof LocationSwitchRefusal && error.failure === "lookup_unavailable") {
+          reportKept(kept);
+          this.deferLocationSwitchLookup(sessionId, entry, pending.occurrenceId);
+        } else if (!this.shuttingDown) {
+          this.failLocationSwitch(sessionId, entry, pending, errText(error), kept);
+        }
         return;
       }
     }

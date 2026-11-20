@@ -4,6 +4,7 @@
  * index.ts that connect those routes to CampaignLocations fails these. */
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -12,7 +13,7 @@ import { test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { CAMPAIGN_LOCATION_GATES_MIN_PROTOCOL, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROJECT_LOCATION_INSPECTION_FAILURES, PROTOCOL_VERSION, WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
-  type CampaignControl, type RunnerMetadata } from "@wollipog/protocol";
+  type CampaignControl, type RegisteredLocationSwitchLookupMessage, type RunnerMetadata, type RunnerToControlPlane, type WorkflowDecisionView } from "@wollipog/protocol";
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
@@ -32,7 +33,7 @@ const ADOPTED_DETACHED = "campaign-locations-adopted-detached";
 const REPOSITORY = "owner/launch";
 /** What each folder's origin says, as a runner would read it. */
 const ORIGINS: Record<string, string> = { "/work/launch": REPOSITORY, "/work/second": "owner/second", "/work/spare": "owner/spare",
-  "/work/imported": "owner/imported", "/work/revived": "owner/revived", "/away/third": "owner/third" };
+  "/work/imported": "owner/imported", "/work/revived": "owner/revived", "/away/third": "owner/third", "/work/registered": "owner/registered" };
 
 const runnerMetadata = (runnerId: string, workspaces: RunnerMetadata["workspaces"]): RunnerMetadata => ({ runnerId, hostname: runnerId, os: "linux", version: "integration", workspaces,
   agents: [{ id: "claude-agent", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code", context: { kind: "native" }, available: true }],
@@ -160,6 +161,8 @@ async function startControlPlane(t: TestContext) {
   const snapshot = (id: string, permissionMode: string | null) => ({ id, workspaceId: "launch", agentId: "claude-agent", title: id, status: "running" as const, driver: "claude-code" as const,
     useWorktree: false, worktreePath: null, config: permissionMode ? { permissionMode } : {}, preview: null, pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, historyEpoch: 0, createdAt: 1, updatedAt: 1 });
   const homeMessages = await connect(runnerMetadata(HOME, HOME_WORKSPACES), HOME_TOKEN, [snapshot(ROOT, "orchestrator"), snapshot(CHILD, null)]);
+  const homeSocket = sockets[0]!;
+  const sendHome = (message: RunnerToControlPlane) => homeSocket.send(JSON.stringify(message));
   const post = (path: string, body: unknown, headers: Record<string, string>) => fetch(`http://127.0.0.1:${port}${path}`, { method: "POST",
     headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
   const get = (path: string, headers: Record<string, string>) => fetch(`http://127.0.0.1:${port}${path}`, { headers });
@@ -184,8 +187,58 @@ async function startControlPlane(t: TestContext) {
     held: JSON.stringify(boundary().repositories),
     revision: boundary().revision,
   }));
-  return { ...seeded, connect, post, get, asOwner, read, write, boundary, until, rows, homeMessages };
+  return { ...seeded, connect, post, get, asOwner, read, write, boundary, until, rows, homeMessages, sendHome };
 }
+
+test("an authenticated runner looks up the exact registered Location before accepting and applying a live switch", { timeout: 45_000 }, async (t) => {
+  const cp = await startControlPlane(t);
+  const sessionId = "registered-switch-session";
+  const token = "registered-switch-session-credential";
+  const destination = cp.write((db) => {
+    const now = Date.now();
+    const project = db.getProject(cp.projectId)!;
+    const launch = project.locations.find((location) => location.runnerId === HOME && location.workspaceId === "launch")!;
+    const workspace = db.createProjectWorkspace(cp.projectId, HOME, { name: "Registered", path: "/work/registered" }, now);
+    db.createSession({ id: sessionId, runnerId: HOME, workspaceId: "launch", agentId: "claude-agent", title: sessionId,
+      useWorktree: false, driver: "claude-code", config: {}, creationActor: "human", scope: db.projectScope(cp.projectId)!, now });
+    db.setSessionProject(sessionId, cp.projectId, launch.id);
+    db.updateSessionStatus(sessionId, "running", now);
+    assert.ok(db.setAgentControlCredential(sessionId, HOME, hashToken(token), now));
+    return db.getProject(cp.projectId)!.locations.find((location) => location.workspaceId === workspace.id)!;
+  });
+  const headers = { authorization: `Bearer ${token}`, [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: sessionId };
+  const path = `/api/sessions/${sessionId}/location-switch-requests`;
+  const requested = await cp.post(path, { requestId: "registered-switch", repository: "owner/registered",
+    reason: "The work belongs in the registered repository.", handoff: "Continue the current task there." }, headers);
+  assert.equal(requested.status, 201, await requested.clone().text());
+  const decision = await requested.json() as WorkflowDecisionView;
+  assert.ok(cp.write((db) => db.resolveLocationSwitchDecision(decision.occurrenceId, "approved", cp.ownerId, Date.now(),
+    `switch:${destination.id}`, false)));
+
+  const executed = cp.post(`${path}/${decision.occurrenceId}/execute`, { resourceDigest: decision.resourceDigest }, headers);
+  const dispatch = () => cp.homeMessages.find((message) => message.type === "session_location_switch" && message.sessionId === sessionId);
+  await cp.until("live switch dispatch", () => Boolean(dispatch()));
+  assert.equal(dispatch()!.registeredWorkspace, true);
+  assert.equal(dispatch()!.workspacePath, destination.path);
+
+  const lookup = async (phase: RegisteredLocationSwitchLookupMessage["phase"], workspaceId = destination.workspaceId) => {
+    const requestId = randomUUID();
+    const response = () => cp.homeMessages.find((message) => message.type === "registered_location_switch_lookup_result" &&
+      message.requestId === requestId);
+    cp.sendHome({ type: "registered_location_switch_lookup", requestId, sessionId, occurrenceId: decision.occurrenceId,
+      workspaceId, repository: "owner/registered", phase });
+    await cp.until(`correlated ${phase} lookup result`, () => Boolean(response()));
+    return response()!.workspacePath;
+  };
+  assert.equal(await lookup("accept", "launch"), null);
+  assert.equal(await lookup("accept"), destination.path);
+  cp.sendHome({ type: "session_location_switch_result", requestId: String(dispatch()!.requestId), sessionId, ok: true });
+  const receipt = await executed;
+  assert.equal(receipt.status, 201, await receipt.clone().text());
+  assert.equal(await lookup("apply"), destination.path);
+  cp.write((db) => db.removeProjectLocation(destination.id));
+  assert.equal(await lookup("apply"), null);
+});
 
 test("an owner's POST of a Location reaches a live campaign, which inspects it and adds it at a new revision (#4117)", { timeout: 90_000 }, async (t) => {
   const cp = await startControlPlane(t);

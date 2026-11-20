@@ -13,6 +13,7 @@ export const LOCATION_SWITCH_FAILURES = {
   not_supported: "This session's harness cannot keep its conversation across a Location switch; start a new session there instead.",
   not_native: "Only sessions running directly on their machine can switch Locations; start a new session there instead.",
   unknown_workspace: "The target Location's folder is not one of this machine's workspaces.",
+  lookup_unavailable: "The machine could not verify the registered Location with Wollipog. Try again when it is connected.",
   path_changed: "The target Location's folder changed since it was approved; ask again.",
   not_repository: "The target Location's folder is not a git repository.",
   repository_changed: "The target Location's folder no longer belongs to the approved repository; ask again.",

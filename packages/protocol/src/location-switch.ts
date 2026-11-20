@@ -177,6 +177,8 @@ export interface RegisteredLocationSwitchLookupMessage {
   occurrenceId: string;
   workspaceId: string;
   repository: string;
+  /** The dispatch deadline applies when accepting, before a switch is durably pending. */
+  phase: "accept" | "apply";
 }
 
 export interface RegisteredLocationSwitchLookupResultMessage {
