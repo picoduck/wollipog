@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import Fastify from "fastify";
 import {
@@ -45,8 +48,8 @@ const accounts: ProviderAccountDefinition[] = [
 ];
 const accountRef = (id: string) => providerAccountRef("r", id);
 
-async function harness(options: { protocolVersion?: number; agents?: AgentDefinition[]; accounts?: ProviderAccountDefinition[] } = {}) {
-  const db = ControlPlaneDb.open(":memory:"), identity = db.localIdentityContext();
+async function harness(options: { protocolVersion?: number; agents?: AgentDefinition[]; accounts?: ProviderAccountDefinition[]; dbPath?: string } = {}) {
+  const db = ControlPlaneDb.open(options.dbPath ?? ":memory:"), identity = db.localIdentityContext();
   const owner = db.operatingHumanPrincipal(identity.userId, identity.organizationId)!;
   const metadata: RunnerMetadata = { runnerId: "r", hostname: "fixture", os: "linux", version: "fixture",
     workspaces: [{ id: "w", name: "Home", path: "/fixture/home" }], agents: options.agents ?? [claude],
@@ -164,6 +167,61 @@ test("install backfills pre-existing threads with the historical fixed limits", 
     AssistantThreadStore.install(h.db.raw());
     assert.deepEqual(h.threads.get(h.owner, created.id).usage, created.usage);
   } finally { await h.close(); }
+});
+
+test("reopening the database rebuilds Assistant thread membership without review sessions", async (t) => {
+  for (const legacyMembership of [false, true]) {
+    await t.test(legacyMembership ? "repairs stray live and retired review memberships" : "skips linked reviews during backfill", async (t) => {
+      const directory = mkdtempSync(join(tmpdir(), "wollipog-thread-review-"));
+      t.after(() => rmSync(directory, { recursive: true, force: true }));
+      const dbPath = join(directory, "control-plane.db");
+      const h = await harness({ dbPath });
+      let thread: AssistantThread;
+      const expectedCosts = { spentUsd: 5, backingSpentUsd: 0, launchedHeldUsd: 10 };
+      try {
+        thread = (await h.call("POST", "/api/assistant-threads", {})).body.thread;
+        const session = { runnerId: "r", workspaceId: "w", agentId: "claude", title: "Work", driver: "claude-code" as const,
+          useWorktree: false, now: Date.now() };
+        h.db.createSession({ ...session, id: "worker", assistantThreadLaunch: thread.id, config: { costBudgetUsd: 10 } });
+        h.db.createSession({ ...session, id: "child", parentSessionId: "worker", config: { costBudgetUsd: 5 } });
+        h.db.raw().exec("UPDATE sessions SET cost_usd=3 WHERE id='worker'; UPDATE sessions SET cost_usd=2 WHERE id='child'");
+        for (const [id, requesterSessionId, number] of [["review", "child", 1], ["retired-review", "worker", 2]] as const) {
+          const review = h.db.createReviewSession({ ...session, id, agentId: "codex", driver: "codex-app-server", config: {} }, {
+            requesterSessionId, pullRequest: { repository: "example/repo", number }, headSha: "a".repeat(40), reviewer: "codex",
+          });
+          assert.equal(review.parentSessionId, requesterSessionId);
+          assert.equal(h.db.assistantThreads.member(id), null);
+          h.db.raw().prepare("UPDATE sessions SET cost_usd=12 WHERE id=?").run(id);
+        }
+        assert.deepEqual(h.db.assistantThreads.costs(thread.id), expectedCosts);
+        if (legacyMembership) {
+          h.db.raw().prepare(`INSERT INTO assistant_thread_members (session_id, thread_id, root_session_id)
+            VALUES ('review', ?, 'worker'), ('retired-review', ?, 'worker')`).run(thread.id, thread.id);
+          h.db.deleteSession("retired-review");
+          assert.equal(h.db.assistantThreads.costs(thread.id).spentUsd, 29);
+        }
+        // Exercise the legacy backfill for an ordinary descendant as well as fresh review exclusion.
+        h.db.raw().exec("DELETE FROM assistant_thread_members WHERE session_id='child'");
+      } finally { await h.close(); }
+
+      const db = ControlPlaneDb.open(dbPath);
+      try {
+        assert.ok(db.assistantThreads.member("worker"));
+        assert.ok(db.assistantThreads.member("child"));
+        assert.equal(db.getSession("review")?.parentSessionId, "child");
+        assert.equal(db.assistantThreads.member("review"), null);
+        assert.equal(db.assistantThreads.member("retired-review"), null);
+        assert.deepEqual(db.assistantThreads.costs(thread.id), expectedCosts);
+        const hub = new Hub(db);
+        hub.isRunnerOnline = () => true;
+        hub.sendToRunner = () => true;
+        const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+        const updated = svc.updateAssistantThreadLimits(db.assistantThreads.get(thread.id)!, { costUsd: 24, launchedSessions: 10 });
+        assert.ok(updated.ok, ("error" in updated ? updated.error : undefined) ?? "Expected the thread budget change to succeed");
+        assert.equal(db.getSession(thread.sessionId)?.costBudgetUsd, 14, "only the worker tree holds part of the backing cap");
+      } finally { db.close(); }
+    });
+  }
 });
 
 test("an assistant session takes no agent-control routes and keeps its role", async () => {
@@ -466,10 +524,12 @@ test("a thread's status follows its backing session and the thread republishes w
 test("install adds the retirement columns to a membership table an earlier build created", async () => {
   const { DatabaseSync } = await import("node:sqlite");
   const { AssistantThreadStore } = await import("./assistant-thread-store.js");
+  const { ReviewSessions } = await import("./review-sessions.js");
   const db = new DatabaseSync(":memory:");
   try {
     db.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT);
       CREATE TABLE assistant_thread_members (session_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, root_session_id TEXT NOT NULL)`);
+    ReviewSessions.install(db);
     AssistantThreadStore.install(db);
     AssistantThreadStore.install(db);
     const columns = (db.prepare("PRAGMA table_info(assistant_thread_members)").all() as Array<{ name: string }>).map((column) => column.name);

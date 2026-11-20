@@ -90,13 +90,17 @@ export class AssistantThreadStore {
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN launch_limit INTEGER DEFAULT 10"); } catch { /* column already present */ }
     // All earlier launches were subject to a budget, even when their allowance was not recorded.
     try { db.exec("ALTER TABLE assistant_thread_launches ADD COLUMN uncapped INTEGER NOT NULL DEFAULT 0"); } catch { /* column already present */ }
-    // Every launch is a member, with every existing descendant in its tree. Idempotent.
-    db.exec(`INSERT OR IGNORE INTO assistant_thread_members (session_id, thread_id, root_session_id)
+    // A cross-model review's parent is for display only. Remove memberships an older backfill
+    // recorded, including retired costs, and skip these links when rebuilding launched trees.
+    // Delegated image reviewers are created as children and keep their normal membership.
+    db.exec(`DELETE FROM assistant_thread_members WHERE session_id IN (SELECT review_session_id FROM review_sessions);
+      INSERT OR IGNORE INTO assistant_thread_members (session_id, thread_id, root_session_id)
         SELECT session_id, thread_id, session_id FROM assistant_thread_launches;
       INSERT OR IGNORE INTO assistant_thread_members (session_id, thread_id, root_session_id)
         WITH RECURSIVE tree(id, thread_id, root) AS (
           SELECT session_id, thread_id, session_id FROM assistant_thread_launches
-          UNION SELECT child.id, tree.thread_id, tree.root FROM sessions child JOIN tree ON child.parent_session_id=tree.id)
+          UNION SELECT child.id, tree.thread_id, tree.root FROM sessions child JOIN tree ON child.parent_session_id=tree.id
+          WHERE NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=child.id))
         SELECT id, thread_id, root FROM tree;`);
   }
 

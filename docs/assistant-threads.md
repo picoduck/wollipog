@@ -85,7 +85,10 @@ deleted. These settings are owner-only.
     the owner changed is only ever lowered.
   - Each launched tree holds the larger of its spend and its root's launch cap (or its current cap,
     if the owner raised it), even after the root's own cap is carved down for its children. A tree
-    is the launched session and every descendant, recorded when each is created.
+    is the launched session and its children at every depth, recorded when each is created.
+    Cross-model reviews have display ancestry only and contribute no spend or held budget to the
+    thread. Delegated image reviewers are created as children of the session that requests them
+    and count when that session belongs to a launched tree.
   - A child created anywhere in a launched tree is carved out of its creator's own cap (#4671).
     The creator's allowance is the cap it was launched or created with. Its own cap is that
     allowance less what its children hold, settled at each child creation and restart, so a
