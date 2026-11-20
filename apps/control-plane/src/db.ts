@@ -22837,6 +22837,30 @@ export class ControlPlaneDb {
     });
   }
 
+  /** The continuation and the child's notice share one durable receipt for a provider refusal. */
+  recordCampaignProviderForgeRefusal(input: {
+    campaignSessionId: string;
+    subjectSessionId: string;
+    occurrenceId: string;
+    attemptedPath: "command" | "managed";
+    message: string;
+    now: number;
+  }): SessionEvent | null {
+    const notice = this.atomic(() => {
+      const recorded = this.recordCampaignContinuationEvent({
+        eventId: `provider_forge_refusal:${input.occurrenceId}:${input.attemptedPath}`,
+        campaignSessionId: input.campaignSessionId,
+        kind: "child_blocked", subjectSessionId: input.subjectSessionId, occurrenceId: input.occurrenceId,
+        subjectStatus: `provider_forge_${input.attemptedPath}`, now: input.now,
+      });
+      return recorded ? this.appendEventTransaction(input.subjectSessionId, {
+        kind: "error", message: input.message, nonFatal: true,
+      }, input.now) : null;
+    });
+    if (notice) this.noteCommittedIngest(input.subjectSessionId, undefined, false);
+    return notice;
+  }
+
   /** A write-ahead checkpoint is committed BEFORE any deferred session change. It may survive
    * an unapplied mutation (harmless comparison on replay), but never an unprotected commit.
    * One write per affected campaign, not per child; immutable first-before identity wins. */
@@ -31172,7 +31196,8 @@ export class ControlPlaneDb {
     // statements — 5 WAL commits per token chunk, and a torn crash could desync seq/counters.
     let appended: SessionEvent;
     const advanceEpoch = options?.runnerSeq !== undefined && this.ingestReassignsSequence(sessionId);
-    this.db.exec("BEGIN");
+    const ownsTransaction = !this.db.isTransaction;
+    if (ownsTransaction) this.db.exec("BEGIN");
     try {
       if (advanceEpoch) this.advanceEventEpochInTransaction(sessionId);
       const seq = this.sessionSeqHighWater(sessionId) + 1;
@@ -31263,8 +31288,10 @@ export class ControlPlaneDb {
         );
       }
 
-      this.db.exec("COMMIT");
-      this.noteCommittedIngest(sessionId, options?.runnerSeq, advanceEpoch);
+      if (ownsTransaction) {
+        this.db.exec("COMMIT");
+        this.noteCommittedIngest(sessionId, options?.runnerSeq, advanceEpoch);
+      }
       appended = {
         id: Number(info.lastInsertRowid),
         sessionId,
@@ -31273,7 +31300,7 @@ export class ControlPlaneDb {
         payload,
       };
     } catch (err) {
-      this.db.exec("ROLLBACK");
+      if (ownsTransaction) this.db.exec("ROLLBACK");
       throw err;
     }
     return appended;

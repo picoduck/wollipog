@@ -490,6 +490,10 @@ function boundedForgeSummary(value: unknown): string {
   return (text || "The action was refused.").slice(0, FORGE_DECISION_ACTION_SUMMARY_LIMIT);
 }
 
+// Allow small skew in a runner's event clock, without attributing an old history refusal to a
+// newer approval of the same command or accepting approval times beyond receipt.
+const PROVIDER_FORGE_REFUSAL_CLOCK_SKEW_MS = 30_000;
+
 function pendingProviderForgeAction(decision: WorkflowDecisionView, at: number): boolean {
   const snapshot = decision.resourceSnapshot;
   if (decision.resolvedAt === undefined || decision.resolvedAt > at ||
@@ -22004,13 +22008,15 @@ export class SessionsService {
     if (frame) this.hub.sendToRunner(runnerId, frame);
   }
 
-  private recordProviderForgeRefusal(session: SessionView, payload: SessionEventPayload, at: number,
+  private recordProviderForgeRefusal(session: SessionView, payload: SessionEventPayload, eventTime: number,
     entryPoint: "live_event" | "history_hydration"): void {
     if (session.driver !== "claude-code" || payload.kind !== "tool_call_update" || payload.status !== "failed" ||
-        payload.parentToolUseId || !payload.providerForgeRefusal) return;
+        payload.parentToolUseId || !payload.providerForgeRefusal || !Number.isSafeInteger(eventTime)) return;
     const proof = payload.providerForgeRefusal;
     const ancestry = this.db.campaignAncestryRoot(session.id);
     if (typeof ancestry !== "object" || !ancestry.hasPolicy || ancestry.id === session.id) return;
+    const now = Date.now();
+    const at = Math.min(now, eventTime + PROVIDER_FORGE_REFUSAL_CLOCK_SKEW_MS);
     let decision: WorkflowDecisionView | null;
     if (proof.kind === "managed" && typeof proof.occurrenceId === "string" && /^workflow_[\w-]{1,80}$/u.test(proof.occurrenceId) &&
         typeof proof.resourceDigest === "string" && /^[a-f0-9]{64}$/u.test(proof.resourceDigest)) {
@@ -22024,15 +22030,13 @@ export class SessionsService {
     if (!decision || decision.sessionId !== session.id || !pendingProviderForgeAction(decision, at) ||
         !this.workflowDecisionRelationship(decision.controllingSessionId, session.id)) return;
 
-    const now = Date.now();
-    const recorded = this.db.recordCampaignContinuationEvent({
-      eventId: `provider_forge_refusal:${decision.occurrenceId}:${proof.kind}`,
+    const notice = this.db.recordCampaignProviderForgeRefusal({
       campaignSessionId: ancestry.id,
-      kind: "child_blocked", subjectSessionId: session.id, occurrenceId: decision.occurrenceId,
-      subjectStatus: `provider_forge_${proof.kind}`, now,
+      subjectSessionId: session.id, occurrenceId: decision.occurrenceId, attemptedPath: proof.kind,
+      message: providerForgeRefusalNotice(decision, proof.kind), now,
     });
-    if (!recorded) return;
-    this.hub.sessionEvent(this.db.appendEvent(session.id, { kind: "error", message: providerForgeRefusalNotice(decision, proof.kind) }, now));
+    if (!notice) return;
+    this.hub.sessionEvent(notice);
     this.hub.sessionChangedById(ancestry.id);
     this.log.info(JSON.stringify({ event: "provider_forge_action_refused", provider: "claude_code", sessionId: session.id,
       campaignId: ancestry.id, occurrenceId: decision.occurrenceId, category: decision.category, attemptedPath: proof.kind, entryPoint }));
@@ -22179,6 +22183,11 @@ export class SessionsService {
       }
     }
 
+    // Persist the refusal before advancing the runner cursor. A crash before the cursor write
+    // leaves a replayable event, and the campaign receipt deduplicates the notice on replay.
+    if (fromRunnerId && payload.kind === "tool_call_update" && payload.providerForgeRefusal) {
+      this.recordProviderForgeRefusal(session(), payload, now, "live_event");
+    }
     const externalized = this.externalizeEventOrOriginal(sessionId, payload, now, prepared?.staged);
     let ev;
     if (runnerSeq != null && history?.historyEpoch != null && indexedHistory) {
@@ -22249,9 +22258,6 @@ export class SessionsService {
     if (reconciledSteering || reconciledCommand ||
         payload.kind === "background_continuation_delivered") {
       this.hub.sessionChangedById(sessionId);
-    }
-    if (fromRunnerId && payload.kind === "tool_call_update" && payload.providerForgeRefusal) {
-      this.recordProviderForgeRefusal(session(), payload, now, "live_event");
     }
     // Keep authoritative usage/tool/history ingestion above. An unresolved media command has
     // no generic prompt/question/permission lifecycle; such events cannot overwrite its queue
@@ -23756,6 +23762,11 @@ export class SessionsService {
 
         const activeLogEpoch = logEpoch;
         if (activeLogEpoch === undefined) return;
+        for (const event of res.events) {
+          if (event.payload.kind === "tool_call_update" && event.payload.providerForgeRefusal) {
+            this.recordProviderForgeRefusal(session, event.payload, event.ts, "history_hydration");
+          }
+        }
         const artifactIds: string[] = [];
         const preparedEvents = res.events.map((event, index) => {
           const prepared = this.externalizeEventOrOriginal(sessionId, event.payload, event.ts, staged[index]);
@@ -23795,9 +23806,6 @@ export class SessionsService {
           trailingAsk = this.updateTrailingAsk(trailingAsk, applied.events[i]!.payload);
           const payload = applied.events[i]!.payload;
           this.settleHydratedQuestionResolution(sessionId, payload);
-          if (payload.kind === "tool_call_update" && payload.providerForgeRefusal) {
-            this.recordProviderForgeRefusal(session, payload, event.ts, "history_hydration");
-          }
           if (this.reconcileSteeringFromUserMessage(sessionId, payload, event.ts)) projectedSteering = true;
           if (payload.kind === "background_continuation_delivered") projectedBackgroundDelivery = true;
           if (payload.kind === "policy_transport") {
