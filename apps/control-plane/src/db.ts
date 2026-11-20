@@ -400,7 +400,7 @@ import { matchWorkspaceId, matchWorkspaceIds, workspacePathsEqual } from "./work
 import { installMaintenanceIndexes } from "./maintenance-indexes.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { CAMPAIGN_RECOVERY_SCHEMA, CampaignRecoveryStore, type CampaignRecoveryVerifiedReport } from "./campaign-recovery-store.js";
-import { CAMPAIGN_HANDOFF_QUESTION_KEY } from "@wollipog/protocol";
+import { CAMPAIGN_HANDOFF_QUESTION_KEY, CAMPAIGN_HANDOFF_TITLE, isCampaignHandoffQuestion } from "@wollipog/protocol";
 import {
   CAMPAIGN_FORGE_OBSERVATION_SCHEMA,
   CampaignForgeObservationStore,
@@ -25430,8 +25430,9 @@ export class ControlPlaneDb {
           this.stmt("SELECT 1 FROM sessions WHERE id=? AND json_extract(orchestrator_policy, '$.control.mode')='full_control'")
             .get(decision.controllingSessionId)
           ? { returnableOwnerResource: true as const } : {}),
-        ...(isWorkflowQuestionSnapshot(decision.resourceSnapshot) ? { kind: "question" as const } : {}),
-        summary: decision.resourceSnapshot.category === "campaign_issue_scope"
+        ...(isCampaignHandoffQuestion(decision) ? { kind: "handoff" as const }
+          : isWorkflowQuestionSnapshot(decision.resourceSnapshot) ? { kind: "question" as const } : {}),
+        summary: isCampaignHandoffQuestion(decision) ? CAMPAIGN_HANDOFF_TITLE : decision.resourceSnapshot.category === "campaign_issue_scope"
           ? campaignScopeChangeSummary(decision.resourceSnapshot, this.scopeApprovalIncrease(controllingSessionId, decision.resourceSnapshot))
           : ownerDecisionSummary(decision.resourceSnapshot),
         ...(() => {

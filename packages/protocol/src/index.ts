@@ -185,7 +185,7 @@ import type {
 } from "./campaign-work-ledger.js";
 export type { ConversationHandoffDraft, InPlaceHandoffTurn } from "./conversation-handoff.js";
 import { pendingRequests, prioritizedPendingRequests } from "./worker-attention.js";
-import { isChildQuestionSnapshot, isOwnerQuestionCard, isOwnerQuestionRequest } from "./owner-question.js";
+import { isCampaignHandoffQuestion, isChildQuestionSnapshot, isOwnerQuestionCard, isOwnerQuestionRequest } from "./owner-question.js";
 export {
   attentionRequestRank,
   pendingRequests,
@@ -2477,8 +2477,8 @@ export interface CampaignOwnerDecision {
   /** The current campaign supports a human-only return of future requests. */
   returnableOwnerResource?: true;
   occurrenceId: string;
-  /** v332: a question is presented as input, never as an action approval. */
-  kind?: "question";
+  /** Which informational presentation to use when the request asks for no approval. */
+  kind?: "question" | "handoff";
   /** The session whose request it is: the root for an owner decision, else the requester. */
   sessionId: string;
   category: WorkflowDecisionCategory | "runner_recovery";
@@ -4368,13 +4368,22 @@ function singleSessionAttentionStatus(
   const pending = requests[0] ?? session.pendingApproval;
   if (requests.length > 1) {
     const children = requests.filter((request) => request.ownerToolUseId).length;
-    const questions = requests.filter((request) => request.kind === "question" || isOwnerQuestionRequest(request)).length;
+    const handoffs = requests.filter((request) => isCampaignHandoffQuestion(request.workflowDecision)).length;
+    const questions = requests.filter((request) => !isCampaignHandoffQuestion(request.workflowDecision) &&
+      (request.kind === "question" || isOwnerQuestionRequest(request))).length;
     const authentication = requests.filter((request) => request.kind === "authentication").length;
-    const approvals = requests.length - questions - authentication;
+    const approvals = requests.length - questions - authentication - handoffs;
     return {
       kind: "input_required",
       label: `${requests.length} Actions Required`,
-      description: `${requests.length} unresolved requests: ${approvals} approvals, ${questions} questions, ${authentication} authentication requests; ${children} belong to child agents. Open Agents to inspect each request.`,
+      description: `${approvals} approvals, ${questions} questions, and ${authentication} authentication requests remain open.${handoffs ? ` ${handoffs} handoff notice${handoffs === 1 ? " needs" : "s need"} acknowledgment.` : ""} Of the ${requests.length} open requests, ${children} belong to child agents. Open Agents to inspect each request.`,
+    };
+  }
+  if (isCampaignHandoffQuestion(pending?.workflowDecision)) {
+    return {
+      kind: "input_required",
+      label: "Handoffs to Acknowledge",
+      description: "Review and acknowledge the campaign handoffs. The work stays listed in Campaign Status.",
     };
   }
   if (isOwnerQuestionCard(pending)) {

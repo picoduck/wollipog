@@ -489,11 +489,12 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
   // So does its request to add a repository (#4117): the owner never kept it, it is always theirs.
   const repositoryAddition = (item: (typeof ownerDecisions.items)[number]) => item.category === "campaign_repository_addition" && !item.ownerRule && !item.handedOff;
   const one = ownerDecisions.total === 1;
+  const hasHandoff = ownerDecisions.items.some((item) => item.kind === "handoff");
   const runtimeRecovery = ownerDecisions.items.some((item) => item.category === "runner_recovery");
   return (
     <CampaignSection title="Waiting for You" count={ownerDecisions.total} attention={ownerDecisions.items.map(item => item.occurrenceId).join("|")} className="campaign-status-handoffs">
       <p className="section-note">
-        {`Only you can make ${one ? "this decision" : "these decisions"}.`}{" "}
+        {hasHandoff ? "Open each request to review what it needs." : `Only you can make ${one ? "this decision" : "these decisions"}.`}{" "}
         {runtimeRecovery ? "Relaunch the Orchestrator to restore its tools and continue its pending work." : "The Orchestrator keeps working on everything else meanwhile."}
       </p>
       <ul className="campaign-detail-list">
@@ -518,12 +519,12 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
                   <dd>{item.credentialScreenReview.workItem.label}</dd>
                 </div>}
                 <div>
-                  <dt>{item.category === "runner_recovery" ? "Runner Recovery" : item.kind === "question" ? "Question" : item.ownerRule ? "Kept by Rule" : item.handedOff ? "Handed to You" : scopeApproval(item) ? "Scope Approval"
+                  <dt>{item.category === "runner_recovery" ? "Runner Recovery" : item.kind === "handoff" ? "Status Update" : item.kind === "question" ? "Question" : item.ownerRule ? "Kept by Rule" : item.handedOff ? "Handed to You" : scopeApproval(item) ? "Scope Approval"
                     : repositoryAddition(item) ? "Add Repository" : "Owner Decision"}</dt>
                   <dd>
                     {item.summary}
                     <span className="campaign-status-meta">
-                      {item.category === "runner_recovery" ? "Runner restarted" : item.ownerRule ? "Requested under a rule" : item.handedOff ? "Handed over by the Orchestrator"
+                      {item.category === "runner_recovery" ? "Runner restarted" : item.kind === "handoff" ? "Ready to acknowledge" : item.ownerRule ? "Requested under a rule" : item.handedOff ? "Handed over by the Orchestrator"
                         : scopeApproval(item) ? "Proposed by the Orchestrator" : item.credentialScreenReview ? "Held by the model screen" : "Asked by the Orchestrator"}{" "}
                       <RecordedTime at={item.createdAt} now={now} />
                     </span>

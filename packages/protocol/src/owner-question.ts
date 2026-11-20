@@ -38,7 +38,9 @@ export function isOwnerQuestionSnapshot(snapshot: WorkflowDecisionResourceSnapsh
   return snapshot?.category === "owner_decision" && snapshot.kind === "question";
 }
 
-/** Reserved for the server's consolidated campaign handoff question. */
+export const CAMPAIGN_HANDOFF_TITLE = "Campaign Handoffs";
+
+/** Reserved for the server's consolidated campaign handoff notice. */
 export const CAMPAIGN_HANDOFF_QUESTION_KEY = "campaign_handoffs:owner";
 
 export function isCampaignHandoffQuestion(decision: Pick<WorkflowDecisionView, "resourceKey" | "resourceSnapshot"> | null | undefined): boolean {
@@ -131,6 +133,10 @@ export function ownerQuestionAnswer(snapshot: WorkflowQuestionSnapshot, answers:
  * route, which the control plane resolves as the owner's answer.
  */
 export function presentOwnerQuestionRequest(request: PendingApproval): PendingApproval {
+  // Keep the stored question snapshot so existing occurrences retain their acknowledgment state.
+  if (isCampaignHandoffQuestion(request.workflowDecision)) {
+    return { ...request, title: CAMPAIGN_HANDOFF_TITLE, options: [] };
+  }
   if (scopeProposalOfRequest(request)) return presentScopeProposalRequest(request);
   const snapshot = ownerQuestionOfRequest(request);
   // A question the Decision Model could not screen is classified on its own card first (#4104).

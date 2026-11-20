@@ -9,6 +9,7 @@ import {
   type MouseEvent,
 } from "react";
 import {
+  isCampaignHandoffQuestion,
   presentOwnerQuestionRequest,
   isOwnerQuestionRequest,
   isChildQuestionSnapshot,
@@ -82,6 +83,7 @@ function itemKey(sessionId: string, occurrenceId: string): string {
 }
 
 export function requestTypeLabel(request: PendingApproval): string {
+  if (isCampaignHandoffQuestion(request.workflowDecision)) return "Status Update";
   if (request.kind === "question" || isOwnerQuestionRequest(request)) return "Question";
   if (request.kind === "authentication") return "Authentication";
   if (request.kind === "workflow_decision") {

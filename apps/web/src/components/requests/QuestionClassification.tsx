@@ -6,7 +6,7 @@ import { Notice } from "../Notice.js";
 import { BusyButton } from "../ui/BusyButton.js";
 
 export const QUESTION_CLASSIFICATION_REASON = "The campaign owner must classify this question first on this card or in Campaign Status. Nobody can answer it until then.";
-export const HANDOFF_CLASSIFICATION_REASON = "The credential check was inconclusive. The campaign owner can dismiss or classify this handoff.";
+export const HANDOFF_CLASSIFICATION_REASON = "The credential check was inconclusive. The campaign owner can acknowledge or classify this handoff.";
 
 /** Reuses the screen occurrence and the existing owner-only classification route. */
 export function QuestionClassification({ sessionId, request, onSessionUpdate }: {
@@ -69,20 +69,20 @@ export function QuestionClassification({ sessionId, request, onSessionUpdate }: 
     } finally { inFlight.current = false; setBusy(null); }
   };
   return <>
-    {error && <Notice tone="danger" compact role="alert" title={settledScreen ? "Couldn't Refresh the Request" : "Couldn't Update the Question"}>{error}</Notice>}
+    {error && <Notice tone="danger" compact role="alert" title={settledScreen ? "Couldn't Refresh the Request" : handoff ? "Couldn't Update the Handoffs" : "Couldn't Update the Question"}>{error}</Notice>}
     {settledScreen && <div className="request-card-reasons">
-      <p role="status">{settledScreen.dismissed ? "The handoff question was dismissed." : "The question was classified."} Waiting for the updated request.</p>
+      <p role="status">{settledScreen.dismissed ? "The handoffs were acknowledged." : "The question was classified."} Waiting for the updated request.</p>
       <BusyButton className="btn" busy={busy === "refresh"} disabled={busy !== null} progress="Refreshing the request…"
         onClick={() => void refresh()}>Refresh Request</BusyButton>
     </div>}
-    {canClassify && screenId && !settledScreen && <div className="campaign-screen-actions" role="group" aria-label="Question Classification">
+    {canClassify && screenId && !settledScreen && <div className="campaign-screen-actions" role="group" aria-label={handoff ? "Credential Review" : "Question Classification"}>
       {handoff && <BusyButton className="btn" busy={busy === "dismiss"} disabled={busy !== null}
-        progress="Dismissing the handoff question…" onClick={() => void respond("dismiss")}>Dismiss</BusyButton>}
+        progress="Acknowledging the handoffs…" onClick={() => void respond("dismiss")}>Acknowledge</BusyButton>}
       <BusyButton className="btn" busy={busy === "decline"} disabled={busy !== null}
         progress="Declining the question…" onClick={() => void respond("decline")}>{handoff ? "Decline Credentials Request" : "Decline"}</BusyButton>
       <BusyButton className="btn primary" busy={busy === "orchestrator"} disabled={busy !== null}
         progress="Allowing an answer…" onClick={() => void respond("orchestrator")}>
-        {decision?.category === "owner_decision" || decision?.ownerRule ? "Let Me Answer" : "Let the Orchestrator Answer"}
+        {handoff ? "Confirm No Credentials Requested" : decision?.category === "owner_decision" || decision?.ownerRule ? "Let Me Answer" : "Let the Orchestrator Answer"}
       </BusyButton>
     </div>}
   </>;

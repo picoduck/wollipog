@@ -14,15 +14,15 @@ async function openOwnerQuestion(page: Page) {
 }
 
 for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844 }, { name: "narrow-phone", width: 320, height: 740 }]) {
-  test(`an expanded handoff question can be dismissed without an answer (${viewport.name})`, async ({ page }) => {
+  test(`a campaign handoff can be acknowledged (${viewport.name})`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/agent-questions-e2e.html?set=owner-question&style=composer&handoffs=true");
-    const card = page.locator(".composer-answer");
-    const dismiss = card.getByRole("button", { name: "Dismiss", exact: true });
-    await expect(card.locator("input.composer-answer-input")).toHaveValue("");
-    await expect(dismiss).toBeInViewport({ ratio: 1 });
-    if (process.env.WOLLIPOG_CAPTURE_DISMISS) await page.screenshot({ path: `/tmp/owner-question-dismiss-${viewport.name}.png`, fullPage: true });
-    await dismiss.click();
+    const card = page.locator(".request-card");
+    const acknowledge = card.getByRole("button", { name: "Acknowledge", exact: true });
+    await expect(page.locator(".composer-answer")).toHaveCount(0);
+    await expect(acknowledge).toBeInViewport({ ratio: 1 });
+    if (process.env.WOLLIPOG_CAPTURE_HANDOFFS) await page.screenshot({ path: `/tmp/campaign-handoff-${viewport.name}.png`, fullPage: true });
+    await acknowledge.click();
     await expect(card).toHaveCount(0);
     expect(await page.evaluate(() => window.agentQuestionCalls)).toEqual([
       expect.objectContaining({ answers: {}, action: "dismiss" }),
@@ -31,7 +31,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "
 }
 
 for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844 }]) {
-  test(`campaign handoffs appear in the Inbox as Needs Your Input (${viewport.name})`, async ({ page }) => {
+  test(`campaign handoffs appear in the Inbox as Handoffs to Acknowledge (${viewport.name})`, async ({ page }) => {
     await page.setViewportSize(viewport);
     const fixture = await installInboxFixture(page);
     await page.goto("/index.html");
@@ -53,21 +53,24 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "
     });
     const row = page.locator(".inbox-row-shell", { hasText: "Owner Handoffs — Campaign #4541" });
     await expect(row).toBeVisible();
-    await expect(row.getByText("Needs Your Input", { exact: true })).toBeVisible();
+    await expect(row.getByText("Handoffs to Acknowledge", { exact: true })).toBeVisible();
     if (process.env.WOLLIPOG_CAPTURE_HANDOFFS) await page.screenshot({ path: `/tmp/4541-inbox-${viewport.name}.png`, fullPage: true });
   });
 
-  test(`campaign handoffs ask for input without approval (${viewport.name})`, async ({ page }) => {
+  test(`campaign handoffs are shown as a status update (${viewport.name})`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/agent-questions-e2e.html?set=owner-question&style=composer&handoffs=true");
-    const card = page.locator(".composer-answer");
+    const card = page.locator(".request-card");
     await expect(card).toBeVisible();
-    await expect(card.locator(".answer-title")).toHaveText("This campaign handed work to you. What should happen next?");
-    await expect(page.getByLabel("Attention: Needs Your Input", { exact: true })).toBeVisible();
-    await expect(card.locator(".answer-context")).toContainText("Owner Handoff (human)");
-    await expect(card.locator(".answer-context")).toContainText("External Review (external)");
-    await expect(card.locator(".answer-context")).toContainText("Your answer grants no action authority.");
-    await expect(card.locator("input.composer-answer-input")).toBeEditable();
+    await expect(card.getByRole("heading", { name: "Campaign Handoffs" })).toBeVisible();
+    await expect(card.getByText("Status Update", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Attention: Handoffs to Acknowledge", { exact: true })).toBeVisible();
+    await expect(card).toContainText("Owner Handoff (human)");
+    await expect(card).toContainText("External Review (external)");
+    await expect(card).toContainText("Next action: Choose the supported delivery path.");
+    await expect(card).not.toContainText("What should happen next?");
+    await expect(card).not.toContainText("Your answer grants no action authority.");
+    await expect(page.getByRole("button", { name: "Submit Answers" })).toHaveCount(0);
     await expect(page.getByText("Approval Required")).toHaveCount(0);
     if (process.env.WOLLIPOG_CAPTURE_HANDOFFS) await page.screenshot({ path: `/tmp/4541-handoffs-${viewport.name}.png`, fullPage: true });
   });

@@ -12,7 +12,7 @@ test("Decline on the session card removes the held question", async ({ page }) =
 
 for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["phone", { width: 390, height: 844 }]] as const) {
   for (const surface of ["session", "inbox"] as const) {
-    test(`held handoff can be dismissed on ${surface} without a credential decline (${device})`, async ({ page }, testInfo) => {
+    test(`held handoff can be acknowledged on ${surface} without a credential decline (${device})`, async ({ page }, testInfo) => {
       await page.setViewportSize(viewport);
       const path = surface === "session" ? `&path=${encodeURIComponent(viewPath({ name: "session", id: "session-alpha" }))}` : "";
       await page.goto(`/command-inbox-projects-e2e.html?scenario=question-classification&handoff=1&fullShell=1&sessionShell=1${path}`);
@@ -21,11 +21,11 @@ for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
         await page.screenshot({ path: testInfo.outputPath("handoff-inbox-phone-list-before.png") });
         await page.getByText("Rollout Documentation Campaign", { exact: true }).first().click();
       }
-      const card = page.locator(".request-card").filter({ has: page.getByRole("group", { name: "Question Classification" }) }).first();
-      const actions = card.getByRole("group", { name: "Question Classification" });
-      const dismiss = actions.getByRole("button", { name: "Dismiss", exact: true });
-      await expect(dismiss).toBeVisible();
-      const expand = card.getByRole("button", { name: "Expand Decision", exact: true });
+      const card = page.locator(".request-card").filter({ has: page.getByRole("group", { name: "Credential Review" }) }).first();
+      const actions = card.getByRole("group", { name: "Credential Review" });
+      const acknowledge = actions.getByRole("button", { name: "Acknowledge", exact: true });
+      await expect(acknowledge).toBeVisible();
+      const expand = card.getByRole("button", { name: "Expand Update", exact: true });
       if (await expand.count()) await expand.click();
       await expect(actions.getByRole("button", { name: "Decline Credentials Request", exact: true })).toBeVisible();
       const uncertainty = card.getByText(/The credential check was inconclusive/);
@@ -38,9 +38,9 @@ for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
         });
         expect(lines).toBe(1);
       }
-      await expect(dismiss).toBeInViewport();
+      await expect(acknowledge).toBeInViewport();
       await page.screenshot({ path: testInfo.outputPath(`handoff-${surface}-${device}-before.png`) });
-      await dismiss.click();
+      await acknowledge.click();
       await expect(page.locator(".request-card")).toHaveCount(0);
       await page.screenshot({ path: testInfo.outputPath(`handoff-${surface}-${device}-after.png`) });
       if (surface === "inbox" && device === "phone") {
@@ -92,17 +92,17 @@ for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
   }
 }
 
-test("eight handoffs keep the dismissal visible on a phone", async ({ page }, testInfo) => {
+test("eight handoffs keep the acknowledgment visible on a phone", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const path = encodeURIComponent(viewPath({ name: "session", id: "session-alpha" }));
   await page.goto(`/command-inbox-projects-e2e.html?scenario=question-classification&handoff=1&handoffStress=1&fullShell=1&sessionShell=1&path=${path}`);
   const card = page.locator(".request-card");
-  await card.getByRole("button", { name: "Expand Decision", exact: true }).click();
+  await card.getByRole("button", { name: "Expand Update", exact: true }).click();
   await expect(card.getByRole("listitem")).toHaveCount(8);
   await expect(card.getByRole("listitem").last()).toContainText("Review Documentation Section 8");
   await expectNoHorizontalOverflow(card);
   await expectPageNoHorizontalOverflow(page);
-  await expectFullyInViewport(card.getByRole("button", { name: "Dismiss", exact: true }));
-  await expectFullyInViewport(card.getByRole("button", { name: "Let Me Answer", exact: true }));
+  await expectFullyInViewport(card.getByRole("button", { name: "Acknowledge", exact: true }));
+  await expectFullyInViewport(card.getByRole("button", { name: "Confirm No Credentials Requested", exact: true }));
   await page.screenshot({ path: testInfo.outputPath("handoff-eight-items-phone.png") });
 });

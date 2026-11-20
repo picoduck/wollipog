@@ -15419,11 +15419,11 @@ export class SessionsService {
     if (decision.authority !== "human" || actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(sessionId, actor.id)) {
       return fail("Only the campaign's owner can answer an owner question", 403);
     }
-    // A held question cannot be answered. The owner may discard the server's informational
+    // A held question cannot be answered. The owner may acknowledge the server's informational
     // handoff without making a statement about credentials.
     if (credentialScreenDecline && action !== "dismiss") return fail("a declined question cannot be answered", 400);
-    const plainHandoffDismissal = action === "dismiss" && isCampaignHandoffQuestion(decision);
-    if (decision.authorityEvaluation?.reason === "credential_screen_review" && !credentialScreenDecline && !plainHandoffDismissal) {
+    const acknowledgeHandoff = action === "dismiss" && !credentialScreenDecline && isCampaignHandoffQuestion(decision);
+    if (decision.authorityEvaluation?.reason === "credential_screen_review" && !credentialScreenDecline && !acknowledgeHandoff) {
       return fail(TYPED_QUESTION_CLASSIFY_FIRST, 409);
     }
     const root = this.db.getSession(sessionId);
@@ -15433,16 +15433,21 @@ export class SessionsService {
     const answer = action === "submit" ? ownerQuestionAnswer(snapshot, answers) : null;
     if (action === "submit" && !answer) return fail("choose an option or type an answer", 400);
     const now = Date.now();
-    const oweResume = this.workflowDecisionResumeOwed(root);
+    const oweResume = !acknowledgeHandoff && this.workflowDecisionResumeOwed(root);
     const resolved = this.db.resolveWorkflowDecision(occurrenceId, "human", answer ? "approved" : "denied", now,
       answer?.selectedOptionId, undefined, auditDigest(assistantDelegation?.reason), answer?.text ?? credentialScreenDecline?.message,
       oweResume, undefined, undefined, undefined, assistantDelegation && {
         ...assistantDelegation, resolvedAt: now, outcome: answer ? "answered" : "denied",
       });
     if (!resolved) return fail("this owner question was answered concurrently", 409);
-    this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
-    this.recordWorkflowDecisionAudit(resolved, answer ? "answered" : "denied", actor, now, assistantDelegation?.reason);
-    if (plainHandoffDismissal) this.campaignRecovery.synchronize(root, now);
+    if (acknowledgeHandoff) {
+      this.settleWorkflowDecisionPause(sessionId, occurrenceId, now);
+      this.campaignRecovery.synchronize(root, now);
+    } else {
+      this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
+    }
+    this.recordWorkflowDecisionAudit(resolved, answer ? "answered" : "denied", actor, now,
+      assistantDelegation?.reason ?? (acknowledgeHandoff ? "Campaign handoffs acknowledged." : undefined));
     void this.reconcileUncertainIssueClosures(sessionId).catch(() => this.log.warn("Issue closure acknowledgement is pending"));
     this.hub.sessionChangedById(sessionId);
     this.publishCampaignAttentionTransition(root);

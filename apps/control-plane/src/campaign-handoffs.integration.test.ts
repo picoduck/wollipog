@@ -951,6 +951,9 @@ test("settled human handoffs reach one owner question and update in place (#4541
     assert.equal(first.resourceSnapshot.category === "owner_decision" && first.resourceSnapshot.material,
       "- picoduck/wollipog#4070: File the Advisory (human)\n  Reason: Private vulnerability reporting refused the agent's account.\n  Next action: File the advisory from a maintainer account.\n\n" +
       "This question authorizes nothing. Your answer grants no action authority.");
+    const [notice] = h.db.campaignProjection("root")!.ownerDecisions!.items;
+    assert.equal(notice?.kind, "handoff");
+    assert.equal(notice?.summary, "Campaign Handoffs");
     assert.equal(first.authority, "human");
     assert.equal(first.resourceSnapshot.category === "owner_decision" && first.resourceSnapshot.kind, "question");
     assert.equal(h.db.getSession("root")!.attention!.humanActions.length, 1);
@@ -1018,12 +1021,17 @@ test("stuck campaigns report handoffs once across retries and service recreation
     restarted.setDecisionRuntime(fakeScreenRuntime(h.db, () => ({ verdict: "discusses" })).runtime);
     await restarted.reconcileCampaignHandoffQuestion("root");
     assert.equal(h.db.campaignHandoffQuestion("root")!.occurrenceId, question.occurrenceId);
+    const messages: ControlPlaneToRunner[] = [];
+    h.hub.sendToRunner = (_runner, message) => { messages.push(message); return true; };
     const identity = h.db.localIdentityContext();
     assert.ok(restarted.answerOwnerQuestion("root", question.occurrenceId, {}, "dismiss",
       { kind: "human", id: identity.userId }).ok);
     await restarted.reconcileCampaignHandoffQuestion("root");
     assert.equal(h.db.campaignHandoffQuestion("root")!.occurrenceId, question.occurrenceId);
     assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 0);
+    assert.equal(h.db.campaignProjection("root")!.handoffs?.total, 1, "acknowledgment preserves the handoff");
+    assert.ok(!messages.some(message => message.type === "prompt_session" && message.text.includes(question.occurrenceId)),
+      "acknowledgment does not send the campaign a prompt");
   } finally { h.db.close(); }
 });
 
