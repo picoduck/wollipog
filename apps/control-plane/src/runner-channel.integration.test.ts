@@ -107,6 +107,7 @@ test("a real WebSocket closing under queue pressure completes its handshake with
 // Health request logs can overwrite all reconciliation evidence in the raw output tail.
 // Keep a small, numeric-only trace separately; each stream owns its partial-line buffer.
 class ReconciliationDiagnostics {
+  firstWriteCredentialReady: boolean | undefined;
   private lifecycle: Record<string, string | number>[] = [];
   private slowUpdates: Record<string, string | number>[] = [];
 
@@ -116,6 +117,11 @@ class ReconciliationDiagnostics {
       const lines = (partial + String(chunk)).split("\n");
       partial = (lines.pop() ?? "").slice(-16_384);
       for (const line of lines) {
+        // Retain the first observation before the raw tail or lifecycle ring can evict it.
+        // A later success must never hide an ordering violation at the first write.
+        if (this.firstWriteCredentialReady === undefined && /^FIRST_WRITE_CREDENTIAL_READY=(true|false)$/.test(line)) {
+          this.firstWriteCredentialReady = line === "FIRST_WRITE_CREDENTIAL_READY=true";
+        }
         if (!line.includes("runner_reconciliation_") && !line.includes("session_runtime_update_slow") && !line.includes("runner_credential_")) continue;
         try {
           let value = JSON.parse(line);
@@ -166,6 +172,41 @@ test("reconciliation diagnostics survive noisy split logs while remaining bounde
     assert.deepEqual(JSON.parse(trace.summary()).reconciliation.at(-1), { event, durationMs: 12 });
   }
   assert.doesNotMatch(trace.summary(), /synthetic-private|must not be retained/);
+});
+
+test("first-write credential evidence survives split streams and raw-tail eviction", () => {
+  const trace = new ReconciliationDiagnostics();
+  const stdout = trace.capture();
+  const stderr = trace.capture();
+  const marker = "FIRST_WRITE_CREDENTIAL_READY=true\n";
+  for (let split = 1; split < marker.length; split++) {
+    const splitTrace = new ReconciliationDiagnostics();
+    const capture = splitTrace.capture();
+    capture(marker.slice(0, split));
+    capture(marker.slice(split));
+    assert.equal(splitTrace.firstWriteCredentialReady, true);
+  }
+  stderr(marker.slice(0, 17));
+  stdout("unrelated stdout\n");
+  stderr(marker.slice(17));
+  const noise = (JSON.stringify({ event: "runner_reconciliation_completed" }) + "\n").repeat(4_000);
+  assert.ok(noise.length > 128_000);
+  stdout(noise);
+  stderr(noise);
+  assert.doesNotMatch((marker + noise).slice(-128_000), /FIRST_WRITE_CREDENTIAL_READY/);
+  assert.equal(trace.firstWriteCredentialReady, true);
+});
+
+test("missing or false first-write credential evidence fails even after a later success", () => {
+  const trace = new ReconciliationDiagnostics();
+  const capture = trace.capture();
+  capture("unrelated log\n");
+  assert.equal(trace.firstWriteCredentialReady, undefined);
+  assert.throws(() => assert.equal(trace.firstWriteCredentialReady, true), { name: "AssertionError" });
+  capture("FIRST_WRITE_CREDENTIAL_READY=false\n");
+  capture("FIRST_WRITE_CREDENTIAL_READY=true\n");
+  assert.equal(trace.firstWriteCredentialReady, false);
+  assert.throws(() => assert.equal(trace.firstWriteCredentialReady, true), { name: "AssertionError" });
 });
 
 test("1500 retained campaign children reconcile while real HTTP and heartbeat pongs make progress", { timeout: 180_000 }, (t) => retainedCampaignChildren(t));
@@ -386,7 +427,10 @@ ControlPlaneDb.prototype.updateSessionsFromSnapshots = function(...args) {
   assert.equal(reconciliationCompleted, true);
   t.diagnostic(`Reconciliation cancellation observed: ${/runner_reconciliation_cancelled/.test(output)}`);
   assert.doesNotMatch(output, /runner frame handler threw|runner_frame_queue_closed/);
-  if (slowFirstWrite) assert.match(output, /FIRST_WRITE_CREDENTIAL_READY=true/);
+  if (slowFirstWrite) {
+    t.diagnostic(`First-write credential ready: ${trace.firstWriteCredentialReady}; marker retained in raw tail: ${/FIRST_WRITE_CREDENTIAL_READY=/.test(output)}; raw tail characters: ${output.length}`);
+    assert.equal(trace.firstWriteCredentialReady, true, `credentials must be ready before the first inventory write\n${output}`);
+  }
 }
 
 test("2100 retained children with bidirectional bulk reconcile while real HTTP and heartbeat pongs make progress", { timeout: 180_000 }, (t) => retainedBulk(t));
