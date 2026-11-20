@@ -53,6 +53,39 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+const CI_API = ["api", "--hostname", "github.com"];
+
+async function readCiTarget(gh: GhRunner, path: string): Promise<Record<string, unknown> | null> {
+  const result = await gh(CI_API.concat("--method", "GET", path));
+  if (result.code !== null || result.timedOut) return null;
+  try { return record(JSON.parse(result.stdout)); } catch { return null; }
+}
+
+async function readCiJob(
+  gh: GhRunner, target: NonNullable<ReturnType<typeof normalizeCiRerunTarget>>,
+): Promise<{ job: Record<string, unknown> } | { refusal: ForgeDecisionActionResult }> {
+  const { repository, runId, headSha, jobId, attempt } = target;
+  const job = await readCiTarget(gh, `repos/${repository}/actions/jobs/${jobId}`);
+  if (!job) return { refusal: refused("forge_unavailable", "GitHub could not verify the approved CI job.") };
+  if (job.id !== jobId || job.run_id !== runId || job.run_attempt !== attempt || job.head_sha !== headSha ||
+      typeof job.html_url !== "string" ||
+      job.html_url.toLowerCase() !== `https://github.com/${repository}/actions/runs/${runId}/job/${jobId}`) {
+    return { refusal: refused("ci_target_mismatch", "The CI job does not match the approved repository, run, head or attempt.") };
+  }
+  return { job };
+}
+
+export async function inspectCiRerunJob(
+  action: Extract<ForgeDecisionAction, { kind: "ci_rerun_inspect_job" }>, gh: GhRunner,
+): Promise<ForgeDecisionActionResult & { jobName?: string }> {
+  const target = normalizeCiRerunTarget(action);
+  if (!target || target.jobId === undefined) return refused("ci_target_mismatch", "The CI job target is invalid.");
+  const result = await readCiJob(gh, target);
+  if ("refusal" in result) return result.refusal;
+  const name = typeof result.job.name === "string" ? result.job.name.trim() : "";
+  return { outcome: "ci_job_inspected", ...(name && name.length <= 200 && !/[\p{Cc}\p{Cf}]/u.test(name) ? { jobName: name } : {}) };
+}
+
 export async function executeCiRerun(
   action: Extract<ForgeDecisionAction, { kind: "ci_rerun" }>,
   gh: GhRunner,
@@ -61,27 +94,16 @@ export async function executeCiRerun(
   const target = normalizeCiRerunTarget(action);
   if (!target) return refused("ci_target_mismatch", "The approved CI target is invalid.");
   const { repository, runId, jobId, headSha, attempt } = target;
-  const api = ["api", "--hostname", "github.com"];
   const runs = `repos/${repository}/actions/runs/${runId}`;
   const jobs = `repos/${repository}/actions/jobs/${jobId}`;
-  const read = async (path: string) => {
-    const result = await gh(api.concat("--method", "GET", path));
-    if (result.code !== null || result.timedOut) return null;
-    try { return record(JSON.parse(result.stdout)); } catch { return null; }
-  };
   if (jobId !== undefined) {
-    const job = await read(jobs);
-    if (!job) return refused("forge_unavailable", "GitHub could not verify the approved CI job.");
-    if (job.id !== jobId || job.run_id !== runId || job.run_attempt !== attempt || job.head_sha !== headSha ||
-        typeof job.html_url !== "string" ||
-        job.html_url.toLowerCase() !== `https://github.com/${repository}/actions/runs/${runId}/job/${jobId}`) {
-      return refused("ci_target_mismatch", "The CI job does not match the approved repository, run, head or attempt.");
-    }
-    if (job.status !== "completed") return refused("forge_refused", "The CI job is not complete.");
+    const result = await readCiJob(gh, target);
+    if ("refusal" in result) return result.refusal;
+    if (result.job.status !== "completed") return refused("forge_refused", "The CI job is not complete.");
   }
   // Read the run last. GitHub's write is addressed by immutable run or job ID and does not
   // accept an attempt precondition. The fence excludes other Wollipog writes to this attempt.
-  const run = await read(runs);
+  const run = await readCiTarget(gh, runs);
   if (!run) return refused("forge_unavailable", "GitHub could not verify the approved CI run.");
   const reportedRepository = record(run.repository)?.full_name;
   if (run.id !== runId || run.head_sha !== headSha || run.run_attempt !== attempt ||
@@ -90,7 +112,7 @@ export async function executeCiRerun(
   }
   if (run.status !== "completed") return refused("forge_refused", "The CI run is not complete.");
   if (!writeFence.begin()) return { outcome: "uncertain" };
-  const written = await gh(api.concat("--include", "--method", "POST", `${jobId === undefined ? runs : jobs}/rerun`));
+  const written = await gh(CI_API.concat("--include", "--method", "POST", `${jobId === undefined ? runs : jobs}/rerun`));
   if (written.timedOut) return { outcome: "uncertain" };
   const status = Number(/^HTTP\/\S+ (\d{3})\b/u.exec(written.stdout)?.[1]);
   if (written.code === null && status === 201) return { outcome: "rerun_requested" };

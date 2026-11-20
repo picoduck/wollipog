@@ -98,6 +98,8 @@ export interface AssistantDecisionHistoryEntry {
   sessionId: string;
   category: AssistantDecisionCategory;
   resourceKey: string;
+  /** Display text derived from the approved snapshot, separate from its internal key. */
+  subject?: string;
   delegation: RecordedAssistantDecisionResolution;
 }
 

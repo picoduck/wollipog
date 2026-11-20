@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { GhOutcome } from "./campaign-forge-status.js";
-import { executeTemporaryBranch, executeBranchDeletion, executeCiRerun, executePullRequestEnqueue, observePullRequestMerge, observePullRequestRetirement, observeIssuePublication } from "./forge-decision-action.js";
+import { executeTemporaryBranch, executeBranchDeletion, executeCiRerun, inspectCiRerunJob, executePullRequestEnqueue, observePullRequestMerge, observePullRequestRetirement, observeIssuePublication } from "./forge-decision-action.js";
 
 const HEAD = "a".repeat(40);
 const MERGE = "c".repeat(40);
@@ -54,6 +54,15 @@ test("a changed CI run, head, attempt, repository or job membership makes no wri
     assert.equal(result.refusal?.reason, "ci_target_mismatch", JSON.stringify(change));
     assert.ok(f.calls.every((call) => call.startsWith("GET")));
   }
+});
+
+test("a CI job's display name is accepted from the exact GitHub job through a read-only request", async () => {
+  const action = { ...ciRerun, kind: "ci_rerun_inspect_job" as const };
+  const exact = ciForge({ job: { name: "Build and Bundle" } });
+  assert.deepEqual(await inspectCiRerunJob(action, exact.gh), { outcome: "ci_job_inspected", jobName: "Build and Bundle" });
+  assert.deepEqual(exact.calls, [`GET ${ciJobPath}`]);
+  const wrong = ciForge({ job: { run_id: 201, name: "Different Run" } });
+  assert.equal((await inspectCiRerunJob(action, wrong.gh)).refusal?.reason, "ci_target_mismatch");
 });
 
 test("an ambiguous CI rerun leaves the write fenced and a definite refusal releases it", async () => {

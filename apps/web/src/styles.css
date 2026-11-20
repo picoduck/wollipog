@@ -2926,6 +2926,11 @@ button.status { cursor: pointer; }
   color: var(--text);
   overflow-wrap: anywhere;
 }
+.ci-rerun-target {
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+  column-gap: var(--space-1);
+}
+.ci-rerun-target .ci-rerun-repository dd { grid-column: span 3; }
 .facts.strip {
   grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 0;

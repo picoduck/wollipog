@@ -47,11 +47,11 @@ function DecisionHistory({ campaignId, threadId, onClose }: { campaignId?: strin
       {next && <button type="button" className="btn sm" onClick={() => setCursors((current) => [...current, next])}>Older Decisions</button>}
     </div>}
     {!!page?.entries.length && <ul className="campaign-decision-list assistant-decision-history" aria-label="Delegated Decisions">
-      {page.entries.map(({ occurrenceId, category, resourceKey, delegation }) => {
+      {page.entries.map(({ occurrenceId, category, resourceKey, subject, delegation }) => {
         const title = delegation.threadTitle ?? "Assistant Thread";
         return <li key={occurrenceId} className="campaign-decision-item">
           <strong>{category === "ui_evidence_approval" ? "UI Evidence" : ASSISTANT_DECISION_CATEGORIES[category]}</strong>
-          <p className="muted">{resourceKey}</p>
+          <p className="muted">{subject ?? (category === "ci_rerun" ? "GitHub Actions Run" : resourceKey)}</p>
           <p>{delegation.outcome === "approved" ? "Approved" : delegation.outcome === "denied" ? "Denied" : "Answered"} by Assistant thread{" "}
             {threadId ? <strong>{title}</strong> : <button className="btn sm" type="button" title={delegation.threadId} onClick={() => {
               onClose?.();

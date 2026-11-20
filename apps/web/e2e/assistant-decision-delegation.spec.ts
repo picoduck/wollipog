@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { viewPath } from "../src/navigation.js";
 import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizontalOverflow } from "./layout-invariants.js";
 
@@ -100,6 +100,13 @@ async function threadAction(page: Page, name: string) {
   await page.getByRole("menuitem", { name, exact: true }).click();
 }
 
+async function expectCiRerunHistory(scope: Locator) {
+  const subject = scope.getByText("engineering/release-validation · Run 44699507825 · Attempt 2 · Build and Bundle", { exact: true });
+  await subject.scrollIntoViewIfNeeded();
+  await expectFullyInViewport(subject, "CI Rerun Subject");
+  await expect(scope).not.toContainText("ci_rerun:");
+}
+
 test("a control plane without delegation support offers no grant or history actions", async ({ page }) => {
   await openAssistantFixture(page, thread, false);
   await page.getByRole("button", { name: "Thread Actions", exact: true }).click();
@@ -182,7 +189,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await expect(history).toContainText("under your delegation.");
     await expect(history).toContainText("Triage Open Issues");
     await expect(history.getByRole("listitem")).toHaveCount(5);
-    await history.getByText("CI Rerun", { exact: true }).scrollIntoViewIfNeeded();
+    await expectCiRerunHistory(history);
     await expectNoHorizontalOverflow(history, "Thread Decision History");
     await expectPageNoHorizontalOverflow(page);
     await capture(page, "thread-history");
@@ -206,8 +213,18 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await page.goto("/assistants-e2e.html?delegation=stress&ci-rerun&path=%2F");
     if (layout === "phone") await page.getByRole("button", { name: /Investigate the CI Failure/ }).click();
     await expect(page.getByText("CI Rerun Approval Required", { exact: true })).toBeVisible();
-    await expect(page.getByRole("link", { name: "#136164180219" })).toBeVisible();
-    await expect(page.getByText("2d99e227b73fcad015264f7fe04674953df724b1", { exact: true })).toBeVisible();
+    const target = page.getByLabel("CI Rerun Target");
+    await expectFullyInViewport(target, "CI Rerun Target");
+    for (const label of ["Repository", "Workflow Run", "Job", "Head Commit", "Attempt"]) {
+      await expectFullyInViewport(target.getByText(label, { exact: true }), label);
+    }
+    await expect(target.getByRole("link", { name: "#44699507825" })).toHaveAttribute("href", /\/actions\/runs\/44699507825$/u);
+    await expect(target.getByRole("link", { name: "#136164180219" })).toHaveAttribute("href", /\/job\/136164180219$/u);
+    const head = target.getByRole("link", { name: /Head Commit 2d99e227b73fcad015264f7fe04674953df724b1/ });
+    await expect(head).toHaveText("2d99e227b7");
+    await expect(head).toHaveAttribute("title", "2d99e227b73fcad015264f7fe04674953df724b1");
+    await expect(target.getByText("2", { exact: true })).toBeVisible();
+    await expectNoHorizontalOverflow(target, "CI Rerun Target");
     await expectPageNoHorizontalOverflow(page);
     await capture(page, "ci-rerun-request");
   });
@@ -222,7 +239,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await expect(history.getByRole("button", { name: "Triage Open Issues" }).first()).toBeVisible();
     await expectNoHorizontalOverflow(history, "Inbox Decision History");
     await expectFullyInViewport(history.getByRole("button", { name: "Close", exact: true }).last(), "Close");
-    await history.getByText("CI Rerun", { exact: true }).scrollIntoViewIfNeeded();
+    await expectCiRerunHistory(history);
     await capture(page, "inbox-history");
     await history.getByRole("button", { name: "Older Decisions" }).click();
     await expect(history.getByRole("listitem")).toHaveCount(5);
@@ -236,7 +253,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     const section = page.locator('[data-campaign-section="Delegated Decisions"]');
     await expect(section.getByText("The required checks passed and the review covered the current head.")).toBeVisible();
     await expect(section.getByRole("listitem")).toHaveCount(5);
-    await section.getByText("CI Rerun", { exact: true }).scrollIntoViewIfNeeded();
+    await expectCiRerunHistory(section);
     await expectNoHorizontalOverflow(page.locator(".campaign-status"), "Campaign Status");
     await expectPageNoHorizontalOverflow(page);
     await capture(page, "campaign-history");

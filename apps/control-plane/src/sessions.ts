@@ -12470,7 +12470,25 @@ export class SessionsService {
       if (!inspected.ok || inspected.location.repository !== normalized.data.repository) {
         return fail("The requested GitHub repository could not be verified at this session's Location", 409);
       }
-      return this.createWorkflowDecision(sessionId, request, canAccess, { trustedForgeLocationId: location.id });
+      const target = normalized.data;
+      const prior = this.db.workflowDecisionByRequestId(sessionId, request.requestId)?.resourceSnapshot;
+      let jobName = prior?.category === "ci_rerun" ? prior.jobName : undefined;
+      if (!prior && target.jobId !== undefined) {
+        const requestId = `ci_job_inspection_${randomUUID()}`;
+        const { repository, runId, headSha, attempt } = target;
+        try {
+          const answer = await this.hub.requestFromRunner(child.runnerId, requestId, {
+            type: "forge_decision_action", requestId, sessionId, occurrenceId: requestId,
+            action: { kind: "ci_rerun_inspect_job", repository, runId, jobId: target.jobId, headSha, attempt },
+          }, 10_000);
+          if (answer.type === "forge_decision_action_result" && answer.requestId === requestId &&
+              answer.occurrenceId === requestId && answer.sessionId === sessionId && answer.outcome === "ci_job_inspected" &&
+              boundedDecisionString(answer.jobName, 200) && !/[\p{Cc}\p{Cf}]/u.test(answer.jobName)) jobName = answer.jobName;
+        } catch {
+          // The exact job ID is still available if GitHub cannot supply a display name.
+        }
+      }
+      return this.createWorkflowDecision(sessionId, request, canAccess, { trustedForgeLocationId: location.id, ciRerunJobName: jobName });
     }
     if (normalized.ok && normalized.data?.category === "implementation_question") {
       const credentialScreen = await this.screenImplementationQuestion(sessionId, request, normalized.data);
@@ -14946,6 +14964,7 @@ export class SessionsService {
     internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean; trustedIssueScope?: boolean; trustedPublication?: boolean; trustedAutomationCreation?: boolean;
       /** The control plane just verified this registered Location's origin through the runner. */
       trustedForgeLocationId?: string;
+      ciRerunJobName?: string;
       /** A regular session's Location switch, inspected by LocationSwitchService (#4138). */
       trustedLocationSwitch?: boolean;
       /** An Orchestrator's repository addition, inspected by CampaignLocations (#4117). */
@@ -15017,6 +15036,7 @@ export class SessionsService {
       if (request.resourceKey !== ciRerunResourceKey(normalized.data)) {
         return fail(`Use the canonical CI rerun resourceKey: ${ciRerunResourceKey(normalized.data)}`, 400);
       }
+      if (normalized.data.jobId !== undefined && internal.ciRerunJobName) normalized.data.jobName = internal.ciRerunJobName;
     }
     if (normalized.data.category === "campaign_issue_scope" && !internal?.trustedIssueScope) {
       return fail("use request_campaign_issue_scope_change for a repository-bound human scope proposal", 403);
@@ -16762,7 +16782,7 @@ export class SessionsService {
       (createdIssue !== undefined || decision.forgeAction?.outcome === "uncertain" || decision.forgeAction?.outcome === "in_progress");
     let publicationPlace: ReturnType<SessionsService["publicationPlace"]> = null;
     if (snapshot.category === "ci_rerun") {
-      const { category: _category, ...target } = snapshot;
+      const { category: _category, jobName: _jobName, ...target } = snapshot;
       action = { kind: "ci_rerun", ...target };
     } else if (snapshot.category === "follow_up_issue_publication") {
       const route = this.publicationRoute(child, parent, snapshot, true);

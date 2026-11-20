@@ -460,6 +460,10 @@ test("an explicit Assistant grant approves an exact CI rerun and only the reques
           ok: true, repository: snapshot.repository, issueNumbers: [], digest: "0".repeat(64) };
       }
       assert.equal(frame.type, "forge_decision_action");
+      if (frame.action.kind === "ci_rerun_inspect_job") {
+        return { type: "forge_decision_action_result", requestId, sessionId: frame.sessionId, occurrenceId: frame.occurrenceId,
+          outcome: "ci_job_inspected", jobName: "Build and Bundle" };
+      }
       calls.push(frame);
       return { type: "forge_decision_action_result", requestId, sessionId: frame.sessionId, occurrenceId: frame.occurrenceId,
         outcome: result, ...(result === "refused" ? { refusal: { reason: "ci_target_mismatch",
@@ -502,6 +506,7 @@ test("an explicit Assistant grant approves an exact CI rerun and only the reques
     assert.equal((await execute(run)).status, 409);
     const history = await h.ownerCall("GET", `/api/assistant-decision-history?threadId=${thread.id}&campaignId=root`);
     assert.equal(history.body.entries[0]?.category, "ci_rerun");
+    assert.equal(history.body.entries[0]?.subject, "picoduck/wollipog · Run 123 · Attempt 2");
     assert.equal(history.body.entries[0]?.delegation?.threadId, thread.id);
 
     result = "refused";
@@ -520,6 +525,8 @@ test("an explicit Assistant grant approves an exact CI rerun and only the reques
     assert.equal((await decide(duplicate)).isError, undefined);
     assert.equal((await execute(duplicate)).status, 409);
     assert.equal(calls.length, 3);
+    const jobHistory = await h.ownerCall("GET", `/api/assistant-decision-history?threadId=${thread.id}&campaignId=root`);
+    assert.equal(jobHistory.body.entries[0]?.subject, "picoduck/wollipog · Run 125 · Attempt 2 · Build and Bundle");
   } finally { await h.close(); }
 });
 

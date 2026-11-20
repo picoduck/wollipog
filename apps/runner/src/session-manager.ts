@@ -16,7 +16,7 @@ import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, Gi
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
 import { ciRerunResourceKey, sameForgeMergeQueueFacts } from "@wollipog/protocol";
 import { githubMergeQueueFacts } from "./pull-request-queue.js";
-import { executeBranchDeletion, executeCiRerun, executeTemporaryBranch, executeIssuePublication, executePullRequestEnqueue, observeIssuePublication, observePullRequestMerge, observePullRequestRetirement } from "./forge-decision-action.js";
+import { executeBranchDeletion, executeCiRerun, inspectCiRerunJob, executeTemporaryBranch, executeIssuePublication, executePullRequestEnqueue, observeIssuePublication, observePullRequestMerge, observePullRequestRetirement } from "./forge-decision-action.js";
 import { githubSlug } from "./git-ops.js";
 import { proveWorktreePatchDelivery, type CampaignDeliveredPullRequest, type WorktreePatchDeliveryResult } from "./worktree-patch-delivery.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
@@ -22420,7 +22420,7 @@ export class SessionManager {
       const agentEnv = options.agentEnv?.(meta) ?? {};
       const neutral = meta.context?.kind === "wsl" ? "/" : parsePath(tmpdir()).root;
       const gh = options.gh ?? contextGhRunner(meta.context, neutral, agentEnv);
-      if (message.action?.kind === "ci_rerun") {
+      if (message.action?.kind === "ci_rerun" || message.action?.kind === "ci_rerun_inspect_job") {
         const action = message.action;
         let origin: string | undefined | null;
         try {
@@ -22434,6 +22434,7 @@ export class SessionManager {
           return { ...base, outcome: "refused", refusal: { reason: "ci_target_mismatch",
             summary: "The session's repository no longer matches the approved GitHub repository." } };
         }
+        if (action.kind === "ci_rerun_inspect_job") return { ...base, ...await inspectCiRerunJob(action, gh) };
         const key = ciRerunResourceKey({ ...action, category: "ci_rerun" });
         const directory = "workflow-ci-reruns";
         const digest = createHash("sha256").update(JSON.stringify(action)).digest("hex");

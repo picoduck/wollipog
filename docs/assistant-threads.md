@@ -206,8 +206,9 @@ The requesting session calls `execute_workflow_decision` (CLI `wollipog decision
 the approved occurrence ID and resource digest. Wollipog rechecks the repository, run, commit,
 current attempt and optional job before asking GitHub to rerun it. An accepted rerun consumes the
 approval. If the target changed, request a new approval for the updated target. If the outcome
-is uncertain, inspect the GitHub run before proceeding. Wollipog blocks another write for the
-same attempt. GitHub's rerun API accepts a run or job ID and has no attempt precondition, so an
+is uncertain, inspect the GitHub run before proceeding. Wollipog blocks another typed write for
+the same attempt across sessions on the installation. If GitHub confirms it never started,
+the owner can rerun it manually. GitHub's rerun API accepts a run or job ID and has no attempt precondition, so an
 external rerun racing the final check can still affect the result. Older peers keep the manual
 owner approval path.
 

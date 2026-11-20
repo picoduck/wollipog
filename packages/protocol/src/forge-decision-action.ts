@@ -78,6 +78,8 @@ export type ForgeDecisionActionSuccess =
 
 export type ForgeDecisionActionOutcome =
   | ForgeDecisionActionSuccess
+  /** Read-only admission proof. Never a successful execution or a consumable receipt. */
+  | "ci_job_inspected"
   | "refused"
   /** Dispatched, but no answer proved what happened. A deletion may be retried (compare-and-delete
    * is idempotent); an enqueue is not replayed and is reconciled once the forge reads MERGED; a
@@ -130,7 +132,8 @@ export type ProviderForgeRefusal =
   | { kind: "managed"; occurrenceId: string; resourceDigest: string };
 
 export type ForgeDecisionAction =
-  | (Omit<CiRerunDecisionSnapshot, "category"> & { kind: "ci_rerun" })
+  | (Omit<CiRerunDecisionSnapshot, "category" | "jobName"> & { kind: "ci_rerun" })
+  | (Omit<CiRerunDecisionSnapshot, "category" | "jobName"> & { kind: "ci_rerun_inspect_job"; jobId: number })
   | { kind: "temporary_branch_create"; repository: string; branch: string; headSha: string }
   | { kind: "temporary_branch_deletion"; repository: string; branch: string; headSha: string }
   | { kind: "branch_deletion"; repository: string; branch: string; pullRequest: number; headSha: string; mergeCommitSha: string }
@@ -177,6 +180,8 @@ export interface ForgeDecisionActionResultMessage {
   refusal?: { reason: ForgeDecisionActionRefusalReason; summary: string };
   /** With `published` or `already_published`. */
   issue?: number;
+  /** Only for the read-only CI inspection. */
+  jobName?: string;
   /** v377: immutable default-head containment read that preceded create-only publication. */
   temporaryBranchProof?: { defaultBranch: string; defaultHeadSha: string };
 }
@@ -258,6 +263,8 @@ export interface CiRerunDecisionSnapshot {
   runId: number;
   /** Omit to rerun the whole workflow. GitHub includes a selected job's dependent jobs. */
   jobId?: number;
+  /** Display name read from GitHub by the runner at admission. The ID remains the action target. */
+  jobName?: string;
   headSha: string;
   attempt: number;
 }
@@ -267,7 +274,12 @@ export function ciRerunResourceKey(snapshot: CiRerunDecisionSnapshot): string {
   return `ci_rerun:${snapshot.repository.toLowerCase()}:${snapshot.runId}:${snapshot.attempt}`;
 }
 
-export function normalizeCiRerunTarget(value: Record<string, unknown>): Omit<CiRerunDecisionSnapshot, "category"> | null {
+export function ciRerunSubject(snapshot: CiRerunDecisionSnapshot): string {
+  const run = `${snapshot.repository} · Run ${snapshot.runId} · Attempt ${snapshot.attempt}`;
+  return snapshot.jobId === undefined ? run : `${run} · ${snapshot.jobName ?? `Job #${snapshot.jobId}`}`;
+}
+
+export function normalizeCiRerunTarget(value: Record<string, unknown>): Omit<CiRerunDecisionSnapshot, "category" | "jobName"> | null {
   const { repository, runId, jobId, headSha, attempt } = value;
   const positive = (id: unknown): id is number => typeof id === "number" && Number.isSafeInteger(id) && id > 0;
   if (typeof repository !== "string" || !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/([A-Za-z0-9._-]{1,100})$/u.test(repository) ||

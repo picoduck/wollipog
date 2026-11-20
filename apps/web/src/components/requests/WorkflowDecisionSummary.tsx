@@ -132,20 +132,21 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
             {...(closingReferenceCheck ? { check: closingReferenceCheck } : {})} />
         </dd></div>
       </dl>;
-    case "ci_rerun":
-      return <>
-        <dl className="facts">
-          <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
-          <div><dt>Workflow Run</dt><dd><a href={`https://github.com/${snapshot.repository}/actions/runs/${snapshot.runId}`}
-            target="_blank" rel="noreferrer">#{snapshot.runId}</a></dd></div>
-          {snapshot.jobId !== undefined && <div><dt>Job</dt><dd><a
-            href={`https://github.com/${snapshot.repository}/actions/runs/${snapshot.runId}/job/${snapshot.jobId}`}
-            target="_blank" rel="noreferrer">#{snapshot.jobId}</a></dd></div>}
-          <div><dt>Head Commit</dt><dd><code>{snapshot.headSha}</code></dd></div>
-          <div><dt>Attempt</dt><dd>{snapshot.attempt}</dd></div>
-        </dl>
-        <p>{snapshot.jobId === undefined ? "Approval reruns the entire workflow." : "Approval reruns this job and any jobs that depend on it."}</p>
-      </>;
+    case "ci_rerun": {
+      const runUrl = `https://github.com/${snapshot.repository}/actions/runs/${snapshot.runId}`;
+      return <dl className="facts ci-rerun-target" aria-label="CI Rerun Target">
+        <div className="ci-rerun-repository"><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
+        <div><dt>Workflow Run</dt><dd><a href={runUrl} target="_blank" rel="noreferrer">#{snapshot.runId}</a></dd></div>
+        <div><dt>Attempt</dt><dd>{snapshot.attempt}</dd></div>
+        <div><dt>Head Commit</dt><dd><a href={`https://github.com/${snapshot.repository}/commit/${snapshot.headSha}`}
+          title={snapshot.headSha} aria-label={`Head Commit ${snapshot.headSha}`} target="_blank" rel="noreferrer">
+          <code>{snapshot.headSha.slice(0, 10)}</code>
+        </a></dd></div>
+        <div><dt>Job</dt><dd>{snapshot.jobId === undefined ? "Entire Run" :
+          <a href={`${runUrl}/job/${snapshot.jobId}`} target="_blank" rel="noreferrer"
+            title="GitHub also reruns jobs that depend on this job.">#{snapshot.jobId}</a>}</dd></div>
+      </dl>;
+    }
     case "review_round_extension":
       // What the person is asked to grant: more cross-model review rounds, and why (#3369).
       return <dl className="facts">

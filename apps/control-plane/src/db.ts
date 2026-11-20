@@ -1,6 +1,6 @@
 import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS, issueClosureDeliveryGap, knownProviderCommandHomeWriteSeparation } from "@wollipog/protocol";
 import { validCampaignLaunchDisclosure, ownerResourceLabel, campaignPublicationTitle } from "@wollipog/protocol";
-import { assistantDecisionCategory, type AssistantDecisionHistoryPage } from "@wollipog/protocol";
+import { assistantDecisionCategory, ciRerunSubject, type AssistantDecisionHistoryPage } from "@wollipog/protocol";
 import { withoutProviderAccountNames } from "./agent-account-view.js";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, CAMPAIGN_PENDING_CAUSES, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
@@ -24961,6 +24961,7 @@ export class ControlPlaneDb {
       const category = decision && assistantDecisionCategory(decision.resourceSnapshot);
       if (!decision?.assistantDelegation || !category) return [];
       return [{ occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, category, resourceKey: decision.resourceKey,
+        ...(decision.resourceSnapshot.category === "ci_rerun" ? { subject: ciRerunSubject(decision.resourceSnapshot) } : {}),
         delegation: decision.assistantDelegation }];
     });
     const last = entries.at(-1);
