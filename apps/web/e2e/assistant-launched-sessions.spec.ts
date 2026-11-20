@@ -109,6 +109,34 @@ for (const theme of ["dark", "light"] as const) {
       await expect(panel(page).locator(".rpanel-switcher-name")).toHaveText("Launched Sessions");
     });
 
+    test("as on a session page, one bar holds Thread Actions and the Side Panel toggle, and the panel spans the side under it", async ({ page }) => {
+      await open(page, theme);
+      const bar = page.locator(".assistant-thread-bar");
+      // Thread Settings is in Thread Actions, not a button of its own.
+      await expect(page.getByRole("button", { name: "Thread Settings", exact: true })).toHaveCount(0);
+      await bar.getByRole("button", { name: "Thread Actions" }).click();
+      await expect(page.getByRole("menuitem", { name: "Thread Settings" })).toBeVisible();
+      await page.keyboard.press("Escape");
+      // The Side Panel toggle follows Thread Actions at the bar's end, as the session bar's does.
+      const sidePanel = bar.getByRole("button", { name: "Side Panel" });
+      const [menuBox, toggleBox, barBox] = await Promise.all([
+        bar.getByRole("button", { name: "Thread Actions" }).boundingBox(), sidePanel.boundingBox(), bar.boundingBox()]);
+      expect(toggleBox!.x).toBeGreaterThan(menuBox!.x);
+      expect(barBox!.x + barBox!.width - (toggleBox!.x + toggleBox!.width)).toBeLessThan(24);
+      await expect(sidePanel).toHaveAttribute("aria-pressed", "false");
+      await sidePanel.click();
+      await expect(sidePanel).toHaveAttribute("aria-pressed", "true");
+      await expect(panel(page)).toBeVisible();
+      // The panel runs from under the bar to the bottom of the window, beside the column.
+      const panelBox = (await panel(page).boundingBox())!;
+      expect(Math.abs(panelBox.y - (barBox!.y + barBox!.height))).toBeLessThanOrEqual(1);
+      expect(Math.abs(panelBox.y + panelBox.height - page.viewportSize()!.height)).toBeLessThanOrEqual(1);
+      const facts = (await page.locator(".assistant-thread-head").boundingBox())!;
+      expect(facts.x + facts.width).toBeLessThanOrEqual(panelBox.x + 1);
+      await sidePanel.click();
+      await expect(panel(page)).toHaveCount(0);
+    });
+
     test("a focused card that changes group keeps focus in the panel", async ({ page }) => {
       await open(page, theme);
       await toggle(page).click();
@@ -206,6 +234,13 @@ for (const theme of ["dark", "light"] as const) {
       await panel(page).getByRole("button", { name: "Back to Session" }).click();
       await expect(panel(page)).toHaveCount(0);
       await expect(waitingInHeader(page).getByRole("button", { name: "Approve Once" })).toBeVisible();
+
+      // The detail bar ends with the Side Panel toggle, as a session's phone bar does.
+      const sidePanel = page.locator(".detail-bar").getByRole("button", { name: "Side Panel" });
+      await sidePanel.click();
+      await expect(launched(page)).toBeVisible();
+      await panel(page).getByRole("button", { name: "Back to Session" }).click();
+      await expect(sidePanel).toHaveAttribute("aria-pressed", "false");
 
       // A card in the sheet opens its session with the sheet out of the way.
       await toggle(page).click();

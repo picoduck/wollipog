@@ -12823,7 +12823,11 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: 0;
   list-style: none;
 }
-/* The thread's header, in the session bar's place: the title row, the facts, then the work cards. */
+/* The thread's bar (#4776), on the session bar's geometry (`.detail-bar.session-bar`): the title
+   gives way first, and the status badge and the actions never shrink. */
+.assistant-thread-bar > .status { flex: none; }
+/* The head of the thread's conversation column, under the bar and beside the side panel: the facts,
+   then what waits on the owner. */
 .assistant-thread-head {
   display: grid;
   flex: none;
@@ -12831,22 +12835,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: var(--space-3) var(--page-gutter) var(--space-3) var(--space-6);
   border-bottom: 1px solid var(--border);
 }
-.assistant-thread-title-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  min-width: 0;
-}
-.assistant-thread-title {
-  flex: 0 1 auto;
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  font: var(--type-title);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.assistant-thread-title-row > :last-child { margin-left: auto; }
 /* Neutral facts (§11.3), as a project's meta line draws them. */
 .assistant-thread-meta {
   display: flex;

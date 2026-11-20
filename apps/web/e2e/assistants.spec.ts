@@ -160,7 +160,9 @@ for (const theme of ["dark", "light"] as const) {
     test("an open thread shows its transcript, composer, access level, launched counts and the waiting approval", async ({ page }) => {
       await open(page, theme, "", "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA");
       const head = page.locator(".assistant-thread-head");
-      await expect(head.getByRole("heading", { level: 2, name: "Triage Open Issues" })).toBeVisible();
+      // One bar across the thread pane, as on the session page (#4776); the facts head the column.
+      const bar = page.locator(".assistant-thread-bar");
+      await expect(bar.getByRole("heading", { level: 2, name: "Triage Open Issues" })).toBeVisible();
       await expect(head.getByRole("list", { name: "Thread Details" })).toContainText("Full Access · Ask Before Destructive");
       await expect(head.getByRole("list", { name: "Thread Details" })).toContainText("Claude Code");
       // The backing session's transcript and composer.
@@ -168,7 +170,7 @@ for (const theme of ["dark", "light"] as const) {
       await expect(page.locator(".composer")).toBeVisible();
       // The header counts the launched sessions (#4776); only the one waiting on the person is a card
       // here, with its approval inline. The running one is in the closed Launched Sessions panel.
-      await expect(head.locator(".assistant-launched-toggle")).toHaveText("2 Sessions · 1 Needs You");
+      await expect(bar.locator(".assistant-launched-toggle")).toHaveText("2 Sessions · 1 Needs You");
       const cards = page.getByRole("region", { name: "Waiting for You" }).locator(".assistant-work-card");
       await expect(cards).toHaveCount(1);
       await expect(head).not.toContainText("Fix the Flaky Upload Test");
@@ -183,7 +185,7 @@ for (const theme of ["dark", "light"] as const) {
       await waiting.getByRole("button", { name: "Approve Once" }).click();
       await expect(page.locator("body")).toHaveAttribute("data-approved", "sess-deps:req-1:allow");
       await expect(page.getByRole("button", { name: "Approve Once" })).toHaveCount(0);
-      await expect(head.locator(".assistant-launched-toggle")).toHaveText("2 Sessions");
+      await expect(bar.locator(".assistant-launched-toggle")).toHaveText("2 Sessions");
     });
 
     test("a thread change arrives as an event, and one that lands during a list read survives it", async ({ page }) => {
@@ -206,7 +208,7 @@ for (const theme of ["dark", "light"] as const) {
       // A rename starts a list read; hold that read, publish another change to the thread while it
       // is in flight, then let it land. The read began before the change, so the change must stay.
       await page.evaluate(() => (window as unknown as { assistantsHoldNextList: () => void }).assistantsHoldNextList());
-      await page.locator(".assistant-thread-head").getByRole("button", { name: "Thread Actions" }).click();
+      await page.locator(".assistant-thread-bar").getByRole("button", { name: "Thread Actions" }).click();
       await page.getByRole("menuitem", { name: "Rename" }).click();
       const rename = page.getByRole("dialog", { name: "Rename Thread" });
       await expect(rename.getByRole("textbox", { name: "Title" })).toHaveAttribute("maxlength", "120");
@@ -220,7 +222,7 @@ for (const theme of ["dark", "light"] as const) {
       await page.evaluate(() => (window as unknown as { assistantsReleaseList: () => void }).assistantsReleaseList());
       await page.waitForTimeout(500);
       await expect(threadRow(page, "Triage Last Night's CI").locator(".status")).toHaveText("Done");
-      await expect(page.locator(".assistant-thread-head").getByRole("heading", { level: 2 })).toHaveText("Triage Last Night's CI");
+      await expect(page.locator(".assistant-thread-bar").getByRole("heading", { level: 2 })).toHaveText("Triage Last Night's CI");
     });
 
     test("the thread's transcript is the backing session's, as the Sessions page shows it", async ({ page }) => {
@@ -256,7 +258,7 @@ for (const theme of ["dark", "light"] as const) {
       // A rename starts a list read; hold it, change the triage thread while it is in flight, then
       // send more changes to another thread than the store keeps, each in its own render.
       await page.evaluate(() => (window as unknown as Fixture).assistantsHoldNextList());
-      await page.locator(".assistant-thread-head").getByRole("button", { name: "Thread Actions" }).click();
+      await page.locator(".assistant-thread-bar").getByRole("button", { name: "Thread Actions" }).click();
       await page.getByRole("menuitem", { name: "Rename" }).click();
       const rename = page.getByRole("dialog", { name: "Rename Thread" });
       await rename.getByRole("textbox", { name: "Title" }).fill("Triage Last Night's CI");
@@ -274,7 +276,7 @@ for (const theme of ["dark", "light"] as const) {
 
     test("an archived thread open on its own follows a change the store could not keep", async ({ page }) => {
       await open(page, theme, "", "/assistants/~dABoAHIAXwByAGUAdABpAHIAZQBkAA");
-      const head = page.locator(".assistant-thread-head");
+      const head = page.locator(".assistant-thread-bar");
       await expect(head.getByRole("heading", { level: 2, name: "Retire the Old Runner" })).toBeVisible();
       // Its rename and more changes than the store keeps arrive in one render: the list is read
       // again, and so is the archived thread, which the list leaves out.
@@ -293,7 +295,7 @@ for (const theme of ["dark", "light"] as const) {
       // thr_retired
       await open(page, theme, "", "/assistants/~dABoAHIAXwByAGUAdABpAHIAZQBkAA");
       await expect(threadsList(page).locator("[data-thread-id]")).toHaveCount(3);
-      const head = page.locator(".assistant-thread-head");
+      const head = page.locator(".assistant-thread-bar");
       await expect(head.getByRole("heading", { level: 2, name: "Retire the Old Runner" })).toBeVisible();
       await expect(head.locator(".status")).toHaveText("Archived");
     });
@@ -321,18 +323,18 @@ for (const theme of ["dark", "light"] as const) {
       await dialog.getByRole("textbox", { name: "Title (Optional)" }).fill("Plan the Next Release");
       await dialog.getByRole("button", { name: "Start Thread" }).click();
       await expect(dialog).toHaveCount(0);
-      await expect(page.locator(".assistant-thread-head").getByRole("heading", { level: 2, name: "Plan the Next Release" })).toBeVisible();
+      await expect(page.locator(".assistant-thread-bar").getByRole("heading", { level: 2, name: "Plan the Next Release" })).toBeVisible();
       await expect(threadRow(page, "Plan the Next Release")).toHaveAttribute("aria-current", "true");
       await expect(threadRow(page, "Plan the Next Release").locator(".row-sub")).toContainText("Codex");
 
-      await page.locator(".assistant-thread-head").getByRole("button", { name: "Thread Actions" }).click();
+      await page.locator(".assistant-thread-bar").getByRole("button", { name: "Thread Actions" }).click();
       await page.getByRole("menuitem", { name: "Rename" }).click();
       const rename = page.getByRole("dialog", { name: "Rename Thread" });
       await rename.getByRole("textbox", { name: "Title" }).fill("Plan Release 0.31");
       await rename.getByRole("button", { name: "Rename" }).click();
       await expect(threadRow(page, "Plan Release 0.31")).toBeVisible();
 
-      await page.locator(".assistant-thread-head").getByRole("button", { name: "Thread Actions" }).click();
+      await page.locator(".assistant-thread-bar").getByRole("button", { name: "Thread Actions" }).click();
       await page.getByRole("menuitem", { name: "Archive" }).click();
       await page.getByRole("dialog", { name: "Archive Thread" }).getByRole("button", { name: "Archive Thread" }).click();
       await expect(threadRow(page, "Plan Release 0.31")).toHaveCount(0);
@@ -468,11 +470,11 @@ for (const viewport of LONG_TITLE_VIEWPORTS) {
         await expectFullyInViewport(page.getByRole("button", { name: "Back to Assistants" }), "Back to Assistants");
         await expectFullyInViewport(bar.getByRole("button", { name: "Thread Actions" }), "Thread Actions");
       } else {
-        const head = page.locator(".assistant-thread-head");
+        const head = page.locator(".assistant-thread-bar");
         const title = head.getByRole("heading", { level: 2 });
         await expect(title).toHaveAttribute("title", /^Triage every open issue/);
-        // The work cards' row scrolls sideways by design; the title row never does.
-        await expectNoHorizontalOverflow(head.locator(".assistant-thread-title-row"), "The thread's title row");
+        // The bar never scrolls sideways; its title gives way first.
+        await expectNoHorizontalOverflow(head, "The thread's bar");
         await expectTitleEllipsized(title, head, "The thread's title");
         await expectFullyInViewport(head.getByRole("button", { name: "Thread Actions" }), "Thread Actions");
         await expectNoHorizontalOverflow(threadsList(page), "The Assistants list");

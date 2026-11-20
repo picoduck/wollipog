@@ -15,7 +15,9 @@ async function open(page: Page, path: string, theme: "dark" | "light" = "dark", 
 }
 
 async function editThread(page: Page) {
-  await page.getByRole("button", { name: "Thread Settings", exact: true }).click();
+  // Thread Settings is in Thread Actions (⋯), as the session bar keeps its settings (#4776).
+  await page.getByRole("button", { name: "Thread Actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Thread Settings", exact: true }).click();
   return page.getByRole("dialog", { name: "Thread Settings", exact: true });
 }
 
@@ -96,7 +98,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await open(page, THREAD, theme);
       const details = page.getByLabel("Thread Details");
       await expect(details).toContainText("2 of 10 sessions launched");
-      await expectFullyInViewport(page.getByRole("button", { name: "Thread Settings", exact: true }), "The Thread Settings header action");
+      await expectFullyInViewport(page.getByRole("button", { name: "Thread Actions", exact: true }), "Thread Actions, which holds Thread Settings");
       await expectFullyInViewport(page.locator(".composer"), "The thread composer");
       await expectPageNoHorizontalOverflow(page);
       await capture(page, "thread-header");

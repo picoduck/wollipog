@@ -31,7 +31,7 @@ import { ChangeAssistantThreadAccountDialog } from "./ChangeAssistantThreadAccou
 import { ChangeAssistantThreadHarnessDialog } from "./ChangeAssistantThreadHarnessDialog.js";
 import { AssistantThreadHistory } from "./AssistantThreadHistory.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { AssistantsIcon, BotIcon, PlusIcon, TuningIcon } from "./Icons.js";
+import { AssistantsIcon, BotIcon, PlusIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
 import { NewAssistantThreadDialog, THREADS_UNAVAILABLE_MESSAGE } from "./NewAssistantThreadDialog.js";
 import { Notice } from "./Notice.js";
@@ -42,6 +42,7 @@ import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import type { RightPanelState } from "./right-panel-state.js";
 import { useIsMobile } from "./useIsMobile.js";
+import { SidePanelToggle } from "./SessionPanelToggles.js";
 
 /** The one assistant today; the section lists it first and names its threads under it. */
 const WOLLIPOG_ASSISTANT = "Wollipog Assistant";
@@ -275,12 +276,13 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   };
 
   const threadMenu = (thread: AssistantThread): PageMenuAction[] => [
+    // In ⋯ as the session bar keeps its settings (#4776); it opens limits, harness and account.
+    { label: "Thread Settings", onClick: () => openThreadSettings(thread.id) },
     { label: "Open Session", onClick: () => navigate({ name: "session", id: thread.sessionId }) },
     ...(thread.decisionDelegation ? [{ label: "Delegated Decisions", onClick: () => setViewingDelegationHistory(thread.id) }] : []),
     ...(thread.status === "archived" ? [] : [
       ...(thread.accountChangeSupported ? [{ label: "Change Account", onClick: () => setChangingAccount(thread) }] : []),
       { label: "Rename", onClick: () => setRenaming(thread) },
-      ...(thread.limitsEditable && thread.usage ? [{ label: "Thread Limits", onClick: () => openThreadSettings(thread.id) }] : []),
       ...(thread.decisionDelegation ? [{
         label: "Decision Delegation", onClick: () => navigate({ name: "assistants", threadId: thread.id, delegation: true }),
       }] : []),
@@ -306,15 +308,10 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
           backLabel={backLabel("assistants")}
           onBack={toList}
           status={selected ? <StatusBadge meta={statusMeta("assistantThread", selected.status)} /> : undefined}
-          secondary={selected ? {
-            label: "Thread Settings",
-            icon: <TuningIcon size={16} />,
-            iconOnPhone: true,
-            onClick: () => openThreadSettings(selected.id),
-          } : undefined}
           menu={selected ? threadMenu(selected) : []}
           menuLabel="Thread Actions"
           searchInMenu={Boolean(selected)}
+          controls={selected ? <SidePanelToggle small open={rightPanel.open} onToggle={rightPanel.toggle} /> : undefined}
         />
       ) : (
         // New Thread belongs to the assistant's Threads list, so the page header offers no second one.
@@ -367,11 +364,24 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
               onOpenTerminal={() => navigate({ name: "session", id: selected.sessionId })}
               onBack={toList}
               launchedWork={launchedWork}
-              header={<ThreadHeader
+              // As on the session page (#4776): one bar across the pane, and the side panel under it
+              // beside the column, which the thread's facts and waiting work head. A phone's detail
+              // bar is the thread's bar, so the session view draws none of its own.
+              header={isMobile ? null : (
+                <ThreadBar
+                  thread={selected}
+                  work={launchedWork!}
+                  menu={threadMenu(selected)}
+                  launchedPanelOpen={launchedPanelOpen}
+                  onToggleLaunched={() => rightPanel.openMode("launched")}
+                  sidePanelOpen={rightPanel.open}
+                  onToggleSidePanel={rightPanel.toggle}
+                />
+              )}
+              columnLead={<ThreadFacts
                 thread={selected}
                 work={launchedWork!}
                 compact={isMobile}
-                menu={threadMenu(selected)}
                 launchedPanelOpen={launchedPanelOpen}
                 onToggleLaunched={() => rightPanel.openMode("launched")}
                 onConfirmationAnswered={refresh}
@@ -535,23 +545,50 @@ function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
 }
 
 /**
- * The open thread's header, in the session bar's place: its title, status, harness and access level,
- * the Launched Sessions toggle, and what waits on the owner. The launched sessions themselves are in
- * the side panel's Launched Sessions tool, hidden until asked for (#4776), so many launches never
- * push the conversation down; anything waiting on the owner stays here and is answered here, with
- * the panel open or closed. On a phone the detail bar carries the title and actions, so this keeps only the facts.
+ * The open thread's bar, in the session bar's place and on its geometry (#4776): the title and status,
+ * then the Launched Sessions toggle with its live counts, Thread Actions (⋯, Thread Settings among
+ * them) and, after a divider, the Side Panel toggle, as the session bar ends with its panel toggles.
+ * The side panel opens under it, so it spans the page beside the conversation column.
  */
-function ThreadHeader({ thread, work, compact, menu, launchedPanelOpen, onToggleLaunched, onConfirmationAnswered }: {
+function ThreadBar({ thread, work, menu, launchedPanelOpen, onToggleLaunched, sidePanelOpen, onToggleSidePanel }: {
+  thread: AssistantThread;
+  work: LaunchedWork;
+  menu: PageMenuAction[];
+  launchedPanelOpen: boolean;
+  onToggleLaunched: () => void;
+  sidePanelOpen: boolean;
+  onToggleSidePanel: () => void;
+}) {
+  return (
+    <header className="detail-bar session-bar assistant-thread-bar">
+      <h2 className="detail-bar-title session-bar-title" title={assistantThreadTitle(thread)}>{assistantThreadTitle(thread)}</h2>
+      <StatusBadge meta={statusMeta("assistantThread", thread.status)} />
+      <div className="topbar-actions">
+        <LaunchedSessionsToggle work={work} open={launchedPanelOpen} onToggle={onToggleLaunched} />
+        <ActionsMenu label="Thread Actions" items={menu} />
+        <span className="detail-actions-divider" aria-hidden="true" />
+        <SidePanelToggle small={false} open={sidePanelOpen} onToggle={onToggleSidePanel} />
+      </div>
+    </header>
+  );
+}
+
+/**
+ * The head of the thread's conversation column, beside the side panel (#4776): its harness, access
+ * level and limits, a limit notice, earlier conversations, and what waits on the owner. The launched
+ * sessions themselves are in the side panel's Launched Sessions tool, hidden until asked for, so many
+ * launches never push the conversation down; anything waiting on the owner stays here and is answered
+ * here, with the panel open or closed. On a phone, where the detail bar has no room for it, the
+ * Launched Sessions toggle sits here too.
+ */
+function ThreadFacts({ thread, work, compact, launchedPanelOpen, onToggleLaunched, onConfirmationAnswered }: {
   thread: AssistantThread;
   work: LaunchedWork;
   compact: boolean;
-  menu: PageMenuAction[];
   launchedPanelOpen: boolean;
   onToggleLaunched: () => void;
   onConfirmationAnswered?: () => void;
 }) {
-  const { navigate } = useStoreActions();
-  const meta = statusMeta("assistantThread", thread.status);
   const grant = thread.decisionDelegation?.grant;
   const expiresAt = grant?.expiresAt;
   const now = useTimelineClock(expiresAt != null);
@@ -570,15 +607,6 @@ function ThreadHeader({ thread, work, compact, menu, launchedPanelOpen, onToggle
     : launches ? `${launches.used} of ${launches.limit} sessions launched` : null;
   return (
     <div className="assistant-thread-head">
-      {!compact && (
-        <div className="assistant-thread-title-row">
-          <h2 className="assistant-thread-title" title={assistantThreadTitle(thread)}>{assistantThreadTitle(thread)}</h2>
-          <StatusBadge meta={meta} />
-          <LaunchedSessionsToggle work={work} open={launchedPanelOpen} onToggle={onToggleLaunched} />
-          <button type="button" className="btn sm" onClick={() => navigate(settingsView)}>Thread Settings</button>
-          <ActionsMenu label="Thread Actions" items={menu} />
-        </div>
-      )}
       <ul className="assistant-thread-meta" aria-label="Thread Details">
         <li>{WOLLIPOG_ASSISTANT}</li>
         <li>{assistantThreadHarnessLabel(thread.harness)}</li>

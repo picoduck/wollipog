@@ -145,7 +145,8 @@ export function AssistantWaitingWork({ work, confirmations }: {
   const waiting = groups.needsYou;
   const campaigns = useMemo(() => new Set(work.campaignIds ?? []), [work.campaignIds]);
   const focus = useFocusRecovery<HTMLElement>(waiting.join("\n"), (sessionId, list) => cardFocusTarget(list, sessionId)
-    ?? document.querySelector<HTMLElement>(".assistant-thread-head .assistant-launched-toggle"));
+    // The thread's one Launched Sessions toggle: in its bar on desktop, under its facts on a phone.
+    ?? document.querySelector<HTMLElement>(".assistant-launched-toggle"));
   if (waiting.length === 0 && !confirmations) return null;
   return (
     <section ref={focus.ref} className="assistant-work" aria-label="Waiting for You" onFocus={focus.onFocus} onBlur={focus.onBlur}>

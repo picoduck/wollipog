@@ -67,17 +67,29 @@ export function SessionPanelToggles({
         <CommandLineIcon size={16} />
       </button>
       {!terminalSupported && <span id={TERMINAL_UPDATE_NOTE_ID} hidden>{TERMINAL_UPDATE_NOTE}</span>}
-      <button
-        type="button"
-        className={className}
-        onClick={onSidePanel}
-        title={coarsePointer ? "Side Panel" : `Side Panel (${shortcutDisplay("toggle-side-panel")})`}
-        aria-label="Side Panel"
-        aria-keyshortcuts={shortcutAriaKeys("toggle-side-panel")}
-        aria-pressed={sidePanelOpen}
-      >
-        <PanelRightIcon size={16} />
-      </button>
+      <SidePanelToggle small={small} open={sidePanelOpen} onToggle={onSidePanel} />
     </div>
+  );
+}
+
+/**
+ * The Side Panel toggle, the session bar's last panel toggle and an Assistant thread's bar's (#4776):
+ * one name in both states, `aria-pressed` for the state, and the chord in its tooltip on a fine
+ * pointer.
+ */
+export function SidePanelToggle({ small, open, onToggle }: { small: boolean; open: boolean; onToggle: () => void }) {
+  const coarsePointer = useIsCoarsePointer();
+  return (
+    <button
+      type="button"
+      className={small ? "icon-btn sm" : "icon-btn"}
+      onClick={onToggle}
+      title={coarsePointer ? "Side Panel" : `Side Panel (${shortcutDisplay("toggle-side-panel")})`}
+      aria-label="Side Panel"
+      aria-keyshortcuts={shortcutAriaKeys("toggle-side-panel")}
+      aria-pressed={open}
+    >
+      <PanelRightIcon size={16} />
+    </button>
   );
 }

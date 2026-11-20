@@ -647,6 +647,10 @@ export type SessionDetailProps = {
   header?: ReactNode;
   /** An assistant thread's launched sessions, for the side panel's Launched Sessions tool (#4776). */
   launchedWork?: LaunchedWork;
+  /** Heads the expanded chat column, under the bar and beside the side panel (#4776): an assistant
+   * thread's facts and what waits on its owner, so the panel spans the page under the bar as it does
+   * beside a session's. */
+  columnLead?: ReactNode;
   /** Transport-owned policy seam. Native passthrough commands default to the existing send path. */
   providerCommandAttachmentPolicy?: ProviderComposerCommand["attachmentPolicy"];
   /** Registers preview-only paging ownership and live-follow actions with the Inbox key layer. */
@@ -1170,6 +1174,7 @@ function SessionDetailLoaded({
   topbarControls,
   header,
   launchedWork,
+  columnLead,
   providerCommandAttachmentPolicy = "send",
   onPreviewNavigationReady,
   onPreviewForkReady,
@@ -7365,6 +7370,7 @@ function SessionDetailLoaded({
               onFocusLost={() => scrollRef.current?.focus({ preventScroll: true })}
             />
           )}
+          {mode === "expanded" && columnLead}
           {/* Campaign notices, not session notices (§13.2; #2036): they describe the campaign, not
               whether this session can take its next turn, so they head the chat column directly
               under the session bar, in this order, on its edges (#2157), rather than in the notice
