@@ -191,7 +191,7 @@ older control planes. Outside Assistant connections cannot use a thread grant.
 
 ### CI Reruns
 
-Typed GitHub Actions reruns require control-plane and runner protocol 396 or later. Start from a
+Typed GitHub Actions reruns require control-plane and runner protocol 399 or later. Start from a
 session in the repository's registered Project Location. Read the workflow run's ID, head SHA
 and current attempt in GitHub before requesting a decision. Include the job ID to rerun a job and
 its dependent jobs. Omitting the job ID reruns the entire workflow.

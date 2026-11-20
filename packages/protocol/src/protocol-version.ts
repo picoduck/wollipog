@@ -1534,13 +1534,13 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 395: Revalidate a control-plane-registered Location before accepting and applying a live switch (Refs #4557).
   395,
   // v396 slot
-  // 396: Execute an approved, exact GitHub Actions rerun through the requesting runner (Refs #4761).
-  396,
   // v397 slot
   // 397: Verify and acknowledge Assistant UI evidence image delivery at the runner relay (Refs #4762).
   397,
   // v398 slot
   // v399 slot
+  // 399: Execute an approved, exact GitHub Actions rerun through the requesting runner (Refs #4761).
+  399,
   // v400 slot
   // v401 slot
   // v402 slot

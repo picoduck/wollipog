@@ -282,8 +282,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * forge observations report the head branch that merged-branch cleanup tracks. Checked against
    * the child's runner, and against the control plane by the runner's tools. */
   forgeDecisionActions: 284,
-  /** v396 adds exact, requester-executed GitHub Actions rerun decisions. */
-  typedCiRerun: 396,
+  /** v399 adds exact, requester-executed GitHub Actions rerun decisions. */
+  typedCiRerun: 399,
   /** v275 campaign handoffs and recorded delivery (#4070). Gates the `complete_with_handoffs`
    * status for dashboards and the delivery and handoff ledger writes for runner tools. */
   campaignHandoffs: 275,
