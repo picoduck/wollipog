@@ -2937,7 +2937,7 @@ button.status { cursor: pointer; }
 }
 .ci-rerun-token {
   display: inline-block;
-  max-inline-size: 100%;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   vertical-align: bottom;
