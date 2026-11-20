@@ -155,14 +155,20 @@ const sessions = new Map<string, SessionView>([
 if (params.has("ci-rerun")) {
   const id = "sess-ci-rerun";
   const occurrenceId = "workflow_ci_rerun";
+  const long = params.get("ci-rerun") === "long";
+  const repository = long ? "some-organization-name/an-unusually-long-repository-name" : "engineering/release-validation";
+  const runId = long ? 98765432109 : 44699507825;
+  const jobId = long ? 98765432198765 : 136164180219;
+  const jobName = long ? "Build, Typecheck and Bundle the Desktop Sidecar for Linux arm64" : "Build and Bundle";
+  const attempt = long ? 12 : 2;
   sessions.set(id, session(id, "Investigate the CI Failure", { status: "input_required", pendingApproval: {
     requestId: occurrenceId, occurrenceId, kind: "workflow_decision", title: "CI Rerun Approval Required",
     options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
     workflowDecision: { requestId: occurrenceId, occurrenceId, sessionId: id, controllingSessionId: id,
       category: "ci_rerun", authority: "human", status: "pending", policyRevision: 0, createdAt: NOW,
-      resourceKey: "ci_rerun:engineering/release-validation:44699507825:2", resourceDigest: "b".repeat(64),
-      resourceSnapshot: { category: "ci_rerun", repository: "engineering/release-validation", runId: 44699507825,
-        jobId: 136164180219, headSha: "2d99e227b73fcad015264f7fe04674953df724b1", attempt: 2 } },
+      resourceKey: `ci_rerun:${repository}:${runId}:${attempt}`, resourceDigest: "b".repeat(64),
+      resourceSnapshot: { category: "ci_rerun", repository, runId, jobId, jobName, attempt,
+        headSha: "2d99e227b73fcad015264f7fe04674953df724b1" } },
   } }));
 }
 

@@ -215,11 +215,14 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await expect(page.getByText("CI Rerun Approval Required", { exact: true })).toBeVisible();
     const target = page.getByLabel("CI Rerun Target");
     await expectFullyInViewport(target, "CI Rerun Target");
-    for (const label of ["Repository", "Workflow Run", "Job", "Head Commit", "Attempt"]) {
+    for (const label of ["Repository", "Workflow Run", "Job and Dependents", "Head Commit", "Attempt"]) {
       await expectFullyInViewport(target.getByText(label, { exact: true }), label);
     }
     await expect(target.getByRole("link", { name: "#44699507825" })).toHaveAttribute("href", /\/actions\/runs\/44699507825$/u);
-    await expect(target.getByRole("link", { name: "#136164180219" })).toHaveAttribute("href", /\/job\/136164180219$/u);
+    const job = target.getByRole("link", { name: "Build and Bundle (#136164180219)", exact: true });
+    await expect(job).toHaveText("Build and Bundle");
+    await expect(job).toHaveAttribute("href", /\/job\/136164180219$/u);
+    await expect(job).toHaveAttribute("title", "Job #136164180219");
     const head = target.getByRole("link", { name: /Head Commit 2d99e227b73fcad015264f7fe04674953df724b1/ });
     await expect(head).toHaveText("2d99e227b7");
     await expect(head).toHaveAttribute("title", "2d99e227b73fcad015264f7fe04674953df724b1");
@@ -227,6 +230,33 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await expectNoHorizontalOverflow(target, "CI Rerun Target");
     await expectPageNoHorizontalOverflow(page);
     await capture(page, "ci-rerun-request");
+  });
+
+  if (layout === "phone") test("the CI rerun approval wraps long names and keeps actions visible on phone", async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await page.goto("/assistants-e2e.html?delegation=stress&ci-rerun=long&path=%2F");
+    await page.getByRole("button", { name: /Investigate the CI Failure/ }).click();
+    const target = page.getByLabel("CI Rerun Target");
+    const card = page.locator(".request-card").filter({ has: target });
+    const repository = target.getByText("some-organization-name/an-unusually-long-repository-name", { exact: true });
+    const jobName = "Build, Typecheck and Bundle the Desktop Sidecar for Linux arm64";
+    const job = target.getByRole("link", { name: `${jobName} (#98765432198765)`, exact: true });
+    await expectFullyInViewport(target, "CI Rerun Target");
+    await expectFullyInViewport(repository, "Long Repository Name");
+    await expect(job).toHaveText(jobName);
+    await expectFullyInViewport(job, "Long Job Name");
+    await expect(job).toHaveAttribute("title", "Job #98765432198765");
+    await expectFullyInViewport(target.getByText("Job and Dependents", { exact: true }), "Job and Dependents");
+    const run = target.getByRole("link", { name: "#98765432109", exact: true });
+    await expect(run).toHaveCSS("white-space", "nowrap");
+    await expect(run).toHaveAttribute("title", "#98765432109");
+    expect(await run.evaluate((link) => link.scrollWidth <= link.clientWidth)).toBe(true);
+    await expect(target.getByRole("link", { name: /Head Commit/ })).toHaveCSS("white-space", "nowrap");
+    await expectFullyInViewport(card.getByRole("button", { name: "Approve", exact: true }), "Approve");
+    await expectFullyInViewport(card.getByRole("button", { name: "Deny", exact: true }), "Deny");
+    await expectNoHorizontalOverflow(card, "CI Rerun Approval Card");
+    await expectPageNoHorizontalOverflow(page);
+    await capture(page, "ci-rerun-request-long-values");
   });
 
   test(`Inbox and Campaign Status show bounded delegated decisions on ${layout}`, async ({ page }) => {
