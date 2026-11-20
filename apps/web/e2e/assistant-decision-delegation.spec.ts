@@ -45,7 +45,12 @@ for (const theme of ["light", "dark"] as const) {
       await approval.scrollIntoViewIfNeeded();
       await screenshot("unavailable");
       await openGrant("available");
+      await expect(approval).toBeEnabled();
       await expect(approval).not.toBeChecked();
+      await expect(approval).not.toHaveAccessibleDescription(/provider may retain/);
+      await approval.focus();
+      await approval.scrollIntoViewIfNeeded();
+      await screenshot("available-default");
       await approval.check();
       await expect(approval).toHaveAccessibleDescription(/Claude Code.*claude-opus-5-5.*provider may retain/);
       await dialog.getByRole("button", { name: "Project Scope: All Projects" }).click();
@@ -68,6 +73,24 @@ for (const theme of ["light", "dark"] as const) {
       await expect(message).toBeVisible();
       await expectPageNoHorizontalOverflow(page);
       await screenshot("refused");
+      if (theme === "dark" && layout === "phone") {
+        await scenario("refused-stress");
+        await page.getByRole("button", { name: /Worked.*1 Failed/ }).click();
+        await page.getByLabel("Resolve UI Evidence · Failed", { exact: true }).click();
+        await expect(message).toContainText("settings-desktop-dark-preview-01");
+        await expect(message).toContainText("settings-desktop-dark-preview-16");
+        const output = page.locator("pre.tl-step-output").filter({ hasText: "settings-desktop-dark-preview-16" });
+        await expectNoHorizontalOverflow(output, "Long missing-receipt refusal");
+        await expectPageNoHorizontalOverflow(page);
+        await output.scrollIntoViewIfNeeded();
+        await screenshot("refused-stress");
+        const scrolled = await output.evaluate((element) => {
+          element.scrollTop = element.scrollHeight;
+          return element.scrollTop;
+        });
+        expect(scrolled).toBeGreaterThan(0);
+        await screenshot("refused-stress-scrolled");
+      }
     });
   }
 }
