@@ -15,6 +15,9 @@ import {
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   ciRerunResourceKey,
+  releaseDecisionPayloadBytes,
+  releaseDecisionResourceKey,
+  type ReleaseDecisionSnapshot,
   type AgentDefinition,
   type AssistantDecisionGrant,
   type AssistantThread,
@@ -165,7 +168,7 @@ test("the owner grants and revokes exact typed resolution, and Assistant calls n
     const deniedOwnerRoute = await h.app.inject({ method: "PUT", url: path, payload: { revision: 0, grant } });
     assert.equal(deniedOwnerRoute.statusCode, 403);
     for (const category of ["policy_ask", "tool_approval", "authentication", "persistent_permissions", "owner_decision", "campaign_issue_scope",
-      "automation_creation", "location_switch", "campaign_repository_addition", "release_publish", "release_tag", "all"]) {
+      "automation_creation", "location_switch", "campaign_repository_addition", "all"]) {
       const invalid = await h.ownerCall("PUT", path, { revision: 0, grant: { ...grant, categories: [category] } });
       assert.equal(invalid.status, 400, category);
       assert.match(invalid.body.error, /no typed Assistant resolution path/u);
@@ -527,6 +530,96 @@ test("an explicit Assistant grant approves an exact CI rerun and only the reques
     assert.equal(calls.length, 3);
     const jobHistory = await h.ownerCall("GET", `/api/assistant-decision-history?threadId=${thread.id}&campaignId=root`);
     assert.equal(jobHistory.body.entries[0]?.subject, "picoduck/wollipog · Run 125 · Attempt 2 · Build and Bundle");
+  } finally { await h.close(); }
+});
+
+const releaseDecisionTarget = { repository: "picoduck/wollipog", tag: "v1.2.3", commitSha: "a".repeat(40), releasePayloadDigest: "" };
+const releaseSnapshots: ReleaseDecisionSnapshot[] = [
+  { ...releaseDecisionTarget, category: "release_tag" },
+  { ...releaseDecisionTarget, category: "release_publish", releaseId: 200, releasePayload: {
+    name: "Wollipog v1.2.3", body: "Release notes.", draft: { name: null, body: null, targetCommitish: "main" },
+    previousStable: null, assets: [],
+  } },
+].map((snapshot) => {
+  const target = snapshot as ReleaseDecisionSnapshot;
+  return { ...target, releasePayloadDigest: createHash("sha256").update(releaseDecisionPayloadBytes(target)).digest("hex") };
+});
+
+test("release approval is owner-held and an Assistant grant only covers its exact release action", async () => {
+  const h = await harness();
+  try {
+    decisionSession(h, "root");
+    decisionSession(h, "child", "root");
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", { title: "Release Assistant" })).body.thread as AssistantThread;
+    const env = await h.provision(thread.sessionId);
+    const calls: Array<Extract<ControlPlaneToRunner, { type: "forge_decision_action" }>> = [];
+    h.hub.requestFromRunner = async (_runnerId, requestId, frame) => {
+      if (frame.type === "campaign_launch_inspect") {
+        return { type: "campaign_launch_inspection_result", requestId, workspaceId: frame.workspaceId,
+          ok: true, repository: releaseDecisionTarget.repository, issueNumbers: [], digest: "0".repeat(64) };
+      }
+      assert.equal(frame.type, "forge_decision_action");
+      calls.push(frame);
+      return { type: "forge_decision_action_result", requestId, sessionId: frame.sessionId, occurrenceId: frame.occurrenceId,
+        outcome: frame.action.kind === "release_tag" ? "release_tagged" : "release_published" };
+    };
+    const request = async (resourceSnapshot: ReleaseDecisionSnapshot) => {
+      const asked = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: resourceSnapshot.category,
+        resourceKey: releaseDecisionResourceKey(resourceSnapshot), resourceSnapshot });
+      assert.ok(asked.ok && asked.data, asked.error ?? "request created");
+      assert.equal(asked.data.authority, "human");
+      return asked.data;
+    };
+    const resolve = async (decision: Awaited<ReturnType<typeof request>>, digest = decision.resourceDigest) => {
+      const [response] = await h.callTools(env, { jsonrpc: "2.0", id: 1, method: "tools/call", params: {
+        name: "assistant_decision_resolve", arguments: { sessionId: "child", occurrenceId: decision.occurrenceId,
+          resourceDigest: digest, outcome: "approve", reason: "Approved the exact release target and payload." },
+      } });
+      return response.result;
+    };
+    const tag = await request(releaseSnapshots[0]!);
+    const publish = await request(releaseSnapshots[1]!);
+    const execute = (decision: typeof tag, session = "child") =>
+      h.svc.executeWorkflowDecision(session, decision.occurrenceId, { resourceDigest: decision.resourceDigest });
+    assert.equal((await execute(tag)).status, 409);
+    assert.match((await resolve(tag)).content[0].text, /no decision delegation grant/u);
+    const grant = async (revision: number, categories: AssistantDecisionGrant["categories"]) => {
+      const saved = await h.ownerCall("PUT", `/api/assistant-threads/${thread.id}/delegation`, { revision,
+        grant: { categories, projects: [h.project.id], campaigns: ["root"], expiresAt: null } });
+      assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    };
+    await grant(0, ["release_tag"]);
+    assert.match((await resolve(publish)).content[0].text, /outside the thread's decision delegation grant/u);
+    assert.match((await resolve(tag, "0".repeat(64))).content[0].text, /snapshot changed/u);
+    assert.equal((await resolve(tag)).isError, undefined);
+    assert.equal((await execute(tag, "root")).status, 404);
+    assert.equal((await h.svc.consumeWorkflowDecision("child", tag.occurrenceId, { resourceSnapshot: tag.resourceSnapshot })).status, 403);
+    assert.equal((await execute(tag)).data?.status, "consumed");
+    assert.equal((await execute(tag)).status, 409);
+    await grant(1, ["release_publish"]);
+    assert.equal((await resolve(publish)).isError, undefined);
+    assert.equal((await execute(publish)).data?.forgeAction?.outcome, "release_published");
+    assert.deepEqual(calls.map(({ action }) => action), releaseSnapshots.map(({ category, ...snapshot }) => ({ kind: category, ...snapshot })));
+    const history = await h.ownerCall("GET", `/api/assistant-decision-history?threadId=${thread.id}&campaignId=root`);
+    assert.deepEqual(history.body.entries.map((entry: { subject: string }) => entry.subject),
+      ["picoduck/wollipog · v1.2.3", "picoduck/wollipog · v1.2.3"]);
+    assert.equal(history.body.entries[0]?.delegation.threadId, thread.id);
+  } finally { await h.close(); }
+});
+
+test("older runners refuse typed release requests before contacting GitHub", async () => {
+  const h = await harness(RUNNER_CAPABILITY_MIN_PROTOCOL.typedReleaseDecisions - 1);
+  try {
+    decisionSession(h, "root");
+    decisionSession(h, "child", "root");
+    h.hub.requestFromRunner = async () => { throw new Error("an older runner must not be asked"); };
+    for (const snapshot of releaseSnapshots) {
+      const result = await h.svc.createWorkflowDecisionWithVideo("child", {
+        requestId: snapshot.category, resourceKey: releaseDecisionResourceKey(snapshot), resourceSnapshot: snapshot,
+      });
+      assert.match(result.error ?? "", /typed release decisions/u);
+    }
+    assert.deepEqual(h.db.pendingWorkflowDecisionsForSession("child"), []);
   } finally { await h.close(); }
 });
 

@@ -147,10 +147,11 @@ All Campaigns includes future campaigns, including those the owner confirms from
 the ordinary, exact-snapshot checks when the requester acts on it.
 Archiving a thread or its backing session clears the grant.
 
-A grant covers Owner Questions from campaigns, PR merges, typed CI reruns, merged branch deletions,
+A grant covers Owner Questions from campaigns, PR merges, typed CI reruns, release tags, release
+publications, merged branch deletions,
 follow-up issue publication, issue closure, review round extensions, and separate UI Evidence Denial
 and UI Evidence Approval categories. Existing denial grants still permit denial. Generic provider
-permissions, Assistant command confirmations, and release tag and publish commands stay with the owner.
+permissions and Assistant command confirmations stay with the owner.
 Credentials, sign-in, governance or policy changes, budgets, persistent permissions, connection
 and delegation changes, and occurrences explicitly kept for a person stay human-only. Campaign
 boundaries and Human Required rules continue to apply. Wollipog's own handoff and forge recovery
@@ -211,6 +212,30 @@ the same attempt across sessions on the installation. If GitHub confirms it neve
 the owner can rerun it manually. GitHub's rerun API accepts a run or job ID and has no attempt precondition, so an
 external rerun racing the final check can still affect the result. Older peers keep the manual
 owner approval path.
+
+### Release Tags and Publications
+
+Typed release decisions require control plane and runner protocol 401 or later and a registered
+GitHub Project Location. The **Release Tag** and **Release Publication** categories are separate
+grants. Tagging creates an absent stable `vX.Y.Z` tag on the approved commit. Publication updates
+the exact approved draft to become the latest stable release. Generic shell and tool permissions
+remain owner-held. Older peers can use the manual release procedure.
+
+To use the typed path with the release script, run
+`node scripts/release.mjs resume --state /path/to/checkpoint.json --typed-decisions`. At the
+tag or publication gate the script prints its `resourceKey` and `resourceSnapshot`. Request
+that snapshot with `request_workflow_decision` or `wollipog decision request`. Once approved,
+resume with `--typed-decisions --reviewed-head <sha>` and either `--tag-decision <occurrence>`
+or `--publish-decision <occurrence>`, as appropriate. The script refreshes its release
+checks before executing the approval and keeps decision IDs out of the checkpoint. The release
+certification, workflow, signed-asset and latest-stable checks apply.
+
+The requester executes with `execute_workflow_decision` or `wollipog decision execute`, using
+the approved occurrence and its resource digest. Wollipog checks the exact repository, commit,
+tag, draft metadata and asset identities and digests immediately before the write. A stale
+target requires a new approval. After an uncertain write, check GitHub before doing anything
+else. Wollipog will not replay it. GitHub does not offer a conditional release update, so
+manual writes to the same tag or draft should wait until the typed action finishes.
 
 ## Thread Credential and Runner Proxy
 

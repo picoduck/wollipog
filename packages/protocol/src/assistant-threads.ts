@@ -48,6 +48,8 @@ export const ASSISTANT_DECISION_CATEGORIES = {
   owner_question: "Owner Questions",
   pr_merge: "Pull Request Merge",
   ci_rerun: "CI Rerun",
+  release_tag: "Release Tag",
+  release_publish: "Release Publication",
   merged_branch_deletion: "Merged Branch Deletion",
   follow_up_issue_publication: "Follow-Up Issue Publication",
   issue_closure: "Issue Closure",

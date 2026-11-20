@@ -88,6 +88,7 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
   const [expiry, setExpiry] = useState(localDateTime(delegation.grant?.expiresAt));
   const [busy, setBusy] = useState<"save" | "revoke" | null>(null);
   const ciRerunSupported = useStoreSelector((state) => state.assistantCiRerunDecisionsSupported);
+  const releaseSupported = useStoreSelector((state) => state.assistantReleaseDecisionsSupported);
   const [error, setError] = useState<string | null>(null);
   const evidenceSelected = categories.includes("ui_evidence_review");
 
@@ -138,12 +139,14 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
                   : evidenceReview.reason}
                 onChange={(checked) => setCategories((current) => checked ? [...current, category] : current.filter((item) => item !== category))} />;
             }
-            const unavailable = category === "ci_rerun" && !ciRerunSupported;
+            const unavailable = (category === "ci_rerun" && !ciRerunSupported) ||
+              ((category === "release_tag" || category === "release_publish") && !releaseSupported);
             return <Checkbox key={category} label={label} checked={categories.includes(category)}
               disabled={unavailable && !categories.includes(category)}
               onChange={(checked) => setCategories((current) => checked ? [...current, category] : current.filter((item) => item !== category))} />;
           })}
           {!ciRerunSupported && <span className="muted">Update the control plane to grant CI rerun decisions.</span>}
+          {!releaseSupported && <span className="muted">Update the control plane to grant release decisions.</span>}
         </fieldset>
         <SelectionScope name="Projects" value={projectScope} onChange={setProjectScope}
           items={[...projects.values()].map(({ id, name }) => ({ id, title: name }))} />

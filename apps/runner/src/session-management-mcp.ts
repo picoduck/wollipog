@@ -834,11 +834,15 @@ function forgeActionSummary(decision: unknown): string {
     case "already_queued": return `${name}: the approved head was already in the merge queue. Park on the pull request until it merges.`;
     case "already_merged": return `${name}: the approved head was already merged.`;
     case "rerun_requested": return `${name}: GitHub accepted the approved CI rerun. Check the new attempt in GitHub Actions.`;
+    case "release_tagged": return `${name}: GitHub created the approved release tag.`;
+    case "release_published": return `${name}: GitHub published the approved draft release.`;
     case "published":
     case "already_published": return `${name}: a Location of ${view?.resourceSnapshot?.repository ?? "the repository"} on runner ${action.performedByRunnerId ?? "(unknown)"} ` +
       `${action.outcome === "published" ? "created" : "had already created"} issue #${action.publishedIssue ?? "(unknown)"} with that runner's login. Read it back and record it on the recommendation.`;
     case "uncertain": return action.kind === "ci_rerun"
       ? `${name}: the CI rerun may have been requested. Inspect the GitHub Actions run before proceeding. This write cannot be replayed.`
+      : action.kind === "release_tag" || action.kind === "release_publish"
+      ? `${name}: the release write may have taken effect. Inspect GitHub before proceeding. This write cannot be replayed.`
       : action.kind === "pr_merge_enqueue"
       ? `${name}: the enqueue may have run. Do not replay it; reconcile_workflow_decision once the pull request reads MERGED, or report it to your Orchestrator.`
       : action.kind === "issue_publication"
@@ -1263,6 +1267,14 @@ const GOVERNANCE_POLICY_PROPERTIES: Json = {
   },
 };
 
+const RELEASE_TARGET_PROPERTIES = {
+  repository: { type: "string", description: "The requesting session's GitHub owner/name." },
+  tag: { type: "string", description: "An exact stable release tag, vX.Y.Z." },
+  commitSha: { type: "string", pattern: "^[0-9a-f]{40}$" },
+  releasePayloadDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+};
+const RELEASE_TARGET_FIELDS = Object.keys(RELEASE_TARGET_PROPERTIES);
+
 const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
   oneOf: [
     {
@@ -1330,6 +1342,47 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
         attempt: { type: "integer", minimum: 1 },
       },
       required: ["category", "repository", "runId", "headSha", "attempt"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: { category: { const: "release_tag" }, ...RELEASE_TARGET_PROPERTIES },
+      required: ["category", ...RELEASE_TARGET_FIELDS],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: {
+        category: { const: "release_publish" },
+        ...RELEASE_TARGET_PROPERTIES,
+        releaseId: { type: "integer", minimum: 1 },
+        releasePayload: {
+          type: "object",
+          description: "Proposed stable publication and exact current draft, verified asset inventory and latest stable release. The release script can produce this snapshot.",
+          properties: {
+            name: { type: "string", maxLength: 256 },
+            body: { type: "string", maxLength: 32768 },
+            draft: { type: "object", properties: {
+              name: { type: ["string", "null"], maxLength: 256 },
+              body: { type: ["string", "null"], maxLength: 32768 },
+              targetCommitish: { type: "string", maxLength: 255 },
+            }, required: ["name", "body", "targetCommitish"], additionalProperties: false },
+            assets: { type: "array", maxItems: 128, items: { type: "object", properties: {
+              id: { type: "integer", minimum: 1 }, name: { type: "string", maxLength: 255 },
+              size: { type: "integer", minimum: 1 }, digest: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
+            }, required: ["id", "name", "size", "digest"], additionalProperties: false } },
+            previousStable: { oneOf: [{ type: "null" }, { type: "object", properties: {
+              id: { type: "integer", minimum: 1 }, tag: { type: "string" },
+            }, required: ["id", "tag"], additionalProperties: false }] },
+            workflow: { type: "object", properties: {
+              runId: { type: "integer", minimum: 1 }, attempt: { type: "integer", minimum: 1 },
+            }, required: ["runId", "attempt"], additionalProperties: false },
+          },
+          required: ["name", "body", "draft", "assets", "previousStable"],
+          additionalProperties: false,
+        },
+      },
+      required: ["category", ...RELEASE_TARGET_FIELDS, "releaseId", "releasePayload"],
       additionalProperties: false,
     },
     {
@@ -2772,6 +2825,11 @@ export const TOOLS: McpTool[] = [
         return controlPlaneUpdateRequired("Typed CI reruns need a newer Wollipog. No approval was requested.",
           RUNNER_CAPABILITY_MIN_PROTOCOL.typedCiRerun, deps.controlPlaneProtocolVersion);
       }
+      if ((args?.resourceSnapshot?.category === "release_tag" || args?.resourceSnapshot?.category === "release_publish") &&
+          !await controlPlaneSupports(deps, RUNNER_CAPABILITY_MIN_PROTOCOL.typedReleaseDecisions)) {
+        return controlPlaneUpdateRequired("Typed release decisions need a newer Wollipog. No approval was requested.",
+          RUNNER_CAPABILITY_MIN_PROTOCOL.typedReleaseDecisions, deps.controlPlaneProtocolVersion);
+      }
       if (args?.resourceSnapshot?.category === "implementation_question" && args.resourceSnapshot.kind === "question" &&
           !await controlPlaneSupports(deps, RUNNER_CAPABILITY_MIN_PROTOCOL.childQuestions)) {
         return controlPlaneUpdateRequired("Child questions need a newer Wollipog. Update Wollipog; nothing was requested. Do not retry as an approval.",
@@ -2916,7 +2974,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "execute_workflow_decision",
-    description: "Have Wollipog itself perform one approved forge action, bound to its exact snapshot, through this session's own forge login: a GitHub ci_rerun (v399, exact run or job, head and attempt; execute without consume), an approved merged_branch_deletion that names pullRequest and headSha (deleted by compare-and-delete only while the remote tip is still the approved merged head and no open pull request targets the branch), a protocol-377 temporary deletion with merged:false and a matching server creation receipt (exact created tip, still default-contained, no open head or base PR), or an approved and already armed GitHub pr_merge (the canonical gh pr merge --squash --match-head-commit enqueue, never --delete-branch, after GitHub's closing references are re-read). Use it when your provider refuses the approved command, or instead of running it. An approved follow_up_issue_publication in another of the campaign's repositories than the one you work in must use this instead of being consumed: a Location of that repository creates the issue with that runner's login, never yours, and decision.forgeAction names the issue and runner (v327). Pass occurrenceId and resourceDigest from get_workflow_decision. Read decision.forgeAction: a success consumes the approval once; a refusal that changed nothing leaves it approved for a retry; a stale snapshot (tip moved, dependent pull request opened, head or closures changed) revokes it and needs a new decision; an uncertain CI rerun or enqueue is never replayed (reconcile it once the PR reads MERGED), and after an uncertain publication another call only looks for the issue. Never retry a refused command through another shell, wrapper or permission change. Requires control plane and runner protocol v284.",
+    description: "Have Wollipog itself perform one approved forge action, bound to its exact snapshot, through this session's own forge login: a GitHub ci_rerun (v399, exact run or job, head and attempt; execute without consume), a GitHub release_tag or release_publish (v401, exact target and payload; execute without consume), an approved merged_branch_deletion that names pullRequest and headSha (deleted by compare-and-delete only while the remote tip is still the approved merged head and no open pull request targets the branch), a protocol-377 temporary deletion with merged:false and a matching server creation receipt (exact created tip, still default-contained, no open head or base PR), or an approved and already armed GitHub pr_merge (the canonical gh pr merge --squash --match-head-commit enqueue, never --delete-branch, after GitHub's closing references are re-read). Use it when your provider refuses the approved command, or instead of running it. An approved follow_up_issue_publication in another of the campaign's repositories than the one you work in must use this instead of being consumed: a Location of that repository creates the issue with that runner's login, never yours, and decision.forgeAction names the issue and runner (v327). Pass occurrenceId and resourceDigest from get_workflow_decision. Read decision.forgeAction: a success consumes the approval once; a refusal that changed nothing leaves it approved for a retry; a stale snapshot (tip moved, dependent pull request opened, head or closures changed) revokes it and needs a new decision; an uncertain CI rerun, release write, or enqueue is never replayed (reconcile an enqueue once the PR reads MERGED), and after an uncertain publication another call only looks for the issue. Never retry a refused command through another shell, wrapper or permission change. Requires control plane and runner protocol v284.",
     inputSchema: {
       type: "object",
       properties: {

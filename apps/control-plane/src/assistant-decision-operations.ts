@@ -83,7 +83,7 @@ export function registerAssistantDecisionOperations(operations: AssistantOperati
   const check = (decision: WorkflowDecisionView, owner: HumanPrincipal, connection: AssistantConnection,
     name: string, { grant }: ReturnType<typeof liveGrant>, evidenceOutcome?: "approve" | "deny") => {
     const category = assistantDecisionCategory(decision.resourceSnapshot);
-    if (!category) throw new AssistantRefusal("This decision has no supported typed Assistant resolution path. Generic permissions and release commands require the owner.");
+    if (!category) throw new AssistantRefusal("This decision has no supported typed Assistant resolution path. Generic permissions require the owner.");
     const mayAct = category === "ui_evidence_approval"
       ? (evidenceOutcome !== "approve" && grant.categories.includes(category)) ||
         (evidenceOutcome !== "deny" && grant.categories.includes("ui_evidence_review"))
@@ -218,7 +218,7 @@ export function registerAssistantDecisionOperations(operations: AssistantOperati
         const live = liveGrant(owner, connection);
         const decision = db.workflowDecisionByOccurrence(requiredText(args.occurrenceId, "occurrenceId", 128));
         if (!decision || decision.sessionId !== args.sessionId) {
-          throw new AssistantRefusal("No typed workflow decision matches this occurrence in the session. Generic permissions and release commands require the owner.");
+          throw new AssistantRefusal("No typed workflow decision matches this occurrence in the session. Generic permissions require the owner.");
         }
         const { outcome, resourceDigest } = args;
         const { campaign } = check(decision, owner, connection, name, live,

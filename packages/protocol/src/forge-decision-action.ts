@@ -25,6 +25,8 @@
  * proving the snapshot stale revokes it.
  */
 
+import { isReleaseDecisionCategory, type ReleaseDecisionCategory, type ReleaseForgeAction } from "./release-decision.js";
+
 export type ForgeDecisionActionKind = "branch_deletion" | "pr_merge_enqueue" | "issue_publication" | RequesterForgeDecisionCategory;
 
 /** Why Wollipog did not perform an approved forge action. A fixed code, never forge output. */
@@ -43,6 +45,8 @@ export type ForgeDecisionActionRefusalReason =
   | "repository_mismatch"
   /** The CI run or job no longer matches the approved run identity, head or attempt. */
   | "ci_target_mismatch"
+  /** The tag, commit, draft or publication preconditions no longer match the approved release. */
+  | "release_target_mismatch"
   /** The forge refused the write itself (protection rules, mergeability) and nothing changed. */
   | "forge_refused"
   /** The forge could not be read or written (unreachable, signed out, CLI missing). */
@@ -59,13 +63,13 @@ export type ForgeDecisionActionRefusalReason =
 /** The reasons a runner may report. */
 export const FORGE_DECISION_ACTION_REFUSAL_REASONS: readonly ForgeDecisionActionRefusalReason[] = [
   "tip_moved", "dependent_pull_request_open", "pull_request_mismatch", "closure_mismatch",
-  "repository_mismatch", "ci_target_mismatch", "forge_refused", "forge_unavailable", "runner_unavailable", "publication_refused",
+  "repository_mismatch", "ci_target_mismatch", "release_target_mismatch", "forge_refused", "forge_unavailable", "runner_unavailable", "publication_refused",
 ];
 
 /** Refusals that prove the approved snapshot no longer describes the forge: the approval is revoked
  * and a new decision is needed. Every other refusal changed nothing and leaves it approved. */
 export const FORGE_DECISION_ACTION_STALE_REFUSALS: ReadonlySet<ForgeDecisionActionRefusalReason> = new Set([
-  "tip_moved", "dependent_pull_request_open", "pull_request_mismatch", "closure_mismatch", "ci_target_mismatch",
+  "tip_moved", "dependent_pull_request_open", "pull_request_mismatch", "closure_mismatch", "ci_target_mismatch", "release_target_mismatch",
 ]);
 
 /** Outcomes that prove the approved action took effect; each consumes the approval. */
@@ -74,6 +78,7 @@ export type ForgeDecisionActionSuccess =
   | "enqueued" | "already_queued" | "already_merged"
   | "published" | "already_published"
   | "rerun_requested"
+  | "release_tagged" | "release_published"
   | "open_unqueued";
 
 export type ForgeDecisionActionOutcome =
@@ -88,6 +93,7 @@ export type ForgeDecisionActionOutcome =
 
 export const FORGE_DECISION_ACTION_SUCCESSES: ReadonlySet<ForgeDecisionActionOutcome> = new Set([
   "deleted", "already_deleted", "enqueued", "already_queued", "already_merged", "published", "already_published", "rerun_requested",
+  "release_tagged", "release_published",
 ]);
 
 /** Dispatch attempts one approval allows, successful or not. */
@@ -132,6 +138,7 @@ export type ProviderForgeRefusal =
   | { kind: "managed"; occurrenceId: string; resourceDigest: string };
 
 export type ForgeDecisionAction =
+  | ReleaseForgeAction
   | (Omit<CiRerunDecisionSnapshot, "category" | "jobName"> & { kind: "ci_rerun" })
   | (Omit<CiRerunDecisionSnapshot, "category" | "jobName"> & { kind: "ci_rerun_inspect_job"; jobId: number })
   | { kind: "temporary_branch_create"; repository: string; branch: string; headSha: string }
@@ -251,10 +258,14 @@ export interface CampaignMergedBranch {
 /** Merged branches `get_campaign` lists at most, pending first; the counts stay complete. */
 export const CAMPAIGN_MERGED_BRANCHES_LIMIT = 50;
 /** Forge decisions approved by the owner (or a scoped Assistant grant) and executed only here. */
-export type RequesterForgeDecisionCategory = "ci_rerun";
+export type RequesterForgeDecisionCategory = "ci_rerun" | ReleaseDecisionCategory;
 
 export function isRequesterForgeDecisionCategory(category: unknown): category is RequesterForgeDecisionCategory {
-  return category === "ci_rerun";
+  return category === "ci_rerun" || isReleaseDecisionCategory(category);
+}
+
+export function requesterForgeCapability(category: RequesterForgeDecisionCategory) {
+  return category === "ci_rerun" ? "typedCiRerun" : "typedReleaseDecisions";
 }
 
 export interface CiRerunDecisionSnapshot {

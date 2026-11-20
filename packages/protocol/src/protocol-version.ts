@@ -1543,6 +1543,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   399,
   // v400 slot
   // v401 slot
+  // 401: Execute exact GitHub release tag and draft publication decisions (Refs #4761).
+  401,
   // v402 slot
   // v403 slot
   // v404 slot

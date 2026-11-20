@@ -51,7 +51,8 @@ function DecisionHistory({ campaignId, threadId, onClose }: { campaignId?: strin
         const title = delegation.threadTitle ?? "Assistant Thread";
         return <li key={occurrenceId} className="campaign-decision-item">
           <strong>{category === "ui_evidence_approval" ? "UI Evidence" : ASSISTANT_DECISION_CATEGORIES[category]}</strong>
-          <p className="muted">{subject ?? (category === "ci_rerun" ? "GitHub Actions Run" : resourceKey)}</p>
+          <p className="muted">{subject ?? (category === "ci_rerun" ? "GitHub Actions Run" :
+            category === "release_tag" || category === "release_publish" ? "GitHub Release" : resourceKey)}</p>
           <p>{delegation.outcome === "approved" ? "Approved" : delegation.outcome === "denied" ? "Denied" : "Answered"} by Assistant thread{" "}
             {threadId ? <strong>{title}</strong> : <button className="btn sm" type="button" title={delegation.threadId} onClick={() => {
               onClose?.();

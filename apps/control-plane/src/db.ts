@@ -1,6 +1,7 @@
 import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS, issueClosureDeliveryGap, knownProviderCommandHomeWriteSeparation } from "@wollipog/protocol";
 import { validCampaignLaunchDisclosure, ownerResourceLabel, campaignPublicationTitle } from "@wollipog/protocol";
-import { assistantDecisionCategory, ciRerunSubject, type AssistantDecisionHistoryPage } from "@wollipog/protocol";
+import { assistantDecisionCategory, ciRerunSubject, isRequesterForgeDecisionCategory,
+  releaseDecisionSubject, type AssistantDecisionHistoryPage } from "@wollipog/protocol";
 import { withoutProviderAccountNames } from "./agent-account-view.js";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, CAMPAIGN_PENDING_CAUSES, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
@@ -7775,8 +7776,9 @@ export class ControlPlaneDb {
     // An enqueue Wollipog performed is a merge whatever its occurrence's status became meanwhile.
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_forge_merges
       ON workflow_decisions(controlling_session_id) WHERE category='pr_merge' AND forge_action IS NOT NULL`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_ci_reruns
-      ON workflow_decisions(resource_key) WHERE category='ci_rerun' AND forge_action IS NOT NULL`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_requester_forge
+      ON workflow_decisions(category, resource_key) WHERE forge_action IS NOT NULL`);
+    db.exec("DROP INDEX IF EXISTS idx_workflow_decisions_ci_reruns");
     admitCampaignEventKinds(db);
     preserveCampaignFollowUpOrigins(db);
     widenCampaignDecisionSubjects(db);
@@ -24961,7 +24963,9 @@ export class ControlPlaneDb {
       const category = decision && assistantDecisionCategory(decision.resourceSnapshot);
       if (!decision?.assistantDelegation || !category) return [];
       return [{ occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, category, resourceKey: decision.resourceKey,
-        ...(decision.resourceSnapshot.category === "ci_rerun" ? { subject: ciRerunSubject(decision.resourceSnapshot) } : {}),
+        ...(decision.resourceSnapshot.category === "ci_rerun" ? { subject: ciRerunSubject(decision.resourceSnapshot) } :
+          decision.resourceSnapshot.category === "release_tag" || decision.resourceSnapshot.category === "release_publish"
+            ? { subject: releaseDecisionSubject(decision.resourceSnapshot) } : {}),
         delegation: decision.assistantDelegation }];
     });
     const last = entries.at(-1);
@@ -26585,13 +26589,13 @@ export class ControlPlaneDb {
     try {
       const row = this.stmt("SELECT status, category, forge_action FROM workflow_decisions WHERE occurrence_id=?")
         .get(occurrenceId) as { status: WorkflowDecisionStatus; category: string; forge_action: string | null } | undefined;
-      // A run attempt is shared by its whole-run and single-job approvals, including approvals
-      // in different sessions. An effect still possible at this attempt blocks a second write.
-      const competingRerun = kind === "ci_rerun" && this.stmt(`SELECT 1 FROM workflow_decisions
-        WHERE category='ci_rerun' AND resource_key=(SELECT resource_key FROM workflow_decisions WHERE occurrence_id=?)
+      // A target can be approved in multiple sessions. An existing or still-possible effect at
+      // this run attempt or release tag blocks a second write.
+      const competingWrite = isRequesterForgeDecisionCategory(kind) && this.stmt(`SELECT 1 FROM workflow_decisions
+        WHERE category=? AND resource_key=(SELECT resource_key FROM workflow_decisions WHERE occurrence_id=?)
         AND occurrence_id<>? AND forge_action IS NOT NULL
-        AND json_extract(forge_action,'$.outcome') IN ('in_progress','uncertain','rerun_requested') LIMIT 1`)
-        .get(occurrenceId, occurrenceId);
+        AND json_extract(forge_action,'$.outcome') IN ('in_progress','uncertain','rerun_requested','release_tagged','release_published') LIMIT 1`)
+        .get(kind, occurrenceId, occurrenceId);
       let previous = parseJson<NonNullable<WorkflowDecisionView["forgeAction"]>>(row?.forge_action ?? null);
       if (previous?.outcome === "in_progress" && now - previous.updatedAt > staleAfterMs) {
         previous = { ...previous, outcome: "uncertain", updatedAt: now };
@@ -26599,11 +26603,11 @@ export class ControlPlaneDb {
       }
       const eligible = row && (row.status === "approved" ||
         (row.status === "consumed" && row.category === "merged_branch_deletion" && kind === "branch_deletion"));
-      if (!eligible || competingRerun || (previous && previous.kind !== kind) || previous?.outcome === "in_progress" ||
+      if (!eligible || competingWrite || (previous && previous.kind !== kind) || previous?.outcome === "in_progress" ||
           (previous && FORGE_DECISION_ACTION_SUCCESSES.has(previous.outcome)) ||
           // A consumed deletion cannot be revoked, so a stale refusal ends it here instead.
           (previous?.refusal && FORGE_DECISION_ACTION_STALE_REFUSALS.has(previous.refusal.reason)) ||
-          (previous?.outcome === "uncertain" && (kind === "pr_merge_enqueue" || kind === "ci_rerun")) ||
+          (previous?.outcome === "uncertain" && (kind === "pr_merge_enqueue" || isRequesterForgeDecisionCategory(kind))) ||
           (previous?.attempts ?? 0) >= FORGE_DECISION_ACTION_MAX_ATTEMPTS) {
         this.db.exec("COMMIT");
         return null;
@@ -36025,6 +36029,8 @@ function ownerDecisionSummary(snapshot: Exclude<WorkflowDecisionView["resourceSn
       case "implementation_question": return snapshot.question;
       case "pr_merge": return `Merge ${snapshot.repository}#${snapshot.pullRequest}`;
       case "ci_rerun": return `Rerun CI for run ${snapshot.runId} in ${snapshot.repository}`;
+      case "release_tag": return `Tag release ${snapshot.tag} in ${snapshot.repository}`;
+      case "release_publish": return `Publish release ${snapshot.tag} in ${snapshot.repository}`;
       case "review_round_extension": return `More review rounds for ${snapshot.repository}#${snapshot.pullRequest}`;
       case "merged_branch_deletion": return `Delete branch ${snapshot.branch} in ${snapshot.repository}`;
       case "issue_closure": return `Close ${snapshot.repository}#${snapshot.issue}`;

@@ -50,7 +50,7 @@ const attentionCount = Number(params.get("attention") ?? 0);
 const limitsScenario = params.get("limits");
 const campaignScenario = params.has("campaign");
 const delegationScenario = params.get("delegation");
-const showDelegation = delegationScenario === "stress" || delegationScenario === "ci-old";
+const showDelegation = delegationScenario === "stress" || delegationScenario === "ci-old" || delegationScenario === "release-old";
 const evidenceScenario = params.get("evidence");
 const missingEvidenceIds = evidenceScenario === "refused-stress"
   ? Array.from({ length: 16 }, (_, index) => `settings-desktop-dark-preview-${String(index + 1).padStart(2, "0")}`)
@@ -169,6 +169,49 @@ if (params.has("ci-rerun")) {
       resourceKey: `ci_rerun:${repository}:${runId}:${attempt}`, resourceDigest: "b".repeat(64),
       resourceSnapshot: { category: "ci_rerun", repository, runId, jobId, jobName, attempt,
         headSha: "2d99e227b73fcad015264f7fe04674953df724b1" } },
+  } }));
+}
+
+const releaseScenario = params.get("release-decision");
+if (releaseScenario === "tag" || releaseScenario === "publish") {
+  const id = "sess-release-decision";
+  const occurrenceId = "workflow_release_decision";
+  const repository = "engineering/release-validation";
+  const category = releaseScenario === "tag" ? "release_tag" : "release_publish";
+  const coordinates = { repository, tag: "v0.38.0", commitSha: "2d99e227b73fcad015264f7fe04674953df724b1",
+    releasePayloadDigest: "a".repeat(64) };
+  const resourceSnapshot = releaseScenario === "tag" ? { category: "release_tag" as const, ...coordinates }
+    : { category: "release_publish" as const, ...coordinates, releaseId: 54921, releasePayload: {
+      name: "Wollipog v0.38.0",
+      body: [
+        "# Release Notes",
+        "This update adds separate approvals for creating a release tag and publishing a draft. Reviewers can see the exact commit, notes, and signed assets before choosing whether to proceed.",
+        "The desktop bundle includes the runner and its sidecar for Linux, macOS, and Windows. The workflow checks each platform before packaging and verifies the signatures again before publication.",
+        "If a release stops midway through verification, reopen the checkpoint after checking the job status. The release procedure repeats its checks against the same candidate before it can continue.",
+        "Owners can review the approving thread from Inbox or Campaign Status. Those views show the repository, version, and delegation under which the decision was made.",
+        "Installation instructions and signed checksums are included with the published assets.",
+      ].join("\n\n"),
+      draft: { name: "Release Draft", body: null, targetCommitish: "main" },
+      assets: [
+        "wollipog-desktop-v0.38.0-linux-arm64-standalone-with-signed-runner-and-bundled-sidecar.tar.gz",
+        "wollipog-linux-x64.tar.gz",
+        "wollipog-macos-arm64.dmg",
+        "wollipog-macos-x64.dmg",
+        "wollipog-windows-x64.msi",
+        "wollipog-release-checksums.txt",
+      ].map((name, index) => ({
+        id: 23568 + index, name, size: 42240 + index * 1024,
+        digest: `sha256:${(index + 10).toString(16).repeat(64)}`,
+      })),
+      previousStable: { id: 54920, tag: "v0.37.0" }, workflow: { runId: 4215871234, attempt: 2 },
+    } };
+  const title = releaseScenario === "tag" ? "Release Tag Approval Required" : "Release Publication Approval Required";
+  sessions.set(id, session(id, "Prepare the Release", { status: "input_required", pendingApproval: {
+    kind: "workflow_decision", requestId: occurrenceId, occurrenceId, title,
+    options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+    workflowDecision: { requestId: occurrenceId, occurrenceId, sessionId: id, controllingSessionId: id, category,
+      authority: "human", status: "pending", policyRevision: 0, createdAt: NOW,
+      resourceKey: `${category}:${repository}:${coordinates.tag}`, resourceDigest: "c".repeat(64), resourceSnapshot },
   } }));
 }
 
@@ -423,7 +466,8 @@ function snapshot(): UiSnapshotMessage {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false,
       projects: delegationScenario === "stress", ...(showDelegation ? { assistantDecisionHistory: true as const } : {}),
-      ...(delegationScenario === "stress" ? { assistantCiRerunDecisions: true as const } : {}) },
+      ...(delegationScenario === "stress" || delegationScenario === "release-old" ? { assistantCiRerunDecisions: true as const } : {}),
+      ...(delegationScenario === "stress" ? { assistantReleaseDecisions: true as const } : {}) },
     projects: delegationProjects,
     runners: [structuredClone(runner)],
     boxes: [],
@@ -583,7 +627,8 @@ const client = {
     publish(current);
     return { thread: structuredClone(current) };
   },
-  assistantDecisionHistory: async (filter: { threadId?: string; before?: string }) => assistantDecisionHistoryFixture("campaign_0", filter.before),
+  assistantDecisionHistory: async (filter: { threadId?: string; before?: string }) =>
+    assistantDecisionHistoryFixture("campaign_0", filter.before, params.has("release-history")),
   setConfig: async (sessionId: string, patch: SessionConfig) => {
     const current = threads.find((thread) => thread.sessionId === sessionId);
     if (current?.usage && patch.costBudgetUsd !== undefined) {

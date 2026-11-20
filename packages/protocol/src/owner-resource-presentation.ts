@@ -7,6 +7,8 @@ export function ownerResourceLabel(snapshot: WorkflowDecisionResourceSnapshot): 
     case "pr_merge":
     case "review_round_extension": return `PR #${snapshot.pullRequest} in ${snapshot.repository}`;
     case "ci_rerun": return `CI run ${snapshot.runId} in ${snapshot.repository}`;
+    case "release_tag":
+    case "release_publish": return `Release ${snapshot.tag} in ${snapshot.repository}`;
     case "merged_branch_deletion": return `Branch ${snapshot.branch} in ${snapshot.repository}`;
     case "owner_decision":
     case "implementation_question": return snapshot.question;
@@ -29,6 +31,8 @@ export function ownerResourceNoun(category: WorkflowDecisionCategory): string {
   case "pr_merge":
   case "review_round_extension": return "PR";
   case "ci_rerun": return "CI run";
+  case "release_tag":
+  case "release_publish": return "release";
   case "merged_branch_deletion": return "branch";
   case "follow_up_issue_publication": return "publication";
   case "issue_closure": return "issue";

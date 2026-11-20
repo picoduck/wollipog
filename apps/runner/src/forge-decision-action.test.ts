@@ -1,12 +1,106 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
+import { releaseDecisionPayloadBytes, type ReleaseDecisionSnapshot } from "@wollipog/protocol";
 import type { GhOutcome } from "./campaign-forge-status.js";
-import { executeTemporaryBranch, executeBranchDeletion, executeCiRerun, inspectCiRerunJob, executePullRequestEnqueue, observePullRequestMerge, observePullRequestRetirement, observeIssuePublication } from "./forge-decision-action.js";
+import { executeTemporaryBranch, executeBranchDeletion, executeCiRerun, executeReleaseDecision, inspectCiRerunJob, executePullRequestEnqueue, observePullRequestMerge, observePullRequestRetirement, observeIssuePublication } from "./forge-decision-action.js";
 
 const HEAD = "a".repeat(40);
 const MERGE = "c".repeat(40);
 const ok = (stdout = ""): GhOutcome => ({ stdout, stderr: "", code: null, timedOut: false });
 const failed = (stderr: string, code: number | string = 1, timedOut = false): GhOutcome => ({ stdout: "", stderr, code, timedOut });
+
+const RELEASE_REPO = "picoduck/wollipog";
+const releaseTarget = { repository: RELEASE_REPO, tag: "v1.2.3", commitSha: HEAD, releasePayloadDigest: "" };
+const releaseAsset = { id: 4, name: "bundle.zip", size: 120, digest: `sha256:${"b".repeat(64)}` };
+function signedTarget<T extends ReleaseDecisionSnapshot>(target: T): T {
+  return { ...target, releasePayloadDigest: createHash("sha256").update(releaseDecisionPayloadBytes(target)).digest("hex") };
+}
+const { category: _tag, ...tagTarget } = signedTarget({ ...releaseTarget, category: "release_tag" });
+const { category: _publish, ...publishTarget } = signedTarget({ ...releaseTarget, category: "release_publish",
+  releaseId: 42, releasePayload: { name: "Wollipog v1.2.3", body: "Reviewed notes.", assets: [releaseAsset],
+    draft: { name: "Draft", body: null, targetCommitish: "main" },
+    previousStable: { id: 40, tag: "v1.2.2" }, workflow: { runId: 33, attempt: 1 } } });
+const github = (body: unknown) => ok(JSON.stringify(body));
+
+function releaseForge(options: {
+  ref?: Record<string, unknown> | null; compareBase?: string; draft?: object; assets?: unknown[];
+  latest?: object; run?: object; write?: GhOutcome;
+} = {}) {
+  let fenced = false;
+  const writes: { method: string; endpoint: string; payload: unknown }[] = [];
+  const reads: string[] = [];
+  return {
+    writes, reads,
+    fence: { begin: () => !fenced && (fenced = true), release: () => { fenced = false; } },
+    gh: async (args: string[], _signal?: AbortSignal, stdin?: string) => {
+      assert.ok(args.includes("github.com"));
+      if (stdin !== undefined) {
+        const [method, endpoint] = args.slice(args.indexOf("--method") + 1);
+        const payload = JSON.parse(stdin);
+        writes.push({ method: method!, endpoint: endpoint!, payload });
+        return options.write ?? (method === "POST"
+          ? github({ ref: payload.ref, object: { type: "commit", sha: payload.sha } })
+          : github({ ...payload, id: 42, published_at: "2026-11-20T00:00:00Z" }));
+      }
+      const path = args[1] === "graphql" ? "graphql" : args.at(-1)!;
+      reads.push(path);
+      if (path === "graphql") return github({ data: { repository: {
+        nameWithOwner: RELEASE_REPO, ref: options.ref ?? null, defaultBranchRef: { target: { oid: MERGE } },
+      } } });
+      if (path.includes("/compare/")) return github({ status: "ahead", behind_by: 0,
+        merge_base_commit: { sha: options.compareBase ?? HEAD } });
+      if (path.endsWith("/releases/latest")) return github({ id: 40, tag_name: "v1.2.2", draft: false, prerelease: false, ...options.latest });
+      if (path.includes("/assets?")) return github(options.assets ?? [releaseAsset]);
+      if (path.endsWith("/releases/42")) return github({ id: 42, tag_name: "v1.2.3", draft: true, prerelease: false,
+        name: "Draft", body: null, target_commitish: "main", ...options.draft });
+      if (path.endsWith("/actions/runs/33")) return github({ id: 33, run_attempt: 1, head_sha: HEAD, head_branch: "v1.2.3",
+        repository: { full_name: RELEASE_REPO }, status: "completed", conclusion: "success", ...options.run });
+      throw new Error(`unexpected forge read ${path}`);
+    },
+  };
+}
+
+const releaseRefOn = (sha: string) => ({ target: { __typename: "Commit", oid: sha } });
+test("typed release writes create only the absent tag and publish only the exact draft", async () => {
+  const tagging = releaseForge();
+  assert.equal((await executeReleaseDecision({ kind: "release_tag", ...tagTarget }, tagging.gh, tagging.fence)).outcome, "release_tagged");
+  assert.equal(tagging.reads.length, 3);
+  assert.deepEqual(tagging.writes, [{ method: "POST", endpoint: `repos/${RELEASE_REPO}/git/refs`,
+    payload: { ref: "refs/tags/v1.2.3", sha: HEAD } }]);
+  const publishing = releaseForge({ ref: releaseRefOn(HEAD) });
+  assert.equal((await executeReleaseDecision({ kind: "release_publish", ...publishTarget }, publishing.gh, publishing.fence)).outcome, "release_published");
+  assert.deepEqual(publishing.writes, [{ method: "PATCH", endpoint: `repos/${RELEASE_REPO}/releases/42`,
+    payload: { tag_name: "v1.2.3", target_commitish: HEAD, name: "Wollipog v1.2.3", body: "Reviewed notes.",
+      draft: false, prerelease: false, make_latest: "true" } }]);
+});
+
+test("typed release writes fail closed on changed tag, commit, payload, assets or workflow", async () => {
+  for (const options of [{ ref: releaseRefOn(HEAD) }, { compareBase: MERGE }]) {
+    const f = releaseForge(options);
+    assert.equal((await executeReleaseDecision({ kind: "release_tag", ...tagTarget }, f.gh, f.fence)).refusal?.reason, "release_target_mismatch");
+    assert.deepEqual(f.writes, []);
+  }
+  for (const options of [{ ref: releaseRefOn(MERGE) }, { draft: { id: 41 } }, { draft: { body: "Replaced" } },
+    { draft: { draft: false } }, { assets: [] }, { run: { run_attempt: 2 } }, { latest: { id: 43 } }]) {
+    const f = releaseForge({ ref: releaseRefOn(HEAD), ...options });
+    assert.equal((await executeReleaseDecision({ kind: "release_publish", ...publishTarget }, f.gh, f.fence)).refusal?.reason,
+      "release_target_mismatch", JSON.stringify(options));
+    assert.deepEqual(f.writes, []);
+  }
+  const f = releaseForge({ ref: releaseRefOn(HEAD) });
+  assert.equal((await executeReleaseDecision({ kind: "release_publish", ...publishTarget,
+    releasePayload: { ...publishTarget.releasePayload, body: "Different notes" } }, f.gh, f.fence)).refusal?.reason, "release_target_mismatch");
+  assert.deepEqual(f.reads, []);
+});
+
+test("uncertain release writes keep the fence and cannot be replayed", async () => {
+  const f = releaseForge({ ref: releaseRefOn(HEAD), write: failed("timeout", 1, true) });
+  const action = { kind: "release_publish" as const, ...publishTarget };
+  assert.equal((await executeReleaseDecision(action, f.gh, f.fence)).outcome, "uncertain");
+  assert.equal((await executeReleaseDecision(action, f.gh, f.fence)).outcome, "uncertain");
+  assert.equal(f.writes.length, 1);
+});
 
 const ciRerun = { kind: "ci_rerun" as const, repository: "picoduck/wollipog", runId: 200, jobId: 300, headSha: HEAD, attempt: 2 };
 const ciRunPath = "repos/picoduck/wollipog/actions/runs/200";

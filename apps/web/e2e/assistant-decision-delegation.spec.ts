@@ -140,7 +140,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     const details = page.getByLabel("Thread Details");
     await expect(details).toContainText("Decision Delegation Off");
     await expect(settings.getByRole("checkbox", { checked: true })).toHaveCount(0);
-    await expect(settings.getByRole("checkbox", { name: /release|ui evidence approval/i })).toHaveCount(0);
+    await expect(settings.getByRole("checkbox", { name: /ui evidence approval/i })).toHaveCount(0);
     const ciRerun = settings.getByRole("checkbox", { name: "CI Rerun", exact: true });
     await expect(ciRerun).toBeEnabled();
     await ciRerun.check();
@@ -230,6 +230,129 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await expectNoHorizontalOverflow(target, "CI Rerun Target");
     await expectPageNoHorizontalOverflow(page);
     await capture(page, "ci-rerun-request");
+  });
+
+  test(`release grants are opt-in and older peers show both disabled categories on ${layout}`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await openAssistantFixture(page, thread);
+    await threadAction(page, "Decision Delegation");
+    const dialog = page.getByRole("dialog", { name: "Decision Delegation" });
+    const tag = dialog.getByRole("checkbox", { name: "Release Tag", exact: true });
+    const publish = dialog.getByRole("checkbox", { name: "Release Publication", exact: true });
+    await expect(tag).not.toBeChecked();
+    await expect(publish).not.toBeChecked();
+    await tag.check();
+    await publish.check();
+    await expectFullyInViewport(tag, "Release Tag");
+    await expectFullyInViewport(publish, "Release Publication");
+    await expectNoHorizontalOverflow(dialog, "Release Decision Grant");
+    await capture(page, "release-decision-grant");
+
+    await page.goto(`/assistants-e2e.html?delegation=release-old&path=${encodeURIComponent(thread)}`);
+    await threadAction(page, "Decision Delegation");
+    await expect(tag).toBeDisabled();
+    await expect(publish).toBeDisabled();
+    await expect(dialog.getByRole("checkbox", { name: "CI Rerun", exact: true })).toBeEnabled();
+    const explanation = dialog.getByText("Update the control plane to grant release decisions.");
+    await explanation.scrollIntoViewIfNeeded();
+    await expectFullyInViewport(explanation, "Capability Explanation");
+    await expectNoHorizontalOverflow(dialog, "Release Decision Grant");
+    await capture(page, "release-decision-unavailable");
+  });
+
+  for (const action of ["tag", "publish"] as const) {
+    test(`release ${action} shows the exact decision and reachable actions on ${layout}`, async ({ page }) => {
+      await page.setViewportSize({ width, height });
+      const path = viewPath({ name: "session", id: "sess-release-decision" });
+      await page.goto(`/assistants-e2e.html?delegation=stress&release-decision=${action}&path=${encodeURIComponent(path)}`);
+      const target = page.getByLabel("Release Target");
+      const card = page.locator(".request-card").filter({ has: target });
+      const tag = target.getByText("v0.38.0", { exact: true });
+      const commit = target.getByRole("link", { name: "2d99e227b73fcad015264f7fe04674953df724b1" });
+      const approve = card.getByRole("button", { name: "Approve", exact: true });
+      const deny = card.getByRole("button", { name: "Deny", exact: true });
+      await expect(commit).toHaveAttribute("href", /\/commit\/2d99e227b73fcad015264f7fe04674953df724b1$/u);
+      await approve.click({ trial: true });
+      await deny.click({ trial: true });
+      await target.getByText("engineering/release-validation", { exact: true }).scrollIntoViewIfNeeded();
+      await expectFullyInViewport(tag, "Release Tag");
+      await expectFullyInViewport(approve, "Approve");
+      await expectFullyInViewport(deny, "Deny");
+      await expectNoHorizontalOverflow(card, "Release Approval Card");
+      await expectPageNoHorizontalOverflow(page);
+      const payloadDigest = target.getByText("a".repeat(64), { exact: true });
+      await expect(payloadDigest).toBeVisible();
+      if (action === "tag") {
+        await capture(page, "release-tag-request");
+        return;
+      }
+
+      await card.getByRole("button", { name: "Expand Decision", exact: true }).click();
+      await expect(card.getByRole("button", { name: "Collapse Decision", exact: true })).toBeVisible();
+      await expect(target.getByText("#54921", { exact: true })).toBeVisible();
+      const notesToggle = target.getByText("Show Release Notes", { exact: true });
+      const assetsToggle = target.getByText("Show Assets (6)", { exact: true });
+      await payloadDigest.scrollIntoViewIfNeeded();
+      await expectFullyInViewport(notesToggle, "Release Notes Summary");
+      await expectFullyInViewport(assetsToggle, "Release Assets Summary");
+      await expectFullyInViewport(payloadDigest, "Payload Digest");
+      await expectNoHorizontalOverflow(payloadDigest, "Payload Digest");
+      await expectWithinWidth(payloadDigest, card, "Payload Digest");
+      await expectFullyInViewport(approve, "Approve");
+      await expectFullyInViewport(deny, "Deny");
+      await capture(page, "release-publish-request");
+
+      await notesToggle.click();
+      const notes = target.locator("pre");
+      await expect(notes).toContainText("Installation instructions and signed checksums");
+      await notesToggle.evaluate((element) => element.scrollIntoView({ block: "start" }));
+      await expectFullyInViewport(notesToggle, "Expanded Release Notes Summary");
+      await expectWithinWidth(notes, card, "Release Notes");
+      await expectNoHorizontalOverflow(notes, "Release Notes");
+      await expectFullyInViewport(approve, "Approve With Notes Open");
+      await capture(page, "release-publish-notes");
+
+      await notesToggle.click();
+      await assetsToggle.click();
+      await expect(target.getByRole("listitem")).toHaveCount(6);
+      const firstAsset = target.getByRole("listitem").filter({ hasText: /standalone-with-signed-runner-and-bundled-sidecar/u });
+      const assetDigest = firstAsset.getByText(`sha256:${"a".repeat(64)}`, { exact: true });
+      await assetsToggle.evaluate((element) => element.scrollIntoView({ block: "start" }));
+      await expectFullyInViewport(assetsToggle, "Expanded Release Assets Summary");
+      await expectFullyInViewport(firstAsset, "Long Release Asset");
+      await expectNoHorizontalOverflow(assetDigest, "Release Asset Digest");
+      await expectWithinWidth(assetDigest, card, "Release Asset Digest");
+      await expectNoHorizontalOverflow(card, "Expanded Release Payload");
+      await expectFullyInViewport(approve, "Approve With Assets Open");
+      await capture(page, "release-publish-assets");
+      await payloadDigest.scrollIntoViewIfNeeded();
+      await expectFullyInViewport(payloadDigest, "Payload Digest With Assets Open");
+    });
+  }
+
+  test(`release decisions show the approving thread in Inbox and Campaign Status on ${layout}`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    const expectReleaseEntry = async (scope: Locator) => {
+      const entry = scope.getByRole("listitem").filter({ hasText: "Release Publication" });
+      await expect(entry).toContainText("engineering/release-validation · v0.38.0");
+      await expect(entry).toContainText("Approved by Assistant thread");
+      const attribution = entry.getByRole("button", { name: "Triage Open Issues", exact: true });
+      await entry.evaluate((element) => element.scrollIntoView({ block: "center" }));
+      await expectFullyInViewport(attribution, "Release Publication Thread Attribution");
+      await expect(scope.getByRole("listitem").filter({ hasText: "Release Tag" })).toContainText("Approved by Assistant thread");
+      await expect(scope).not.toContainText("release_publish:");
+      await expectNoHorizontalOverflow(scope);
+    };
+    await page.goto("/assistants-e2e.html?delegation=stress&release-history&path=%2F");
+    await page.getByRole("button", { name: "More Actions", exact: true }).first().click();
+    await page.getByRole("menuitem", { name: "Delegated Decisions", exact: true }).click();
+    await expectReleaseEntry(page.getByRole("dialog", { name: "Delegated Decisions" }));
+    await capture(page, "release-inbox-history");
+
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&delegation=stress&release-history");
+    await page.getByRole("navigation", { name: "Campaign Sections" }).getByRole("button", { name: /Delegated Decisions/ }).click();
+    await expectReleaseEntry(page.locator('[data-campaign-section="Delegated Decisions"]'));
+    await capture(page, "release-campaign-history");
   });
 
   if (layout === "phone") test("the CI rerun approval wraps long names and keeps actions reachable on phone", async ({ page }) => {
