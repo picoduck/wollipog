@@ -100,6 +100,19 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await expectFullyInViewport(page.locator(".composer"), "The thread composer");
       await expectPageNoHorizontalOverflow(page);
       await capture(page, "thread-header");
+      if (layout === "phone") {
+        const title = page.getByRole("heading", { name: "Triage Open Issues", exact: true });
+        await expect.poll(() => title.evaluate((heading) => heading.clientWidth), {
+          message: "The phone thread title keeps room for the short name beside its actions",
+        }).toBeGreaterThanOrEqual(145);
+        await expect(page.getByRole("button", { name: "Search", exact: true })).toHaveCount(0);
+        await page.getByRole("button", { name: "Thread Actions", exact: true }).click();
+        await page.getByRole("menuitem", { name: "Search", exact: true }).click();
+        const search = page.getByRole("dialog", { name: "Search", exact: true });
+        await expect(search).toBeVisible();
+        await page.keyboard.press("Escape");
+        await expect(search).toHaveCount(0);
+      }
 
       const limits = await editThread(page);
       await expect(limits).toContainText("This thread's conversation belongs to this harness.");
@@ -285,9 +298,16 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await page.setViewportSize({ width, height });
       await open(page, "/settings/behavior", theme);
       await expect(page.getByRole("region", { name: "Input" })).toBeVisible();
+      await expect(page.getByRole("region", { name: "Assistant Threads" })).toHaveCount(0);
       await expect(page.getByRole("region", { name: "Thread Defaults" })).toHaveCount(0);
       await expect(page.getByRole("region", { name: "Assistant Connections" })).toHaveCount(0);
-      if (layout === "desktop" && theme === "dark") await capture(page, "behavior-without-assistant-settings");
+      if (layout === "desktop" && theme === "dark" && EVIDENCE) {
+        const body = page.locator(".main-body");
+        const overflow = await body.evaluate((node) => node.scrollHeight - node.clientHeight);
+        await page.setViewportSize({ width, height: height + overflow + 8 });
+        await expectFullyInViewport(page.getByText("About Artifact Uploads", { exact: true }), "The last row in Behavior");
+        await capture(page, "behavior-without-assistant-settings");
+      }
     });
   }
 }

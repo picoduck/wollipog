@@ -302,6 +302,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
           } : undefined}
           menu={selected ? threadMenu(selected) : []}
           menuLabel="Thread Actions"
+          searchInMenu={Boolean(selected)}
         />
       ) : (
         // New Thread belongs to the assistant's Threads list, so the page header offers no second one.
