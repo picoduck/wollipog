@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { expectNoHorizontalOverflow } from "./layout-invariants.js";
 
 /** A failed turn is one Turn Failed notice with Retry Turn; a stop is a footer fact (#2169). */
 
@@ -62,6 +63,22 @@ for (const width of [1440, 390]) {
       await page.screenshot({ path: test.info().outputPath(`turn-problem-${width}-${theme}.png`) });
     });
   }
+}
+
+for (const width of [1440, 390]) {
+  test(`a launch fallback is visible before the first turn at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/turn-outcomes-e2e.html?problem=worktree-fallback");
+    const reader = page.getByTestId("reader");
+    const warning = reader.locator(".notice", { has: page.getByText("Worktree Base Fallback", { exact: true }) });
+    await expect(warning).toHaveCount(1);
+    await warning.scrollIntoViewIfNeeded();
+    await expect(warning.locator(".notice-body")).toContainText(
+      "Git error while fetching the remote default branch. TLS certificate verification failed.");
+    await expect(warning.getByRole("button", { name: "Retry Turn" })).toHaveCount(0);
+    await expectNoHorizontalOverflow(reader, "The transcript with the worktree fallback warning");
+    await page.screenshot({ path: test.info().outputPath(`worktree-base-fallback-${width}.png`) });
+  });
 }
 
 test("Retry Turn submits the failed turn's prompt again", async ({ page }) => {

@@ -6554,6 +6554,8 @@ export type SessionEventPayload =
       /** A problem the driver reported while the turn kept running (#3806), not a failed turn: a
        * dashboard shows it without Retry Turn. Older peers ignore the flag and show a failed turn. */
       nonFatal?: true;
+      /** A non-fatal warning from automatic worktree creation, before the first turn. */
+      source?: "worktree_base_fallback";
     }
   | {
       kind: "policy_transport";
@@ -8883,6 +8885,8 @@ export interface SessionWorktreeView {
   branch: string;
   /** Caller-selected creation ref. Attached and legacy worktrees may omit it. */
   baseRef?: string;
+  /** The automatic remote-base check failed, so creation used local HEAD. */
+  baseFallback?: "remote_check_failed";
   /**
    * The repository's default branch, as a plain branch name with no remote prefix.
    *
