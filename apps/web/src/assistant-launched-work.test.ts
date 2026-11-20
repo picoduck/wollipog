@@ -57,6 +57,14 @@ test("each group lists the newest launch first (#4776)", () => {
   });
 });
 
+test("launch time orders sessions and campaigns together; an unloaded launch leads its group (#4776)", () => {
+  // Sessions then campaigns, as the thread lists them: the campaign was launched between the two
+  // sessions, so it sits between them rather than ahead of both.
+  const ids = ["s-old", "s-new", "c-mid", "s-unloaded"];
+  const at: Record<string, number | undefined> = { "s-old": 100, "s-new": 300, "c-mid": 200, "s-unloaded": undefined };
+  assert.deepEqual(groupLaunchedWork(ids, () => "active", (id) => at[id]).active, ["s-unloaded", "s-new", "c-mid", "s-old"]);
+});
+
 test("the header toggle names the sessions, and those needing you only while there are some (#4776)", () => {
   assert.equal(launchedSessionsToggleLabel({ total: 1, needsYou: 0 }), "1 Session");
   assert.equal(launchedSessionsToggleLabel({ total: 3, needsYou: 0 }), "3 Sessions");

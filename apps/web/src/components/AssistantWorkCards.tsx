@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { prioritizedPendingRequests, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import {
@@ -27,13 +27,27 @@ const GROUP_OF_CODE: Record<string, LaunchedWorkGroup> = { n: "needsYou", a: "ac
 
 /**
  * A thread's launched work, grouped live from the store (#4776): each session's group follows its
- * stream, so the counts and the panel's order change as the work does. The selector returns one code
- * per id, so a stream update that moves no session between groups re-renders nothing.
+ * stream, so the counts and the panel's order change as the work does. The selector returns one line
+ * per id, its group code and launch time, so a stream update that moves no session between groups
+ * re-renders nothing.
  */
 export function useLaunchedWorkGroups(work: LaunchedWork): { ids: string[]; groups: LaunchedWorkGroups } {
   const ids = useMemo(() => launchedWorkIds(work), [work]);
-  const codes = useStoreSelector((state) => ids.map((id) => GROUP_CODES[launchedWorkGroup(state.sessions.get(id))]).join(""));
-  const groups = useMemo(() => groupLaunchedWork(ids, (_id, index) => GROUP_OF_CODE[codes.charAt(index)] ?? "active"), [ids, codes]);
+  const lines = useStoreSelector((state) => ids.map((id) => {
+    const session = state.sessions.get(id);
+    return `${GROUP_CODES[launchedWorkGroup(session)]}${session?.createdAt ?? ""}`;
+  }).join("\n"));
+  const groups = useMemo(() => {
+    const parsed = lines.split("\n");
+    return groupLaunchedWork(
+      ids,
+      (_id, index) => GROUP_OF_CODE[parsed[index]?.charAt(0) ?? ""] ?? "active",
+      (_id, index) => {
+        const at = parsed[index]?.slice(1);
+        return at ? Number(at) : undefined;
+      },
+    );
+  }, [ids, lines]);
   return { ids, groups };
 }
 
@@ -43,6 +57,10 @@ export function useLaunchedWorkGroups(work: LaunchedWork): { ids: string[]; grou
  * would unblock, then each launched session waiting on an approval or a question, as its work card
  * with the approval inline. `showSessions` is false while the Launched Sessions panel shows those
  * cards itself, so the same approval is never offered twice on one screen.
+ *
+ * A card leaves once its session stops waiting, Approve Once's own card included. When focus was in
+ * one that left, it moves to the header's Launched Sessions toggle, where that session now is,
+ * rather than dropping to the page.
  */
 export function AssistantWaitingWork({ work, confirmations, showSessions }: {
   work: LaunchedWork;
@@ -52,9 +70,31 @@ export function AssistantWaitingWork({ work, confirmations, showSessions }: {
   const { groups } = useLaunchedWorkGroups(work);
   const waiting = showSessions ? groups.needsYou : [];
   const campaigns = useMemo(() => new Set(work.campaignIds ?? []), [work.campaignIds]);
+  const sectionRef = useRef<HTMLElement | null>(null);
+  // Whether focus was last inside this region. A removed element takes focus with it without a blur
+  // that names where focus went, so only a blur to somewhere else clears it.
+  const focusWithin = useRef(false);
+  const waitingKey = waiting.join("\n");
+  useLayoutEffect(() => {
+    if (!focusWithin.current) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && sectionRef.current?.contains(active)) return;
+    focusWithin.current = false;
+    if (active && active !== document.body) return;
+    document.querySelector<HTMLElement>(".assistant-thread-head .assistant-launched-toggle")?.focus();
+  }, [waitingKey]);
   if (waiting.length === 0 && !confirmations) return null;
   return (
-    <section className="assistant-work" aria-label="Waiting for You">
+    <section
+      ref={sectionRef}
+      className="assistant-work"
+      aria-label="Waiting for You"
+      onFocus={() => { focusWithin.current = true; }}
+      onBlur={(event) => {
+        const next = event.relatedTarget;
+        if (next instanceof Node && !event.currentTarget.contains(next)) focusWithin.current = false;
+      }}
+    >
       {confirmations && <ul className="assistant-work-confirmations" aria-label="Approvals Needed">{confirmations}</ul>}
       {waiting.length > 0 && (
         <ul className="assistant-work-cards" aria-label="Sessions Waiting for You">

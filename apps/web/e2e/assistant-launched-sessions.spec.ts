@@ -56,6 +56,8 @@ for (const theme of ["dark", "light"] as const) {
       await expect(toggle(page)).toHaveText("2 Sessions");
       await expect(waitingInHeader(page)).toHaveCount(0);
       await expect(panel(page)).toHaveCount(0);
+      // Its card left the header with focus in it; focus moves to the toggle, where the session now is.
+      await expect(toggle(page)).toBeFocused();
     });
 
     test("the toggle opens Launched Sessions with waiting work first, and the counts follow the work live", async ({ page }) => {

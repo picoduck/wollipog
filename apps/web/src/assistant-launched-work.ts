@@ -36,10 +36,21 @@ export interface LaunchedWorkGroups {
   finished: string[];
 }
 
-/** `ids` sorted into their groups, given each id's group (`launchedWorkGroup` of its session). */
-export function groupLaunchedWork(ids: readonly string[], groupOf: (id: string, index: number) => LaunchedWorkGroup): LaunchedWorkGroups {
+/**
+ * `ids` sorted into their groups, given each id's group (`launchedWorkGroup` of its session) and when
+ * it was launched (its session's `createdAt`). Sessions and campaigns arrive as two lists with no
+ * shared order, so launch time orders them together. One not loaded yet has no time; it is most
+ * likely the newest launch, so it leads. Ties keep the later position in `ids` first.
+ */
+export function groupLaunchedWork(
+  ids: readonly string[],
+  groupOf: (id: string, index: number) => LaunchedWorkGroup,
+  launchedAt: (id: string, index: number) => number | undefined = () => undefined,
+): LaunchedWorkGroups {
+  const entries = ids.map((id, index) => ({ id, index, at: launchedAt(id, index) ?? Number.POSITIVE_INFINITY }));
+  entries.sort((a, b) => b.at - a.at || b.index - a.index);
   const groups: LaunchedWorkGroups = { needsYou: [], active: [], finished: [] };
-  for (let index = ids.length - 1; index >= 0; index--) groups[groupOf(ids[index]!, index)].push(ids[index]!);
+  for (const entry of entries) groups[groupOf(entry.id, entry.index)].push(entry.id);
   return groups;
 }
 
