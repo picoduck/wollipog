@@ -65,6 +65,7 @@ export * from "./pull-request-watch.js";
 export * from "./session-waits.js";
 export * from "./workspace-removal.js";
 export * from "./forge-decision-action.js";
+export * from "./release-decision.js";
 export * from "./merge-closure-watch.js";
 export * from "./campaign-activity.js";
 export * from "./review-retirement.js";
@@ -284,6 +285,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   forgeDecisionActions: 284,
   /** v399 adds exact, requester-executed GitHub Actions rerun decisions. */
   typedCiRerun: 399,
+  /** v401 adds exact GitHub release tag and draft publication decisions. */
+  typedReleaseDecisions: 401,
   /** v275 campaign handoffs and recorded delivery (#4070). Gates the `complete_with_handoffs`
    * status for dashboards and the delivery and handoff ledger writes for runner tools. */
   campaignHandoffs: 275,
@@ -5230,6 +5233,7 @@ export type WorkflowDecisionResourceSnapshot =
     }
   | OwnerDecisionSnapshot
   | import("./forge-decision-action.js").CiRerunDecisionSnapshot
+  | import("./release-decision.js").ReleaseDecisionSnapshot
   | {
       category: "pr_merge";
       /** A GitHub `owner/repo`, or (v239, #3602) a GitLab project with its host and full namespace. */
@@ -12731,6 +12735,7 @@ export interface UiSnapshotMessage {
     assistantDecisionHistory?: true;
     /** The owner can grant typed GitHub Actions rerun decisions on this control plane. */
     assistantCiRerunDecisions?: true;
+    assistantReleaseDecisions?: true;
     /** Session reminders support the explicit no-timer Someday schedule kind. */
     indefiniteSessionReminders?: boolean;
     /** Per-user worktree setup notices and runner-owned generation are available. */

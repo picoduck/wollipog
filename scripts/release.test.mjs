@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { acquireCheckpointLock, advance, bumpVersions, notesPath, prepare, saveCheckpoint, validateCheckpoint, verifyMergedPreparation, verifyReleaseJobs } from "./release.mjs";
 import { FINALIZER_JOB, NATIVE_RELEASE_JOBS } from "./release-timings.mjs";
+import { canonicalReleasePayload } from "../packages/protocol/src/release-payload.mjs";
 
 const head = "a".repeat(40), merge = "b".repeat(40), base = "c".repeat(40);
 const notes = "# Wollipog v0.35.0\n\nRelease notes.\n\n";
@@ -40,7 +41,7 @@ function fixture() {
     baseRefName: "main", headRepository: { nameWithOwner: "example/project" }, mergeCommit: { oid: merge }, mergeQueueEntry: null };
   const run = { id: 100, run_attempt: 1, status: "completed", conclusion: "success", path: ".github/workflows/release.yml",
     repository: { full_name: "example/project" }, event: "push", head_branch: "v0.35.0", head_sha: merge };
-  const release = { id: 200, tag_name: "v0.35.0", draft: true, prerelease: false };
+  const release = { id: 200, tag_name: "v0.35.0", draft: true, prerelease: false, name: "Draft", body: null, target_commitish: "main" };
   let tag = { object: { type: "commit", sha: merge } };
   const controls = { failVerification: false, crashAfterPublish: false, changedPreparation: false, runs: [run], latestId: 200,
     previousTag: "v0.34.0", certificationStatus: "certified", certificationChecks: 0 };
@@ -187,6 +188,59 @@ test("successful checks do not substitute for publication authority", () => {
   assert.equal(f.mutations().length, 0);
   assert.ok(f.calls.some((call) => call.verify));
   assert.equal(f.saved.at(-1).releaseId, 200);
+});
+
+test("typed tagging keeps the certification gate and never falls back to a manual write", () => {
+  const f = fixture(), s = state();
+  f.setTag(null);
+  f.controls.certificationStatus = "pending";
+  const typed = { typedDecisions: true, reviewedHead: head };
+  assert.equal(advance(s, typed, f.io).stage, "full-regression-certification");
+  f.controls.certificationStatus = "certified";
+  const gate = advance(s, { ...typed, allowTag: true }, f.io);
+  const payload = { ref: "refs/tags/v0.35.0", sha: merge };
+  assert.equal(gate.stage, "tag-approval");
+  assert.equal(gate.resourceKey, "release_tag:example/project:v0.35.0");
+  assert.deepEqual(gate.resourceSnapshot, { category: "release_tag", repository: "example/project", tag: "v0.35.0", commitSha: merge,
+    releasePayloadDigest: createHash("sha256").update(canonicalReleasePayload(payload)).digest("hex") });
+  f.io.typedDecision = (id, snapshot) => {
+    assert.equal(id, "typed-tag");
+    assert.deepEqual(snapshot, gate.resourceSnapshot);
+    f.setTag({ object: { type: "commit", sha: merge } });
+  };
+  assert.equal(advance(s, { ...typed, tagDecision: "typed-tag" }, f.io).stage, "tag-created");
+  assert.deepEqual(f.mutations(), []);
+});
+
+test("typed publication pins the signed inventory and preserves all just-in-time release checks", () => {
+  const f = fixture(), s = state();
+  const typed = { typedDecisions: true, reviewedHead: head };
+  const inventory = [{ id: 308, name: "bundle.zip", size: 128, digest: `sha256:${"e".repeat(64)}` }];
+  f.io.verify = () => () => inventory;
+  const gate = advance(s, typed, f.io);
+  assert.equal(gate.stage, "publish-approval");
+  assert.equal(gate.resourceKey, "release_publish:example/project:v0.35.0");
+  assert.deepEqual(gate.resourceSnapshot.releasePayload, {
+    name: "Wollipog v0.35.0", body: notes, draft: { name: "Draft", body: null, targetCommitish: "main" },
+    assets: inventory, previousStable: { id: 199, tag: "v0.34.0" }, workflow: { runId: 100, attempt: 1 },
+  });
+  let executions = 0;
+  f.io.typedDecision = (id, snapshot) => {
+    assert.equal(id, "typed-publish");
+    assert.deepEqual(snapshot, gate.resourceSnapshot);
+    executions++;
+  };
+  const approved = { ...typed, publishDecision: "typed-publish" };
+  f.io.verify = () => () => { throw new Error("Hosted assets changed after verification"); };
+  assert.throws(() => advance(s, approved, f.io), /Hosted assets changed/);
+  f.io.verify = () => () => inventory;
+  f.controls.previousTag = "v0.36.0";
+  assert.throws(() => advance(s, approved, f.io), /newer or unrecognised stable release/);
+  assert.equal(executions, 0);
+  f.controls.previousTag = "v0.34.0";
+  assert.equal(advance(s, approved, f.io).stage, "publication-requested");
+  assert.equal(executions, 1);
+  assert.deepEqual(f.mutations(), []);
 });
 
 test("missing timing metadata does not weaken or replace semantic release gates", () => {

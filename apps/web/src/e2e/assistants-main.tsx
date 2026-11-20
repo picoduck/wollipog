@@ -50,7 +50,7 @@ const attentionCount = Number(params.get("attention") ?? 0);
 const limitsScenario = params.get("limits");
 const campaignScenario = params.has("campaign");
 const delegationScenario = params.get("delegation");
-const showDelegation = delegationScenario === "stress" || delegationScenario === "ci-old";
+const showDelegation = delegationScenario === "stress" || delegationScenario === "ci-old" || delegationScenario === "release-old";
 const evidenceScenario = params.get("evidence");
 const missingEvidenceIds = evidenceScenario === "refused-stress"
   ? Array.from({ length: 16 }, (_, index) => `settings-desktop-dark-preview-${String(index + 1).padStart(2, "0")}`)
@@ -169,6 +169,31 @@ if (params.has("ci-rerun")) {
       resourceKey: `ci_rerun:${repository}:${runId}:${attempt}`, resourceDigest: "b".repeat(64),
       resourceSnapshot: { category: "ci_rerun", repository, runId, jobId, jobName, attempt,
         headSha: "2d99e227b73fcad015264f7fe04674953df724b1" } },
+  } }));
+}
+
+const releaseScenario = params.get("release-decision");
+if (releaseScenario === "tag" || releaseScenario === "publish") {
+  const id = "sess-release-decision";
+  const occurrenceId = "workflow_release_decision";
+  const repository = "engineering/release-validation";
+  const category = releaseScenario === "tag" ? "release_tag" : "release_publish";
+  const coordinates = { repository, tag: "v0.38.0", commitSha: "2d99e227b73fcad015264f7fe04674953df724b1",
+    releasePayloadDigest: "a".repeat(64) };
+  const resourceSnapshot = releaseScenario === "tag" ? { category: "release_tag" as const, ...coordinates }
+    : { category: "release_publish" as const, ...coordinates, releaseId: 54921, releasePayload: {
+      name: "Wollipog v0.38.0", body: "# Release Notes\n\nVerified Linux, macOS, and Windows assets.",
+      draft: { name: "Release Draft", body: null, targetCommitish: "main" },
+      assets: [{ id: 23568, name: "wollipog-arm64-linux.tar.gz", size: 42240, digest: `sha256:${"b".repeat(64)}` }],
+      previousStable: { id: 54920, tag: "v0.37.0" }, workflow: { runId: 4215871234, attempt: 2 },
+    } };
+  const title = releaseScenario === "tag" ? "Release Tag Approval Required" : "Release Publication Approval Required";
+  sessions.set(id, session(id, "Prepare the Release", { status: "input_required", pendingApproval: {
+    kind: "workflow_decision", requestId: occurrenceId, occurrenceId, title,
+    options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+    workflowDecision: { requestId: occurrenceId, occurrenceId, sessionId: id, controllingSessionId: id, category,
+      authority: "human", status: "pending", policyRevision: 0, createdAt: NOW,
+      resourceKey: `${category}:${repository}:${coordinates.tag}`, resourceDigest: "c".repeat(64), resourceSnapshot },
   } }));
 }
 
@@ -423,7 +448,8 @@ function snapshot(): UiSnapshotMessage {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false,
       projects: delegationScenario === "stress", ...(showDelegation ? { assistantDecisionHistory: true as const } : {}),
-      ...(delegationScenario === "stress" ? { assistantCiRerunDecisions: true as const } : {}) },
+      ...(delegationScenario === "stress" || delegationScenario === "release-old" ? { assistantCiRerunDecisions: true as const } : {}),
+      ...(delegationScenario === "stress" ? { assistantReleaseDecisions: true as const } : {}) },
     projects: delegationProjects,
     runners: [structuredClone(runner)],
     boxes: [],
@@ -583,7 +609,8 @@ const client = {
     publish(current);
     return { thread: structuredClone(current) };
   },
-  assistantDecisionHistory: async (filter: { threadId?: string; before?: string }) => assistantDecisionHistoryFixture("campaign_0", filter.before),
+  assistantDecisionHistory: async (filter: { threadId?: string; before?: string }) =>
+    assistantDecisionHistoryFixture("campaign_0", filter.before, params.has("release-history")),
   setConfig: async (sessionId: string, patch: SessionConfig) => {
     const current = threads.find((thread) => thread.sessionId === sessionId);
     if (current?.usage && patch.costBudgetUsd !== undefined) {

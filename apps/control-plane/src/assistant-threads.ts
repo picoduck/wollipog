@@ -62,7 +62,7 @@ function decisionDelegation(body: unknown, now: number): AssistantDecisionDelega
   const categories = grant?.categories;
   if (!Array.isArray(categories) || categories.length === 0 || categories.length > Object.keys(ASSISTANT_DECISION_CATEGORIES).length ||
       categories.some((category) => typeof category !== "string" || !Object.hasOwn(ASSISTANT_DECISION_CATEGORIES, category))) {
-    throw new AssistantThreadRefusal("Select at least one supported decision category. Generic permissions, CI reruns and release commands have no typed Assistant resolution path.", 400);
+    throw new AssistantThreadRefusal("Select at least one supported decision category. Generic permissions have no typed Assistant resolution path.", 400);
   }
   const scope = (value: unknown): "all" | string[] => {
     if (value === "all") return value;

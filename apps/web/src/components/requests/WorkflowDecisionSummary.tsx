@@ -155,6 +155,38 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
           </a>}</dd></div>
       </dl>;
     }
+    case "release_tag":
+    case "release_publish": {
+      const repository = `https://github.com/${snapshot.repository}`;
+      return <dl className="facts" aria-label="Release Target">
+        <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
+        <div><dt>Tag</dt><dd>{snapshot.tag}</dd></div>
+        <div><dt>Commit</dt><dd><a href={`${repository}/commit/${snapshot.commitSha}`} target="_blank" rel="noreferrer">
+          <code>{snapshot.commitSha}</code>
+        </a></dd></div>
+        {snapshot.category === "release_tag" ? <div><dt>Action</dt><dd>Create the tag if it is absent.</dd></div> : <>
+          <div><dt>Draft ID</dt><dd>#{snapshot.releaseId}</dd></div>
+          <div><dt>Release Name</dt><dd>{snapshot.releasePayload.name}</dd></div>
+          <div><dt>Action</dt><dd>Publish this draft as the latest stable release.</dd></div>
+          {snapshot.releasePayload.workflow && <div><dt>Workflow Attempt</dt><dd>
+            <a href={`${repository}/actions/runs/${snapshot.releasePayload.workflow.runId}/attempts/${snapshot.releasePayload.workflow.attempt}`}
+              target="_blank" rel="noreferrer">Run {snapshot.releasePayload.workflow.runId}, attempt {snapshot.releasePayload.workflow.attempt}</a>
+          </dd></div>}
+          <div><dt>Previous Stable Release</dt><dd>{snapshot.releasePayload.previousStable?.tag ?? "None"}</dd></div>
+          <div><dt>Release Notes</dt><dd><details>
+            <summary>Show Release Notes</summary>
+            <div className="code-well"><pre>{snapshot.releasePayload.body}</pre></div>
+          </details></dd></div>
+          <div><dt>Assets</dt><dd><details>
+            <summary>Show Assets ({snapshot.releasePayload.assets.length})</summary>
+            <ul>{snapshot.releasePayload.assets.map((asset) => <li key={asset.id}>{asset.name} · #{asset.id} · {asset.size} bytes
+              <br /><code>{asset.digest}</code>
+            </li>)}</ul>
+          </details></dd></div>
+        </>}
+        <div><dt>Payload Digest</dt><dd><code>{snapshot.releasePayloadDigest}</code></dd></div>
+      </dl>;
+    }
     case "review_round_extension":
       // What the person is asked to grant: more cross-model review rounds, and why (#3369).
       return <dl className="facts">

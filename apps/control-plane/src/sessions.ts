@@ -22,6 +22,7 @@ import { runnerSupportsReviewQuestionPreservation } from "./review-session-capab
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
 import { FORGE_DECISION_ACTION_REFUSAL_REASONS, FORGE_DECISION_ACTION_STALE_REFUSALS, FORGE_DECISION_ACTION_SUCCESSES,
   FORGE_DECISION_ACTION_SUMMARY_LIMIT, ciRerunResourceKey, isRequesterForgeDecisionCategory, normalizeCiRerunTarget,
+  isReleaseDecisionCategory, normalizeReleaseDecision, releaseDecisionResourceKey, releaseDecisionPayloadBytes, requesterForgeCapability,
   type ExecuteWorkflowDecisionRequest, type ForgeDecisionAction, type ProjectLocationView,
   type ForgeDecisionActionRefusalReason, type ForgeDecisionActionResultMessage, type WorkflowDecisionForgeAction } from "@wollipog/protocol";
 import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
@@ -1383,6 +1384,13 @@ export function normalizeWorkflowDecisionSnapshot(
   }
   const value = input as Record<string, unknown>;
   const category = value.category;
+  if (isReleaseDecisionCategory(category)) {
+    const release = normalizeReleaseDecision(value);
+    if (!release || createHash("sha256").update(releaseDecisionPayloadBytes(release)).digest("hex") !== release.releasePayloadDigest) {
+      return fail("a release decision needs exact GitHub release coordinates and the digest of its canonical payload");
+    }
+    return ok(release);
+  }
   if (category === "ci_rerun") {
     const target = normalizeCiRerunTarget(value);
     if (!target || Object.keys(value).some((key) => !["category", "repository", "runId", "jobId", "headSha", "attempt"].includes(key))) {
@@ -12451,26 +12459,33 @@ export class SessionsService {
     if (normalized.ok && normalized.data?.category === "pr_merge") {
       return this.createMergeDecision(sessionId, request, normalized.data, canAccess);
     }
-    if (normalized.ok && normalized.data?.category === "ci_rerun") {
+    if (normalized.ok && normalized.data && (normalized.data.category === "ci_rerun" ||
+        normalized.data.category === "release_tag" || normalized.data.category === "release_publish")) {
       const child = requesting;
       if (!child || !canAccess(child.id)) return fail("session not found", 404);
-      if (!boundedDecisionString(request?.requestId, 256) || request.resourceKey !== ciRerunResourceKey(normalized.data)) {
-        return fail(`Supply a requestId and the canonical CI rerun resourceKey: ${ciRerunResourceKey(normalized.data)}`, 400);
+      const target = normalized.data;
+      const key = target.category === "ci_rerun" ? ciRerunResourceKey(target) : releaseDecisionResourceKey(target);
+      if (!boundedDecisionString(request?.requestId, 256) || request.resourceKey !== key) {
+        return fail(`Supply a requestId and the canonical resourceKey: ${key}`, 400);
       }
-      const controller = this.workflowDecisionController(child, "ci_rerun");
+      const controller = this.workflowDecisionController(child, target.category);
       if (!controller || !canAccess(controller.session.id)) return fail("workflow decision controller is unavailable", 409);
       if (isTerminal(child.status) || isTerminal(controller.session.status)) return fail("a terminal session cannot request or control a workflow decision", 409);
-      const unsupported = this.capabilityFailure(child.runnerId, "typedCiRerun", "typed CI reruns");
+      const capability = requesterForgeCapability(target.category);
+      const unsupported = this.capabilityFailure(child.runnerId, capability,
+        target.category === "ci_rerun" ? "typed CI reruns" : "typed release decisions");
       if (unsupported) return unsupported;
       const location = this.requesterForgeDecisionLocation(child);
-      if (!location) return fail("A typed CI rerun requires a registered Project Location", 409);
+      if (!location) return fail("This action requires a registered Project Location", 409);
       const inspected = await inspectProjectLocation({ db: this.db, hub: this.hub }, location.id, {
-        projectId: location.projectId, requireProtocol: "typedCiRerun", timeoutMs: 10_000,
+        projectId: location.projectId, requireProtocol: capability, timeoutMs: 10_000,
       });
       if (!inspected.ok || inspected.location.repository !== normalized.data.repository) {
         return fail("The requested GitHub repository could not be verified at this session's Location", 409);
       }
-      const target = normalized.data;
+      if (target.category !== "ci_rerun") {
+        return this.createWorkflowDecision(sessionId, request, canAccess, { trustedForgeLocationId: location.id });
+      }
       const prior = this.db.workflowDecisionByRequestId(sessionId, request.requestId)?.resourceSnapshot;
       let jobName = prior?.category === "ci_rerun" ? prior.jobName : undefined;
       if (!prior && target.jobId !== undefined) {
@@ -12824,7 +12839,8 @@ export class SessionsService {
   private excludedRepositoryRefusalDetail(requester: SessionView, controller: SessionView | null, snapshot: WorkflowDecisionResourceSnapshot):
     ExcludedRepositoryDetail | null {
     if (snapshot.category !== "follow_up_issue_publication" && snapshot.category !== "pr_merge" &&
-        snapshot.category !== "merged_branch_deletion" && snapshot.category !== "ci_rerun") return null;
+        snapshot.category !== "merged_branch_deletion" && snapshot.category !== "ci_rerun" &&
+        snapshot.category !== "release_tag" && snapshot.category !== "release_publish") return null;
     const rootId = this.db.campaignRootForMember(requester.id);
     const root = (rootId ? this.db.getSession(rootId) : null) ?? controller ?? requester;
     return this.excludedRepositoryDetail(root, snapshot.repository, requester);
@@ -15029,14 +15045,16 @@ export class SessionsService {
       "typed workflow decisions",
     );
     if (unsupported) return unsupported;
-    if (normalized.data.category === "ci_rerun") {
+    if (normalized.data.category === "ci_rerun" || normalized.data.category === "release_tag" || normalized.data.category === "release_publish") {
+      const target = normalized.data;
       if (!internal?.trustedForgeLocationId || this.requesterForgeDecisionLocation(child)?.id !== internal.trustedForgeLocationId) {
-        return fail("A typed CI rerun requires the session's verified Project Location", 409);
+        return fail("This action requires the session's verified Project Location", 409);
       }
-      if (request.resourceKey !== ciRerunResourceKey(normalized.data)) {
-        return fail(`Use the canonical CI rerun resourceKey: ${ciRerunResourceKey(normalized.data)}`, 400);
+      const key = target.category === "ci_rerun" ? ciRerunResourceKey(target) : releaseDecisionResourceKey(target);
+      if (request.resourceKey !== key) {
+        return fail(`Use the canonical resourceKey: ${key}`, 400);
       }
-      if (normalized.data.jobId !== undefined && internal.ciRerunJobName) normalized.data.jobName = internal.ciRerunJobName;
+      if (target.category === "ci_rerun" && target.jobId !== undefined && internal.ciRerunJobName) target.jobName = internal.ciRerunJobName;
     }
     if (normalized.data.category === "campaign_issue_scope" && !internal?.trustedIssueScope) {
       return fail("use request_campaign_issue_scope_change for a repository-bound human scope proposal", 403);
@@ -16722,7 +16740,8 @@ export class SessionsService {
     if (!decision || decision.sessionId !== sessionId || !canAccess(sessionId)) return fail("workflow decision not found", 404);
     const snapshot = decision.resourceSnapshot;
     if (snapshot.category !== "merged_branch_deletion" && snapshot.category !== "pr_merge" &&
-        snapshot.category !== "follow_up_issue_publication" && snapshot.category !== "ci_rerun") {
+        snapshot.category !== "follow_up_issue_publication" && snapshot.category !== "ci_rerun" &&
+        snapshot.category !== "release_tag" && snapshot.category !== "release_publish") {
       return fail("This workflow decision has no Wollipog forge executor", 403);
     }
     if (typeof request?.resourceDigest !== "string" || request.resourceDigest !== decision.resourceDigest) {
@@ -16730,8 +16749,8 @@ export class SessionsService {
     }
     const kind: WorkflowDecisionForgeAction["kind"] = snapshot.category === "pr_merge" ? "pr_merge_enqueue"
       : snapshot.category === "follow_up_issue_publication" ? "issue_publication"
-      : snapshot.category === "ci_rerun" ? "ci_rerun" : "branch_deletion";
-    const directForge = isRequesterForgeDecisionCategory(decision.category);
+      : snapshot.category === "merged_branch_deletion" ? "branch_deletion" : snapshot.category;
+    const directForge = isRequesterForgeDecisionCategory(kind);
     const performed = decision.forgeAction && (FORGE_DECISION_ACTION_SUCCESSES as ReadonlySet<string>).has(decision.forgeAction.outcome);
     const consumedDeletion = kind === "branch_deletion" && decision.status === "consumed" && !performed;
     if (decision.status !== "approved" && !consumedDeletion) {
@@ -16742,7 +16761,7 @@ export class SessionsService {
     const parent = this.db.getSession(decision.controllingSessionId);
     // A publication is performed by its Location's runner, whose own version is checked below.
     if (child && snapshot.category !== "follow_up_issue_publication") {
-      const unsupported = this.capabilityFailure(child.runnerId, directForge ? "typedCiRerun" : "forgeDecisionActions",
+      const unsupported = this.capabilityFailure(child.runnerId, directForge ? requesterForgeCapability(kind) : "forgeDecisionActions",
         "Wollipog-performed forge actions");
       if (unsupported) return unsupported;
     }
@@ -16784,6 +16803,12 @@ export class SessionsService {
     if (snapshot.category === "ci_rerun") {
       const { category: _category, jobName: _jobName, ...target } = snapshot;
       action = { kind: "ci_rerun", ...target };
+    } else if (snapshot.category === "release_tag") {
+      const { category, ...target } = snapshot;
+      action = { kind: category, ...target };
+    } else if (snapshot.category === "release_publish") {
+      const { category, ...target } = snapshot;
+      action = { kind: category, ...target };
     } else if (snapshot.category === "follow_up_issue_publication") {
       const route = this.publicationRoute(child, parent, snapshot, true);
       if (!route) return fail("This publication is outside the campaign's verified repositories; nothing was performed", 403);
@@ -16938,6 +16963,8 @@ export class SessionsService {
         : kind === "issue_publication"
           ? new Set([lookOnly ? "already_published" : "published", "refused", "uncertain"])
           : kind === "ci_rerun" ? new Set(["rerun_requested", "refused", "uncertain"])
+          : kind === "release_tag" ? new Set(["release_tagged", "refused", "uncertain"])
+          : kind === "release_publish" ? new Set(["release_published", "refused", "uncertain"])
           : new Set(["enqueued", "already_queued", "already_merged", "refused", "uncertain"]);
       // A publication's success must name the issue it created.
       const publishedIssue = kind === "issue_publication" && Number.isSafeInteger(answer?.issue) && answer!.issue! > 0 ? answer!.issue! : undefined;
@@ -17898,7 +17925,7 @@ export class SessionsService {
         !campaignBoundaryCurrent(controller))) return false;
     if (isRequesterForgeDecisionCategory(decision.category)) {
       return decision.authority === "human" && Boolean(requester && this.requesterForgeDecisionLocation(requester) &&
-        runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, "typedCiRerun"));
+        runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, requesterForgeCapability(decision.category)));
     }
     if (ownerKept) return true;
     if (decision.category === "ui_evidence_approval" && decision.authority === "human") return true;
@@ -18718,6 +18745,8 @@ export class SessionsService {
       implementation_question: "Implementation Decision Required",
       pr_merge: "PR Merge Approval Required",
       ci_rerun: "CI Rerun Approval Required",
+      release_tag: "Release Tag Approval Required",
+      release_publish: "Release Publication Approval Required",
       merged_branch_deletion: "Merged Branch Deletion Approval Required",
       follow_up_issue_publication: "Follow-Up Issue Publication Approval Required",
       issue_closure: "Issue Closure Approval Required",

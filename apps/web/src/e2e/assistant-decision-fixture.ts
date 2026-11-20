@@ -3,7 +3,7 @@ import type { AssistantDecisionHistoryEntry, AssistantDecisionHistoryPage } from
 const ciRerunKey = "ci_rerun:engineering/release-validation:44699507825:2";
 const ciRerunSubject = "engineering/release-validation · Run 44699507825 · Attempt 2 · Build and Bundle";
 
-export function assistantDecisionHistoryFixture(campaignId: string, before?: string): AssistantDecisionHistoryPage {
+export function assistantDecisionHistoryFixture(campaignId: string, before?: string, release = false): AssistantDecisionHistoryPage {
   const entries: AssistantDecisionHistoryEntry[] = Array.from({ length: 24 }, (_, index) => ({
     occurrenceId: `workflow_${index}`,
     sessionId: campaignId,
@@ -20,6 +20,14 @@ export function assistantDecisionHistoryFixture(campaignId: string, before?: str
         : "The exact decision matches the approved release scope.",
     },
   }));
+  if (release) {
+    for (const [index, category] of (["release_publish", "release_tag"] as const).entries()) {
+      const entry = entries[index]!;
+      entries[index] = { ...entry, category,
+        resourceKey: `${category}:engineering/release-validation:v0.38.0`, subject: "engineering/release-validation · v0.38.0",
+        delegation: { ...entry.delegation, outcome: "approved", reason: "The approval binds the exact release target and payload." } };
+    }
+  }
   const offset = Number(before ?? 0);
   return { entries: entries.slice(offset, offset + 5), ...(offset + 5 < entries.length ? { nextBefore: String(offset + 5) } : {}) };
 }

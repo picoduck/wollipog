@@ -1262,7 +1262,7 @@ if (params.get("typed") === "1") {
 const client = {
   ...api,
   assistantDecisionHistory: async (filter: { campaignId: string; before?: string }) =>
-    assistantDecisionHistoryFixture(filter.campaignId, filter.before),
+    assistantDecisionHistoryFixture(filter.campaignId, filter.before, params.has("release-history")),
   ...(params.get("screen") === "ask" ? { session: async (id: string) => ({
     session: { ...sessionsFor(revision).find((candidate) => candidate.id === id)!, pendingApproval: classificationRequest },
   }) } : {}),

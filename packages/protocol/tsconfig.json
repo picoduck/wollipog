@@ -3,8 +3,10 @@
   "compilerOptions": {
     "outDir": "dist",
     "rootDir": "src",
-    "types": ["node"]
+    "types": ["node"],
+    "allowJs": true
   },
+  "files": ["src/release-payload.mjs"],
   "include": ["src"],
   "exclude": ["src/**/*.test.ts"]
 }
