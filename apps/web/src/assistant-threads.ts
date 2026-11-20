@@ -24,6 +24,7 @@ import type {
   AssistantThreadLimits,
   AssistantThreadResponse,
   ChangeAssistantThreadAccountRequest,
+  ChangeAssistantThreadHarnessRequest,
   CreateAssistantThreadRequest,
   UpdateAssistantThreadRequest,
 } from "@wollipog/protocol";
@@ -82,6 +83,10 @@ export function assistantThreadRoutes(req: JsonRequest) {
       req<AssistantThreadResponse>(`${threadPath(threadId)}/archive`, { method: "POST", body: "{}" }),
     assistantThreadAccountChoices: (threadId: string) =>
       req<AssistantThreadAccountChoices>(`${threadPath(threadId)}/account`),
+    assistantThreadHarnessChoices: (threadId: string) =>
+      req<{ harnesses: AssistantThreadHarnessOption[] }>(`${threadPath(threadId)}/harness`),
+    changeAssistantThreadHarness: (threadId: string, body: ChangeAssistantThreadHarnessRequest) =>
+      req<AssistantThreadResponse>(`${threadPath(threadId)}/harness`, { method: "POST", body: JSON.stringify(body) }),
     changeAssistantThreadAccount: (threadId: string, body: ChangeAssistantThreadAccountRequest) =>
       req<AssistantThreadResponse>(`${threadPath(threadId)}/account`, { method: "POST", body: JSON.stringify(body) }),
   };

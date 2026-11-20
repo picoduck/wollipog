@@ -58,7 +58,9 @@ function discoveryArguments(args: unknown): {operations?: string[]; cursor?: str
 }
 
 export function createAssistantOperations(db: ControlPlaneDb): AssistantOperations {
-  const operations = new AssistantOperations(db.assistantConnections, (user, organization) => db.operatingHumanPrincipal(user, organization));
+  const operations = new AssistantOperations(db.assistantConnections,
+    (user, organization) => db.operatingHumanPrincipal(user, organization),
+    (threadId) => db.assistantThreads.harnessChangeInProgress(threadId));
   operations.register({
     name: "assistant_discover",
     description: "Read this installation's identity, connection scope and operation names. Request full input schemas by name or the Assistant guide with skill.",
@@ -217,6 +219,9 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: {
     const relayAck = message.method === ASSISTANT_EVIDENCE_RELAY_ACK;
     try {
       const connection = store.current(credential);
+      if (connection.threadId && deps.db.assistantThreads.harnessChangeInProgress(connection.threadId)) {
+        throw new AssistantRefusal("This Assistant thread is changing harnesses. Try again when the change finishes.");
+      }
       const principal = deps.db.operatingHumanPrincipal(connection.ownerUserId, connection.organizationId);
       if (principal?.role !== "owner") throw new AssistantRefusal("The granting owner is no longer active. An active owner must recreate this connection.");
       if (message.id === undefined) {

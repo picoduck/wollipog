@@ -3796,7 +3796,7 @@ export class SessionsService {
       // The session publish reads the thread row. Store the new limits before it and restore on
       // refusal, so the persisted limits and the runner's derived cap advance together.
       this.db.assistantThreads.setLimits(row.id, limits);
-      const target = assistantThreadBackingCap(limits.costUsd, launchedHeldUsd);
+      const target = assistantThreadBackingCap(limits.costUsd, launchedHeldUsd + this.db.assistantThreads.earlierBackingSpend(row.id));
       const changed = Boolean(budgetChanged || edit) && (backing.costBudgetUsd ?? null) !== target;
       if (edit || changed) {
         const { costBudgetUsd: _threadBudget, ...other } = edit?.config ?? {};
@@ -3820,7 +3820,9 @@ export class SessionsService {
     if (!backingSessionId) return { ok: true };
     const backing = this.db.getSession(backingSessionId);
     if (!backing) return { ok: true };
-    const target = assistantThreadBackingCap(limitUsd, heldUsd);
+    const thread = this.db.assistantThreads.forSession(backingSessionId);
+    const earlierSpend = thread ? this.db.assistantThreads.earlierBackingSpend(thread.id) : 0;
+    const target = assistantThreadBackingCap(limitUsd, heldUsd + earlierSpend);
     if ((backing.costBudgetUsd ?? null) === target) return { ok: true };
     const updated = this.applySessionConfig(backing.id, { costBudgetUsd: target ?? 0 });
     return updated.ok ? { ok: true } : fail(`The backing session's budget could not be updated: ${updated.error ?? "unknown error"}.`, 409);
@@ -4405,7 +4407,7 @@ export class SessionsService {
       review?: { policy: ReviewLaunchPolicy };
       /** Internal only (#4663): this session backs a Wollipog Assistant thread, so its role is
        * `assistant`. Only the owner's thread creation passes it; request JSON cannot. */
-      assistantThread?: { threadId: string };
+      assistantThread?: { threadId: string; stagedSessionId?: string };
       /** Internal only (#4074): this session is the delegated image reviewer of one decision. */
       [DELEGATED_IMAGE_REVIEW]?: NewDelegatedImageReview;
       assistantImageReviewAccount?: string | null;
@@ -4783,7 +4785,7 @@ export class SessionsService {
     if (delivery?.sessionId !== undefined && (!delivery.sessionId.trim() || delivery.sessionId.length > 256)) {
       return fail("pre-staged session id is invalid", 400);
     }
-    const id = delivery?.sessionId ?? shortId("s_");
+    const id = delivery?.sessionId ?? creationContext?.assistantThread?.stagedSessionId ?? shortId("s_");
     const now = Date.now();
     const images = snapshotCommand?.type === "start_session" ? (snapshotCommand.initialImages ?? []) : (req.images ?? []);
     if (capture && images.length) return fail("Initial media is delivered only through the exact prepared grant.", 409);
@@ -6764,6 +6766,10 @@ export class SessionsService {
     }
     let session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    if (session.role === "assistant" && (!this.db.assistantThreads.forSession(sessionId) ||
+        this.db.assistantThreads.harnessChangeBlocksSession(sessionId))) {
+      return fail("This Assistant conversation is read-only or changing harnesses.", 409);
+    }
     // Only its owner's first message can start a Full Control campaign launched without a task
     // (#2940); nothing an agent or automation sends may reach it first.
     const firstMessageRefusal = this.firstMessageFence(sessionId, session);
@@ -6799,7 +6805,12 @@ export class SessionsService {
       // A migration or a released reservation can leave the previous runner threshold behind.
       // Settle it before admitting the next turn, including when no launch happens during it.
       const { threadId, limitUsd } = session.assistantThreadBudget;
-      const held = limitUsd === null ? 0 : this.db.assistantThreads.costs(threadId).launchedHeldUsd;
+      const costs = this.db.assistantThreads.costs(threadId);
+      if (limitUsd !== null && this.db.assistantThreads.earlierBackingSpend(threadId) > 0 &&
+          floorBudgetCents(limitUsd - costs.backingSpentUsd - costs.launchedHeldUsd) < 0.01) {
+        return fail(assistantThreadBudgetRefusal(limitUsd), 409);
+      }
+      const held = limitUsd === null ? 0 : costs.launchedHeldUsd;
       const settled = this.rebalanceAssistantBacking(sessionId, limitUsd, held);
       if (!settled.ok) return settled;
       session = this.db.getSession(sessionId)!;
@@ -17971,6 +17982,7 @@ export class SessionsService {
     const session = thread?.session_id ? this.db.getSession(thread.session_id) : null;
     const connection = thread?.connection_id ? this.db.assistantConnections.get(thread.connection_id) : null;
     if (thread?.state !== "active" || !session || session.archived || session.role !== "assistant" ||
+        this.db.assistantThreads.harnessChangeInProgress(threadId) ||
         connection?.threadId !== threadId || connection.revoked) {
       return fail("This Assistant thread or its connection is unavailable.", 403);
     }

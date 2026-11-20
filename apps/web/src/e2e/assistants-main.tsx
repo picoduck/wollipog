@@ -20,7 +20,7 @@ import { Shell } from "../App.js";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { AssistantThread, AssistantThreadDefaults, CreateAssistantThreadRequest } from "../assistant-threads.js";
-import type { AssistantOwnerConfirmation, AssistantThreadAccountChoices, ChangeAssistantThreadAccountRequest, OrchestratorCampaignBudgetDefault } from "@wollipog/protocol";
+import type { AssistantOwnerConfirmation, AssistantThreadAccountChoices, ChangeAssistantThreadAccountRequest, ChangeAssistantThreadHarnessRequest, OrchestratorCampaignBudgetDefault } from "@wollipog/protocol";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { assistantDecisionHistoryFixture } from "./assistant-decision-fixture.js";
 import { ThemeProvider } from "../components/ThemeProvider.js";
@@ -52,6 +52,11 @@ const campaignScenario = params.has("campaign");
 const delegationScenario = params.get("delegation");
 const showDelegation = delegationScenario === "stress" || delegationScenario === "ci-old" || delegationScenario === "release-old";
 const evidenceScenario = params.get("evidence");
+const migrationScenario = params.get("harness-change");
+const stressHarnessLabel = "Codex App Server With a Long Installation Label on the Shared Engineering Machine";
+const stressAccountLabel = "Engineering Shared Subscription With a Long Account Display Name";
+let settleHarnessLaunch: (() => void) | undefined;
+Object.defineProperty(window, "finishAssistantHarnessChange", { value: () => settleHarnessLaunch?.() });
 const missingEvidenceIds = evidenceScenario === "refused-stress"
   ? Array.from({ length: 16 }, (_, index) => `settings-desktop-dark-preview-${String(index + 1).padStart(2, "0")}`)
   : ["desktop-dark", "desktop-light", "phone-dark", "phone-light"];
@@ -329,6 +334,10 @@ const LONG_TITLES = [
 const longTitle = (index: number) => `${LONG_TITLES[(index - 1) % LONG_TITLES.length]!.slice(0, 116)} ${index}`;
 const triage = (overrides: Partial<AssistantThread> = {}) =>
   thread("thr_triage", "sess-triage", { status: "needs_you", launchedSessionIds: ["sess-flaky", "sess-deps"], lastActivityAt: NOW - minute,
+    ...(migrationScenario && migrationScenario !== "old" ? { status: "done", harnessChangeSupported: true, decisionDelegation: {
+      revision: 1, grant: { categories: ["owner_question", "ui_evidence_review"], projects: "all", campaigns: "all",
+        expiresAt: null, evidenceDisclosureDigest: "a".repeat(64) },
+    } } : {}),
     ...(accountScenario ? { accountChangeSupported: true, providerAccountLabel: triageAccount.label } : {}),
     ...(confirmationCount > 0 ? { confirmations: Array.from({ length: confirmationCount }, (_unused, index) => confirmation(index)) } : {}),
     ...overrides });
@@ -671,6 +680,34 @@ const client = {
     threads = [created, ...threads];
     publish(created);
     return { thread: structuredClone(created) };
+  },
+  assistantThreadHarnessChoices: async () => ({ harnesses: [{
+    id: "codex", label: stressHarnessLabel, available: true,
+    accountSelection: { runnerId: "runner-1", workspaceId: "workspace-1", accounts: Array.from({ length: 9 }, (_, i) => ({
+      accountRef: fixtureAccountRef(20 + i), label: `${stressAccountLabel} ${i + 1}`,
+    })) },
+  }] }),
+  changeAssistantThreadHarness: async (id: string, input: ChangeAssistantThreadHarnessRequest) => {
+    const current = found(id);
+    if (input.expectedSessionId !== current.sessionId) throw new ApiError("The original conversation changed.", 409);
+    await new Promise<void>((resolve) => { settleHarnessLaunch = resolve; });
+    settleHarnessLaunch = undefined;
+    if (migrationScenario === "fail") {
+      throw new ApiError("The selected harness could not start. The original conversation is ready to use.", 409);
+    }
+    const sessionId = "sess-triage-codex";
+    upsert(session(sessionId, current.title, { status: "idle", role: "assistant", messageCount: 0,
+      agentId: "codex", driver: "codex-app-server", agentName: "Codex" }));
+    const changed: AssistantThread = {
+      ...current, sessionId, harness: "codex", providerAccountLabel: `${stressAccountLabel} 1`,
+      earlierConversations: [{ sessionId: current.sessionId, harness: current.harness, nextHarness: "codex", switchedAt: NOW }],
+      decisionDelegation: { revision: 2, grant: { categories: ["owner_question", "ui_evidence_review"], projects: "all",
+        campaigns: "all", expiresAt: null } },
+      evidenceReview: { available: true, provider: "Codex App Server", model: "gpt-6.2-sol", disclosureDigest: "b".repeat(64) },
+    };
+    threads = threads.map((candidate) => candidate.id === id ? changed : candidate);
+    publish(changed);
+    return { thread: structuredClone(changed) };
   },
   assistantThreadAccountChoices: async (threadId: string) => fixtureAccountChoices(found(threadId).harness, accountSelections.get(threadId)),
   changeAssistantThreadAccount: async (threadId: string, input: ChangeAssistantThreadAccountRequest) => {

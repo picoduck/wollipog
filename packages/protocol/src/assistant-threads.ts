@@ -116,6 +116,19 @@ export interface AssistantThreadUsage {
   costUsd: { used: number; limit: number | null };
 }
 
+export interface AssistantThreadHistoryEntry {
+  sessionId: string;
+  harness: AssistantThreadHarness;
+  nextHarness: AssistantThreadHarness;
+  switchedAt: number;
+}
+
+export interface ChangeAssistantThreadHarnessRequest {
+  expectedSessionId: string;
+  harness: AssistantThreadHarness;
+  providerAccountRef: string;
+}
+
 export interface AssistantThread {
   /** Absent on control planes that support denial only. */
   evidenceReview?: AssistantEvidenceReviewAvailability;
@@ -133,6 +146,8 @@ export interface AssistantThread {
   /** Owner-only label of the currently bound account. */
   providerAccountLabel?: string;
   /** An older control plane does not offer account changes. */
+  harnessChangeSupported?: boolean;
+  earlierConversations?: AssistantThreadHistoryEntry[];
   accountChangeSupported?: true;
   /** Sessions this thread's assistant launched, oldest first. */
   launchedSessionIds: string[];

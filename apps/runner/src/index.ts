@@ -3692,6 +3692,13 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         }),
       ));
       break;
+    case "assistant_harness_readiness":
+      sendUp({
+        type: "assistant_harness_readiness_result",
+        requestId: msg.requestId,
+        ok: sessions.assistantHarnessReady(msg),
+      });
+      break;
     case "switch_session_provider_account":
       runCommandTask(
         "switch_session_provider_account",

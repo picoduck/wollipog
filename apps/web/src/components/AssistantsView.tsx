@@ -27,6 +27,8 @@ import { AssistantDecisionDelegationDialog } from "./AssistantDecisionDelegation
 import { AssistantDecisionHistoryDialog } from "./AssistantDecisionHistory.js";
 import { AssistantWorkCards } from "./AssistantWorkCards.js";
 import { ChangeAssistantThreadAccountDialog } from "./ChangeAssistantThreadAccountDialog.js";
+import { ChangeAssistantThreadHarnessDialog } from "./ChangeAssistantThreadHarnessDialog.js";
+import { AssistantThreadHistory } from "./AssistantThreadHistory.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { AssistantsIcon, BotIcon, PlusIcon, TuningIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
@@ -94,6 +96,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   const [viewingDelegationHistory, setViewingDelegationHistory] = useState<string | null>(null);
   const [archiving, setArchiving] = useState(false);
   const [changingAccount, setChangingAccount] = useState<AssistantThread | null>(null);
+  const [changingHarness, setChangingHarness] = useState<AssistantThread | null>(null);
   const generation = useRef(0);
   /** A read is in flight, and whether another was asked for while it was. */
   const reading = useRef(false);
@@ -392,6 +395,9 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
           }}
         />
       )}
+      {changingHarness && <ChangeAssistantThreadHarnessDialog
+        thread={changingHarness} onClose={() => setChangingHarness(null)}
+        onChanged={(thread) => { replace(thread); setChangingHarness(null); }} />}
       {limits && selected && (
         <AssistantThreadLimitsDialog
           key={selected.id}
@@ -403,6 +409,10 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
           onNewThread={() => {
             navigate({ name: "assistants", threadId: selected.id }, { replace: true });
             setCreating(true);
+          }}
+          onChangeHarness={() => {
+            navigate({ name: "assistants", threadId: selected.id }, { replace: true });
+            setChangingHarness(selected);
           }}
           onAccountChanged={replace}
           onSave={async (next) => replace((await api.setAssistantThreadLimits(selected.id, next)).thread)}
@@ -568,6 +578,7 @@ function ThreadHeader({ thread, compact, menu, onConfirmationAnswered }: {
         <AssistantSettingsLink view={settingsView}>Thread Settings</AssistantSettingsLink>
         <AssistantSettingsLink view={ASSISTANT_DEFAULTS_VIEW}>Assistant Defaults</AssistantSettingsLink>
       </>}>{launchRefusal}</Notice> : null}
+      {thread.earlierConversations?.length ? <AssistantThreadHistory entries={thread.earlierConversations} /> : null}
       <AssistantWorkCards
         sessionIds={thread.launchedSessionIds}
         campaignIds={thread.launchedCampaignIds}

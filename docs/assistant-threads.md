@@ -17,6 +17,8 @@ owner's own threads; another owner gets 404. Responses never carry a credential 
 | `PUT /api/assistant-threads/defaults/launch` | Saves `{ harness, providerAccount }` for new threads. A null account uses Machine Policy. |
 | `POST /api/assistant-threads` | Body `{ harness?, title?, runnerId?, workspaceId?, providerAccountRef? }`, result `{ thread }`. |
 | `GET /api/assistant-threads/:threadId` | `{ thread }` |
+| `GET /api/assistant-threads/:threadId/harness` | Eligible target harness and account choices on the thread's current Machine. |
+| `POST /api/assistant-threads/:threadId/harness` | Body `{ expectedSessionId, harness, providerAccountRef }`, result `{ thread }`. Confirms a fresh conversation on the selected provider and account. |
 | `PATCH /api/assistant-threads/:threadId` | Body `{ title }`, result `{ thread }`. |
 | `PUT /api/assistant-threads/:threadId/delegation` | Body `{ revision, grant }`, result `{ thread }`. Use the current `decisionDelegation.revision` and set `grant` to null to revoke. |
 | `GET /api/assistant-decision-history` | The owner's delegated decisions. Accepts `threadId`, `campaignId` and the previous page's `nextBefore` as `before`. |
@@ -44,9 +46,24 @@ archived or its session is archived or deleted outside it.
 Each change is published to the owner's dashboards as the `assistant_thread_upsert` web event
 (`{ type, userId, thread }`), including every published change of the backing session.
 
+### Changing Harnesses
+
+**Change Harness** in Thread Settings requires a compatible control plane, runner protocol v402,
+and an eligible native harness and account on the thread's Machine. The owner reviews the target
+provider and account before confirming. The thread keeps its links, grant scope, usage and limits.
+Each **Earlier Conversation** opens its original transcript from the thread. Future prompts start
+a fresh provider conversation with no transfer of prior messages or credentials.
+
+Migration requires an idle conversation and fences prompts and Assistant commands during staging.
+The new credential becomes valid in the same database transaction that switches the backing session.
+A failed staging attempt preserves the old credential and backing session. Cancel closes the picker
+before staging begins. Work already launched by the thread continues. The new backing session only
+receives the budget left after prior spend and the work it holds. UI Evidence Approval requires
+confirmation of the new provider disclosure in Decision Delegation before evidence can be shared.
+
 ## The Assistant Role
 
-- Only thread creation makes an `assistant`-role session. `role: "assistant"` in session request
+- Only thread creation and harness migration make an `assistant`-role session. `role: "assistant"` in session request
   JSON is refused, and the role is never converted to another one.
 - The control plane sends `SessionLaunchSpec.assistant` (`{ threadId }`) on every start and
   restart. The runner (capability `assistantRole`) launches it with the role instructions and

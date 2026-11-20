@@ -11,13 +11,14 @@ import { BusyButton } from "./ui/BusyButton.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
 import { ActionRow, SettingsGroup } from "./ui/SettingsRows.js";
 
-export function AssistantThreadLimitsDialog({ defaults, limits, thread, model, effort, onNewThread, onAccountChanged, onClose, onSave }: {
+export function AssistantThreadLimitsDialog({ defaults, limits, thread, model, effort, onNewThread, onChangeHarness, onAccountChanged, onClose, onSave }: {
   defaults?: boolean;
   limits?: AssistantThreadLimits;
   thread?: AssistantThread;
   model?: string | null;
   effort?: string | null;
   onNewThread?: () => void;
+  onChangeHarness?: () => void;
   onAccountChanged?: (thread: AssistantThread) => void;
   onClose: () => void;
   onSave: (limits: AssistantThreadLimits) => Promise<void>;
@@ -92,8 +93,11 @@ export function AssistantThreadLimitsDialog({ defaults, limits, thread, model, e
           : undefined}>
           <ActionRow title="Harness"
             description={<>{[assistantThreadHarnessLabel(thread.harness), model, effort].filter(Boolean).join(" · ")}<br />
-              This thread's conversation belongs to this harness. Start a new thread to use a different one.</>}
-            actionLabel="New Thread" hasPopup="dialog" onAction={() => onNewThread?.()} />
+              {thread.harnessChangeSupported
+                ? "Changing harnesses starts a fresh provider conversation. Earlier conversations remain readable in this thread."
+                : "This thread's conversation belongs to this harness. Start a new thread to use a different one."}</>}
+            actionLabel={thread.harnessChangeSupported ? "Change Harness…" : "New Thread"} hasPopup="dialog"
+            onAction={() => (thread.harnessChangeSupported ? onChangeHarness : onNewThread)?.()} />
           <ActionRow title="Account" description={<>{account}{accountRefusal && <><br />{accountRefusal}</>}</>}
             actionLabel="Change Account…" disabled={Boolean(accountRefusal) || editingAccount}
             onAction={() => setEditingAccount(true)} />

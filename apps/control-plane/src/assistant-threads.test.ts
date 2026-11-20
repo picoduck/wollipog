@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -85,8 +86,9 @@ test("a new thread launches an assistant-role session whose every launch carries
     const thread = created.body.thread as AssistantThread;
     assert.match(thread.id, /^thr_/);
     assert.match(thread.connectionId ?? "", /^asst_/);
-    const { accountChangeSupported, ...baseline } = thread;
+    const { accountChangeSupported, harnessChangeSupported, ...baseline } = thread;
     assert.equal(accountChangeSupported, true);
+    assert.equal(harnessChangeSupported, true);
     assert.deepEqual({ ...baseline, id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined, connectionId: undefined }, {
       id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined, connectionId: undefined,
       assistant: "wollipog", title: "Weekly Cleanup", harness: "claude-code", status: "working",
@@ -598,6 +600,110 @@ test("a runner that supports threads but predates account choices refuses both n
     assert.equal(change.status, 409, change.raw);
     assert.equal(change.body.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.assistantThreadProviderAccount);
     assert.equal(h.sent.length, 1);
+  } finally { await h.close(); }
+});
+
+for (const ready of [true, false]) {
+  test(`a harness change ${ready ? "commits only the ready conversation and rotates disclosure" : "leaves the source usable after target failure"}`, async () => {
+    const imageCapability = { models: [{ id: "image-model", name: "Image Model", default: true }],
+      supportsImages: true, imageToolResults: true };
+    const h = await harness({ accounts, agents: [
+      { ...claude, capabilities: { ...claude.capabilities!, ...imageCapability } },
+      { ...codex, capabilities: { ...codex.capabilities!, ...imageCapability } },
+    ] });
+    try {
+      const created = await h.call("POST", "/api/assistant-threads", { title: "Keep This Title", providerAccountRef: accountRef("work") });
+      const thread = created.body.thread as AssistantThread;
+      const path = `/api/assistant-threads/${thread.id}`;
+      assert.equal(thread.harnessChangeSupported, true);
+      h.db.updateSessionStatus(thread.sessionId, "idle", Date.now());
+      h.db.raw().prepare("UPDATE sessions SET cost_usd=4 WHERE id=?").run(thread.sessionId);
+      const child = h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", providerAccountId: "work" });
+      assert.ok(child.ok && child.data);
+      h.db.assistantThreads.recordLaunch(thread.id, child.data.id, Date.now(), 6);
+
+      const evidence = thread.evidenceReview;
+      assert.ok(evidence?.available);
+      const grant = { categories: ["owner_question", "ui_evidence_review"], campaigns: ["campaign"], projects: ["project"],
+        expiresAt: Date.now() + 60_000, evidenceDisclosureDigest: evidence.disclosureDigest };
+      assert.equal((await h.call("PUT", `${path}/delegation`, { revision: 0, grant })).status, 200);
+      const token = (char: string) => `wollipoga_${char.repeat(43)}`;
+      const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+      assert.ok(h.threads.registerCredential("r", thread.sessionId, hash(token("a"))).accepted);
+
+      const choices = await h.call("GET", `${path}/harness`);
+      assert.deepEqual(choices.body.harnesses.map(({ id }: { id: string }) => id), ["codex"]);
+      const input = { harness: "codex", expectedSessionId: thread.sessionId, providerAccountRef: accountRef("codex") };
+      const before = (await h.call("GET", path)).body.thread;
+      assert.equal(before.usage.costUsd.used, 4);
+      assert.equal(h.sessionCount(), 2, "opening choices initiates no migration");
+
+      const send = h.hub.sendToRunner;
+      let targetId = "";
+      h.hub.sendToRunner = (runnerId, message) => {
+        if (message.type === "start_session" && message.spec.assistant?.threadId === thread.id) {
+          targetId = message.spec.sessionId;
+          assert.equal(message.spec.config?.costBudgetUsd, 15);
+          assert.equal(message.initialPrompt, undefined);
+          assert.equal(message.spec.providerAccountId, "codex");
+          assert.ok(h.threads.registerCredential("r", targetId, hash(token("b"))).accepted);
+          assert.equal(h.db.assistantConnections.authenticate(token("b")), null, "the target credential stays inactive");
+          h.db.updateSessionStatus(targetId, ready ? "idle" : "failed", Date.now());
+        }
+        return send(runnerId, message);
+      };
+      h.hub.requestFromRunner = async (_runnerId, requestId, message) => {
+        assert.equal(message.type, "assistant_harness_readiness");
+        assert.equal(h.svc.prompt(thread.sessionId, "Racing prompt").status, 409);
+        assert.equal(h.svc.prompt(targetId, "Racing prompt").status, 409);
+        assert.ok(h.db.assistantConnections.authenticate(token("a")));
+        return { type: "assistant_harness_readiness_result", requestId, ok: true };
+      };
+
+      const result = await h.call("POST", `${path}/harness`, input);
+      assert.equal(h.db.assistantThreads.harnessChangeInProgress(thread.id), false);
+      if (!ready) {
+        assert.equal(result.status, 409, result.raw);
+        assert.deepEqual((await h.call("GET", path)).body.thread, before);
+        assert.ok(h.db.assistantConnections.authenticate(token("a")));
+        assert.equal(h.db.assistantConnections.authenticate(token("b")), null);
+        assert.equal(h.svc.prompt(thread.sessionId, "Still on Claude").ok, true);
+        assert.equal(h.db.getSession(targetId), null, "the staged session was discarded");
+        return;
+      }
+      assert.equal(result.status, 200, result.raw);
+      const migrated = result.body.thread as AssistantThread;
+      for (const key of ["id", "title", "connectionId", "launchedSessionIds", "usage"] as const) {
+        assert.deepEqual(migrated[key], before[key]);
+      }
+      assert.equal(migrated.harness, "codex");
+      assert.equal(migrated.sessionId, targetId);
+      assert.equal(migrated.earlierConversations?.[0]?.sessionId, thread.sessionId);
+      assert.equal(migrated.decisionDelegation?.revision, 2);
+      const { evidenceDisclosureDigest: _, ...unchangedGrant } = grant;
+      assert.deepEqual(migrated.decisionDelegation?.grant, unchangedGrant);
+      assert.equal(h.db.assistantConnections.authenticate(token("a")), null);
+      assert.ok(h.db.assistantConnections.authenticate(token("b")));
+      assert.equal(h.svc.prompt(thread.sessionId, "Read-only source").status, 409);
+      assert.equal(h.svc.prompt(targetId, "Now on Codex").ok, true);
+      assert.equal(h.db.getSession(targetId)?.costBudgetUsd, 15);
+      assert.equal((await h.call("PUT", `${path}/delegation`, { revision: 2, grant })).status, 409, "old disclosure cannot be restored");
+      const targetEvidence = migrated.evidenceReview;
+      assert.ok(targetEvidence?.available);
+      assert.equal((await h.call("PUT", `${path}/delegation`, {
+        revision: 2, grant: { ...grant, evidenceDisclosureDigest: targetEvidence.disclosureDigest },
+      })).status, 200);
+    } finally { await h.close(); }
+  });
+}
+
+test("a runner without harness migration keeps an existing thread read-only in the harness row", async () => {
+  const h = await harness({ accounts, agents: [claude, codex], protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.assistantThreadHarnessChange - 1 });
+  try {
+    const { body: { thread } } = await h.call("POST", "/api/assistant-threads", {});
+    assert.equal(thread.harnessChangeSupported, undefined);
+    assert.equal((await h.call("GET", `/api/assistant-threads/${thread.id}/harness`)).status, 409);
+    assert.equal(h.sessionCount(), 1);
   } finally { await h.close(); }
 });
 

@@ -49,6 +49,11 @@ export function registerAssistantThreadRoutes(app: FastifyInstance, deps: {
   app.post("/api/assistant-threads/:threadId/account", handle(async (owner, req) =>
     ({ thread: await deps.threads.changeAccount(owner, threadId(req), req.body) })));
 
+  app.get("/api/assistant-threads/:threadId/harness", handle((owner, req) =>
+    ({ harnesses: deps.threads.harnessChoices(owner, threadId(req)) })));
+  app.post("/api/assistant-threads/:threadId/harness", handle(async (owner, req) =>
+    ({ thread: await deps.threads.changeHarness(owner, threadId(req), req.body) })));
+
   const confirmations = deps.confirmations;
   if (!confirmations) return;
   const answer = (decide: (owner: HumanPrincipal, thread: string, id: string, body: unknown) => unknown) => handle(async (owner, req) => {
