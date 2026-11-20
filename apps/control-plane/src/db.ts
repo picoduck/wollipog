@@ -26311,6 +26311,16 @@ export class ControlPlaneDb {
         AND json_extract(location_switch_result, '$.state')='starting'`).run(occurrenceId);
   }
 
+  /** True only after the exact live move was dispatched, including when runner acceptance was recorded. */
+  hasLocationSwitchDispatch(occurrenceId: string, locationId: string): boolean {
+    return Boolean(this.stmt(`SELECT 1 FROM workflow_decisions
+      WHERE occurrence_id=? AND category='location_switch' AND authority='human'
+        AND json_extract(location_switch_result, '$.action')='switch'
+        AND json_extract(location_switch_result, '$.locationId')=?
+        AND (status='consumed' OR (status='approved' AND json_extract(location_switch_result, '$.state')='starting'))`)
+      .get(occurrenceId, locationId));
+  }
+
   completeLocationSwitch(occurrenceId: string, resourceDigest: string, result: NonNullable<WorkflowDecisionView["locationSwitchResult"]>, now: number): boolean {
     return Number(this.stmt(`UPDATE workflow_decisions SET status='consumed', consumed_at=?, location_switch_result=?
       WHERE occurrence_id=? AND category='location_switch' AND authority='human' AND status='approved'

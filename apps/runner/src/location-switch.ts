@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, readdir, realpath, rename, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { cp, lstat, mkdir, readdir, realpath, rename, rm, stat } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import type { AgentContext } from "@wollipog/protocol";
 import { claudeProjectPathKey } from "./claude-background-work.js";
 import { runContextCommand } from "./context-command.js";
-import { githubSlug, parseForgeRemote } from "./git-ops.js";
+import { githubSlug } from "./git-ops.js";
+import { gitlabIssueOrigin } from "./gitlab-issue-closure.js";
+import { nativePathSpelling } from "./worktree.js";
 
 /** Fixed, non-sensitive reasons a live Location switch is refused or fails (#4138). */
 export const LOCATION_SWITCH_FAILURES = {
@@ -32,34 +34,45 @@ export function originNamesRepository(origin: string, repository: string): boole
   const wanted = repository.toLowerCase();
   const github = githubSlug(origin);
   if (github) return github.toLowerCase() === wanted;
-  const remote = parseForgeRemote(origin);
-  return !!remote && (`${remote.host}/${remote.project}`.toLowerCase() === wanted || remote.project.toLowerCase() === wanted);
+  const remote = gitlabIssueOrigin(origin);
+  return !!remote && `${remote.host}/${remote.project}`.toLowerCase() === wanted;
 }
 
-/** Re-verify an approved target on this runner, immediately before it is used: the workspace is
- * this runner's own, its folder is the approved one and a Git checkout, and its origin still names
- * the approved repository. Returns the canonical repository path. */
+/** Re-verify the approved workspace, folder and repository on this machine. `registeredPath`
+ * comes from a fresh lookup of the approved switch, distinct from its original dispatch. */
 export async function verifyLocationSwitchTarget(
   context: AgentContext,
   workspaces: readonly { id: string; path: string }[],
   target: { workspaceId: string; workspacePath: string; repository: string },
+  registeredPath?: string | null,
 ): Promise<string> {
   const workspace = workspaces.find((candidate) => candidate.id === target.workspaceId);
-  if (!workspace) throw new LocationSwitchRefusal("unknown_workspace");
-  const [configured, approved] = await Promise.all([
-    realpath(workspace.path).catch(() => null),
-    realpath(target.workspacePath).catch(() => null),
-  ]);
-  if (!configured || !approved || configured !== approved) throw new LocationSwitchRefusal("path_changed");
-  const git = async (args: string[]) => (await runContextCommand(context, "git", args, { cwd: configured, timeoutMs: 15_000 })).stdout.trim();
+  const workspacePath = registeredPath === undefined ? workspace?.path : registeredPath;
+  if (!workspacePath) throw new LocationSwitchRefusal("unknown_workspace");
+  if (registeredPath !== undefined && (workspace || !isAbsolute(workspacePath) || workspacePath !== target.workspacePath)) {
+    throw new LocationSwitchRefusal("path_changed");
+  }
+  const checkout = await realpath(workspacePath).catch(() => null);
+  if (!checkout || (registeredPath === undefined && checkout !== await realpath(target.workspacePath).catch(() => null))) {
+    throw new LocationSwitchRefusal("path_changed");
+  }
+  const git = async (args: string[]) => (await runContextCommand(context, "git", args, {
+    cwd: checkout, timeoutMs: 15_000, maxBuffer: 16 * 1024,
+  })).stdout.trim();
   try {
-    if (await git(["rev-parse", "--is-inside-work-tree"]) !== "true") throw new Error("not a work tree");
+    if (!(await stat(checkout)).isDirectory()) throw new Error("not a directory");
+    if (registeredPath !== undefined) {
+      const root = await realpath(await git(["rev-parse", "--show-toplevel"]));
+      if (nativePathSpelling(root) !== nativePathSpelling(checkout)) throw new Error("not the work tree root");
+    } else if (await git(["rev-parse", "--is-inside-work-tree"]) !== "true") {
+      throw new Error("not a work tree");
+    }
   } catch {
     throw new LocationSwitchRefusal("not_repository");
   }
   const origin = await git(["remote", "get-url", "origin"]).catch(() => "");
   if (!originNamesRepository(origin, target.repository)) throw new LocationSwitchRefusal("repository_changed");
-  return configured;
+  return checkout;
 }
 
 /** The project directories that hold `sessionId`'s transcript under one Claude projects root. */

@@ -2133,6 +2133,8 @@ export class SessionManager {
   }>();
 
   private sharedDirectoryWorkspaces: readonly RunnerConfigWorkspace[] = [];
+  private registeredLocationSwitchLookup?: (sessionId: string,
+    target: Pick<PendingLocationSwitch, "occurrenceId" | "workspaceId" | "repository">) => Promise<string | null>;
   /** (#4138) Existing worktrees a Location switch has chosen to continue in, by path, until its
    * metadata records them: the window between the holder check and the move. */
   private readonly reusedWorktreeClaims = new Map<string, string>();
@@ -2153,6 +2155,10 @@ export class SessionManager {
     this.sharedDirectoryWorkspaces = workspaces.map((workspace) => ({ ...workspace,
       sharedWritableDirectories: workspace.sharedWritableDirectories ? [...workspace.sharedWritableDirectories] : undefined }));
     this.sharedDirectoryForbiddenRoots = [...forbiddenRoots];
+  }
+
+  setRegisteredLocationSwitchLookup(lookup: NonNullable<SessionManager["registeredLocationSwitchLookup"]>): void {
+    this.registeredLocationSwitchLookup = lookup;
   }
 
   constructor(
@@ -15856,7 +15862,10 @@ export class SessionManager {
         }
         if (!entry) throw new Error("the session is not running; send it a message and ask again");
         if ((meta.seq ?? 0) > 0 && (!meta.agentSessionId || !canResumeSession(meta))) throw new LocationSwitchRefusal("not_resumable");
-        const repoPath = await verifyLocationSwitchTarget(meta.context, this.sharedDirectoryWorkspaces, msg);
+        const registeredPath = msg.registeredWorkspace === true
+          ? await this.registeredLocationSwitchLookup?.(sessionId, msg) ?? null
+          : undefined;
+        const repoPath = await verifyLocationSwitchTarget(meta.context, this.sharedDirectoryWorkspaces, msg, registeredPath);
         const current = await realpath(meta.repoPath).catch(() => meta.repoPath);
         if (current === repoPath) throw new LocationSwitchRefusal("same_repository");
         if (msg.recoverBranch !== undefined && !validLocationSwitchBranch(msg.recoverBranch)) {
@@ -15865,6 +15874,7 @@ export class SessionManager {
         const updated = this.store.patchMeta(sessionId, {
           pendingLocationSwitch: {
             requestId: msg.requestId, occurrenceId: msg.occurrenceId, workspaceId: msg.workspaceId, repoPath,
+            ...(registeredPath ? { registeredWorkspacePath: registeredPath } : {}),
             repository: msg.repository, locationName: msg.locationName, continuation: msg.continuation,
             ...(msg.recoverBranch ? { recoverBranch: msg.recoverBranch } : {}), requestedAt: Date.now(),
           },
@@ -15892,6 +15902,17 @@ export class SessionManager {
     });
     this.providerAccountSwitches.set(sessionId, { entry, promise });
     return promise;
+  }
+
+  private async verifyPendingLocationSwitch(meta: SessionMeta, pending: PendingLocationSwitch): Promise<string> {
+    const registeredPath = pending.registeredWorkspacePath !== undefined
+      ? await this.registeredLocationSwitchLookup?.(meta.sessionId, pending) ?? null
+      : undefined;
+    const repoPath = await verifyLocationSwitchTarget(meta.context, this.sharedDirectoryWorkspaces,
+      { workspaceId: pending.workspaceId, workspacePath: pending.registeredWorkspacePath ?? pending.repoPath,
+        repository: pending.repository }, registeredPath);
+    if (repoPath !== pending.repoPath) throw new LocationSwitchRefusal("path_changed");
+    return repoPath;
   }
 
   /** The Claude projects roots this session's conversation may live in, most specific first. */
@@ -16166,9 +16187,7 @@ export class SessionManager {
     // What the session is told about a worktree it comes back to, if it is not quite as it was.
     let returning: { setup?: "unfinished" | "unreadable"; portBlock?: WorktreePortBlock } | undefined;
     try {
-      const repoPath = await verifyLocationSwitchTarget(meta.context, this.sharedDirectoryWorkspaces,
-        { workspaceId: pending.workspaceId, workspacePath: pending.repoPath, repository: pending.repository });
-      if (repoPath !== pending.repoPath) throw new LocationSwitchRefusal("path_changed");
+      const repoPath = await this.verifyPendingLocationSwitch(meta, pending);
       const targetBranch = pending.recoverBranch ?? `agent/${sessionId}`;
       const removal = await this.pendingWorktreeRemoval(sessionId, meta.context, repoPath, targetBranch);
       if (removal) throw new Error(this.pendingRemovalRefusal(removal, targetBranch));
@@ -16261,6 +16280,17 @@ export class SessionManager {
         // durable and runs again once the runner is back.
         if (this.shuttingDown) return;
         this.failLocationSwitch(sessionId, entry, pending, setupFailure, kept);
+        return;
+      }
+    }
+    if (pending.registeredWorkspacePath !== undefined) {
+      try {
+        // Preparing a worktree can take time. Recheck authority and local identity before retiring
+        // the current provider, while a refusal still leaves the session in its current Location.
+        await this.verifyPendingLocationSwitch(meta, pending);
+      } catch (error) {
+        const kept = await release();
+        if (!this.shuttingDown) this.failLocationSwitch(sessionId, entry, pending, errText(error), kept);
         return;
       }
     }

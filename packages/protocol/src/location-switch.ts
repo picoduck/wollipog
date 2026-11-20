@@ -149,6 +149,8 @@ export interface SessionLocationSwitchMessage {
   sessionId: string;
   workspaceId: string;
   workspacePath: string;
+  /** This registration is held by the control plane. The runner must fetch it again before use. */
+  registeredWorkspace?: true;
   repository: string;
   locationName: string;
   /** The approved occurrence; the runner records it with the switch for attribution. */
@@ -165,6 +167,23 @@ export interface SessionLocationSwitchResultMessage {
   sessionId: string;
   ok: boolean;
   error?: string;
+}
+
+/** Runner → control plane, over the authenticated runner channel. Looks up only a dispatched switch. */
+export interface RegisteredLocationSwitchLookupMessage {
+  type: "registered_location_switch_lookup";
+  requestId: string;
+  sessionId: string;
+  occurrenceId: string;
+  workspaceId: string;
+  repository: string;
+}
+
+export interface RegisteredLocationSwitchLookupResultMessage {
+  type: "registered_location_switch_lookup_result";
+  requestId: string;
+  /** The current registered path, only while the exact switch still has authority. */
+  workspacePath: string | null;
 }
 
 /** A branch name a request may ask to recover: Git's own rules are applied again by the runner. */

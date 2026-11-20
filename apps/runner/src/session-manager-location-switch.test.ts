@@ -84,7 +84,7 @@ interface Harness {
 }
 
 async function withSession(name: string, body: (h: Harness) => Promise<void>,
-  options: { driver?: "claude-code" | "codex-app-server"; failLaunch?: number } = {}): Promise<void> {
+  options: { driver?: "claude-code" | "codex-app-server"; failLaunch?: number; registeredDestination?: boolean } = {}): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), `wollipog-location-switch-${name}-`));
   const previousClaudeHome = process.env.CLAUDE_CONFIG_DIR;
   const claudeHome = join(root, "claude-home");
@@ -96,16 +96,21 @@ async function withSession(name: string, body: (h: Harness) => Promise<void>,
     git(docs, "branch", "fix/install-link");
     const dataDir = join(root, "data");
     const sent: RunnerToControlPlane[] = [];
+    const sessionId = `s_location_${name.replaceAll("-", "_")}`;
     const runner = (fake: ReturnType<typeof fakeProvider>) => {
       const store = new SessionStore(join(dataDir, "sessions"));
       const manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
         fake.factory as never, dataDir, 1);
-      manager.configureSharedDirectories([{ id: "app", name: "App", path: app }, { id: "docs", name: "Docs", path: docs }] as never);
+      manager.configureSharedDirectories([{ id: "app", name: "App", path: app },
+        ...(!options.registeredDestination ? [{ id: "docs", name: "Docs", path: docs }] : [])] as never);
+      if (options.registeredDestination) {
+        manager.setRegisteredLocationSwitchLookup(async (id, { occurrenceId, workspaceId, repository }) =>
+          id === sessionId && occurrenceId === "occurrence-1" && workspaceId === "docs" && repository === "acme/docs" ? docs : null);
+      }
       managers.push(manager);
       return { manager, store, fake };
     };
     const { manager, store, fake } = runner(fakeProvider({ failLaunch: options.failLaunch }));
-    const sessionId = `s_location_${name.replaceAll("-", "_")}`;
     const driver = options.driver ?? "claude-code";
     const spec: SessionLaunchSpec = { sessionId, workspaceId: "app", workspacePath: app, agentId: driver, command: driver,
       args: [], env: {}, useWorktree: false, driver, context: { kind: "native" } };
@@ -113,7 +118,7 @@ async function withSession(name: string, body: (h: Harness) => Promise<void>,
     const message = (overrides: Partial<SessionLocationSwitchMessage> = {}): SessionLocationSwitchMessage => ({
       type: "session_location_switch", requestId: "request-1", sessionId, workspaceId: "docs", workspacePath: docs,
       repository: "acme/docs", locationName: "Docs", occurrenceId: "occurrence-1", continuation: "Continue the docs fix here.",
-      recoverBranch: "fix/install-link", ...overrides,
+      recoverBranch: "fix/install-link", ...(options.registeredDestination ? { registeredWorkspace: true } : {}), ...overrides,
     });
     await body({ manager, store, sessionId, fake, sent, app, docs, claudeHome, dataDir, message,
       restartRunner: (next = fakeProvider()) => {
@@ -207,6 +212,92 @@ test("a Codex session switches too: the same thread resumes in the new working d
     assert.equal(meta.agentSessionId, "provider-session-id");
   }, { driver: "codex-app-server" });
 });
+
+test("an approved registered Location absent from runner configuration continues the same Codex thread", async () => {
+  await withSession("registered", async (h) => {
+    await establishConversation(h);
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => h.fake.prompts.length === 2, "the registered Location did not continue");
+    const meta = h.store.readMeta(h.sessionId)!;
+    assert.equal(meta.workspaceId, "docs");
+    assert.equal(meta.repoPath, h.docs);
+    assert.equal(h.fake.resumed[1], "provider-session-id");
+    assert.deepEqual(h.fake.prompts[1], { cwd: meta.worktreePath, text: "Continue the docs fix here." });
+  }, { driver: "codex-app-server", registeredDestination: true });
+});
+
+test("the runner refuses a registered Location whose on-disk origin differs from the approved repository", async () => {
+  await withSession("registered-wrong-origin", async (h) => {
+    await establishConversation(h);
+    git(h.docs, "remote", "set-url", "origin", "git@github.com:acme/other.git");
+    const result = await h.manager.requestLocationSwitch(h.message());
+    assert.deepEqual(result, { ok: false, error: LOCATION_SWITCH_FAILURES.repository_changed });
+    git(h.docs, "remote", "set-url", "origin", "git@gitlab.com:acme/docs.git");
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), result, "the same project path on another forge does not match");
+    assert.equal(h.store.readMeta(h.sessionId)?.pendingLocationSwitch, undefined);
+    assert.equal(h.fake.launches(), 1);
+  }, { registeredDestination: true });
+});
+
+test("the runner refuses unauthorized IDs, changed paths and subdirectories for a registered switch", async () => {
+  await withSession("registered-wrong-path", async (h) => {
+    const refuse = async (overrides: Partial<SessionLocationSwitchMessage>, message: string) =>
+      assert.deepEqual(await h.manager.requestLocationSwitch(h.message(overrides)), { ok: false, error: message });
+    await refuse({ workspaceId: "different" }, LOCATION_SWITCH_FAILURES.unknown_workspace);
+    await refuse({ workspacePath: h.app }, LOCATION_SWITCH_FAILURES.path_changed);
+    await refuse({ workspacePath: "docs" }, LOCATION_SWITCH_FAILURES.path_changed);
+    const nested = join(h.docs, "nested");
+    mkdirSync(nested);
+    h.manager.setRegisteredLocationSwitchLookup(async () => nested);
+    await refuse({ workspacePath: nested }, LOCATION_SWITCH_FAILURES.not_repository);
+    h.manager.setRegisteredLocationSwitchLookup(async () => h.docs);
+    rmSync(h.docs, { recursive: true });
+    await refuse({}, LOCATION_SWITCH_FAILURES.path_changed);
+    assert.equal(h.store.readMeta(h.sessionId)?.pendingLocationSwitch, undefined);
+  }, { registeredDestination: true });
+});
+
+test("a registered switch rechecks the on-disk origin and registration at the turn boundary", async () => {
+  const changes = [
+    { name: "origin", change: (h: Harness) => git(h.docs, "remote", "set-url", "origin", "git@github.com:acme/other.git"),
+      reason: LOCATION_SWITCH_FAILURES.repository_changed },
+    { name: "registration", change: (h: Harness) => h.manager.setRegisteredLocationSwitchLookup(async () => null),
+      reason: LOCATION_SWITCH_FAILURES.unknown_workspace },
+    { name: "path", change: (h: Harness) => h.manager.setRegisteredLocationSwitchLookup(async () => h.app),
+      reason: LOCATION_SWITCH_FAILURES.path_changed },
+  ];
+  for (const { name, change, reason } of changes) {
+    await withSession(`registered-changed-${name}`, async (h) => {
+      await establishConversation(h);
+      assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+      change(h);
+      await waitFor(() => Boolean(h.store.readMeta(h.sessionId)?.locationSwitchFailure), `the changed ${name} was not refused`);
+      const meta = h.store.readMeta(h.sessionId)!;
+      assert.ok(meta.locationSwitchFailure!.reason?.includes(reason), meta.locationSwitchFailure!.reason ?? "missing refusal reason");
+      assert.equal(meta.workspaceId, "app");
+      assert.equal(meta.pendingLocationSwitch, undefined);
+      assert.equal(h.fake.launches(), 1);
+    }, { registeredDestination: true });
+  }
+});
+
+test("a registered switch refuses a path alias retargeted to another checkout of the same repository",
+  { skip: process.platform === "win32" }, async () => {
+    await withSession("registered-alias", async (h) => {
+      await establishConversation(h);
+      const alias = join(h.docs, "..", "registered");
+      const replacement = repository(join(h.docs, ".."), "another-docs", "git@github.com:acme/docs.git");
+      symlinkSync(h.docs, alias, "dir");
+      h.manager.setRegisteredLocationSwitchLookup(async () => alias);
+      assert.deepEqual(await h.manager.requestLocationSwitch(h.message({ workspacePath: alias })), { ok: true });
+      rmSync(alias);
+      symlinkSync(replacement, alias, "dir");
+      await waitFor(() => Boolean(h.store.readMeta(h.sessionId)?.locationSwitchFailure), "the retargeted path was not refused");
+      const meta = h.store.readMeta(h.sessionId)!;
+      assert.ok(meta.locationSwitchFailure!.reason?.includes(LOCATION_SWITCH_FAILURES.path_changed));
+      assert.equal(meta.repoPath, h.app);
+    }, { registeredDestination: true });
+  });
 
 test("a Codex session continuing in a reused worktree can commit there, and the guard and veto protect it", async () => {
   await withSession("codex-reuse", async (h) => {

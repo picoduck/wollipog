@@ -106,6 +106,8 @@ export interface PendingLocationSwitch {
   workspaceId: string;
   /** Canonical path of the target repository, verified when the switch was accepted. */
   repoPath: string;
+  /** Original spelling of the approved CP registration, looked up again before the switch. */
+  registeredWorkspacePath?: string;
   repository: string;
   locationName: string;
   continuation: string;

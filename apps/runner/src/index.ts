@@ -1393,6 +1393,26 @@ sessions.setDetachedClaudeEnvironment(sessionAgentEnvironment);
 const sharedDirectoryForbiddenRoots = [parsed.configPath, providerAccountsConfigPath,
   ...(tokenFile ? [tokenFile] : []), ...config.providerAccounts.map((account) => account.directory)];
 sessions.configureSharedDirectories(config.workspaces, sharedDirectoryForbiddenRoots);
+const registeredLocationSwitchLookups = new Map<string, (path: string | null) => void>();
+sessions.setRegisteredLocationSwitchLookup((sessionId, { occurrenceId, workspaceId, repository }) => {
+  const socket = ws;
+  if (!socket || socket.readyState !== WebSocket.OPEN || !registered ||
+      !runnerSupportsProtocol(controlPlaneProtocolVersion, "registeredLocationSwitch")) return Promise.resolve(null);
+  const requestId = randomUUID();
+  return new Promise<string | null>((resolve) => {
+    const finish = (path: string | null) => {
+      clearTimeout(timer);
+      registeredLocationSwitchLookups.delete(requestId);
+      resolve(path);
+    };
+    const timer = setTimeout(() => finish(null), 10_000);
+    timer.unref();
+    registeredLocationSwitchLookups.set(requestId, finish);
+    // A lookup belongs to this connection alone. Never queue it for replay on reconnect.
+    const message: RunnerToControlPlane = { type: "registered_location_switch_lookup", requestId, sessionId, occurrenceId, workspaceId, repository };
+    try { socket.send(JSON.stringify(message)); } catch { finish(null); }
+  });
+});
 sessions.configureProviderProfiles({
   access: () => providerProfileGrants.access(),
   expectedProfileIdForHome: (home) => providerProfileGrants.expectedProfileIdForHome(home),
@@ -3703,6 +3723,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         ),
       );
       break;
+    case "registered_location_switch_lookup_result":
+      registeredLocationSwitchLookups.get(msg.requestId)?.(typeof msg.workspacePath === "string" ? msg.workspacePath : null);
+      break;
     case "prepare_session_role":
       runCommandTask("prepare_session_role", sessions.prepareSessionRole(msg, () => {
         removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
@@ -4600,6 +4623,7 @@ function connect(): void {
     stopHeartbeat();
     registered = false;
     forgetAgentControlRegistrationAnswers();
+    for (const finish of registeredLocationSwitchLookups.values()) finish(null);
     controlPlaneProtocolVersion = null;
     automaticAccountSwitchConfigurationSynchronized = false;
     sessions.setAutomaticAccountSwitchAuthorityReady(false);

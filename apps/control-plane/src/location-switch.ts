@@ -5,7 +5,7 @@ import {
   normalizeLocationSwitchRepository, parseLocationSwitchOption, runnerSupportsProtocol, sameLocationSwitchRepository, sessionRole,
   type CreateSessionRequest, type LocationSwitchAction, type LocationSwitchCandidate, type LocationSwitchPlace, type LocationSwitchRequest,
   type LocationSwitchResult, type LocationSwitchSnapshot, type LocationSwitchUnavailable, type ProjectLocationInspection,
-  type ProjectLocationView, type SessionView, type WorkflowDecisionView, PROJECT_LOCATION_INSPECTION_FAILURES,
+  type ProjectLocationView, type RegisteredLocationSwitchLookupMessage, type SessionView, type WorkflowDecisionView, PROJECT_LOCATION_INSPECTION_FAILURES,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
@@ -178,8 +178,9 @@ export class LocationSwitchService {
         const sameRunner = location.runnerId === session.runnerId;
         // The live session moves only on its own runner, and only where the harness keeps its
         // conversation across a working-directory change; elsewhere the task moves to a new session.
+        const managed = this.db.workspaceSource(location.runnerId, location.workspaceId) === "managed";
         const switchable = sameRunner && LIVE_SWITCH_DRIVERS.has(session.driver ?? "") &&
-          runnerSupportsProtocol(target?.protocolVersion, "sessionLocationSwitchLive");
+          runnerSupportsProtocol(target?.protocolVersion, managed ? "registeredLocationSwitch" : "sessionLocationSwitchLive");
         const actions: LocationSwitchAction[] = [...(switchable ? ["switch" as const] : []), ...(agent ? ["new_session" as const] : [])];
         candidates.push({
           ...this.place(location, inspection.location.repository), locationId: location.id, repository: inspection.location.repository,
@@ -319,15 +320,47 @@ export class LocationSwitchService {
     const requester = this.requester(principal, sessionId);
     if (!requester.ok) return fail(requester.error!, requester.status);
     const session = requester.data!;
-    const scope = this.db.sessionScope(sessionId);
+    const access = this.authorizeApprover(session, occurrenceId, target);
+    return access.ok ? ok({ session, human: access.data! }) : fail(access.error!, access.status);
+  }
+
+  private authorizeApprover(session: SessionView, occurrenceId: string, target: LocationSwitchCandidate): ServiceResult<HumanPrincipal> {
+    const scope = this.db.sessionScope(session.id);
     const approver = this.db.locationSwitchApprover(occurrenceId);
     const human = scope && approver ? this.db.operatingHumanPrincipal(approver, scope.organizationId) : null;
-    if (!human || !this.db.isSessionOwner(human, sessionId)) return fail("The approver no longer owns this session or can no longer start sessions");
+    if (!human || !this.db.isSessionOwner(human, session.id)) return fail("The approver no longer owns this session or can no longer start sessions");
     if (!session.projectId || !this.db.canAccessProject(human, session.projectId) ||
         !this.db.canAccessRunner(human, target.runnerId) || !this.db.canAccessWorkspace(human, target.runnerId, target.workspaceId)) {
       return fail("The approver can no longer reach that Location");
     }
-    return ok({ session, human });
+    return ok(human);
+  }
+
+  /** Read the exact registration again for the authenticated runner. The runner independently
+   * checks the checkout. A claim counts before acceptance so the runner can verify it before ack. */
+  lookupRegisteredSwitch(runnerId: string, message: RegisteredLocationSwitchLookupMessage, now = Date.now()): string | null {
+    if (![message.sessionId, message.occurrenceId, message.workspaceId].every((id) => bounded(id, 256)) ||
+        !bounded(message.repository, LOCATION_SWITCH_LIMITS.repository)) return null;
+    const session = this.db.getSession(message.sessionId);
+    if (!session || session.runnerId !== runnerId || session.archived || isTerminal(session.status) ||
+        locationSwitchRole({ role: sessionRole(session), parentSessionId: session.parentSessionId }) !== "offer") return null;
+    const decision = this.db.workflowDecisionByOccurrence(message.occurrenceId);
+    const snapshot = decision?.resourceSnapshot;
+    if (!decision || decision.sessionId !== session.id || snapshot?.category !== "location_switch" ||
+        !decision.resolvedAt || now >= snapshot.expiresAt || now >= decision.resolvedAt + LOCATION_SWITCH_APPROVAL_TTL_MS ||
+        session.projectId !== snapshot.projectId || session.projectLocationId !== snapshot.current.locationId ||
+        session.workspaceId !== snapshot.current.workspaceId) return null;
+    const choice = parseLocationSwitchOption(decision.selectedOptionId);
+    const target = choice?.action === "switch" && snapshot.candidates.find((candidate) => candidate.locationId === choice.locationId);
+    if (!target || target.runnerId !== runnerId || target.workspaceId !== message.workspaceId || target.repository !== message.repository ||
+        !this.db.hasLocationSwitchDispatch(message.occurrenceId, target.locationId) ||
+        !this.authorizeApprover(session, message.occurrenceId, target).ok) return null;
+    const location = this.db.getProjectLocation(target.locationId);
+    if (!location || location.availability === "runner_removed" || location.projectId !== snapshot.projectId ||
+        location.runnerId !== runnerId || location.workspaceId !== target.workspaceId || location.path !== target.path ||
+        this.db.workspaceSource(runnerId, target.workspaceId) !== "managed") return null;
+    const path = this.db.getWorkspacePath(runnerId, target.workspaceId);
+    return path === target.path ? path : null;
   }
 
   /** Hand the verified target to the session's own runner, which re-verifies it and moves the live
@@ -336,7 +369,10 @@ export class LocationSwitchService {
   private async switchLiveSession(occurrenceId: string, digest: string, session: SessionView, snapshot: LocationSwitchSnapshot,
     target: LocationSwitchCandidate, now: number): Promise<ServiceResult<LocationSwitchResult>> {
     const workspacePath = this.db.getWorkspacePath(target.runnerId, target.workspaceId);
-    if (!workspacePath || target.runnerId !== session.runnerId) return fail("The target Location is no longer available on this session's machine");
+    if (!workspacePath || workspacePath !== target.path || target.runnerId !== session.runnerId) {
+      return fail("The target Location is no longer available on this session's machine");
+    }
+    const managed = this.db.workspaceSource(target.runnerId, target.workspaceId) === "managed";
     // The claim names its target, so a runner snapshot that arrives after a lost reply still moves
     // the session row and completes this receipt.
     if (!this.db.claimLocationSwitch(occurrenceId, digest, now, { action: "switch", locationId: target.locationId })) {
@@ -347,6 +383,7 @@ export class LocationSwitchService {
       reply = await this.deps.switchSession(session.runnerId, {
         type: "session_location_switch", requestId: `location_switch_${randomUUID()}`, sessionId: session.id,
         workspaceId: target.workspaceId, workspacePath, repository: target.repository, locationName: target.name, occurrenceId,
+        ...(managed ? { registeredWorkspace: true } : {}),
         continuation: locationSwitchContinuationPrompt(session, snapshot, target),
         ...(snapshot.recoverBranch ? { recoverBranch: snapshot.recoverBranch } : {}),
       });
