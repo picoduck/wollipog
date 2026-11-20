@@ -2589,7 +2589,12 @@ function guardStateReadings(text: string): GuardStateReading[] {
  * what the command DOES. `words` is null when the segment carries an unexpanded variable, since one
  * opaque word could be a recursion flag or another operand.
  */
-interface CommandSegment { operands: Array<string | null>; words: string[] | null; redirects: Array<string | null> }
+interface CommandSegment {
+  operands: Array<string | null>;
+  words: string[] | null;
+  redirects: Array<string | null>;
+  walkWords: string[];
+}
 
 /**
  * Split a parsed command into segments, or `null` when it contains a construct this classifier does
@@ -2601,13 +2606,17 @@ function commandSegments(tokens: readonly ShellToken[], allowPipe = false): Comm
   let operands: Array<string | null> = [];
   let words: string[] | null = [];
   let redirects: Array<string | null> = [];
+  let walkWords: string[] = [];
   let redirected = false;
   let previousWord: string | null = null;
+  let previousWasArgument = false;
   for (const token of tokens) {
     const op = operator(token);
     if (op === null) {
       const text = tokenText(token);
       operands.push(text);
+      previousWasArgument = !redirected;
+      if (previousWasArgument) walkWords.push(text ?? "\0");
       if (redirected) { redirects.push(text); redirected = false; }
       else if (words !== null) {
         if (text === null || text.includes("\0")) words = null;
@@ -2617,12 +2626,14 @@ function commandSegments(tokens: readonly ShellToken[], allowPipe = false): Comm
       continue;
     }
     if (SEGMENT_SEPARATORS.has(op) || (allowPipe && op === "|")) {
-      segments.push({ operands, words, redirects });
+      segments.push({ operands, words, redirects, walkWords });
       operands = [];
       words = [];
       redirects = [];
+      walkWords = [];
       redirected = false;
       previousWord = null;
+      previousWasArgument = false;
       continue;
     }
     if (!REDIRECTIONS.has(op)) return null;
@@ -2631,10 +2642,14 @@ function commandSegments(tokens: readonly ShellToken[], allowPipe = false): Comm
     // an ordinary numeric argument.
     if (words !== null && words.length === 1 && previousWord !== null &&
         words[0] === previousWord && /^\d+$/u.test(previousWord)) words.pop();
+    // For the additive walk check, a number immediately before a redirect cannot prove
+    // that the walk has an explicit path. Keep the original reading for inspection bounds.
+    if (previousWasArgument && previousWord !== null && /^\d+$/u.test(previousWord)) walkWords.pop();
     redirected = true;
     previousWord = null;
+    previousWasArgument = false;
   }
-  segments.push({ operands, words, redirects });
+  segments.push({ operands, words, redirects, walkWords });
   return segments;
 }
 
@@ -3296,11 +3311,11 @@ export function commandTargetsGuardState(
   const segments = singleLine ? commandSegments(tokens, pipeline) : null;
   // This additional check never changes the explicit-operand exemptions. A pipeline can
   // contain a default-root walk even when it is ineligible for the inspection whitelist.
+  // This reading is limited to shell segments the tokenizer can delimit and direct invocations.
   const walkSegments = segments ?? (!/[`\n\r]/u.test(parseText.trimEnd()) ? commandSegments(tokens, true) : null);
   if (walkSegments !== null) {
-    for (const { words, operands } of walkSegments) {
-      const argv = words ?? operands.map((word) => word ?? "");
-      if (!usesImplicitWalkRoot(argv)) continue;
+    for (const { words, walkWords } of walkSegments) {
+      if (!usesImplicitWalkRoot(walkWords)) continue;
       const relation = relationOf(".");
       if (relation?.kind === "inside") return GUARD_STATE_REFUSAL;
       if (relation?.kind === "ancestor" && !(words?.[0] === "find" &&

@@ -1155,6 +1155,14 @@ test("recursive commands are checked against their implicit working directory", 
     "rg example ./project", "ls -R ./project", "tree ./project"]) {
     assert.equal(commandTargetsGuardState(command, home, directory), null, command);
   }
+  for (const command of ["du -a", "grep -r example", "rg example", "ls -R", "tree"]) {
+    const redirected = `${command} 2>fixture.log`;
+    assertGuardRefused(commandTargetsGuardState(redirected, home, directory), redirected);
+    assert.equal(commandTargetsGuardState(redirected, project, directory), null);
+  }
+  const opaque = "du -a >fixture.log $UNSET";
+  assertGuardRefused(commandTargetsGuardState(opaque, home, directory), opaque);
+  assert.equal(commandTargetsGuardState(opaque, project, directory), null);
 });
 
 test("the reported home-directory listings are allowed while the file tools stay closed", () => {
