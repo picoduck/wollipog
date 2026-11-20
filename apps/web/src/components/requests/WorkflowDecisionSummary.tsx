@@ -180,11 +180,13 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
           <div className="release-payload-detail"><dt>Assets</dt><dd><details>
             <summary>Show Assets ({snapshot.releasePayload.assets.length})</summary>
             <ul>{snapshot.releasePayload.assets.map((asset) => <li key={asset.id}>{asset.name} · #{asset.id} · {asset.size} bytes
-              <br /><code>{asset.digest}</code>
+              <code className="release-payload-digest">{asset.digest}</code>
             </li>)}</ul>
           </details></dd></div>
         </>}
-        <div><dt>Payload Digest</dt><dd><code>{snapshot.releasePayloadDigest}</code></dd></div>
+        <div><dt>Payload Digest</dt><dd><code className={snapshot.category === "release_publish" ? "release-payload-digest" : undefined}>
+          {snapshot.releasePayloadDigest}
+        </code></dd></div>
       </dl>;
     }
     case "review_round_extension":

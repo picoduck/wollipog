@@ -7778,6 +7778,7 @@ export class ControlPlaneDb {
       ON workflow_decisions(controlling_session_id) WHERE category='pr_merge' AND forge_action IS NOT NULL`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_requester_forge
       ON workflow_decisions(category, resource_key) WHERE forge_action IS NOT NULL`);
+    db.exec("DROP INDEX IF EXISTS idx_workflow_decisions_ci_reruns");
     admitCampaignEventKinds(db);
     preserveCampaignFollowUpOrigins(db);
     widenCampaignDecisionSubjects(db);

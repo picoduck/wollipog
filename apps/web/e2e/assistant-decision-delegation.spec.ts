@@ -280,22 +280,53 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await expectFullyInViewport(deny, "Deny");
       await expectNoHorizontalOverflow(card, "Release Approval Card");
       await expectPageNoHorizontalOverflow(page);
-      await capture(page, `release-${action}-request`);
-      await expect(target.getByText("a".repeat(64))).toBeVisible();
-      if (action === "publish") {
-        await expect(target.getByText("#54921")).toBeVisible();
-        await target.getByText("Show Release Notes", { exact: true }).click();
-        const notes = target.getByText(/Verified Linux, macOS, and Windows assets/);
-        await notes.scrollIntoViewIfNeeded();
-        await expectFullyInViewport(notes, "Release Notes");
-        await capture(page, "release-publish-notes");
-        await target.getByText("Show Assets (1)", { exact: true }).click();
-        const asset = target.getByText(/wollipog-arm64-linux.tar.gz/);
-        await asset.evaluate((element) => element.scrollIntoView({ block: "center" }));
-        await expectFullyInViewport(asset, "Release Asset");
-        await expectNoHorizontalOverflow(card, "Expanded Release Payload");
-        await capture(page, "release-publish-assets");
+      const payloadDigest = target.getByText("a".repeat(64), { exact: true });
+      await expect(payloadDigest).toBeVisible();
+      if (action === "tag") {
+        await capture(page, "release-tag-request");
+        return;
       }
+
+      await card.getByRole("button", { name: "Expand Decision", exact: true }).click();
+      await expect(card.getByRole("button", { name: "Collapse Decision", exact: true })).toBeVisible();
+      await expect(target.getByText("#54921", { exact: true })).toBeVisible();
+      const notesToggle = target.getByText("Show Release Notes", { exact: true });
+      const assetsToggle = target.getByText("Show Assets (6)", { exact: true });
+      await payloadDigest.scrollIntoViewIfNeeded();
+      await expectFullyInViewport(notesToggle, "Release Notes Summary");
+      await expectFullyInViewport(assetsToggle, "Release Assets Summary");
+      await expectFullyInViewport(payloadDigest, "Payload Digest");
+      await expectNoHorizontalOverflow(payloadDigest, "Payload Digest");
+      await expectWithinWidth(payloadDigest, card, "Payload Digest");
+      await expectFullyInViewport(approve, "Approve");
+      await expectFullyInViewport(deny, "Deny");
+      await capture(page, "release-publish-request");
+
+      await notesToggle.click();
+      const notes = target.locator("pre");
+      await expect(notes).toContainText("Installation instructions and signed checksums");
+      await notesToggle.evaluate((element) => element.scrollIntoView({ block: "start" }));
+      await expectFullyInViewport(notesToggle, "Expanded Release Notes Summary");
+      await expectWithinWidth(notes, card, "Release Notes");
+      await expectNoHorizontalOverflow(notes, "Release Notes");
+      await expectFullyInViewport(approve, "Approve With Notes Open");
+      await capture(page, "release-publish-notes");
+
+      await notesToggle.click();
+      await assetsToggle.click();
+      await expect(target.getByRole("listitem")).toHaveCount(6);
+      const firstAsset = target.getByRole("listitem").filter({ hasText: /standalone-with-signed-runner-and-bundled-sidecar/u });
+      const assetDigest = firstAsset.getByText(`sha256:${"a".repeat(64)}`, { exact: true });
+      await assetsToggle.evaluate((element) => element.scrollIntoView({ block: "start" }));
+      await expectFullyInViewport(assetsToggle, "Expanded Release Assets Summary");
+      await expectFullyInViewport(firstAsset, "Long Release Asset");
+      await expectNoHorizontalOverflow(assetDigest, "Release Asset Digest");
+      await expectWithinWidth(assetDigest, card, "Release Asset Digest");
+      await expectNoHorizontalOverflow(card, "Expanded Release Payload");
+      await expectFullyInViewport(approve, "Approve With Assets Open");
+      await capture(page, "release-publish-assets");
+      await payloadDigest.scrollIntoViewIfNeeded();
+      await expectFullyInViewport(payloadDigest, "Payload Digest With Assets Open");
     });
   }
 

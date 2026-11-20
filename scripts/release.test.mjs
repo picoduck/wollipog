@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { acquireCheckpointLock, advance, bumpVersions, notesPath, prepare, saveCheckpoint, validateCheckpoint, verifyMergedPreparation, verifyReleaseJobs } from "./release.mjs";
+import { acquireCheckpointLock, advance, bumpVersions, notesPath, prepare, saveCheckpoint, services, validateCheckpoint, verifyMergedPreparation, verifyReleaseJobs } from "./release.mjs";
 import { FINALIZER_JOB, NATIVE_RELEASE_JOBS } from "./release-timings.mjs";
 import { canonicalReleasePayload } from "../packages/protocol/src/release-payload.mjs";
 
@@ -242,6 +242,45 @@ test("typed publication pins the signed inventory and preserves all just-in-time
   assert.equal(executions, 1);
   assert.deepEqual(f.mutations(), []);
 });
+
+test("typed release CLI executes only the matching snapshot and requires a confirmed receipt",
+  { skip: process.platform === "win32" && "The fake CLI uses an executable shebang" }, () => {
+    const directory = mkdtempSync(join(tmpdir(), "release-cli-test-"));
+    const cli = join(directory, "wollipog");
+    const occurrenceId = `workflow_${"f".repeat(32)}`;
+    const resourceDigest = "d".repeat(64);
+    const resourceSnapshot = { category: "release_publish", commitSha: merge, tag: "v0.35.0" };
+    const previousCLI = process.env.WOLLIPOG_CLI;
+    try {
+      process.env.WOLLIPOG_CLI = cli;
+      const setReplies = (approval, result) => writeFileSync(cli, `#!/usr/bin/env node
+const assert = require("node:assert/strict");
+const args = process.argv.slice(2);
+const occurrence = ${JSON.stringify(occurrenceId)};
+if (args[1] === "get") {
+  assert.deepEqual(args, ["decision", "get", occurrence, "--json"]);
+  console.log(JSON.stringify({ decision: ${JSON.stringify(approval)} }));
+} else {
+  assert.deepEqual(args, ["decision", "execute", occurrence, "--resource-digest", ${JSON.stringify(resourceDigest)}, "--json"]);
+  console.log(JSON.stringify({ decision: ${JSON.stringify(result)} }));
+}
+`, { mode: 0o700 });
+      const approval = { status: "approved", occurrenceId, resourceDigest, resourceSnapshot };
+      const receipt = { status: "consumed", occurrenceId, forgeAction: { outcome: "release_published" } };
+      const { typedDecision } = services();
+      setReplies(approval, receipt);
+      assert.doesNotThrow(() => typedDecision(occurrenceId, resourceSnapshot));
+      setReplies(approval, { ...receipt, status: "approved", forgeAction: { outcome: "uncertain" } });
+      assert.throws(() => typedDecision(occurrenceId, resourceSnapshot), /did not confirm the approved release write/);
+      setReplies({ ...approval, resourceSnapshot: { ...resourceSnapshot, commitSha: base } }, receipt);
+      assert.throws(() => typedDecision(occurrenceId, resourceSnapshot), /does not match the current certified commit and exact payload/);
+      assert.throws(() => typedDecision("invalid", resourceSnapshot), /Invalid release decision occurrence ID/);
+    } finally {
+      if (previousCLI === undefined) delete process.env.WOLLIPOG_CLI;
+      else process.env.WOLLIPOG_CLI = previousCLI;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 
 test("missing timing metadata does not weaken or replace semantic release gates", () => {
   const f = fixture(), s = state();
