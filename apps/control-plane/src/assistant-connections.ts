@@ -216,7 +216,11 @@ export const ASSISTANT_OPERATION_NAME = /^[a-z][a-z0-9_]{0,31}$/;
 /** Single inventory for every Assistant transport. Full Access includes future registrations. */
 export class AssistantOperations {
   private operations = new Map<string, AssistantOperation>();
-  constructor(readonly connections: AssistantConnections, private ownerPrincipal: (userId: string, organizationId: string) => HumanPrincipal | null) {}
+  constructor(
+    readonly connections: AssistantConnections,
+    private ownerPrincipal: (userId: string, organizationId: string) => HumanPrincipal | null,
+    private threadChangingHarness?: (threadId: string) => boolean,
+  ) {}
   register(operation: AssistantOperation): void {
     if (!ASSISTANT_OPERATION_NAME.test(operation.name) || this.operations.has(operation.name)) throw new Error("Invalid or duplicate Assistant operation");
     this.operations.set(operation.name, operation);
@@ -267,7 +271,14 @@ export class AssistantOperations {
     }, name, args, ownerConfirmationId);
   }
   private async run(currentConnection: () => AssistantConnection, name: string, args: unknown, ownerConfirmationId?: string): Promise<unknown> {
-    let connection = currentConnection();
+    const current = () => {
+      const connection = currentConnection();
+      if (connection.threadId && this.threadChangingHarness?.(connection.threadId)) {
+        throw new AssistantRefusal("This Assistant thread is changing harnesses. Try again when the change finishes.");
+      }
+      return connection;
+    };
+    let connection = current();
     const operation = this.operations.get(name);
     if (!operation) throw new AssistantRefusal("Operation is not registered on this control plane. Upgrade the control plane or select a registered operation.");
     let target: AssistantTarget = { kind: "operation", id: name };
@@ -276,7 +287,7 @@ export class AssistantOperations {
       const recheck = async () => {
         // A session can move projects while a mutation waits; never reuse its queued placement.
         target = await operation.resolveTarget(args);
-        connection = currentConnection();
+        connection = current();
         return this.authorize(connection.id, name, target);
       };
       const owner = await recheck();

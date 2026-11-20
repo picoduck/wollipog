@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   ASSISTANT_THREAD_CREDENTIAL_TTL_MS,
   ASSISTANT_THREAD_HARNESSES,
@@ -22,6 +23,8 @@ import {
   type AssistantThreadLimits,
   type AssistantThreadStatus,
   type ChangeAssistantThreadAccountRequest,
+  type ChangeAssistantThreadHarnessRequest,
+  type AssistantThreadHarnessOption,
   type CreateSessionRequest,
   type RunnerView,
   type SessionView,
@@ -36,6 +39,7 @@ import type { Hub } from "./hub.js";
 import { assistantThreadBudgetRefusal, assistantThreadLaunchLimitMessage, floorBudgetCents, UNTITLED, type SessionsService } from "./sessions.js";
 import { failureBody } from "./capability-refusal.js";
 import { assistantEvidenceReviewAvailability } from "./assistant-evidence-review.js";
+import { providerAccountRef } from "./agent-account-view.js";
 
 const DEFAULT_THREAD_TITLE = "New Thread";
 export function assistantThreadDisplayTitle(row: Pick<ThreadRow, "title">, session: Pick<SessionView, "title"> | null): string {
@@ -145,7 +149,7 @@ export interface AssistantThreadDeps {
   evidenceReview?(session: SessionView): AssistantEvidenceReviewAvailability;
   /** Creates the backing session exactly as an owner's New Session would, with the trusted
    * assistant marker. Never accepts the marker from request JSON. */
-  createBackingSession(owner: HumanPrincipal, request: CreateSessionRequest, threadId: string):
+  createBackingSession(owner: HumanPrincipal, request: CreateSessionRequest, threadId: string, stagedSessionId?: string):
     { ok: boolean; status: number; data?: SessionView; error?: string; [key: string]: unknown };
   archiveBackingSession(sessionId: string): { ok: boolean; status: number; error?: string };
   updateLimits(row: ThreadRow, limits: AssistantThreadLimits): { ok: boolean; status?: number; error?: string };
@@ -153,6 +157,10 @@ export interface AssistantThreadDeps {
   accountChoices(runner: RunnerView, agent: AgentDefinition, session?: SessionView): AssistantThreadAccountChoices;
   changeAccount(runner: RunnerView, agent: AgentDefinition, session: SessionView, threadId: string, input: ChangeAssistantThreadAccountRequest):
     ReturnType<SessionsService["changeAssistantThreadAccount"]>;
+  checkHarnessReadiness?(runnerId: string, threadId: string, sourceId: string, targetId: string, accountId: string): Promise<boolean>;
+  harnessChangeSupported?(runnerId: string): boolean;
+  discardHarnessTarget?(sessionId: string): void;
+  retireHarnessSource?(runnerId: string, sessionId: string): void;
   /** The thread's owner confirmations waiting for its owner (#4665). */
   pendingConfirmations?(threadId: string): AssistantOwnerConfirmation[];
   launchedCampaignIds?(threadId: string): string[];
@@ -162,6 +170,9 @@ export interface AssistantThreadDeps {
 /** Owner operations on Wollipog Assistant threads. The thread record is authoritative for the
  * thread's lifecycle; the backing session is authoritative for its live status and transcript. */
 export class AssistantThreads {
+  private readonly stagedCredentials = new Map<string, { tokenHash: string; expiresAt: number }>();
+  private readonly stagedReadiness = new Map<string, (session: SessionView | null) => void>();
+
   constructor(private readonly store: AssistantThreadStore, private readonly deps: AssistantThreadDeps) {}
 
   private now(): number { return this.deps.now?.() ?? Date.now(); }
@@ -181,6 +192,7 @@ export class AssistantThreads {
     const status = assistantThreadStatus(row.state, session, confirmations.length);
     const launchCount = launched.length + campaigns.length;
     const costs = this.store.costs(row.id);
+    const earlierConversations = this.store.history(row.id);
     const launchLimitRefusal = status === "archived" ? null : assistantThreadLaunchLimitMessage(launchCount, row.launch_limit)
       ?? (row.cost_limit_usd !== null && floorBudgetCents(row.cost_limit_usd - costs.launchedHeldUsd - costs.backingSpentUsd) < 0.01
         ? assistantThreadBudgetRefusal(row.cost_limit_usd) : null);
@@ -195,6 +207,9 @@ export class AssistantThreads {
       access: { level: "full_access", destructive: "ask" },
       connectionId: row.connection_id,
       accountChangeSupported: true,
+      ...(session && row.state === "active" && !session.archived && this.deps.harnessChangeSupported?.(session.runnerId)
+        ? { harnessChangeSupported: true } : {}),
+      ...(earlierConversations.length ? { earlierConversations } : {}),
       ...(session?.providerAccountLabel ? { providerAccountLabel: session.providerAccountLabel } : {}),
       launchedSessionIds: launched,
       ...(campaigns.length ? { launchedCampaignIds: campaigns } : {}),
@@ -459,6 +474,7 @@ export class AssistantThreads {
 
   async changeAccount(owner: HumanPrincipal, id: string, body: unknown): Promise<AssistantThread> {
     const { runner, agent, session } = this.accountTarget(owner, this.owned(owner, id));
+    if (this.store.harnessChangeInProgress(id)) throw new AssistantThreadRefusal("This thread is already changing harnesses.", 409);
     const input = body as Partial<ChangeAssistantThreadAccountRequest> | null;
     if (!input || typeof input.providerAccountRef !== "string" || !isProviderAccountRef(input.providerAccountRef) ||
         (input.expectedProviderAccountRef !== null &&
@@ -473,6 +489,128 @@ export class AssistantThreads {
     if (!result.ok) throw new AssistantThreadRefusal(result.error ?? "The thread's account could not be changed.", result.status, failureBody(result));
     // The runner updates the backing session. The thread retains its session, connection and work.
     return this.get(owner, id);
+  }
+
+  harnessChoices(owner: HumanPrincipal, id: string): AssistantThreadHarnessOption[] {
+    const row = this.owned(owner, id);
+    const { session, runner } = this.harnessSource(owner, row);
+    return ASSISTANT_THREAD_HARNESSES.filter((harness) => harness !== row.harness).map((harness) => {
+      const label = HARNESS_LABELS[harness];
+      const agent = harnessAgent(runner, harness);
+      const workspace = runner.workspaces.find(({ id }) => id === session.workspaceId);
+      if (!agent || !workspace) {
+        return { id: harness, label, available: false, reason: `${label} needs a native installation and the thread's Location on this Machine.` };
+      }
+      return { id: harness, label, available: true, accountSelection: {
+        ...this.deps.accountChoices(runner, agent), runnerId: runner.runnerId, workspaceId: workspace.id,
+      } };
+    });
+  }
+
+  private harnessSource(owner: HumanPrincipal, row: ThreadRow): { session: SessionView; runner: RunnerView } {
+    const session = row.session_id ? this.deps.getSession(row.session_id) : null;
+    const runner = session && this.deps.listRunners(owner).find((candidate) => candidate.runnerId === session.runnerId);
+    if (!session || row.state !== "active" || session.archived || !runner || !this.deps.checkHarnessReadiness ||
+        !runnerSupportsProtocol(runner.protocolVersion, "assistantThreadHarnessChange")) {
+      throw new AssistantThreadRefusal("Changing the harness requires an active thread and a compatible Machine.", 409);
+    }
+    if (!this.deps.isRunnerOnline(runner.runnerId)) throw new AssistantThreadRefusal("Connect this thread's Machine before changing its harness.", 409);
+    return { session, runner };
+  }
+
+  private sourceReady(session: SessionView, threadId: string): boolean {
+    return session.role === "assistant" && (session.status === "idle" || session.status === "completed") && !session.archived &&
+      !session.pendingApproval && !session.pendingPrompts?.length && !session.backgroundWorkState &&
+      !this.deps.pendingConfirmations?.(threadId).length;
+  }
+
+  private async waitForStagedSession(targetId: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => settle(false), 30_000);
+      const settle = (ready: boolean) => {
+        clearTimeout(timer);
+        this.stagedReadiness.delete(targetId);
+        resolve(ready);
+      };
+      const observe = (session: SessionView | null) => {
+        if (!session || session.archived || session.status === "failed" || session.status === "stopped" || session.status === "input_required") settle(false);
+        else if (session.status === "idle") settle(true);
+      };
+      this.stagedReadiness.set(targetId, observe);
+      observe(this.deps.getSession(targetId));
+    });
+  }
+
+  recoverHarnessChanges(): void {
+    for (const { threadId, targetId } of this.store.unfinishedHarnessChanges()) {
+      if (this.deps.getSession(targetId)) this.deps.discardHarnessTarget?.(targetId);
+      this.store.finishHarnessChange(threadId, targetId);
+    }
+    for (const { runnerId, sessionId } of this.store.unretiredHarnessSources()) {
+      this.deps.retireHarnessSource?.(runnerId, sessionId);
+    }
+  }
+
+  async changeHarness(owner: HumanPrincipal, id: string, body: unknown): Promise<AssistantThread> {
+    const row = this.owned(owner, id);
+    const { session, runner } = this.harnessSource(owner, row);
+    const input = body as Partial<ChangeAssistantThreadHarnessRequest> | null;
+    if (!input || typeof input !== "object" || Object.keys(input).some((key) => !["harness", "expectedSessionId", "providerAccountRef"].includes(key)) ||
+        typeof input.expectedSessionId !== "string" ||
+        typeof input.providerAccountRef !== "string" || !isProviderAccountRef(input.providerAccountRef)) {
+      throw new AssistantThreadRefusal("The current conversation and a chosen account are required.", 400);
+    }
+    const harness = harnessOf(input.harness);
+    if (input.expectedSessionId !== session.id) throw new AssistantThreadRefusal("The backing conversation changed. Reopen Change Harness.", 409);
+    if (!this.sourceReady(session, id)) throw new AssistantThreadRefusal("Wait for the current turn or pending work to finish before changing harnesses.", 409);
+    const agent = harness !== row.harness && harnessAgent(runner, harness);
+    const choice = this.harnessChoices(owner, id).find((option) => option.id === harness);
+    const account = choice?.accountSelection?.accounts.find((item) => item.accountRef === input.providerAccountRef && !item.reason);
+    const providerAccount = (runner.providerAccounts ?? []).find((item) => providerAccountRef(runner.runnerId, item.id) === account?.accountRef);
+    if (!agent || !session.workspaceId || !providerAccount) throw new AssistantThreadRefusal("Choose an available harness and account on this Machine.", 409);
+    const connection = row.connection_id && this.deps.connections.get(row.connection_id);
+    if (!connection || connection.revoked) throw new AssistantThreadRefusal("The thread's Assistant connection is unavailable.", 409);
+    const targetId = `s_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    if (!this.store.startHarnessChange(id, session.id, targetId)) throw new AssistantThreadRefusal("This thread is already changing harnesses.", 409);
+
+    let committed = false;
+    try {
+      const costs = this.store.costs(id);
+      const cap = row.cost_limit_usd === null ? null : Math.max(0.01, floorBudgetCents(row.cost_limit_usd - costs.backingSpentUsd - costs.launchedHeldUsd));
+      const title = assistantThreadDisplayTitle(row, session);
+      const created = this.deps.createBackingSession(owner, {
+        runnerId: runner.runnerId, workspaceId: session.workspaceId, agentId: agent.id,
+        providerAccountId: input.providerAccountRef, title, useWorktree: false, role: "normal",
+        ...(cap !== null ? { config: { costBudgetUsd: cap } } : {}),
+      }, id, targetId);
+      if (!created.ok || created.data?.id !== targetId) throw new AssistantThreadRefusal("The selected harness could not start. The original conversation is ready to use.", 409);
+
+      const ready = await this.waitForStagedSession(targetId) &&
+        await this.deps.checkHarnessReadiness!(runner.runnerId, id, session.id, targetId, providerAccount.id).catch(() => false);
+      const current = this.deps.getSession(session.id);
+      const target = this.deps.getSession(targetId);
+      const credential = this.stagedCredentials.get(targetId);
+      if (!ready || !current || !this.sourceReady(current, id) ||
+          !target || target.status !== "idle" || target.providerAccountId !== providerAccount.id ||
+          this.store.get(id)?.cost_limit_usd !== row.cost_limit_usd || !credential ||
+          !this.deps.ownerPrincipal(owner.userId, owner.organizationId) ||
+          !this.store.commitHarnessChange({
+            threadId: id, sourceId: session.id, targetId, harness, title, connectionId: connection.id,
+            ...credential, now: this.now(),
+            bindCredential: (connectionId, tokenHash, expiresAt) => this.deps.connections.bindThreadCredential(connectionId, tokenHash, expiresAt),
+          })) {
+        throw new AssistantThreadRefusal("The change could not be completed. Reopen the thread to use the original conversation.", 409);
+      }
+      committed = true;
+      this.deps.retireHarnessSource?.(session.runnerId, session.id);
+      return this.publish(this.store.get(id)!);
+    } finally {
+      this.stagedCredentials.delete(targetId);
+      if (!committed) {
+        try { if (this.deps.getSession(targetId)) this.deps.discardHarnessTarget?.(targetId); }
+        finally { this.store.finishHarnessChange(id, targetId); }
+      }
+    }
   }
 
   /** Records the archive first, so a later failure to archive the session never leaves the thread
@@ -516,6 +654,14 @@ export class AssistantThreads {
   registerCredential(runnerId: string, sessionId: string, tokenHash: string): { accepted: boolean; expiresAt?: number; error?: string } {
     const session = this.deps.getSession(sessionId);
     const row = this.store.forSession(sessionId);
+    const staged = this.store.harnessChangeForTarget(sessionId);
+    if (staged && session?.runnerId === runnerId && session.role === "assistant" && !session.archived) {
+      if (!/^[0-9a-f]{64}$/u.test(tokenHash)) return { accepted: false, error: "invalid Assistant credential" };
+      const expiresAt = this.now() + ASSISTANT_THREAD_CREDENTIAL_TTL_MS;
+      // The target proxy can initialize, but the hash cannot authenticate until cutover.
+      this.stagedCredentials.set(sessionId, { tokenHash, expiresAt });
+      return { accepted: true, expiresAt };
+    }
     if (!session || !row || session.runnerId !== runnerId || session.role !== "assistant") {
       return { accepted: false, error: "this session is not an Assistant thread's session on this runner" };
     }
@@ -550,6 +696,10 @@ export class AssistantThreads {
     if (row && row.state !== "creating") this.deps.broadcast(row.owner_user_id, this.view(row, session));
   }
 
+  stagedSessionChanged(sessionId: string): void {
+    this.stagedReadiness.get(sessionId)?.(this.deps.getSession(sessionId));
+  }
+
   private publish(row: ThreadRow): AssistantThread {
     const thread = this.view(row);
     this.deps.broadcast(row.owner_user_id, thread);
@@ -569,12 +719,12 @@ export function createAssistantThreads(db: ControlPlaneDb, hub: Hub, svc: Sessio
     isRunnerOnline: (runnerId) => hub.isRunnerOnline(runnerId),
     getSession: (sessionId) => db.getSession(sessionId),
     evidenceReview: (session) => assistantEvidenceReviewAvailability(db, session),
-    createBackingSession: (owner, request, threadId) => {
+    createBackingSession: (owner, request, threadId, stagedSessionId) => {
       // The owner's New Session launch path, but never in a Project or a shared scope: the session
       // acts with the owner's Assistant authority, so it belongs to the owner alone.
       const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
       const created = svc.createSession({ ...request, projectId: null, projectLocationId: null }, undefined, scope, false, false, false,
-        { defaultOwnerUserId: owner.userId, assistantThread: { threadId } });
+        { defaultOwnerUserId: owner.userId, assistantThread: { threadId, stagedSessionId } });
       return created.ok ? { ok: true, status: created.status, data: created.data } : { ...failureBody(created), ok: false, status: created.status };
     },
     archiveBackingSession: (sessionId) => svc.setArchived(sessionId, true),
@@ -582,10 +732,28 @@ export function createAssistantThreads(db: ControlPlaneDb, hub: Hub, svc: Sessio
     broadcast: (userId, thread) => hub.assistantThreadChanged(userId, thread),
     accountChoices: (runner, agent, session) => svc.assistantThreadAccountChoices(runner, agent, session),
     changeAccount: (runner, agent, session, threadId, input) => svc.changeAssistantThreadAccount(runner, agent, session, threadId, input),
+    harnessChangeSupported: (runnerId) => runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "assistantThreadHarnessChange"),
+    checkHarnessReadiness: async (runnerId, threadId, sourceId, targetId, providerAccountId) => {
+      const requestId = randomUUID();
+      const result = await hub.requestFromRunner(runnerId, requestId, {
+        type: "assistant_harness_readiness", requestId, threadId, sourceSessionId: sourceId,
+        targetSessionId: targetId, providerAccountId,
+      }, 5_000);
+      return result.type === "assistant_harness_readiness_result" && result.ok;
+    },
+    discardHarnessTarget: (sessionId) => { svc.delete(sessionId); },
+    retireHarnessSource: (runnerId, sessionId) => {
+      hub.sendToRunner(runnerId, { type: "assistant_credential_revoked", sessionId });
+      svc.setArchived(sessionId, true);
+    },
     pendingConfirmations: (threadId) => db.assistantOwnerConfirmations.pendingForThread(threadId),
     launchedCampaignIds: (threadId) => db.assistantOwnerConfirmations.launchedCampaignIds(threadId),
   });
   hub.onAssistantSessionUpsert((view) => threads.sessionChanged(view));
+  hub.observeSessions({
+    changed: (sessionId) => threads.stagedSessionChanged(sessionId),
+    removed: (sessionId) => threads.stagedSessionChanged(sessionId),
+  });
   db.assistantOwnerConfirmations.onChange((threadId) => threads.confirmationsChanged(threadId));
   // Archive, deletion or the owner revoking the connection: the runner forgets the credential and
   // closes the proxy. Any later proxy call is refused by the control plane regardless.
@@ -597,6 +765,7 @@ export function createAssistantThreads(db: ControlPlaneDb, hub: Hub, svc: Sessio
     if (session) hub.sendToRunner(session.runnerId, { type: "assistant_credential_revoked", sessionId: session.id });
   });
   svc.onAssistantSessionRetired((sessionId) => threads.sessionRetired(sessionId));
+  threads.recoverHarnessChanges();
   return threads;
 }
 

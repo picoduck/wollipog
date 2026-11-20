@@ -39,6 +39,7 @@ function makeManager(
   messages: RunnerToControlPlane[],
   useRealTranscripts = false,
   parkIdle = false,
+  capacity = 1,
 ): { manager: SessionManager; store: SessionStore } {
   const store = new SessionStore(join(root, "data", "sessions"));
   const manager = new SessionManager(
@@ -49,7 +50,7 @@ function makeManager(
     undefined,
     driverFactory as never,
     join(root, "data"),
-    1,
+    capacity,
     undefined,
     undefined,
     parkIdle ? { agentLimits: {}, agentWeights: {}, idleProcessPolicy: "park_when_needed" } : undefined,
@@ -95,6 +96,43 @@ function advertiseAssistantAccounts(manager: SessionManager) {
       id: account.id, label: account.label, provider: account.provider, authStatus: "authenticated", billing: "subscription",
     }));
 }
+
+test("the runner proves readiness for a fresh harness and refuses a racing original turn", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-assistant-harness-"));
+  let startTurn!: () => void;
+  let finishTurn!: () => void;
+  const started = new Promise<void>((resolve) => { startTurn = resolve; });
+  const finished = new Promise<void>((resolve) => { finishTurn = resolve; });
+  const messages: RunnerToControlPlane[] = [];
+  const { manager, store } = makeManager(root, (driver: AgentDriverKind) => ({
+    initialize: async () => {}, newSession: async () => {},
+    async prompt() { startTurn(); await finished; return "end_turn" as const; },
+    cancel() {}, dispose() {}, setConfig: async () => {}, resolvePermission: () => false,
+    agentSessionId: () => `fixture-${driver}`,
+  }), messages, false, false, 2);
+  try {
+    const source = launchSpec(root, "claude-code", "claude-work");
+    const target = launchSpec(root, "codex-app-server", "work");
+    assert.ok(await manager.start(source));
+    assert.ok(await manager.start(target), JSON.stringify(messages.filter((message) => message.type === "session_status")));
+    for (const spec of [source, target]) store.patchMeta(spec.sessionId, { assistant: { threadId: "thr_fixture" } });
+    const request = { type: "assistant_harness_readiness" as const, requestId: "fixture", threadId: "thr_fixture",
+      sourceSessionId: source.sessionId, targetSessionId: target.sessionId, providerAccountId: "work" };
+    assert.equal(manager.assistantHarnessReady(request), true);
+    assert.equal(manager.assistantHarnessReady({ ...request, providerAccountId: "personal" }), false);
+    assert.ok(manager.prompt(source.sessionId, "Complete this on Claude before switching"));
+    await started;
+    assert.equal(manager.assistantHarnessReady(request), false);
+    finishTurn();
+    await waitFor(() => store.readMeta(source.sessionId)?.status === "idle", "the original turn did not finish");
+    assert.equal(manager.assistantHarnessReady(request), true);
+    assert.equal(store.readEvents(target.sessionId).some(({ payload }) => payload.kind === "user_message"), false);
+  } finally {
+    finishTurn();
+    manager.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("an idle Codex session switches credential homes, resumes the same thread, and can switch back", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-codex-"));

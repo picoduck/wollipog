@@ -32,6 +32,7 @@ import type {
   ListSessionFilesResultMessage,
   LogoutAgentResultMessage,
   SwitchSessionProviderAccountResultMessage,
+  AssistantHarnessReadinessResult,
   SessionRoleResultMessage,
   InspectProviderAuthenticationResultMessage,
   SelectProviderAuthenticationAccountResultMessage,
@@ -362,6 +363,7 @@ export type RunnerRequestResult =
   | ListSessionFilesResultMessage
   | LogoutAgentResultMessage
   | SwitchSessionProviderAccountResultMessage
+  | AssistantHarnessReadinessResult
   | SessionRoleResultMessage
   | InspectProviderAuthenticationResultMessage
   | SelectProviderAuthenticationAccountResultMessage
@@ -948,7 +950,7 @@ export class Hub {
         unarchiveAndRestart: true,
         sessionReminders: true,
         ...(!info.principal || info.principal.kind === "human" && info.principal.role === "owner"
-          ? { assistantDecisionHistory: true, assistantCiRerunDecisions: true, assistantReleaseDecisions: true } : {}),
+          ? { assistantDecisionHistory: true, assistantCiRerunDecisions: true, assistantReleaseDecisions: true, assistantThreadHarnessChange: true } : {}),
         indefiniteSessionReminders: true,
         worktreeSetupConfig: true,
         renameProjectLocations: true,

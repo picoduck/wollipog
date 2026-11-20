@@ -1546,6 +1546,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 401: Execute exact GitHub release tag and draft publication decisions (Refs #4761).
   401,
   // v402 slot
+  // 402: Verify a prepared backing session before switching an Assistant thread’s harness (Refs #4765).
+  402,
   // v403 slot
   // v404 slot
   // v405 slot

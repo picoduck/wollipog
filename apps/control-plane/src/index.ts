@@ -1926,6 +1926,7 @@ app.register(async (instance) => {
       case "session_worktree_result":
       case "workspace_worktree_setup_result":
       case "logout_agent_result":
+      case "assistant_harness_readiness_result":
       case "switch_session_provider_account_result":
       case "session_location_switch_result":
       case "session_role_result":

@@ -355,6 +355,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   assistantRole: 384,
   assistantThreadProviderAccount: 388,
   assistantEvidenceReview: 397,
+  assistantThreadHarnessChange: 402,
   assistantCampaignLaunch: 391,
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
@@ -10494,6 +10495,7 @@ export type RunnerToControlPlane =
   | SessionWorktreeResultMessage
   | WorkspaceWorktreeSetupResultMessage
   | LogoutAgentResultMessage
+  | AssistantHarnessReadinessResult
   | SwitchSessionProviderAccountResultMessage
   | import("./location-switch.js").SessionLocationSwitchResultMessage
   | import("./location-switch.js").RegisteredLocationSwitchLookupMessage
@@ -11375,6 +11377,21 @@ export interface LogoutAgentResultMessage {
   requestId: string;
   ok: boolean;
   error?: string;
+}
+
+export interface AssistantHarnessReadinessRequest {
+  type: "assistant_harness_readiness";
+  requestId: string;
+  threadId: string;
+  sourceSessionId: string;
+  targetSessionId: string;
+  providerAccountId: string;
+}
+
+export interface AssistantHarnessReadinessResult {
+  type: "assistant_harness_readiness_result";
+  requestId: string;
+  ok: boolean;
 }
 
 export interface SwitchSessionProviderAccountMessage {
@@ -12651,6 +12668,7 @@ export type ControlPlaneToRunner =
   | DeleteSessionNamingCustomModelKeyMessage
   | TestSessionNamingCustomModelMessage
   | LogoutAgentMessage
+  | AssistantHarnessReadinessRequest
   | SwitchSessionProviderAccountMessage
   | import("./location-switch.js").SessionLocationSwitchMessage
   | import("./location-switch.js").RegisteredLocationSwitchLookupResultMessage
@@ -12736,6 +12754,7 @@ export interface UiSnapshotMessage {
     /** The owner can grant typed GitHub Actions rerun decisions on this control plane. */
     assistantCiRerunDecisions?: true;
     assistantReleaseDecisions?: true;
+    assistantThreadHarnessChange?: true;
     /** Session reminders support the explicit no-timer Someday schedule kind. */
     indefiniteSessionReminders?: boolean;
     /** Per-user worktree setup notices and runner-owned generation are available. */

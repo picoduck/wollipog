@@ -148,6 +148,11 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
           {!ciRerunSupported && <span className="muted">Update the control plane to grant CI rerun decisions.</span>}
           {!releaseSupported && <span className="muted">Update the control plane to grant release decisions.</span>}
         </fieldset>
+        {evidenceSelected && delegation.grant?.categories.includes("ui_evidence_review") && evidenceReview?.available &&
+          delegation.grant.evidenceDisclosureDigest !== evidenceReview.disclosureDigest &&
+          <Notice tone="warning" role="status" title="Confirm Provider Disclosure">
+            UI Evidence Approval is paused. Review the current provider disclosure above and select Save Grant to restore it.
+          </Notice>}
         <SelectionScope name="Projects" value={projectScope} onChange={setProjectScope}
           items={[...projects.values()].map(({ id, name }) => ({ id, title: name }))} />
         <SelectionScope name="Campaigns" value={campaignScope} onChange={setCampaignScope}

@@ -14941,6 +14941,25 @@ export class SessionManager {
     return { ok: true, scheduled: false };
   }
 
+  assistantHarnessReady(request: import("@wollipog/protocol").AssistantHarnessReadinessRequest): boolean {
+    const source = this.store.readMeta(request.sourceSessionId);
+    const target = this.store.readMeta(request.targetSessionId);
+    if (!source || !target || source.assistant?.threadId !== request.threadId ||
+        target.assistant?.threadId !== request.threadId || target.providerAccountId !== request.providerAccountId ||
+        source.driver === target.driver || this.store.readEvents(target.sessionId).some(({ payload }) => payload.kind === "user_message") ||
+        !this.active.has(target.sessionId) || target.status !== "idle") return false;
+    for (const meta of [source, target]) {
+      const entry = this.active.get(meta.sessionId);
+      if (meta.status !== "idle" && meta.status !== "completed" ||
+          !this.sessionCanOpen(meta.sessionId) || this.launchGenerations.has(meta.sessionId) ||
+          this.closing.has(meta.sessionId) || this.roleConversionPending(meta.sessionId) ||
+          meta.pendingProviderAccountId || meta.pendingLocationSwitch || meta.backgroundWorkState ||
+          meta.pendingBackgroundTaskIds?.length || this.hasPendingApproval(meta.sessionId) ||
+          (entry && (entry.queue.length > 0 || !this.providerAccountSwitchCanProceed(meta.sessionId, entry)))) return false;
+    }
+    return true;
+  }
+
   /** An owner changes the existing backing session at an idle boundary. A queued or racing turn
    * is refused; retirement fences new prompts until the replacement is ready. */
   async changeAssistantThreadAccount(

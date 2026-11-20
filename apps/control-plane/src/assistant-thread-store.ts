@@ -5,6 +5,7 @@ import {
   type AssistantDecisionDelegation,
   type AssistantDecisionGrant,
   type AssistantThreadHarness,
+  type AssistantThreadHistoryEntry,
   type AssistantThreadLaunchDefaults,
   type AssistantThreadLimits,
 } from "@wollipog/protocol";
@@ -64,6 +65,14 @@ export class AssistantThreadStore {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       archived_at INTEGER);
+      CREATE TABLE IF NOT EXISTS assistant_thread_harness_change (
+        thread_id TEXT PRIMARY KEY, source_id TEXT NOT NULL, target_id TEXT UNIQUE NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS assistant_thread_history (
+        thread_id TEXT NOT NULL, session_id TEXT UNIQUE NOT NULL, harness TEXT NOT NULL,
+        next_harness TEXT NOT NULL, switched_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS assistant_thread_history_thread ON assistant_thread_history(thread_id, switched_at);
       CREATE INDEX IF NOT EXISTS assistant_threads_owner ON assistant_threads(owner_user_id, organization_id, state);
       CREATE TABLE IF NOT EXISTS assistant_thread_limit_defaults (
         owner_user_id TEXT NOT NULL,
@@ -158,6 +167,94 @@ export class AssistantThreadStore {
 
   forSession(sessionId: string): ThreadRow | null {
     return (this.db.prepare("SELECT * FROM assistant_threads WHERE session_id=?").get(sessionId) as ThreadRow | undefined) ?? null;
+  }
+
+  history(threadId: string): AssistantThreadHistoryEntry[] {
+    return this.db.prepare(`SELECT session_id AS sessionId, harness, next_harness AS nextHarness, switched_at AS switchedAt
+      FROM assistant_thread_history WHERE thread_id=? ORDER BY switched_at DESC, rowid DESC`).all(threadId) as unknown as AssistantThreadHistoryEntry[];
+  }
+
+  harnessChangeInProgress(threadId: string): boolean {
+    return this.db.prepare("SELECT 1 FROM assistant_thread_harness_change WHERE thread_id=?").get(threadId) !== undefined;
+  }
+
+  startHarnessChange(threadId: string, sourceId: string, targetId: string): boolean {
+    return this.db.prepare("INSERT OR IGNORE INTO assistant_thread_harness_change VALUES (?,?,?)")
+      .run(threadId, sourceId, targetId).changes === 1;
+  }
+
+  finishHarnessChange(threadId: string, targetId: string): void {
+    this.db.prepare("DELETE FROM assistant_thread_harness_change WHERE thread_id=? AND target_id=?").run(threadId, targetId);
+  }
+
+  unfinishedHarnessChanges(): { threadId: string; targetId: string }[] {
+    return this.db.prepare("SELECT thread_id AS threadId, target_id AS targetId FROM assistant_thread_harness_change")
+      .all() as { threadId: string; targetId: string }[];
+  }
+
+  unretiredHarnessSources(): { runnerId: string; sessionId: string }[] {
+    return this.db.prepare(`SELECT session.runner_id AS runnerId, session.id AS sessionId
+      FROM assistant_thread_history history JOIN sessions session ON session.id=history.session_id
+      WHERE session.archived_at IS NULL`).all() as { runnerId: string; sessionId: string }[];
+  }
+
+  harnessChangeForTarget(targetId: string): boolean {
+    return this.db.prepare("SELECT 1 FROM assistant_thread_harness_change WHERE target_id=?").get(targetId) !== undefined;
+  }
+
+  /** A staged or former backing session cannot receive prompts through its ordinary Session URL. */
+  harnessChangeBlocksSession(sessionId: string): boolean {
+    return this.db.prepare(`SELECT 1 FROM assistant_thread_harness_change WHERE source_id=? OR target_id=?
+      UNION ALL SELECT 1 FROM assistant_thread_history WHERE session_id=? LIMIT 1`).get(sessionId, sessionId, sessionId) !== undefined;
+  }
+
+  earlierBackingSpend(threadId: string): number {
+    return (this.db.prepare(`SELECT retired_cost_usd + (${this.historySpendSql("assistant_threads.id")}) AS cost
+      FROM assistant_threads WHERE id=?`)
+      .get(threadId) as { cost: number } | undefined)?.cost ?? 0;
+  }
+
+  private historySpendSql(threadId: string): string {
+    return `SELECT COALESCE(SUM(session.cost_usd + session.live_cost_usd), 0)
+      FROM assistant_thread_history history JOIN sessions session ON session.id=history.session_id
+      WHERE history.thread_id=${threadId}`;
+  }
+
+  /** Credential activation and the backing pointer share a transaction. A target with no
+   * committed credential cannot use the Assistant connection, even if its process started. */
+  commitHarnessChange(input: {
+    threadId: string; sourceId: string; targetId: string; harness: AssistantThreadHarness; title: string;
+    connectionId: string; tokenHash: string; expiresAt: number; now: number;
+    bindCredential: (connectionId: string, tokenHash: string, expiresAt: number) => boolean;
+  }): boolean {
+    const { threadId, sourceId, targetId, harness, title, connectionId, tokenHash, expiresAt, now, bindCredential } = input;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.get(threadId);
+      if (!row || row.state !== "active" || row.session_id !== sourceId || row.connection_id !== connectionId ||
+          !this.db.prepare("SELECT 1 FROM assistant_thread_harness_change WHERE thread_id=? AND source_id=? AND target_id=?")
+            .get(threadId, sourceId, targetId) ||
+          !this.db.prepare("SELECT 1 FROM sessions WHERE id=? AND assistant_thread_id=? AND archived_at IS NULL")
+            .get(targetId, threadId) ||
+          !bindCredential(connectionId, tokenHash, expiresAt)) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const grant = threadDecisionDelegation(row).grant;
+      const invalidate = grant?.evidenceDisclosureDigest !== undefined;
+      if (invalidate) delete grant.evidenceDisclosureDigest;
+      this.db.prepare("INSERT INTO assistant_thread_history VALUES (?,?,?,?,?)")
+        .run(threadId, sourceId, row.harness, harness, now);
+      this.db.prepare(`UPDATE assistant_threads SET session_id=?, harness=?, title=COALESCE(title, ?), updated_at=?,
+        backing_cap_usd=NULL, decision_grant=?, decision_grant_revision=decision_grant_revision+?
+        WHERE id=?`).run(targetId, harness, title, now, grant ? JSON.stringify(grant) : null, invalidate ? 1 : 0, threadId);
+      this.finishHarnessChange(threadId, targetId);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   listForOwner(userId: string, organizationId: string, includeArchived: boolean): ThreadRow[] {
@@ -260,7 +357,9 @@ export class AssistantThreadStore {
     this.db.prepare(`UPDATE assistant_thread_members SET retired_cost_usd=${cost},
         retired_cap_usd=(SELECT ${TREE_COMMITMENT_SQL("s", "assistant_thread_members")} FROM sessions s WHERE s.id=?)
       WHERE session_id=? AND retired_cost_usd IS NULL`).run(sessionId, sessionId, sessionId);
-    this.db.prepare(`UPDATE assistant_threads SET retired_cost_usd = retired_cost_usd + ${cost} WHERE session_id=?`).run(sessionId, sessionId);
+    this.db.prepare(`UPDATE assistant_threads SET retired_cost_usd = retired_cost_usd + ${cost}
+      WHERE session_id=? OR id=(SELECT thread_id FROM assistant_thread_history WHERE session_id=?)`)
+      .run(sessionId, sessionId, sessionId);
   }
 
   /** The same, for every session of a runner before a bulk deletion removes them all. */
@@ -281,7 +380,7 @@ export class AssistantThreadStore {
    * Each tree holds the larger of its spend and its root's commitment: the part of the budget the
    * backing session can no longer use. */
   costs(threadId: string): { spentUsd: number; backingSpentUsd: number; launchedHeldUsd: number } {
-    const thread = this.db.prepare(`SELECT thread.retired_cost_usd +
+    const thread = this.db.prepare(`SELECT thread.retired_cost_usd + (${this.historySpendSql("thread.id")}) +
         COALESCE((SELECT cost_usd + live_cost_usd FROM sessions WHERE id=thread.session_id), 0) AS backing
       FROM assistant_threads thread WHERE thread.id=?`).get(threadId) as { backing: number } | undefined;
     // A deleted member counts its final cost, inside its own tree; a deleted root no longer holds a cap.
