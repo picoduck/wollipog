@@ -52,19 +52,21 @@ after launch, in one user-visible first report posted after `get_campaign` and b
   its exact source file and quoted requirement, and that each such gate will reach the owner typed
   as described below, never only in prose.
 
-In either control mode, when the campaign has no cost ceiling or accounting is unpriced, name that
-condition plainly in the first report. Read the campaign-wide ceiling from `budget.authority.costUsd`
-in `get_campaign`. The `limits.costBudgetUsd` field covers only the root session. State how many
-children you plan to run at once, the applicable concurrency ceiling, and the fixed child model
-and effort from `get_campaign.behavior`.
+The always-injected Orchestrator preset carries this Full Control authority preflight. A nested
+Orchestrator does not repeat it.
+
+When running `orchestrate-issues`, disclose usage risk if the campaign has no cost ceiling or
+accounting is unpriced. Include it in the Full Control first report or in the Custom root's first
+selection or status report before dispatch. Read the campaign-wide ceiling from
+`budget.authority.costUsd` in `get_campaign`. The `limits.costBudgetUsd` field covers only the root
+session. State how many children you plan to run at once, the applicable concurrency ceiling, and
+the fixed child model and effort from `get_campaign.behavior`.
 For Automatic dimensions, give the planned values if known and confirm the choices in the selection
 table. Warn that parallel work and reviews can exhaust a provider subscription allowance. Suggest
 a concrete conservative concurrency the owner could set, or a cost ceiling when accounting is
 priced. Keep existing settings and guardrails.
 
-The report is not a question: it asks nothing, waits for nobody, and the root continues in the same
-turn. A nested Orchestrator does not repeat it. The always-injected Orchestrator preset carries the
-same requirement.
+Post the report and continue in the same turn, without asking for an answer.
 
 When the owner's first message started the campaign, the server reads no scope from it: the root's
 first campaign action, right after the report, is proposing the initial scope with

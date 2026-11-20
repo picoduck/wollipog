@@ -80,9 +80,9 @@ server-established authority permitted by repository policy. Custom preserves ex
 requirements. A changed policy must pass its own explicitly authorized contribution workflow.
 Under Full Control, which launches with no form or question, the root makes this record visible
 after launch in one first report before its first child; the reference says what it names. The
-report asks nothing and waits for nobody. In either control mode, include the
-[campaign usage disclosure](../using-wollipog/references/campaign-authority.md#first-report)
-in the first report before dispatch when the budget is unlimited or accounting is unpriced.
+report asks nothing and waits for nobody. When the budget is unlimited or accounting is unpriced,
+include the [campaign usage disclosure](../using-wollipog/references/campaign-authority.md#first-report)
+in that report. In Custom, put the disclosure in the first selection or status report before dispatch.
 
 Carry forward the user's actual campaign authorization and repository rules. Routine claims, isolated worktrees, testing, pushing, opening PRs, and required reviews need no repeated permission. Repository rules, installed third-party skills and Human Required rules retain their approval requirements. Do not silently convert a request for this workflow into a waiver of those gates.
 
