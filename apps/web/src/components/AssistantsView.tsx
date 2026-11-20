@@ -538,8 +538,8 @@ function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
  * The open thread's header, in the session bar's place: its title, status, harness and access level,
  * the Launched Sessions toggle, and what waits on the owner. The launched sessions themselves are in
  * the side panel's Launched Sessions tool, hidden until asked for (#4776), so many launches never
- * push the conversation down; anything waiting on the owner stays here, actionable with the panel
- * closed. On a phone the detail bar carries the title and actions, so this keeps only the facts.
+ * push the conversation down; anything waiting on the owner stays here and is answered here, with
+ * the panel open or closed. On a phone the detail bar carries the title and actions, so this keeps only the facts.
  */
 function ThreadHeader({ thread, work, compact, menu, launchedPanelOpen, onToggleLaunched, onConfirmationAnswered }: {
   thread: AssistantThread;
@@ -608,7 +608,6 @@ function ThreadHeader({ thread, work, compact, menu, launchedPanelOpen, onToggle
       {thread.earlierConversations?.length ? <AssistantThreadHistory entries={thread.earlierConversations} /> : null}
       <AssistantWaitingWork
         work={work}
-        showSessions={!launchedPanelOpen}
         confirmations={pending.length > 0 ? pending.map(({ confirmation }) => (
           <AssistantConfirmationCard key={confirmation.id} confirmation={confirmation} onAnswered={onConfirmationAnswered} />
         )) : undefined}

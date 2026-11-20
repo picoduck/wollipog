@@ -140,20 +140,8 @@ function session(id: string, title: string, overrides: Partial<SessionView> = {}
 }
 
 /** The Vite bump's install approval. `?deps=question` adds a nonblocking question beside it, which the
- * card shows once the approval is answered (#4776). A re-raised approval keeps the provider's request
- * id under a new occurrence id. */
+ * card shows once the approval is answered (#4776). */
 function depsApproval(occurrenceId: string): PendingApproval {
-  // `?deps=auth`: the session lost its sign-in instead. The runner's recovery card offers Retry and
-  // Dismiss Recovery and carries no occurrence id, so a failed Retry raises it again under its id.
-  if (params.get("deps") === "auth") return {
-    requestId: "req-auth",
-    title: "Claude Code needs you to sign in again",
-    options: [
-      { optionId: "auth:revalidate", name: "Retry", kind: "allow_once" },
-      { optionId: "auth:dismiss", name: "Dismiss Recovery", kind: "reject_once" },
-    ],
-    kind: "authentication",
-  } as PendingApproval;
   return {
     requestId: "req-1",
     occurrenceId,
@@ -552,10 +540,6 @@ function upsert(next: SessionView) {
 /** `assistantsHoldNextList()`: the next list read answers with the threads as they were when it
  * began, but only once `assistantsReleaseList()` lets it, as a slow read would. */
 let holdNextList = false;
-/** "request": the decision waits before the control plane applies it; "response": it applies at once,
- * and only its response back to the page waits. */
-let holdApprovals: "request" | "response" | null = null;
-const releaseApprovals: (() => void)[] = [];
 let releaseHeldList: (() => void) | null = null;
 let slowListMs = 0;
 
@@ -816,19 +800,7 @@ const client = {
   },
   session: async (id: string) => ({ session: structuredClone(sessions.get(id)!) }),
   approve: async (id: string, body: { requestId: string; optionId: string | null }) => {
-    document.body.dataset.approveCount = String(Number(document.body.dataset.approveCount ?? 0) + 1);
-    // `assistantsHoldApprovals(mode)`: the approval waits until `assistantsReleaseApprovals()`, as a
-    // slow control plane's would (#4776): before it is applied, or with only its response held back.
-    const hold = holdApprovals;
-    if (hold === "request") await new Promise<void>((resolve) => { releaseApprovals.push(resolve); });
     const current = sessions.get(id)!;
-    // The control plane hands an authentication answer to the runner and leaves its card in place.
-    if (current.pendingApproval?.kind === "authentication") {
-      document.body.dataset.approved = `${id}:${body.requestId}:${body.optionId}`;
-      const unchanged = structuredClone(current);
-      if (hold === "response") await new Promise<void>((resolve) => { releaseApprovals.push(resolve); });
-      return unchanged;
-    }
     // Only the answered request leaves; another one waiting beside it stays.
     const remaining = removePendingRequest(current.pendingApproval, body.requestId);
     const next = { ...current, status: remaining ? current.status : "running" as const, pendingApproval: remaining, updatedAt: Date.now() };
@@ -837,9 +809,7 @@ const client = {
     // The thread no longer waits on anyone once its only approval is answered.
     threads = threads.map((candidate) => candidate.launchedSessionIds.includes(id) ? { ...candidate, status: "working" } : candidate);
     for (const changed of threads.filter((candidate) => candidate.launchedSessionIds.includes(id))) publish(changed);
-    const response = structuredClone(next);
-    if (hold === "response") await new Promise<void>((resolve) => { releaseApprovals.push(resolve); });
-    return response;
+    return structuredClone(next);
   },
   getSessionEventPage: () => new Promise<never>(() => {}),
   getSessionEventTailPage: (id: string, _before: number | undefined, eventEpoch: number) => Promise.resolve({
@@ -908,18 +878,6 @@ Object.assign(window, {
     publish(threads.find((candidate) => candidate.id === threadId)!);
   },
   assistantsHoldNextList: () => { holdNextList = true; },
-  assistantsHoldApprovals: (mode: "request" | "response" = "request") => { holdApprovals = mode; },
-  /** The runner raises the install approval again under the same provider request id, as a new
-   * occurrence, while the first answer is still on its way back. */
-  /** Every request on the Vite bump is answered elsewhere (another tab), and the stream says so. */
-  assistantsClearDepsElsewhere: () => upsert({ ...sessions.get("sess-deps")!, status: "running", pendingApproval: null, updatedAt: Date.now() }),
-  /** The runner's Retry still can't authenticate, and it raises the recovery card again. */
-  assistantsRepublishAuth: () => upsert({ ...sessions.get("sess-deps")!, pendingApproval: depsApproval(""), updatedAt: Date.now() }),
-  assistantsReraiseDeps: () => upsert({ ...sessions.get("sess-deps")!, status: "input_required", pendingApproval: depsApproval("occ-deps-2") }),
-  assistantsReleaseApprovals: () => {
-    holdApprovals = null;
-    for (const release of releaseApprovals.splice(0)) release();
-  },
   assistantsSlowLists: (ms: number) => { slowListMs = ms; },
   assistantsReleaseList: () => {
     releaseHeldList?.();

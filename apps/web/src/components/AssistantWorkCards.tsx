@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type FocusEvent, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type ReactNode } from "react";
 import { prioritizedPendingRequests, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import {
@@ -53,8 +53,9 @@ export function useLaunchedWorkGroups(work: LaunchedWork): { ids: string[]; grou
 
 /**
  * Keeps keyboard focus when the control holding it leaves a list of cards (#4776). A card is drawn
- * again elsewhere when its session changes group or leaves the header for the panel, and a card's own
- * request actions leave when that request is answered while another keeps the card waiting. Either
+ * again elsewhere when its session changes group, a header card leaves once its session stops
+ * waiting, and a card's own request actions leave when that request is answered while another keeps
+ * the card waiting. Either
  * way the focused element is removed. If focus was last inside the list and the page now has none,
  * `recover` gets the session whose card last held focus and the list, and returns where focus goes.
  * The check runs after each change named by `changeKey`, which can remove the list itself, and after
@@ -125,83 +126,23 @@ function cardFocusTarget(list: HTMLElement | null, sessionId: string | null): HT
 }
 
 /**
- * A card's answer to a request, by session and request occurrence (#4776): Approve Once or Deny in
- * flight, then `answered` once the control plane accepted it. A card is a separate mount in the
- * header and in the panel, so the answer outlives the card: the same request's card elsewhere keeps
- * both actions disabled and never sends a second answer.
- *
- * The card never applies the answer's response. The control plane publishes the answered session on
- * the session stream, which the cards follow for everything else, while a response read earlier or
- * later than another change can't be ordered against the stream and could hide a newer request or
- * restore an answered one.
- *
- * After an accepted answer the actions stay disabled while the store still holds the session exactly
- * as it was when the answer was clicked (`against`): nothing has reported the answer's outcome yet,
- * whether the control plane's answered session or, for an authentication Retry the runner checks on
- * its own, the runner's result. The next session the stream publishes is that outcome or newer, and
- * whatever it lists is answerable, a Retry raised again under the same id included. One that arrived
- * before the response leaves the request answerable at once. An answer is kept only while some card
- * shows its request, so the
- * record never outlives the cards. A provider may reuse a request id for a new request, so the key
- * is the occurrence where there is one.
- */
-type ResponseState =
-  | { state: "approve" | "deny" }
-  | { state: "answered"; against: SessionView | undefined };
-const respondingTo = new Map<string, ResponseState>();
-const respondingListeners = new Set<() => void>();
-function setResponding(key: string, state: ResponseState | null) {
-  if (state) respondingTo.set(key, state);
-  else respondingTo.delete(key);
-  for (const listener of respondingListeners) listener();
-}
-function subscribeResponding(listener: () => void) {
-  respondingListeners.add(listener);
-  return () => { respondingListeners.delete(listener); };
-}
-/** How many mounted cards show each request. */
-const respondingReaders = new Map<string, number>();
-function useResponding(key: string): ResponseState | null {
-  useEffect(() => {
-    respondingReaders.set(key, (respondingReaders.get(key) ?? 0) + 1);
-    return () => {
-      const left = (respondingReaders.get(key) ?? 1) - 1;
-      if (left > 0) {
-        respondingReaders.set(key, left);
-        return;
-      }
-      respondingReaders.delete(key);
-      // A card moving between the header and the panel unmounts and mounts in one commit; only an
-      // answer no card picked up again is dropped. One still in flight settles on its own.
-      queueMicrotask(() => {
-        if (!respondingReaders.has(key) && respondingTo.get(key)?.state === "answered") setResponding(key, null);
-      });
-    };
-  }, [key]);
-  return useSyncExternalStore(subscribeResponding, () => respondingTo.get(key) ?? null);
-}
-function requestKey(sessionId: string, request: Pick<PendingApproval, "requestId" | "occurrenceId">): string {
-  return `${sessionId}\n${request.occurrenceId ?? request.requestId}`;
-}
-
-/**
  * What a thread is waiting on its owner for, in the thread header where a closed panel never hides it
  * (#4665, #4776): the owner confirmations bound to the thread itself first, ahead of the work they
  * would unblock, then each launched session waiting on an approval or a question, as its work card
- * with the approval inline. `showSessions` is false while the Launched Sessions panel shows those
- * cards itself, so the same approval is never offered twice on one screen.
+ * with the approval inline. This is the one place a launched session's request is answered from the
+ * thread: the Launched Sessions panel lists the same sessions without actions, so a card being
+ * answered never moves between surfaces, whether the panel is open or not.
  *
  * A card leaves once its session stops waiting, Approve Once's own card included. When focus was in
  * one that left, it moves to the header's Launched Sessions toggle, where that session now is,
  * rather than dropping to the page; a card that stays, waiting on another request, keeps it.
  */
-export function AssistantWaitingWork({ work, confirmations, showSessions }: {
+export function AssistantWaitingWork({ work, confirmations }: {
   work: LaunchedWork;
   confirmations?: ReactNode;
-  showSessions: boolean;
 }) {
   const { groups } = useLaunchedWorkGroups(work);
-  const waiting = showSessions ? groups.needsYou : [];
+  const waiting = groups.needsYou;
   const campaigns = useMemo(() => new Set(work.campaignIds ?? []), [work.campaignIds]);
   const focus = useFocusRecovery<HTMLElement>(waiting.join("\n"), (sessionId, list) => cardFocusTarget(list, sessionId)
     ?? document.querySelector<HTMLElement>(".assistant-thread-head .assistant-launched-toggle"));
@@ -211,7 +152,7 @@ export function AssistantWaitingWork({ work, confirmations, showSessions }: {
       {confirmations && <ul className="assistant-work-confirmations" aria-label="Approvals Needed">{confirmations}</ul>}
       {waiting.length > 0 && (
         <ul className="assistant-work-cards" aria-label="Sessions Waiting for You">
-          {waiting.map((sessionId) => <AssistantWorkCard key={sessionId} sessionId={sessionId} campaign={campaigns.has(sessionId)} />)}
+          {waiting.map((sessionId) => <AssistantWorkCard key={sessionId} sessionId={sessionId} campaign={campaigns.has(sessionId)} actions />)}
         </ul>
       )}
     </section>
@@ -250,11 +191,13 @@ export function LaunchedSessionsToggle({ work, open, onToggle }: {
  * on the owner first, then those still working, then the finished ones in a group that folds away.
  * The list scrolls inside the panel, so the conversation keeps its height however many there are.
  * Finished work starts folded while anything else is listed, and open when it is all there is.
- * `beforeOpen` runs before a card opens its session: a panel covering the conversation closes, so it
- * doesn't cover the session it opened.
+ * Its cards open their session, a waiting one at its request; the request itself is answered from
+ * the thread header (`AssistantWaitingWork`), which stays in place beside the panel. `beforeOpen`
+ * runs before a card opens its session: a panel covering the conversation closes, so it doesn't
+ * cover the session it opened.
  *
- * When a card changes group, answering its approval for example, focus follows it to its new place;
- * in a folded Finished group it lands on Finished, and otherwise on the panel's tool switcher.
+ * When a card changes group while focused, its session finishing for example, focus follows it to its
+ * new place; in a folded Finished group it lands on Finished, and otherwise on the tool switcher.
  */
 export function LaunchedSessionsPanel({ work, beforeOpen }: { work: LaunchedWork; beforeOpen?: () => void }) {
   const { ids, groups } = useLaunchedWorkGroups(work);
@@ -318,7 +261,17 @@ export function LaunchedSessionsPanel({ work, beforeOpen }: { work: LaunchedWork
   );
 }
 
-function AssistantWorkCard({ sessionId, campaign, beforeOpen }: { sessionId: string; campaign?: boolean; beforeOpen?: () => void }) {
+/**
+ * One launched session as a card that opens it. With `actions` (the header's waiting cards) a waiting
+ * request carries Approve Once, Deny and Open Session inline; without (the panel), the card names the
+ * request and opens the session at it.
+ */
+function AssistantWorkCard({ sessionId, campaign, actions, beforeOpen }: {
+  sessionId: string;
+  campaign?: boolean;
+  actions?: boolean;
+  beforeOpen?: () => void;
+}) {
   const session = useStoreSelector((state) => state.sessions.get(sessionId));
   const runnerOnline = useStoreSelector((state) => {
     const runnerId = session?.runnerId;
@@ -347,7 +300,7 @@ function AssistantWorkCard({ sessionId, campaign, beforeOpen }: { sessionId: str
   const request = session.archived ? undefined : prioritizedPendingRequests(session.pendingApproval)[0];
   return (
     <li className="assistant-work-card" data-session-id={sessionId} data-needs-you={request ? "" : undefined}>
-      <button type="button" className="assistant-work-open" onClick={() => open()} title={title}>
+      <button type="button" className="assistant-work-open" onClick={() => open(actions ? undefined : request?.requestId)} title={title}>
         <span className="assistant-work-line">
           <span className="assistant-work-title">{title}</span>
           {campaign && <StatusBadge label="Campaign" noDot />}
@@ -357,11 +310,11 @@ function AssistantWorkCard({ sessionId, campaign, beforeOpen }: { sessionId: str
           {session.agentName ? `${session.agentName} · ` : ""}{relativeTime(session.updatedAt)}
         </span>
       </button>
-      {request && (
+      {request && (actions ? (
         // Keyed by occurrence: a new request reusing the provider's id starts with nothing carried over.
         <WorkCardRequest key={request.occurrenceId ?? request.requestId} session={session} requestId={request.requestId}
           onOpen={() => open(request.requestId)} />
-      )}
+      ) : <p className="assistant-work-request-title">{request.title}</p>)}
     </li>
   );
 }
@@ -369,8 +322,9 @@ function AssistantWorkCard({ sessionId, campaign, beforeOpen }: { sessionId: str
 /** A launched session's waiting request, inline on its card: Approve Once / Deny / Open Session. */
 function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView; requestId: string; onOpen: () => void }) {
   const api = useApi();
-  const { beginSessionDetailLoad, getSession } = useStoreActions();
+  const { loadSession, beginSessionDetailLoad } = useStoreActions();
   const { showToast } = useFeedback();
+  const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
   const listed = prioritizedPendingRequests(session.pendingApproval).find((candidate) => candidate.requestId === requestId);
   // The live list carries summary sessions, whose requests arrive without their options. The card
   // reads the session's detail once per request and keeps that request's options, so a later
@@ -391,15 +345,6 @@ function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView;
     return () => { current = false; };
   }, [api, beginSessionDetailLoad, needsDetail, requestId, session.id]);
   const request = listed && listed.options.length === 0 && hydrated?.requestId === requestId ? hydrated : listed;
-  const respondingKey = requestKey(session.id, listed ?? { requestId });
-  const entry = useResponding(respondingKey);
-  // Drop an answer the stream has moved past, now that it no longer holds anything.
-  useEffect(() => {
-    const current = respondingTo.get(respondingKey);
-    if (current?.state === "answered" && current.against !== session) setResponding(respondingKey, null);
-  }, [respondingKey, session]);
-  // An answer the stream has moved past no longer holds the request (see `ResponseState`).
-  const answer = entry?.state === "answered" && entry.against !== session ? null : entry?.state ?? null;
   if (!request) return null;
   // Only a request with exactly one once-only option per intent is decided from the card; anything
   // richer (a question, a choice of scopes) is answered in the session, where its context is.
@@ -408,22 +353,17 @@ function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView;
   const refusal = sessionCommandRefusal(session, "respond");
   const decide = async (intent: "approve" | "deny") => {
     const option = intent === "approve" ? approve : deny;
-    const key = respondingKey;
-    if (!option || respondingTo.has(key)) return;
-    const clicked = session;
-    setResponding(key, { state: intent });
+    if (!option || busy) return;
+    setBusy(intent);
     try {
-      await api.approve(session.id, { requestId: request.requestId, optionId: option.optionId });
-      // The stream brings the answered session. Until then, with nothing newer in the store, the
-      // request stays answered; otherwise it is the stream's to show (see `ResponseState`).
-      const behind = getSession(session.id) === clicked && respondingReaders.has(key);
-      setResponding(key, behind ? { state: "answered", against: clicked } : null);
+      loadSession(await api.approve(session.id, { requestId: request.requestId, optionId: option.optionId }));
     } catch (cause) {
-      setResponding(key, null);
       showToast(intent === "approve" ? "Couldn't approve the request." : "Couldn't deny the request.", {
         tone: "error",
         detail: cause instanceof Error ? cause.message : String(cause),
       });
+    } finally {
+      setBusy(null);
     }
   };
   return (
@@ -432,13 +372,13 @@ function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView;
       <div className="assistant-work-request-actions">
         {approve && deny && (
           <>
-            <BusyButton className="btn sm primary" busy={answer === "approve"} progress="Approving…"
-              disabled={answer !== null || refusal !== null} title={refusal ?? undefined}
+            <BusyButton className="btn sm primary" busy={busy === "approve"} progress="Approving…"
+              disabled={busy !== null || refusal !== null} title={refusal ?? undefined}
               onClick={() => void decide("approve")}>
               Approve Once
             </BusyButton>
-            <BusyButton className="btn sm" busy={answer === "deny"} progress="Denying…"
-              disabled={answer !== null || refusal !== null} title={refusal ?? undefined}
+            <BusyButton className="btn sm" busy={busy === "deny"} progress="Denying…"
+              disabled={busy !== null || refusal !== null} title={refusal ?? undefined}
               onClick={() => void decide("deny")}>
               Deny
             </BusyButton>
