@@ -475,8 +475,10 @@ function snapshot(): UiSnapshotMessage {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false,
       projects: delegationScenario === "stress", ...(showDelegation ? { assistantDecisionHistory: true as const } : {}),
-      ...(delegationScenario === "stress" || delegationScenario === "release-old" ? { assistantCiRerunDecisions: true as const } : {}),
-      ...(delegationScenario === "stress" ? { assistantReleaseDecisions: true as const } : {}) },
+      ...(delegationScenario === "stress" || delegationScenario === "release-old" || migrationScenario && migrationScenario !== "old"
+        ? { assistantCiRerunDecisions: true as const } : {}),
+      ...(delegationScenario === "stress" || migrationScenario && migrationScenario !== "old"
+        ? { assistantReleaseDecisions: true as const } : {}) },
     projects: delegationProjects,
     runners: [structuredClone(runner)],
     boxes: [],
