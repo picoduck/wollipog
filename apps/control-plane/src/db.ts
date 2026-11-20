@@ -401,6 +401,7 @@ import { CAMPAIGN_HANDOFF_QUESTION_KEY } from "@wollipog/protocol";
 import {
   CAMPAIGN_FORGE_OBSERVATION_SCHEMA,
   CampaignForgeObservationStore,
+  hasCampaignCheckFailure,
   type CampaignForgeObservingRunner,
   type ForgeObserverState,
 } from "./campaign-forge-observations.js";
@@ -6412,10 +6413,7 @@ export class ControlPlaneDb {
                 record.resource.pullRequest !== ref.number) continue;
             if (record.resource.kind === "pull_request" && record.resource.sessionId === campaignId &&
                 record.resource.occurrenceId === fact.value.headSha &&
-                (record.action === "repair_checks" && record.reason === "failed_checks" &&
-                  (fact.value.forge === "gitlab"
-                    ? fact.value.pipeline?.status === "failed"
-                    : fact.value.checks.state === "failing" || fact.value.requiredChecks.state === "failing") ||
+                (record.action === "repair_checks" && record.reason === "failed_checks" && hasCampaignCheckFailure(fact.value) ||
                  record.action === "rereview" && record.reason === "reviewer_objection" &&
                   fact.value.forge !== "gitlab" && fact.value.reviewDecision === "changes_requested")) {
               recoveryIds.add(record.id);
