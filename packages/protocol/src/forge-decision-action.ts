@@ -121,6 +121,11 @@ export interface ExecuteWorkflowDecisionRequest {
   resourceDigest: string;
 }
 
+/** Diagnostic evidence from a provider's structured denial. It carries no execution authority. */
+export type ProviderForgeRefusal =
+  | { kind: "command"; commandSha256: string }
+  | { kind: "managed"; occurrenceId: string; resourceDigest: string };
+
 export type ForgeDecisionAction =
   | { kind: "temporary_branch_create"; repository: string; branch: string; headSha: string }
   | { kind: "temporary_branch_deletion"; repository: string; branch: string; headSha: string }

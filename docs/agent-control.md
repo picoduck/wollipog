@@ -2534,6 +2534,12 @@ An uncertain deletion may be executed again, because a compare-and-delete pinned
 head cannot do more than the approval allowed. The consume result for a merge or deletion names
 this fallback (`forgeActionFallback`).
 
+When Claude Code reports a structured permission denial for an exact approved GitHub command or
+for `execute_workflow_decision`, v393 records one notice in the child's session and one campaign
+continuation per decision and attempt path. Raw provider output is excluded. The notice identifies
+the occurrence and the applicable recovery. Managed execution and campaign cleanup keep their
+existing approval, ancestry, and forge checks. The refusal report itself authorizes no action.
+
 `get_campaign` reports `mergedBranches` on the same version. For each GitHub pull request a campaign
 child merged through a consumed `pr_merge`, or through one whose enqueue Wollipog performed (a
 success or an uncertain attempt, even if a new request superseded or a revocation ended that

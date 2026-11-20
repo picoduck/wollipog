@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -144,6 +145,26 @@ test("a review session records the root result's permission denials, including o
   (h.driver as unknown as { lastPermissionDenials: number }).lastPermissionDenials = 0;
   h.feed({ type: "result", subtype: "success", parent_tool_use_id: "toolu_2", ...denied });
   assert.deepEqual(h.driver.reviewDiagnostics(), { permissionDenials: 0 });
+});
+
+test("Claude forge refusals carry structured coordinates and omit tool output", () => {
+  const h = makeHarness();
+  const digest = "a".repeat(64);
+  const managed = { tool_name: "mcp__wollipog__execute_workflow_decision", tool_use_id: "tu_managed",
+    tool_input: { occurrenceId: "workflow_123", resourceDigest: digest, other: "private provider data" } };
+  const bash = { tool_name: "Bash", tool_use_id: "tu_command",
+    tool_input: { command: "git push origin --delete agent/child", description: "private provider data" } };
+  h.feed({ type: "result", subtype: "success", parent_tool_use_id: "tu_parent", permission_denials: [managed] });
+  h.feed({ type: "result", subtype: "success", permission_denials: [managed, bash,
+    { ...managed, tool_use_id: "invalid", tool_input: { occurrenceId: "bad\nvalue", resourceDigest: digest } },
+    { ...bash, tool_use_id: "unrelated", tool_input: { command: "echo private provider data" } }] });
+  const refusals = h.events.filter((event) => event.kind === "tool_call_update" && "providerForgeRefusal" in event);
+  assert.deepEqual(refusals, [
+    { kind: "tool_call_update", toolCallId: "tu_managed", status: "failed",
+      providerForgeRefusal: { kind: "managed", occurrenceId: "workflow_123", resourceDigest: digest } },
+    { kind: "tool_call_update", toolCallId: "tu_command", status: "failed",
+      providerForgeRefusal: { kind: "command", commandSha256: createHash("sha256").update(bash.tool_input.command).digest("hex") } },
+  ]);
 });
 
 test("a top-level result with provider tokens reports that the account answered", () => {

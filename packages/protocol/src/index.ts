@@ -6528,6 +6528,8 @@ export type SessionEventPayload =
       subagentLifecycle?: AuthoritativeSubagentLifecycle;
       /** v207: the integer exit code the provider reported; replaces any earlier value. */
       exitCode?: number;
+      /** v393: content-safe evidence from the provider's structured permission-denial result. */
+      providerForgeRefusal?: import("./forge-decision-action.js").ProviderForgeRefusal;
     }
   | { kind: "plan"; entries: PlanEntry[]; parentToolUseId?: string }
   | { kind: "command_output"; text: string; textRefs?: EventPayloadReference[]; parentToolUseId?: string }

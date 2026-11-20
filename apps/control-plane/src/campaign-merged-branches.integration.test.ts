@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { CAMPAIGN_FORGE_OBSERVATION, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL, type CampaignForgePullRequestObservation, type CampaignPullRequestRef,
@@ -76,6 +77,71 @@ const observed = (tipSha: string | null, overrides: Partial<CampaignForgePullReq
 
 const observe = (h: ReturnType<typeof fixture>, observation: CampaignForgePullRequestObservation, at = Date.now()) =>
   h.db.campaignForgeObservations.record("root", "r", [{ ref: { repository: "picoduck/wollipog", number: 4100 }, observation }], at);
+
+function addConsumedDeletion(db: ControlPlaneDb): void {
+  db.raw().prepare(`INSERT INTO workflow_decisions(request_id,occurrence_id,session_id,controlling_session_id,
+    category,resource_key,resource_snapshot,resource_digest,policy_revision,authority,status,created_at,resolved_at,consumed_at)
+    VALUES ('delete','workflow_delete','child','root','merged_branch_deletion','branch:agent/child',?,? ,1,'orchestrator','consumed',6,7,8)`)
+    .run(JSON.stringify({ category: "merged_branch_deletion", repository: "picoduck/wollipog", branch: "agent/child",
+      merged: true, mergeCommitSha: "b".repeat(40), pullRequest: 4100, headSha: "a".repeat(40),
+      dependentPullRequests: { checkedAt: 5, open: [] } }), "d".repeat(64));
+}
+
+test("a consumed deletion for an externally merged PR still gates campaign completion", () => {
+  const h = fixture();
+  try {
+    h.db.raw().prepare("DELETE FROM workflow_decisions WHERE occurrence_id='merge-4100'").run();
+    addConsumedDeletion(h.db);
+    observe(h, observed("a".repeat(40)), 100);
+    assert.equal(h.db.campaignStatusOnly("root"), "complete_needs_cleanup");
+    assert.deepEqual(h.db.campaignProjection("root")?.mergedBranches?.items.map((row) => [row.branch, row.state]),
+      [["agent/child", "pending"]]);
+    observe(h, observed(null), 200);
+    assert.equal(h.db.campaignStatusOnly("root"), "verified_complete");
+  } finally { h.db.close(); }
+});
+
+test("an armed merge that never ran keeps an earlier verified campaign from appearing complete", () => {
+  const h = fixture();
+  try {
+    h.db.raw().prepare(`UPDATE workflow_decisions SET status='approved', consumed_at=NULL,
+      action_kind='pr_merge_enqueue', action_armed_at=6 WHERE occurrence_id='merge-4100'`).run();
+    observe(h, observed("a".repeat(40), { state: "open", mergeCommitSha: null }), 100);
+    assert.equal(h.db.campaignStatusOnly("root"), "complete_needs_cleanup");
+    assert.equal(h.db.campaignProjection("root")?.mergedBranches?.pending, 1);
+    assert.equal(h.db.campaignProjection("root")?.cleanup?.items[0]?.action.kind, "automatic");
+  } finally { h.db.close(); }
+});
+
+test("Claude forge refusals notify parent and child once per decision, without executing an action", () => {
+  const h = fixture();
+  try {
+    addConsumedDeletion(h.db);
+    const sha256 = (input: string) => createHash("sha256").update(input).digest("hex");
+    const command = `gh pr merge https://github.com/picoduck/wollipog/pull/4100 --squash --match-head-commit ${"a".repeat(40)}`;
+    h.db.raw().prepare(`UPDATE workflow_decisions SET status='approved', consumed_at=NULL,
+      action_kind='pr_merge_enqueue', action_command=?, action_command_digest=?, action_armed_at=6 WHERE occurrence_id='merge-4100'`)
+      .run(command, sha256(JSON.stringify({ kind: "pr_merge_enqueue", command })));
+    const refusals = [
+      { kind: "command", commandSha256: sha256(command) },
+      { kind: "command", commandSha256: sha256("git push origin --delete agent/child") },
+      { kind: "managed", occurrenceId: "workflow_delete", resourceDigest: "d".repeat(64) },
+      { kind: "managed", occurrenceId: "workflow_delete", resourceDigest: "b".repeat(64) },
+    ] as const;
+    for (const proof of refusals) {
+      for (const toolCallId of ["first", "replay"]) {
+        h.svc.onSessionEvent("child", { kind: "tool_call_update", toolCallId, status: "failed",
+          providerForgeRefusal: proof }, undefined, 20, "r");
+      }
+    }
+    const events = h.db.campaignContinuationEvents("root").filter((event) => event.kind === "child_blocked");
+    assert.deepEqual(events.map((event) => event.occurrenceId), ["merge-4100", "workflow_delete", "workflow_delete"]);
+    assert.equal(h.db.listEvents("child").filter((event) => event.payload.kind === "error" &&
+      event.payload.message.includes("execute_workflow_decision")).length, 3);
+    assert.equal(h.db.workflowDecisionByOccurrence("merge-4100")?.status, "approved");
+    assert.equal(h.db.workflowDecisionByOccurrence("workflow_delete")?.forgeAction, undefined);
+  } finally { h.db.close(); }
+});
 
 test("a campaign whose merged branch still exists on origin is not verified complete (#4067)", async () => {
   const h = fixture();
