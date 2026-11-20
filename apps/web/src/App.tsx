@@ -138,6 +138,7 @@ const NavigationRailPanel = lazy(() => import("./components/SettingsView.js").th
 const BehaviorPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.BehaviorPanel })));
 const AssistantThreadDefaultsPanel = lazy(() => import("./components/AssistantThreadDefaultsPanel.js").then((module) => ({ default: module.AssistantThreadDefaultsPanel })));
 const AssistantConnectionsPanel = lazy(() => import("./components/AssistantConnectionsPanel.js").then((module) => ({ default: module.AssistantConnectionsPanel })));
+const AssistantDelegationPanel = lazy(() => import("./components/AssistantDelegationPanel.js").then((module) => ({ default: module.AssistantDelegationPanel })));
 const AgentDefaultsPanel = lazy(() => import("./components/AgentDefaultsPanel.js").then((module) => ({ default: module.AgentDefaultsPanel })));
 const NetworkPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NetworkPanel })));
 const NotificationsPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NotificationsPanel })));
@@ -895,7 +896,7 @@ export function Shell() {
               </State>
             </div>
           )}
-          {view.name === "assistants" && <AssistantsView threadId={view.threadId} limits={view.limits} rightPanel={rightPanel} />}
+          {view.name === "assistants" && <AssistantsView threadId={view.threadId} limits={view.limits} delegation={view.delegation} rightPanel={rightPanel} />}
           {view.name === "automations" && (view.editor ? <AutomationEditor key={viewPath(view)} route={view.editor} /> : <AutomationsView />)}
           {view.name === "automation" && <AutomationDetail key={view.id} automationId={view.id} />}
           {view.name === "skills" && <SkillsView route={view} />}
@@ -953,7 +954,11 @@ export function Shell() {
                 ),
                 approvals: <ApprovalsPanel policyId={view.policyId} />,
                 orchestrator: <><OrchestratorSettingsPanel discoveryRevision={runners} /><DecisionModelPanel /></>,
-                assistant: <><AssistantThreadDefaultsPanel onOpenThreads={() => navigate({ name: "assistants" })} /><AssistantConnectionsPanel /></>,
+                assistant: <>
+                  <AssistantThreadDefaultsPanel onOpenThreads={() => navigate({ name: "assistants" })} />
+                  <AssistantConnectionsPanel />
+                  <AssistantDelegationPanel onOpenGrant={(threadId) => navigate({ name: "assistants", threadId, delegation: true })} />
+                </>,
                 reviews: <ReviewSettingsPanel />,
                 network: <NetworkPanel tailnet={tailnet} onNavigate={navigate} />,
                 storage: <ArchivedHistoryRetentionPanel />,

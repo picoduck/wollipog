@@ -235,7 +235,8 @@ function thread(id: string, sessionId: string, overrides: Partial<AssistantThrea
   return {
     id, assistant: "wollipog", title: backing.title, harness: "claude-code", sessionId, status: "done", access,
     connectionId: `conn-${id}`, launchedSessionIds: [], lastActivityAt: backing.updatedAt, createdAt: backing.createdAt,
-    ...(delegationScenario === "stress" ? { decisionDelegation: { revision: 0, grant: null } } : {}),
+    ...(delegationScenario === "stress" || (limitsScenario && limitsScenario !== "old")
+      ? { decisionDelegation: { revision: 0, grant: null } } : {}),
     ...(delegationScenario === "expires" ? { decisionDelegation: { revision: 1, grant: {
       categories: ["owner_question"], campaigns: "all", projects: "all", expiresAt: NOW + minute,
     } } } : {}),
@@ -270,6 +271,16 @@ let threads: AssistantThread[] = scenario === "long" ? [
   thread("thr_retired", "sess-cleanup", { title: "Retire the Old Runner", status: "archived", archivedAt: NOW - 2 * 24 * 60 * minute,
     lastActivityAt: NOW - 3 * 24 * 60 * minute }),
 ] : [];
+if (delegationScenario === "many") {
+  const grant = { categories: ["owner_question"] as const, campaigns: "all" as const, projects: "all" as const };
+  threads[0]!.decisionDelegation = { revision: 1, grant: { ...grant, categories: [...grant.categories], expiresAt: null } };
+  for (let index = 1; index <= 9; index += 1) {
+    threads.push(thread(`thr_grant_${index}`, "sess-release", {
+      title: index === 1 ? longTitle(index + 1) : `Delegated Release Review ${index}`,
+      decisionDelegation: { revision: 1, grant: { ...grant, categories: [...grant.categories], expiresAt: index % 2 ? NOW - minute : NOW + minute } },
+    }));
+  }
+}
 for (let index = 2; index < attentionCount; index += 1) {
   const threadId = `thr_attention_${index}`;
   const sessionId = `sess_attention_${index}`;

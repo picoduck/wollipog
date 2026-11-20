@@ -20,6 +20,7 @@ import {
 } from "@wollipog/protocol";
 import { AgentDefaultsPanel } from "../components/AgentDefaultsPanel.js";
 import { AssistantConnectionsPanel } from "../components/AssistantConnectionsPanel.js";
+import { AssistantDelegationPanel } from "../components/AssistantDelegationPanel.js";
 import { AssistantThreadDefaultsPanel } from "../components/AssistantThreadDefaultsPanel.js";
 import { ArchivedHistoryRetentionPanel } from "../components/ArchivedHistoryRetentionPanel.js";
 import { OrchestratorSettingsPanel } from "../components/OrchestratorSettingsPanel.js";
@@ -309,6 +310,7 @@ const harnessDefaultsTransport: ApiTransport = {
   publicOrigin: window.location.origin,
   close() {},
   async request(path, init) {
+    if (path === "/api/assistant-threads") return Response.json({ threads: [] });
     if (path === "/api/assistant-threads/defaults") return Response.json({
       harness: "claude-code",
       launchDefaults: { harness: "claude-code", providerAccount: null },
@@ -733,7 +735,9 @@ function Harness() {
                 </FeedbackProvider>
               ),
               assistant: <FeedbackProvider><ApiProvider client={harnessDefaultsApi}>
-                <AssistantThreadDefaultsPanel onOpenThreads={() => navigate({ name: "assistants" })} /><AssistantConnectionsPanel />
+                <AssistantThreadDefaultsPanel onOpenThreads={() => navigate({ name: "assistants" })} />
+                <AssistantConnectionsPanel />
+                <AssistantDelegationPanel onOpenGrant={(threadId) => navigate({ name: "assistants", threadId, delegation: true })} />
               </ApiProvider></FeedbackProvider>,
               network: (
                 <ApiProvider client={harnessDefaultsApi}><NetworkPanel

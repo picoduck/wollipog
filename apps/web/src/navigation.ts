@@ -23,7 +23,7 @@ export type View =
   | { name: "automations"; editor?: AutomationEditorRoute; tab?: AutomationsTab }
   | { name: "automation"; id: string }
   /** The Assistants section (#4664): the Wollipog Assistant's threads, and one open thread. */
-  | { name: "assistants"; threadId?: string; limits?: true }
+  | { name: "assistants"; threadId?: string; limits?: true; delegation?: true }
   | { name: "skills"; id?: string; pane?: SkillsPane }
   | { name: "usage"; tab?: UsageTab }
   /** Archive visit intents are memory-only; viewPath deliberately serializes neither field. */
@@ -533,7 +533,7 @@ export function viewPath(view: View): string {
         : view.tab === "outbound" ? "/automations/outbound" : "/automations";
     case "automation": return `/automations/~${encodeResourceId(view.id)}`;
     case "assistants": return view.threadId !== undefined
-      ? `/assistants/~${encodeResourceId(view.threadId)}${view.limits ? "/settings" : ""}` : "/assistants";
+      ? `/assistants/~${encodeResourceId(view.threadId)}${view.delegation ? "/delegation" : view.limits ? "/settings" : ""}` : "/assistants";
     case "skills": return view.id ? `/skills/~${encodeResourceId(view.id)}` : view.pane ? `/skills/${view.pane}` : "/skills";
     case "usage": return view.tab === "api" ? "/usage/api" : "/usage";
     case "archived": return "/archived";
@@ -613,10 +613,13 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     return id === null ? null : { name: "automation", id };
   }
   if (path === "/assistants") return { name: "assistants" };
-  const threadMatch = /^\/assistants\/~([^/]+)(\/settings)?$/.exec(path);
+  const threadMatch = /^\/assistants\/~([^/]+)(?:\/(settings|delegation))?$/.exec(path);
   if (threadMatch) {
     const threadId = decodeResourceId(threadMatch[1]!);
-    return threadId === null ? null : { name: "assistants", threadId, ...(threadMatch[2] ? { limits: true } : {}) };
+    if (threadId === null) return null;
+    if (threadMatch[2] === "delegation") return { name: "assistants", threadId, delegation: true };
+    if (threadMatch[2] === "settings") return { name: "assistants", threadId, limits: true };
+    return { name: "assistants", threadId };
   }
   if (path === "/skills") return { name: "skills" };
   const skillsPaneMatch = /^\/skills\/(orphans|overview)$/.exec(path);

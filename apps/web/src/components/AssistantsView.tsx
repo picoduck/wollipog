@@ -73,9 +73,10 @@ function newThreadBlock(list: ListState): { title: string; message: string } | u
  * routes. Every thread comes from the Thread API; a control plane without it (404) shows the empty
  * section and New Thread explains, never a failure.
  */
-export function AssistantsView({ threadId, limits, rightPanel }: {
+export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   threadId?: string;
   limits?: true;
+  delegation?: true;
   /** The shell's session panel (Files, Changes, Subagents), shared with the session page. */
   rightPanel: RightPanelState;
 }) {
@@ -90,7 +91,6 @@ export function AssistantsView({ threadId, limits, rightPanel }: {
   const [missing, setMissing] = useState(false);
   const [creating, setCreating] = useState(false);
   const [renaming, setRenaming] = useState<AssistantThread | null>(null);
-  const [editingDelegation, setEditingDelegation] = useState<AssistantThread | null>(null);
   const [viewingDelegationHistory, setViewingDelegationHistory] = useState<string | null>(null);
   const [archiving, setArchiving] = useState(false);
   const [changingAccount, setChangingAccount] = useState<AssistantThread | null>(null);
@@ -277,7 +277,9 @@ export function AssistantsView({ threadId, limits, rightPanel }: {
       ...(thread.accountChangeSupported ? [{ label: "Change Account", onClick: () => setChangingAccount(thread) }] : []),
       { label: "Rename", onClick: () => setRenaming(thread) },
       ...(thread.limitsEditable && thread.usage ? [{ label: "Thread Limits", onClick: () => openThreadSettings(thread.id) }] : []),
-      ...(thread.decisionDelegation ? [{ label: "Decision Delegation", onClick: () => setEditingDelegation(thread) }] : []),
+      ...(thread.decisionDelegation ? [{
+        label: "Decision Delegation", onClick: () => navigate({ name: "assistants", threadId: thread.id, delegation: true }),
+      }] : []),
       { label: "Archive", disabled: archiving, onClick: () => void archive(thread) },
     ]),
   ];
@@ -405,11 +407,15 @@ export function AssistantsView({ threadId, limits, rightPanel }: {
           onSave={async (next) => replace((await api.setAssistantThreadLimits(selected.id, next)).thread)}
         />
       )}
-      {editingDelegation?.decisionDelegation && <AssistantDecisionDelegationDialog
-        delegation={editingDelegation.decisionDelegation}
-        onClose={() => setEditingDelegation(null)}
-        onSave={async (delegation) => replace((await api.setAssistantThreadDelegation(editingDelegation.id, delegation)).thread)}
-      />}
+      {delegation && selected && (selected.decisionDelegation && selected.status !== "archived"
+        ? <AssistantDecisionDelegationDialog key={selected.id}
+            delegation={selected.decisionDelegation}
+            onClose={() => navigate({ name: "assistants", threadId: selected.id }, { replace: true })}
+            onSave={async (next) => replace((await api.setAssistantThreadDelegation(selected.id, next)).thread)}
+          />
+        : <Modal title="Decision Delegation" onClose={() => navigate({ name: "assistants", threadId: selected.id }, { replace: true })}>
+            <p>{selected.status === "archived" ? "Archived threads cannot hold delegation grants." : "This control plane does not support decision delegation."}</p>
+          </Modal>)}
       {viewingDelegationHistory && <AssistantDecisionHistoryDialog threadId={viewingDelegationHistory} onClose={() => setViewingDelegationHistory(null)} />}
     </section>
   );

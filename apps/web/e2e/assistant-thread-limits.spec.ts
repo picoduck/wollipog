@@ -8,9 +8,9 @@ const SETTINGS = "/settings/assistant";
 const OLD_SETTINGS = "/settings/behavior/assistant-threads";
 const EVIDENCE = process.env.ASSISTANT_LIMITS_EVIDENCE_DIR;
 
-async function open(page: Page, path: string, theme: "dark" | "light" = "dark", state = "enabled") {
+async function open(page: Page, path: string, theme: "dark" | "light" = "dark", state = "enabled", delegation = "") {
   await page.emulateMedia({ colorScheme: theme });
-  await page.goto(`/assistants-e2e.html?limits=${state}&accounts=stress&path=${encodeURIComponent(path)}`);
+  await page.goto(`/assistants-e2e.html?limits=${state}&accounts=stress&delegation=${delegation}&path=${encodeURIComponent(path)}`);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 }
 
@@ -145,6 +145,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       const action = group.getByRole("button", { name: /Edit Limits/ });
       await action.scrollIntoViewIfNeeded();
       await expectFullyInViewport(action, "Edit Default Thread Limits");
+      await expect(page.getByRole("region", { name: "Delegation" })).toContainText("No Delegation Grants");
       await expect(page.getByRole("alert")).toHaveCount(0);
       await expectPageNoHorizontalOverflow(page);
       await capture(page, "assistant-settings");
@@ -173,6 +174,42 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
         await assistant.click();
         await expect(page.getByRole("region", { name: "Thread Defaults" })).toBeVisible();
       }
+    });
+
+    test(`Assistant settings list delegation grants and open the shared editor on ${layout} in ${theme}`, async ({ page }) => {
+      await page.clock.setFixedTime(new Date("2025-11-19T18:00:00Z"));
+      await page.setViewportSize({ width, height });
+      await open(page, SETTINGS, theme);
+      const group = page.getByRole("region", { name: "Delegation", exact: true });
+      await expect(group).toContainText("No Delegation Grants");
+      await group.scrollIntoViewIfNeeded();
+      await capture(page, "assistant-delegation-empty");
+
+      await open(page, SETTINGS, theme, "enabled", "many");
+      const active = group.getByRole("button", { name: "Triage Open Issues Active", exact: true });
+      const expired = group.getByRole("button", { name: /^Ship the release notes .* Expired$/ });
+      await expect(group.getByRole("button")).toHaveCount(10);
+      await expect(active).toBeVisible();
+      await expect(expired).toBeVisible();
+      await group.getByRole("heading", { name: "Delegation", exact: true }).evaluate((heading) => heading.scrollIntoView({ block: "start" }));
+      await expectPageNoHorizontalOverflow(page);
+      await capture(page, "assistant-delegation-many");
+
+      await expired.click();
+      const editor = page.getByRole("dialog", { name: "Decision Delegation" });
+      await expect(editor.getByRole("checkbox", { name: "Owner Questions" })).toBeChecked();
+      expect(new URL(page.url()).searchParams.get("path")).toMatch(/\/delegation$/);
+      await editor.getByRole("button", { name: "Cancel", exact: true }).click();
+      await expect(editor).toHaveCount(0);
+
+      await open(page, THREAD, theme);
+      const threadSettings = await editThread(page);
+      const link = threadSettings.getByRole("link", { name: "Decision Delegation", exact: true });
+      await expect(link).toHaveAttribute("href", `${THREAD}/delegation`);
+      await link.click();
+      await expect(threadSettings).toHaveCount(0);
+      await expect(editor.getByRole("button", { name: "Save Grant" })).toBeVisible();
+      await capture(page, "thread-delegation-editor");
     });
 
     test(`budget warnings and editors link to one another on ${layout} in ${theme}`, async ({ page }) => {

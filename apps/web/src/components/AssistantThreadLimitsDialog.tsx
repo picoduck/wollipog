@@ -87,7 +87,9 @@ export function AssistantThreadLimitsDialog({ defaults, limits, thread, model, e
       </>}
     >
       {thread && <>
-        <SettingsGroup title="Conversation">
+        <SettingsGroup title="Conversation" foot={thread.decisionDelegation && thread.status !== "archived"
+          ? <AssistantSettingsLink view={{ name: "assistants", threadId: thread.id, delegation: true }}>Decision Delegation</AssistantSettingsLink>
+          : undefined}>
           <ActionRow title="Harness"
             description={<>{[assistantThreadHarnessLabel(thread.harness), model, effort].filter(Boolean).join(" · ")}<br />
               This thread's conversation belongs to this harness. Start a new thread to use a different one.</>}

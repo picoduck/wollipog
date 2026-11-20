@@ -137,7 +137,9 @@ assistant acting through Assistant tools, not coding agents in ordinary sessions
 
 ## Decision Delegation
 
-Open **Thread Actions → Decision Delegation** to grant categories to one thread. New and existing
+Open **Decision Delegation** from **Thread Settings** or **Thread Actions** to grant categories to one
+thread. **Settings → Assistant → Delegation** lists saved grants, including expired ones, and opens
+the same editor. New and existing
 threads start without a grant. Select all or specific projects and campaigns, and optionally set
 an expiry in your device's local time. When both scopes are limited, the decision must match both.
 All Campaigns includes future campaigns, including those the owner confirms from this thread.
