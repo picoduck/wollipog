@@ -1525,6 +1525,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   391,
   // v392 slot
   // v393 slot
+  // 393: Forward content-safe provider refusals of approved forge actions.
+  393,
   // v394 slot
   // v395 slot
   // v396 slot

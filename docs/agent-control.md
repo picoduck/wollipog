@@ -2549,16 +2549,23 @@ An uncertain deletion may be executed again, because a compare-and-delete pinned
 head cannot do more than the approval allowed. The consume result for a merge or deletion names
 this fallback (`forgeActionFallback`).
 
-`get_campaign` reports `mergedBranches` on the same version. For each GitHub pull request a campaign
-child merged through a consumed `pr_merge`, or through one whose enqueue Wollipog performed (a
-success or an uncertain attempt, even if a new request superseded or a revocation ended that
-occurrence while it ran), it gives the head branch the forge last reported as
+When Claude Code reports a structured permission denial for an exact approved GitHub command or
+for `execute_workflow_decision`, v393 records one notice in the child's session and one campaign
+continuation per decision and attempt path. Raw provider output is excluded. The notice identifies
+the occurrence and the applicable recovery. Managed execution and campaign cleanup keep their
+existing approval, ancestry, and forge checks. The refusal report itself authorizes no action.
+
+`get_campaign` reports `mergedBranches` from v284. For each GitHub pull request a campaign child
+merged through a consumed `pr_merge`, or whose enqueue Wollipog performed (a success or an uncertain
+attempt, even if a new request superseded or a revocation ended that occurrence while it ran),
+it gives the head branch the forge last reported as
 `deleted`, `retained` (its work item is handed to `human` or `external`, with the handoff's reason),
-or `pending`. A pull request not read yet, or still open after its approved enqueue, is `pending`
-too, and a handoff retains it even before the first read. A pending branch keeps
-`campaignTerminalStatus` from `verified_complete` and leaves the campaign `active`. A retained one
-finishes it as `complete_with_handoffs`. The forge observer keeps re-reading such a pull request
-until it merges and its branch is gone, and `get_campaign` refreshes pending ones before answering.
+or `pending`. The projection also includes still-armed approvals and approved or consumed typed
+deletions that name an exact merged head, even if the merge ran outside Wollipog. A pull request
+awaiting a read or still open under an armed or consumed approval remains `pending`. A handoff can
+retain the branch before the first read. Pending and retained branches keep a settled campaign in
+`complete_needs_cleanup`. The forge observer keeps re-reading pending pull requests and branches,
+and `get_campaign` refreshes pending ones before answering.
 A merged pull request whose branch the forge does not name usably, including one read before branches
 were reported, stays `pending` with no branch name. A handoff can retain it, but a deletion cannot
 be pinned to it. The background pass keeps re-reading it too, so a read stored before the upgrade

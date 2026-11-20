@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { CAMPAIGN_FORGE_OBSERVATION, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL, type CampaignForgePullRequestObservation, type CampaignPullRequestRef,
   type RunnerMetadata } from "@wollipog/protocol";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import { ControlPlaneDb } from "./db.js";
-import { Hub } from "./hub.js";
+import { Hub, reminderWakeReasonForEvent } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 
@@ -63,7 +64,7 @@ function fixture(protocolVersion = PROTOCOL_VERSION) {
     workItem: { id: item, outcome: "delivered" } });
   assert.ok(verified.ok, verified.error ?? "verification refused");
   db.updateSessionStatus("root", "idle", Date.now());
-  return { db, svc, item, metadata };
+  return { db, hub, svc, item, metadata };
 }
 
 const observed = (tipSha: string | null, overrides: Partial<CampaignForgePullRequestObservation> = {}): CampaignForgePullRequestObservation => ({
@@ -76,6 +77,133 @@ const observed = (tipSha: string | null, overrides: Partial<CampaignForgePullReq
 
 const observe = (h: ReturnType<typeof fixture>, observation: CampaignForgePullRequestObservation, at = Date.now()) =>
   h.db.campaignForgeObservations.record("root", "r", [{ ref: { repository: "picoduck/wollipog", number: 4100 }, observation }], at);
+
+function addConsumedDeletion(db: ControlPlaneDb): void {
+  db.raw().prepare(`INSERT INTO workflow_decisions(request_id,occurrence_id,session_id,controlling_session_id,
+    category,resource_key,resource_snapshot,resource_digest,policy_revision,authority,status,created_at,resolved_at,consumed_at)
+    VALUES ('delete','workflow_delete','child','root','merged_branch_deletion','branch:agent/child',?,? ,1,'orchestrator','consumed',6,7,8)`)
+    .run(JSON.stringify({ category: "merged_branch_deletion", repository: "picoduck/wollipog", branch: "agent/child",
+      merged: true, mergeCommitSha: "b".repeat(40), pullRequest: 4100, headSha: "a".repeat(40),
+      dependentPullRequests: { checkedAt: 5, open: [] } }), "d".repeat(64));
+}
+
+test("a consumed deletion for an externally merged PR still gates campaign completion", () => {
+  const h = fixture();
+  try {
+    h.db.raw().prepare("DELETE FROM workflow_decisions WHERE occurrence_id='merge-4100'").run();
+    addConsumedDeletion(h.db);
+    observe(h, observed("a".repeat(40)), 100);
+    assert.equal(h.db.campaignStatusOnly("root"), "complete_needs_cleanup");
+    assert.deepEqual(h.db.campaignProjection("root")?.mergedBranches?.items.map((row) => [row.branch, row.state]),
+      [["agent/child", "pending"]]);
+    observe(h, observed(null), 200);
+    assert.equal(h.db.campaignStatusOnly("root"), "verified_complete");
+  } finally { h.db.close(); }
+});
+
+test("an armed merge that never ran keeps an earlier verified campaign from appearing complete", () => {
+  const h = fixture();
+  try {
+    h.db.raw().prepare(`UPDATE workflow_decisions SET status='approved', consumed_at=NULL,
+      action_kind='pr_merge_enqueue', action_armed_at=6 WHERE occurrence_id='merge-4100'`).run();
+    observe(h, observed("a".repeat(40), { state: "open", mergeCommitSha: null }), 100);
+    assert.equal(h.db.campaignStatusOnly("root"), "complete_needs_cleanup");
+    assert.equal(h.db.campaignProjection("root")?.mergedBranches?.pending, 1);
+    assert.equal(h.db.campaignProjection("root")?.cleanup?.items[0]?.action.kind, "automatic");
+  } finally { h.db.close(); }
+});
+
+test("Claude forge refusals notify parent and child once per decision, without executing an action", () => {
+  const h = fixture();
+  try {
+    addConsumedDeletion(h.db);
+    const sha256 = (input: string) => createHash("sha256").update(input).digest("hex");
+    const command = `gh pr merge https://github.com/picoduck/wollipog/pull/4100 --squash --match-head-commit ${"a".repeat(40)}`;
+    const armedAt = Date.now();
+    h.db.raw().prepare(`UPDATE workflow_decisions SET status='approved', consumed_at=NULL,
+      action_kind='pr_merge_enqueue', action_command=?, action_command_digest=?, action_armed_at=? WHERE occurrence_id='merge-4100'`)
+      .run(command, sha256(JSON.stringify({ kind: "pr_merge_enqueue", command })), armedAt);
+    const refusals = [
+      { kind: "command", commandSha256: sha256(command) },
+      { kind: "command", commandSha256: sha256("git push origin --delete agent/child") },
+      { kind: "managed", occurrenceId: "workflow_delete", resourceDigest: "d".repeat(64) },
+      { kind: "managed", occurrenceId: "workflow_delete", resourceDigest: "b".repeat(64) },
+    ] as const;
+    for (const proof of refusals) {
+      for (const toolCallId of ["first", "replay"]) {
+        h.svc.onSessionEvent("child", { kind: "tool_call_update", toolCallId, status: "failed",
+          providerForgeRefusal: proof }, undefined, armedAt - 2_000, "r");
+      }
+    }
+    const events = h.db.campaignContinuationEvents("root").filter((event) => event.kind === "child_blocked");
+    assert.deepEqual(events.map((event) => event.occurrenceId), ["merge-4100", "workflow_delete", "workflow_delete"]);
+    const notices = h.db.listEvents("child").filter((event) => event.payload.kind === "error" &&
+      event.payload.message.includes("execute_workflow_decision"));
+    assert.equal(notices.length, 3);
+    for (const notice of notices) assert.equal(reminderWakeReasonForEvent(notice.payload), null);
+    assert.equal(h.db.workflowDecisionByOccurrence("merge-4100")?.status, "approved");
+    assert.equal(h.db.workflowDecisionByOccurrence("workflow_delete")?.forgeAction, undefined);
+  } finally { h.db.close(); }
+});
+
+test("history hydration reports a refused managed deletion and delivers the Orchestrator's fallback", async () => {
+  const h = fixture();
+  try {
+    addConsumedDeletion(h.db);
+    const approvedAt = Date.now();
+    h.db.raw().prepare("UPDATE workflow_decisions SET resolved_at=? WHERE occurrence_id='workflow_delete'").run(approvedAt);
+    h.db.updateSessionStatus("child", "running", approvedAt);
+    let throughSeq = 1;
+    h.db.reconcileRunnerHistory("child", 1, throughSeq);
+    h.svc.hydrateHistory = SessionsService.prototype.hydrateHistory.bind(h.svc);
+    h.hub.requestFromRunner = async (_runnerId, requestId, message) => {
+      assert.equal(message.type, "session_history_page");
+      const events = [approvedAt - 120_000, approvedAt - 2_000].map((ts, index) => ({
+        seq: index + 1, ts, payload: { kind: "tool_call_update" as const, toolCallId: `refused-${index}`,
+          status: "failed" as const, providerForgeRefusal: { kind: "managed" as const,
+            occurrenceId: "workflow_delete", resourceDigest: "d".repeat(64) } },
+      })).filter((event) => event.seq > message.afterSeq && event.seq <= throughSeq);
+      return { type: "session_history_page_result", requestId, sessionId: "child", ok: true, events,
+        page: { logEpoch: 1, throughSeq, nextAfterSeq: throughSeq, hasMore: false } };
+    };
+    await h.svc.hydrateHistory("child", { force: true });
+    assert.equal(h.db.campaignContinuationEvents("root").some((event) => event.kind === "child_blocked"), false,
+      "an older refusal cannot be attributed to a newer approval");
+    throughSeq = 2;
+    h.db.reconcileRunnerHistory("child", 1, throughSeq);
+    await h.svc.hydrateHistory("child", { force: true });
+    await h.svc.hydrateHistory("child", { force: true });
+
+    const events = h.db.campaignContinuationEvents("root").filter((event) => event.kind === "child_blocked");
+    assert.deepEqual(events.map((event) => [event.occurrenceId, event.subjectStatus]),
+      [["workflow_delete", "provider_forge_managed"]]);
+    h.svc.retryDuePrompts(Date.now() + 32_000);
+    const continuation = h.db.latestCampaignContinuation("root");
+    assert.ok(continuation);
+    const command = h.db.getSessionPromptCommand(continuation.commandId);
+    assert.ok(command);
+    const { text } = JSON.parse(command.payloadJson);
+    assert.match(text, /Action needed: yes/u);
+    assert.match(text, /Claude Code refused execute_workflow_decision.*workflow_delete.*Check Campaign Cleanup/u);
+    assert.equal(h.db.workflowDecisionByOccurrence("workflow_delete")?.forgeAction, undefined);
+  } finally { h.db.close(); }
+});
+
+test("a provider refusal can be recorded again after its child notice rolls back", () => {
+  const h = fixture();
+  try {
+    const refusal = { campaignSessionId: "root", subjectSessionId: "child", occurrenceId: "workflow_delete",
+      attemptedPath: "managed" as const, message: "The managed deletion was refused.", now: Date.now() };
+    h.db.raw().exec(`CREATE TEMP TRIGGER test_notice_failure BEFORE INSERT ON session_events
+      WHEN NEW.kind='error' BEGIN SELECT RAISE(ABORT, 'test notice failure'); END`);
+    assert.throws(() => h.db.recordCampaignProviderForgeRefusal(refusal), /test notice failure/u);
+    assert.equal(h.db.campaignContinuationEvents("root").some((event) => event.kind === "child_blocked"), false);
+    h.db.raw().exec("DROP TRIGGER test_notice_failure");
+    assert.ok(h.db.recordCampaignProviderForgeRefusal(refusal));
+    assert.equal(h.db.recordCampaignProviderForgeRefusal(refusal), null);
+    assert.equal(h.db.campaignContinuationEvents("root").filter((event) => event.kind === "child_blocked").length, 1);
+  } finally { h.db.close(); }
+});
 
 test("a campaign whose merged branch still exists on origin is not verified complete (#4067)", async () => {
   const h = fixture();

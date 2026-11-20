@@ -293,6 +293,8 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type WorkflowDecisionCategory,
   type WorkflowDecisionResourceSnapshot,
   type WorkflowDecisionView,
+  type ProviderForgeRefusal,
+  mergedBranchDeletionCommand,
   type MergeClosureWatch,
   type WorkflowDecisionRevocation,
   type WorkflowDecisionRevocationReason,
@@ -486,6 +488,50 @@ const LIFECYCLE_MERGE_CHECK_WINDOW_MS = 24 * 60 * 60_000;
 function boundedForgeSummary(value: unknown): string {
   const text = typeof value === "string" ? value.replace(/[\x00-\x1f\x7f]+/gu, " ").trim() : "";
   return (text || "The action was refused.").slice(0, FORGE_DECISION_ACTION_SUMMARY_LIMIT);
+}
+
+// Allow small skew in a runner's event clock, without attributing an old history refusal to a
+// newer approval of the same command or accepting approval times beyond receipt.
+const PROVIDER_FORGE_REFUSAL_CLOCK_SKEW_MS = 30_000;
+
+function pendingProviderForgeAction(decision: WorkflowDecisionView, at: number): boolean {
+  const snapshot = decision.resourceSnapshot;
+  if (decision.resolvedAt === undefined || decision.resolvedAt > at ||
+      (decision.forgeAction && decision.forgeAction.outcome !== "refused")) return false;
+  if (snapshot.category === "pr_merge") {
+    const admission = decision.actionAdmission;
+    return decision.status === "approved" && snapshot.mergeMethod === undefined && !!admission &&
+      admission.kind === "pr_merge_enqueue" && admission.armedAt <= at && admission.command === canonicalPrMergeEnqueueCommand(snapshot);
+  }
+  return snapshot.category === "merged_branch_deletion" && snapshot.merged &&
+    snapshot.pullRequest !== undefined && snapshot.headSha !== undefined &&
+    /^[^/]+\/[^/]+$/u.test(snapshot.repository) &&
+    (decision.status === "approved" || decision.status === "consumed");
+}
+
+function matchesProviderForgeCommand(decision: WorkflowDecisionView, commandSha256: string): boolean {
+  const snapshot = decision.resourceSnapshot;
+  const digestMatches = (command: string) => createHash("sha256").update(command, "utf8").digest("hex") === commandSha256;
+  if (snapshot.category === "pr_merge") return digestMatches(canonicalPrMergeEnqueueCommand(snapshot));
+  if (snapshot.category !== "merged_branch_deletion" || !snapshot.merged || snapshot.pullRequest === undefined) return false;
+  if (digestMatches(mergedBranchDeletionCommand(snapshot.repository, snapshot.branch, snapshot.pullRequest))) return true;
+  if (!/^[A-Za-z0-9_./+@-]+$/u.test(snapshot.branch) || snapshot.branch.startsWith("-")) return false;
+  const ref = `repos/${snapshot.repository}/git/refs/heads/${snapshot.branch}`;
+  return digestMatches(`git push origin --delete ${snapshot.branch}`) || digestMatches(`gh api -X DELETE ${ref}`) ||
+    digestMatches(`gh api --method DELETE ${ref}`);
+}
+
+function providerForgeRefusalNotice(decision: WorkflowDecisionView, kind: ProviderForgeRefusal["kind"], forOrchestrator = false): string {
+  const target = decision.category === "pr_merge" ? "merge enqueue" : "merged branch deletion";
+  if (kind === "command") {
+    return `Claude Code refused the approved ${target} command for decision ${decision.occurrenceId}. ` +
+      `${forOrchestrator ? "Have the child use" : "Use"} execute_workflow_decision with that occurrence and resource digest ${decision.resourceDigest}.`;
+  }
+  return `Claude Code refused execute_workflow_decision for the approved ${target} on decision ${decision.occurrenceId}. ` +
+    (decision.category === "merged_branch_deletion"
+      ? "Check Campaign Cleanup for Wollipog's approved branch deletion or hand off the specific blocker."
+      : forOrchestrator ? "Check the decision and forge state before deciding how to hand off an unresolved enqueue."
+        : "Read the decision and the forge state, then report the specific blocker to the Orchestrator.");
 }
 export const SESSION_COMMAND_INVOCATION_EXPIRY_MS = 24 * 60 * 60_000;
 export const SESSION_COMMAND_INVOCATION_RETENTION_MS = 30 * 24 * 60 * 60_000;
@@ -7474,12 +7520,21 @@ export class SessionsService {
           ...base, ...subject(event.subjectSessionId), watchId: event.occurrenceId,
           pullRequest: event.subjectStatus, instruction: "The queue wait is stalled. The child stays parked. Inspect the forge; this grants no authority and performs no re-enqueue." } };
       }
-      case "child_blocked":
+      case "child_blocked": {
+        const refusalKind = event.subjectStatus === "provider_forge_command" ? "command"
+          : event.subjectStatus === "provider_forge_managed" ? "managed" : undefined;
+        if (refusalKind && event.occurrenceId) {
+          const decision = this.db.workflowDecisionByOccurrence(event.occurrenceId);
+          const actionable = !!decision && decision.sessionId === event.subjectSessionId && pendingProviderForgeAction(decision, now);
+          return { actionable, summary: { ...base, ...subject(event.subjectSessionId), occurrenceId: event.occurrenceId,
+            ...(actionable ? { instruction: providerForgeRefusalNotice(decision, refusalKind, true) } : {}) } };
+        }
         return { actionable: true, summary: {
           ...base, ...subject(event.subjectSessionId),
           ...(event.subjectStatus ? { hold: event.subjectStatus } : {}),
           ...(event.occurrenceId ? { holdId: event.occurrenceId } : {}),
         } };
+      }
       case "human_blockers_cleared":
         return { actionable: true, summary: base };
       case "campaign_idle": {
@@ -22001,6 +22056,40 @@ export class SessionsService {
     if (frame) this.hub.sendToRunner(runnerId, frame);
   }
 
+  private recordProviderForgeRefusal(session: SessionView, payload: SessionEventPayload, eventTime: number,
+    entryPoint: "live_event" | "history_hydration"): void {
+    if (session.driver !== "claude-code" || payload.kind !== "tool_call_update" || payload.status !== "failed" ||
+        payload.parentToolUseId || !payload.providerForgeRefusal || !Number.isSafeInteger(eventTime)) return;
+    const proof = payload.providerForgeRefusal;
+    const ancestry = this.db.campaignAncestryRoot(session.id);
+    if (typeof ancestry !== "object" || !ancestry.hasPolicy || ancestry.id === session.id) return;
+    const now = Date.now();
+    const at = Math.min(now, eventTime + PROVIDER_FORGE_REFUSAL_CLOCK_SKEW_MS);
+    let decision: WorkflowDecisionView | null;
+    if (proof.kind === "managed" && typeof proof.occurrenceId === "string" && /^workflow_[\w-]{1,80}$/u.test(proof.occurrenceId) &&
+        typeof proof.resourceDigest === "string" && /^[a-f0-9]{64}$/u.test(proof.resourceDigest)) {
+      decision = this.db.workflowDecisionByOccurrence(proof.occurrenceId);
+      if (!decision || decision.resourceDigest !== proof.resourceDigest) return;
+    } else if (proof.kind === "command" && typeof proof.commandSha256 === "string" && /^[a-f0-9]{64}$/u.test(proof.commandSha256)) {
+      const matches = this.db.workflowForgeRefusalCandidates(session.id).filter((candidate) =>
+        pendingProviderForgeAction(candidate, at) && matchesProviderForgeCommand(candidate, proof.commandSha256));
+      decision = matches.length === 1 ? matches[0]! : null;
+    } else return;
+    if (!decision || decision.sessionId !== session.id || !pendingProviderForgeAction(decision, at) ||
+        !this.workflowDecisionRelationship(decision.controllingSessionId, session.id)) return;
+
+    const notice = this.db.recordCampaignProviderForgeRefusal({
+      campaignSessionId: ancestry.id,
+      subjectSessionId: session.id, occurrenceId: decision.occurrenceId, attemptedPath: proof.kind,
+      message: providerForgeRefusalNotice(decision, proof.kind), now,
+    });
+    if (!notice) return;
+    this.hub.sessionEvent(notice);
+    this.hub.sessionChangedById(ancestry.id);
+    this.log.info(JSON.stringify({ event: "provider_forge_action_refused", provider: "claude_code", sessionId: session.id,
+      campaignId: ancestry.id, occurrenceId: decision.occurrenceId, category: decision.category, attemptedPath: proof.kind, entryPoint }));
+  }
+
   /** Ingest one live runner event. The runner socket passes a staged large payload from
    * awaitStagedLiveSessionEvent; without one, a large payload is written on the calling thread. */
   onSessionEvent(
@@ -22142,6 +22231,11 @@ export class SessionsService {
       }
     }
 
+    // Persist the refusal before advancing the runner cursor. A crash before the cursor write
+    // leaves a replayable event, and the campaign receipt deduplicates the notice on replay.
+    if (fromRunnerId && payload.kind === "tool_call_update" && payload.providerForgeRefusal) {
+      this.recordProviderForgeRefusal(session(), payload, now, "live_event");
+    }
     const externalized = this.externalizeEventOrOriginal(sessionId, payload, now, prepared?.staged);
     let ev;
     if (runnerSeq != null && history?.historyEpoch != null && indexedHistory) {
@@ -23716,6 +23810,11 @@ export class SessionsService {
 
         const activeLogEpoch = logEpoch;
         if (activeLogEpoch === undefined) return;
+        for (const event of res.events) {
+          if (event.payload.kind === "tool_call_update" && event.payload.providerForgeRefusal) {
+            this.recordProviderForgeRefusal(session, event.payload, event.ts, "history_hydration");
+          }
+        }
         const artifactIds: string[] = [];
         const preparedEvents = res.events.map((event, index) => {
           const prepared = this.externalizeEventOrOriginal(sessionId, event.payload, event.ts, staged[index]);
