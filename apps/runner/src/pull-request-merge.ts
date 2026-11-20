@@ -25,7 +25,7 @@ import {
 } from "@wollipog/protocol";
 import { classifyGhFailure, type GhRunner } from "./campaign-forge-status.js";
 import { githubPullRequestFromUrl } from "./pull-request-queue.js";
-import { readPullRequestQueue, waitForPullRequest, type PullRequestWaitSummary } from "./pull-request-wait.js";
+import { PULL_REQUEST_WAIT_READ_GRACE_MS, readPullRequestQueue, waitForPullRequest, type PullRequestWaitSummary } from "./pull-request-wait.js";
 
 const SETTINGS_QUERY = `query($owner:String!,$name:String!,$number:Int!){
   repository(owner:$owner,name:$name){
@@ -118,8 +118,11 @@ export async function readPullRequestMergeFacts(
       typeof repository.nameWithOwner !== "string" || repository.nameWithOwner.toLowerCase() !== ref.repository.toLowerCase()) {
     return { ok: false, reason: "GitHub returned an unexpected answer for the pull request." };
   }
-  const waited = await waitForPullRequest({ repository: ref.repository, number: ref.number, timeoutMs: 1 }, { gh, now });
-  if (!waited.ok) return { ok: false, reason: "GitHub could not be read for the pull request's checks." };
+  const waited = await waitForPullRequest({ repository: ref.repository, number: ref.number, timeoutMs: 1 },
+    { gh, now, readGraceMs: PULL_REQUEST_WAIT_READ_GRACE_MS });
+  if (!waited.ok || waited.summary.forgeDegraded) {
+    return { ok: false, reason: "GitHub could not be read for the pull request's checks." };
+  }
   const summary = waited.summary;
   return {
     ok: true,

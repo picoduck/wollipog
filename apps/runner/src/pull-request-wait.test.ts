@@ -285,7 +285,6 @@ test("common query fields never require workflow-run access, including queue and
 
 for (const [label, reads] of [
   ["denied check lookup", { check: failed("gh: Forbidden (HTTP 403)") }],
-  ["failed Actions lookup", { runs: failed("gh: Bad Gateway (HTTP 502)") }],
   ["partial Actions lookup", { runs: ok({ ...actionRuns(), errors: [{ message: "Actions unavailable" }] }) }],
   ["partial check lookup", { check: ok({ id: 200, check_suite: { id: 100 } }) }],
   ["unmatched check suite", { runs: ok(actionRuns({ check_suite_id: 999 })) }],
@@ -298,6 +297,18 @@ for (const [label, reads] of [
     assert.deepEqual(result.summary.checks.required, [{ name: AGGREGATOR, state: "pending", reported: true }]);
   });
 }
+
+test("a transient skip-provenance read is retried until the required skip is proved", async () => {
+  const fake = fakeGh([ok(pr(admission(), [run(AGGREGATOR, "SKIPPED", provenance())]))]);
+  let reads = 0;
+  const gh: GhRunner = (args, signal) => args.some((arg) => arg.includes("/actions/runs?")) && ++reads <= 4
+    ? Promise.resolve(failed("gh: HTTP 503"))
+    : fake.gh(args, signal);
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 600_000 }, { gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_passed");
+  assert.equal(result.summary.transientErrorCount, 4);
+});
 
 test("a thrown provenance transport failure leaves a skip pending", async () => {
   const fake = fakeGh([ok(pr(admission(), [run(AGGREGATOR, "SKIPPED", provenance())]))]);
@@ -439,7 +450,7 @@ test("a non-required failure keeps waiting unless returnOnAnyFailure is set", as
     { gh: fakeGh([ok(pr({}, nodes))]).gh, ...clock() });
   assert.ok(waiting.ok);
   assert.equal(waiting.summary.outcome, "timeout");
-  assert.equal(waiting.summary.polls, 4);
+  assert.equal(waiting.summary.polls, 3);
   assert.equal(waiting.summary.waitedMs, 90_000);
 
   const early = await waitForPullRequest({ repository: "o/r", number: 7, returnOnAnyFailure: true },
@@ -542,11 +553,16 @@ test("past one page of contexts a pass also needs GitHub's merge state to confir
   assert.equal(confirmed.summary.outcome, "checks_passed");
 });
 
-test("a persistent required-rules outage exhausts the retry budget instead of the whole timeout", async () => {
+test("a persistent required-rules outage times out without treating incomplete rules as an observation", async () => {
   const fake = fakeGh([ok(pr({}, [run(AGGREGATOR, null)]))], { rules: failed("gh: Bad Gateway (HTTP 502)") });
   const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 10_800_000 }, { gh: fake.gh, ...clock() });
-  assert.deepEqual(result, { ok: false, error: "could not read the rules for main: forge_unreachable (gh: Bad Gateway (HTTP 502))" });
-  assert.equal(fake.graphqlCalls(), 4);
+  assert.ok(!result.ok && result.timeout);
+  assert.match(result.error, /could not read the rules for main: forge_unreachable/u);
+  assert.equal(result.timeout.waitedMs, 10_800_000);
+  assert.equal(result.timeout.observation, null);
+  assert.equal(result.timeout.forgeDegraded, true);
+  assert.equal(result.timeout.transientErrorCount, fake.graphqlCalls());
+  assert.ok(fake.graphqlCalls() > 4);
 });
 
 test("an ejection needs the entry missing for the whole confirmation interval", async () => {
@@ -680,32 +696,44 @@ test("a closed pull request returns closed", async () => {
   assert.equal(result.summary.merged, false);
 });
 
-test("transient GitHub failures retry on the same pace; others fail at once", async () => {
-  const fake = fakeGh([failed("error connecting to api.github.com"), ok({ errors: [{ type: "RATE_LIMITED", message: "slow down" }] }),
-    ok(pr({}, [run(AGGREGATOR, "SUCCESS")]))]);
+test("a queued wait recovers after successive 5xx, rate limit, timeout and transport errors", async () => {
+  const failures = [
+    failed("gh: HTTP 504"), failed("gh: Bad Gateway (HTTP 502)"), failed("gh: HTTP 503"),
+    { ...failed("read timed out"), timedOut: true }, failed("read tcp: connection reset by peer"),
+    ok({ errors: [{ type: "RATE_LIMITED", message: "slow down" }] }),
+  ];
+  const fake = fakeGh([
+    ok(pr({ mergeQueueEntry: { state: "QUEUED", position: 1 } })), ...failures,
+    ok(pr({ state: "MERGED", mergeCommit: { oid: MERGE } })),
+  ]);
+  const time = clock();
   let observations = 0;
-  const result = await waitForPullRequest({ repository: "o/r", number: 7 },
-    { gh: fake.gh, ...clock(), onObservation: () => { observations++; } });
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 2_000_000 },
+    { gh: fake.gh, ...time, random: () => 0.5, onObservation: () => { observations++; } });
   assert.ok(result.ok);
-  assert.equal(result.summary.outcome, "checks_passed");
-  assert.equal(observations, 1, "only the complete observation is a progress signal (#1280), never a failed read");
+  assert.equal(result.summary.outcome, "merged");
+  assert.equal(result.summary.transientErrorCount, failures.length);
+  assert.equal(result.summary.forgeDegraded, false);
+  assert.equal(observations, 1, "only a complete observation renews progress while waiting");
+  assert.ok(time.sleeps[1]! < 30_000, "the first retry is jittered");
+  assert.ok(time.sleeps[2]! > time.sleeps[1]!, "successive failures back off");
+  assert.ok(time.sleeps.every((duration) => duration <= 600_000));
+});
 
-  const stuck = fakeGh([failed("error connecting to api.github.com")]);
-  observations = 0;
-  const gaveUp = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 3_600_000 },
-    { gh: stuck.gh, ...clock(), onObservation: () => { observations++; } });
-  assert.equal(gaveUp.ok, false);
-  assert.equal(stuck.graphqlCalls(), 4);
-  assert.equal(observations, 0, "retried failures report no progress");
-
-  const unauthenticated = await waitForPullRequest({ repository: "o/r", number: 7 },
-    { gh: fakeGh([failed("To get started with GitHub CLI, please run:  gh auth login", 4)]).gh, ...clock() });
-  assert.equal(unauthenticated.ok, false);
-  assert.match(!unauthenticated.ok ? unauthenticated.error : "", /forge_unauthenticated/u);
-
-  const missing = await waitForPullRequest({ repository: "o/r", number: 7 },
-    { gh: fakeGh([ok({ data: { repository: { pullRequest: null } }, errors: [{ type: "NOT_FOUND", message: "Could not resolve to a PullRequest with the number of 7." }] })]).gh, ...clock() });
-  assert.deepEqual(missing, { ok: false, error: "could not read o/r#7: Could not resolve to a PullRequest with the number of 7." });
+test("a permanent failure after a transient error ends the wait immediately", async () => {
+  for (const error of [
+    failed("gh: HTTP 401"), failed("gh: Forbidden (HTTP 403)"),
+    failed("gh: HTTP 404"), failed("gh auth login", 4),
+    ok({ ...pr(), errors: [{ type: "NOT_FOUND", message: "Could not resolve to a PullRequest." }] }),
+  ]) {
+    const fake = fakeGh([failed("gh: HTTP 504"), error, ok(pr({ state: "MERGED" }))]);
+    const time = clock();
+    const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...time });
+    assert.equal(result.ok, false, error.stderr);
+    if (!result.ok) assert.equal(result.transientErrorCount, 1);
+    assert.equal(fake.graphqlCalls(), 2);
+    assert.equal(time.sleeps.length, 1);
+  }
 });
 
 test("the polling interval and timeout are clamped", async () => {
@@ -775,7 +803,10 @@ test("a partial GraphQL answer is never trusted, so a nulled queue entry cannot 
   assert.equal(recovered.summary.outcome, "merged", "the partial read was retried, not taken as checks_passed");
 
   const persistent = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 600_000 }, { gh: fakeGh([partial]).gh, ...clock() });
-  assert.deepEqual(persistent, { ok: false, error: "could not read o/r#7: Something went wrong" });
+  assert.ok(!persistent.ok && persistent.timeout);
+  assert.equal(persistent.timeout.waitedMs, 600_000);
+  assert.equal(persistent.timeout.observation, null);
+  assert.equal(persistent.error, "could not read o/r#7: Something went wrong");
 });
 
 test("the full base branch name reaches GitHub even when the summary clips it", async () => {
@@ -1112,7 +1143,7 @@ test("check names that collide with object prototype keys evaluate normally", ()
   }
 });
 
-test("slow reads cannot carry the call past the timeout plus one read's grace", async () => {
+test("no additional paginated read starts at or after the wait deadline", async () => {
   // Every read takes 25 s and the contexts never end, so only the shared budget stops the reads.
   const time = clock();
   const started = time.now();
@@ -1130,9 +1161,8 @@ test("slow reads cannot carry the call past the timeout plus one read's grace", 
     return fake.gh(args);
   };
   const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 60_000 }, { gh: slow, now: time.now, sleep: async () => {} });
-  assert.equal(result.ok, false);
-  assert.ok(starts.every((at) => at < 80_000), `no read starts past timeout + grace: ${starts.join(",")}`);
-  assert.equal(starts.length, 4);
+  assert.ok(!result.ok && result.timeout);
+  assert.deepEqual(starts, [0, 25_000, 50_000]);
 });
 
 test("a read hung past the budget is killed on the real clock", async () => {
@@ -1141,9 +1171,10 @@ test("a read hung past the budget is killed on the real clock", async () => {
   const hung: GhRunner = (_args, signal) => new Promise(() => {
     signal?.addEventListener("abort", () => { killed = true; }, { once: true });
   });
-  const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1 }, { gh: hung, readGraceMs: 50 });
-  assert.equal(result.ok, false);
-  assert.match(!result.ok ? result.error : "", /forge_unreachable/u);
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 50 }, { gh: hung });
+  assert.ok(!result.ok && result.timeout);
+  assert.equal(result.timeout.forgeDegraded, true);
+  assert.equal(result.timeout.transientErrorCount, 1);
   assert.ok(Date.now() - startedAt < 2_000);
   assert.equal(killed, true, "the read's process is told to stop, not merely abandoned");
 });
@@ -1158,12 +1189,27 @@ test("aborting a context command kills its process", async () => {
   assert.ok(Date.now() - startedAt < 5_000);
 });
 
-test("a read that fails once the timeout has passed reports the last observation as a timeout", async () => {
-  const fake = fakeGh([ok(pr({}, [run(AGGREGATOR, null)])), failed("error connecting to api.github.com")]);
-  const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 30_000 }, { gh: fake.gh, ...clock() });
+test("a prolonged outage times out with the last complete observation and no new read at the deadline", async () => {
+  const entry = { state: "QUEUED", position: 4 };
+  const fake = fakeGh([ok(pr({ mergeQueueEntry: entry }, [run(AGGREGATOR, null)])), failed("gh: HTTP 504")]);
+  const time = clock();
+  const starts: number[] = [];
+  const started = time.now();
+  const timeoutMs = 500_000;
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs }, {
+    ...time, random: () => 0, gh: (args, signal) => {
+      starts.push(time.now() - started);
+      return fake.gh(args, signal);
+    },
+  });
   assert.ok(result.ok);
   assert.equal(result.summary.outcome, "timeout");
-  assert.equal(result.summary.polls, 2);
+  assert.equal(result.summary.waitedMs, timeoutMs);
+  assert.equal(result.summary.forgeDegraded, true);
+  assert.ok(result.summary.transientErrorCount > 3);
+  assert.equal(result.summary.transientErrorCount, fake.graphqlCalls() - 1);
+  assert.ok(starts.every((at) => at < timeoutMs));
+  assert.equal(result.summary.mergeQueue?.position, 4);
   assert.deepEqual(result.summary.checks.required, [{ name: AGGREGATOR, state: "pending", reported: true }]);
 });
 
@@ -1322,8 +1368,8 @@ for (const response of [failed("gh: Bad Gateway (HTTP 502)"), failed("API rate l
   test(`an unavailable optional lookup never invents supersession (${response.stderr})`, async () => {
     const fake = fakeGh([ok(pr({}, [suiteJob("CANCELLED", 100, 1), suiteJob("SUCCESS", 101, 2)]))], { runs: response });
     const result = await waitForPullRequest({ repository: "o/r", number: 7 }, { gh: fake.gh, ...clock() });
-    assert.ok(result.ok, "optional provenance failure must not fail the operation");
-    assert.equal(result.summary.outcome, "checks_failed", "the observed cancelled suite remains until supersession is proved");
+    assert.ok(!result.ok && result.timeout, "ambiguous check conclusions time out when supersession cannot be checked");
+    assert.ok(result.timeout.transientErrorCount > 3);
   });
 }
 
@@ -1420,8 +1466,8 @@ test("transient optional identity failure retries without passing or ending on a
 test("transient optional identity failure at the deadline returns timeout", async () => {
   const fake = fakeGh([ok(pr({}, [suiteJob("CANCELLED", 100, 1), suiteJob("SUCCESS", 101, 2)]))], { runs: failed("gh: Bad Gateway (HTTP 502)") });
   const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1 }, { gh: fake.gh, ...clock() });
-  assert.ok(result.ok);
-  assert.equal(result.summary.outcome, "timeout");
+  assert.ok(!result.ok && result.timeout);
+  assert.equal(result.timeout.forgeDegraded, true);
 });
 
 for (const absent of [false, true]) {
@@ -1432,8 +1478,8 @@ for (const absent of [false, true]) {
     const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 60_000 }, { gh: fake.gh, ...clock() });
     assert.ok(result.ok);
     assert.equal(result.summary.outcome, "timeout");
-    assert.equal(result.summary.polls, 3);
-    assert.equal(fake.calls.filter((args) => args.some((arg) => arg.includes("/actions/runs?"))).length, absent ? 3 : 1);
+    assert.equal(result.summary.polls, 2);
+    assert.equal(fake.calls.filter((args) => args.some((arg) => arg.includes("/actions/runs?"))).length, absent ? 2 : 1);
   });
 }
 
@@ -1475,10 +1521,16 @@ for (const required of [false, true]) {
       const gh: GhRunner = async (args) => args.some((arg) => arg.includes("/actions/runs?"))
         ? ++reads > 1 && recovers ? ok(suiteRuns()) : failed("gh: Bad Gateway (HTTP 502)") : fake.gh(args);
       const result = await waitForPullRequest({ repository: "o/r", number: 7, returnOnAnyFailure: true }, { gh, ...clock() });
-      assert.ok(result.ok);
-      assert.equal(result.summary.outcome, recovers ? required ? "checks_passed" : "no_required_checks" : "checks_failed");
-      assert.equal(result.summary.polls, recovers ? 2 : 4);
-      assert.equal(reads, recovers ? 2 : 4);
+      if (recovers) {
+        assert.ok(result.ok);
+        assert.equal(result.summary.outcome, required ? "checks_passed" : "no_required_checks");
+        assert.equal(result.summary.polls, 2);
+        assert.equal(reads, 2);
+      } else {
+        assert.ok(!result.ok && result.timeout);
+        assert.equal(result.timeout.forgeDegraded, true);
+        assert.equal(result.timeout.transientErrorCount, reads);
+      }
     });
   }
 }

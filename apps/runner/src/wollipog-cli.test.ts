@@ -235,7 +235,7 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
   assert.equal(pending.code, 124);
   assert.equal(JSON.parse(pending.stdout).outcome, "timeout");
 
-  const skipped = await run(["pr", "wait", "picoduck/wollipog#7", "--head", head, "--timeout", "1", "--json"], fakeGh("SKIPPED").gh);
+  const skipped = await run(["pr", "wait", "picoduck/wollipog#7", "--head", head, "--timeout", "250", "--json"], fakeGh("SKIPPED").gh);
   assert.equal(skipped.code, 124, "an old skipped draft check cannot certify newly admitted CI");
   assert.equal(JSON.parse(skipped.stdout).outcome, "timeout");
   assert.deepEqual(JSON.parse(skipped.stdout).checks.required, [{ name: "CI", state: "pending", reported: true }]);
@@ -256,19 +256,22 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
   assert.equal(unreadable.code, 1);
   assert.match(JSON.parse(unreadable.stdout).error, /forge_unauthenticated/u);
 
-  // Resolving the repository is one more read in the wait's budget of the timeout plus the grace.
-  // A lookup slower than the timeout but within the grace still yields one snapshot (#3121).
+  const degraded = await run(["pr", "wait", "picoduck/wollipog#7", "--timeout", "100", "--json"],
+    async () => ({ stdout: "", stderr: "gh: HTTP 504", code: 1, timedOut: false }));
+  assert.equal(degraded.code, 124);
+  const { waitedMs, ...degradedSummary } = JSON.parse(degraded.stdout);
+  assert.ok(waitedMs >= 100);
+  assert.deepEqual(degradedSummary, {
+    outcome: "timeout", repository: "picoduck/wollipog", number: 7, observation: null,
+    polls: 1, transientErrorCount: 1, forgeDegraded: true,
+  });
+
+  // A bare PR number's repository lookup spends the same budget as the wait.
   const slowLookup = (milliseconds: number, rest: GhRunner): GhRunner => async (args, signal) => {
     if (args[0] !== "repo") return rest(args, signal);
-    await new Promise((resolve) => setTimeout(resolve, milliseconds));
+    if (milliseconds > 0) await new Promise((resolve) => setTimeout(resolve, milliseconds));
     return { stdout: "picoduck/wollipog\n", stderr: "", code: null, timedOut: false };
   };
-  const snapshot = await run(["pr", "wait", "7", "--timeout", "1", "--json"], slowLookup(150, fakeGh(null).gh));
-  assert.equal(snapshot.code, 124);
-  assert.equal(JSON.parse(snapshot.stdout).outcome, "timeout");
-  assert.equal(JSON.parse(snapshot.stdout).repository, "picoduck/wollipog");
-
-  // A lookup outlasting the timeout and the grace is killed with the existing --repo guidance.
   let startedAt = Date.now();
   let discoveryKilled = false;
   const hungDiscovery: GhRunner = (_args, signal) => new Promise((resolve) => {
@@ -277,24 +280,25 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
       resolve({ stdout: "", stderr: "killed", code: "ABORT_ERR", timedOut: true });
     }, { once: true });
   });
-  const slow = await run(["pr", "wait", "7", "--timeout", "100", "--json"], hungDiscovery, 100);
-  assert.equal(slow.code, 1);
+  const slow = await run(["pr", "wait", "7", "--timeout", "100", "--json"], hungDiscovery, 500);
+  assert.equal(slow.code, 124);
   assert.match(JSON.parse(slow.stdout).error, /pass --repo/u);
   assert.equal(discoveryKilled, true);
   const slowMs = Date.now() - startedAt;
-  assert.ok(slowMs >= 190 && slowMs < 1_500, `discovery ran until the timeout plus the grace: ${slowMs} ms`);
+  assert.ok(slowMs >= 90 && slowMs < 500, `discovery should end at the deadline: ${slowMs} ms`);
 
-  // The wait gets only what discovery left of both, so a hung read after it still ends in time.
+  // A GitHub read after discovery shares the original deadline.
   startedAt = Date.now();
   let readKilled = false;
   const hungRead: GhRunner = (_args, signal) => new Promise(() => {
     signal?.addEventListener("abort", () => { readKilled = true; }, { once: true });
   });
-  const spent = await run(["pr", "wait", "7", "--timeout", "100", "--json"], slowLookup(150, hungRead), 200);
-  assert.equal(spent.code, 1);
+  const spent = await run(["pr", "wait", "7", "--timeout", "250", "--json"], slowLookup(75, hungRead), 500);
+  assert.equal(spent.code, 124);
   assert.equal(readKilled, true);
+  assert.equal(JSON.parse(spent.stdout).outcome, "timeout");
   const spentMs = Date.now() - startedAt;
-  assert.ok(spentMs >= 290 && spentMs < 1_500, `the command ended at the timeout plus the grace: ${spentMs} ms`);
+  assert.ok(spentMs >= 240 && spentMs < 680, `the command should end at the original deadline: ${spentMs} ms`);
   const fractional = await run(["pr", "wait", "7", "--timeout", "100.5", "--json"], passed.gh);
   assert.equal(fractional.code, 0, "a fractional timeout is floored, never a crash");
   assert.equal(JSON.parse(fractional.stdout).outcome, "checks_passed");

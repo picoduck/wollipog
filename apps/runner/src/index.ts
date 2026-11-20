@@ -1783,7 +1783,6 @@ reviewSessionLauncher.releaseAll();
 const pullRequestWatcher = new PullRequestWatcher({
   gh: contextGhRunner({ kind: "native" }, process.cwd()),
   send: (update) => sendUp(update),
-  log,
 });
 sessions.setReviewSessions({
   markPreparing: (sessionId) => reviewSessionLauncher.markPreparing(sessionId),

@@ -133,7 +133,7 @@ export interface McpDeps {
   gh?: GhRunner;
   /** Read-only `glab` for a GitLab `wait_pull_request` (#3602); defaults to this process's own login. */
   glab?: GlabRunner;
-  /** `wait_pull_request`'s read grace when a caller already spent part of it (CLI repository discovery). */
+  /** Read grace for the GitLab merge-request waiter. */
   pullRequestReadGraceMs?: number;
 }
 
@@ -3288,15 +3288,16 @@ export const TOOLS: McpTool[] = [
       // The waiter's own clamps, so the reported deadline and progress bound match the call (#1280).
       const integer = (value: unknown, fallback: number, min: number, max: number) =>
         Math.min(max, Math.max(min, typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback));
+      const gitlab = campaignRepositoryLocation(ref.repository)?.forge === "gitlab";
       const reporter = waitProgressReporter(deps, "wait_pull_request",
         { kind: "pull_request", repository: ref.repository, number: ref.number },
         integer(args?.timeoutMs, PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, 1, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS) +
-          (deps.pullRequestReadGraceMs ?? PULL_REQUEST_WAIT_READ_GRACE_MS),
+          (gitlab ? deps.pullRequestReadGraceMs ?? PULL_REQUEST_WAIT_READ_GRACE_MS : 0),
         integer(args?.intervalMs, PULL_REQUEST_WAIT_DEFAULT_INTERVAL_MS, PULL_REQUEST_WAIT_MIN_INTERVAL_MS,
           PULL_REQUEST_WAIT_MAX_INTERVAL_MS));
       const onObservation = () => reporter.poll();
       try {
-        if (campaignRepositoryLocation(ref.repository)?.forge === "gitlab") {
+        if (gitlab) {
           const waited = await waitForMergeRequest({
             ...ref,
             ...(typeof args?.headSha === "string" ? { headSha: args.headSha.trim().toLowerCase() } : {}),
@@ -3323,10 +3324,13 @@ export const TOOLS: McpTool[] = [
           ...(deps.now ? { now: deps.now } : {}),
           ...(deps.sleep ? { sleep: deps.sleep } : {}),
           ...(deps.signal ? { signal: deps.signal } : {}),
-          ...(deps.pullRequestReadGraceMs !== undefined ? { readGraceMs: deps.pullRequestReadGraceMs } : {}),
           onObservation,
         });
-        return result.ok ? textResult(result.summary) : errorResult(result.error);
+        if (result.ok) return textResult(result.summary);
+        if (result.timeout) return textResult(result.timeout);
+        return result.transientErrorCount === undefined
+          ? errorResult(result.error)
+          : { ...textResult({ error: result.error, transientErrorCount: result.transientErrorCount }), isError: true };
       } finally {
         await reporter.end();
       }

@@ -13,16 +13,11 @@ import {
 } from "@wollipog/protocol";
 import type { GhRunner } from "./campaign-forge-status.js";
 import {
-  cancellableSleep,
   PULL_REQUEST_WAIT_MAX_TIMEOUT_MS,
   waitForPullRequest,
   type PullRequestWaitSummary,
 } from "./pull-request-wait.js";
 
-/** Consecutive unreadable waits before a watch is reported lost rather than retried. */
-export const PULL_REQUEST_WATCH_MAX_FAILURES = 6;
-/** Pause after an unreadable wait; with the limit above, about half an hour of retrying. */
-export const PULL_REQUEST_WATCH_RETRY_MS = 5 * 60_000;
 /** Reported outcomes kept to answer a control plane that resends a start it missed the end of. */
 const MAX_REPORTED = 500;
 
@@ -31,7 +26,6 @@ export interface PullRequestWatcherDeps {
   send: (update: PullRequestWatchUpdate) => void;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
-  log?: (message: string) => void;
   /** Each wait's timeout; tests shorten it. */
   waitTimeoutMs?: number;
   /** The wait itself; tests replace it. */
@@ -106,7 +100,7 @@ export class PullRequestWatcher {
   }
 
   private async watch(command: PullRequestWatchStartCommand, signal: AbortSignal): Promise<void> {
-    let failures = 0;
+    let priorTransientErrors = 0;
     const now = this.deps.now ?? Date.now;
     let group: string | null | undefined = command.progress?.groupSha;
     let groupSince = command.progress?.groupSince ?? command.watchedSince ?? now();
@@ -118,7 +112,7 @@ export class PullRequestWatcher {
       this.deps.send({ type: "pull_request_watch_update", watchId: command.watchId, state: "progress",
         progress: { groupSha: next, groupSince, stalled: !!queue &&
           (!!queue.checks?.failedJobs.length || now() - groupSince >= PULL_REQUEST_WATCH_STALL_MS),
-          summary: serializedWatchSummary(summary) } });
+          summary: serializedWatchSummary({ ...summary, transientErrorCount: priorTransientErrors + summary.transientErrorCount }) } });
     };
     while (!signal.aborted) {
       const result = await (this.deps.wait ?? waitForPullRequest)({
@@ -135,24 +129,31 @@ export class PullRequestWatcher {
       });
       if (signal.aborted) return;
       if (result.ok) {
-        failures = 0;
-        if (result.summary.outcome === "timeout") { progress(result.summary); continue; }
+        if (result.summary.outcome === "timeout") {
+          // Failed reads must never renew the control plane's observation lease.
+          if (!result.summary.forgeDegraded) progress(result.summary);
+          priorTransientErrors += result.summary.transientErrorCount;
+          continue;
+        }
         this.report({
           type: "pull_request_watch_update",
           watchId: command.watchId,
           state: "fired",
           outcome: result.summary.outcome as PullRequestWatchOutcome,
-          summary: serializedWatchSummary(result.summary),
+          summary: serializedWatchSummary({
+            ...result.summary, transientErrorCount: priorTransientErrors + result.summary.transientErrorCount,
+          }),
         });
         return;
       }
-      if (++failures >= PULL_REQUEST_WATCH_MAX_FAILURES) {
-        this.report({ type: "pull_request_watch_update", watchId: command.watchId, state: "lost",
-          reason: clip(`GitHub could not be read: ${result.error}`, PULL_REQUEST_WATCH_REASON_LIMIT) });
-        return;
+      priorTransientErrors += result.transientErrorCount ?? 0;
+      if (result.timeout) {
+        continue;
       }
-      this.deps.log?.(`pull request watch ${command.watchId}: ${result.error}; retrying`);
-      if (!await cancellableSleep({ ...(this.deps.sleep ? { sleep: this.deps.sleep } : {}), signal }, PULL_REQUEST_WATCH_RETRY_MS)) return;
+      const count = priorTransientErrors ? ` after ${priorTransientErrors} transient forge errors` : "";
+      this.report({ type: "pull_request_watch_update", watchId: command.watchId, state: "lost",
+        reason: clip(`GitHub could not be read${count}: ${result.error}`, PULL_REQUEST_WATCH_REASON_LIMIT) });
+      return;
     }
   }
 }
