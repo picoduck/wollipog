@@ -31195,8 +31195,11 @@ export class ControlPlaneDb {
     // write path (one call per streamed delta) and was previously 5 separate auto-commit
     // statements — 5 WAL commits per token chunk, and a torn crash could desync seq/counters.
     let appended: SessionEvent;
-    const advanceEpoch = options?.runnerSeq !== undefined && this.ingestReassignsSequence(sessionId);
     const ownsTransaction = !this.db.isTransaction;
+    // Only a control-plane notice may join its caller's transaction. Runner ingest must commit
+    // before updating its in-memory cursor and history-epoch bookkeeping below.
+    if (!ownsTransaction && options?.runnerSeq !== undefined) throw new Error("Runner event ingest requires its own transaction");
+    const advanceEpoch = options?.runnerSeq !== undefined && this.ingestReassignsSequence(sessionId);
     if (ownsTransaction) this.db.exec("BEGIN");
     try {
       if (advanceEpoch) this.advanceEventEpochInTransaction(sessionId);
