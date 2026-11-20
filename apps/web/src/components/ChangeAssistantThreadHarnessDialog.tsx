@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { AssistantThread, AssistantThreadHarness, AssistantThreadHarnessOption } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
 import { AssistantThreadAccountField } from "./AssistantThreadAccountField.js";
+import { ArrowLeftRightIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
 import { Skeleton } from "./common.js";
@@ -15,6 +16,7 @@ export function ChangeAssistantThreadHarnessDialog({ thread, onClose, onChanged 
   onChanged: (thread: AssistantThread) => void;
 }) {
   const api = useApi();
+  const harnessLabelId = useId();
   const [options, setOptions] = useState<AssistantThreadHarnessOption[] | null>(null);
   const [harness, setHarness] = useState<AssistantThreadHarness | null>(null);
   const [account, setAccount] = useState<string | null>(null);
@@ -56,7 +58,8 @@ export function ChangeAssistantThreadHarnessDialog({ thread, onClose, onChanged 
       <button type="button" className="btn" onClick={onClose} disabled={busy}>Cancel</button>
       {confirming ? <>
         <button type="button" className="btn" disabled={busy} onClick={() => { setConfirming(false); setError(null); }}>Back</button>
-        <BusyButton className="btn primary" busy={busy} progress="Starting the selected harness…" onClick={() => void change()}>
+        <BusyButton className="btn primary" busy={busy} progress="Starting the selected harness…"
+          icon={<ArrowLeftRightIcon size={14} aria-hidden="true" />} onClick={() => void change()}>
           Change Harness
         </BusyButton>
       </> : <button type="button" className="btn primary" disabled={!selected} onClick={() => setConfirming(true)}>Review Change</button>}
@@ -74,11 +77,14 @@ export function ChangeAssistantThreadHarnessDialog({ thread, onClose, onChanged 
         {busy && <p role="status">Starting the selected harness. The original conversation is kept until the new harness is ready.</p>}
       </> : <>
         {!options && !error && <Skeleton rows={2} announce="Loading harnesses…" />}
-        {options && <ChoiceRows className="assistant-thread-account-picker" label="Harness" value={harness}
+        {options && <div className="field">
+          <span id={harnessLabelId}>Harness</span>
+          <ChoiceRows className="assistant-thread-account-picker" label="Harness" labelledBy={harnessLabelId} value={harness}
           onChange={(id) => { setHarness(options.find((option) => option.id === id)?.id ?? null); setAccount(null); }}
           options={options.map((option) => ({
             value: option.id, title: option.label, disabled: !option.available, disabledReason: option.reason,
-          }))} />}
+          }))} />
+        </div>}
         {target?.accountSelection && <AssistantThreadAccountField choices={target.accountSelection}
           value={account} onChange={setAccount} disabled={busy} />}
       </>}

@@ -5,6 +5,7 @@ import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizont
 
 const threadPath = "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA";
 const evidenceDir = process.env.ASSISTANT_HARNESS_EVIDENCE_DIR;
+const captureStates = process.env.ASSISTANT_HARNESS_EVIDENCE_STATES?.split(",");
 const accountName = "Engineering Shared Subscription With a Long Account Display Name 1";
 
 async function open(page: Page, theme: "dark" | "light", scenario: "ready" | "fail" | "old") {
@@ -21,6 +22,7 @@ async function settings(page: Page) {
 async function chooseHarness(page: Page) {
   await (await settings(page)).getByRole("button", { name: /^Change Harness…/ }).click();
   const picker = page.getByRole("dialog", { name: "Change Harness", exact: true });
+  await expect(picker.getByText("Harness", { exact: true })).toBeVisible();
   await picker.getByRole("radio", { name: /Codex App Server With a Long Installation Label/ }).check();
   await expect(picker.getByRole("radio")).toHaveCount(10);
   await picker.getByRole("radio", { name: accountName, exact: true }).check();
@@ -43,7 +45,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
   for (const theme of ["light", "dark"] as const) {
     const capture = async (page: Page, state: string) => {
       await expectPageNoHorizontalOverflow(page);
-      if (!evidenceDir) return;
+      if (!evidenceDir || captureStates && !captureStates.includes(state)) return;
       mkdirSync(evidenceDir, { recursive: true });
       await page.screenshot({ path: join(evidenceDir, `${layout}-${theme}-${state}.png`), animations: "disabled" });
     };
@@ -55,13 +57,17 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await capture(page, "picker");
       const confirmation = await confirmChange(page);
       await capture(page, "confirmation");
-      await confirmation.getByRole("button", { name: "Change Harness", exact: true }).click();
+      const submit = confirmation.getByRole("button", { name: "Change Harness", exact: true });
+      const padding = await submit.evaluate((element) => getComputedStyle(element).paddingInline);
+      await submit.click();
       await expect(confirmation.getByText("Starting the selected harness. The original conversation is kept until the new harness is ready.")).toBeVisible();
+      await expect(submit).toHaveCSS("padding-inline", padding);
       await expect(confirmation.getByRole("button", { name: "Cancel", exact: true })).toBeDisabled();
       await capture(page, "in-progress");
       await page.evaluate(() => Reflect.get(window, "finishAssistantHarnessChange")());
       await expect(confirmation).toHaveCount(0);
       await expect(page.getByText(/Switched from Claude Code to Codex/)).toBeVisible();
+      await expect(page.getByText("Codex App Server is ready on Shared Engineering Machine.")).toBeVisible();
       await expect(page.getByLabel("Thread Details")).toContainText("$8.13 of $25.00 spent");
       await expect(page.getByLabel("Thread Details")).toContainText("2 of 10 sessions launched");
       await expectFullyInViewport(page.locator(".composer"), "The new conversation composer");

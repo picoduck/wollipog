@@ -90,7 +90,7 @@ function fixtureAccountChoices(harness: string, currentAccountRef?: string): Ass
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "build-box",
-  displayName: "Build Box",
+  displayName: migrationScenario && migrationScenario !== "old" ? "Shared Engineering Machine" : "Build Box",
   os: "linux",
   version: "1",
   status: "online",
