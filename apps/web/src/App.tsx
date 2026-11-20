@@ -702,10 +702,18 @@ export function Shell() {
 
   // Session-view panel shortcuts (Codex bindings). Registered without deps on purpose: the
   // handler closes over this render's view/rightPanel, and re-registering per render keeps the
-  // mode toggle's "same mode → close" check reading fresh state.
+  // mode toggle's "same mode → close" check reading fresh state. An open Assistant thread shows its
+  // session's side panel with the session bar's Side Panel toggle (#4776), so the side panel's own
+  // chords work there too; Files, Side Chat and Terminal stay the session page's.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || shortcutLayerActive(document, false, e) || xtermOwnsKey(e.target) || view.name !== "session") return;
+      const threadOpen = view.name === "assistants" && view.threadId !== undefined;
+      if (e.defaultPrevented || shortcutLayerActive(document, false, e) || xtermOwnsKey(e.target)) return;
+      if (threadOpen) {
+        handleSidePanelChord(e, rightPanel);
+        return;
+      }
+      if (view.name !== "session") return;
       // Go to File: opens the panel on Files when needed and never closes it (#2852).
       if (matchesShortcut(e, "open-files")) {
         e.preventDefault();

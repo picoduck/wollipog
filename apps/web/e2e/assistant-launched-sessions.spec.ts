@@ -135,6 +135,15 @@ for (const theme of ["dark", "light"] as const) {
       expect(facts.x + facts.width).toBeLessThanOrEqual(panelBox.x + 1);
       await sidePanel.click();
       await expect(panel(page)).toHaveCount(0);
+      // The chord its tooltip names works here, as on a session page.
+      await expect(sidePanel).toHaveAttribute("aria-keyshortcuts", /\\/);
+      await page.locator(".assistant-thread-pane").click({ position: { x: 300, y: 600 } });
+      await page.keyboard.press("Control+Backslash");
+      await expect(sidePanel).toHaveAttribute("aria-pressed", "true");
+      await expect(panel(page)).toBeVisible();
+      await page.keyboard.press("Control+Backslash");
+      await expect(sidePanel).toHaveAttribute("aria-pressed", "false");
+      await expect(panel(page)).toHaveCount(0);
     });
 
     test("a focused card that changes group keeps focus in the panel", async ({ page }) => {
