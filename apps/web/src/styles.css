@@ -13063,9 +13063,19 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .assistant-budget-presets > .btn,
 .assistant-launch-stepper > .btn { min-width: var(--control-h); }
 .assistant-launch-stepper > input { width: 6rem; }
+.assistant-launch-stepper > input:disabled { background: var(--bg-elev-2); }
+.assistant-thread-defaults-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-h);
+  color: inherit;
+  text-decoration: underline;
+}
 .assistant-thread-spending-row .assistant-panel-meter > span { grid-column: 1 / -1; }
 .assistant-thread-account-label { overflow-wrap: anywhere; }
 @media (max-width: 760px) {
+  .assistant-thread-settings .modal-back { display: none; }
+  .assistant-thread-settings-cancel { order: -1; }
   .assistant-thread-account-label:not(.pid),
   .assistant-thread-account-label .pid-value {
     display: -webkit-box;

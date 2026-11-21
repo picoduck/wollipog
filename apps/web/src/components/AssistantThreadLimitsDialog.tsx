@@ -72,18 +72,24 @@ export function AssistantThreadLimitsDialog({ thread, model, effort, onClose, on
   const closeEditor = () => setEditor(null);
   const grant = (delegation ?? thread.decisionDelegation)?.grant;
   const now = useTimelineClock(grant?.expiresAt != null);
-  const readOnly = thread.status === "archived" ? "Archived threads are read-only."
+  const archived = thread.status === "archived";
+  const readOnly = archived ? "Archived threads are read-only."
     : !thread.usage ? "This control plane does not report thread limits. Update Wollipog to manage them."
     : !thread.limitsEditable ? "This control plane uses fixed thread limits. Update Wollipog to change them." : null;
   const disabled = saving || Boolean(readOnly);
   const working = thread.status === "working";
+  const conversationDisabled = saving || archived || working;
+  const saveDisabled = archived || (Boolean(readOnly) && !conversation);
+  const conversationHelp = !readOnly && working ? "Wait for the current turn to finish before changing the conversation."
+    : !readOnly && !thread.harnessChangeSupported ? "Start a new thread to use a different harness."
+    : "Changing the harness starts a fresh provider conversation. Earlier conversations stay readable.";
   const accountLabel = conversation?.accountLabel ?? thread.providerAccountLabel;
   const providerChange = conversation?.kind === "harness";
   const restarting = providerChange || (conversation?.kind === "account" && conversation.input.freshConversation);
   const parsedCount = parseCount(launches, Number.MAX_SAFE_INTEGER, 1);
 
   const save = async (confirmed = false) => {
-    if (disabled) return;
+    if (saving || saveDisabled) return;
     setError(null);
     const budget = parseUsd(selection === "none" ? "" : cost);
     let limits: AssistantThreadLimits | undefined;
@@ -152,7 +158,7 @@ export function AssistantThreadLimitsDialog({ thread, model, effort, onClose, on
   };
 
   const saveButton = <BusyButton className="btn primary" type="submit" form={form} busy={saving}
-    disabled={Boolean(readOnly)} progress="Saving changes…">Save Changes</BusyButton>;
+    disabled={saveDisabled} progress="Saving changes…">Save Changes</BusyButton>;
   const editLaunches = (value: string) => {
     setLaunches(value);
     setLaunchesEdited(true);
@@ -161,31 +167,33 @@ export function AssistantThreadLimitsDialog({ thread, model, effort, onClose, on
   const preview = parseUsd(cost);
   const budgetPreview = selection === "none" ? null : preview.ok ? preview.value ?? costLimit : costLimit;
   return <>
-    <Modal title="Thread Settings" phoneSheet="full" onClose={saving ? () => {} : onClose}
-      back={phone ? { label: "Cancel", onBack: saving ? () => {} : onClose } : undefined}
+    {editor !== "confirm" && <Modal title="Thread Settings" phoneSheet="full" onClose={saving ? () => {} : onClose}
       className="assistant-thread-settings"
-      headerActions={phone ? saveButton : undefined}
+      headerActions={phone ? <>
+        <button type="button" className="btn assistant-thread-settings-cancel" onClick={onClose} disabled={saving}>Cancel</button>
+        {saveButton}
+      </> : undefined}
       footer={phone ? undefined : <>
         <button type="button" className="btn" onClick={onClose} disabled={saving}>Cancel</button>
         {saveButton}
       </>}>
       <form id={form} className="form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
         {readOnly && <Notice tone="neutral" role="status">{readOnly}</Notice>}
-        {editor !== "confirm" && error && <Notice tone="danger" role="alert" noticeRef={errorRef}>{error}</Notice>}
-        <SettingsGroup title="Conversation" foot="Changing the harness starts a fresh provider conversation. Earlier conversations stay readable.">
+        {error && <Notice tone="danger" role="alert" noticeRef={errorRef}>{error}</Notice>}
+        <SettingsGroup title="Conversation" foot={conversationHelp}>
           <ActionRow title="Harness" description={providerChange ? conversation.harnessLabel
-            : [assistantThreadHarnessLabel(thread.harness), model, effort].filter(Boolean).join(" · ")}
-            actionLabel="Change…" hasPopup="dialog" disabled={disabled || working || !thread.harnessChangeSupported}
+            : [assistantThreadHarnessLabel(thread.harness), model ?? "Model Unavailable", effort ?? "Effort Unavailable"].join(" · ")}
+            actionLabel="Change…" hasPopup="dialog" disabled={conversationDisabled || !thread.harnessChangeSupported}
             onAction={() => setEditor("harness")} />
           <ActionRow title="Account" description={accountLabel
             ? <AccountIdentifier className="assistant-thread-account-label" value={accountLabel} label="Account Email" identity={thread.id} />
             : thread.accountChangeSupported ? "Machine Sign-In" : "Unavailable"}
             actionLabel="Change…" hasPopup="dialog"
-            disabled={disabled || working || (!providerChange && !thread.accountChangeSupported)}
+            disabled={conversationDisabled || (!providerChange && !thread.accountChangeSupported)}
             onAction={() => setEditor(providerChange ? "harness" : "account")} />
         </SettingsGroup>
         {conversation && <div className="field-row">
-          <button type="button" className="btn ghost" disabled={disabled} onClick={() => setConversation(null)}>Undo Conversation Change</button>
+          <button type="button" className="btn ghost" disabled={conversationDisabled} onClick={() => setConversation(null)}>Undo Conversation Change</button>
         </div>}
         <SettingsGroup title="Spending">
           <div className="setting-row assistant-thread-spending-row">
@@ -225,11 +233,10 @@ export function AssistantThreadLimitsDialog({ thread, model, effort, onClose, on
             actionLabel="Manage…" hasPopup="dialog" disabled={disabled || !thread.decisionDelegation}
             onAction={() => setEditor("delegation")} />
         </SettingsGroup>
-        <p className="field-helper">For new-thread defaults, go to{" "}
-          <AssistantSettingsLink view={ASSISTANT_DEFAULTS_VIEW} className="btn ghost">Settings › Assistant</AssistantSettingsLink>.
-        </p>
+        <p className="field-helper">For new-thread defaults, go to{" "}<AssistantSettingsLink
+          view={ASSISTANT_DEFAULTS_VIEW} className="assistant-thread-defaults-link">Settings › Assistant</AssistantSettingsLink>.</p>
       </form>
-    </Modal>
+    </Modal>}
     {editor === "harness" && <ChangeAssistantThreadHarnessDialog thread={thread}
       draft={conversation?.kind === "harness" ? conversation.input : undefined} onClose={closeEditor}
       onChoose={(input, harnessLabel, accountLabel) => {

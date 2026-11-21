@@ -471,6 +471,16 @@ if (limitsScenario) {
   }
 }
 
+if (params.has("recorded-thread-model")) {
+  for (const item of threads) {
+    const backing = sessions.get(item.sessionId);
+    if (backing) {
+      backing.model = "claude-opus-4-6";
+      backing.effort = "high";
+    }
+  }
+}
+
 if (panelScenario) {
   const current = threads[0]!;
   current.title = (current.title + " now and report what remains").slice(0, 120);

@@ -8,7 +8,7 @@ const archivedPath = "/assistants/~dABoAHIAXwByAGUAdABpAHIAZQBkAA/settings";
 const evidence = process.env.ASSISTANT_THREAD_SETTINGS_EVIDENCE_DIR;
 
 async function open(page: Page, path = threadPath + "/settings", query = "limits=enabled") {
-  await page.goto(`/assistants-e2e.html?${query}&path=${encodeURIComponent(path)}`);
+  await page.goto(`/assistants-e2e.html?${query}&recorded-thread-model&path=${encodeURIComponent(path)}`);
   const dialog = page.getByRole("dialog", { name: "Thread Settings", exact: true });
   await expect(dialog).toBeVisible();
   return dialog;
@@ -80,6 +80,9 @@ for (const { width, height, phone } of [{ width: 1440, height: 900, phone: false
   for (const theme of ["light", "dark"] as const) {
     test.describe(`Thread Settings at ${width}×${height} in ${theme}`, () => {
       test.use({ viewport: { width, height }, hasTouch: phone, isMobile: phone, colorScheme: theme, reducedMotion: "reduce" });
+      test.beforeEach(async ({ page }) => {
+        await page.clock.setFixedTime(new Date("2026-11-19T18:00:00Z"));
+      });
 
       async function capture(dialog: Locator, state: string, claim: string) {
         const page = dialog.page();
@@ -179,19 +182,22 @@ for (const { width, height, phone } of [{ width: 1440, height: 900, phone: false
         const dialog = await open(page, undefined, "limits=enabled&accounts=stress&harness-change=ready");
         const conversation = dialog.getByRole("region", { name: "Conversation" });
         const account = conversation.getByText(/DesignResearchAndEngineeringSubscription/);
-        await expect(conversation).toContainText("Claude Code");
+        await expect(conversation.getByRole("button", { name: "Change… Harness" }))
+          .toHaveAccessibleDescription(/Claude Code · .*Opus.*4\.6 · High/);
         await expect(conversation.getByRole("button", { name: "Change… Harness" })).toBeEnabled();
         await expect(account).toBeVisible();
         const lines = await account.evaluate((element) => element.clientHeight / parseFloat(getComputedStyle(element).lineHeight));
         if (phone) {
           expect(lines).toBeGreaterThan(1);
           expect(lines).toBeLessThanOrEqual(2.05);
-          await expect(dialog.locator(".modal-head").getByRole("button", { name: "Save Changes" })).toBeVisible();
+          const bar = dialog.locator(".modal-head");
+          await expectFullyInViewport(bar.getByRole("button", { name: "Save Changes" }));
+          await expectFullyInViewport(bar.getByRole("button", { name: "Cancel", exact: true }));
           expect((await dialog.boundingBox())!.height).toBeCloseTo(height, 1);
         }
         await capture(dialog, "conversation-long-account", phone
-          ? "Conversation shows the harness and a long account alias wrapping to two lines. Save Changes is in the full-height sheet bar."
-          : "Conversation shows the harness and a long account alias without horizontal overflow.");
+          ? "Conversation shows harness, model and effort and a long account alias wrapping to two lines. Cancel and Save Changes are in the full-height sheet bar."
+          : "Conversation shows harness, model and effort and a long account alias without horizontal overflow.");
         await conversation.getByRole("button", { name: "Change… Account" }).click();
         const picker = page.getByRole("dialog", { name: "Change Account" });
         await picker.getByRole("radio", { name: "Studio Subscription", exact: true }).check();
@@ -199,6 +205,7 @@ for (const { width, height, phone } of [{ width: 1440, height: 900, phone: false
         await expect(page.locator("body")).not.toHaveAttribute("data-changed-account", /.+/);
         await dialog.getByRole("button", { name: "Save Changes" }).click();
         const confirmation = page.getByRole("dialog", { name: "Confirm Conversation Change" });
+        await expect(dialog).toHaveCount(0);
         await expect(confirmation).toContainText("The Assistant will restart on the selected account.");
         await expect(confirmation).toContainText("Studio Subscription");
         await expect(confirmation).toContainText("try to resume the current provider conversation");
@@ -217,6 +224,7 @@ for (const { width, height, phone } of [{ width: 1440, height: 900, phone: false
         await picker.getByRole("button", { name: "Use Harness" }).click();
         await dialog.getByRole("button", { name: "Save Changes" }).click();
         const confirmation = page.getByRole("dialog", { name: "Confirm Conversation Change" });
+        await expect(dialog).toHaveCount(0);
         await expect(confirmation).toContainText("The Assistant will restart on Codex App Server");
         await expect(confirmation).toContainText("The provider conversation starts fresh. Earlier messages stay readable.");
         await expect(confirmation).toContainText("Engineering Shared Subscription With a Long Account Display Name 1");
@@ -224,7 +232,6 @@ for (const { width, height, phone } of [{ width: 1440, height: 900, phone: false
       });
 
       test("shows delegated and Ask Me summaries and saves edits from the shared editor", async ({ page }) => {
-        await page.clock.setFixedTime(new Date("2026-11-19T18:00:00Z"));
         const dialog = await open(page, undefined, "limits=enabled&delegation=settings");
         const decisions = dialog.getByRole("region", { name: "Decisions" });
         await expect(decisions).toContainText("Delegate All · Expires in 6 days");
@@ -239,6 +246,18 @@ for (const { width, height, phone } of [{ width: 1440, height: 900, phone: false
         await expect(decisions).toContainText("Ask Me");
         await expect(page.locator("body")).not.toHaveAttribute("data-delegation-grant", /.+/);
         await capture(dialog, "decisions-ask-me", "Decisions shows Ask Me with a Manage… action. The edit is staged until Save Changes.");
+        const defaults = dialog.getByRole("link", { name: "Settings › Assistant" });
+        expect(await defaults.evaluate((link) => ({
+          before: link.previousSibling?.textContent,
+          after: link.nextSibling?.textContent,
+          horizontalPadding: getComputedStyle(link).paddingInline,
+        }))).toEqual({ before: " ", after: ".", horizontalPadding: "0px" });
+        await expect(defaults.locator("..")).toHaveText("For new-thread defaults, go to Settings › Assistant.");
+        if (phone) {
+          await defaults.scrollIntoViewIfNeeded();
+          await expectFullyInViewport(defaults.locator(".."));
+          await capture(dialog, "defaults-helper", "The dialog is scrolled to the fully visible new-thread defaults sentence with an inline Settings › Assistant link.");
+        }
         await dialog.getByRole("button", { name: "Save Changes" }).click();
         await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", "null");
       });
@@ -248,10 +267,21 @@ for (const { width, height, phone } of [{ width: 1440, height: 900, phone: false
         ["older-fixed-limits", threadPath + "/settings", "old", "This control plane uses fixed thread limits."],
       ] as const) {
         test(`keeps ${state} readable with editing disabled`, async ({ page }) => {
-          const dialog = await open(page, path, `limits=${limits}&accounts=stress`);
+          const dialog = await open(page, path, `limits=${limits}`);
           await expect(dialog.getByRole("status").filter({ hasText: notice })).toBeVisible();
           await expect(dialog.getByRole("button", { name: "$25", exact: true })).toHaveAttribute("aria-pressed", "true");
           await expect(dialog.getByRole("switch", { name: "Pause New Launches" })).toBeDisabled();
+          const launchCount = dialog.getByRole("textbox", { name: "Session Launch Limit" });
+          await expect(launchCount).toBeDisabled();
+          await expect(launchCount).toHaveCSS("cursor", "not-allowed");
+          expect(await launchCount.evaluate((input) => {
+            const sample = document.createElement("span");
+            sample.style.color = "var(--text-faint)";
+            input.parentElement!.append(sample);
+            const matches = getComputedStyle(input).color === getComputedStyle(sample).color;
+            sample.remove();
+            return matches;
+          })).toBe(true);
           await expect(dialog.getByRole("button", { name: "Change… Account" })).toBeDisabled();
           await expect(dialog.getByRole("button", { name: "Save Changes" })).toBeDisabled();
           await capture(dialog, state, `${notice} The $25 budget is displayed and the edit controls are disabled.`);
@@ -275,4 +305,17 @@ test("an editable older server pauses with zero and resumes the remembered limit
   await pause.click();
   await dialog.getByRole("button", { name: "Save Changes" }).click();
   await expect(page.locator("body")).toHaveAttribute("data-thread-limits", '{"costUsd":25,"launchedSessions":4}');
+});
+
+test("an older server that advertises account changes can save one while spending stays read-only", async ({ page }) => {
+  const dialog = await open(page, undefined, "limits=old&accounts=stress");
+  await expect(dialog.getByRole("textbox", { name: "Session Launch Limit" })).toBeDisabled();
+  await dialog.getByRole("button", { name: "Change… Account" }).click();
+  const picker = page.getByRole("dialog", { name: "Change Account" });
+  await picker.getByRole("radio", { name: "Studio Subscription", exact: true }).check();
+  await picker.getByRole("button", { name: "Use Account" }).click();
+  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  await page.getByRole("button", { name: "Confirm and Save" }).click();
+  await expect(page.locator("body")).toHaveAttribute("data-changed-account", /acct:/);
+  await expect(page.locator("body")).not.toHaveAttribute("data-thread-limits", /.+/);
 });
