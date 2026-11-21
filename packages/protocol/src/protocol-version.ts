@@ -1555,6 +1555,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 404: Install and update a managed Google Antigravity CLI from Connections, verified against Google's release manifest (Refs #4780).
   404,
   // v405 slot
+  // 405: Structured Wollipog prompt origins in session history (#4800).
+  405,
   // v406 slot
   // v407 slot
   // v408 slot

@@ -772,7 +772,7 @@ export function createAssistantThreads(db: ControlPlaneDb, hub: Hub, svc: Sessio
 
 /** The production composition of thread owner confirmations (#4665), shared with tests. Approved
  * commands run through `operations`, so they take each operation's own receipt path. */
-export function createAssistantOwnerConfirmationService(db: ControlPlaneDb, svc: { prompt(sessionId: string, text: string): { ok: boolean } },
+export function createAssistantOwnerConfirmationService(db: ControlPlaneDb, svc: { promptWollipogNotice(sessionId: string, text: string, origin: import("@wollipog/protocol").WollipogPromptOrigin): { ok: boolean } },
   operations: Pick<AssistantOperations, "callOwnerApproved">): AssistantOwnerConfirmationService {
   const receipts = new AssistantCommandReceipts(db.raw());
   const service = new AssistantOwnerConfirmationService({
@@ -789,11 +789,11 @@ export function createAssistantOwnerConfirmationService(db: ControlPlaneDb, svc:
     run: (connectionId, operation, args, id) => operations.callOwnerApproved(connectionId, operation, args, id),
     // The outcome reaches the assistant as a message in its own conversation, queued if it is
     // busy. A refused admission (its runner offline, say) is retried until it is admitted.
-    tell: (threadId, text) => {
+    tell: (threadId, text, origin) => {
       const row = db.assistantThreads.get(threadId);
       const session = row?.session_id ? db.getSession(row.session_id) : null;
       if (row?.state !== "active" || !session || session.archived) return "gone";
-      return svc.prompt(session.id, text).ok ? "delivered" : "retry";
+      return svc.promptWollipogNotice(session.id, text, origin).ok ? "delivered" : "retry";
     },
   });
   db.assistantConnections.onChange((connectionId) => {

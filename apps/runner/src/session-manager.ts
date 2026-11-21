@@ -1,3 +1,4 @@
+import { OWNER_CONFIRMATION_NOTICE_PREFIX, type PromptSessionMessage, type WollipogPromptOrigin } from "@wollipog/protocol";
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
 import { isProviderCapacityFailure, PROVIDER_RETRY_CONTINUATION } from "./provider-turn-retry.js";
 import { artifactGuidance } from "./artifact-guidance.js";
@@ -694,6 +695,7 @@ interface QueuedPrompt {
   /** Control-plane-authenticated campaign or review continuation, distinct from human input.
    * This historical name also persists in user_message and authentication-retry records. */
   campaignContinuation?: boolean;
+  promptOrigin?: WollipogPromptOrigin;
   /** Durable managed jobs whose barrier terminal observation caused this continuation. */
   backgroundJobIds?: string[];
   /** Submit-only continuation for a lost callback or an async question answered in a later turn. */
@@ -11824,6 +11826,12 @@ export class SessionManager {
     this.nextQueueOrdinalBySession.delete(sessionId);
   }
 
+  promptFromControlPlane(command: PromptSessionMessage, durable?: DurableCommandLifecycle): boolean {
+    return this.prompt(command.sessionId, command.text, command.images, command.slashCommand, command.config,
+      durable, false, undefined, false, undefined, undefined, undefined,
+      Boolean(durable && (command.campaignContinuation || command.reviewContinuation)), false, false, command.promptOrigin);
+  }
+
   prompt(
     sessionId: string,
     text: string,
@@ -11841,6 +11849,7 @@ export class SessionManager {
     /** The launch's own initial prompt, which precedes whatever queued up while it was admitted. */
     launchInitialPrompt = false,
     providerRecovery = false,
+    promptOrigin?: WollipogPromptOrigin,
   ): boolean {
     const recoveryLaunch = this.launchGenerations.get(sessionId);
     const admittedRecoveryLaunch = recoveryLaunch !== undefined && this.preLaunchAdmissionGenerations.get(sessionId) === recoveryLaunch;
@@ -11984,6 +11993,7 @@ export class SessionManager {
           reservedOrdinal,
           recoveredQuestion,
           campaignContinuation,
+          promptOrigin,
         );
       }
       this.emitEvent(sessionId, {
@@ -12016,7 +12026,7 @@ export class SessionManager {
         images,
         slashCommand,
         config: effectiveConfig, durable, syntheticRecovery, providerRecovery, backgroundJobIds, recoveredQuestion,
-        campaignContinuation,
+        campaignContinuation, promptOrigin,
       });
       if (!this.recoveryLaunching.has(sessionId)) {
         setImmediate(() => void this.recoverQueuedAppServer(sessionId).catch((error) =>
@@ -12043,7 +12053,7 @@ export class SessionManager {
         id: queuedPromptId ?? durable?.commandId ?? randomUUID(),
         ordinal: reservedOrdinal ?? this.nextQueueOrdinal(sessionId), text, images, slashCommand,
         config: effectiveConfig, durable, syntheticRecovery, providerRecovery, backgroundJobIds, recoveredQuestion,
-        campaignContinuation,
+        campaignContinuation, promptOrigin,
       });
       this.preLaunchQueues.set(sessionId, queue);
       this.emitQueue(sessionId);
@@ -12067,6 +12077,7 @@ export class SessionManager {
         queuedPromptId,
         campaignContinuation,
         providerRecovery,
+        promptOrigin,
       ).catch((error) => {
         // resumeAndPrompt handles EXPECTED failures internally (durable.failed / error events). An
         // UNEXPECTED throw (e.g. a JSON.stringify RangeError writing a pathological config) escapes
@@ -12110,7 +12121,7 @@ export class SessionManager {
       images,
       slashCommand,
       config: effectiveConfig, durable, syntheticRecovery, providerRecovery, backgroundJobIds, recoveredQuestion,
-      campaignContinuation,
+      campaignContinuation, promptOrigin,
     });
     this.emitQueue(sessionId);
     this.scheduleDrain(sessionId);
@@ -12761,7 +12772,7 @@ export class SessionManager {
               operation.result?.disposition !== "uncertain" || operation.result.reason !== "transport_uncertain" || operation.resolved ||
               this.active.get(request.sessionId)?.client !== entry!.client) return;
           if (!this.appendAcceptedSteeringEvent(request.sessionId, request.turnId,
-            request.submissionId, displayText, imageInputs)) return;
+            request.submissionId, displayText, imageInputs, undefined, source?.promptOrigin)) return;
           operation.result = this.makeSteeringResult(request, "accepted", "accepted", { providerTurnId });
           operation.promise = Promise.resolve(operation.result);
           const current = this.active.get(request.sessionId);
@@ -12817,6 +12828,7 @@ export class SessionManager {
       displayText,
       imageInputs,
       source?.durable,
+      source?.promptOrigin,
     );
     if (!persisted) {
       return this.makeSteeringResult(request, "uncertain", "history_integrity_failure", {
@@ -13068,6 +13080,7 @@ export class SessionManager {
     text: string,
     images: PromptImageInput[],
     durable?: DurableCommandLifecycle,
+    promptOrigin?: WollipogPromptOrigin,
   ): boolean {
     // Landing pending text can itself latch a history failure, so check only after it.
     this.flushTextDeltas(sessionId);
@@ -13080,6 +13093,7 @@ export class SessionManager {
         turnId,
         submissionId,
         deliveryIntent: "steer",
+        ...this.promptEventOrigin(text, promptOrigin),
         ...(durable ? { commandId: durable.commandId } : {}),
       };
       const stored = this.store.appendEvent(sessionId, payload);
@@ -13198,6 +13212,9 @@ export class SessionManager {
   private queuedPromptEditEligibility(prompt: QueuedPrompt): { eligible: true } | { eligible: false; message: string } {
     if (prompt.durable) {
       return { eligible: false, message: "Messages controlled by durable delivery cannot be edited until delivery resolves." };
+    }
+    if (prompt.promptOrigin) {
+      return { eligible: false, message: "Wollipog notices cannot be edited after admission." };
     }
     if (prompt.sessionCommand) {
       return { eligible: false, message: "Provider commands cannot be edited after admission." };
@@ -13994,6 +14011,7 @@ export class SessionManager {
     queuedPromptId?: string,
     campaignContinuation = false,
     providerRecovery = false,
+    promptOrigin?: WollipogPromptOrigin,
   ): Promise<void> {
     const meta = this.store.readMeta(sessionId);
     if (providerRecovery && (!meta || meta.status === "stopped" || !meta.agentSessionId || !canResumeSession(meta))) return;
@@ -14153,7 +14171,7 @@ export class SessionManager {
         providerRecovery,
         backgroundJobIds,
         recoveredQuestion,
-        campaignContinuation,
+        campaignContinuation, promptOrigin,
       });
       this.preLaunchQueues.set(sessionId, queue);
     }
@@ -14239,6 +14257,7 @@ export class SessionManager {
           reservedOrdinal,
           recoveredQuestion,
           campaignContinuation,
+          promptOrigin,
         );
       } else if (blocked?.providerAuthBlock?.delivery === "not_delivered" &&
           blocked.providerAuthRetryAttemptedRecoveryId !== blocked.providerAuthBlock.recoveryId &&
@@ -14250,6 +14269,7 @@ export class SessionManager {
               ...(reservedOrdinal ? { ordinal: reservedOrdinal } : {}),
               text,
               images: [],
+              ...(promptOrigin ? { promptOrigin } : {}),
               ...(slashCommand ? { slashCommand } : {}),
               ...(config ? { config } : {}),
             },
@@ -14316,6 +14336,7 @@ export class SessionManager {
         campaignContinuation,
         false,
         providerRecovery,
+        promptOrigin,
       );
     }
   }
@@ -17299,10 +17320,12 @@ export class SessionManager {
                 backgroundJobIds.includes(job.id) && job.restartedAt !== undefined && !job.restartResumed)
               ? "Runner reported the background work of the conversation the restart replaced."
               : "Runner continued after managed background work completed.",
+          ...(backgroundJobIds?.length ? { backgroundPrompt: { origin: { kind: "background_result" as const }, text } } : {}),
         })
       : this.emitEvent(sessionId, {
           kind: "user_message",
           text: displayText,
+          ...this.promptEventOrigin(displayText, queued.promptOrigin),
           images: imageInputs.length ? imageInputs : undefined,
           ...(campaignContinuation ? { campaignContinuation: true as const } : {}),
           ...(durable ? { commandId: durable.commandId } : {}),
@@ -19407,6 +19430,7 @@ export class SessionManager {
           prompt.campaignContinuation,
           false,
           prompt.providerRecovery,
+          prompt.promptOrigin,
         );
       }
     });
@@ -22087,6 +22111,13 @@ export class SessionManager {
     this.textDeltaCoalescers.delete(sessionId);
   }
 
+  private promptEventOrigin(text: string, origin?: WollipogPromptOrigin): { promptOrigin?: WollipogPromptOrigin | null } {
+    if (origin) return { promptOrigin: origin };
+    if (text.startsWith(OWNER_CONFIRMATION_NOTICE_PREFIX) &&
+        runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "wollipogPromptOrigin")) return { promptOrigin: null };
+    return {};
+  }
+
   private emitEvent(
     sessionId: string,
     payload: SessionEventPayload,
@@ -24739,6 +24770,7 @@ export class SessionManager {
     reservedOrdinal: number | undefined,
     recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
     campaignContinuation = false,
+    promptOrigin?: WollipogPromptOrigin,
   ): boolean {
     const block = meta.providerAuthBlock;
     if (!block) return false;
@@ -24771,6 +24803,7 @@ export class SessionManager {
         ...(slashCommand ? { slashCommand } : {}),
         ...(config ? { config } : {}),
         ...(campaignContinuation ? { campaignContinuation: true as const } : {}),
+        ...(promptOrigin ? { promptOrigin } : {}),
         ...(recoveredQuestion ? { recoveredQuestion } : {}),
       };
       this.ensureQueueOrdinal(meta.sessionId, retry);
@@ -24903,6 +24936,7 @@ export class SessionManager {
           "recoveredQuestion" in retry ? retry.recoveredQuestion : undefined,
           undefined,
           "campaignContinuation" in retry && retry.campaignContinuation === true,
+          false, false, retry.promptOrigin,
         );
         if (!accepted && "commandId" in retry && retry.recoveredQuestion) {
           refusedRecoveredQuestion = { commandId: retry.commandId, question: retry.recoveredQuestion };

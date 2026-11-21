@@ -331,6 +331,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerLogin: 171,
   /** v403 (Refs #4780): Google Antigravity runtime and sign-in setup from Connections. */
   antigravitySetup: 403,
+  /** Peers distinguish server-authored prompts from ordinary text matching the legacy prefix. */
+  wollipogPromptOrigin: 405,
   /** v404 (Refs #4780): a managed Google Antigravity install and update from Connections. */
   antigravityManagedInstall: 404,
   providerAccountRemoval: 188,
@@ -6499,6 +6501,8 @@ export type SessionEventPayload =
   | {
       kind: "user_message";
       text: string;
+      /** Null explicitly identifies ordinary input matching the legacy notice prefix. */
+      promptOrigin?: WollipogPromptOrigin | null;
       images?: PromptImageInput[];
       /** Runner-authenticated automatic campaign or review turn; preserves earlier async questions.
        * The historical field name is retained for persisted event compatibility. */
@@ -6573,6 +6577,8 @@ export type SessionEventPayload =
       textRefs?: EventPayloadReference[];
       /** Authenticated runner-only durable marker. Provider stderr can never set this field. */
       runnerMarker?: "background_continuation_delivery";
+      /** Managed background turns retain their diagnostic event on older UIs. */
+      backgroundPrompt?: { origin: { kind: "background_result" }; text: string };
     }
   | {
       kind: "background_continuation_delivered";
@@ -10643,7 +10649,24 @@ export interface StartSessionMessage {
   initialImages?: PromptImageInput[];
 }
 
+export const OWNER_CONFIRMATION_NOTICE_PREFIX = "[Wollipog Owner Confirmation]";
+
+/** Display metadata for a prompt authored by Wollipog, never input to the provider. */
+export type WollipogPromptOrigin =
+  | {
+      kind: "owner_confirmation";
+      confirmationId: string;
+      outcome: "approved" | "denied" | "expired" | "refused";
+      title: string;
+      target: { kind: string; id: string; label: string };
+      receiptStatus?: NonNullable<import("./assistant-threads.js").AssistantOwnerConfirmation["outcome"]>["receiptStatus"];
+      resolvedAt?: number;
+    }
+  | { kind: "background_result" | "delegation_notice" | "scheduled_wake" | "system_notice" };
+
 export interface PromptSessionMessage {
+  /** Set only by the control plane for server-authored prompts. */
+  promptOrigin?: WollipogPromptOrigin;
   /** v360: server-created approved root issue-closure notification. This marks only its durable
    * receipt as eligible for safe queue promotion; public prompt APIs never accept this field. */
   issueClosureResume?: true;

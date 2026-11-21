@@ -211,6 +211,10 @@ test("the owner grants and revokes exact typed resolution, and Assistant calls n
     assert.equal(recorded.assistantDelegation?.reason, resolution.reason);
     assert.equal(recorded.assistantDelegation?.grantRevision, 5);
     assert.ok(decisionPrompts(h, "child").some((prompt) => prompt.includes(`Assistant thread "Release Assistant" ("${thread.id}") under your owner's delegation`)));
+    const delegatedPrompt = h.db.raw().prepare(
+      "SELECT payload_json FROM session_prompt_commands WHERE session_id=? AND json_extract(payload_json, '$.promptOrigin.kind')='delegation_notice'",
+    ).get("child") as { payload_json: string } | undefined;
+    assert.ok(delegatedPrompt, "delegation provenance persists with the durable prompt");
     const audit = h.db.listGovernanceAudit("child").find((entry) => entry.requestId === occurrenceId && entry.outcome === "allowed");
     assert.equal(audit?.actor.kind, "agent");
     assert.equal(audit?.workflowDecision?.assistantDelegation?.threadId, thread.id);
