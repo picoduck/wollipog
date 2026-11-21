@@ -545,6 +545,11 @@ export class AntigravitySetupSupervisor {
     if (this.installing) throw new Error("Google Antigravity is already being installed on this machine.");
     if (this.signIn && !this.signIn.ended) throw new Error("Finish or cancel the Google sign-in before installing.");
     if (this.checking) throw new Error("Google Antigravity is being checked. Try again when the check finishes.");
+    // An earlier update that was never verified (or whose rollback failed) is undone first: its
+    // record names the last working version. Until it can be undone, nothing new is installed.
+    if (!this.recoverPendingActivation()) {
+      throw new Error("Wollipog hasn't restored the version before the last update yet. Check that the runner can write its data folder, then check again.");
+    }
     const operation: AntigravityInstallOperationView = {
       operationId: `agy_install_${randomUUID()}`,
       kind: this.readManaged() ? "update" : "install",
@@ -664,15 +669,23 @@ export class AntigravitySetupSupervisor {
     return this.releasePlatformKey;
   }
 
-  /** Undo an unverified activation, then re-read the managed pointers. */
-  private recoverPendingActivation(): void {
+  /** Undo an unverified activation, then re-read the managed pointers. Returns false while one is
+   * still pending (its restore failed again). */
+  private recoverPendingActivation(): boolean {
     const recovered = this.store.recoverPending();
     if (recovered.found) {
       this.options.log?.(recovered.restored
         ? "Google Antigravity: restored the managed version an unverified update replaced."
         : "Google Antigravity: an unverified update couldn't be undone yet; it will be retried at the next check.");
     }
+    // A failed rollback is no longer pending once the restore succeeds: the outcome becomes the
+    // failed check it began with, and the restored version is reported as kept.
+    const operation = this.managed.operation;
+    if (recovered.restored && operation?.status === "failed" && operation.failure === "rollback_failed") {
+      this.managed.operation = { ...operation, failure: "access_check_failed" };
+    }
     this.readManaged();
+    return !recovered.found || recovered.restored;
   }
 
   /** Re-read the managed pointers from disk. Returns the current generation, if intact. */
@@ -875,7 +888,18 @@ export class AntigravitySetupSupervisor {
           restored ? "The new release didn't pass its check with this machine's sign-in, so it was rolled back."
             : "The new release didn't pass its check, and restoring the version before it failed.");
       }
-      await this.store.confirm().catch(() => {});
+      try {
+        await this.store.confirm();
+      } catch {
+        // The activation can't be committed (its pending record can't be removed), so the next
+        // check would undo it anyway: undo it now and report the failure.
+        let restored = true;
+        try { await this.store.rollback(activation); } catch { restored = false; }
+        this.readManaged();
+        if (!this.stopped) await this.runCheck("never");
+        throw new AntigravityInstallError(restored ? "activation_failed" : "rollback_failed",
+          "The runner couldn't commit the new release.");
+      }
       this.readManaged();
       this.managed.latest = { version: release.version, checkedAt: this.now() };
       // Provenance for the runner's log and the generation's release.json: what was verified.

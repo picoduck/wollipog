@@ -301,6 +301,11 @@ test("activation swaps current atomically, keeps exactly one previous generation
   writeFileSync(join(store.root, "pending-activation.json"), JSON.stringify({ generation: "../escape", replaced: {} }));
   assert.deepEqual(store.recoverPending(), { found: true, restored: false });
   assert.equal(store.read("current")?.id, third.id);
+  // A new activation never replaces a pending record: it names the last working version.
+  await assert.rejects(store.activate(await stage(store, 10, "blocked"), release("1.3.2")),
+    (error: unknown) => error instanceof AntigravityInstallError && error.failure === "activation_failed");
+  assert.equal(store.read("current")?.id, third.id);
+  assert.equal(JSON.parse(readFileSync(join(store.root, "pending-activation.json"), "utf8")).generation, "../escape");
   rmSync(join(store.root, "pending-activation.json"));
   const confirmed = await store.activate(await stage(store, 9, "confirmed"), release("1.3.1"));
   await store.confirm();

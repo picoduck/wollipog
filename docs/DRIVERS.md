@@ -1493,9 +1493,13 @@ Antigravity agent, so Antigravity is not offered in New Session, and nothing her
      when stopping). Only a verified activation removes the pending record, and then the generations
      other than `current` and `previous`, keeping exactly one previous.
   8. Recover: a pending record means an activation was never verified (the runner exited mid-check,
-     or a restore failed). The runner restores the pointers it names at startup, before anything
-     reads `current`, and before each check. A restore that fails reports `rollback_failed` and
-     claims no kept version; the record stays for the next attempt.
+     a restore failed, or the record couldn't be removed to commit it). The runner restores the
+     pointers it names at startup, before anything reads `current`, before each check and before
+     each install. An install refuses to start while a record it can't restore remains, and an
+     activation never replaces one. A restore that fails reports `rollback_failed` and claims no
+     kept version; once a later restore succeeds, the outcome reads `access_check_failed` (the
+     previous version kept). A verified activation whose record can't be removed is rolled back and
+     reported as failed, never as a success.
 
   Any failure removes the staging folder, leaves `current` untouched and reports a distinct
   `managedInstall.operation.failure` (`platform_not_supported`, `installer_not_recognized`,

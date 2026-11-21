@@ -607,6 +607,11 @@ export class AntigravityManagedStore {
     if (!proceed()) throw stopped();
     const directory = join(generations, staging.id);
     await rename(staging.directory, directory);
+    // An unfinished activation's record names the last working version: never replace it.
+    if (existsSync(this.pendingPath())) {
+      await rm(directory, { recursive: true, force: true }).catch(() => {});
+      throw new AntigravityInstallError("activation_failed", "An earlier activation is still pending.");
+    }
     const replaced = { ...this.target("current"), ...this.target("previous") };
     const activation: AntigravityActivation = { generation: { id: staging.id, directory, release }, replaced };
     try {
@@ -626,7 +631,8 @@ export class AntigravityManagedStore {
    * names, so one previous remains. */
   async confirm(): Promise<void> {
     await rm(this.pendingPath(), { force: true });
-    await this.prune();
+    // Removing older generations is best effort: a leftover is removed by the next confirm.
+    await this.prune().catch(() => {});
   }
 
   /** Undo an activation: restore both pointers to what they named before, then remove the new

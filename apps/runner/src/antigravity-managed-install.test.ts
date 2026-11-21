@@ -454,37 +454,44 @@ test("an update is verified by itself: a working PATH copy can't pass it on the 
   assertAllValid(published);
 });
 
-test("a rollback that fails is reported as such, and the next check restores the version it replaced", async () => {
+/** A ready managed 1.5.14, then an update to `candidate` during which the managed folder becomes
+ * unwritable as soon as the candidate's own check starts (its pointers have already moved). */
+async function updateWithBlockedFolder(candidate: Buffer) {
   const server = new FakeReleaseServer();
   server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
-  let blockAfterActivation = false;
-  let managedRootRef = "";
+  let block = false;
+  let root = "";
   const views: AntigravitySetupView[] = [];
-  const { setup, managedRoot } = supervisor(server, {
+  const created = supervisor(server, {
     onUpdate: (view) => {
       views.push(view);
-      // The candidate's own check has started: the pointers already moved. Make the folder
-      // unwritable so the rollback's new symlinks can't be created.
-      if (blockAfterActivation && view.managedInstall?.operation?.stage === "activating" && view.status === "checking") {
-        blockAfterActivation = false;
-        chmodSync(managedRootRef, 0o500);
+      if (block && view.managedInstall?.operation?.stage === "activating" && view.status === "checking") {
+        block = false;
+        chmodSync(root, 0o500);
       }
     },
   });
-  managedRootRef = managedRoot;
-  await install(setup);
-  const working = readlinkSync(join(managedRoot, "current"));
+  root = created.managedRoot;
+  await install(created.setup);
+  const working = readlinkSync(join(root, "current"));
+  server.publish({ platform: PLATFORM, version: "1.6.0", archive: candidate });
+  block = true;
+  created.setup.startInstall();
+  const failed = await until(created.setup, (view) => view.managedInstall?.operation?.status === "failed" && view.status !== "checking");
+  return { ...created, server, views, working, failed, unblock: () => chmodSync(root, 0o700) };
+}
 
-  server.publish({ platform: PLATFORM, version: "1.6.0", archive: release("1.6.0", "session_error") });
-  blockAfterActivation = true;
-  setup.startInstall();
-  const failed = await until(setup, (view) => view.managedInstall?.operation?.status === "failed" && view.status !== "checking");
+test("a rollback that fails is reported as such, blocks new installs, and the next check restores the version it replaced", async () => {
+  const blocked = await updateWithBlockedFolder(release("1.6.0", "session_error"));
+  const { setup, managedRoot, working, failed, views } = blocked;
   try {
     assert.equal(failed.managedInstall?.operation?.failure, "rollback_failed");
     assert.notEqual(readlinkSync(join(managedRoot, "current")), working, "the rejected version is still current");
     assert.ok(existsSync(join(managedRoot, "pending-activation.json")), "the pending record stays for a retry");
+    // Nothing new is installed over a record that still names the last working version.
+    assert.throws(() => setup.startInstall(), /hasn't restored the version before the last update/u);
   } finally {
-    chmodSync(managedRoot, 0o700);
+    blocked.unblock();
   }
   const recovered = await setup.check("never");
   assert.equal(readlinkSync(join(managedRoot, "current")), working);
@@ -492,7 +499,40 @@ test("a rollback that fails is reported as such, and the next check restores the
   assert.equal(recovered.status, "ready");
   assert.equal(recovered.executable?.version, "1.5.14");
   assert.equal(recovered.managedInstall?.active?.version, "1.5.14");
+  // Once restored, the outcome is the failed check the update began with, not a pending rollback.
+  assert.equal(recovered.managedInstall?.operation?.failure, "access_check_failed");
   assertAllValid(views);
+});
+
+test("Try Again after a failed rollback first restores the last working version", async () => {
+  const blocked = await updateWithBlockedFolder(release("1.6.0", "session_error"));
+  const { setup, managedRoot, working, failed } = blocked;
+  assert.equal(failed.managedInstall?.operation?.failure, "rollback_failed");
+  blocked.unblock();
+  // The same broken release, retried before any check.
+  const retried = await install(setup);
+  assert.equal(retried.managedInstall?.operation?.failure, "access_check_failed");
+  assert.equal(readlinkSync(join(managedRoot, "current")), working);
+  assert.equal(existsSync(join(managedRoot, "pending-activation.json")), false);
+  const checked = await setup.check("never");
+  assert.equal(readlinkSync(join(managedRoot, "current")), working);
+  assert.equal(checked.executable?.version, "1.5.14");
+});
+
+test("an update that passes its check but can't be committed is not reported as a success", async () => {
+  // A healthy candidate: only the folder fault stops it.
+  const blocked = await updateWithBlockedFolder(release("1.6.0"));
+  const { setup, managedRoot, working, failed } = blocked;
+  try {
+    assert.notEqual(failed.managedInstall?.operation?.status, "succeeded");
+    assert.equal(failed.managedInstall?.operation?.failure, "rollback_failed");
+    assert.ok(existsSync(join(managedRoot, "pending-activation.json")));
+  } finally {
+    blocked.unblock();
+  }
+  const recovered = await setup.check("never");
+  assert.equal(readlinkSync(join(managedRoot, "current")), working);
+  assert.equal(recovered.executable?.version, "1.5.14");
 });
 
 test("a runner that exits mid-verification restores the replaced version when it starts again", async () => {
