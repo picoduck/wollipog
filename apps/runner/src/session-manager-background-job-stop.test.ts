@@ -282,6 +282,13 @@ test("a queued Wollipog notice records its origin and sends the original text to
     const messages = store.readEvents(spec.sessionId).flatMap(({ payload }) =>
       payload.kind === "user_message" ? [{ text: payload.text, origin: payload.promptOrigin }] : []);
     assert.deepEqual(messages, [{ text: "First prompt", origin: undefined }, { text, origin: promptOrigin }]);
+    const ordinaryText = "[Wollipog Owner Confirmation] is a label discussed in this test.";
+    manager.prompt(spec.sessionId, ordinaryText);
+    await waitFor(() => fake.prompts.length === 3, "the ordinary prompt did not reach the provider");
+    const lastMessage = store.readEvents(spec.sessionId).findLast(({ payload }) => payload.kind === "user_message")?.payload;
+    assert.equal(lastMessage?.kind, "user_message");
+    assert.equal(lastMessage.text, ordinaryText);
+    assert.equal(lastMessage.promptOrigin, null);
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

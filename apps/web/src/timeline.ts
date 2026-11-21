@@ -951,7 +951,7 @@ export class TimelineBuilder {
         break;
       case "user_message": {
         this.breakText();
-        const promptOrigin = p.promptOrigin ?? legacyOwnerConfirmationOrigin(p.text);
+        const promptOrigin = p.promptOrigin === undefined ? legacyOwnerConfirmationOrigin(p.text) : p.promptOrigin;
         const userIndex = this.items.push({
           kind: "user_message",
           id: ev.seq,

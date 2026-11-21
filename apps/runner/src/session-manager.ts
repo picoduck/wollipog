@@ -1,4 +1,4 @@
-import type { PromptSessionMessage, WollipogPromptOrigin } from "@wollipog/protocol";
+import { OWNER_CONFIRMATION_NOTICE_PREFIX, type PromptSessionMessage, type WollipogPromptOrigin } from "@wollipog/protocol";
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
 import { isProviderCapacityFailure, PROVIDER_RETRY_CONTINUATION } from "./provider-turn-retry.js";
 import { artifactGuidance } from "./artifact-guidance.js";
@@ -13049,7 +13049,7 @@ export class SessionManager {
         turnId,
         submissionId,
         deliveryIntent: "steer",
-        ...(promptOrigin ? { promptOrigin } : {}),
+        ...this.promptEventOrigin(text, promptOrigin),
         ...(durable ? { commandId: durable.commandId } : {}),
       };
       const stored = this.store.appendEvent(sessionId, payload);
@@ -17281,7 +17281,7 @@ export class SessionManager {
       : this.emitEvent(sessionId, {
           kind: "user_message",
           text: displayText,
-          ...(queued.promptOrigin ? { promptOrigin: queued.promptOrigin } : {}),
+          ...this.promptEventOrigin(displayText, queued.promptOrigin),
           images: imageInputs.length ? imageInputs : undefined,
           ...(campaignContinuation ? { campaignContinuation: true as const } : {}),
           ...(durable ? { commandId: durable.commandId } : {}),
@@ -22058,6 +22058,13 @@ export class SessionManager {
   private closeTextDeltas(sessionId: string): void {
     this.textDeltaCoalescers.get(sessionId)?.close();
     this.textDeltaCoalescers.delete(sessionId);
+  }
+
+  private promptEventOrigin(text: string, origin?: WollipogPromptOrigin): { promptOrigin?: WollipogPromptOrigin | null } {
+    if (origin) return { promptOrigin: origin };
+    if (text.startsWith(OWNER_CONFIRMATION_NOTICE_PREFIX) &&
+        runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "wollipogPromptOrigin")) return { promptOrigin: null };
+    return {};
   }
 
   private emitEvent(

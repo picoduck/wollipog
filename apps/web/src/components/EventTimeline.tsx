@@ -3139,7 +3139,7 @@ function TurnFailedNotice({ message, prompt }: { message: string; prompt?: UserM
   const raw = withoutPromptFailedPrefix(message);
   const reason = prompt?.commandInvocation ? RETRY_TURN_COMMAND_REASON : retry?.unavailableReason;
   const retrying = prompt !== undefined && retry?.pendingPromptId === prompt.id;
-  const actions = retry && prompt && !prompt.promptOrigin && (
+  const actions = retry && prompt && (!prompt.promptOrigin || prompt.promptOrigin.kind === "legacy_confirmation") && (
     <BusyButton
       className="btn sm"
       busy={retrying}
@@ -3298,7 +3298,8 @@ function TurnFooter({ summary, onFork, forkAvailability, prompt, alone = false, 
   const fork = actions.find((action) => action.key === "fork");
   const forkUsable = fork !== undefined && transcriptActionAvailable(fork);
   const groups = [
-    ...(prompt && !prompt.promptOrigin ? [{ label: "Your Message", actions: messageActions(prompt, messageInput) }] : []),
+    ...(prompt && (!prompt.promptOrigin || prompt.promptOrigin.kind === "legacy_confirmation")
+      ? [{ label: "Your Message", actions: messageActions(prompt, messageInput) }] : []),
     { label: "This Turn", actions },
   ];
   return (

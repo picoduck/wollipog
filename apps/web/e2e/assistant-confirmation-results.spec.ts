@@ -5,6 +5,7 @@ import { approvedConfirmationText, legacyConfirmationText, longConfirmationTarge
 import { expectPageNoHorizontalOverflow } from "./layout-invariants.js";
 
 const evidenceDir = process.env.WOLLIPOG_CONFIRMATION_RESULTS_EVIDENCE_DIR;
+const evidenceState = process.env.WOLLIPOG_CONFIRMATION_RESULTS_EVIDENCE_STATE;
 const threadPath = "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA";
 const sessionPath = "/sessions/~" + Buffer.from("sess-flaky", "utf16le").toString("base64url");
 
@@ -75,7 +76,7 @@ async function capture(page: Page, surface: string, dimensions: string, theme: s
     expect(min).toBeGreaterThanOrEqual(44);
     size = "-target" + min + "csspx";
   }
-  if (evidenceDir) {
+  if (evidenceDir && (!evidenceState || evidenceState === state)) {
     mkdirSync(evidenceDir, { recursive: true });
     await page.screenshot({ path: join(evidenceDir, ["4800", surface, dimensions, theme, state].join("-") + size + ".png") });
   }
@@ -101,7 +102,7 @@ for (const theme of ["light", "dark"] as const) {
           ["denied", "You denied Stop Session"],
           ["expired", "Approval expired for Stop Session"],
           ["refused", "Wollipog refused Stop Session"],
-          ["legacy", "You approved Archive Session"],
+          ["legacy", "Unverified Confirmation Message"],
           ["delegation", "Delegated Decision"],
           ["scheduled", "Scheduled Wake-Up"],
         ]) {
@@ -109,9 +110,12 @@ for (const theme of ["light", "dark"] as const) {
           const row = page.locator(".tl-wollipog-prompt");
           await expect(row.locator(".tl-prompt-heading")).toContainText(heading!);
           await expect(row.locator("details")).not.toHaveAttribute("open");
-          if (state === "approved" || state === "legacy") {
+          if (state === "approved") {
             await expect(row.locator(".tl-prompt-fact")).toContainText("Wollipog ran it once · Receipt: Completed");
-            await expect(row.getByRole("button", { name: /Bump the Vite Group/ })).toContainText(state === "approved" ? "Archived" : "Awaiting Input");
+            await expect(row.getByRole("button", { name: /Bump the Vite Group/ })).toContainText("Archived");
+          } else if (state === "legacy") {
+            await expect(row).not.toHaveAttribute("data-confirmation-outcome");
+            await expect(row.locator(".tl-prompt-target")).toHaveCount(0);
           } else if (state !== "delegation" && state !== "scheduled") {
             await expect(row.locator(".tl-prompt-fact")).toContainText("Nothing ran");
             await expect(row.getByRole("button", { name: /Fix the Flaky Upload Test/ })).toContainText("Running");
@@ -121,7 +125,7 @@ for (const theme of ["light", "dark"] as const) {
           }
           if (state === "approved" || state === "legacy") {
             await row.getByText("Details", { exact: true }).click();
-            await expect(row.getByText("Message Wollipog Sent to the Assistant")).toBeVisible();
+            await expect(row.getByText(state === "legacy" ? "Recorded Message" : "Message Wollipog Sent to the Assistant")).toBeVisible();
             expect(await row.locator("pre").textContent()).toBe(state === "approved" ? approvedConfirmationText : legacyConfirmationText);
             if (state === "approved") await capture(page, "assistant-thread", dimensions, theme, "approved-expanded", row);
           }
@@ -130,6 +134,9 @@ for (const theme of ["light", "dark"] as const) {
             await expect(row.getByRole("button", { name: /Fix the Flaky Upload Test/ })).toContainText("Completed");
           }
         }
+        await open(page, theme, "ordinary");
+        await expect(page.locator(".tl-row.user").last()).toContainText(legacyConfirmationText);
+        await expect(page.locator(".tl-wollipog-prompt")).toHaveCount(0);
         await open(page, theme, "stress");
         const stressedRow = page.locator('[data-confirmation-outcome="refused"]');
         await expect(stressedRow).toContainText(longConfirmationTarget);

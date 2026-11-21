@@ -33,6 +33,8 @@ export function confirmationResultFixture(scenario: string): Payload[] {
       return [confirmation(scenario)];
     case "legacy":
       return [{ kind: "user_message", text: legacyConfirmationText }];
+    case "ordinary":
+      return [{ kind: "user_message", text: legacyConfirmationText, promptOrigin: null }];
     case "scheduled":
       return [{ kind: "user_message", text: "The campaign has resumed. Continue the preserved work.", promptOrigin: { kind: "scheduled_wake" } }];
     case "delegation":

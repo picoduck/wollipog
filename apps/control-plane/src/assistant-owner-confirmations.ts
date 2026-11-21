@@ -1,4 +1,4 @@
-import type { WollipogPromptOrigin } from "@wollipog/protocol";
+import { OWNER_CONFIRMATION_NOTICE_PREFIX as NOTICE, type WollipogPromptOrigin } from "@wollipog/protocol";
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import {
@@ -410,7 +410,6 @@ export interface AssistantOwnerConfirmationServiceDeps {
   now?(): number;
 }
 
-const NOTICE = "[Wollipog Owner Confirmation]";
 /** An outcome undelivered this long after its request ended is no longer news to the assistant. */
 export const OWNER_CONFIRMATION_NOTICE_RETRY_MS = 24 * 60 * 60 * 1000;
 

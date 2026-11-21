@@ -1645,10 +1645,7 @@ export class AutomationsService {
         result = this.sessions.prompt(
           session.id, request.text, [], request.slashCommand,
           { ...(request.config ?? {}), costBudgetUsd, maxToolCalls },
-          {
-            ...this.deliveryOptions(automation, execution, {}, now, target, commandSnapshots),
-            promptOrigin: { kind: execution.triggerDelivery ? "system_notice" : "scheduled_wake" },
-          },
+          this.deliveryOptions(automation, execution, {}, now, target, commandSnapshots),
         );
       }
     } else {

@@ -25,6 +25,7 @@ const noticeTitles = {
   delegation_notice: "Delegated Decision",
   scheduled_wake: "Scheduled Wake-Up",
   system_notice: "Wollipog Notice",
+  legacy_confirmation: "Unverified Confirmation Message",
 } as const;
 
 const receipts = {
@@ -117,7 +118,7 @@ export function WollipogPromptRow({ origin, text, createdAt, open, onToggle }: {
             Details
           </summary>
           <div className="code-well tl-prompt-message">
-            <strong>Message Wollipog Sent to the Assistant</strong>
+            <strong>{origin.kind === "legacy_confirmation" ? "Recorded Message" : "Message Wollipog Sent to the Assistant"}</strong>
             <pre>{text}</pre>
           </div>
         </details>
