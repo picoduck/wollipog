@@ -3,6 +3,7 @@ import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { awaitWorkerTerminal, budgetApi, main, WORKER_HANDOFF_WAIT_MS } from "./main-ci-health.mjs";
 
 const repository = "example/project", target = "a".repeat(40);
@@ -91,4 +92,69 @@ test("worker terminal job dispatches health with literal command and scoped toke
   assert.deepEqual(shells, Array(2).fill('timeout 30 gh workflow run main-ci-health.yml --ref main --repo "$GITHUB_REPOSITORY" -f worker_run_id="$WORKER_RUN_ID" -f worker_attempt="$WORKER_ATTEMPT"'));
   assert.match(wake, /if: steps.dispatch.outcome == 'failure'/);
   assert.match(wake, /"event":"main_ci_health_wake","delivery":"failed"/);
+});
+
+// Run the entry module itself: importing main() hides pending top-level-await cycles.
+test("rolling CLI reconciles successfully after its real terminal worker handoff", () => {
+  const preload = `globalThis.fetch = async (url, options) => {
+    const path = new URL(url).pathname;
+    let status = 200, body;
+    if (path === "/repos/${repository}/actions/runs/10") body = ${JSON.stringify(run({ status: "completed", conclusion: "success" }))};
+    else if (path.endsWith("/git/ref/heads/ci/main-rolling-state")) { status = 404; body = {}; }
+    else if (path.endsWith("/git/ref/heads/main")) body = { object: { sha: "${target}" } };
+    else if (path.endsWith("/runs")) body = { total_count: 0, workflow_runs: [] };
+    else if (path.endsWith("/git/trees") || path.endsWith("/git/commits")) body = { sha: "${target}" };
+    else if (path === "/repos/${repository}") body = { node_id: "repo" };
+    else if (path === "/graphql") body = { data: { updateRefs: {} } };
+    else if (path.endsWith("/dispatches") && options.method === "POST") { status = 204; }
+    else throw new Error("Unexpected fixture request");
+    return new Response(status === 204 ? null : JSON.stringify(body), { status });
+  };`;
+  const child = spawnSync(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(preload),
+    new URL("./main-rolling-validation.mjs", import.meta.url).pathname, "reconcile"], {
+    encoding: "utf8", timeout: 10_000,
+    env: { ...process.env, GITHUB_REPOSITORY: repository, GITHUB_REF: "refs/heads/main",
+      GITHUB_TOKEN: "test-token", MAIN_ROLLING_WORKER_RUN_ID: "10", MAIN_ROLLING_WORKER_ATTEMPT: "1",
+      GITHUB_STEP_SUMMARY: "" },
+  });
+  assert.ifError(child.error); assert.equal(child.signal, null);
+  assert.equal(child.status, 0, child.stderr);
+  assert.doesNotMatch(child.stderr, /unsettled top-level await/);
+  const events = child.stdout.trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(events[0].event, "main_rolling_handoff"); assert.equal(events[0].status, "completed");
+  assert.equal(events[1].event, "main_rolling_reconciled");
+  assert.equal(events[1].pending.targetSha, target);
+});
+
+test("rolling CLI completes its real worker handoff and fails closed on a later API refusal", () => {
+  for (const changed of [false, true]) {
+    const worker = run({ status: "completed", conclusion: "success", ...(changed ? { run_attempt: 2 } : {}) });
+    const preload = `globalThis.fetch = async (url, options) => {
+      if (options.method !== "GET") throw new Error("Unexpected fixture mutation");
+      const path = new URL(url).pathname;
+      console.log(JSON.stringify({ fixtureRequest: path }));
+      if (path === "/repos/${repository}/actions/runs/10")
+        return new Response(JSON.stringify(${JSON.stringify(worker)}), { status: 200 });
+      return new Response("private response must stay hidden", { status: 503 });
+    };`;
+    const child = spawnSync(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(preload),
+      new URL("./main-rolling-validation.mjs", import.meta.url).pathname, "reconcile"], {
+      encoding: "utf8", timeout: 10_000,
+      env: { ...process.env, GITHUB_REPOSITORY: repository, GITHUB_REF: "refs/heads/main",
+        GITHUB_TOKEN: "test-token", MAIN_ROLLING_WORKER_RUN_ID: "10", MAIN_ROLLING_WORKER_ATTEMPT: "1",
+        GITHUB_STEP_SUMMARY: "" },
+    });
+    assert.ifError(child.error); assert.equal(child.signal, null);
+    assert.equal(child.status, 1, child.stderr);
+    assert.doesNotMatch(child.stderr, /unsettled top-level await|private response|test-token/);
+    const events = child.stdout.trim().split("\n").map(line => JSON.parse(line));
+    assert.deepEqual(events.filter(e => e.fixtureRequest).map(e => e.fixtureRequest), changed
+      ? [`/repos/${repository}/actions/runs/10`]
+      : [`/repos/${repository}/actions/runs/10`, `/repos/${repository}/git/ref/heads/ci/main-rolling-state`]);
+    const handoff = events.find(e => e.event === "main_rolling_handoff");
+    assert.equal(handoff?.status, changed ? undefined : "completed");
+    if (!changed) { assert.equal(handoff.runId, 10); assert.equal(handoff.attempt, 1); assert.equal(handoff.targetSha, target); }
+    assert.equal(JSON.parse(child.stderr.split("\n").find(line => line.startsWith("{"))).failureClass,
+      changed ? "worker-handoff-identity-changed" : "api-error");
+  }
 });

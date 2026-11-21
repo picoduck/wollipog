@@ -20,7 +20,13 @@ test("actual CLI settles its worker back-import and emits bounded unknown eviden
   const preload = `globalThis.fetch = async (url) => {
     const path = new URL(url).pathname;
     let status = 200, body;
-    if (path === "/rate_limit") body = {};
+    if (path === "/repos/${repository}/actions/runs/10") body = {
+      id: 10, run_attempt: 1, status: "completed", conclusion: "success",
+      display_title: "Rolling ${sha} 12345678-1234-1234-1234-123456789012",
+      path: ".github/workflows/main-rolling-validation.yml", event: "workflow_dispatch", head_branch: "main",
+      head_sha: "${sha}", created_at: "2026-10-25T12:00:00Z",
+      repository: { full_name: "${repository}" }, head_repository: { full_name: "${repository}" } };
+    else if (path === "/rate_limit") body = {};
     else if (path.endsWith("/issues")) body = [];
     else if (path.endsWith("/git/ref/heads/ci/main-health-state")) { status = 404; body = {}; }
     else if (path.endsWith("/git/ref/heads/main")) { status = 503; body = {}; }
@@ -38,7 +44,8 @@ test("actual CLI settles its worker back-import and emits bounded unknown eviden
         new URL("./main-ci-health.mjs", import.meta.url).pathname, mode], {
         encoding: "utf8", timeout: 10_000,
         env: { ...process.env, GITHUB_REPOSITORY: repository, GITHUB_REF: "refs/heads/main",
-          GITHUB_TOKEN: "test-token", GITHUB_EVENT_NAME: "schedule", MAIN_CI_HEALTH_OUTPUT: output },
+          GITHUB_TOKEN: "test-token", GITHUB_EVENT_NAME: "workflow_dispatch", MAIN_CI_HEALTH_OUTPUT: output,
+          MAIN_CI_HEALTH_WORKER_RUN_ID: "10", MAIN_CI_HEALTH_WORKER_ATTEMPT: "1" },
       });
       assert.ifError(child.error); assert.equal(child.signal, null);
       assert.equal(child.status, mode === "report" ? 1 : 0, child.stderr);
@@ -46,6 +53,10 @@ test("actual CLI settles its worker back-import and emits bounded unknown eviden
       const health = JSON.parse(mode === "report" ? child.stdout : readFileSync(output, "utf8"));
       assert.equal(health.status, "unknown"); assert.equal(health.fullCertification, null);
       assert.deepEqual(health.reasons, ["forge-api-unavailable"]);
+      if (mode === "reconcile") {
+        assert.equal(health.workerHandoff.status, "completed");
+        assert.equal(health.workerHandoff.targetSha, sha);
+      }
       const usage = (child.stdout + child.stderr).split("\n").filter(Boolean)
         .filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
         .find((entry) => entry.event === "main_ci_health_api_usage");

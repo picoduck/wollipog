@@ -8,10 +8,11 @@ import { candidateReceipt, candidatePlan, cleanCandidates, queueCandidate, valid
 
 import { isSupersededWorkerAttempt } from "./main-rolling-outcomes.mjs";
 import { BROWSER_SHARDS } from "./browser-shard-count.mjs";
+import { WORKER, workerIdentity } from "./main-rolling-identity.mjs";
+export { WORKER, workerIdentity } from "./main-rolling-identity.mjs";
 export { isSupersededWorkerAttempt } from "./main-rolling-outcomes.mjs";
 
 export const STATE_REF = "refs/heads/ci/main-rolling-state";
-export const WORKER = ".github/workflows/main-rolling-validation.yml";
 export const MAX_HISTORY = 32;
 export const COMPACT_EVERY = 128;
 export const RETRY_MS = 10 * 60_000;
@@ -72,16 +73,6 @@ export function validState(s, repository) {
     (s.candidates === undefined || validCandidates(s.candidates)) &&
     Array.isArray(s.records) && s.records.length <= MAX_HISTORY && s.records.every((r) =>
       positive(r?.runId) && positive(r.attempt) && SHA.test(r.targetSha)) && STATUSES.has(s.status);
-}
-
-export function workerIdentity(run, repository) {
-  const match = /^Rolling ([a-f0-9]{40}) ([a-f0-9-]{36})$/.exec(run?.display_title ?? "");
-  if (!REPOSITORY.test(repository) || !match || !UUID.test(match[2]) ||
-      run.path !== WORKER || run.event !== "workflow_dispatch" || run.head_branch !== "main" ||
-      run.repository?.full_name !== repository || run.head_repository?.full_name !== repository ||
-      !positive(run.id) || !positive(run.run_attempt) || !SHA.test(run.head_sha) || !date(run.created_at)) return null;
-  return { targetSha: match[1], claimId: match[2], runId: run.id, attempt: run.run_attempt,
-    workflowRevision: run.head_sha, createdAt: run.created_at };
 }
 
 /** Never certify from the dispatcher head, controller result, state ref, or uploaded artifacts. */
