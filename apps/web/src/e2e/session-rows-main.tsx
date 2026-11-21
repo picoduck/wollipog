@@ -119,6 +119,11 @@ const SESSION_ROWS: readonly InboxListEntry[] = [
     lastEventAt: SESSION_ROWS_NOW - minutes(95) }), projectName: "Docs", unread: false },
   { session: session("session-idle", "Idle: Plan the Next Sessions List Unit", {
     lastEventAt: SESSION_ROWS_NOW - minutes(180), ...branch("plan/sessions-list") }), projectName: "Wollipog", unread: false },
+  // #4791, `?dense=1` only: the status line that used to push a phone card to a fourth line. Two
+  // badges, the strip and a long branch, on an unread card.
+  ...(QUERY.has("dense") ? [{ session: session("session-dense", "Dense: Number-Line Widgets, Merge Main and Edge Cases", {
+    status: "running", lastEventAt: SESSION_ROWS_NOW - minutes(0), backgroundWorkState: "orphaned",
+    ...branch("feat/issue-12-number-line-widgets-v2") }), projectName: "Wollipog", unread: true }] : []),
 ];
 
 const FAMILY = QUERY.has("family");
@@ -143,6 +148,10 @@ const FAMILY_ROWS: readonly InboxListEntry[] = [
     status: "running", lastEventAt: SESSION_ROWS_NOW - minutes(0) }),
   familyChild("family-done", "Completed Child: Roll the Daily Budget Over", {
     status: "completed", lastEventAt: SESSION_ROWS_NOW - minutes(30) }),
+  // #4791: the dense status line again, on an indented child, which has the least room of any card.
+  ...(QUERY.has("dense") ? [familyChild("family-dense", "Dense Child: PR #94 Number-Line Widgets and Edge Cases", {
+    status: "running", lastEventAt: SESSION_ROWS_NOW - minutes(0), backgroundWorkState: "orphaned",
+    ...branch("feat/issue-12-number-line-v2") })] : []),
   ...(QUERY.get("family") === "large" ? Array.from({ length: 12 }, (_, index) =>
     familyChild(`family-extra-${index}`, `Extra Child ${index + 1}`, {
       status: "running", lastEventAt: SESSION_ROWS_NOW })) : []),
@@ -160,6 +169,8 @@ const ACTIVITY = new Map<string, SessionActivity>([
   ["session-stalled", activityAt(17, 18, 21, 23)],
   ["session-starting", activityAt(0)],
   ["session-snoozed-blocked", activityAt(3, 4, 6)],
+  ["session-dense", activityAt(0, 1, 1, 4, 9)],
+  ["family-dense", activityAt(0, 2, 3, 7)],
 ]);
 
 function SessionRows() {
