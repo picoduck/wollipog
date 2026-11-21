@@ -472,6 +472,8 @@ export class AntigravitySetupSupervisor {
   private checking: Promise<AntigravitySetupView> | null = null;
   private signIn: ActiveSignIn | null = null;
   private installing: Promise<void> | null = null;
+  /** What the last ready check verified for session launches (#4779); null otherwise. */
+  private verifiedLaunch: { command: string; managed: boolean; accessObservedAt: number } | null = null;
   private installAbort: AbortController | null = null;
   private managed: ManagedState = {};
   /** Why the last install failed before its rollback failed too. Once a later restore succeeds,
@@ -527,11 +529,26 @@ export class AntigravitySetupSupervisor {
     return { command: executable.path, context: this.credentialContext(executable.source === "managed") };
   }
 
-  /** Settles once no install or update is running (#4779). An update moves `current` before it
-   * verifies the new copy, so a session launch waits for that verification (or its rollback)
-   * before it reads `launchTarget()`. */
-  async installSettled(): Promise<void> {
-    while (this.installing) await this.installing.catch(() => {});
+  /** What a session launch may run (#4779): the executable the last check verified as ready,
+   * once no install, update or check is running. A managed copy is named by its resolved
+   * generation path, which no later update rewrites, never by the movable `current/agy`. Null when
+   * nothing is verified (a failed check, or a rejected release a rollback could not undo). */
+  async verifiedLaunchTarget(): Promise<{ command: string; context: AntigravityCredentialContext; accessObservedAt: number } | null> {
+    while (this.installing || this.checking) {
+      await this.installing?.catch(() => {});
+      await this.checking?.catch(() => {});
+    }
+    const verified = this.verifiedLaunch;
+    return verified
+      ? { command: verified.command, context: this.credentialContext(verified.managed), accessObservedAt: verified.accessObservedAt }
+      : null;
+  }
+
+  /** When the last ready check observed the sign-in working, or undefined without one. A check
+   * publishes after slower work (Google's release lookup), so its `checkedAt` can be later than
+   * what it observed. */
+  accessObservedAt(): number | undefined {
+    return this.verifiedLaunch?.accessObservedAt;
   }
 
   /** Check the runtime and its sign-in. Concurrent calls share one check. While a sign-in or an
@@ -787,8 +804,11 @@ export class AntigravitySetupSupervisor {
     // A working managed copy is preferred. When it fails its version check the PATH copy is the
     // fallback; without one, the managed copy's failure is the result.
     let executable: { path: string; version?: string; source: "managed" | "path" } | undefined;
+    // The managed copy's generation, resolved before it is checked: what a ready result verified.
+    let managedGeneration: string | undefined;
     if (managed) {
       const path = this.store.executablePath();
+      try { managedGeneration = realpathSync(path); } catch { managedGeneration = undefined; }
       const versioned = await version(path, true);
       if (versioned.ok) {
         executable = { path, ...(versioned.version ? { version: versioned.version } : {}), source: "managed" };
@@ -815,8 +835,12 @@ export class AntigravitySetupSupervisor {
       executable = { path: pathCopy, ...(versioned.version ? { version: versioned.version } : {}), source: "path" };
     }
     const access = await this.checkAccess(executable.path, executable.source === "managed");
+    const accessObservedAt = this.now();
     await latestRead;
     if (access.status === "ready") {
+      const isManaged = executable.source === "managed";
+      this.verifiedLaunch = { command: isManaged ? managedGeneration ?? executable.path : executable.path, managed: isManaged,
+        accessObservedAt };
       return this.settleCheck({ ...base, status: "ready", executable, models: access.models, checkedAt: this.now() });
     }
     return this.settleCheck({ ...base, status: access.status, executable,
@@ -999,6 +1023,8 @@ export class AntigravitySetupSupervisor {
   }
 
   private settleCheck(view: AntigravitySetupView): AntigravitySetupView {
+    // Only a ready check verifies what a session may launch (#4779); any other result withdraws it.
+    if (view.status !== "ready") this.verifiedLaunch = null;
     // A sign-in's progress during the check is newer than the check's copy of it.
     const { signIn: _stale, ...rest } = view;
     this.view = { ...rest, ...(this.view.signIn ? { signIn: this.view.signIn } : {}) };

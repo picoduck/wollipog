@@ -1588,10 +1588,13 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   runs the executable the setup currently resolves (`launchTarget()`: the managed copy's
   `current/agy`, with `AGY_CLI_DISABLE_AUTO_UPDATE=true`, or else the PATH copy) as `agy acp`, with
   exactly that copy's `antigravityCredentialContext()` environment, pinned over every later layer
-  (a worktree setup environment cannot turn the managed copy's updater back on). A launch that
-  starts during a managed install or update waits for it to verify or roll back
-  (`installSettled()`), because an update moves `current` before it verifies the new copy. It
-  passes the context's scrub list to `spawnAgent`, which
+  (a worktree setup environment cannot turn the managed copy's updater back on). A launch runs
+  only what the last ready check verified (`verifiedLaunchTarget()`), once no install, update or
+  check is running: a managed copy by its resolved generation path, which no later update
+  rewrites, so a candidate that an update moved `current` to before verifying it is never
+  launched. With nothing verified (a failed check, or a rejected release a rollback could not
+  undo) the launch is refused with the start failure below and nothing is spawned. It passes
+  the context's scrub list to `spawnAgent`, which
   removes those variables from the inherited environment. The profile also withholds every ambient
   credential name and `GOOGLE_CLOUD_*` prefix from the explicit launch environment, whatever layer
   added it (an approved worktree setup environment included). The version check, access check,
@@ -1608,8 +1611,10 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   shared sign-in), `session/load`, `session/list`, and, unless the runner uses `provider` execution
   isolation, `session/resume`. agy's stderr is never mirrored into the transcript or runner log,
   because its fallback log names the signed-in account. An auth-required error from `session/new`,
-  `session/resume` or `session/prompt` marks the agent signed out until a setup check that
-  finishes afterwards confirms the sign-in, never by a republished earlier view (which re-runs the setup check, so
+  `session/resume` or `session/prompt` marks the agent signed out until a setup check whose
+  access probe ran after the report confirms the sign-in, judged by when it observed access
+  rather than when it published (which re-runs the setup check, and once more if the check it
+  joined had probed before the report, so
   New Session and Connections follow) and fails with "needs sign-in on this machine. Sign in from
   Connections". A failed handshake (including a missing executable) fails with "could not be started
   on this machine. Check its setup in Connections". A rejected turn fails with "could not complete

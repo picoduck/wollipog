@@ -511,6 +511,9 @@ export interface SessionLaunchPreparation {
   scrubInheritedEnv?: string[];
   /** ACP only: narrow handling this launch's agent needs (see `acp-compatibility.ts`). */
   acpCompatibility?: DriverOptions["acpCompatibility"];
+  /** The launch must not start a provider (nothing verified to run, #4779). The sentence is the
+   * runner's own and becomes the launch failure; no process is spawned. */
+  launchRefusal?: string;
 }
 
 /** Transcript text for an invoked provider command, spelled the way the harness expects: a
@@ -10578,6 +10581,13 @@ export class SessionManager {
       // session with a new generation (and even a different provider) during that window; the old
       // continuation must not patch or publish its stale launch-local metadata.
       if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
+      if (launchPreparation?.launchRefusal) {
+        // Nothing may be spawned (#4779): fail the launch with the runner's sentence, as a failed
+        // provider start would, before any isolation or provider process is set up.
+        this.emitEvent(sessionId, { kind: "error", message: `agent init failed: ${launchPreparation.launchRefusal}` });
+        this.emitStatus(sessionId, "failed", launchPreparation.launchRefusal);
+        return false;
+      }
       // Repository setup values are resolved runner-side from the immutable base-commit config.
       // Apply them after agent-config refresh so they reach hooks and the provider without ever
       // being persisted in meta.json or projected to the control plane.
@@ -18346,6 +18356,7 @@ export class SessionManager {
         });
         this.rememberAcpCompatibility(source, launchPreparation);
         if (!forkIsCurrent()) throw new Error("conversation fork preparation was canceled");
+        if (launchPreparation?.launchRefusal) throw new Error(launchPreparation.launchRefusal);
         if (sameSlashCommandCatalog(priorSessionSlashCommands, source.sessionSlashCommands)) {
           source.sessionSlashCommands = priorSessionSlashCommands;
         }

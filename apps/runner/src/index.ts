@@ -191,6 +191,7 @@ import {
   withAntigravityAgent,
   withoutAntigravityAgent,
 } from "./antigravity-session.js";
+import { acpCompatibilityFailure } from "./acp-compatibility.js";
 import { createProviderProfileLoginSettlement } from "./provider-profile-login-settlement.js";
 import { runnerCredentialRoots, setCampaignCredentialRoots } from "./campaign-operation-evidence.js";
 import {
@@ -889,8 +890,14 @@ function updateAgentAuthStatus(agentId: string, update: AcpAuthRuntime): void {
   // A session found the shared Antigravity sign-in gone: check the setup again, so New Session
   // and Connections say sign-in is needed rather than offering a session that cannot start.
   if (agentId === ANTIGRAVITY_AGENT_ID && update.status === "unauthenticated" && !configuredAgentIds.has(agentId)) {
-    antigravitySignedOutAt = Date.now();
-    void antigravitySetup.check();
+    const signedOutAt = Date.now();
+    antigravitySignedOutAt = signedOutAt;
+    // A check already in flight may have probed access before this report; then one more check
+    // probes it afresh, so the sign-out stands until a probe made after it says otherwise.
+    void antigravitySetup.check().then((setup) => {
+      const observed = antigravitySetup.accessObservedAt();
+      if (setup.status === "ready" && observed !== undefined && observed <= signedOutAt) void antigravitySetup.check();
+    }, () => {});
   }
   const prior = acpAuthStatus.get(agentId) ?? {};
   if (
@@ -1024,7 +1031,8 @@ function publishAntigravityAgent(setup: AntigravitySetupView): void {
   const row = antigravityAgentDefinition(setup, antigravityLaunchContext(), config.executionIsolation);
   // A sign-in confirmed by a check that finished after a session's sign-out report replaces it.
   const runtime = acpAuthStatus.get(ANTIGRAVITY_AGENT_ID);
-  const staleSignOut = runtime?.status !== undefined && antigravitySignOutSuperseded(setup, antigravitySignedOutAt);
+  const staleSignOut = runtime?.status !== undefined &&
+    antigravitySignOutSuperseded(setup, antigravitySetup.accessObservedAt(), antigravitySignedOutAt);
   if (staleSignOut) {
     if (runtime?.capabilities) acpAuthStatus.set(ANTIGRAVITY_AGENT_ID, { capabilities: runtime.capabilities });
     else acpAuthStatus.delete(ANTIGRAVITY_AGENT_ID);
@@ -1040,19 +1048,21 @@ function publishAntigravityAgent(setup: AntigravitySetupView): void {
 /** An Antigravity session launch (after the shared preparation): the setup's current executable,
  * `agy acp`, and the setup's credential context, whose ambient credentials are dropped both from
  * the inherited environment and from anything the preparation layered on. */
-async function prepareAntigravityLaunch(meta: SessionMeta): Promise<Pick<SessionLaunchPreparation, "scrubInheritedEnv" | "acpCompatibility"> | undefined> {
+async function prepareAntigravityLaunch(
+  meta: SessionMeta,
+): Promise<Pick<SessionLaunchPreparation, "scrubInheritedEnv" | "acpCompatibility" | "launchRefusal"> | undefined> {
   if (meta.agentId !== ANTIGRAVITY_AGENT_ID || configuredAgentIds.has(ANTIGRAVITY_AGENT_ID) ||
       meta.driver !== "acp" || meta.context.kind !== "native") return undefined;
-  // An update moves the managed `current/agy` before it verifies the new copy: wait for that
-  // verification (or its rollback), so a launch never runs an unverified release.
-  await antigravitySetup.installSettled();
-  // The setup's launch target: the checked executable (the managed copy's `current/agy`, or the
-  // PATH copy) and the credential context that copy runs with.
-  const target = antigravitySetup.launchTarget();
+  // Only what the last ready check verified, once no install, update or check is running: a
+  // managed copy by its resolved generation path, which no later update rewrites, so an update
+  // that moves `current` before verifying its candidate can never put that candidate here.
+  const target = await antigravitySetup.verifiedLaunchTarget();
   const launch = antigravitySessionLaunch(antigravitySetup.current(), target?.context ?? antigravitySetup.credentialContext(),
     config.executionIsolation);
-  const command = target?.command ?? launch.command;
-  if (command) meta.command = command;
+  // Nothing verified (a failed check, or a rejected release a rollback could not undo): refuse,
+  // rather than run an executable no check passed.
+  if (!target) return { launchRefusal: acpCompatibilityFailure(launch.acpCompatibility, "start")! };
+  meta.command = target.command;
   meta.args = [...launch.args];
   const env = { ...meta.env };
   for (const name of launch.scrubInheritedEnv) delete env[name];

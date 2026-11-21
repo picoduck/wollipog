@@ -49,3 +49,30 @@ test("launch preparation's credential scrub and ACP compatibility reach the prov
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
+
+// A launch whose preparation finds nothing verified to run (#4779) never constructs a driver: the
+// session fails with the runner's sentence, as a failed provider start would.
+test("a launch refusal from preparation fails the session without spawning a provider", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-acp-refusal-"));
+  const store = new SessionStore(root);
+  let constructed = 0;
+  const manager = new SessionManager(
+    () => {}, () => {}, store, "compat-runner", undefined,
+    () => { constructed++; throw new Error("no driver may be constructed"); },
+    undefined, 4, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, [],
+    () => ({ launchRefusal: "Google Antigravity could not be started on this machine. Check its setup in Connections." }),
+  );
+  try {
+    await manager.start({
+      sessionId: "refused", workspaceId: "workspace", workspacePath: root, agentId: "google-antigravity",
+      driver: "acp", command: "agy", args: ["acp"], env: {}, useWorktree: false, title: "", titleSource: "generated",
+    });
+    assert.equal(constructed, 0);
+    assert.equal(store.readMeta("refused")?.status, "failed");
+    const errors = store.readEvents("refused").flatMap((event) => event.payload.kind === "error" ? [event.payload.message] : []);
+    assert.deepEqual(errors, ["agent init failed: Google Antigravity could not be started on this machine. Check its setup in Connections."]);
+  } finally {
+    manager.shutdownAll();
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});

@@ -95,11 +95,17 @@ export function withAntigravityAgent(
   return row ? [...others, row] : others;
 }
 
-/** Whether a setup confirms the sign-in after a session reported it gone. Only a ready check that
- * finished after the report does: a republished earlier view (install or update progress, say)
- * leaves the session's newer sign-out in place. */
-export function antigravitySignOutSuperseded(setup: Pick<AntigravitySetupView, "status" | "checkedAt">, signedOutAt: number | undefined): boolean {
-  return setup.status === "ready" && (signedOutAt === undefined || setup.checkedAt > signedOutAt);
+/** Whether a setup confirms the sign-in after a session reported it gone. Only a ready check whose
+ * access probe ran after the report does, judged by when it observed access (`accessObservedAt`),
+ * not when it published: a check can publish after slower work, and a republished earlier view
+ * (install or update progress, say) observed nothing new. */
+export function antigravitySignOutSuperseded(
+  setup: Pick<AntigravitySetupView, "status">,
+  accessObservedAt: number | undefined,
+  signedOutAt: number | undefined,
+): boolean {
+  if (setup.status !== "ready") return false;
+  return signedOutAt === undefined || (accessObservedAt !== undefined && accessObservedAt > signedOutAt);
 }
 
 /** The agents external-session discovery and adoption may probe: never the setup-derived

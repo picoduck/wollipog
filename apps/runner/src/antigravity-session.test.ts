@@ -197,10 +197,13 @@ test("a launch uses the setup's executable and exact credential context, and res
   assert.deepEqual(compatibleAcpEnvironment({ AGY_CLI_DISABLE_AUTO_UPDATE: "false", FIXTURE_SETUP_VAR: "kept" },
     managedLaunch.acpCompatibility), { AGY_CLI_DISABLE_AUTO_UPDATE: "true", FIXTURE_SETUP_VAR: "kept" });
   // A session's sign-out stands until a check that finished after it confirms the sign-in.
-  assert.equal(antigravitySignOutSuperseded({ status: "ready", checkedAt: 100 }, 200), false, "a republished earlier view");
-  assert.equal(antigravitySignOutSuperseded({ status: "ready", checkedAt: 300 }, 200), true);
-  assert.equal(antigravitySignOutSuperseded({ status: "sign_in_required", checkedAt: 300 }, 200), false);
-  assert.equal(antigravitySignOutSuperseded({ status: "ready", checkedAt: 100 }, undefined), true);
+  // Judged by when access was observed: a check that probed before the report but published after
+  // it (its release lookup was slower) does not clear the report.
+  assert.equal(antigravitySignOutSuperseded({ status: "ready" }, 100, 200), false, "observed before the sign-out");
+  assert.equal(antigravitySignOutSuperseded({ status: "ready" }, 300, 200), true);
+  assert.equal(antigravitySignOutSuperseded({ status: "ready" }, undefined, 200), false);
+  assert.equal(antigravitySignOutSuperseded({ status: "sign_in_required" }, 300, 200), false);
+  assert.equal(antigravitySignOutSuperseded({ status: "ready" }, 100, undefined), true);
   assert.equal(antigravitySessionLaunch(setup({}), context, PROVIDER).env.AGY_CLI_DISABLE_AUTO_UPDATE, undefined);
 });
 

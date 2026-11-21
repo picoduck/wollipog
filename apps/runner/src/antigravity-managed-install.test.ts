@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { AntigravityManagedStore } from "./antigravity-install.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -487,6 +487,7 @@ test("a rollback that fails is reported as such, blocks new installs, and the ne
   try {
     assert.equal(failed.managedInstall?.operation?.failure, "rollback_failed");
     assert.notEqual(readlinkSync(join(managedRoot, "current")), working, "the rejected version is still current");
+    assert.equal(await setup.verifiedLaunchTarget(), null, "no session can launch the rejected version (#4779)");
     assert.ok(existsSync(join(managedRoot, "pending-activation.json")), "the pending record stays for a retry");
     // Nothing new is installed over a record that still names the last working version.
     assert.throws(() => setup.startInstall(), /hasn't restored the version before the last update/u);
@@ -499,6 +500,8 @@ test("a rollback that fails is reported as such, blocks new installs, and the ne
   assert.equal(recovered.status, "ready");
   assert.equal(recovered.executable?.version, "1.5.14");
   assert.equal(recovered.managedInstall?.active?.version, "1.5.14");
+  assert.equal((await setup.verifiedLaunchTarget())?.command, realpathSync(join(managedRoot, working, "agy")),
+    "after the restore, sessions launch the verified working generation");
   // Once restored, the outcome is the failed check the update began with, not a pending rollback.
   assert.equal(recovered.managedInstall?.operation?.failure, "access_check_failed");
   assertAllValid(views);
@@ -697,14 +700,18 @@ test("a session launch waits for a running install to verify before reading its 
   server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
   const { setup, managedRoot } = supervisor(server);
   await setup.check("never");
-  await setup.installSettled(); // Nothing running: settles at once.
+  assert.equal(await setup.verifiedLaunchTarget(), null, "nothing verified yet: a launch is refused");
   setup.startInstall();
   assert.equal(setup.current().managedInstall?.operation?.status, "running");
-  await setup.installSettled();
+  // Asked while the install runs, the answer waits for it, its verification included.
+  const target = await setup.verifiedLaunchTarget();
   const view = setup.current();
   assert.equal(view.managedInstall?.operation?.status, "succeeded", "the install, its verification included, finished first");
   assert.equal(view.status, "ready");
-  const target = setup.launchTarget();
-  assert.equal(target?.command, join(managedRoot, "current", "agy"));
+  // A session launches the verified generation by its own path, never the movable `current/agy`.
+  const generation = realpathSync(join(managedRoot, "current", "agy"));
+  assert.notEqual(generation, join(managedRoot, "current", "agy"));
+  assert.equal(target?.command, generation);
   assert.equal(target?.context.env.AGY_CLI_DISABLE_AUTO_UPDATE, "true", "the managed copy launches with its updater off");
+  assert.ok((target?.accessObservedAt ?? 0) > 0);
 });
