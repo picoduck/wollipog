@@ -1,4 +1,5 @@
 import {
+  ANTIGRAVITY_AGENT_ID,
   ANTIGRAVITY_SETUP_GUIDANCE,
   ANTIGRAVITY_SIGN_IN_ACTIVE_STATUSES,
   antigravityVersionNewer,
@@ -147,6 +148,28 @@ export function antigravityInstallFailureSentence(failure: AntigravityInstallFai
     default:
       return "Wollipog couldn't write the new version to the runner's data folder.";
   }
+}
+
+/** Whether people can start Google Antigravity sessions on this machine (#4779), from the agent the
+ * runner advertises beside its setup. A ready setup without that agent is an older runner. */
+export function antigravitySessions(runner: Pick<RunnerView, "agents" | "antigravitySetup">, machineName: string): { label: string; sentence: string } {
+  // The agent the runner derives from this setup; an operator-configured agent that happens to use
+  // the id is not it, and says nothing about the setup's sessions.
+  const agent = runner.agents.find((candidate) => candidate.id === ANTIGRAVITY_AGENT_ID && candidate.source !== "config");
+  // The runner never replaces a configured agent with the id, so the setup offers no sessions there.
+  if (!agent && runner.agents.some((candidate) => candidate.id === ANTIGRAVITY_AGENT_ID && candidate.source === "config")) {
+    return { label: "Setup Only", sentence: `A configured agent on ${machineName} already uses the Google Antigravity agent id, so this setup doesn't add Antigravity to New Session.` };
+  }
+  if (agent?.available === true) {
+    return { label: "Available in New Session", sentence: "Available in New Session." };
+  }
+  if (agent && runner.antigravitySetup?.status === "ready") {
+    return { label: "Not in New Session", sentence: "Not available, because this machine's execution isolation denies the network access Antigravity needs." };
+  }
+  if (!agent && runner.antigravitySetup?.status === "ready") {
+    return { label: "Setup Only", sentence: `Update Wollipog on ${machineName} to start Antigravity sessions.` };
+  }
+  return { label: "Not in New Session", sentence: "Available in New Session once setup is ready." };
 }
 
 /** One sentence for a failed check. Sentence case: this is helper text. */
