@@ -56,11 +56,17 @@ test("a runner's setup is validated, version-gated, cleared on reconnect, and sh
   }
 });
 
-function harness(options: { canManage?: boolean | (() => boolean); online?: boolean; protocolVersion?: number; reply?: (msg: AntigravitySetupCommandMessage) => unknown } = {}) {
+function harness(options: {
+  canManage?: boolean | ((principal: HumanPrincipal) => boolean);
+  /** The caller as its credential resolves now; null once its device is revoked. */
+  caller?: () => HumanPrincipal | null;
+  online?: boolean; protocolVersion?: number; reply?: (msg: AntigravitySetupCommandMessage) => unknown;
+} = {}) {
   const sent: AntigravitySetupCommandMessage[] = [];
   const stored: unknown[] = [];
   const db = {
-    canManageRunner: () => typeof options.canManage === "function" ? options.canManage() : options.canManage ?? true,
+    canManageRunner: (principal: HumanPrincipal) =>
+      typeof options.canManage === "function" ? options.canManage(principal) : options.canManage ?? true,
     getRunner: (id: string) => id === "runner-1" ? { runnerId: id, protocolVersion: options.protocolVersion ?? SUPPORTED } : null,
     updateRunnerAntigravitySetup: (_id: string, setup: unknown) => { stored.push(setup); },
   } as unknown as ControlPlaneDb;
@@ -73,7 +79,7 @@ function harness(options: { canManage?: boolean | (() => boolean); online?: bool
     },
   } as unknown as Hub;
   const app = Fastify();
-  registerAntigravitySetupRoutes(app, db, hub, () => owner);
+  registerAntigravitySetupRoutes(app, db, hub, () => options.caller ? options.caller() : owner);
   return { app, sent, stored };
 }
 
@@ -116,6 +122,27 @@ test("manage access revoked while the runner answers withholds the reply and its
     assert.ok(!response.body.includes("accounts.google.com"));
   } finally {
     await app.close();
+  }
+
+  // The caller is resolved again from its credential: a demotion or a revoked device while the
+  // runner answers withholds the reply too, even though the principal captured earlier could manage.
+  for (const change of ["demoted", "device revoked"] as const) {
+    let caller: HumanPrincipal | null = owner;
+    const changed = harness({
+      caller: () => caller,
+      canManage: (principal) => principal.role === "owner",
+      reply: (msg) => {
+        caller = change === "demoted" ? { ...owner, role: "viewer" } : null;
+        return { type: "antigravity_setup_result", requestId: msg.requestId, ok: true, setup: pending };
+      },
+    });
+    try {
+      const response = await changed.app.inject({ method: "POST", url: "/api/runners/runner-1/antigravity-setup/check" });
+      assert.equal(response.statusCode, 403, change);
+      assert.ok(!response.body.includes("accounts.google.com"), change);
+    } finally {
+      await changed.app.close();
+    }
   }
 });
 

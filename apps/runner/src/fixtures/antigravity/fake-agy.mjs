@@ -38,7 +38,12 @@ if (args[0] === "acp" && args[1] === "--login") {
     const link = "https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture-client&state=fixture-state";
     const prompt = () => process.stdout.write(".\nPaste the authorization code: ");
     process.stdout.write("\u001b[1mSign in with Google\u001b[0m\nOpen this link in a browser:\n");
-    if (modes.has("login_split_url")) {
+    if (modes.has("login_ansi_split")) {
+      // A style reset between the path and the query, with the chunk cut right after its ESC byte.
+      const query = link.indexOf("?");
+      process.stdout.write(`${link.slice(0, query)}\u001b`);
+      setTimeout(() => { process.stdout.write(`[0m${link.slice(query)}`); prompt(); }, 300);
+    } else if (modes.has("login_split_url")) {
       // The link arrives in two writes, cut inside its query string.
       process.stdout.write(link.slice(0, 50));
       setTimeout(() => { process.stdout.write(link.slice(50)); prompt(); }, 300);

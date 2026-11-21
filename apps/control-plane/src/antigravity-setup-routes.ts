@@ -59,9 +59,11 @@ export function registerAntigravitySetupRoutes(
         // The runner's own antigravity_setup_updated frame remains authoritative.
       }
     }
-    // Manage access may have been revoked while the runner answered (a Machine transfer, say). The
-    // reply can carry the bearer-like sign-in link, so authority is checked again before it leaves.
-    if (!db.canManageRunner(principal, id)) {
+    // Authority may have changed while the runner answered: a Machine transfer, a demotion or a
+    // revoked device. The reply can carry the bearer-like sign-in link, so the caller is resolved
+    // again from its credential (not the principal captured above) before the reply leaves.
+    const current = requestHuman(req);
+    if (!current || current.userId !== principal.userId || !db.canManageRunner(current, id)) {
       return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
     }
     if (!result.ok) return reply.code(409).send({ error: result.error ?? "Google Antigravity setup could not continue." });

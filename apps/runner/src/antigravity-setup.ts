@@ -111,10 +111,14 @@ function launch(options: AntigravityProcessOptions): AgentProcess {
   });
 }
 
+/** Text without its escape sequences. An escape still arriving at the end (a chunk cut after ESC
+ * or inside a CSI) is dropped with everything after it, so it can neither show nor end a link:
+ * the rest of the link arrives with the sequence's remainder. */
 function stripAnsi(value: string): string {
   const stripped = value.replace(ANSI_ESCAPE_PATTERN, "");
   const incompleteOsc = stripped.indexOf("\u001b]");
-  return incompleteOsc < 0 ? stripped : stripped.slice(0, incompleteOsc);
+  const complete = incompleteOsc < 0 ? stripped : stripped.slice(0, incompleteOsc);
+  return complete.replace(/(?:\u001b(?:\[[0-?]*[ -/]*)?|\u009b[0-?]*[ -/]*)$/u, "");
 }
 
 /** The version `agy --version` printed, or undefined when it printed nothing recognizable. */

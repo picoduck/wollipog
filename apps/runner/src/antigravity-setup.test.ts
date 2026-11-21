@@ -293,6 +293,17 @@ test("a link split across writes is published only once it is complete", async (
   assert.equal(published.filter((view) => view.signIn?.verificationUrl).length, 1);
 });
 
+test("a chunk cut inside an escape sequence within the link does not end the link early", async () => {
+  mode("login_ansi_split");
+  const { setup, published } = supervisor();
+  await setup.check();
+  setup.startSignIn();
+  const waiting = await until(setup, (view) => view.signIn?.status === "awaiting_code");
+  assert.equal(waiting.signIn!.verificationUrl,
+    "https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture-client&state=fixture-state");
+  assert.equal(published.filter((view) => view.signIn?.verificationUrl).length, 1);
+});
+
 test("JSON that is not a JSON-RPC message is ignored rather than crashing the check", async () => {
   writeFileSync(join(state, "signed-in"), "fixture");
   mode("acp_null");
@@ -316,6 +327,10 @@ test("parsers accept only safe, complete links, versions and bounded models", ()
   assert.equal(parseAntigravitySignInUrl("visit http://insecure.example/x then https://user:pw@accounts.google.com/x\n"), undefined);
   assert.equal(parseAntigravitySignInUrl("\u001b[4mhttps://accounts.google.com/o?x=1\u001b[0m).\n"), "https://accounts.google.com/o?x=1");
   assert.equal(parseAntigravitySignInUrl("https://accounts.google.com/o?state=par"), undefined, "a link at the end may be cut short");
+  for (const partial of ["\u001b", "\u001b[", "\u001b[0", "\u009b0"]) {
+    assert.equal(parseAntigravitySignInUrl(`https://accounts.google.com/o/auth${partial}`), undefined, JSON.stringify(partial));
+  }
+  assert.equal(parseAntigravitySignInUrl("https://accounts.google.com/o/auth\u001b[0m?state=s\n"), "https://accounts.google.com/o/auth?state=s");
   assert.equal(parseAntigravityVersion("\u001b[32mAntigravity CLI v2.0.1-beta.3\u001b[0m"), "2.0.1-beta.3");
   assert.equal(parseAntigravityVersion("no version here"), undefined);
   assert.deepEqual(advertisedAntigravityModels({ models: { availableModels: [
