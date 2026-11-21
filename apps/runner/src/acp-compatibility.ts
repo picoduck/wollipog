@@ -25,6 +25,37 @@ export interface AcpCompatibility {
   profile: "antigravity";
   /** Whether this launch can persist the agent's conversations, so resume by id may be offered. */
   resumable: boolean;
+  /** Variables the agent's explicit environment may never carry, whatever layer added them (an
+   * approved worktree setup environment, say): the agent's credential context drops them from the
+   * inherited environment, and this keeps them out of the one the launch supplies. */
+  withheldEnvironment?: { names: readonly string[]; prefixes: readonly string[] };
+  /** Bounds for the handshake and for opening or resuming the session: a process that never
+   * answers fails the launch with the profile's error instead of leaving it starting. */
+  deadlines?: { handshakeMs: number; sessionMs: number };
+}
+
+/** JSON-RPC options bounding one launch request, for a profile that sets deadlines. */
+export function acpLaunchRequestOptions(
+  compatibility: AcpCompatibility | undefined,
+  stage: "handshake" | "session",
+  now: () => number = Date.now,
+): { deadlineAt?: number } {
+  const deadlines = compatibility?.deadlines;
+  if (!deadlines) return {};
+  return { deadlineAt: now() + (stage === "handshake" ? deadlines.handshakeMs : deadlines.sessionMs) };
+}
+
+/** Whether a JSON-RPC failure is a request that hit its deadline. */
+export function acpRequestTimedOut(error: unknown): boolean {
+  return !!error && typeof error === "object" && (error as { requestTimeout?: unknown }).requestTimeout === true;
+}
+
+/** The explicit launch environment without the variables the profile withholds. */
+export function compatibleAcpEnvironment(env: Record<string, string>, compatibility?: AcpCompatibility): Record<string, string> {
+  const withheld = compatibility?.withheldEnvironment;
+  if (!withheld) return env;
+  return Object.fromEntries(Object.entries(env).filter(([name]) =>
+    !withheld.names.includes(name) && !withheld.prefixes.some((prefix) => name.startsWith(prefix))));
 }
 
 const AGENT_NAME = { antigravity: "Google Antigravity" } as const;
@@ -68,13 +99,16 @@ export function acpCompatibilityFailure(
     case "resume":
       return `${name} could not resume this conversation, so its history here is read-only. Start a new session to continue.`;
     case "turn": {
-      const reason = detail ? redactAccountIdentifiers(detail).replace(/\s+/gu, " ").trim().slice(0, 300) : "";
+      const full = detail ? redactAccountIdentifiers(detail).replace(/\s+/gu, " ").trim() : "";
+      // Bounded, and visibly cut rather than ending mid-word.
+      const reason = full.length > TURN_DETAIL_LIMIT ? `${full.slice(0, TURN_DETAIL_LIMIT - 1).trimEnd()}…` : full;
       return reason ? `${name} could not complete this turn: ${reason}` : `${name} could not complete this turn.`;
     }
   }
 }
 
-const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gu;
+const TURN_DETAIL_LIMIT = 300;
+const EMAIL =/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gu;
 
 /** Agent text with email-shaped account identifiers removed. */
 export function redactAccountIdentifiers(text: string): string {

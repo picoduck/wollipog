@@ -1699,6 +1699,10 @@ export interface AgentCapabilities {
   claudeMutableSystemPromptFlag?: "--system-prompt-recording" | "--system-prompt-snapshot";
   /** Approval presets (claude: default|acceptEdits|plan|…; codex: untrusted|on-request|never). */
   permissionModes?: string[];
+  /** ACP only (#4779): the agent's own bounded name and description for each advertised mode, from
+   * its live session. Mode ids belong to the agent, so a client names an ACP mode from here rather
+   * than from a native harness's meaning for the same id. Additive; older peers ignore it. */
+  agentPermissionModes?: Array<{ id: string; name: string; description?: string }>;
   /** How approvals reach the UI per permission mode. Absent = not probed (unknown, not false). */
   elicitation?: Partial<Record<string, ElicitationTransport[]>>;
   /**

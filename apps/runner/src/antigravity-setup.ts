@@ -42,7 +42,7 @@ export const ANTIGRAVITY_AMBIENT_CREDENTIAL_ENV = [
   "GOOGLE_APPLICATION_CREDENTIALS",
   "GOOGLE_GENAI_USE_VERTEXAI",
 ] as const;
-const ANTIGRAVITY_AMBIENT_CREDENTIAL_PREFIXES = ["GOOGLE_CLOUD_"] as const;
+export const ANTIGRAVITY_AMBIENT_CREDENTIAL_PREFIXES = ["GOOGLE_CLOUD_"] as const;
 
 /** How every Antigravity process on this runner is launched. `scrubInheritedEnv` is passed to
  * `spawnAgent`, which also drops the runner's own credentials. */

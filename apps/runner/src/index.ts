@@ -188,6 +188,7 @@ import {
   antigravityAgentDefinition,
   antigravitySessionLaunch,
   withAntigravityAgent,
+  withoutAntigravityAgent,
 } from "./antigravity-session.js";
 import { createProviderProfileLoginSettlement } from "./provider-profile-login-settlement.js";
 import { runnerCredentialRoots, setCampaignCredentialRoots } from "./campaign-operation-evidence.js";
@@ -1006,7 +1007,8 @@ metadata.antigravitySetup = antigravitySetup.current();
 let antigravityAgentRow: AgentDefinition | null = null;
 const configuredAgentIds = new Set(config.agents.map((agent) => agent.id));
 function publishAntigravityAgent(setup: AntigravitySetupView): void {
-  if (setup.status === "checking") return;
+  // An operator's configured agent owns the id, its row and its auth status; the setup touches none.
+  if (setup.status === "checking" || configuredAgentIds.has(ANTIGRAVITY_AGENT_ID)) return;
   const row = antigravityAgentDefinition(setup, antigravitySetup.credentialContext(), config.executionIsolation);
   // A confirmed sign-in replaces a session's earlier report that it was signed out.
   const runtime = acpAuthStatus.get(ANTIGRAVITY_AGENT_ID);
@@ -4451,7 +4453,7 @@ async function handleListExternal(requestId: string, agentId?: string): Promise<
       selectedDriver && selectedDriver !== "acp"
         ? Promise.resolve([])
         : listAcpExternalSessions(
-          selectedAgent ? [selectedAgent] : metadata.agents,
+          withoutAntigravityAgent(selectedAgent ? [selectedAgent] : metadata.agents, configuredAgentIds),
           knownAcp,
           (reportedAgentId, capabilities) => {
             updateAgentAuthStatus(reportedAgentId, { capabilities });
@@ -4489,9 +4491,10 @@ async function handleAdopt(msg: AdoptSessionMessage): Promise<void> {
   let adoptedProviderState: SessionMeta["adoptedProviderState"];
   let adoptionEvents: SessionEventPayload[] | undefined;
   if (claimedAcpAgentId) {
-    const agent = configuredAcpAgent(metadata.agents, claimedAcpAgentId);
+    const adoptable = withoutAntigravityAgent(metadata.agents, configuredAgentIds);
+    const agent = configuredAcpAgent(adoptable, claimedAcpAgentId);
     if (!agent) return fail("that ACP agent is not configured or available on this box");
-    const found = await findAcpExternalSession(metadata.agents, claimedAcpAgentId, claimed.agentSessionId);
+    const found = await findAcpExternalSession(adoptable, claimedAcpAgentId, claimed.agentSessionId);
     if (!found) return fail("that ACP session was not found on the selected agent");
     descriptor = found.descriptor;
     launch = launchForAcpAgent(agent);

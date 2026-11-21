@@ -14,7 +14,9 @@ import {
   antigravityAgentDefinition,
   antigravitySessionLaunch,
   withAntigravityAgent,
+  withoutAntigravityAgent,
 } from "./antigravity-session.js";
+import { effectiveAcpCompatibility } from "./session-manager.js";
 import { AntigravitySetupSupervisor, antigravityCredentialContext } from "./antigravity-setup.js";
 import { AcpDriver } from "./drivers/acp-driver.js";
 import type { DriverOptions } from "./drivers/driver.js";
@@ -74,16 +76,23 @@ interface Observed {
 }
 
 /** An Antigravity session driver launched exactly as the runner launches one. */
-function launchDriver(view: AntigravitySetupView, isolation: { mode: "provider" | "bwrap" }, cwd: string, resumeId?: string): { driver: AcpDriver; seen: Observed } {
+function launchDriver(
+  view: AntigravitySetupView,
+  isolation: { mode: "provider" | "bwrap" },
+  cwd: string,
+  resumeId?: string,
+  overrides: { layeredEnv?: Record<string, string>; deadlines?: { handshakeMs: number; sessionMs: number } } = {},
+): { driver: AcpDriver; seen: Observed } {
   const context = antigravityCredentialContext();
   const launch = antigravitySessionLaunch(view, context, isolation);
   const seen: Observed = { events: [], stderr: [], auth: [], acp: [], state: [] };
   const options: DriverOptions = {
     command: launch.command!,
     args: launch.args,
-    env: launch.env,
+    // A layer the session manager adds after launch preparation (an approved worktree setup).
+    env: { ...launch.env, ...overrides.layeredEnv },
     scrubInheritedEnv: launch.scrubInheritedEnv,
-    acpCompatibility: launch.acpCompatibility,
+    acpCompatibility: { ...launch.acpCompatibility, ...(overrides.deadlines ? { deadlines: overrides.deadlines } : {}) },
     cwd,
     config: {},
     context: { kind: "native" },
@@ -169,8 +178,14 @@ test("a launch uses the setup's executable and exact credential context, and res
   assert.deepEqual(provider.env, context.env);
   assert.deepEqual(provider.scrubInheritedEnv, context.scrubInheritedEnv);
   assert.ok(provider.scrubInheritedEnv.includes("GEMINI_API_KEY") && provider.scrubInheritedEnv.includes("GOOGLE_CLOUD_PROJECT"));
-  assert.deepEqual(provider.acpCompatibility, { profile: "antigravity", resumable: true });
-  assert.deepEqual(antigravitySessionLaunch(setup({}), context, BWRAP).acpCompatibility, { profile: "antigravity", resumable: false });
+  assert.equal(provider.acpCompatibility.profile, "antigravity");
+  assert.equal(provider.acpCompatibility.resumable, true);
+  assert.deepEqual(provider.acpCompatibility.withheldEnvironment, {
+    names: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL", "AGY_ADC_AUTH", "GOOGLE_APPLICATION_CREDENTIALS",
+      "GOOGLE_GENAI_USE_VERTEXAI"],
+    prefixes: ["GOOGLE_CLOUD_"],
+  });
+  assert.equal(antigravitySessionLaunch(setup({}), context, BWRAP).acpCompatibility.resumable, false);
   assert.deepEqual(antigravitySessionLaunch(setup({}), context, { mode: "seatbelt" }).acpCompatibility.resumable, false);
   assert.equal(antigravitySessionLaunch(setup({ status: "missing_runtime", executable: undefined }), context, PROVIDER).command, undefined);
 });
@@ -363,7 +378,61 @@ test("installation, sign-in and turn failures each say what failed", async () =>
   assert.equal(serialized(turn.seen).includes(ACCOUNT), false);
 });
 
+test("credential selectors a later layer adds never reach agy, while other approved variables do", async () => {
+  signIn();
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  assert.equal(process.env.GOOGLE_CLOUD_LOCATION, undefined, "absent from the inherited environment");
+  const { driver } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined, {
+    layeredEnv: { AGY_ADC_AUTH: "true", GOOGLE_CLOUD_LOCATION: "us-central1", GEMINI_API_KEY: "layered-key",
+      FIXTURE_SETUP_VAR: "kept" },
+  });
+  await driver.initialize();
+  const entry = readFileSync(join(state, "environments.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line)).at(-1);
+  assert.deepEqual(entry.present, []);
+  assert.equal(entry.setupVariable, "kept");
+});
+
+test("a launch that never answers fails with its Antigravity error instead of hanging", async () => {
+  signIn();
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const deadlines = { handshakeMs: 300, sessionMs: 300 };
+  process.env.FAKE_AGY_MODE = "handshake_hang";
+  const silent = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined, { deadlines });
+  await assert.rejects(silent.driver.initialize(), /could not be started on this machine/u);
+
+  process.env.FAKE_AGY_MODE = "session_hang";
+  const unopened = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined, { deadlines });
+  await unopened.driver.initialize();
+  await assert.rejects(unopened.driver.newSession(cwd), /could not be started on this machine/u);
+
+  process.env.FAKE_AGY_MODE = "resume_hang";
+  const unresumed = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, "fixture-session-1", { deadlines });
+  await unresumed.driver.initialize();
+  await assert.rejects(unresumed.driver.newSession(cwd), /could not resume this conversation/u);
+  assert.deepEqual(antigravitySessionLaunch(setup({}), antigravityCredentialContext({}), PROVIDER).acpCompatibility.deadlines,
+    { handshakeMs: 20_000, sessionMs: 60_000 });
+});
+
+test("external session discovery and adoption never probe the setup-derived Antigravity agent", () => {
+  const gemini = { id: "gemini" };
+  const antigravity = { id: ANTIGRAVITY_AGENT_ID };
+  assert.deepEqual(withoutAntigravityAgent([gemini, antigravity], new Set()), [gemini]);
+  assert.deepEqual(withoutAntigravityAgent([antigravity], new Set()), [], "even when it is the selected agent");
+  assert.deepEqual(withoutAntigravityAgent([gemini, antigravity], new Set([ANTIGRAVITY_AGENT_ID])), [gemini, antigravity],
+    "an operator-configured agent with the id keeps the existing discovery path");
+});
+
+test("the effective sandbox, not the configured mode, decides whether resume is offered", () => {
+  const profile = { profile: "antigravity" as const, resumable: true };
+  assert.deepEqual(effectiveAcpCompatibility(profile, undefined), { acpCompatibility: profile });
+  assert.deepEqual(effectiveAcpCompatibility(profile, { backend: "bwrap" } as never), { acpCompatibility: { ...profile, resumable: false } });
+  assert.deepEqual(effectiveAcpCompatibility(undefined, { backend: "bwrap" } as never), {});
+});
+
 test("account identifiers are redacted from agent text", () => {
   assert.equal(redactAccountIdentifiers("signed in as first.last+tag@sub.example.co.uk now"), "signed in as [account] now");
   assert.equal(acpCompatibilityFailure(undefined, "turn", "x"), undefined, "other agents keep the shared wording");
+  const long = acpCompatibilityFailure({ profile: "antigravity", resumable: true }, "turn", `${"word ".repeat(100)}end`)!;
+  assert.ok(long.endsWith("…"), "a cut provider message says it was cut");
+  assert.ok(long.length <= "Google Antigravity could not complete this turn: ".length + 300);
 });

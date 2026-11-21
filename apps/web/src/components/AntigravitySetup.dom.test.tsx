@@ -120,6 +120,13 @@ test("a ready setup says whether its runner offers Antigravity in New Session, a
     assert.match((await openSetup(older.body)).textContent ?? "", /Update Wollipog on Studio Mac to start Antigravity sessions\./u);
   } finally { await older.unmount(); }
 
+  // An operator-configured agent that uses the id is its own agent, listed beside the setup row.
+  const configured = await mount(runner(ready, { agents: [{ ...antigravity, source: "config", name: "Operator Wrapper" }] }));
+  try {
+    const agentRows = [...configured.body.querySelectorAll('ul[aria-label="Agents"] .row-title')].map((title) => title.textContent);
+    assert.ok(agentRows.includes("Operator Wrapper"));
+  } finally { await configured.unmount(); }
+
   // Without the setup row (Account Setup), the advertised agent is listed like any other.
   const accountSetup = await mount(runner(ready, { agents: [antigravity] }), {}, false);
   try {

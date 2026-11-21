@@ -252,10 +252,13 @@ export function MachineAgentsSection({ runner, online, machineName, canFindSessi
   const [openAgentId, setOpenAgentId] = useState<string | null>(null);
   const [findingSessionsFor, setFindingSessionsFor] = useState<string | null>(null);
   const opener = useRef<HTMLElement | null>(null);
-  // Where its setup row shows, that row stands for Google Antigravity (#4779): its advertised agent
-  // is not listed a second time, though it still counts as a ready agent.
+  // Where its setup row shows, that row stands for Google Antigravity (#4779): the agent the runner
+  // derives from that setup is not listed a second time, though it still counts as a ready agent.
+  // An operator-configured agent that happens to use the id is its own row.
   const showsAntigravitySetup = antigravitySetup && antigravitySetupVisible(runner);
-  const agents = showsAntigravitySetup ? runner.agents.filter((agent) => agent.id !== ANTIGRAVITY_AGENT_ID) : runner.agents;
+  const agents = showsAntigravitySetup
+    ? runner.agents.filter((agent) => agent.id !== ANTIGRAVITY_AGENT_ID || agent.source === "config")
+    : runner.agents;
   const { listed, notInstalled } = machineAgentGroups(agents, online);
   const { anyReady } = machineAgentGroups(runner.agents, online);
   const nameOf = (agent: AgentDefinition) => agentDisplayName(agent, agents);

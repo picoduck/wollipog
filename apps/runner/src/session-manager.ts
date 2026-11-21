@@ -996,6 +996,17 @@ export function providerStopError(stop: StopReason, client: Pick<Driver, "lastTu
   return detail ? `provider ${reason}: ${detail}` : `provider ${reason}`;
 }
 
+/** A launch's ACP compatibility profile as its effective sandbox allows (#4779). Any runner-owned
+ * sandbox (bwrap, including the one a managed Linux worktree forces, or Seatbelt) leaves the
+ * agent's own state read-only, so resume is withheld whatever the configured isolation mode. */
+export function effectiveAcpCompatibility(
+  compatibility: DriverOptions["acpCompatibility"],
+  isolation: SpawnIsolation | undefined,
+): Pick<DriverOptions, "acpCompatibility"> {
+  if (!compatibility) return {};
+  return { acpCompatibility: isolation ? { ...compatibility, resumable: false } : compatibility };
+}
+
 function canResumeSession(meta: SessionMeta): boolean {
   if (meta.driver === "acp") {
     return meta.acpCapabilities?.sessionResume === true || meta.acpCapabilities?.loadSession === true;
@@ -2049,6 +2060,9 @@ export class SessionManager {
   private readonly claudeInitCatalogQueue = new Map<string, Promise<void>>();
   /** Sessions whose init list merged before the provider was ready to authorize it. */
   private readonly claudeInitAwaitingAuthority = new Set<string>();
+  /** The ACP compatibility profile a launch's preparation returned, keyed by the exact metadata
+   * object that launch prepares and isolates (#4779). */
+  private readonly launchAcpCompatibility = new WeakMap<SessionMeta, NonNullable<DriverOptions["acpCompatibility"]>>();
   /** Async seam covers WSL markerless recovery without blocking runner startup. */
   private discoverClaudeTasksInContext: typeof discoverIncompleteClaudeTasksInContext = discoverIncompleteClaudeTasksInContext;
   private resolveDetachedClaudeEnvironment: (meta: SessionMeta) => Record<string, string> = () => ({});
@@ -10559,6 +10573,7 @@ export class SessionManager {
         providerHome: preparationHome,
         ...(providerHomeWait ? { providerHomeWait } : {}),
       });
+      this.rememberAcpCompatibility(meta, launchPreparation);
       // Launch preparation may await filesystem/provider discovery. A restart can replace this
       // session with a new generation (and even a different provider) during that window; the old
       // continuation must not patch or publish its stale launch-local metadata.
@@ -10767,7 +10782,7 @@ export class SessionManager {
           cwd,
           env: meta.env,
           ...(launchPreparation?.scrubInheritedEnv?.length ? { scrubInheritedEnv: launchPreparation.scrubInheritedEnv } : {}),
-          ...(launchPreparation?.acpCompatibility ? { acpCompatibility: launchPreparation.acpCompatibility } : {}),
+          ...effectiveAcpCompatibility(launchPreparation?.acpCompatibility, isolation),
           config: meta.config,
           artifactGuidance: meta.review ? "" : [artifactGuidance(meta, this.controlPlaneProtocolVersion()), shellGuidance(meta)].filter(Boolean).join(" "),
           ...(meta.review ? { review: true } : {}),
@@ -11368,7 +11383,10 @@ export class SessionManager {
         path: protectedWorktree, gitWritableRoots, requiredReadOnlyPaths,
         ...(ownedWorktrees.length ? { ownedWorktrees } : {}),
       } } : {}),
-      ...(protectedWorktree && this.executionIsolation.mode === "provider" ? { preserveProviderHome: true } : {}),
+      // An ACP agent's home has no known preservable state; one whose compatibility profile accepts
+      // read-only state (Antigravity, #4779) runs in the protected worktree without it.
+      ...(protectedWorktree && this.executionIsolation.mode === "provider" &&
+        !(meta.driver === "acp" && this.launchAcpCompatibility.has(meta)) ? { preserveProviderHome: true } : {}),
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(guardStateMask ? { guardStateMask } : {}),
       ...(this.strictProjectIsolation(meta) ? { orchestratorScratchOnly: true } : {}),
@@ -11395,6 +11413,11 @@ export class SessionManager {
       join(homedir(), ".aws"), join(homedir(), ".codex"), join(homedir(), ".claude"),
       ...[meta.providerCredentialHome, meta.pendingProviderCredentialHome].filter((path): path is string => !!path),
     ]);
+  }
+
+  private rememberAcpCompatibility(meta: SessionMeta, preparation: SessionLaunchPreparation | void | undefined): void {
+    if (preparation?.acpCompatibility) this.launchAcpCompatibility.set(meta, preparation.acpCompatibility);
+    else this.launchAcpCompatibility.delete(meta);
   }
 
   private requiresManagedWorktreeBwrap(meta: SessionMeta): boolean {
@@ -18321,6 +18344,7 @@ export class SessionManager {
           isCurrent: forkIsCurrent,
           providerHome: forkPreparationHome,
         });
+        this.rememberAcpCompatibility(source, launchPreparation);
         if (!forkIsCurrent()) throw new Error("conversation fork preparation was canceled");
         if (sameSlashCommandCatalog(priorSessionSlashCommands, source.sessionSlashCommands)) {
           source.sessionSlashCommands = priorSessionSlashCommands;
@@ -18385,7 +18409,7 @@ export class SessionManager {
             cwd: source.worktreePath,
             env: source.env,
             ...(launchPreparation?.scrubInheritedEnv?.length ? { scrubInheritedEnv: launchPreparation.scrubInheritedEnv } : {}),
-            ...(launchPreparation?.acpCompatibility ? { acpCompatibility: launchPreparation.acpCompatibility } : {}),
+            ...effectiveAcpCompatibility(launchPreparation?.acpCompatibility, isolation),
             config: source.config,
             context: source.context,
             capabilities: source.capabilities,

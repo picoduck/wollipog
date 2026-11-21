@@ -66,7 +66,10 @@ import {
 import { AcpFilesystemService, AcpTerminalService } from "./acp-client-services.js";
 import {
   acpCompatibilityFailure,
+  acpLaunchRequestOptions,
+  acpRequestTimedOut,
   acpStderrMirrored,
+  compatibleAcpEnvironment,
   compatibleAcpNegotiation,
   type AcpCompatibility,
 } from "./acp-compatibility.js";
@@ -173,12 +176,13 @@ export class AcpClient {
     this.orchestratorRole = opts.orchestratorRole === true || this.orchestrator;
     this.commands = this.orchestrator ? [] : normalizeAcpCommands(opts.initialCommands);
     this.sessionContext = opts.sessionContext;
-    this.mcpEnvironment = { ...process.env, ...opts.env };
+    const env = compatibleAcpEnvironment(opts.env, opts.compatibility);
+    this.mcpEnvironment = { ...process.env, ...env };
     const context = opts.context ?? { kind: "native" as const };
     this.filesystem = new AcpFilesystemService(opts.cwd, context);
     this.terminals = new AcpTerminalService(this.filesystem, context, opts.isolation, { cgroup: opts.reviewWriterCgroup });
     this.kill = deps.kill ?? killTree;
-    this.child = (deps.spawn ?? spawnAgent)(opts);
+    this.child = (deps.spawn ?? spawnAgent)({ ...opts, env });
     this.peer = new JsonRpcPeer(this.child.stdin, this.child.stdout, (err) =>
       this.ev.onStderr(`transport: ${err.message}`),
     );
@@ -258,7 +262,8 @@ export class AcpClient {
 
   async initialize(): Promise<void> {
     try {
-      const res = await this.peer.request("initialize", acpInitializeRequest());
+      const res = await this.peer.request("initialize", acpInitializeRequest() as unknown as Record<string, unknown>,
+        acpLaunchRequestOptions(this.compatibility, "handshake"));
       this.negotiation = compatibleAcpNegotiation(negotiateAcpInitialize(res), this.compatibility);
     } catch (error) {
       // A profiled agent that cannot complete the handshake is an installation problem.
@@ -300,7 +305,8 @@ export class AcpClient {
       this.establishingSession = true;
       this.pendingSessionStateUpdates = [];
       try {
-        const res = (await this.peer.request("session/new", this.sessionRequest(cwd))) as NewSessionResponse;
+        const res = (await this.peer.request("session/new", this.sessionRequest(cwd),
+          acpLaunchRequestOptions(this.compatibility, "session"))) as NewSessionResponse;
         this.sessionId = res.sessionId;
         this.establishingSession = false;
         this.acceptSessionState(res.modes, res.configOptions);
@@ -311,6 +317,8 @@ export class AcpClient {
         this.establishingSession = false;
         this.pendingSessionStateUpdates = [];
         if (this.compatibility && !this.transportClosed && isAgentAuthRequiredError(error)) throw this.signInRequired();
+        // A profiled agent that never opens the session is a start failure, not a hang.
+        if (this.compatibility && acpRequestTimedOut(error)) throw this.compatibilityError("start")!;
         if (this.transportClosed || !isAgentAuthRequiredError(error) || !this.negotiation?.authMethods.length) throw error;
         await this.authenticate();
       }
@@ -328,7 +336,8 @@ export class AcpClient {
     try {
       if (this.negotiation?.stable.sessionResume) {
         const request: ResumeSessionRequest = { sessionId, ...this.sessionRequest(cwd) };
-        const response = await this.peer.request("session/resume", request) as ResumeSessionResponse;
+        const response = await this.peer.request("session/resume", request,
+          acpLaunchRequestOptions(this.compatibility, "session")) as ResumeSessionResponse;
         this.acceptSessionState(response.modes, response.configOptions);
       } else if (this.negotiation?.stable.loadSession) {
         const request: LoadSessionRequest = { sessionId, ...this.sessionRequest(cwd) };

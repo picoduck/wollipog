@@ -273,6 +273,33 @@ test("each permission mode is one two-line menu radio with its meaning, and unkn
   assert.equal(describedBy.length, 1);
   assert.match(describedBy[0]!, />Manual</);
 });
+test("an ACP agent's modes use its own names and meanings, never a native harness's for the same id (#4779)", () => {
+  // Google Antigravity 1.5.14's advertised modes.
+  const capabilities = {
+    models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+    permissionModes: ["default", "accept-edits", "auto", "plan"],
+    elicitation: { default: ["acp-permission" as const], "accept-edits": ["acp-permission" as const],
+      auto: ["acp-permission" as const], plan: ["acp-permission" as const] },
+    agentPermissionModes: [
+      { id: "default", name: "Default", description: "Ask before edits and commands, per your permission settings." },
+      { id: "accept-edits", name: "Accept edits", description: "Approve file edits in the workspace without asking." },
+      { id: "auto", name: "Auto", description: "Approve edits and safe commands; ask before irreversible actions." },
+      { id: "plan", name: "Plan" },
+    ],
+  };
+  const html = renderToStaticMarkup(React.createElement(ApprovalsMenuChoices, {
+    capabilities, driver: "acp", permModes: capabilities.permissionModes, permVal: "auto", apply: () => {}, close: () => {},
+  }));
+  assert.match(html, /aria-checked="true"[^>]*>[\s\S]*?>Auto<[\s\S]*?Approve edits and safe commands; ask before irreversible actions\./);
+  assert.match(html, />Accept Edits<[\s\S]*?Approve file edits in the workspace without asking\./, "Title Case label from the agent's name");
+  assert.match(html, />Plan<[\s\S]*?Wollipog doesn&#x27;t know what this mode permits\./);
+  assert.doesNotMatch(html, /AI-Reviewed|classifier|Ask Every Time|Plan Only|accept-edits</u);
+  assert.equal(approvalControlLabel("acp", "accept-edits", "available", capabilities), "Accept Edits");
+  // Without advertised names (an older runner), the existing labels stay.
+  assert.equal(approvalControlLabel("acp", "plan", "available"), "Plan Only (Read-Only)");
+  assert.equal(approvalControlLabel("claude-code", "auto", "available", capabilities), "Auto (AI-Reviewed)");
+});
+
 test("an active Plan mode remains the one checked state while staying outside selectable permission modes", () => {
   const html = renderToStaticMarkup(React.createElement(ApprovalsMenuChoices, {
     capabilities: {

@@ -28,8 +28,10 @@ const AMBIENT = ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL", "
 
 function recordEnvironment(label) {
   if (!state) return;
-  const present = AMBIENT.filter((name) => process.env[name] !== undefined);
-  appendFileSync(join(state, "environments.jsonl"), `${JSON.stringify({ label, present, home: process.env.HOME ?? null })}\n`);
+  const present = [...new Set([...AMBIENT, ...Object.keys(process.env).filter((name) => name.startsWith("GOOGLE_CLOUD_"))])]
+    .filter((name) => process.env[name] !== undefined);
+  appendFileSync(join(state, "environments.jsonl"), `${JSON.stringify({ label, present, home: process.env.HOME ?? null,
+    ...(process.env.FIXTURE_SETUP_VAR ? { setupVariable: process.env.FIXTURE_SETUP_VAR } : {}) })}\n`);
 }
 
 if (args[0] === "--version") {
@@ -188,6 +190,7 @@ if (args[0] === "acp" && args[1] === "--login") {
     }
     if (request.method === "session/resume" || request.method === "session/load") {
       const sessionId = request.params?.sessionId;
+      if (modes.has("resume_hang")) return;
       if (!signedInMarker || !existsSync(signedInMarker)) {
         return send({ id: request.id, error: { code: -32000, message: "Authentication required" } });
       }

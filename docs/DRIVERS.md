@@ -1496,10 +1496,16 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
 - **One credential context.** Every launch (new session, restart, fork) re-reads the setup: it
   runs the executable the setup currently resolves as `agy acp`, with exactly
   `antigravityCredentialContext()`'s environment, and passes its scrub list to `spawnAgent`, which
-  removes those variables from the inherited environment (they are also removed from anything the
-  shared launch preparation layered on). The version check, access check, sign-in and session
-  therefore share one executable, one HOME and one OS-keyring sign-in. Worktree, provider-home,
-  execution-isolation and admission checks are the shared ACP launch's, unchanged.
+  removes those variables from the inherited environment. The profile also withholds every ambient
+  credential name and `GOOGLE_CLOUD_*` prefix from the explicit launch environment, whatever layer
+  added it (an approved worktree setup environment included). The version check, access check,
+  sign-in and session therefore share one executable, one HOME and one OS-keyring sign-in.
+  Worktree, execution-isolation and admission checks are the shared ACP launch's. The one
+  provider-home difference: a managed Linux worktree forces bwrap even under `provider` isolation,
+  and normally asks bwrap to keep the provider's own state writable, which no ACP agent can name.
+  An ACP launch whose profile accepts read-only state (Antigravity) runs there with HOME read-only
+  instead of being refused; every other ACP agent keeps that refusal. Find Sessions and adoption
+  never probe the setup-derived row, since they spawn adapters without its context or profile.
 - **Compatibility profile.** The ACP client withholds, for Antigravity only: every advertised auth
   method (they include an API key and Agent Platform ADC, which would change the account or billing;
   sign-in happens in Connections), `logout` (it would sign every session on the runner out of the
@@ -1510,15 +1516,22 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   New Session and Connections follow) and fails with "needs sign-in on this machine. Sign in from
   Connections". A failed handshake (including a missing executable) fails with "could not be started
   on this machine. Check its setup in Connections". A rejected turn fails with "could not complete
-  this turn: …" and the provider's message with email-shaped text replaced by `[account]`.
+  this turn: …" and the provider's message with email-shaped text replaced by `[account]` (bounded,
+  with an ellipsis when cut). The handshake has a 20-second deadline and opening or resuming the
+  session a 60-second one, so a process that never answers fails the launch with the same errors.
+- **Modes.** For every ACP agent, the session capabilities now carry the agent's own bounded mode
+  names and descriptions (`agentPermissionModes`), and the composer shows those for an ACP session
+  instead of a native harness's meaning for the same id (Claude's classifier `auto`, say).
 - **Stop.** For every ACP agent, `cancel()` now answers each pending `session/request_permission`
   with `cancelled`, as ACP requires, so a stopped turn's approval never stays open in the agent. The
   card itself settles with the turn, as for the native drivers.
-- **Resume.** Under `provider` isolation agy can persist its conversation, so the session advertises
-  `session/resume` and a restart resumes by id without replaying history. With bwrap or Seatbelt agy's
-  state directory (`~/.gemini/antigravity-cli`, which also holds its OAuth token and settings) is
-  read-only and nothing is persisted, so no resume is advertised and a restart shows the existing
-  "read-only history" refusal instead of starting a fresh conversation. A writable grant for agy's
+- **Resume.** Only a launch with no runner-owned sandbox (`provider` isolation and no managed Linux
+  worktree) lets agy persist its conversation, so only then does the session advertise
+  `session/resume`, and a restart resumes by id without replaying history. Under any runner sandbox
+  (bwrap, including a managed worktree's, or Seatbelt) agy's state directory
+  (`~/.gemini/antigravity-cli`, which also holds its OAuth token and settings) is read-only and
+  nothing is persisted, so no resume is advertised and a restart shows the existing "read-only
+  history" refusal instead of starting a fresh conversation. A writable grant for agy's
   conversation state is a follow-up. `session/load` is never used: agy answers a load of an id it
   cannot read with an empty session, which would pass for a resumed conversation.
 - **Approvals.** Commands ask through `session/request_permission` (string request ids, `allow` and

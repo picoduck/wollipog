@@ -25,6 +25,7 @@ import {
   permissionModeForDisplay,
   permissionModeLabel,
   effortLabel,
+  titleCaseLabel,
 } from "../format.js";
 import {
   defaultPermissionMode,
@@ -912,11 +913,29 @@ export function permissionModeOptionDescription(
   return base;
 }
 
+/** An ACP agent's own name and meaning for one of its modes, when its session advertised them
+ * (#4779). A native harness's meaning for the same id (Claude's classifier `auto`, say) never
+ * describes an ACP agent's mode. */
+export function advertisedPermissionMode(
+  capabilities: AgentCapabilities | undefined,
+  driver: AgentDriverKind,
+  mode: string | undefined,
+): { label: string; description: string } | undefined {
+  if (driver !== "acp" || !mode) return undefined;
+  const entry = capabilities?.agentPermissionModes?.find((candidate) => candidate.id === mode);
+  return entry
+    ? { label: titleCaseLabel(entry.name), description: entry.description ?? "Wollipog doesn't know what this mode permits." }
+    : undefined;
+}
+
 export function approvalControlLabel(
   driver: AgentDriverKind,
   permissionMode: string,
   _status: ElicitationAvailability,
+  capabilities?: AgentCapabilities,
 ): string {
+  const advertised = advertisedPermissionMode(capabilities, driver, permissionMode);
+  if (advertised) return advertised.label;
   if (permissionMode) return permissionModeLabel(permissionMode, driver);
   if (driver === "pi") return permissionModeLabel("default", driver);
   if (driver === "claude-code") return defaultPermissionModeDisplayLabel(driver);
@@ -978,7 +997,7 @@ export function ApprovalsMenuChoices({
     }] : []),
     ...displayedModes.map((mode) => ({
       key: `mode-${mode}`,
-      label: permissionModeLabel(mode, driver),
+      label: advertisedPermissionMode(capabilities, driver, mode)?.label ?? permissionModeLabel(mode, driver),
       mode,
       checked: mode === permVal,
       select: () => {
@@ -988,9 +1007,10 @@ export function ApprovalsMenuChoices({
   ];
   const described = rows.map((row) => {
     const status = elicitationAvailability(capabilities, row.mode);
+    const advertised = row.key === "default-row" ? undefined : advertisedPermissionMode(capabilities, driver, row.mode);
     return {
       ...row,
-      description: permissionModeOptionDescription(
+      description: advertised?.description ?? permissionModeOptionDescription(
         row.mode,
         driver,
         status,
@@ -1040,7 +1060,7 @@ export function ApprovalsControl({ session, apply, disabledReason = null }: {
   if (permModes.length === 0) return null;
   const currentMode = permVal || defaultPermissionMode(session.driver);
   const currentStatus = elicitationAvailability(caps, currentMode);
-  const currentLabel = approvalControlLabel(session.driver, permVal, currentStatus);
+  const currentLabel = approvalControlLabel(session.driver, permVal, currentStatus, caps);
   const unrestricted = skipsApprovals(currentMode);
   const accessibleLabel = `Permission Mode: ${currentLabel}`;
   if (permModes.length === 1 && permModes[0] === "orchestrator") {

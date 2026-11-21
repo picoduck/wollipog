@@ -11,7 +11,11 @@
 
 import { ANTIGRAVITY_AGENT_ID, type AgentDefinition, type AntigravitySetupView } from "@wollipog/protocol";
 import type { AcpCompatibility } from "./acp-compatibility.js";
-import type { AntigravityCredentialContext } from "./antigravity-setup.js";
+import {
+  ANTIGRAVITY_AMBIENT_CREDENTIAL_ENV,
+  ANTIGRAVITY_AMBIENT_CREDENTIAL_PREFIXES,
+  type AntigravityCredentialContext,
+} from "./antigravity-setup.js";
 import type { RunnerExecutionIsolation } from "./config.js";
 
 export { ANTIGRAVITY_AGENT_ID };
@@ -19,6 +23,10 @@ export const ANTIGRAVITY_AGENT_NAME = "Google Antigravity";
 /** The launch arguments. Never `--dangerously-skip-permissions`, `--login`, or a directory flag:
  * permissions follow the agent's advertised modes and the session's cwd is its worktree. */
 export const ANTIGRAVITY_ACP_ARGS = ["acp"] as const;
+
+/** Real agy 1.5.14 answered initialize at once and opened a session in about a second; these bound
+ * a process that never answers. Session creation and resume reach Google, so they get longer. */
+export const ANTIGRAVITY_LAUNCH_DEADLINES = { handshakeMs: 20_000, sessionMs: 60_000 } as const;
 
 /** Runner-visible reasons; New Session words them as their fix (`agent-options.ts`). */
 export const ANTIGRAVITY_UNAVAILABLE = {
@@ -87,6 +95,16 @@ export function withAntigravityAgent(
   return row ? [...others, row] : others;
 }
 
+/** The agents external-session discovery and adoption may probe: never the setup-derived
+ * Antigravity row. Those paths spawn adapters without its credential context or compatibility
+ * profile, and listing (and the load that adoption needs) is withheld for Antigravity anyway. */
+export function withoutAntigravityAgent<T extends Pick<AgentDefinition, "id">>(
+  agents: readonly T[],
+  configuredIds: ReadonlySet<string>,
+): T[] {
+  return configuredIds.has(ANTIGRAVITY_AGENT_ID) ? [...agents] : agents.filter((agent) => agent.id !== ANTIGRAVITY_AGENT_ID);
+}
+
 export interface AntigravitySessionLaunch {
   /** Undefined when the setup has no executable: the launch keeps the command it was started with
    * and, if that is gone, fails as an installation problem. */
@@ -111,6 +129,8 @@ export function antigravitySessionLaunch(
     args: [...ANTIGRAVITY_ACP_ARGS],
     env: { ...context.env },
     scrubInheritedEnv: [...context.scrubInheritedEnv],
-    acpCompatibility: { profile: "antigravity", resumable: antigravityResumable(isolation) },
+    acpCompatibility: { profile: "antigravity", resumable: antigravityResumable(isolation),
+      withheldEnvironment: { names: [...ANTIGRAVITY_AMBIENT_CREDENTIAL_ENV], prefixes: [...ANTIGRAVITY_AMBIENT_CREDENTIAL_PREFIXES] },
+      deadlines: { ...ANTIGRAVITY_LAUNCH_DEADLINES } },
   };
 }
