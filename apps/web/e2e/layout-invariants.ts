@@ -57,3 +57,66 @@ export async function expectPageNoHorizontalOverflow(page: Page) {
   const widths = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth }));
   expect(widths.scroll, "The page has no horizontal overflow").toBeLessThanOrEqual(widths.client + 1);
 }
+
+/** Read both the real control box and the shared coarse-pointer hit-area expansion. */
+export async function expectTouchTargets(container: Locator) {
+  const targets = await container.getByRole("button").evaluateAll((buttons) => buttons.flatMap((button) => {
+    if (button.matches(":disabled") || !button.getClientRects().length) return [];
+    const rect = button.getBoundingClientRect();
+    const after = getComputedStyle(button, "::after");
+    const style = getComputedStyle(button);
+    const expands = after.content !== "none" && after.position === "absolute" && after.pointerEvents !== "none";
+    const inset = (edge: "left" | "right" | "top" | "bottom", border: string) =>
+      expands ? Math.min(0, (parseFloat(after[edge]) || 0) + parseFloat(border)) : 0;
+    return [{
+      name: button.getAttribute("aria-label") || button.textContent?.trim(),
+      left: rect.left + inset("left", style.borderLeftWidth),
+      right: rect.right - inset("right", style.borderRightWidth),
+      top: rect.top + inset("top", style.borderTopWidth),
+      bottom: rect.bottom - inset("bottom", style.borderBottomWidth),
+    }];
+  }));
+  for (const [index, first] of targets.entries()) {
+    expect(first.right - first.left, first.name + " hit width in CSS px").toBeGreaterThanOrEqual(44);
+    expect(first.bottom - first.top, first.name + " hit height in CSS px").toBeGreaterThanOrEqual(44);
+    for (const second of targets.slice(index + 1)) {
+      const width = Math.min(first.right, second.right) - Math.max(first.left, second.left);
+      const height = Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top);
+      expect(width > 0.5 && height > 0.5, first.name + " overlaps " + second.name).toBe(false);
+    }
+  }
+}
+
+/** Composite translucent backgrounds from the ancestors outward before measuring text contrast. */
+export async function expectTextContrast(root: Locator) {
+  const weakest = await root.evaluate((element) => {
+    const context = document.createElement("canvas").getContext("2d")!;
+    const fill = (color: string) => {
+      context.fillStyle = color;
+      context.fillRect(0, 0, 1, 1);
+    };
+    const luminance = () => Array.from(context.getImageData(0, 0, 1, 1).data.slice(0, 3))
+      .map((channel) => channel / 255)
+      .map((value) => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4)
+      .reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index]!, 0);
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    let weakest = { ratio: Infinity, text: "" };
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const parent = node.parentElement;
+      if (!parent || !node.textContent?.trim() || !parent.getClientRects().length || parent.closest(".sr-only, :disabled")) continue;
+      const layers: string[] = [];
+      for (let layer: Element | null = parent; layer; layer = layer.parentElement) {
+        layers.push(getComputedStyle(layer).backgroundColor);
+      }
+      fill("white");
+      layers.reverse().forEach(fill);
+      const background = luminance();
+      fill(getComputedStyle(parent).color);
+      const text = luminance();
+      const ratio = (Math.max(background, text) + 0.05) / (Math.min(background, text) + 0.05);
+      if (ratio < weakest.ratio) weakest = { ratio, text: node.textContent.trim() };
+    }
+    return weakest;
+  });
+  expect(weakest.ratio, weakest.text + " contrast against its computed background").toBeGreaterThanOrEqual(4.5);
+}

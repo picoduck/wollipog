@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useApi } from "../api-context.js";
+import type { ApiClient } from "../api.js";
+import { threadSpendingCopy, threadSpendingStates } from "../assistant-thread-spending.js";
 import {
   applyAssistantThreadEvents,
   ASSISTANT_THREAD_TITLE_MAX,
@@ -14,24 +16,26 @@ import { useReportEntityTitle } from "../entity-title.js";
 import { effortLabel, relativeTime, resolvedModelLabel } from "../format.js";
 import { backLabel, destination } from "../navigation.js";
 import { statusMeta } from "../status-meta.js";
+import { sessionDisplayTitle } from "../session-title.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { pendingAssistantConfirmations } from "../assistant-confirmations.js";
 import { AssistantConfirmationCard } from "./AssistantConfirmationCard.js";
-import { ASSISTANT_DEFAULTS_VIEW, AssistantSettingsLink } from "./AssistantSettingsLink.js";
+import { AssistantSpendingNotice } from "./AssistantSpendingNotice.js";
 import { AssistantThreadLimitsDialog } from "./AssistantThreadLimitsDialog.js";
 import { AssistantDecisionDelegationDialog } from "./AssistantDecisionDelegationDialog.js";
 import { AssistantWaitingWork, useLaunchedWorkGroups } from "./AssistantWorkCards.js";
 import type { LaunchedWork } from "../assistant-launched-work.js";
 import { ChangeAssistantThreadAccountDialog } from "./ChangeAssistantThreadAccountDialog.js";
 import { ChangeAssistantThreadHarnessDialog } from "./ChangeAssistantThreadHarnessDialog.js";
-import { useFeedback } from "./FeedbackProvider.js";
+import { ConfirmationFailure, useFeedback } from "./FeedbackProvider.js";
 import { AssistantsIcon, PlusIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
 import { NewAssistantThreadDialog, THREADS_UNAVAILABLE_MESSAGE } from "./NewAssistantThreadDialog.js";
 import { Notice } from "./Notice.js";
 import { ActionsMenu, DetailBar, PageHeader, type PageMenuAction } from "./PageHeader.js";
 import { SessionDetail } from "./SessionDetail.js";
+import { SESSION_NOTICE_RANK, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
 import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -46,6 +50,9 @@ import { SidePanelToggle } from "./SessionPanelToggles.js";
 const ASSISTANTS = destination("assistants");
 /** How often the list is read while a thread is working, as a net under the thread events. */
 const WORKING_POLL_MS = 15_000;
+/** Keep a thread's warning dismissed while navigating elsewhere in this browser tab. */
+const dismissedBudgetsByClient = new WeakMap<ApiClient, ReadonlyMap<string, number>>();
+const NO_DISMISSED_BUDGETS: ReadonlyMap<string, number> = new Map();
 
 type ListState =
   | { kind: "loading" }
@@ -76,13 +83,13 @@ function newThreadBlock(list: ListState): { title: string; message: string } | u
  */
 export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   threadId?: string;
-  limits?: true;
+  limits?: true | "spending";
   delegation?: true;
   /** Opens a session tool if the conversation offers a link to one. */
   rightPanel: RightPanelState;
 }) {
   const api = useApi();
-  const { navigate, dispatch } = useStoreActions();
+  const { navigate, dispatch, getSession, loadSession } = useStoreActions();
   const { confirm, showToast } = useFeedback();
   const isMobile = useIsMobile();
   const conn = useStoreSelector((state) => state.conn);
@@ -96,6 +103,12 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   const [archiving, setArchiving] = useState(false);
   const [changingAccount, setChangingAccount] = useState<AssistantThread | null>(null);
   const [changingHarness, setChangingHarness] = useState<AssistantThread | null>(null);
+  const [budgetDismissal, setBudgetDismissal] = useState(() => ({
+    client: api,
+    budgets: dismissedBudgetsByClient.get(api) ?? NO_DISMISSED_BUDGETS,
+  }));
+  const dismissedBudgets = budgetDismissal.client === api ? budgetDismissal.budgets
+    : dismissedBudgetsByClient.get(api) ?? NO_DISMISSED_BUDGETS;
   const generation = useRef(0);
   /** A read is in flight, and whether another was asked for while it was. */
   const reading = useRef(false);
@@ -240,6 +253,20 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   }, [launchedWorkActive, refresh]);
   const refreshInBackground = launchedWorkActive || threads.some((thread) => thread.status === "working");
   useEffect(() => {
+    if (!dismissedBudgets.size) return;
+    // A fresh warning band (including one created by raising the budget) can warn again.
+    const next = new Map(dismissedBudgets);
+    for (const thread of threads) {
+      if (next.has(thread.id) && !threadSpendingStates(thread).some(
+        (state) => state.kind === "near_budget" && state.limit === next.get(thread.id),
+      )) next.delete(thread.id);
+    }
+    if (next.size !== dismissedBudgets.size) {
+      dismissedBudgetsByClient.set(api, next);
+      setBudgetDismissal({ client: api, budgets: next });
+    }
+  }, [api, dismissedBudgets, threads]);
+  useEffect(() => {
     if (!refreshInBackground) return;
     const timer = setInterval(refresh, WORKING_POLL_MS);
     return () => clearInterval(timer);
@@ -265,7 +292,8 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   };
 
   const openThread = (id: string) => navigate({ name: "assistants", threadId: id });
-  const openThreadSettings = (id: string) => navigate({ name: "assistants", threadId: id, limits: true });
+  const openThreadSettings = (id: string, section: true | "spending" = true) =>
+    navigate({ name: "assistants", threadId: id, limits: section });
   const toList = () => navigate({ name: "assistants" });
 
   const archive = async (thread: AssistantThread) => {
@@ -307,6 +335,57 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   // The open thread's launched work, for the header toggle and the Work tab. Kept
   // the same object while the thread's lists are, so their live counts don't recompute each render.
   const launchedSessionIds = selected?.launchedSessionIds;
+  const canStopLaunched = useStoreSelector((state) => launchedSessionIds?.some((id) => {
+    const session = state.sessions.get(id);
+    return session?.status === "running" && !session.archived;
+  }) ?? false);
+  const stopLaunched = async (thread: AssistantThread) => {
+    const targets = [...new Set(thread.launchedSessionIds)].flatMap((id) => {
+      const session = getSession(id);
+      return session?.status === "running" && !session.archived ? [{ id, label: sessionDisplayTitle(session.title) }] : [];
+    });
+    if (!targets.length) return;
+    const remaining = new Set(targets.map(({ id }) => id));
+    await confirm({
+      title: "Stop Launched Sessions",
+      message: "This stops the sessions below and cancels their queued prompts and background jobs. Their transcripts and worktrees are kept.",
+      detailRows: targets,
+      showAllDetailRows: true,
+      confirmLabel: "Stop Sessions",
+      tone: "danger",
+      progress: "Stopping the sessions…",
+      cancelWhileRunning: false,
+      onConfirm: async () => {
+        const results = await Promise.allSettled([...remaining].map(async (id) => {
+          const session = getSession(id);
+          if (session?.status === "running" && !session.archived) loadSession(await api.stop(id));
+          remaining.delete(id);
+        }));
+        const failures = results.flatMap((result) => result.status === "rejected" ? [String(result.reason)] : []);
+        if (failures.length) throw new ConfirmationFailure("Couldn't stop every listed session. Try again.", failures.join("\n"));
+      },
+    });
+  };
+  const spendingNotices: SessionNoticeEntry[] = selected ? threadSpendingStates(selected)
+    .filter((state) => state.kind !== "near_budget" || dismissedBudgets.get(selected.id) !== state.limit)
+    .map((state) => ({
+      key: "assistant-spending:" + state.kind,
+      severity: state.kind === "over_budget" ? "danger" : "warning",
+      rank: state.kind === "near_budget" ? SESSION_NOTICE_RANK.assistantNearBudget
+        : state.kind === "launch_limit" ? SESSION_NOTICE_RANK.assistantLaunchLimit : SESSION_NOTICE_RANK.assistantBudget,
+      title: threadSpendingCopy(state).title,
+      render: ({ trailing }) => <AssistantSpendingNotice state={state} trailing={trailing}
+        onRaise={() => openThreadSettings(selected.id, "spending")}
+        onSettings={() => openThreadSettings(selected.id)}
+        onStop={() => void stopLaunched(selected)}
+        onBreakdown={() => panel.show("Details")}
+        onDismiss={() => {
+          const budgets = new Map(dismissedBudgets).set(selected.id, state.limit);
+          dismissedBudgetsByClient.set(api, budgets);
+          setBudgetDismissal({ client: api, budgets });
+        }}
+        canStop={canStopLaunched} />,
+    })) : [];
   const launchedCampaignIds = selected?.launchedCampaignIds;
   const launchedWork = useMemo<LaunchedWork | undefined>(() => launchedSessionIds
     ? { sessionIds: launchedSessionIds, ...(launchedCampaignIds ? { campaignIds: launchedCampaignIds } : {}) }
@@ -421,6 +500,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
                 work={launchedWork!}
                 onConfirmationAnswered={refresh}
               />}
+              assistantSpendingNotices={spendingNotices}
             />
           )}
         </div>
@@ -465,6 +545,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
         <AssistantThreadLimitsDialog
           key={selected.id}
           thread={selected}
+          startAtSpending={limits === "spending"}
           model={model ? resolvedModelLabel(model) : undefined}
           effort={effort ? effortLabel(effort) : undefined}
           limits={selected.usage && { costUsd: selected.usage.costUsd.limit, launchedSessions: selected.usage.launchedSessions.limit }}
@@ -558,7 +639,7 @@ function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
                   <span className="row-body">
                     <span className="row-line">
                       <span className="row-title" title={assistantThreadTitle(thread)}>{assistantThreadTitle(thread)}</span>
-                      <StatusBadge meta={statusMeta("assistantThread", thread.status)} />
+                      {threadStatusBadge(thread)}
                     </span>
                     <span className="row-sub">
                       {assistantThreadHarnessLabel(thread.harness)} · {relativeTime(thread.lastActivityAt)}
@@ -597,9 +678,15 @@ function ThreadBar({ thread, work, menu, sidePanelOpen, onToggleSidePanel }: {
   );
 }
 
-/** Use the same thread lifecycle on both bars. "Done" is the thread's at-rest state. */
+/** Spending supersedes lifecycle on the row and both bars. The bars omit the at-rest badge. */
 function threadBarStatus(thread: AssistantThread) {
-  return thread.status === "done" ? null : <StatusBadge meta={statusMeta("assistantThread", thread.status)} />;
+  return threadStatusBadge(thread, true);
+}
+
+function threadStatusBadge(thread: AssistantThread, hideDone = false) {
+  const spending = threadSpendingStates(thread)[0];
+  if (spending) return <StatusBadge meta={statusMeta("assistantThreadSpending", spending.kind)} />;
+  return hideDone && thread.status === "done" ? null : <StatusBadge meta={statusMeta("assistantThread", thread.status)} />;
 }
 
 function AssistantSidePanelToggle({ work, open, onToggle }: {
@@ -660,17 +747,8 @@ function ThreadWaitingLead({ thread, work, onConfirmationAnswered }: {
   // Destructive commands this thread's assistant is waiting on the owner for (#4665), drawn ahead
   // of the work they would unblock.
   const pending = pendingAssistantConfirmations([thread]);
-  const usage = thread.usage;
-  const launches = usage?.launchedSessions;
-  const launchRefusal = thread.launchLimitRefusal ?? (launches?.limit != null && launches.used >= launches.limit && thread.status !== "archived"
-    ? "This thread has reached its session launch limit." : null);
-  const settingsView = { name: "assistants", threadId: thread.id, limits: true } as const;
   return (
     <div className="assistant-thread-head">
-      {launchRefusal ? <Notice tone="warning" role="status" title="Thread Limit Reached" actions={<>
-        <AssistantSettingsLink view={settingsView}>Thread Settings</AssistantSettingsLink>
-        <AssistantSettingsLink view={ASSISTANT_DEFAULTS_VIEW}>Assistant Defaults</AssistantSettingsLink>
-      </>}>{launchRefusal}</Notice> : null}
       <AssistantWaitingWork
         work={work}
         confirmations={pending.length > 0 ? pending.map(({ confirmation }) => (

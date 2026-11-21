@@ -1,12 +1,176 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
-import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizontalOverflow } from "./layout-invariants.js";
+import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizontalOverflow, expectTextContrast, expectTouchTargets } from "./layout-invariants.js";
 
 const THREAD = "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA";
 const SETTINGS = "/settings/assistant";
 const OLD_SETTINGS = "/settings/behavior/assistant-threads";
 const EVIDENCE = process.env.ASSISTANT_LIMITS_EVIDENCE_DIR;
+
+const SPENDING_CASES = [
+  { scenario: "near", title: "Near Budget", badge: "Near Budget", state: "86percent",
+    copy: "$21.40 of $25.00 used. At $25.00 the assistant can't launch more sessions.", meter: "$21.40 of $25.00 spent" },
+  { scenario: "used-up", title: "Budget Used Up", badge: "Budget Used Up", state: "100percent",
+    copy: "This thread has spent its $25.00 budget, so the assistant can't launch more sessions. It can still answer you.", meter: "$25.00 of $25.00 spent" },
+  { scenario: "over", title: "Over Budget by $54.93", badge: "Over Budget", state: "320percent",
+    copy: "Sessions this thread launched kept running after its $25.00 budget ran out, and their cost counts toward it. The assistant can't launch more until you raise the budget.", meter: "$79.93 of $25.00 spent" },
+  { scenario: "launch-limit", title: "Launch Limit Reached", badge: "Launch Limit Reached", state: "10of10",
+    copy: "10 of 10 session launches used. The assistant can't start more.", meter: "10 of 10 session launches used" },
+] as const;
+
+const spendingNotice = (page: Page) => page.locator(".composer .session-notice-slot .assistant-spending-notice");
+const threadRow = (page: Page, id = "thr_triage") => page.locator('[data-thread-id="' + id + '"]');
+const threadBar = (page: Page) => page.locator(".assistant-thread-bar, .page > .detail-bar");
+
+async function openSpending(page: Page, scenario: string, path = THREAD) {
+  await page.clock.setFixedTime(Date.UTC(2026, 10, 20, 17));
+  await page.goto("/assistants-e2e.html?limits=budget&launched=many&accounts=stress&spending=" + scenario +
+    "&path=" + encodeURIComponent(path));
+}
+
+async function captureSpending(page: Page, surface: string, theme: string, state: string) {
+  if (process.env.ASSISTANT_SPENDING_EVIDENCE !== "1") return;
+  const { width, height } = page.viewportSize()!;
+  const name = ["4810", surface, width + "x" + height, theme, state].join("-");
+  await page.screenshot({ path: join("playwright-report", "4810", name + ".png"), animations: "disabled" });
+}
+
+for (const theme of ["light", "dark"] as const) {
+  for (const [width, height] of [[1440, 900], [390, 844]] as const) {
+    const phone = width === 390;
+    test.describe("spending on " + width + "px in " + theme, () => {
+      test.use({ viewport: { width, height }, hasTouch: phone, isMobile: phone, colorScheme: theme, locale: "en-US", timezoneId: "UTC" });
+      for (const { scenario, title, badge, state, copy, meter } of SPENDING_CASES) {
+        test("shows " + badge + " above the composer with matching badges", async ({ page }) => {
+          await openSpending(page, scenario);
+          await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+          const notice = spendingNotice(page);
+          await expect(notice).toHaveRole("status");
+          await expect(notice.locator(".notice-title")).toHaveText(title);
+          await expect(notice.getByText(copy, { exact: true })).toBeVisible();
+          await expect(notice.getByRole("meter")).toHaveAttribute("aria-valuetext", meter);
+          await expect(page.getByText("Thread Limit Reached", { exact: true })).toHaveCount(0);
+          const composerBox = page.locator(".composer-box");
+          await expect(composerBox).not.toHaveClass(/is-disabled/);
+          await expectFullyInViewport(page.locator(".composer"), "The composer and its spending notice");
+          await expectFullyInViewport(composerBox, "The composer input");
+          await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
+          expect((await notice.boundingBox())!.y + (await notice.boundingBox())!.height).toBeLessThanOrEqual((await composerBox.boundingBox())!.y);
+          await expectPageNoHorizontalOverflow(page);
+          await expectNoHorizontalOverflow(notice);
+          await expectTextContrast(notice);
+
+          await expect(threadBar(page).locator(".status")).toHaveText(badge);
+          await expectTextContrast(threadBar(page).locator(".status"));
+          await expectFullyInViewport(threadBar(page).locator(".status"), "The spending badge");
+          await expect(threadBar(page).locator(".detail-bar-title")).toHaveCSS("text-overflow", "ellipsis");
+          expect((await threadBar(page).boundingBox())!.height).toBe(48);
+          expect((await threadBar(page).getByRole("heading").textContent())!.length).toBe(120);
+          const raise = notice.getByRole("button", { name: scenario === "launch-limit" ? "Raise Limit…" : "Raise Budget…" });
+          for (const button of await notice.getByRole("button").all()) {
+            await expectFullyInViewport(button, "A notice action");
+            if (!phone) expect((await button.boundingBox())!.height).toBe(28);
+          }
+          if (phone) await expectTouchTargets(notice);
+          if (scenario === "over") {
+            await expect(notice.locator(".assistant-spending-overflow")).toHaveCSS("background-image", /repeating-linear-gradient/);
+          } else {
+            await expect(notice.locator(".assistant-spending-overflow")).toHaveCount(0);
+          }
+          if (!phone) {
+            await expect(threadRow(page).locator(".status")).toHaveText(badge);
+            await expectTextContrast(threadRow(page).locator(".status"));
+          }
+          await captureSpending(page, phone ? "notice-title-bar" : "notice-and-badges", theme,
+            state + "-bar48csspx" + (phone ? "-target44csspx" : ""));
+
+          await raise.click();
+          const settings = page.getByRole("dialog", { name: "Thread Settings", exact: true });
+          await expect(settings.getByRole("heading", { name: "Spending" })).toBeFocused();
+          await expectFullyInViewport(settings.getByRole("heading", { name: "Spending" }), "Spending settings");
+          await settings.getByRole("button", { name: "Done", exact: true }).click();
+          if (scenario === "over") {
+            await notice.getByRole("button", { name: "Show Breakdown" }).click();
+            const details = page.getByRole("tabpanel", { name: "Details", exact: true });
+            await expect(details).toBeVisible();
+            await expect(details).toContainText("$79.93 of $25.00 spent");
+            await closeDetails(page);
+          }
+          if (phone) {
+            await page.getByRole("button", { name: "Back to Assistants" }).click();
+            await expect(threadRow(page).locator(".status")).toHaveText(badge);
+            await expectTextContrast(threadRow(page).locator(".status"));
+            await expectTouchTargets(page.getByRole("complementary", { name: "Assistants", exact: true }));
+            await captureSpending(page, "list-row", theme, state + "-target44csspx");
+          }
+        });
+      }
+
+      test("confirms the named running sessions and stops only those that are still running", async ({ page }) => {
+        await openSpending(page, "over");
+        const stop = spendingNotice(page).getByRole("button", { name: "Stop Launched Sessions…" });
+        await expect(stop).toBeEnabled();
+        await stop.click();
+        const dialog = page.getByRole("dialog", { name: "Stop Launched Sessions" });
+        const rows = dialog.locator(".confirmation-rows .row-title");
+        await expect(rows).toHaveCount(9);
+        await expect(rows.first()).toHaveAttribute("title", /.{100,}/);
+        await expect(rows.first()).toHaveCSS("text-overflow", "ellipsis");
+        await expect(dialog.getByText("Unrelated Running Session")).toHaveCount(0);
+        await expect(page.locator("body")).not.toHaveAttribute("data-stopped-sessions", /./);
+        const cancel = dialog.getByRole("button", { name: "Cancel" });
+        await expect(cancel).toBeFocused();
+        const confirm = dialog.getByRole("button", { name: "Stop Sessions" });
+        await expectFullyInViewport(confirm, "The stop confirmation action");
+        await expectFullyInViewport(cancel, "Cancel");
+        await expectPageNoHorizontalOverflow(page);
+        await expectNoHorizontalOverflow(dialog);
+        await expectTextContrast(dialog);
+        if (phone) await expectTouchTargets(dialog);
+        await captureSpending(page, "stop-confirmation", theme, "9running-sessions" + (phone ? "-target44csspx" : ""));
+        await cancel.click();
+        await expect(page.locator("body")).not.toHaveAttribute("data-stopped-sessions", /./);
+        await stop.click();
+        await page.evaluate(() => (window as unknown as { assistantsAdvance(): void }).assistantsAdvance());
+        await confirm.click();
+        await expect(dialog).toHaveCount(0);
+        await expect(page.locator("body")).toHaveAttribute("data-stopped-sessions", "sess-many-5,sess-many-10,sess-many-15,sess-many-20,sess-many-25,sess-many-30,sess-many-35,sess-many-40");
+        await expect(stop).toBeDisabled();
+      });
+    });
+  }
+}
+
+test("Near Budget dismissal is per thread and the next threshold still warns", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openSpending(page, "near");
+  const notice = spendingNotice(page);
+  await notice.getByRole("button", { name: "Dismiss Near Budget" }).click();
+  await expect(notice).toHaveCount(0);
+  await threadRow(page, "thr_release").click();
+  await expect(notice.locator(".notice-title")).toHaveText("Near Budget");
+  await threadRow(page).click();
+  await expect(notice).toHaveCount(0);
+  await page.getByRole("link", { name: "Sessions", exact: true }).click();
+  await page.getByRole("link", { name: "Assistants", exact: true }).click();
+  await threadRow(page).click();
+  await expect(notice).toHaveCount(0);
+  await page.evaluate(() => (window as unknown as { assistantsSpend(used: number): void }).assistantsSpend(25));
+  await expect(notice.locator(".notice-title")).toHaveText("Budget Used Up");
+  await expect(notice.getByRole("button", { name: "Dismiss Near Budget" })).toHaveCount(0);
+  await page.locator(".composer-input").fill("Summarize the work so far");
+  await page.locator(".composer-input").press("Enter");
+  await expect(page.locator("body")).toHaveAttribute("data-assistant-prompt", "sess-triage:Summarize the work so far");
+  await expect(notice.locator(".notice-title")).toHaveText("Budget Used Up");
+});
+
+test("a control plane without thread usage shows no spending notice", async ({ page }) => {
+  await open(page, THREAD, "light", "");
+  await expect(threadBar(page).getByRole("heading")).toBeVisible();
+  await expect(spendingNotice(page)).toHaveCount(0);
+  await expect(threadBar(page).locator(".status")).toHaveText("Needs You");
+});
 
 async function openDetails(page: Page) {
   const panel = page.locator("#right-panel");
@@ -268,11 +432,12 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
 
     test(`budget warnings and editors link to one another on ${layout} in ${theme}`, async ({ page }) => {
       await page.setViewportSize({ width, height });
-      await open(page, THREAD, theme, "budget");
-      const warning = page.getByRole("status").filter({ hasText: "whole $25 budget" });
-      await expect(warning.getByRole("link", { name: "Assistant Defaults" })).toHaveAttribute("href", SETTINGS);
+      await page.emulateMedia({ colorScheme: theme });
+      await page.goto(`/assistants-e2e.html?limits=budget&spending=used-up&accounts=stress&path=${encodeURIComponent(THREAD)}`);
+      const warning = page.locator(".composer .session-notice-slot").getByRole("status");
+      await expect(warning).toContainText("Budget Used Up");
       if (theme === "dark") await capture(page, "thread-limit-warning");
-      await warning.getByRole("link", { name: "Thread Settings", exact: true }).click();
+      await warning.getByRole("button", { name: "Thread Settings", exact: true }).click();
       const thread = page.getByRole("dialog", { name: "Thread Settings", exact: true });
       await expect(thread.getByRole("textbox", { name: "Cost Budget (USD)" })).toHaveValue("25");
       if (theme === "dark") await capture(page, "one-click-remove-budget");

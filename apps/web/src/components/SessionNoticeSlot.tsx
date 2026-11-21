@@ -117,6 +117,9 @@ export const SESSION_NOTICE_RANK = {
   // A queued message whose delivery failed or could not be confirmed (#2178), after the composer's
   // own entries: the draft in hand comes before a message already sent.
   queuedMessageError: 16,
+  assistantBudget: 17,
+  assistantLaunchLimit: 18,
+  assistantNearBudget: 19,
 } as const;
 
 /**

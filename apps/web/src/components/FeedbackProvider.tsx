@@ -57,6 +57,8 @@ export interface ConfirmationOptions {
    * `MAX_CONFIRMATION_DETAIL_ROWS` show; the rest are counted in "and N more". The rows are part of
    * the dialog's accessible description. */
   detailRows?: readonly ConfirmationDetailRow[];
+  /** List each target when the person is confirming an exact set of affected objects. */
+  showAllDetailRows?: boolean;
   /** Affected objects the caller knows of but cannot list (the server withheld them), added to the
    * "and N more" count. */
   detailRowsOverflow?: number;
@@ -139,6 +141,7 @@ function confirmationFingerprint(options: ConfirmationOptions): string {
     typeof options.details === "string" ? options.details : "",
     JSON.stringify((options.detailRows ?? []).map((row) => [row.label, row.labelStyle ?? "", row.meta ?? "", row.status?.label ?? "", row.status?.tone ?? ""])),
     String(options.detailRowsOverflow ?? 0),
+    String(options.showAllDetailRows ?? false),
     options.cancelLabel ?? "",
     options.secondaryAction?.label ?? "",
     options.typeToConfirm ?? "",
@@ -146,9 +149,9 @@ function confirmationFingerprint(options: ConfirmationOptions): string {
   ].join("\u0000");
 }
 
-function detailRowsOverflowCount(rows: readonly ConfirmationDetailRow[], overflow: number | undefined): number {
+function detailRowsOverflowCount(shown: number, total: number, overflow: number | undefined): number {
   const unlisted = Number.isFinite(overflow) ? Math.max(0, Math.floor(overflow!)) : 0;
-  return Math.max(0, rows.length - MAX_CONFIRMATION_DETAIL_ROWS) + unlisted;
+  return total - shown + unlisted;
 }
 
 export interface ToastOptions {
@@ -620,8 +623,8 @@ function ConfirmationDialog({ request, onSettle }: {
   const danger = request.tone === "danger";
   const isPhone = useIsMobile();
   const rows = request.detailRows ?? [];
-  const shownRows = rows.slice(0, MAX_CONFIRMATION_DETAIL_ROWS);
-  const moreRows = detailRowsOverflowCount(rows, request.detailRowsOverflow);
+  const shownRows = request.showAllDetailRows ? rows : rows.slice(0, MAX_CONFIRMATION_DETAIL_ROWS);
+  const moreRows = detailRowsOverflowCount(shownRows.length, rows.length, request.detailRowsOverflow);
   const describedBy = [
     descriptionId,
     request.details ? detailsId : null,

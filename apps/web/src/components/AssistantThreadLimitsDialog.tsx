@@ -11,12 +11,13 @@ import { BusyButton } from "./ui/BusyButton.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
 import { ActionRow, SettingsGroup } from "./ui/SettingsRows.js";
 
-export function AssistantThreadLimitsDialog({ defaults, limits, thread, model, effort, onNewThread, onChangeHarness, onAccountChanged, onClose, onSave }: {
+export function AssistantThreadLimitsDialog({ defaults, limits, thread, model, effort, startAtSpending, onNewThread, onChangeHarness, onAccountChanged, onClose, onSave }: {
   defaults?: boolean;
   limits?: AssistantThreadLimits;
   thread?: AssistantThread;
   model?: string | null;
   effort?: string | null;
+  startAtSpending?: boolean;
   onNewThread?: () => void;
   onChangeHarness?: () => void;
   onAccountChanged?: (thread: AssistantThread) => void;
@@ -32,6 +33,7 @@ export function AssistantThreadLimitsDialog({ defaults, limits, thread, model, e
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const errorRef = useRef<HTMLElement>(null);
+  const spendingRef = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     if (error) errorRef.current?.scrollIntoView?.({ block: "nearest" });
   }, [error]);
@@ -81,6 +83,7 @@ export function AssistantThreadLimitsDialog({ defaults, limits, thread, model, e
       title={defaults ? "Default Thread Limits" : "Thread Settings"}
       description={defaults ? "These limits apply to new Assistant threads." : "The cost budget covers this thread and the work it launches."}
       phoneSheet={thread ? "full" : undefined}
+      initialFocusRef={startAtSpending ? spendingRef : undefined}
       onClose={saving ? () => {} : onClose}
       footer={<>
         <button type="button" className="btn" onClick={onClose} disabled={saving}>{thread ? "Done" : "Cancel"}</button>
@@ -114,6 +117,7 @@ export function AssistantThreadLimitsDialog({ defaults, limits, thread, model, e
         {readOnly && <Notice tone="neutral" role="status">{readOnly}</Notice>}
       </>}
       <form id={form} className="form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+        {thread && <h3 className="field-label" ref={spendingRef} tabIndex={-1}>Spending</h3>}
         <div className="field" role="group" aria-label="Cost Budget">
           <label className="field">
             <span>Cost Budget (USD)</span>

@@ -650,6 +650,8 @@ export type SessionDetailProps = {
    * thread's waiting work, so the panel spans the page under the bar as it does
    * beside a session's. */
   columnLead?: ReactNode;
+  /** Usage warnings from the Assistant thread that owns this conversation. */
+  assistantSpendingNotices?: readonly SessionNoticeEntry[];
   /** Transport-owned policy seam. Native passthrough commands default to the existing send path. */
   providerCommandAttachmentPolicy?: ProviderComposerCommand["attachmentPolicy"];
   /** Registers preview-only paging ownership and live-follow actions with the Inbox key layer. */
@@ -1174,6 +1176,7 @@ function SessionDetailLoaded({
   header,
   assistantPanel,
   columnLead,
+  assistantSpendingNotices = [],
   providerCommandAttachmentPolicy = "send",
   onPreviewNavigationReady,
   onPreviewForkReady,
@@ -5046,7 +5049,8 @@ function SessionDetailLoaded({
   const runnerOfflineReason = runnerOnline ? null : `${runnerDisp.name || "This machine"} is offline.`;
   const accountSwitchApplicable = sessionAccountSwitchApplicable(session);
   const accountSwitchSupported = runnerSupportsProtocol(runner?.protocolVersion, "sessionProviderAccountSwitch");
-  const sessionNotices: SessionNoticeEntry[] = [];
+  const sessionNotices: SessionNoticeEntry[] = [...assistantSpendingNotices];
+  const spendingBelowDock = assistantSpendingNotices.length > 0;
   if (worktreeRecovery && worktreeMissingOrder) {
     sessionNotices.push({
       ...worktreeMissingOrder,
@@ -7694,12 +7698,12 @@ function SessionDetailLoaded({
             {/* The one polite live region for recovery, whatever the control is showing. */}
             <span className="sr-only" role="status" data-transcript-recovery-status>{recoveryAnnouncement}</span>
           </div>
-          {/* While a request is pending it takes the notice slot ahead of every notice, which wait
-              behind the "+N More" in its card's head line (§13.2). */}
+          {/* Requests usually lead the slot. A thread with spending notices keeps the request
+              dock visible above the composer's notice slot. */}
           {mode === "expanded" && requestDockLead && (
             <SessionNoticeSlot
               sessionId={session.id}
-              entries={sessionNotices}
+              entries={spendingBelowDock ? [] : sessionNotices}
               lead={requestDockLead}
               onFocusLost={focusComposerOrTitle}
             />
@@ -7721,7 +7725,7 @@ function SessionDetailLoaded({
             >
             {/* The one notice slot (§13.2): the most severe session condition, the rest behind
                 "+N More". Session notices are entries of it, never banners of their own. */}
-            {!requestDockLead && (
+            {(!requestDockLead || spendingBelowDock) && (
               <SessionNoticeSlot sessionId={session.id} entries={sessionNotices} onFocusLost={focusComposerOrTitle} />
             )}
             {switchAccountOpen && (

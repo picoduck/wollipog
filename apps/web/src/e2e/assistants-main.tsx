@@ -55,6 +55,7 @@ const streamingReply = params.has("streaming-reply");
 const scenario = params.get("threads") ?? "some";
 const attentionCount = Number(params.get("attention") ?? 0);
 const limitsScenario = params.get("limits");
+const spendingScenario = params.get("spending");
 const overBudgetBar = params.get("thread-bar") === "over-budget";
 const panelScenario = params.get("thread-panel");
 const campaignScenario = params.has("campaign");
@@ -470,6 +471,24 @@ if (limitsScenario) {
   }
 }
 
+if (spendingScenario) {
+  const current = threads.find((candidate) => candidate.id === "thr_triage")!;
+  const isLaunchLimit = spendingScenario === "launch-limit";
+  if (isLaunchLimit) current.launchedSessionIds = current.launchedSessionIds.slice(-10);
+  current.title = (longTitle(1) + " and report what remains").slice(0, 120);
+  current.usage = {
+    costUsd: { used: spendingScenario === "over" ? 79.93 : spendingScenario === "used-up" ? 25 : isLaunchLimit ? 8.13 : 21.40, limit: 25 },
+    launchedSessions: { used: current.launchedSessionIds.length, limit: isLaunchLimit ? 10 : 60 },
+  };
+  for (const [index, id] of current.launchedSessionIds.entries()) {
+    sessions.get(id)!.title = "Session " + (index + 1) + " · " + longTitle(index + 1);
+  }
+  const second = threads.find((candidate) => candidate.id === "thr_release")!;
+  second.usage = { costUsd: { used: 21.40, limit: 25 }, launchedSessions: { used: 1, limit: 10 } };
+  second.launchedSessionIds = ["sess-unrelated-active"];
+  sessions.set("sess-unrelated-active", session("sess-unrelated-active", "Unrelated Running Session", { status: "running" }));
+}
+
 if (panelScenario) {
   const current = threads[0]!;
   current.title = (current.title + " now and report what remains").slice(0, 120);
@@ -878,6 +897,16 @@ const client = {
     return { thread: structuredClone(archived) };
   },
   session: async (id: string) => ({ session: structuredClone(sessions.get(id)!) }),
+  prompt: async (id: string, message: string) => {
+    document.body.dataset.assistantPrompt = id + ":" + message;
+    return structuredClone(sessions.get(id)!);
+  },
+  stop: async (id: string) => {
+    const next = { ...sessions.get(id)!, status: "stopped" as const, updatedAt: Date.now() };
+    document.body.dataset.stoppedSessions = [document.body.dataset.stoppedSessions, id].filter(Boolean).join(",");
+    upsert(next);
+    return structuredClone(next);
+  },
   approve: async (id: string, body: { requestId: string; optionId: string | null }) => {
     const current = sessions.get(id)!;
     // Only the answered request leaves; another one waiting beside it stays.
@@ -910,6 +939,11 @@ function backingActivity() {
 }
 
 Object.assign(window, {
+  assistantsSpend: (used: number) => {
+    const current = found("thr_triage");
+    current.usage = { ...current.usage!, costUsd: { ...current.usage!.costUsd, used } };
+    publish(current);
+  },
   assistantsReplyChunk: (text: string, settle: boolean) => {
     if (!streamingReply) return;
     const id = "sess-triage";
