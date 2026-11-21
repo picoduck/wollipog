@@ -33,6 +33,7 @@ jobs:
       actions: write
     outputs:
       admitted: ${{ steps.admit.outputs.admitted }}
+      reconcile: ${{ steps.admit.outputs.reconcile }}
     steps:
       # Only trusted workflow-revision code sees the write token. Never check out target here.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -111,5 +112,48 @@ jobs:
           else
             echo '::warning::Main CI Health dispatch failed; use trusted manual health recovery.'
             echo '{"event":"main_ci_health_wake","delivery":"failed"}'
+            exit 1
+          fi
+
+  controller_wake:
+    if: always() && !cancelled() && github.ref == 'refs/heads/main' && needs.admit.outputs.reconcile == 'true'
+    needs: [admit, validation]
+    name: Wake Rolling Controller
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      # The receiver waits for this exact attempt to finish before reading claims.
+      # Unsafe predecessor failures emit no reconcile output and never enter this path.
+      - name: Dispatch Exact Worker Reconciliation
+        id: dispatch
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKER_RUN_ID: ${{ github.run_id }}
+          WORKER_ATTEMPT: ${{ github.run_attempt }}
+        run: timeout 30 gh workflow run main-rolling-controller.yml --ref main --repo "$GITHUB_REPOSITORY" -f worker_run_id="$WORKER_RUN_ID" -f worker_attempt="$WORKER_ATTEMPT"
+      - name: Retry Exact Worker Reconciliation
+        id: retry
+        if: steps.dispatch.outcome == 'failure'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKER_RUN_ID: ${{ github.run_id }}
+          WORKER_ATTEMPT: ${{ github.run_attempt }}
+        run: timeout 30 gh workflow run main-rolling-controller.yml --ref main --repo "$GITHUB_REPOSITORY" -f worker_run_id="$WORKER_RUN_ID" -f worker_attempt="$WORKER_ATTEMPT"
+      - name: Record Controller Dispatch Delivery
+        if: always()
+        env:
+          FIRST_OUTCOME: ${{ steps.dispatch.outcome }}
+          RETRY_OUTCOME: ${{ steps.retry.outcome }}
+        run: |
+          if [ "$FIRST_OUTCOME" = success ] || [ "$RETRY_OUTCOME" = success ]; then
+            echo '{"event":"main_rolling_wake","delivery":"dispatched"}'
+          else
+            echo '::warning::Rolling controller dispatch failed; use trusted manual reconciliation.'
+            echo '{"event":"main_rolling_wake","delivery":"failed"}'
             exit 1
           fi

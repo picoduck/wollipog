@@ -79,7 +79,7 @@ test("entry-point timeout retains unknown handoff evidence without any incident 
 
 test("worker terminal job dispatches health with literal command and scoped token only", () => {
   const worker = readFileSync(new URL("../.github/workflows/main-rolling-validation.yml", import.meta.url), "utf8");
-  const wake = worker.slice(worker.indexOf("\n  health_wake:\n"));
+  const wake = worker.split("\n  health_wake:\n")[1].split("\n  controller_wake:\n")[0];
   assert.match(wake, /if: always\(\) && github.ref == 'refs\/heads\/main'/);
   assert.match(wake, /needs: \[admit, validation\]/);
   assert.match(wake, /permissions:\n      actions: write/);
