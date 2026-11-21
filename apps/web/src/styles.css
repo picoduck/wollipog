@@ -12271,7 +12271,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
 }
-.delegation-group-toggle {
+.checkbox.delegation-group-toggle {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;

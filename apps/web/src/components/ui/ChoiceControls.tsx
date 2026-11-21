@@ -263,7 +263,13 @@ export function Checkbox({
   onChange: (checked: boolean) => void;
 }) {
   const ids = useId();
-  const change = (event: React.ChangeEvent<HTMLInputElement>) => onChange(event.target.checked);
+  const change = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const next = event.currentTarget.checked;
+    // Activating a native checkbox clears indeterminate before dispatch. Preserve the
+    // controlled value when a group changes selection but is still mixed.
+    if (indeterminate) event.currentTarget.indeterminate = true;
+    onChange(next);
+  };
   if (labelHidden) {
     return (
       <ChoiceMark

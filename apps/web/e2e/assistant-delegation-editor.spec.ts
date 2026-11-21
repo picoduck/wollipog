@@ -38,12 +38,25 @@ test("upgrading capabilities does not widen a saved Delegate All grant", async (
 });
 
 test("a control plane can offer CI reruns before it supports release grants", async ({ page }) => {
-  await page.goto(`/assistants-e2e.html?delegation=release-old&path=${encodeURIComponent(thread)}`);
+  await page.goto(`/assistants-e2e.html?delegation=release-old&saved-release&path=${encodeURIComponent(thread)}`);
   const dialog = await openEditor(page);
-  await dialog.getByRole("radio", { name: "Choose" }).click();
-  await expect(dialog.getByRole("checkbox", { name: "Rerun CI", exact: true })).toBeEnabled();
-  await expect(dialog.getByRole("checkbox", { name: "Tag Releases", exact: true })).toBeDisabled();
+  const group = dialog.getByRole("checkbox", { name: "CI and Releases", exact: true });
+  const rerun = dialog.getByRole("checkbox", { name: "Rerun CI", exact: true });
+  const tag = dialog.getByRole("checkbox", { name: "Tag Releases", exact: true });
+  await expect(rerun).toBeEnabled();
+  await expect(tag).toBeChecked();
+  await expect(tag).toHaveAccessibleDescription(/Update the control plane/);
   await expect(dialog.getByRole("checkbox", { name: "Publish Releases", exact: true })).toBeDisabled();
+  await expect(group).toBeChecked({ indeterminate: true });
+  await expect(group).toHaveAccessibleDescription("1 of 3");
+  await group.click();
+  await expect(rerun).toBeChecked();
+  await expect(group).toHaveAccessibleDescription("2 of 3");
+  await expect(group).toBeChecked({ indeterminate: true });
+  await dialog.getByRole("button", { name: "Save Delegation" }).click();
+  await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", JSON.stringify({
+    categories: ["release_tag", "ci_rerun"], selectionMode: "choose", projects: "all", campaigns: "all", expiresAt: null,
+  }));
 });
 
 async function expectEditorLayout(dialog: Locator, width: number) {
