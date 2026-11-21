@@ -4,8 +4,8 @@ import { expectFullyInViewport, expectPageNoHorizontalOverflow } from "./layout-
 
 /**
  * An Assistant thread's launched sessions in the side panel (#4776), against `assistants-main.tsx`'s
- * stub of the Thread API. The thread header keeps a toggle with live counts and whatever waits on the
- * owner, answered there; the sessions themselves are in the thread panel's Work tab, hidden
+ * stub of the Thread API. The thread bar signals when launched work needs the owner,
+ * and the waiting approval is answered in the conversation; the sessions themselves are in the thread panel's Work tab, hidden
  * until asked for and remembered per device like the session side panel. With `WOLLIPOG_EVIDENCE_DIR`
  * set, each state is also captured as UI evidence.
  */
@@ -27,7 +27,7 @@ async function capture(page: Page, name: string) {
   await page.screenshot({ path: join(evidenceDir, `${name}.png`) });
 }
 
-const toggle = (page: Page) => page.locator(".assistant-launched-toggle");
+const toggle = (page: Page) => page.getByRole("button", { name: /Side Panel/ });
 const panel = (page: Page) => page.locator("#right-panel");
 const launched = (page: Page) => panel(page).locator(".launched-sessions");
 const group = (page: Page, name: string) => launched(page).getByRole("region", { name });
@@ -38,10 +38,10 @@ for (const theme of ["dark", "light"] as const) {
   test.describe(`${theme} at 1440×900`, () => {
     test.use({ viewport: { width: 1440, height: 900 }, colorScheme: theme, timezoneId: "UTC", locale: "en-US" });
 
-    test("the panel starts closed; the header keeps the counts and the waiting approval, actionable", async ({ page }) => {
+    test("the panel starts closed; the bar signals the waiting approval, actionable", async ({ page }) => {
       await open(page, theme);
-      await expect(toggle(page)).toHaveText("2 Sessions · 1 Needs You");
-      await expect(toggle(page)).toHaveAttribute("aria-expanded", "false");
+      await expect(toggle(page)).toHaveAccessibleName("Show Side Panel, 1 Session Needs You");
+      await expect(toggle(page)).toHaveAttribute("aria-pressed", "false");
       await expect(panel(page)).toHaveCount(0);
       // Only the waiting session is in the header; the running one is in the closed panel.
       const waiting = waitingInHeader(page).locator(".assistant-work-card");
@@ -54,17 +54,17 @@ for (const theme of ["dark", "light"] as const) {
       // The approval is answered from the header with the panel still closed.
       await waiting.getByRole("button", { name: "Approve Once" }).click();
       await expect(page.locator("body")).toHaveAttribute("data-approved", "sess-deps:req-1:allow");
-      await expect(toggle(page)).toHaveText("2 Sessions");
+      await expect(toggle(page)).toHaveAccessibleName("Side Panel");
       await expect(waitingInHeader(page)).toHaveCount(0);
       await expect(panel(page)).toHaveCount(0);
       // Its card left the header with focus in it; focus moves to the toggle, where the session now is.
       await expect(toggle(page)).toBeFocused();
     });
 
-    test("the toggle opens Launched Sessions with waiting work first, and the counts follow the work live", async ({ page }) => {
+    test("Work lists waiting work first and its counts follow the work live", async ({ page }) => {
       await open(page, theme);
       await toggle(page).click();
-      await expect(toggle(page)).toHaveAttribute("aria-expanded", "true");
+      await expect(toggle(page)).toHaveAttribute("aria-pressed", "true");
       await expect(panel(page).getByRole("tab", { name: /^Work/, selected: true })).toBeVisible();
       const needsYou = group(page, "Needs You").locator(".assistant-work-row");
       await expect(needsYou).toHaveText([/Bump the Vite Group/]);
@@ -93,9 +93,9 @@ for (const theme of ["dark", "light"] as const) {
       await finished.getByRole("button", { name: /Finished/ }).click();
       await expect(finished.locator(".assistant-work-row")).toHaveText([/Fix the Flaky Upload Test/]);
 
-      // The assistant launches more work; the toggle counts it at once.
+      // The assistant launches more work; Work counts it at once.
       await page.evaluate(() => (window as unknown as { assistantsLaunch: () => void }).assistantsLaunch());
-      await expect(toggle(page)).toHaveText("3 Sessions", { timeout: 2_000 });
+      await expect(panel(page).getByRole("tab", { name: "Work 3", exact: true })).toBeVisible({ timeout: 2_000 });
       await expect(group(page, "Running").locator('[data-session-id="sess-changelog"]')).toHaveCount(1);
 
       // A card opens its session. The session page has no Launched Sessions, so its panel shows
@@ -131,8 +131,8 @@ for (const theme of ["dark", "light"] as const) {
       const panelBox = (await panel(page).boundingBox())!;
       expect(Math.abs(panelBox.y - (barBox!.y + barBox!.height))).toBeLessThanOrEqual(1);
       expect(Math.abs(panelBox.y + panelBox.height - page.viewportSize()!.height)).toBeLessThanOrEqual(1);
-      const facts = (await page.locator(".assistant-thread-head").boundingBox())!;
-      expect(facts.x + facts.width).toBeLessThanOrEqual(panelBox.x + 1);
+      const waiting = (await page.locator(".assistant-thread-head").boundingBox())!;
+      expect(waiting.x + waiting.width).toBeLessThanOrEqual(panelBox.x + 1);
       await sidePanel.click();
       await expect(panel(page)).toHaveCount(0);
       // The chord its tooltip names works here, as on a session page.
@@ -184,18 +184,18 @@ for (const theme of ["dark", "light"] as const) {
       await expect(launched(page)).toBeVisible();
       await page.reload();
       await expect(launched(page)).toBeVisible();
-      await expect(toggle(page)).toHaveAttribute("aria-expanded", "true");
+      await expect(toggle(page)).toHaveAttribute("aria-pressed", "true");
       await toggle(page).click();
       await expect(panel(page)).toHaveCount(0);
       await page.reload();
       await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
-      await expect(toggle(page)).toHaveAttribute("aria-expanded", "false");
+      await expect(toggle(page)).toHaveAttribute("aria-pressed", "false");
       await expect(panel(page)).toHaveCount(0);
     });
 
     test("with 42 launched sessions the conversation keeps its height and the panel scrolls on its own", async ({ page }) => {
       await open(page, theme, "launched=many");
-      await expect(toggle(page)).toHaveText("42 Sessions · 1 Needs You");
+      await expect(toggle(page)).toHaveAccessibleName("Show Side Panel, 1 Session Needs You");
       const head = page.locator(".assistant-thread-head");
       const closedHead = (await head.boundingBox())!.height;
       expect(closedHead, "the header holds no list of 42 cards").toBeLessThan(260);
@@ -229,9 +229,9 @@ for (const theme of ["dark", "light"] as const) {
   test.describe(`${theme} at 390×844`, () => {
     test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, colorScheme: theme, timezoneId: "UTC", locale: "en-US" });
 
-    test("a phone keeps the waiting approval in the header and opens Launched Sessions as a full-screen sheet", async ({ page }) => {
+    test("a phone keeps the waiting approval in the conversation and opens Launched Sessions as a full-screen sheet", async ({ page }) => {
       await open(page, theme);
-      await expect(toggle(page)).toHaveText("2 Sessions · 1 Needs You");
+      await expect(toggle(page)).toHaveAccessibleName("Show Side Panel, 1 Session Needs You");
       await expect(panel(page)).toHaveCount(0);
       const waiting = waitingInHeader(page).locator(".assistant-work-card");
       await expect(waiting.getByRole("button", { name: "Approve Once" })).toBeVisible();
@@ -256,12 +256,12 @@ for (const theme of ["dark", "light"] as const) {
       await expect(panel(page)).toHaveCount(0);
       await expect(waitingInHeader(page).getByRole("button", { name: "Approve Once" })).toBeVisible();
 
-      // The detail bar ends with the Side Panel toggle, as a session's phone bar does.
       const sidePanel = page.locator(".detail-bar").getByRole("button", { name: "Side Panel" });
       await sidePanel.click();
       await expect(launched(page)).toBeVisible();
       await panel(page).getByRole("button", { name: "Close Panel" }).click();
       await expect(sidePanel).toHaveAttribute("aria-pressed", "false");
+      await expect(sidePanel).toBeFocused();
 
       // A card in the sheet opens its session with the sheet out of the way.
       await toggle(page).click();

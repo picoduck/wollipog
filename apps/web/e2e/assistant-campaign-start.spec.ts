@@ -85,7 +85,7 @@ for (const theme of ["light", "dark"] as const) {
         await expect(toast).toBeHidden();
       }
       // The launched campaign is in the Launched Sessions panel, which the header's toggle opens (#4776).
-      await page.locator(".assistant-launched-toggle").click();
+      await page.getByRole("button", { name: /Side Panel/ }).click();
       const work = page.locator("#right-panel").getByRole("button", { name: /Plan the Release.*Campaign/u });
       await work.scrollIntoViewIfNeeded();
       await expect(work).toBeInViewport({ ratio: 1 });
