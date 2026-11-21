@@ -453,11 +453,16 @@ test.describe("with a row in every status", () => {
             const lineOne = row.querySelector<HTMLElement>(".inbox-row-sender-line")!;
             const line = row.querySelector<HTMLElement>(".inbox-row-status-line")!;
             const lineBox = line.getBoundingClientRect();
-            // Drawn on the line: not `display: none`, and not left in the name only (`.sr-only`-style).
-            const shown = (element: Element | null): element is HTMLElement =>
-              element !== null && (element as HTMLElement).getClientRects().length > 0
-              && getComputedStyle(element).position !== "absolute"
-              && (element.parentElement === null || getComputedStyle(element.parentElement).position !== "absolute");
+            // Drawn on the line: not `display: none`, and neither it nor any ancestor up to the line left
+            // in the name only (`.sr-only`-style, which a clipped ancestor hides its whole subtree with).
+            const shown = (element: Element | null): element is HTMLElement => {
+              if (element === null || (element as HTMLElement).getClientRects().length === 0) return false;
+              for (let node: Element | null = element; node && node !== line; node = node.parentElement) {
+                const style = getComputedStyle(node);
+                if (style.position === "absolute" || style.clipPath !== "none") return false;
+              }
+              return true;
+            };
             const whole = (element: HTMLElement, box: DOMRect) => {
               const r = element.getBoundingClientRect();
               return r.width > 0 && r.left >= box.left - 0.5 && r.right <= box.right + 0.5
@@ -489,8 +494,10 @@ test.describe("with a row in every status", () => {
                 const pr = line.querySelector<HTMLElement>(".inbox-row-pr > .status");
                 if (!pr) return null;
                 const r = pr.getBoundingClientRect();
-                return { shown: shown(pr), inside: r.width > 0 && r.left >= lineBox.left - 0.5 && r.right <= lineBox.right + 0.5,
-                  text: pr.textContent };
+                // Inside the line AND inside the Git group, which clips what overflows it.
+                const group = pr.closest(".inbox-row-git")!.getBoundingClientRect();
+                const within = (box: DOMRect) => r.left >= box.left - 0.5 && r.right <= box.right + 0.5;
+                return { shown: shown(pr), inside: r.width > 0 && within(lineBox) && within(group), text: pr.textContent };
               })(),
               timeOnLineOne: time.closest(".inbox-row-sender-line") === lineOne,
               timeWhole: whole(time, rowBox) && time.getBoundingClientRect().right <= contentRight + 0.5,
