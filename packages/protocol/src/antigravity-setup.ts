@@ -110,9 +110,11 @@ export interface AntigravitySetupView {
   signIn?: AntigravitySignInView;
 }
 
-/** Google's documented install command and guides. Wollipog shows them; it never runs them. */
+/** Google's documented install commands and guides (Antigravity CLI getting started: macOS/Linux
+ * shell, Windows PowerShell). Wollipog shows them; it never runs them. */
 export const ANTIGRAVITY_SETUP_GUIDANCE = {
   installCommand: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+  windowsInstallCommand: "irm https://antigravity.google/cli/install.ps1 | iex",
   installDocsUrl: "https://antigravity.google/docs/getting-started?tab=cli",
   signInCommand: "agy acp --login",
   signInDocsUrl: "https://antigravity.google/docs/ide/extensions/acp/#authentication",

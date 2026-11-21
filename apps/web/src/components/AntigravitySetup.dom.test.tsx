@@ -127,6 +127,39 @@ test("an older runner and an unsupported platform show terminal setup guidance w
   }
 });
 
+test("a Windows runner gets Google's PowerShell command and never the bash one", async () => {
+  for (const view of [
+    runner(setup({ status: "unsupported", failure: "unsupported_platform", executable: undefined }), { os: "windows" }),
+    runner(undefined, { os: "windows", protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.antigravitySetup - 1 }),
+  ]) {
+    const mounted = await mount(view);
+    try {
+      const opened = await openSetup(mounted.body);
+      const text = opened.textContent ?? "";
+      assert.doesNotMatch(text, /install\.sh|\| bash|terminal/u);
+      assert.match(text, /irm https:\/\/antigravity\.google\/cli\/install\.ps1 \| iex/u);
+      assert.match(text, /from PowerShell on this machine/u);
+    } finally { await mounted.unmount(); }
+  }
+  // A Linux runner on an older protocol still gets the shell script.
+  const linux = await mount(runner(undefined, { os: "linux", protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.antigravitySetup - 1 }));
+  try {
+    const opened = await openSetup(linux.body);
+    assert.match(opened.textContent ?? "", /install\.sh \| bash/u);
+    assert.doesNotMatch(opened.textContent ?? "", /install\.ps1/u);
+  } finally { await linux.unmount(); }
+});
+
+test("a failed check names the executable it checked", async () => {
+  const path = `/home/fixture/${"releases".repeat(25)}/bin/agy`;
+  const view = await mount(runner(setup({ status: "verification_failed", failure: "session_check_failed", executable: { path } })));
+  try {
+    const opened = await openSetup(view.body);
+    const notice = [...opened.querySelectorAll(".notice")].find((node) => node.textContent?.includes("Check Failed"));
+    assert.ok(notice?.textContent?.includes(`Checked executable: ${path}`));
+  } finally { await view.unmount(); }
+});
+
 test("sign-in required starts Google's remote sign-in", async () => {
   let started = 0;
   const view = await mount(runner(setup({})), { startAntigravitySignIn: async () => { started += 1; return {}; } });

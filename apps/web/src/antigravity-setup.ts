@@ -1,10 +1,20 @@
 import {
+  ANTIGRAVITY_SETUP_GUIDANCE,
   ANTIGRAVITY_SIGN_IN_ACTIVE_STATUSES,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type AntigravitySetupView,
+  type OS,
   type RunnerView,
 } from "@wollipog/protocol";
+
+/** Google's install command for the machine's own shell: PowerShell on Windows, the shell script
+ * on macOS and Linux. A bash command is never shown for a Windows machine. */
+export function antigravityTerminalSetup(os: OS): { installCommand: string; shell: string } {
+  return os === "windows"
+    ? { installCommand: ANTIGRAVITY_SETUP_GUIDANCE.windowsInstallCommand, shell: "PowerShell" }
+    : { installCommand: ANTIGRAVITY_SETUP_GUIDANCE.installCommand, shell: "terminal" };
+}
 
 /** What the Google Antigravity row and its setup dialog show for one machine (#4780). */
 export type AntigravitySetupPhase =

@@ -3,6 +3,7 @@ import { ANTIGRAVITY_SETUP_GUIDANCE, type AntigravitySetupView, type RunnerView 
 import { useApi } from "../api-context.js";
 import {
   antigravityCheckFailureSentence,
+  antigravityTerminalSetup,
   antigravitySetupPresentation,
   antigravitySignInEnding,
   type AntigravitySetupPresentation,
@@ -143,9 +144,17 @@ function AntigravityNotice({ runner, presentation, checkAgain, signIn }: {
   signIn: (label: string) => React.ReactNode;
 }) {
   const { phase, setup, blocked } = presentation;
+  const terminal = antigravityTerminalSetup(runner.os);
+  const shellName = terminal.shell === "PowerShell" ? "PowerShell" : "the terminal";
+  const guides = (
+    <>
+      <GuideLink href={ANTIGRAVITY_SETUP_GUIDANCE.installDocsUrl}>Install Guide</GuideLink>
+      <GuideLink href={ANTIGRAVITY_SETUP_GUIDANCE.signInDocsUrl}>Remote Sign-In Guide</GuideLink>
+    </>
+  );
   const terminalSetup = (
     <>
-      <CodeWell value={ANTIGRAVITY_SETUP_GUIDANCE.installCommand} name="Google Antigravity Install Command" />
+      <CodeWell value={terminal.installCommand} name="Google Antigravity Install Command" />
       <CodeWell value={ANTIGRAVITY_SETUP_GUIDANCE.signInCommand} name="Google Antigravity Sign-In Command" />
     </>
   );
@@ -153,10 +162,9 @@ function AntigravityNotice({ runner, presentation, checkAgain, signIn }: {
   switch (phase) {
     case "update_runner":
       return (
-        <Notice tone="warning" title="Update This Runner" role="status"
-          actions={<GuideLink href={ANTIGRAVITY_SETUP_GUIDANCE.signInDocsUrl}>Remote Sign-In Guide</GuideLink>}>
+        <Notice tone="warning" title="Update This Runner" role="status" actions={guides}>
           <p>{blocked}</p>
-          <p>Until then, install Antigravity and sign in from this machine&apos;s terminal, as the runner&apos;s user.</p>
+          <p>Until then, install Antigravity and sign in from {shellName} on this machine, as the runner&apos;s user.</p>
           {terminalSetup}
         </Notice>
       );
@@ -168,9 +176,8 @@ function AntigravityNotice({ runner, presentation, checkAgain, signIn }: {
       );
     case "unsupported":
       return (
-        <Notice tone="neutral" title="Not Available on This Machine" role="status"
-          actions={<GuideLink href={ANTIGRAVITY_SETUP_GUIDANCE.signInDocsUrl}>Remote Sign-In Guide</GuideLink>}>
-          <p>Setup from Connections supports Linux and macOS machines. Install Antigravity and sign in from this machine&apos;s terminal instead.</p>
+        <Notice tone="neutral" title="Not Available on This Machine" role="status" actions={guides}>
+          <p>Setup from Connections supports Linux and macOS machines. Install Antigravity and sign in from {shellName} on this machine instead.</p>
           {terminalSetup}
         </Notice>
       );
@@ -179,7 +186,7 @@ function AntigravityNotice({ runner, presentation, checkAgain, signIn }: {
         <Notice tone="neutral" title="Not Installed" role="status"
           actions={<>{checkAgain}<GuideLink href={ANTIGRAVITY_SETUP_GUIDANCE.installDocsUrl}>Install Guide</GuideLink></>}>
           <p>Antigravity isn&apos;t installed for this machine&apos;s runner user. Run Google&apos;s install command in the machine&apos;s terminal as that user, then check again. Wollipog doesn&apos;t install it for you.</p>
-          <CodeWell value={ANTIGRAVITY_SETUP_GUIDANCE.installCommand} name="Google Antigravity Install Command" />
+          <CodeWell value={terminal.installCommand} name="Google Antigravity Install Command" />
         </Notice>
       );
     case "sign_in_required":
@@ -197,6 +204,11 @@ function AntigravityNotice({ runner, presentation, checkAgain, signIn }: {
       return (
         <Notice tone="danger" title="Check Failed" role="alert" actions={<>{checkAgain}{signIn("Sign In Again")}</>}>
           <p>{setup ? antigravityCheckFailureSentence(setup) : null}</p>
+          {/* The runner reports fixed sentences, never the CLI's own output, so the executable it
+              checked is the one variable detail. A long path wraps at any character. */}
+          {setup?.executable && (
+            <p>Checked executable: <span className="connection-fact-mono">{setup.executable.path}</span></p>
+          )}
           {ending && <p>{ending.sentence}</p>}
         </Notice>
       );
@@ -265,36 +277,39 @@ function AntigravitySignIn({ runnerId, setup, blocked, running, act }: {
   }
   return (
     <Notice tone="info" title="Signing In" role="status" actions={cancel}>
-      <Steps className="signin-steps">
-        <li>
-          <a className="btn sm" href={signIn.verificationUrl} target="_blank" rel="noreferrer">
-            Open Google Sign-In
-            <ExternalLinkIcon size={14} aria-hidden="true" />
-          </a>
-        </li>
-        <li className="signin-step-field">
-          <form className="signin-code-form" noValidate onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-            <div className="field">
-              <label className="field-label" htmlFor={fieldId}>Paste the Code Google Shows</label>
-              <input
-                ref={inputRef}
-                id={fieldId}
-                type="password"
-                autoComplete="off"
-                maxLength={4_096}
-                aria-invalid={codeError ? true : undefined}
-                aria-describedby={codeError ? `${fieldId}-error` : undefined}
-                onChange={(event) => { setHasCode(event.target.value.trim() !== ""); setCodeError(null); }}
-              />
-              {codeError && <FieldError id={`${fieldId}-error`}>{codeError}</FieldError>}
-            </div>
-            <BusyButton type="submit" className="btn" busy={running === "submit"} progress="Submitting the code…"
-              disabled={!hasCode || blocked !== null}>
-              Submit Code
-            </BusyButton>
-          </form>
-        </li>
-      </Steps>
+      {/* `.signin` is the container that stacks the code field over Submit Code when narrow. */}
+      <div className="signin">
+        <Steps className="signin-steps">
+          <li>
+            <a className="btn sm" href={signIn.verificationUrl} target="_blank" rel="noreferrer">
+              Open Google Sign-In
+              <ExternalLinkIcon size={14} aria-hidden="true" />
+            </a>
+          </li>
+          <li className="signin-step-field">
+            <form className="signin-code-form" noValidate onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+              <div className="field">
+                <label className="field-label" htmlFor={fieldId}>Paste the Code Google Shows</label>
+                <input
+                  ref={inputRef}
+                  id={fieldId}
+                  type="password"
+                  autoComplete="off"
+                  maxLength={4_096}
+                  aria-invalid={codeError ? true : undefined}
+                  aria-describedby={codeError ? `${fieldId}-error` : undefined}
+                  onChange={(event) => { setHasCode(event.target.value.trim() !== ""); setCodeError(null); }}
+                />
+                {codeError && <FieldError id={`${fieldId}-error`}>{codeError}</FieldError>}
+              </div>
+              <BusyButton type="submit" className="btn" busy={running === "submit"} progress="Submitting the code…"
+                disabled={!hasCode || blocked !== null}>
+                Submit Code
+              </BusyButton>
+            </form>
+          </li>
+        </Steps>
+      </div>
     </Notice>
   );
 }

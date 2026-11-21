@@ -184,8 +184,9 @@ if (runner) {
   const longName = new URLSearchParams(window.location.search).has("longName");
   const checkedAt = Date.now();
   const executable = {
+    // A 300+ character path with a 200-character unbroken segment: the longest variable detail.
     path: longName
-      ? "/home/design-workstation-operator-with-a-very-long-account-name/.local/share/google-antigravity/releases/stable/bin/agy"
+      ? `/home/design-workstation-operator-with-a-very-long-account-name/.local/share/google-antigravity/${"releases".repeat(25)}/stable/bin/agy`
       : "/home/misko/.local/bin/agy",
     version: "1.4.2",
   };
