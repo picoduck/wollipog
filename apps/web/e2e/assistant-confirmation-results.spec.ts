@@ -24,7 +24,14 @@ async function capture(page: Page, surface: string, dimensions: string, theme: s
     const overflow = element.scrollWidth - element.clientWidth;
     const text = ".tl-prompt-heading > span, .tl-prompt-heading > strong, .tl-prompt-target, .status, .tl-prompt-fact, summary, .tl-prompt-message > strong, .tl-prompt-message > pre";
     const icon = ".tl-prompt-icon svg";
-    const rgb = (value: string) => (value.match(/[\d.]+/g) ?? []).map(Number);
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const pixel = canvas.getContext("2d", { willReadFrequently: true })!;
+    const fill = (color: string) => {
+      pixel.fillStyle = color;
+      pixel.fillRect(0, 0, 1, 1);
+    };
+    const rgb = () => Array.from(pixel.getImageData(0, 0, 1, 1).data).slice(0, 3);
     const luminance = (color: number[]) => color.slice(0, 3).map((channel) => {
       const n = channel / 255;
       return n <= 0.04045 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4;
@@ -32,13 +39,16 @@ async function capture(page: Page, surface: string, dimensions: string, theme: s
     const contrast = [...element.querySelectorAll(text + ", " + icon)].flatMap((part) => {
       if (!part.getClientRects().length) return [];
       let surface: Element | null = part;
-      let background = rgb("rgb(255, 255, 255)");
+      const backgrounds: string[] = [];
       while (surface) {
-        const color = rgb(getComputedStyle(surface).backgroundColor);
-        if (color.length === 3) { background = color; break; }
+        backgrounds.push(getComputedStyle(surface).backgroundColor);
         surface = surface.parentElement;
       }
-      const lightness = [luminance(background), luminance(rgb(getComputedStyle(part).color))];
+      fill("white");
+      backgrounds.reverse().forEach(fill);
+      const background = luminance(rgb());
+      fill(getComputedStyle(part).color);
+      const lightness = [background, luminance(rgb())];
       return [{ element: part.className.toString(), ratio: (Math.max(...lightness) + 0.05) / (Math.min(...lightness) + 0.05),
         minimum: part.matches(icon) ? 3 : 4.5 }];
     });

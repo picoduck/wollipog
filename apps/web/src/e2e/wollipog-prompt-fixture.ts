@@ -54,6 +54,7 @@ export function confirmationResultFixture(scenario: string): Payload[] {
         confirmation("approved"),
         ...confirmationResultFixture("delegation"),
         ...confirmationResultFixture("scheduled"),
+        { kind: "agent_message", text: "The upload check is still running.", final: true },
         confirmation("refused", true),
       ];
     default:
