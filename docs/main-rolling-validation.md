@@ -37,6 +37,14 @@ manual reconciliation. Admission and controller CAS conflicts retry at most thre
 times from fresh state. Admission never joins the controller's short pending lane.
 No controller path invokes an active-run cancellation API.
 
+Admitted workers and non-predecessor admission errors also have an explicit terminal controller
+wake. It uses only Actions write, no checkout, and two bounded 30-second dispatch attempts.
+The receiver waits for the exact run/attempt to finish before reconciling live evidence, using
+the same bounded terminal wait as health. This avoids dependence on missing `workflow_run`
+deliveries and sparse cron when admission fails. Three incomplete target attempts still require
+an operator; an unsafe predecessor emits no automatic recovery output. See the
+[health runbook](main-ci-health.md) for diagnostic classes and post-merge observation limits.
+
 Unsafe predecessor evidence is different from supersession: admission fails with
 `predecessor-evidence-operator-required`, so its default-success receipt/wake steps
 do not run. This prevents a persistent fence failure causing a dispatch/reject/wake
