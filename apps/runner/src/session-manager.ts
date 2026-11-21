@@ -173,6 +173,7 @@ import type {
   DriverSubscriptionUsageUpdate,
   StopReason,
 } from "./drivers/driver.js";
+import { AcpLaunchRefusedError } from "./acp-compatibility.js";
 import { coalesceDriverTextDeltas, type TextDeltaCoalescer } from "./text-delta-coalescer.js";
 import { CodexAppServerResumeError, CodexCommandSandboxUnavailableError } from "./drivers/codex-app-server.js";
 import type { CodexPromptTemplate } from "./discovery/codex-prompts.js";
@@ -507,6 +508,13 @@ export interface SessionLaunchPreparation {
   sessionCommandCatalogProvenance?: string;
   /** Codex App Server custom prompts read for this launch. Bodies never enter session metadata. */
   codexPrompts?: CodexPromptTemplate[];
+  /** ACP only: inherited variables this launch's agent must not see (its credential context). */
+  scrubInheritedEnv?: string[];
+  /** ACP only: narrow handling this launch's agent needs (see `acp-compatibility.ts`). */
+  acpCompatibility?: DriverOptions["acpCompatibility"];
+  /** The launch must not start a provider (nothing verified to run, #4779). The sentence is the
+   * runner's own and becomes the launch failure; no process is spawned. */
+  launchRefusal?: string;
 }
 
 /** Transcript text for an invoked provider command, spelled the way the harness expects: a
@@ -990,6 +998,17 @@ export function providerStopError(stop: StopReason, client: Pick<Driver, "lastTu
   const detail = stop === "refusal" ? client.lastTurnError?.()?.trim() : undefined;
   const reason = stop === "cancelled" ? "canceled" : stop;
   return detail ? `provider ${reason}: ${detail}` : `provider ${reason}`;
+}
+
+/** A launch's ACP compatibility profile as its effective sandbox allows (#4779). Any runner-owned
+ * sandbox (bwrap, including the one a managed Linux worktree forces, or Seatbelt) leaves the
+ * agent's own state read-only, so resume is withheld whatever the configured isolation mode. */
+export function effectiveAcpCompatibility(
+  compatibility: DriverOptions["acpCompatibility"],
+  isolation: SpawnIsolation | undefined,
+): Pick<DriverOptions, "acpCompatibility"> {
+  if (!compatibility) return {};
+  return { acpCompatibility: isolation ? { ...compatibility, resumable: false } : compatibility };
 }
 
 function canResumeSession(meta: SessionMeta): boolean {
@@ -2045,6 +2064,9 @@ export class SessionManager {
   private readonly claudeInitCatalogQueue = new Map<string, Promise<void>>();
   /** Sessions whose init list merged before the provider was ready to authorize it. */
   private readonly claudeInitAwaitingAuthority = new Set<string>();
+  /** The ACP compatibility profile a launch's preparation returned, keyed by the exact metadata
+   * object that launch prepares and isolates (#4779). */
+  private readonly launchAcpCompatibility = new WeakMap<SessionMeta, NonNullable<DriverOptions["acpCompatibility"]>>();
   /** Async seam covers WSL markerless recovery without blocking runner startup. */
   private discoverClaudeTasksInContext: typeof discoverIncompleteClaudeTasksInContext = discoverIncompleteClaudeTasksInContext;
   private resolveDetachedClaudeEnvironment: (meta: SessionMeta) => Record<string, string> = () => ({});
@@ -10555,10 +10577,18 @@ export class SessionManager {
         providerHome: preparationHome,
         ...(providerHomeWait ? { providerHomeWait } : {}),
       });
+      this.rememberAcpCompatibility(meta, launchPreparation);
       // Launch preparation may await filesystem/provider discovery. A restart can replace this
       // session with a new generation (and even a different provider) during that window; the old
       // continuation must not patch or publish its stale launch-local metadata.
       if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
+      if (launchPreparation?.launchRefusal) {
+        // Nothing may be spawned (#4779): fail the launch with the runner's sentence, as a failed
+        // provider start would, before any isolation or provider process is set up.
+        this.emitEvent(sessionId, { kind: "error", message: `agent init failed: ${launchPreparation.launchRefusal}` });
+        this.emitStatus(sessionId, "failed", launchPreparation.launchRefusal);
+        return false;
+      }
       // Repository setup values are resolved runner-side from the immutable base-commit config.
       // Apply them after agent-config refresh so they reach hooks and the provider without ever
       // being persisted in meta.json or projected to the control plane.
@@ -10762,6 +10792,8 @@ export class SessionManager {
           args: preparedProjectMemoryArgs ?? launchPreparation?.codexLaunchArgs ?? meta.args,
           cwd,
           env: meta.env,
+          ...(launchPreparation?.scrubInheritedEnv?.length ? { scrubInheritedEnv: launchPreparation.scrubInheritedEnv } : {}),
+          ...effectiveAcpCompatibility(launchPreparation?.acpCompatibility, isolation),
           config: meta.config,
           artifactGuidance: meta.review ? "" : [artifactGuidance(meta, this.controlPlaneProtocolVersion()), shellGuidance(meta)].filter(Boolean).join(" "),
           ...(meta.review ? { review: true } : {}),
@@ -11004,7 +11036,8 @@ export class SessionManager {
       if (reviewWriter) this.driverReviewWriterTokens.set(client, reviewWriter);
     } catch (error) {
       if (launchHome) {
-        if (driverConstructionStarted) await this.retainProviderHomeReference(launchHome);
+        // An ACP profile's refusal comes before its spawn (#4779): no process used the HOME.
+        if (driverConstructionStarted && !(error instanceof AcpLaunchRefusedError)) await this.retainProviderHomeReference(launchHome);
         else await this.releaseProviderHomeReference(launchHome);
       }
       if (worktreeLeaseOwner) this.store.releaseWorktreeLease(sessionId, worktreeLeaseOwner);
@@ -11016,7 +11049,10 @@ export class SessionManager {
       // Only the driver's own lease acquisition can refuse with a lease code here. Keep the
       // established prefix: older web clients use it to recognize account failures in transcripts.
       const refusal = !driverConstructionStarted ? providerHomeLaunchRefusal(error, meta) : undefined;
-      const prefix = refusal ? "provider account unavailable" : "agent process could not be created";
+      // An ACP profile that found nothing verified to run when it was about to spawn (#4779) fails
+      // the launch the way a launch-preparation refusal does.
+      const prefix = refusal ? "provider account unavailable"
+        : error instanceof AcpLaunchRefusedError ? "agent init failed" : "agent process could not be created";
       this.emitEvent(sessionId, { kind: "error", message: `${prefix}: ${errText(error)}` });
       this.emitStatus(sessionId, "failed", errText(error));
       if (refusal) this.recordProviderHomeRefusal(sessionId, refusal);
@@ -11362,7 +11398,10 @@ export class SessionManager {
         path: protectedWorktree, gitWritableRoots, requiredReadOnlyPaths,
         ...(ownedWorktrees.length ? { ownedWorktrees } : {}),
       } } : {}),
-      ...(protectedWorktree && this.executionIsolation.mode === "provider" ? { preserveProviderHome: true } : {}),
+      // An ACP agent's home has no known preservable state; one whose compatibility profile accepts
+      // read-only state (Antigravity, #4779) runs in the protected worktree without it.
+      ...(protectedWorktree && this.executionIsolation.mode === "provider" &&
+        !(meta.driver === "acp" && this.launchAcpCompatibility.has(meta)) ? { preserveProviderHome: true } : {}),
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(guardStateMask ? { guardStateMask } : {}),
       ...(this.strictProjectIsolation(meta) ? { orchestratorScratchOnly: true } : {}),
@@ -11389,6 +11428,11 @@ export class SessionManager {
       join(homedir(), ".aws"), join(homedir(), ".codex"), join(homedir(), ".claude"),
       ...[meta.providerCredentialHome, meta.pendingProviderCredentialHome].filter((path): path is string => !!path),
     ]);
+  }
+
+  private rememberAcpCompatibility(meta: SessionMeta, preparation: SessionLaunchPreparation | void | undefined): void {
+    if (preparation?.acpCompatibility) this.launchAcpCompatibility.set(meta, preparation.acpCompatibility);
+    else this.launchAcpCompatibility.delete(meta);
   }
 
   private requiresManagedWorktreeBwrap(meta: SessionMeta): boolean {
@@ -18199,6 +18243,8 @@ export class SessionManager {
     // driver's own reference holds the HOME, or when the fork gives up before that.
     const forkPreparationHome = this.launchPreparationProviderHome();
     let forkConstructionStarted = false;
+    // An ACP profile refused before spawning (#4779): no process ever used the provider HOME.
+    let forkRefusedBeforeSpawn = false;
     // The Claude target fork's reference: settled on the fork probe's own tree proof once
     // forkSession returns or throws; released unproven only if forkSession was never called.
     let claudeForkHome: ProviderHomeReference | null = null;
@@ -18315,7 +18361,9 @@ export class SessionManager {
           isCurrent: forkIsCurrent,
           providerHome: forkPreparationHome,
         });
+        this.rememberAcpCompatibility(source, launchPreparation);
         if (!forkIsCurrent()) throw new Error("conversation fork preparation was canceled");
+        if (launchPreparation?.launchRefusal) throw new Error(launchPreparation.launchRefusal);
         if (sameSlashCommandCatalog(priorSessionSlashCommands, source.sessionSlashCommands)) {
           source.sessionSlashCommands = priorSessionSlashCommands;
         }
@@ -18378,6 +18426,8 @@ export class SessionManager {
             args: launchPreparation?.codexLaunchArgs ?? source.args,
             cwd: source.worktreePath,
             env: source.env,
+            ...(launchPreparation?.scrubInheritedEnv?.length ? { scrubInheritedEnv: launchPreparation.scrubInheritedEnv } : {}),
+            ...effectiveAcpCompatibility(launchPreparation?.acpCompatibility, isolation),
             config: source.config,
             context: source.context,
             capabilities: source.capabilities,
@@ -18738,6 +18788,7 @@ export class SessionManager {
         ...(retainedPrompt ? { retainedPrompt } : {}),
       };
     } catch (err) {
+      if (err instanceof AcpLaunchRefusedError) forkRefusedBeforeSpawn = true;
       if (forkedThreadId && client?.archiveSession) {
         try {
           await client.archiveSession(forkedThreadId);
@@ -18814,7 +18865,7 @@ export class SessionManager {
       } else if (forkHome) {
         const unused = forkHome;
         forkHome = null;
-        if (forkConstructionStarted) await this.retainProviderHomeReference(unused);
+        if (forkConstructionStarted && !forkRefusedBeforeSpawn) await this.retainProviderHomeReference(unused);
         else await this.releaseProviderHomeReference(unused);
       }
       if (claudeForkHome) {
