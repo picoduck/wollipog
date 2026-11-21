@@ -8,11 +8,16 @@
  *    that needs the person (#604) stays, whole, after its branch has gone.
  * 2. `strip`: the activity strip hides.
  * 3. `badge`: the secondary badge folds into the "+N" count; the lifecycle badge always stays.
+ * 4. `pr`: a pull request that needs the person ends in an ellipsis rather than being cut off.
+ *
+ * What leaves the line leaves only the eye: the branch and the strip stay in the card's accessible
+ * name, the folded badge is named by its count, and a shortened pull request keeps its whole label
+ * and tooltip.
  *
  * Measured rather than styled: CSS cannot fold a badge into a count, and a wrapping line moves the
  * branch whole instead of shortening it, which is how the fourth line used to appear.
  */
-export type StatusLineDrop = "branch" | "strip" | "badge";
+export type StatusLineDrop = "branch" | "strip" | "badge" | "pr";
 
 /** Below this a cut branch shows a glyph and a letter or two, so it leaves the line instead. */
 export const STATUS_LINE_BRANCH_MIN_PX = 72;
@@ -34,11 +39,14 @@ export function fitStatusLine(line: HTMLElement): StatusLineDrop[] {
   };
   apply();
   const git = line.querySelector<HTMLElement>(":scope > .inbox-row-git");
-  if (git) {
-    const cut = truncated(git.querySelector<HTMLElement>(".inbox-row-branch-name"))
-      || truncated(git.querySelector<HTMLElement>(".inbox-row-base"));
-    // `git` clipping its own contents means the branch is already at its few-character minimum.
-    if (overflows(line) || truncated(git) || (cut && git.getBoundingClientRect().width < STATUS_LINE_BRANCH_MIN_PX)) {
+  const branch = git?.querySelector<HTMLElement>(":scope > .inbox-row-branch") ?? null;
+  if (git && branch) {
+    const cut = truncated(branch.querySelector<HTMLElement>(".inbox-row-branch-name"))
+      || truncated(git.querySelector<HTMLElement>(":scope > .inbox-row-base"));
+    // The branch ITSELF against the cutoff, not the group a pull request label widens. `git` clipping
+    // its own contents means the branch is already at its few-character minimum.
+    if (overflows(line) || truncated(git)
+      || (cut && branch.getBoundingClientRect().width < STATUS_LINE_BRANCH_MIN_PX)) {
       drops.push("branch");
       apply();
     }
@@ -49,6 +57,10 @@ export function fitStatusLine(line: HTMLElement): StatusLineDrop[] {
   }
   if (overflows(line) && line.querySelector(".row-status-collapsed")) {
     drops.push("badge");
+    apply();
+  }
+  if (overflows(line) && git?.querySelector(":scope > .inbox-row-pr > .status")) {
+    drops.push("pr");
     apply();
   }
   return drops;

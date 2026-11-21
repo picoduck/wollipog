@@ -13710,18 +13710,48 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 /* The phone card's status line (#4791) is one line across the whole card and never wraps, so every
    card stays three lines. The branch gives way long before the status does, as the sender does on
    the desktop status line; past that, `fitStatusLine()` drops the branch (keeping a pull request
-   that needs the person, #604), then the strip, then folds the secondary badge into its count. The
-   lifecycle badge always stays. */
+   that needs the person, #604), then the strip, then folds the secondary badge into its count, and
+   last ends that pull request in an ellipsis. The lifecycle badge always stays. */
 .inbox-row-shell.stacked .row-status > .status { flex: none; padding-inline: var(--space-1); }
 .inbox-row-shell.stacked .inbox-row-status-line > .inbox-row-git { flex-shrink: 100000; }
-.inbox-row-status-line[data-fit~="branch"] > .inbox-row-git { flex: none; }
+/* Once its branch has gone, the group holds only a pull request that needs the person, which no longer
+   shrinks: the line overflows instead, so the later steps run. */
+.inbox-row-shell.stacked .inbox-row-status-line[data-fit~="branch"] > .inbox-row-git { flex: none; }
+/* A dropped branch and strip leave the eye only: the card's accessible name still says them, as
+   `.sr-only` text does. The folded secondary badge is named by its count instead. */
 .inbox-row-status-line[data-fit~="branch"] > .inbox-row-git:not(:has(.inbox-row-pr .status)),
 .inbox-row-status-line[data-fit~="branch"] > .inbox-row-git > :is(.inbox-row-branch, .inbox-row-base),
-.inbox-row-status-line[data-fit~="strip"] > .inbox-row-activity,
+.inbox-row-status-line[data-fit~="strip"] > .inbox-row-activity {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
 .inbox-row-status-line[data-fit~="badge"] .row-status > .status + .status,
 .inbox-row-status-line[data-fit~="badge"] .row-status-more { display: none; }
 .row-status-collapsed { display: none; }
 .inbox-row-status-line[data-fit~="badge"] .row-status-collapsed { display: inline; }
+/* Last, a pull request that needs the person ends in an ellipsis rather than being cut off; its
+   whole label stays in the card's name and its tooltip. */
+.inbox-row-shell.stacked .inbox-row-status-line[data-fit~="pr"] > .inbox-row-git { flex: 0 1 auto; }
+.inbox-row-status-line[data-fit~="pr"] .inbox-row-pr { flex: 0 1 auto; min-width: calc(var(--icon-sm) + var(--space-1) + 3em); overflow: hidden; }
+.inbox-row-status-line[data-fit~="pr"] .inbox-row-pr > .status {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.inbox-row-status-line[data-fit~="pr"] .inbox-row-pr > .status::before {
+  display: inline-block;
+  margin-right: var(--space-1);
+  vertical-align: 1px;
+}
 /* Meta (§11.3): plain text, each item after its 14px icon, 12px apart. */
 .inbox-row-git {
   display: flex;

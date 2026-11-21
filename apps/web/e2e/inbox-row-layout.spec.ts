@@ -435,7 +435,7 @@ test.describe("with a row in every status", () => {
         const page = await context.newPage();
         try {
           await page.goto(`${ROWS}?dense=1&family=1`);
-          await expect(page.locator(".inbox-row")).toHaveCount(22);
+          await expect(page.locator(".inbox-row")).toHaveCount(23);
           await pinWidestFace(page, page.locator(".inbox-row"));
           // A face pinned after the first layout changes no box, so nudge the width to re-fit every line.
           // Each step needs its own frame: a ResizeObserver compares sizes once per frame, so a nudge
@@ -444,7 +444,7 @@ test.describe("with a row in every status", () => {
           await page.setViewportSize({ width: width - 1, height: 2600 });
           await nextFrames();
           await page.setViewportSize({ width, height: 2600 });
-          await expect.poll(() => page.locator(".inbox-row-shell.stacked").count()).toBe(22);
+          await expect.poll(() => page.locator(".inbox-row-shell.stacked").count()).toBe(23);
           await nextFrames();
           const cards = await page.locator(".inbox-row").evaluateAll((rows, touch) => rows.map((row) => {
             const rowBox = row.getBoundingClientRect();
@@ -453,8 +453,11 @@ test.describe("with a row in every status", () => {
             const lineOne = row.querySelector<HTMLElement>(".inbox-row-sender-line")!;
             const line = row.querySelector<HTMLElement>(".inbox-row-status-line")!;
             const lineBox = line.getBoundingClientRect();
+            // Drawn on the line: not `display: none`, and not left in the name only (`.sr-only`-style).
             const shown = (element: Element | null): element is HTMLElement =>
-              element !== null && (element as HTMLElement).getClientRects().length > 0;
+              element !== null && (element as HTMLElement).getClientRects().length > 0
+              && getComputedStyle(element).position !== "absolute"
+              && (element.parentElement === null || getComputedStyle(element.parentElement).position !== "absolute");
             const whole = (element: HTMLElement, box: DOMRect) => {
               const r = element.getBoundingClientRect();
               return r.width > 0 && r.left >= box.left - 0.5 && r.right <= box.right + 0.5
@@ -478,6 +481,17 @@ test.describe("with a row in every status", () => {
               stripShown: shown(strip),
               stripWhole: shown(strip) ? whole(strip, lineBox) : null,
               folded: shown(line.querySelector(".row-status-collapsed")),
+              branch: line.querySelector(".inbox-row-branch-name")?.textContent ?? null,
+              branchShown: shown(line.querySelector(".inbox-row-branch")),
+              // A pull request that needs the person (#604): always drawn, inside the line, its whole
+              // label still in the DOM (and so the name) even when it ends in an ellipsis.
+              prAttention: (() => {
+                const pr = line.querySelector<HTMLElement>(".inbox-row-pr > .status");
+                if (!pr) return null;
+                const r = pr.getBoundingClientRect();
+                return { shown: shown(pr), inside: r.width > 0 && r.left >= lineBox.left - 0.5 && r.right <= lineBox.right + 0.5,
+                  text: pr.textContent };
+              })(),
               timeOnLineOne: time.closest(".inbox-row-sender-line") === lineOne,
               timeWhole: whole(time, rowBox) && time.getBoundingClientRect().right <= contentRight + 0.5,
               timeHeight: time.getBoundingClientRect().height,
@@ -489,7 +503,7 @@ test.describe("with a row in every status", () => {
               lineToEdge: Math.abs(lineBox.right - contentRight) <= 0.5,
             };
           }), touch);
-          expect(cards).toHaveLength(22);
+          expect(cards).toHaveLength(23);
           expect(new Set(cards.map((card) => card.height)).size, `one height: ${cards.map((c) => `${c.title} ${c.height}`).join(", ")}`)
             .toBe(1);
           for (const card of cards) {
@@ -514,6 +528,19 @@ test.describe("with a row in every status", () => {
             const top = cards.find((card) => card.title?.startsWith("Dense: Number-Line"))!;
             expect(top, "a 390px phone keeps both badges and the strip on a top-level dense card")
               .toMatchObject({ statuses: 2, folded: false, stripShown: true });
+          }
+          // The depth-2 grandchild's merge-queue warning outlives every drop, whole or ellipsized.
+          const dequeued = cards.find((card) => card.title?.startsWith("Dequeued Grandchild"))!;
+          expect(dequeued.prAttention, "the dequeued warning stays on the line").toEqual({
+            shown: true, inside: true, text: "Dequeued: Check Failed" });
+          expect(dequeued.fit, "its branch gave way first").toContain("branch");
+          // A dropped branch leaves the eye, not the card's accessible name (cross-model review).
+          const dropped = cards.filter((card) => card.branch !== null && !card.branchShown);
+          expect(dropped.length, "the fixture drops at least one branch").toBeGreaterThan(0);
+          for (const card of dropped) {
+            const button = page.locator(".inbox-row", { has: page.locator(".inbox-row-title", { hasText: card.title! }) });
+            await expect(button, `${card.title}: still named with its branch`)
+              .toHaveAccessibleName(new RegExp(`Branch: ${card.branch!.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}`));
           }
           expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
         } finally {
