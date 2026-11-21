@@ -628,6 +628,15 @@ function ThreadBarTitle({ title, phone = false }: { title: string; phone?: boole
     document.addEventListener("keydown", dismiss);
     return () => document.removeEventListener("keydown", dismiss);
   }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    // A tap need not focus the title button, so leaving the tooltip cannot depend on blur.
+    const handleOutsidePress = (event: PointerEvent) => {
+      if (!wrapper.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", handleOutsidePress, true);
+    return () => document.removeEventListener("pointerdown", handleOutsidePress, true);
+  }, [open]);
   return (
     <div className="assistant-bar-title" ref={wrapper} data-open={open || undefined} data-dismissed={dismissed || undefined}
       onPointerLeave={() => setDismissed(false)}>

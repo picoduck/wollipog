@@ -166,6 +166,17 @@ for (const theme of ["light", "dark"] as const) {
         await page.keyboard.press("Escape");
         await expect(tooltip).toHaveCount(0);
         await expect(title).toBeVisible();
+
+        if (phone) {
+          // Model engines that deliver the press without giving a tapped button focus.
+          await title.evaluate((button) => button.addEventListener("pointerdown", (event) => event.preventDefault(), { once: true }));
+          await page.locator(".detail-body").tap();
+          await title.tap();
+          await expect(title).not.toBeFocused();
+          await expect(tooltip).toBeVisible();
+          await page.locator(".detail-body").tap();
+          await expect(tooltip).toHaveCount(0);
+        }
       });
     });
   }
