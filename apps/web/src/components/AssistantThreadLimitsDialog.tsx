@@ -220,7 +220,7 @@ export function AssistantThreadLimitsDialog({ thread, model, effort, onClose, on
                 <button type="button" className="btn" aria-label="Increase Session Launch Limit"
                   disabled={disabled || launchCount === Number.MAX_SAFE_INTEGER}
                   onClick={() => editLaunches(String((launchCount ?? 0) + 1))}>+</button>
-                <button type="button" className="btn" aria-pressed={launches === ""} disabled={disabled}
+                <button type="button" className="btn" disabled={disabled}
                   onClick={() => editLaunches("")}>No Limit</button>
               </div>}
               {thread.usage && <span className="muted">{thread.usage.launchedSessions.used} launched.</span>}

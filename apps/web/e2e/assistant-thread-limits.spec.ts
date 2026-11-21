@@ -10,7 +10,7 @@ const EVIDENCE = process.env.ASSISTANT_LIMITS_EVIDENCE_DIR;
 
 async function openDetails(page: Page) {
   const panel = page.locator("#right-panel");
-  if (!(await panel.isVisible())) await page.getByRole("button", { name: "Side Panel", exact: true }).click();
+  if (!(await panel.isVisible())) await page.getByRole("button", { name: /Side Panel/ }).click();
   await panel.getByRole("tab", { name: "Details", exact: true }).click();
   return panel.getByRole("tabpanel", { name: "Details", exact: true });
 }
@@ -64,7 +64,7 @@ test("the owner edits future defaults from Settings and an existing thread from 
   await picker.getByRole("button", { name: "Use Account", exact: true }).click();
   await expect(limits).toContainText("Studio Subscription");
   await expect(page.locator("body")).not.toHaveAttribute("data-changed-account", /.+/);
-  await limits.getByRole("button", { name: "Custom…" }).click();
+  await limits.getByRole("radio", { name: "Custom…" }).click();
   await limits.getByRole("textbox", { name: "Custom Budget (USD)" }).fill("12");
   await limits.getByRole("button", { name: "Save Changes" }).click();
   const confirmation = page.getByRole("dialog", { name: "Confirm Conversation Change" });
@@ -72,7 +72,7 @@ test("the owner edits future defaults from Settings and an existing thread from 
   await expect(confirmation.getByRole("alert")).toContainText("already spent or committed $15.00");
   await expect(page.locator("body")).not.toHaveAttribute("data-changed-account", /.+/);
   await confirmation.getByRole("button", { name: "Keep Editing", exact: true }).click();
-  await limits.getByRole("group", { name: "Budget Presets" }).getByRole("button", { name: "No Limit" }).click();
+  await limits.getByRole("radiogroup", { name: "Budget Presets" }).getByRole("radio", { name: "No Limit" }).click();
   await limits.getByRole("switch", { name: "Pause New Launches" }).click();
   await limits.getByRole("button", { name: "Save Changes" }).click();
   await confirmation.getByRole("button", { name: "Confirm and Save" }).click();
@@ -247,7 +247,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       if (theme === "dark") await capture(page, "thread-limit-warning");
       await warning.getByRole("link", { name: "Thread Settings", exact: true }).click();
       const thread = page.getByRole("dialog", { name: "Thread Settings", exact: true });
-      await expect(thread.getByRole("button", { name: "$25", exact: true })).toHaveAttribute("aria-pressed", "true");
+      await expect(thread.getByRole("radio", { name: "$25", exact: true })).toBeChecked();
       await expect(thread.getByRole("link", { name: "Session Guardrails" })).toHaveCount(0);
       await expect(thread.getByRole("link", { name: "Settings › Assistant" })).toHaveAttribute("href", SETTINGS);
       await open(page, "/sessions/~cwBlAHMAcwAtAHQAcgBpAGEAZwBlAA/guardrails", theme, "budget");

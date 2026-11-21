@@ -103,15 +103,15 @@ for (const { width, height, phone } of [{ width: 1440, height: 900, phone: false
 
       test("keeps every budget preset, a cents input, and the spend meter together", async ({ page }) => {
         const dialog = await open(page);
-        const group = dialog.getByRole("group", { name: "Budget Presets" });
+        const group = dialog.getByRole("radiogroup", { name: "Budget Presets" });
         const meter = dialog.getByRole("meter", { name: "Budget" });
         const names = ["$25", "$50", "$100", "$250", "Custom…", "No Limit"];
-        await expect(group.getByRole("button")).toHaveText(names);
+        await expect(group.getByRole("radio")).toHaveText(names);
         for (const [index, name] of names.entries()) {
-          const chip = group.getByRole("button", { name, exact: true });
+          const chip = group.getByRole("radio", { name, exact: true });
           await chip.click();
-          await expect(chip).toHaveAttribute("aria-pressed", "true");
-          await expect(group.getByRole("button")).toHaveText(names);
+          await expect(chip).toBeChecked();
+          await expect(group.getByRole("radio")).toHaveText(names);
           if (name === "Custom…") {
             await dialog.getByRole("textbox", { name: "Custom Budget (USD)" }).fill("37.42");
             await expect(meter).toHaveAttribute("aria-valuemax", "37.42");
@@ -129,7 +129,8 @@ for (const { width, height, phone } of [{ width: 1440, height: 900, phone: false
               ? "$8.13 spent and No Budget are visible." : `The spend meter shows $8.13 of ${name === "Custom…" ? "$37.42" : name}.`}`);
         }
         await expect(page.locator("body")).not.toHaveAttribute("data-thread-limits", /.+/);
-        await group.getByRole("button", { name: "Custom…" }).click();
+        await group.getByRole("radio", { name: "No Limit" }).press("ArrowLeft");
+        await expect(group.getByRole("radio", { name: "Custom…" })).toBeChecked();
         const custom = dialog.getByRole("textbox", { name: "Custom Budget (USD)" });
         await custom.fill("37.421");
         await dialog.getByRole("button", { name: "Save Changes" }).click();
@@ -269,7 +270,7 @@ for (const { width, height, phone } of [{ width: 1440, height: 900, phone: false
         test(`keeps ${state} readable with editing disabled`, async ({ page }) => {
           const dialog = await open(page, path, `limits=${limits}`);
           await expect(dialog.getByRole("status").filter({ hasText: notice })).toBeVisible();
-          await expect(dialog.getByRole("button", { name: "$25", exact: true })).toHaveAttribute("aria-pressed", "true");
+          await expect(dialog.getByRole("radio", { name: "$25", exact: true })).toBeChecked();
           await expect(dialog.getByRole("switch", { name: "Pause New Launches" })).toBeDisabled();
           const launchCount = dialog.getByRole("textbox", { name: "Session Launch Limit" });
           await expect(launchCount).toBeDisabled();
