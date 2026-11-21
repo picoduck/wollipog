@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import test from "node:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import fc from "fast-check";
 import { CANDIDATE_POLICY, candidatePlan, candidateReceipt, queueCandidate } from "./main-validation-candidates.mjs";
 import { admit, COMPACT_EVERY, emptyState, main, observe, plan, readState, reconcile, REQUIRED, RETRY_MS, STATE_REF,
@@ -278,14 +280,14 @@ function forge() {
 
 test("candidate request persists before dispatch, concurrent/cross-purpose duplicates share one claim", async () => {
   const { data, api } = forge();
-  await assert.rejects(requestCandidate(repository, B, { api }), /state requires operator/);
+  await assert.rejects(requestCandidate(repository, B, { api }), /candidate-scheduler-state-requires-operator-reconciliation/);
   await writeState(api, repository, await readState(api, repository), emptyState(repository));
   const receipts = await Promise.all(["release", "repair"].map((purpose) => requestCandidate(repository, B, { api, purpose, now: () => at() })));
   assert.equal(receipts[0].claimId, receipts[1].claimId);
   assert.equal(data.dispatches.length, 0);
   assert.equal((await readState(api, repository)).value.candidates.requests.length, 1);
   data.deniedAncestry = true;
-  await assert.rejects(requestCandidate(repository, C, { api }), /outside main/);
+  await assert.rejects(requestCandidate(repository, C, { api }), /candidate-is-outside-main-ancestry/);
 });
 
 test("candidate dispatch/admission survives wakes, then new main takes priority without cancelling it", async () => {
@@ -596,7 +598,7 @@ test("errors never log response bodies or token-bearing exception messages", asy
   const rc = await main(["reconcile"], { env: { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "private-token", GITHUB_REF: "refs/heads/main" },
     api: async () => { throw new Error("private-token private response body"); }, error: (line) => errors.push(line) });
   assert.equal(rc, 1); assert.ok(!errors.join("").includes("private-token"));
-  assert.deepEqual(JSON.parse(errors[0]), { event: "main_rolling_error", httpStatus: null, status: "reconciliation-required" });
+  assert.deepEqual(JSON.parse(errors[0]), { event: "main_rolling_error", failureClass: "unexpected-error", httpStatus: null, status: "reconciliation-required" });
 });
 
 test("a delayed duplicate dispatch cannot repeat an already verified target", async () => {
@@ -927,4 +929,151 @@ test("an operator rerun in the replaceable pending slot remains an incomplete re
   assert.equal(a.status, "in_progress"); assert.equal(manual.conclusion, "cancelled");
   assert.equal(record(manual, []).verdict, "incomplete");
   assert.equal(data.runs.at(-1).status, "pending");
+});
+
+
+test("predecessor completion reconciliation between admission read and CAS retries from fresh evidence", async () => {
+  const { data, api } = forge(); data.nativeQueue = true;
+  await reconcile(repository, { api, now: () => at(), log: () => {} });
+  const prior = data.runs.at(-1);
+  await admit(repository, eventFor(prior), prior.id, 1, { api });
+  data.main = B;
+  await reconcile(repository, { api, now: () => at(2), log: () => {} });
+  const successor = data.runs.at(-1);
+  data.finish(prior);
+  data.jobs.set(`${successor.id}/1`, []);
+  let conflicts = 0;
+  const racingApi = async (path, options) => {
+    if (path === "/graphql" && conflicts++ === 0) {
+      // A completion-triggered controller clears the old active pointer after the
+      // successor reads it, but before its fenced admission write.
+      await reconcile(repository, { api, now: () => at(41), log: () => {} });
+    }
+    return api(path, options);
+  };
+  assert.equal(await admit(repository, eventFor(successor), successor.id, 1, { api: racingApi }), true);
+  assert.equal(conflicts, 2);
+  const stored = await readState(api, repository);
+  assert.equal(stored.value.active.runId, successor.id);
+  assert.equal(stored.value.pending, null);
+  assert.equal(data.dispatches.length, 2, "admission retries never dispatch another worker");
+});
+
+test("admission errors expose only sanitized classes and request a bounded completion reconciliation", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rolling-admit-"));
+  try {
+    const eventPath = join(dir, "event.json"), output = join(dir, "output");
+    writeFileSync(eventPath, JSON.stringify(eventFor(run())));
+    const errors = [];
+    const rc = await main(["admit"], { env: { GITHUB_REPOSITORY: repository,
+      GITHUB_TOKEN: "secret", GITHUB_REF: "refs/heads/main", GITHUB_RUN_ID: "10", GITHUB_RUN_ATTEMPT: "1",
+      GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: output },
+      api: async () => { throw new TypeError("secret transport body"); }, error: line => errors.push(JSON.parse(line)) });
+    assert.equal(rc, 1);
+    assert.equal(errors[0].failureClass, "type-error");
+    assert.equal(errors[0].httpStatus, null);
+    assert.doesNotMatch(JSON.stringify(errors), /secret|transport body/);
+    assert.equal(readFileSync(output, "utf8"), "reconcile=true\n");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("exhausted admission CAS conflicts recover through terminal reconciliation without a push", async () => {
+  const { data, api } = forge(); data.nativeQueue = true;
+  await reconcile(repository, { api, now: () => at(), log: () => {} });
+  const prior = data.runs.at(-1); await admit(repository, eventFor(prior), prior.id, 1, { api });
+  data.main = B; await reconcile(repository, { api, now: () => at(2), log: () => {} });
+  const successor = data.runs.at(-1); data.finish(prior); data.jobs.set(`${successor.id}/1`, []);
+  const dir = mkdtempSync(join(tmpdir(), "rolling-conflict-"));
+  try {
+    const eventPath = join(dir, "event.json"), output = join(dir, "output");
+    writeFileSync(eventPath, JSON.stringify(eventFor(successor)));
+    const env = { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test", GITHUB_REF: "refs/heads/main" };
+    const errors = []; let conflicts = 0;
+    assert.equal(await main(["admit"], { env: { ...env, GITHUB_RUN_ID: String(successor.id),
+      GITHUB_RUN_ATTEMPT: "1", GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: output },
+      api: async (path, options) => {
+        if (path === "/graphql") { conflicts++; return { errors: [{ message: "untrusted body" }] }; }
+        return api(path, options);
+      }, error: line => errors.push(JSON.parse(line)) }), 1);
+    assert.equal(conflicts, 3);
+    assert.deepEqual(errors[0], { event: "main_rolling_error", failureClass: "state-conflict",
+      httpStatus: null, status: "reconciliation-required" });
+    assert.equal(readFileSync(output, "utf8"), "reconcile=true\n");
+    assert.equal((await readState(api, repository)).value.active.runId, prior.id);
+    successor.status = "completed"; successor.conclusion = "failure";
+    assert.equal(await main(["reconcile"], { env: { ...env, MAIN_ROLLING_WORKER_RUN_ID: String(successor.id),
+      MAIN_ROLLING_WORKER_ATTEMPT: "1" }, api, log: () => {} }), 0);
+    const replacement = data.runs.at(-1);
+    assert.notEqual(replacement.id, successor.id);
+    assert.equal(workerIdentity(replacement, repository).targetSha, B);
+    assert.equal(await admit(repository, eventFor(replacement), replacement.id, 1, { api }), true);
+    assert.notEqual((await readState(api, repository)).value.lastVerdict?.targetSha, B,
+      "recovery admission cannot certify the target");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("completion reconciliation waits for the exact terminal attempt before any state reads", async () => {
+  const { data, api } = forge();
+  const env = { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test", GITHUB_REF: "refs/heads/main",
+    MAIN_ROLLING_WORKER_RUN_ID: "10", MAIN_ROLLING_WORKER_ATTEMPT: "1" };
+  const logs = [];
+  for (const status of ["pending", "completed"]) {
+    let waited = false;
+    const before = data.requests.length;
+    const rc = await main(["reconcile"], { env, api: async (...args) => {
+      assert.ok(waited, "no claim read or mutation before terminal handoff");
+      return api(...args);
+    }, waitForWorker: async (repo, expected) => {
+      assert.equal(repo, repository); assert.deepEqual(expected, { runId: 10, attempt: 1 });
+      waited = true; return { status };
+    }, log: line => logs.push(JSON.parse(line)), error: line => logs.push(JSON.parse(line)) });
+    assert.equal(rc, status === "completed" ? 0 : 1);
+    if (status === "pending") assert.equal(data.requests.length, before);
+  }
+  assert.equal(data.dispatches.length, 1);
+});
+
+test("unsafe predecessor admission emits no automatic reconciliation output", async () => {
+  const { data, api } = forge(); data.nativeQueue = true;
+  await reconcile(repository, { api, now: () => at(), log: () => {} });
+  const prior = data.runs.at(-1); await admit(repository, eventFor(prior), prior.id, 1, { api });
+  data.main = B; await reconcile(repository, { api, now: () => at(2), log: () => {} });
+  const successor = data.runs.at(-1);
+  const dir = mkdtempSync(join(tmpdir(), "rolling-unsafe-"));
+  try {
+    const eventPath = join(dir, "event.json"), output = join(dir, "output");
+    writeFileSync(eventPath, JSON.stringify(eventFor(successor))); writeFileSync(output, "");
+    const errors = [];
+    assert.equal(await main(["admit"], { env: { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test",
+      GITHUB_REF: "refs/heads/main", GITHUB_RUN_ID: String(successor.id), GITHUB_RUN_ATTEMPT: "1",
+      GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: output }, api, error: line => errors.push(JSON.parse(line)) }), 1);
+    assert.equal(errors[0].failureClass, "unsafe-predecessor");
+    assert.equal(readFileSync(output, "utf8"), "");
+    assert.equal((await readState(api, repository)).value.status, "predecessor-evidence-operator-required");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("repeated incomplete admission attempts stop completion-driven recovery at the existing limit", () => {
+  const failures = [11, 12, 13].map(id => record(run({ id, conclusion: "failure" }), []));
+  const decision = plan(pendingState(), { active: [], records: failures }, A, at(50));
+  assert.equal(decision.dispatch, false);
+  assert.equal(decision.next.status, "recovery-limit-operator-required");
+  assert.equal(decision.next.lastVerdict, null);
+});
+
+test("controller terminal dispatch is explicitly scoped and bound to recovery outputs", () => {
+  const worker = readFileSync(new URL("../.github/workflows/main-rolling-validation.yml", import.meta.url), "utf8");
+  const wake = worker.split("\n  controller_wake:\n")[1];
+  assert.match(wake, /if: always\(\) && !cancelled\(\) && github.ref == 'refs\/heads\/main' && needs.admit.outputs.reconcile == 'true'/);
+  assert.match(worker, /reconcile: \$\{\{ steps.admit.outputs.reconcile \}\}/);
+  assert.match(wake, /needs: \[admit, validation\]/);
+  assert.match(wake, /permissions:\n      actions: write/);
+  assert.doesNotMatch(wake, /checkout@|contents:|issues:|download-artifact/);
+  const commands = [...wake.matchAll(/run: (timeout .+)/g)].map(match => match[1]);
+  assert.deepEqual(commands, Array(2).fill('timeout 30 gh workflow run main-rolling-controller.yml --ref main --repo "$GITHUB_REPOSITORY" -f worker_run_id="$WORKER_RUN_ID" -f worker_attempt="$WORKER_ATTEMPT"'));
+  assert.match(wake, /if: steps.dispatch.outcome == 'failure'/);
+  assert.match(wake, /"event":"main_rolling_wake","delivery":"failed"/);
+  const controller = readFileSync(new URL("../.github/workflows/main-rolling-controller.yml", import.meta.url), "utf8");
+  assert.match(controller, /MAIN_ROLLING_WORKER_RUN_ID: \$\{\{ inputs.worker_run_id \}\}/);
+  assert.match(controller, /MAIN_ROLLING_WORKER_ATTEMPT: \$\{\{ inputs.worker_attempt \}\}/);
 });
