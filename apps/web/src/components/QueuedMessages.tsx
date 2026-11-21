@@ -22,7 +22,7 @@ import {
 import { isTerminalDeliveryReceipt } from "../session-actions.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { ArrowUpIcon, ChevronRightIcon, CloseIcon, EditIcon, MoreHorizontalIcon, PaperclipIcon } from "./Icons.js";
+import { ArrowUpIcon, ChevronRightIcon, CloseIcon, EditIcon, MoreHorizontalIcon, PaperclipIcon, UpdatedIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSurface } from "./Menu.js";
 import { Notice } from "./Notice.js";
@@ -117,8 +117,8 @@ export interface QueuedMessagesProps {
 
 type QueuedRowStatus = "failed" | "uncertain" | "pending_delivery" | "steering";
 
-/** Row statuses the collapsed summary carries, most severe first: the ones that need the person. */
-const SUMMARY_STATUSES = ["failed", "uncertain"] as const satisfies readonly QueuedRowStatus[];
+/** Keep active steering visible when the rows are closed, after failures that need attention. */
+const SUMMARY_STATUSES = ["failed", "uncertain", "steering"] as const satisfies readonly QueuedRowStatus[];
 
 function rowStatus(prompt: QueuedPromptView, locallyPromoting: boolean): QueuedRowStatus | null {
   return prompt.durableDeliveryState === "failed"
@@ -140,7 +140,7 @@ function sentenceStart(text: string): string {
 
 /**
  * The composer's queue tray (docs/design-system.md §11.2, §19.4; #2178): messages waiting behind
- * the turn, docked on the composer card. It starts as one summary line (#2788): a disclosure that
+ * the turn, shown at the top of the composer card. It starts as one summary line (#2788): a disclosure that
  * counts them, with the Held badge and the most severe row status beside the count. Expanded, it says
  * once what holds for every row: a held queue, a steering reason they share, a cancel they all lack,
  * a Viewer's refusal. A row carries a status only where it differs from "queued". On a phone each
@@ -355,14 +355,14 @@ export function QueuedMessages({
         const steerButton = steerInline && (
           <button
             type="button"
-            className="btn sm ghost queue-steer"
+            className="btn sm queue-steer"
             disabled={row.steer.reason !== null}
             title={row.steer.reason ?? "Send this message into the current turn."}
             aria-label="Steer Queued Message"
             aria-describedby={describedBy(row, "steer")}
             onClick={() => onSteer(prompt)}
           >
-            Steer
+            Steer Now
           </button>
         );
         return (
@@ -372,8 +372,10 @@ export function QueuedMessages({
             data-testid={`queued-prompt-${prompt.id}`}
             aria-current={editing ? "true" : undefined}
           >
+            {single && <UpdatedIcon size={16} className="queue-clock" aria-hidden="true" />}
             {row.status && (
-              <StatusBadge meta={row.status} inline className="queue-status" title={row.steer.reason ?? undefined} />
+              <QueueStatus status={row.status} steering={row.statusKey === "steering"}
+                className="queue-status" title={row.steer.reason ?? undefined} />
             )}
             <span className="queue-text" title={prompt.text || undefined}>
               {prompt.hasImages && <PaperclipIcon size={14} className="queue-clip" aria-hidden="true" />}
@@ -457,17 +459,29 @@ export function QueuedMessages({
       <span className="queue-count">{prompts.length} Queued Messages</span>
       {held && <StatusBadge meta={statusMeta("queuedMessage", "held")} inline />}
       {summaryStatus !== undefined && (
-        <StatusBadge meta={statusMeta("queuedMessage", summaryStatus)} inline />
+        <QueueStatus status={statusMeta("queuedMessage", summaryStatus)} steering={summaryStatus === "steering"} />
       )}
     </button>
   );
   // Keyed, so the row list moves rather than remounts when the queue grows past one or shrinks to
   // it: a row's open sheet and focused control survive the change.
   return (
-    <section ref={trayRef} className={`queue${single ? " is-single" : ""}${phone ? " is-phone" : ""}`}
+    <section ref={trayRef} className={`composer-queue${single ? " is-single" : ""}${phone ? " is-phone" : ""}`}
       aria-label="Queued Messages">
       {single ? [rowList, holdLine, notes] : [summary, holdLine, notes, rowList]}
     </section>
+  );
+}
+
+function QueueStatus({ status, steering, className, title }: {
+  status: StatusMeta;
+  steering: boolean;
+  className?: string;
+  title?: string;
+}) {
+  return (
+    <StatusBadge meta={status} inline noDot={steering} className={className} title={title}
+      label={steering ? <><span className="spinner" aria-hidden="true" />{status.label}</> : undefined} />
   );
 }
 

@@ -159,7 +159,15 @@ function depsApproval(occurrenceId: string): PendingApproval {
 }
 
 const sessions = new Map<string, SessionView>([
-  ["sess-triage", session("sess-triage", "Triage Open Issues", { status: "idle" })],
+  ["sess-triage", session("sess-triage", "Triage Open Issues", params.has("queuedMessage") ? {
+    status: "running",
+    queued: [{
+      id: "queued-checks",
+      text: "Summarize the remaining CI checks",
+      durableDeliveryState: "failed",
+      durableDeliveryError: "The machine restarted before accepting this message.",
+    }],
+  } : { status: "idle" })],
   ["sess-release", session("sess-release", "Ship the Release Notes", { status: "running", agentId: "codex", agentName: "Codex", driver: "codex-app-server" })],
   ["sess-cleanup", session("sess-cleanup", "Weekly Cleanup", { status: "idle", updatedAt: NOW - 26 * 60 * minute })],
   ["sess-flaky", session("sess-flaky", "Fix the Flaky Upload Test", { status: "running", updatedAt: NOW - minute })],

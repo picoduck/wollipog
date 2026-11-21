@@ -151,25 +151,25 @@ function LiveQuestionFixture() {
               )}
               </div>
               <div className="composer">
-                {showQueuedPrompts && queuedPrompts.length > 0 && (
-                  <section className="queue" aria-label="Queued Messages">
-                    <button type="button" className="disclosure-trigger queue-summary" aria-expanded={queueExpanded}
-                      aria-controls="live-queue-rows" onClick={() => setQueueExpanded((open) => !open)}>
-                      <ChevronRightIcon className="disclosure-chevron" />
-                      <span className="queue-count">
-                        {queuedPrompts.length} {queuedPrompts.length === 1 ? "Queued Message" : "Queued Messages"}
-                      </span>
-                    </button>
-                    <ul id="live-queue-rows" className="queue-rows" hidden={!queueExpanded}>
-                      {queuedPrompts.map((prompt) => (
-                        <li className="queue-row" key={prompt.id}>
-                          <span className="queue-text">{prompt.text}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </section>
-                )}
                 <div className={`composer-box${answerActive ? " answer-mode" : ""}`}>
+                  {showQueuedPrompts && queuedPrompts.length > 0 && (
+                    <section className="composer-queue" aria-label="Queued Messages">
+                      <button type="button" className="disclosure-trigger queue-summary" aria-expanded={queueExpanded}
+                        aria-controls="live-queue-rows" onClick={() => setQueueExpanded((open) => !open)}>
+                        <ChevronRightIcon className="disclosure-chevron" />
+                        <span className="queue-count">
+                          {queuedPrompts.length} {queuedPrompts.length === 1 ? "Queued Message" : "Queued Messages"}
+                        </span>
+                      </button>
+                      <ul id="live-queue-rows" className="queue-rows" hidden={!queueExpanded}>
+                        {queuedPrompts.map((prompt) => (
+                          <li className="queue-row" key={prompt.id}>
+                            <span className="queue-text">{prompt.text}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+                  )}
                   {pendingQuestion &&
                     (pendingQuestion.recoveryReason !== "provider_restart" ||
                       pendingQuestion.recoveryAction === "resume_answer") && (
