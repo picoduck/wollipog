@@ -254,7 +254,9 @@ export function buildContentAddressedAttestationCommand(sha256: string): string 
 export function buildContentAddressedStageCommand(sha256: string): string {
   const digest = checkedRunnerDigest(sha256);
   return (
-    `mkdir -p ${REMOTE_RUNNER_CONTENT_ROOT}/${digest} && ` +
+    // Staging runs before credential/profile setup and can create their shared parent.
+    // Set the mask before mkdir: later restrictive mkdir calls leave existing modes alone.
+    `umask 077; mkdir -p ${REMOTE_RUNNER_CONTENT_ROOT}/${digest} && ` +
     `find ${REMOTE_RUNNER_CONTENT_ROOT}/${digest} -maxdepth 1 -name 'wollipog-runner.new-*' -mmin +60 -delete`
   );
 }
