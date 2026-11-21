@@ -82,7 +82,7 @@ import { OfflineBanner } from "./components/OfflineBanner.js";
 import { SecureDashboardNotice } from "./components/SecureDashboardNotice.js";
 import { PairingBanner } from "./components/PairingBanner.js";
 import { ChevronLeftIcon, KeyboardIcon, LockIcon, PlusIcon } from "./components/Icons.js";
-import { backLabel, viewDescription, viewHasHeaderTabs, viewPageWidth, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
+import { assistantConnectionsView, backLabel, viewDescription, viewHasHeaderTabs, viewPageWidth, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
 import { sessionDisplayTitle } from "./session-title.js";
 import { routedSessionPlaceholder } from "./detail-placeholder.js";
 import { useRoutedSessionLookup } from "./routed-session-lookup.js";
@@ -138,7 +138,8 @@ const AppearancePanel = lazy(() => import("./components/SettingsView.js").then((
 const NavigationRailPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NavigationRailPanel })));
 const BehaviorPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.BehaviorPanel })));
 const AssistantThreadDefaultsPanel = lazy(() => import("./components/AssistantThreadDefaultsPanel.js").then((module) => ({ default: module.AssistantThreadDefaultsPanel })));
-const AssistantConnectionsPanel = lazy(() => import("./components/AssistantConnectionsPanel.js").then((module) => ({ default: module.AssistantConnectionsPanel })));
+const AssistantConnectionsGroup = lazy(() => import("./components/AssistantConnectionsGroup.js").then((module) => ({ default: module.AssistantConnectionsGroup })));
+const AssistantConnectionsPages = lazy(() => import("./components/AssistantConnectionsPages.js").then((module) => ({ default: module.AssistantConnectionsPages })));
 const AssistantDelegationPanel = lazy(() => import("./components/AssistantDelegationPanel.js").then((module) => ({ default: module.AssistantDelegationPanel })));
 const AgentDefaultsPanel = lazy(() => import("./components/AgentDefaultsPanel.js").then((module) => ({ default: module.AgentDefaultsPanel })));
 const NetworkPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NetworkPanel })));
@@ -919,7 +920,9 @@ export function Shell() {
             />
           )}
           {view.name === "archived" && <ArchivedSessionsView key={view.browseVisit?.activationId} restoreBrowse={view.browseVisit?.restore} initialSearch={view.archiveSearch} />}
-          {view.name === "settings" && (
+          {view.name === "settings" && (view.assistantConnections ? (
+            <AssistantConnectionsPages route={view.assistantConnections} onNavigate={navigate} />
+          ) : (
             <SettingsView
               section={view.section}
               onNavigate={navigate}
@@ -967,7 +970,7 @@ export function Shell() {
                 orchestrator: <><OrchestratorSettingsPanel discoveryRevision={runners} /><DecisionModelPanel /></>,
                 assistant: <>
                   <AssistantThreadDefaultsPanel onOpenThreads={() => navigate({ name: "assistants" })} />
-                  <AssistantConnectionsPanel />
+                  <AssistantConnectionsGroup onOpen={() => navigate(assistantConnectionsView())} />
                   <AssistantDelegationPanel onOpenGrant={(threadId) => navigate({ name: "assistants", threadId, delegation: true })} />
                 </>,
                 reviews: <ReviewSettingsPanel />,
@@ -976,7 +979,7 @@ export function Shell() {
                 about: <AboutPanel update={desktopUpdate} />,
               }}
             />
-          )}
+          ))}
           {view.name === "projects" && (
             <ProjectsView
               selectedProjectId={view.id}

@@ -184,6 +184,10 @@ export class AssistantConnections {
     return connection.grant.destructiveConfirmation ?? "none";
   }
   activity(id: string): AssistantActivityRecord[] { return this.db.prepare("SELECT connection_id,grant_revision,operation,target_json,outcome,created_at FROM assistant_activity WHERE connection_id=? ORDER BY id DESC LIMIT 100").all(id) as unknown as AssistantActivityRecord[]; }
+  lastUsedAt(id: string): number | null {
+    const latest = this.db.prepare("SELECT created_at FROM assistant_activity WHERE connection_id=? ORDER BY id DESC LIMIT 1").get(id);
+    return latest ? Number(latest.created_at) : null;
+  }
   record(connection: AssistantConnection, operation: string, target: AssistantTarget, outcome: "succeeded" | "refused" | "failed"): void {
     // Only registered names and resolved resource identifiers. Never arguments or exception messages.
     this.db.prepare("INSERT INTO assistant_activity(connection_id,grant_revision,operation,target_json,outcome,created_at) VALUES (?,?,?,?,?,?)").run(connection.id, connection.revision, operation, JSON.stringify(target), outcome, Date.now());

@@ -30,8 +30,15 @@ export type View =
   | { name: "archived"; archiveSearch?: string; browseVisit?: { restore: boolean; activationId: number } }
   | { name: "projects"; id?: string; pane?: ProjectsPane }
   | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget; artifacts?: ArtifactsTarget; campaign?: true; campaignTarget?: CampaignTarget; guardrails?: true }
-  | { name: "settings"; section?: SettingsSection; policyId?: string; focus?: SettingsFocus }
+  | { name: "settings"; section?: SettingsSection; policyId?: string; focus?: SettingsFocus; assistantConnections?: AssistantConnectionsRoute }
   | { name: "not-found" };
+
+export type AssistantConnectionsRoute = { kind: "list" } | { kind: "new" } | { kind: "detail"; id: string };
+const ASSISTANT_CONNECTIONS_PATH = "/settings/assistant/connections";
+
+export function assistantConnectionsView(route: AssistantConnectionsRoute = { kind: "list" }): View {
+  return { name: "settings", section: "assistant", assistantConnections: route };
+}
 /**
  * Settings sections, as ROUTES rather than dialog tabs.
  *
@@ -302,7 +309,10 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
     case "automation":
       return entityTitle || ENTITY_FALLBACK_TITLES[view.name];
     // The section is the <h2> inside the page; repeating it here would say it twice.
-    case "settings": return "Settings";
+    case "settings":
+      if (view.assistantConnections?.kind === "detail") return "Assistant Connection";
+      if (view.assistantConnections?.kind === "new") return "New Connection";
+      return view.assistantConnections ? "Assistant Connections" : "Settings";
     case "not-found": return "Page Not Found";
   }
   // No default branch: this line stops compiling when a view is added without a title.
@@ -332,7 +342,7 @@ export function viewDescription(view: View): string | undefined {
     case "skills":
       return destination(view.name).description;
     case "settings":
-      return SETTINGS_DESCRIPTION;
+      return view.assistantConnections ? undefined : SETTINGS_DESCRIPTION;
     case "session":
     case "automation":
     case "not-found":
@@ -360,8 +370,9 @@ export function viewPageWidth(view: View): "wide" | "full" | "fill" | null {
       return "fill";
     case "projects":
     case "skills":
-    case "settings":
       return "full";
+    case "settings":
+      return view.assistantConnections ? null : "full";
     // Machines is a master-detail; the other Connections tabs are list pages.
     case "runners":
       return (view.section ?? "machines") === "machines" ? "fill" : null;
@@ -388,7 +399,7 @@ export function viewHasHeaderTabs(view: View, layout: { phone: boolean; compact:
     case "runners":
       return !(layout.phone && (view.section ?? "machines") === "machines" && view.machineId !== undefined);
     case "settings":
-      return layout.compact;
+      return !view.assistantConnections && layout.compact;
     default:
       return false;
   }
@@ -549,9 +560,15 @@ export function viewPath(view: View): string {
       : view.guardrails
       ? `/sessions/~${encodeResourceId(view.id)}/guardrails`
       : `/sessions/~${encodeResourceId(view.id)}`;
-    case "settings": return view.section === "approvals" && view.policyId !== undefined
-      ? `/settings/approvals/~${encodeResourceId(view.policyId)}`
-      : view.section ? `/settings/${view.section}` : "/settings";
+    case "settings": {
+      const route = view.assistantConnections;
+      if (route?.kind === "detail") return `${ASSISTANT_CONNECTIONS_PATH}/~${encodeResourceId(route.id)}`;
+      if (route?.kind === "new") return `${ASSISTANT_CONNECTIONS_PATH}/new`;
+      if (route) return ASSISTANT_CONNECTIONS_PATH;
+      return view.section === "approvals" && view.policyId !== undefined
+        ? `/settings/approvals/~${encodeResourceId(view.policyId)}`
+        : view.section ? `/settings/${view.section}` : "/settings";
+    }
   }
 }
 
@@ -636,6 +653,13 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/settings") return { name: "settings" };
   // Keep old bookmarks useful: a copy, so a caller that annotates the view cannot change the table.
   if (isRouteAlias(path)) return structuredClone(ROUTE_ALIASES[path]!);
+  if (path === ASSISTANT_CONNECTIONS_PATH) return assistantConnectionsView();
+  if (path === `${ASSISTANT_CONNECTIONS_PATH}/new`) return assistantConnectionsView({ kind: "new" });
+  const assistantConnectionMatch = /^\/settings\/assistant\/connections\/~([^/]+)$/.exec(path);
+  if (assistantConnectionMatch) {
+    const id = decodeResourceId(assistantConnectionMatch[1]!);
+    return id === null ? null : assistantConnectionsView({ kind: "detail", id });
+  }
   const settingsSection = SETTINGS_SECTIONS.find(({ id }) => path === `/settings/${id}`);
   if (settingsSection) return { name: "settings", section: settingsSection.id };
   const approvalsPolicyMatch = /^\/settings\/approvals\/~([^/]+)$/.exec(path);

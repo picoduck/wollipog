@@ -19,7 +19,7 @@ import {
   type VideoReviewSettingsStatus,
 } from "@wollipog/protocol";
 import { AgentDefaultsPanel } from "../components/AgentDefaultsPanel.js";
-import { AssistantConnectionsPanel } from "../components/AssistantConnectionsPanel.js";
+import { AssistantConnectionsGroup } from "../components/AssistantConnectionsGroup.js";
 import { AssistantDelegationPanel } from "../components/AssistantDelegationPanel.js";
 import { AssistantThreadDefaultsPanel } from "../components/AssistantThreadDefaultsPanel.js";
 import { ArchivedHistoryRetentionPanel } from "../components/ArchivedHistoryRetentionPanel.js";
@@ -44,7 +44,7 @@ import {
   parseColorScheme,
   type ColorScheme,
 } from "../theme.js";
-import { SETTINGS_SECTIONS, viewFromPath, viewPath, type SettingsSection, type View } from "../navigation.js";
+import { assistantConnectionsView, SETTINGS_SECTIONS, viewFromPath, viewPath, type SettingsSection, type View } from "../navigation.js";
 import { browserInstanceManager, InstancesContextProvider, type InstanceManager } from "../instances-context.js";
 import type { TailnetAccessSetting } from "../tailnet-access.js";
 import { DecisionModelPanel } from "../components/DecisionModelPanel.js";
@@ -736,7 +736,7 @@ function Harness() {
               ),
               assistant: <FeedbackProvider><ApiProvider client={harnessDefaultsApi}>
                 <AssistantThreadDefaultsPanel onOpenThreads={() => navigate({ name: "assistants" })} />
-                <AssistantConnectionsPanel />
+                <AssistantConnectionsGroup onOpen={() => navigate(assistantConnectionsView())} />
                 <AssistantDelegationPanel onOpenGrant={(threadId) => navigate({ name: "assistants", threadId, delegation: true })} />
               </ApiProvider></FeedbackProvider>,
               network: (

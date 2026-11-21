@@ -147,7 +147,8 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: {
   app.get("/api/assistant-connections", async (req, reply) => {
     const principal = owner(req);
     if (!principal) return reply.code(403).send({ error: "Only an organization owner can manage Assistant Connections." });
-    return management.list(principal, deps.operations);
+    const view = management.list(principal, deps.operations);
+    return { ...view, connections: view.connections.map(connection => ({ ...connection, lastUsedAt: store.lastUsedAt(connection.id) })) };
   });
   app.post("/api/assistant-connections/installation", async (req, reply) => {
     const principal = owner(req);
