@@ -413,6 +413,7 @@
   --control-h-sm: 28px;
   --control-h: 32px;
   --control-h-lg: 40px;
+  --queue-action-h: 44px;
   --row-h: 40px;
   --row-h-2: 56px;
   --row-h-dense: 32px;
@@ -7026,17 +7027,17 @@ body.shell-dock-dragging * {
 /* Phones (#2178): each row is its text and one 44px actions button. A status that differs moves under
    the text, so the words keep the line. */
 .composer-queue.is-phone:not(.is-single) .queue-text {
-  padding-block: max(0px, calc((44px - 1lh) / 2));
+  padding-block: max(0px, calc((var(--queue-action-h) - 1lh) / 2));
 }
 .composer-queue.is-phone .queue-status {
   order: 1;
 }
 .composer-queue.is-phone:not(.is-single) .queue-status + .queue-text {
-  flex-basis: calc(100% - var(--space-2) - 44px);
+  flex-basis: calc(100% - var(--space-2) - var(--queue-action-h));
 }
 .queue-more {
-  width: 44px;
-  height: 44px;
+  width: var(--queue-action-h);
+  height: var(--queue-action-h);
 }
 /* A lone message replaces the summary (#3962). On touch the actions button sets the row's
    height and the smaller Steer Now borrows its 44px hit area vertically. */
