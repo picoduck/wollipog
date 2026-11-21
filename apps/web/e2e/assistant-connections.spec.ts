@@ -165,12 +165,18 @@ for (const theme of ["dark", "light"] as const) {
   });
 }
 
-test("non-owner refusal offers no grant controls", async ({page}) => {
+test("an authenticated non-owner sees no owner-only connections group", async ({page}) => {
   const server = await assistantUiServer();
   try {
-    await page.addInitScript(({origin}) => { (window as unknown as {assistantTest: unknown}).assistantTest = {origin, ownerCredential: "unrecognized-fixture"}; }, {origin: server.origin});
+    await page.addInitScript(({origin, ownerCredential}) => { (window as unknown as {assistantTest: unknown}).assistantTest = {origin, ownerCredential}; }, {origin: server.origin, ownerCredential: server.ownerCredential});
+    await page.route("**/api/assistant-connections", (route) => route.fulfill({
+      status: 403, json: {error: "Only an organization owner can manage Assistant Connections."},
+    }));
+    const response = page.waitForResponse((candidate) => new URL(candidate.url()).pathname === "/api/assistant-connections");
     await page.goto("/assistant-connections-e2e.html");
-    await expect(page.getByRole("alert")).toBeVisible();
+    expect((await response).status()).toBe(403);
+    await expect(page.getByRole("region", {name: "Assistant Connections"})).toHaveCount(0);
+    await expect(page.getByRole("alert")).toHaveCount(0);
     await expect(page.getByRole("button", {name: /All Connections/})).toHaveCount(0);
     await expect(page.getByRole("button", {name: "New Connection", exact: true})).toHaveCount(0);
   } finally { await server.close(); }

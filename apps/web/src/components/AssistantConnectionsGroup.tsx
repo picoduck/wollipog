@@ -29,7 +29,7 @@ function ConnectionsGroup() {
       }
     }, (cause: unknown) => {
       if (!current) return;
-      if (cause instanceof ApiError && cause.status === 404) setUnavailable(true);
+      if (cause instanceof ApiError && (cause.status === 403 || cause.status === 404)) setUnavailable(true);
       else setError(cause instanceof Error ? cause.message : String(cause));
     });
     return () => { current = false; };
