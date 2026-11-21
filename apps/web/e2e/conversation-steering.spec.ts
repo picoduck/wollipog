@@ -163,21 +163,25 @@ for (const theme of ["light", "dark"] as const) {
 
         await setQueue(8);
         await expect(queue.getByRole("listitem")).toHaveCount(8);
-        const longText = await queue.getByTestId("queued-prompt-layout-queue-6").locator(".queue-text").evaluate((text) => {
-          const row = text.closest(".queue-row")!;
-          const rowBox = row.getBoundingClientRect();
-          const textBox = text.getBoundingClientRect();
-          const style = getComputedStyle(row);
-          return {
-            wraps: textBox.height > parseFloat(getComputedStyle(text).lineHeight),
-            top: textBox.top - rowBox.top - parseFloat(style.borderTopWidth),
-            bottom: rowBox.bottom - textBox.bottom - parseFloat(style.borderBottomWidth),
-          };
-        });
-        expect(longText.wraps, "the long message wraps inside its row").toBe(true);
-        expect(longText.top).toBeGreaterThanOrEqual(4);
-        expect(longText.top).toBeCloseTo(longText.bottom);
         const rows = queue.getByRole("list");
+        const [shortText, longText] = await rows.locator(".queue-text").evaluateAll((texts) =>
+          [texts[0]!, texts[5]!].map((text) => {
+            const row = text.closest(".queue-row")!;
+            const rowBox = row.getBoundingClientRect();
+            const range = document.createRange();
+            range.selectNodeContents(text);
+            const lines = range.getClientRects();
+            const style = getComputedStyle(row);
+            return {
+              lines: lines.length,
+              top: lines[0]!.top - rowBox.top - parseFloat(style.borderTopWidth),
+              bottom: rowBox.bottom - lines[lines.length - 1]!.bottom - parseFloat(style.borderBottomWidth),
+            };
+          }));
+        expect(shortText!.lines).toBe(1);
+        expect(longText!.lines, "the long message wraps inside its row").toBeGreaterThan(1);
+        expect(Math.abs(longText!.top - shortText!.top), "first line's top inset").toBeLessThanOrEqual(1);
+        expect(Math.abs(longText!.bottom - shortText!.bottom), "last line's bottom inset").toBeLessThanOrEqual(1);
         const bounds = await rows.evaluate((list) => ({
           height: list.getBoundingClientRect().height,
           viewportHeight: window.innerHeight,

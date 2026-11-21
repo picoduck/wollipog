@@ -6910,6 +6910,7 @@ body.shell-dock-dragging * {
 }
 /* The queued messages share the card's edge and the editing strip's full-width position. */
 .composer-queue {
+  --queue-row-control: var(--control-h-sm);
   min-width: 0;
   margin-inline: calc(-1 * var(--space-3));
   border-bottom: 1px solid var(--border);
@@ -6999,6 +7000,8 @@ body.shell-dock-dragging * {
   text-overflow: ellipsis;
 }
 .composer-queue:not(.is-single) .queue-text {
+  /* Preserve the inset of a line centred beside the controls when the text wraps. */
+  padding-block: max(0px, calc((var(--queue-row-control) - 1lh) / 2));
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -7023,6 +7026,7 @@ body.shell-dock-dragging * {
 }
 /* Phones (#2178): each row is its text and one 44px actions button. A status that differs moves under
    the text, so the words keep the line. */
+.composer-queue.is-phone { --queue-row-control: 44px; }
 .composer-queue.is-phone .queue-status {
   order: 1;
 }
