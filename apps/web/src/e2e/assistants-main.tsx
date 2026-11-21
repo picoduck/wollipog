@@ -951,6 +951,14 @@ Object.assign(window, {
     publish(threads.find((candidate) => candidate.id === "thr_triage")!);
   },
   assistantsActivity: backingActivity,
+  assistantsReplaceConversation: () => {
+    const current = found("thr_triage");
+    const sessionId = "sess-triage-replacement";
+    upsert({ ...sessions.get(current.sessionId)!, id: sessionId });
+    const changed = { ...current, sessionId };
+    threads = threads.map((thread) => thread.id === changed.id ? changed : thread);
+    publish(changed);
+  },
   /** A thread is renamed elsewhere and the control plane publishes it. */
   assistantsRenameElsewhere: (threadId: string, title: string) => {
     threads = threads.map((candidate) => candidate.id === threadId ? { ...candidate, title } : candidate);

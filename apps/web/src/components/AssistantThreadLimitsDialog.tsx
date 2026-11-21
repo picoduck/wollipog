@@ -114,6 +114,7 @@ export function AssistantThreadLimitsDialog({ thread, model, effort, onClose, on
       const expectedSessionId = conversation.kind === "harness" ? conversation.input.expectedSessionId : conversation.sessionId;
       if (expectedSessionId !== thread.sessionId) {
         setConversation(null);
+        closeEditor();
         return setError("The conversation changed in another window. Choose a harness or account again.");
       }
       if (!confirmed) return setEditor("confirm");

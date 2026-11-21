@@ -245,7 +245,7 @@ for (const { width, height, phone } of [{ width: 1440, height: 900, phone: false
         await expect(editor).toHaveCount(0);
         await expect(decisions).toContainText("Ask Me");
         await expect(page.locator("body")).not.toHaveAttribute("data-delegation-grant", /.+/);
-        await capture(dialog, "decisions-ask-me", "Decisions shows Ask Me with a Manage… action. The edit is staged until Save Changes.");
+        await capture(dialog, "decisions-ask-me", "Decisions shows Ask Me with a Manage… action.");
         const defaults = dialog.getByRole("link", { name: "Settings › Assistant" });
         expect(await defaults.evaluate((link) => ({
           before: link.previousSibling?.textContent,
@@ -318,4 +318,20 @@ test("an older server that advertises account changes can save one while spendin
   await page.getByRole("button", { name: "Confirm and Save" }).click();
   await expect(page.locator("body")).toHaveAttribute("data-changed-account", /acct:/);
   await expect(page.locator("body")).not.toHaveAttribute("data-thread-limits", /.+/);
+});
+
+test("a conversation change elsewhere returns the stale confirmation to Thread Settings", async ({ page }) => {
+  const dialog = await open(page, undefined, "limits=enabled&accounts=stress");
+  await dialog.getByRole("button", { name: "Change… Account" }).click();
+  const picker = page.getByRole("dialog", { name: "Change Account" });
+  await picker.getByRole("radio", { name: "Studio Subscription", exact: true }).check();
+  await picker.getByRole("button", { name: "Use Account" }).click();
+  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  const confirmation = page.getByRole("dialog", { name: "Confirm Conversation Change" });
+  await expect(confirmation).toBeVisible();
+  await page.evaluate(() => Reflect.get(window, "assistantsReplaceConversation")());
+  await confirmation.getByRole("button", { name: "Confirm and Save" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("The conversation changed in another window.");
+  await expect(confirmation).toHaveCount(0);
+  await expect(page.locator("body")).not.toHaveAttribute("data-changed-account", /.+/);
 });
