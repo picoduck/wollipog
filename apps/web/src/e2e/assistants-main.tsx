@@ -453,8 +453,15 @@ if (limitsScenario) {
       launchedSessions: { used: item.launchedSessionIds.length, limit: limitsScenario === "stress" ? null : 10 },
     };
     if (item.status !== "archived" && limitsScenario !== "old") item.limitsEditable = true;
+    if (limitsScenario !== "old" && limitsScenario !== "legacy-pause") item.launchPaused = false;
     if (item.id === "thr_triage" && limitsScenario === "budget") {
       item.launchLimitRefusal = "This Wollipog Assistant thread has spent or committed its whole $25 budget, so it cannot launch another session.";
+    }
+    if (item.id === "thr_triage" && delegationScenario === "settings") {
+      item.decisionDelegation = { revision: 1, grant: {
+        categories: ["pr_merge"], selectionMode: "all", projects: "all", campaigns: "all",
+        expiresAt: NOW + 6 * 24 * 60 * minute,
+      } };
     }
     const backing = sessions.get(item.sessionId);
     if (backing && limitsScenario !== "old") {
@@ -719,7 +726,10 @@ const client = {
       costUsd: { used: current.usage!.costUsd.used, limit: limits.costUsd },
       launchedSessions: { used: current.usage!.launchedSessions.used, limit: limits.launchedSessions },
     };
-    if (limits.costUsd !== 25) delete current.launchLimitRefusal;
+    if (current.launchPaused !== undefined && limits.launchPaused !== undefined) current.launchPaused = limits.launchPaused;
+    if (current.launchPaused) current.launchLimitRefusal = "This Wollipog Assistant thread has paused new launches.";
+    else if (limits.costUsd !== 25 || limitsScenario !== "budget") delete current.launchLimitRefusal;
+    document.body.dataset.threadLimits = JSON.stringify(limits);
     const backing = sessions.get(current.sessionId)!;
     upsert({ ...backing, assistantThreadBudget: { threadId, limitUsd: limits.costUsd }, costBudgetUsd: limits.costUsd });
     publish(current);
@@ -773,6 +783,7 @@ const client = {
     };
     if (limitsScenario && limitsScenario !== "old") {
       created.limitsEditable = true;
+      if (limitsScenario !== "legacy-pause") created.launchPaused = false;
       created.usage = {
         costUsd: { used: 0, limit: limitDefaults.costUsd },
         launchedSessions: { used: 0, limit: limitDefaults.launchedSessions },

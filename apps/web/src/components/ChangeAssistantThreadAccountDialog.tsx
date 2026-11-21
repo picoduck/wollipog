@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { AssistantThreadAccountChoices } from "@wollipog/protocol";
+import type { AssistantThreadAccountChoices, ChangeAssistantThreadAccountRequest } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { ApiError } from "../api.js";
 import type { AssistantThread } from "../assistant-threads.js";
@@ -7,21 +7,19 @@ import { AssistantThreadAccountField } from "./AssistantThreadAccountField.js";
 import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
 import { Skeleton } from "./common.js";
-import { BusyButton } from "./ui/BusyButton.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
 
-export function ChangeAssistantThreadAccountDialog({ thread, onClose, onChanged, inline = false }: {
+export function ChangeAssistantThreadAccountDialog({ thread, draft, onClose, onChoose }: {
   thread: AssistantThread;
+  draft?: ChangeAssistantThreadAccountRequest;
   onClose: () => void;
-  onChanged: (thread: AssistantThread) => void;
-  inline?: boolean;
+  onChoose: (input: ChangeAssistantThreadAccountRequest, accountLabel: string) => void;
 }) {
   const api = useApi();
   const [choices, setChoices] = useState<AssistantThreadAccountChoices | null>(null);
-  const [account, setAccount] = useState<string | null>(null);
-  const [freshConversation, setFreshConversation] = useState(false);
+  const [account, setAccount] = useState<string | null>(draft?.providerAccountRef ?? null);
+  const [freshConversation, setFreshConversation] = useState(draft?.freshConversation ?? false);
   const [failure, setFailure] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     let current = true;
@@ -36,43 +34,27 @@ export function ChangeAssistantThreadAccountDialog({ thread, onClose, onChanged,
     return () => { current = false; };
   }, [api, thread.id]);
 
-  const change = async () => {
-    if (!choices || !account || busy) return;
-    setBusy(true);
-    setFailure(null);
-    try {
-      const result = await api.changeAssistantThreadAccount(thread.id, {
-        providerAccountRef: account, expectedProviderAccountRef: choices.currentAccountRef ?? null, freshConversation,
-      });
-      onChanged(result.thread);
-    } catch (error) {
-      setFailure(error instanceof Error ? error.message : String(error));
-      setBusy(false);
-    }
-  };
-  const description = "Restart this thread on another account. Its existing messages and launched work stay here.";
-  const actions = <>
-    <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
-    <BusyButton className="btn primary" busy={busy} disabled={!account}
-      progress="Changing the account…" onClick={() => void change()}>Change Account</BusyButton>
-  </>;
-  const fields = (
-      <div className="form">
-        {!choices && !failure && <Skeleton rows={2} announce="Loading accounts…" />}
-        {choices && <>
-          <AssistantThreadAccountField choices={choices} value={account} onChange={setAccount} disabled={busy} />
-          <Checkbox label="Start a Fresh Conversation" checked={freshConversation} disabled={busy}
-            onChange={setFreshConversation}
-            helper="Use this if the provider can't carry the conversation over. The assistant starts without the context from earlier messages." />
-        </>}
-        {failure && <Notice tone="danger" role="alert">{failure}</Notice>}
-      </div>
-  );
-  return inline ? <div className="form">
-    <p className="muted">{description}</p>
-    {fields}
-    <div className="field-row">{actions}</div>
-  </div> : <Modal title="Change Account" onClose={busy ? () => {} : onClose} description={description} footer={actions}>
-    {fields}
+  const selected = choices?.accounts.find((item) => item.accountRef === account && !item.reason &&
+    (item.accountRef !== choices.currentAccountRef || choices.retryCurrentAccount));
+  return <Modal title="Change Account" onClose={onClose}
+    description="Restart this thread on another account. Its existing messages and launched work stay here."
+    footer={<>
+      <button type="button" className="btn" onClick={onClose}>Cancel</button>
+      <button type="button" className="btn primary" disabled={!selected} onClick={() => {
+        if (choices && selected) onChoose({
+          providerAccountRef: selected.accountRef, expectedProviderAccountRef: choices.currentAccountRef ?? null, freshConversation,
+        }, selected.label);
+      }}>Use Account</button>
+    </>}>
+    <div className="form">
+      {!choices && !failure && <Skeleton rows={2} announce="Loading accounts…" />}
+      {choices && <>
+        <AssistantThreadAccountField choices={choices} value={account} onChange={setAccount} disabled={false} />
+        <Checkbox label="Start a Fresh Conversation" checked={freshConversation}
+          onChange={setFreshConversation}
+          helper="Use this if the provider can't carry the conversation over. The assistant starts without the context from earlier messages." />
+      </>}
+      {failure && <Notice tone="danger" role="alert">{failure}</Notice>}
+    </div>
   </Modal>;
 }

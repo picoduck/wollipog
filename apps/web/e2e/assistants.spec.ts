@@ -75,7 +75,8 @@ for (const theme of ["dark", "light"] as const) {
         const path = "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA";
         const openChange = async () => {
           await page.getByRole("button", { name: "Thread Actions" }).click();
-          await page.getByRole("menuitem", { name: "Change Account" }).click();
+          await page.getByRole("menuitem", { name: "Thread Settings" }).click();
+          await page.getByRole("button", { name: "Change… Account" }).click();
         };
         await open(page, theme, "accounts=default");
         await threadsList(page).getByRole("button", { name: "New Thread" }).click();
@@ -107,17 +108,17 @@ for (const theme of ["dark", "light"] as const) {
         await start.click();
         await expect(page.locator("body")).toHaveAttribute("data-created-account", "acct:0000000000000002");
 
-        await open(page, theme, "accounts=default", path);
+        await open(page, theme, "accounts=default&limits=enabled", path);
         await openChange();
         const change = page.getByRole("dialog", { name: "Change Account" });
-        const changeButton = change.getByRole("button", { name: "Change Account" });
+        const changeButton = change.getByRole("button", { name: "Use Account" });
         const fresh = change.getByRole("checkbox", { name: "Start a Fresh Conversation" });
         await expect(fresh).not.toBeChecked();
         await expect(fresh).toHaveAccessibleDescription(/can't carry the conversation over/);
-        await expectFullyInViewport(changeButton, "Change Account");
+        await expectFullyInViewport(changeButton, "Use Account");
         await capture(page, `${prefix}-change-default`);
 
-        await open(page, theme, "accounts=stress", path);
+        await open(page, theme, "accounts=stress&limits=enabled", path);
         const panel = page.locator("#right-panel");
         const toggle = page.getByRole("button", { name: "Side Panel", exact: true });
         const details = panel.getByRole("tabpanel", { name: "Details" });
@@ -138,6 +139,8 @@ for (const theme of ["dark", "light"] as const) {
         await changeOptions.getByRole("radio", { name: "Studio Subscription" }).check();
         await captureAccountList(page, change, changeButton, `${prefix}-change-stress`, 9);
         await changeButton.click();
+        await page.getByRole("button", { name: "Save Changes" }).click();
+        await page.getByRole("button", { name: "Confirm and Save" }).click();
         await expect(page.locator("body")).toHaveAttribute("data-changed-account", "acct:0000000000000001");
         await revealAccount();
         await expect(details).toContainText("Studio Subscription");
