@@ -988,6 +988,12 @@ const antigravitySetup = new AntigravitySetupSupervisor({
   },
 });
 metadata.antigravitySetup = antigravitySetup.current();
+/** On `registered`: the register frame carried the setup as it was then, and its frames are
+ * connection-local, so the current setup goes up once more in case it changed before the reply. */
+function publishAntigravitySetupOnRegistration(): void {
+  if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySetup")) return;
+  sendUp({ type: "antigravity_setup_updated", runnerId: config.runnerId, setup: antigravitySetup.current() });
+}
 const providerCredentialImportSupported = providerCredentialImportHostSupported();
 const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSupervisor({
   dataDir: config.dataDir,
@@ -2521,15 +2527,13 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       backoff = INITIAL_BACKOFF_MS;
       registered = true;
       controlPlaneProtocolVersion = msg.protocolVersion ?? null;
+      // Before anything that can throw (session recovery writes metadata): a setup that changed
+      // after the register frame was built must still reach this control plane.
+      publishAntigravitySetupOnRegistration();
       sessions.reconcileRunnerRestartRecovery(msg.rootOrchestratorSessionIds);
       skillStateReporter.resumeRequests(runnerSupportsProtocol(controlPlaneProtocolVersion, "skillRequestResumption")
         ? msg.pendingSkillRequests : undefined);
       harnessInstallationChoices = synchronizedHarnessChoices(controlPlaneProtocolVersion, msg.harnessInstallationChoices);
-      // Google Antigravity setup (#4780): the register frame carried the setup as it was then;
-      // republish it in case it changed before this reply (its frames are connection-local).
-      if (runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySetup")) {
-        sendUp({ type: "antigravity_setup_updated", runnerId: config.runnerId, setup: antigravitySetup.current() });
-      }
       {
         // Before any flush or re-publication, so this control plane's grants decide what it sees.
         const stale = providerProfileGrants.synchronize(controlPlaneProtocolVersion, msg.providerProfileGrants);

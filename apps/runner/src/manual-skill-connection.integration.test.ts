@@ -42,6 +42,9 @@ function fixture(t: TestContext) {
   const hub = new Hub(db, { skillRequestNow: () => 70 + elapsed });
   const messages: SkillsStateMessage[] = [], commands: string[] = [], logs: string[] = [];
   const lookups: RegisteredLocationSwitchLookupMessage[] = [];
+  // Register frames, and the frames the runner sends through sendUp (Google Antigravity setup).
+  const registers: Array<{ runner: Record<string, unknown> }> = [];
+  const upFrames: Array<{ type: string; setup?: { status: string } }> = [];
   const sockets: InertSocket[] = [];
   let reconnects = 0, heartbeatStops = 0, forgotten = 0, persisted = 0;
   const originalPersist = db.setRunnerSkillState.bind(db);
@@ -59,7 +62,7 @@ function fixture(t: TestContext) {
     send(data: string) {
       if (this.failSend) throw new Error("Fixture handoff refused");
       const message = JSON.parse(data);
-      if (message.type === "register") return;
+      if (message.type === "register") { registers.push(message); return; }
       if (message.type === "registered_location_switch_lookup") { lookups.push(message); return; }
       messages.push(message);
       const receiveScope = { hub, db, runnerId: "fixture", runnerClient: this.server, runnerSupportsProtocol,
@@ -89,7 +92,10 @@ function fixture(t: TestContext) {
     log: (message: string) => logs.push(message), errText: (error: Error) => error.message,
     stopHeartbeat: () => { heartbeatStops++; }, forgetAgentControlRegistrationAnswers: () => { forgotten++; },
     scheduleReconnect: () => { reconnects++; },
+    antigravitySetup: { current: () => ({ version: 1, status: "checking", checkedAt: 1, credentialStore: "shared_os_keyring" }) },
+    sendUp: (frame: { type: string; setup?: { status: string } }) => { upFrames.push(frame); },
   };
+  install(slice(runnerSource, "function publishAntigravitySetupOnRegistration(", "const providerCredentialImportSupported"), scope);
   install(slice(runnerSource, "function sendSkillState(", "const skillStateReporter ="), scope);
   const reporter = new SkillStateReporter("fixture", scope.sendSkillState, scope.log, () => 1_000_000 + elapsed);
   scope.skillStateReporter = reporter;
@@ -136,11 +142,28 @@ function fixture(t: TestContext) {
     for (const socket of sockets) hub.detachRunner("fixture", socket.server);
     reporter.resetRequests(); db.close();
   });
-  return { db, hub, reporter, scope, messages, logs, commands, initial, sockets, register, start, request, lookups,
+  return { db, hub, reporter, scope, messages, logs, commands, initial, sockets, register, start, request, lookups, registers, upFrames,
     counts: () => ({ reconnects, heartbeatStops, forgotten, persisted }),
     advance(ms: number) { elapsed += ms; t.mock.timers.tick(ms); },
   };
 }
+
+test("a Google Antigravity setup that changes before the registered reply is published even when session recovery throws", async t => {
+  const f = fixture(t);
+  const checking = { version: 1, status: "checking", checkedAt: 1, credentialStore: "shared_os_keyring" };
+  const ready = { ...checking, status: "ready", executable: { path: "/fixture/agy" }, models: [{ id: "m", name: "Model" }] };
+  f.scope.metadata.antigravitySetup = checking;
+  f.scope.sessions.reconcileRunnerRestartRecovery = () => { throw new Error("Fixture recovery metadata write failed"); };
+  const before = f.upFrames.length;
+  const b = f.start(false);
+  assert.deepEqual(f.registers.at(-1)!.runner.antigravitySetup, checking, "the register frame carries the setup as it was");
+  // The probe finishes before the control plane replies.
+  f.scope.antigravitySetup = { current: () => ready };
+  b.socket.emit("message", Buffer.from(JSON.stringify(b.response)));
+  const published = f.upFrames.slice(before).filter((frame) => frame.type === "antigravity_setup_updated");
+  assert.deepEqual(published.map((frame) => frame.setup?.status), ["ready"],
+    "the newer setup goes up before recovery can throw");
+});
 
 test("registered Location lookup keeps timeouts and socket loss distinct from a correlated refusal", async t => {
   const f = fixture(t);
