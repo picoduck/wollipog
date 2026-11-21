@@ -290,6 +290,20 @@ for (const theme of ["light", "dark"] as const) {
           categories: ["pr_merge"], selectionMode: "choose", projects: ["project_0"], campaigns: ["campaign_0"],
           expiresAt: Date.parse("2026-12-05T12:30:00Z"),
         }));
+
+        await openEditor(page);
+        await approve.check();
+        const approvalRow = dialog.locator(".delegation-category").filter({
+          has: page.getByRole("checkbox", { name: "Approve UI Evidence", exact: true }),
+        });
+        await expect(approve).toHaveAccessibleDescription(/Claude Code.*claude-opus-5-5.*provider may retain/);
+        const consent = approvalRow.getByRole("checkbox", { name: "I accept the provider disclosure." });
+        await expect(consent).not.toBeChecked();
+        await alignTop(approvalRow);
+        await expectFullyInViewport(approvalRow, "Approve UI Evidence Row and Disclosure");
+        await expectFullyInViewport(save, "Save Delegation");
+        await expectEditorLayout(dialog, width);
+        await screenshot(page, "choose-evidence-checked");
       });
 
       test(`Unavailable categories keep their own reasons on ${suffix}`, async ({ page }) => {
