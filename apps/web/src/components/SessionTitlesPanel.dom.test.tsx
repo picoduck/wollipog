@@ -167,7 +167,7 @@ async function selectOption(scope: HTMLElement, label: string, option: string): 
   const trigger = scope.querySelector<HTMLButtonElement>(`[aria-label^="${label}:"]`);
   assert.ok(trigger, `expected ${label} select`);
   await act(async () => trigger.click());
-  const choice = [...body().querySelectorAll<HTMLButtonElement>('[role="option"]')].find((candidate) =>
+  const choice = [...body().querySelectorAll<HTMLButtonElement>('[role="option"], [data-model-choice]')].find((candidate) =>
     (candidate.textContent ?? "").startsWith(option));
   assert.ok(choice, `expected ${option} option in ${label}`);
   await act(async () => choice.click());

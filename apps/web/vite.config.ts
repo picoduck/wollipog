@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { DESKTOP_EXCLUDED_ASSETS, isDesktopBuild, stripManifestLink } from "./src/desktop-bundle.js";
+import catalog from "./src/model-picker-catalog.json" with { type: "json" };
 import { webviewTargets } from "./src/css-support.js";
 import { precompressEmittedAssets } from "./src/precompressed-assets.js";
 import { inboxEntryBudget } from "./src/entry-bundle-budget.js";
@@ -72,10 +73,20 @@ function precompressAssets(mode: string): Plugin {
   };
 }
 
+// Keep this name stable so operators can deliver presentation-only updates between app releases.
+function modelPickerCatalog(): Plugin {
+  return {
+    name: "wollipog-model-picker-catalog",
+    generateBundle() {
+      this.emitFile({ type: "asset", fileName: "model-picker-catalog.json", source: JSON.stringify(catalog) });
+    },
+  };
+}
+
 // The control plane runs separately (default http://127.0.0.1:4317). The web app
 // talks to it directly over CORS + websocket; override via VITE_CONTROL_PLANE_*.
 export default defineConfig(({ mode }) => ({
-  plugins: [react(), inboxEntryBudget(), jsFloorGuard(), excludePwaAssetsFromDesktop(), precompressAssets(mode)],
+  plugins: [react(), modelPickerCatalog(), inboxEntryBudget(), jsFloorGuard(), excludePwaAssetsFromDesktop(), precompressAssets(mode)],
   build: {
     target: WOLLIPOG_WEBVIEW_TARGETS,
     cssTarget: WOLLIPOG_WEBVIEW_TARGETS,

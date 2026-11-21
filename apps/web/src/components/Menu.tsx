@@ -104,6 +104,7 @@ function samePlacement(a: Placement | undefined, b: Placement): boolean {
  */
 function useMenuPlacement(
   surfaceRef: RefObject<HTMLDivElement | null>,
+  contentRef: RefObject<HTMLDivElement | null> | undefined,
   anchor: MenuAnchor,
   align: "start" | "end",
   gap: number,
@@ -215,6 +216,8 @@ function useMenuPlacement(
       frame = window.requestAnimationFrame(update);
     });
     if (surfaceRef.current) observer?.observe(surfaceRef.current);
+    // A height-capped surface can keep the same box as its body grows.
+    if (contentRef?.current) observer?.observe(contentRef.current);
     return () => {
       window.removeEventListener("resize", update);
       window.removeEventListener("scroll", update, true);
@@ -222,12 +225,14 @@ function useMenuPlacement(
       window.cancelAnimationFrame(frame);
       observer?.disconnect();
     };
-  }, [sheet, surfaceRef, trigger, pointX, pointY, align, gap, maxWidth, boundary, beside, inline, prefer]);
+  }, [sheet, surfaceRef, contentRef, trigger, pointX, pointY, align, gap, maxWidth, boundary, beside, inline, prefer]);
   return { placement, box };
 }
 
 export interface MenuSurfaceProps extends Omit<HTMLAttributes<HTMLDivElement>, "role" | "title"> {
   surfaceRef: RefObject<HTMLDivElement | null>;
+  /** Observe expandable content even if the surface's current maximum height holds it still. */
+  contentRef?: RefObject<HTMLDivElement | null>;
   anchor: MenuAnchor;
   /** The accessible name, and the sheet's title row on a phone. */
   label: string;
@@ -274,6 +279,7 @@ export interface MenuSurfaceProps extends Omit<HTMLAttributes<HTMLDivElement>, "
  */
 export function MenuSurface({
   surfaceRef,
+  contentRef,
   anchor,
   label,
   sheetTitle,
@@ -296,6 +302,7 @@ export function MenuSurface({
   const sheet = useIsMobile();
   const { placement, box } = useMenuPlacement(
     surfaceRef,
+    contentRef,
     anchor,
     align,
     kind === "popover" ? POPOVER_GAP : MENU_GAP,

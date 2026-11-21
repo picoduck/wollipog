@@ -1,3 +1,4 @@
+import { ModelPicker } from "./ModelPicker.js";
 import { useEffect, useRef, useState } from "react";
 import type { AgentHarnessDefaultConfig, AgentHarnessDefaultOption } from "@wollipog/protocol";
 import { effortLabel } from "../format.js";
@@ -215,14 +216,15 @@ export function AgentDefaultsDialog({
           {models.length > 0 && (
             <div className="field">
               <span>Model</span>
-              <Select
+              <ModelPicker
+                context={{ mode: "launch", driver: option.driver }}
                 label="Model"
                 value={draft.model ?? UNSET}
                 disabled={busy}
                 describedBy={HELPER_ID}
                 options={[
                   { value: UNSET, label: "Wollipog Default", description: "The model the agent picks for itself." },
-                  ...models.map((model) => ({ value: model.id, label: modelOptionLabel(model, models) })),
+                  ...models.map((model) => ({ value: model.id, label: modelOptionLabel(model, models), description: model.description })),
                 ]}
                 onChange={(model) => {
                   const next: AgentHarnessDefaultConfig = { ...draft };

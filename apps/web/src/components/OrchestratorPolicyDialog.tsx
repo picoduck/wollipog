@@ -212,6 +212,7 @@ export function OrchestratorPolicyDialog({
       />
       <SelectRow
         title="Child Model"
+        modelPicker={{ mode: draft.controlMode === "full_control" ? "exact" : "launch", driver: draft.values.behavior.childHarness?.driver }}
         description="Automatic lets each child's agent choose."
         badge={mark("behavior.childModel", resetLabels.model)}
         options={evaluation.model.options}

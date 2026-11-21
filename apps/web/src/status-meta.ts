@@ -371,6 +371,7 @@ const VOCABULARY = {
     budget_committed: warning("Budget Committed"),
     over_budget: danger("Over Budget"),
     launch_limit: warning("Launch Limit Reached"),
+    launch_paused: warning("Launches Paused"),
   },
   /** One work item in an issue campaign's ledger (Campaign Status, #2417). */
   campaignWork: {

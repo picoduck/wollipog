@@ -30,9 +30,9 @@ export function OrchestratorReviewFields({ value, reviewers, problem, onChange, 
     <SelectRow title="Review Harness" value={value.reviewHarness ?? AUTO} options={[...automatic, ...harnesses]} badge={badge?.("reviewHarness")}
       description="Automatic follows Reviews settings for each child's harness and project at launch." error={problem}
       onChange={harness => onChange({ reviewHarness: harness === AUTO ? null : harness as "codex" | "claude-code", reviewModel: null, reviewEffort: null })} />
-    <SelectRow title="Review Model" value={value.reviewModel ?? AUTO} badge={badge?.("reviewModel")}
+    <SelectRow modelPicker={{ mode: "launch", driver: value.reviewHarness ?? undefined }} title="Review Model" value={value.reviewModel ?? AUTO} badge={badge?.("reviewModel")}
       options={[...automatic, ...[...models.values()].map(m => ({ value: m.id, label: modelOptionLabel(m, models.values()) })),
-        ...(value.reviewModel && !models.has(value.reviewModel) ? [{ value: value.reviewModel, label: `${value.reviewModel} (Unavailable)` }] : [])]}
+        ...(value.reviewModel && !models.has(value.reviewModel) ? [{ value: value.reviewModel, label: `${value.reviewModel} (Unavailable)`, disabled: true }] : [])]}
       description="Automatic inherits the selected reviewer's saved model, then its discovered default. A missing fixed model refuses the review."
       onChange={model => onChange({ reviewModel: model === AUTO ? null : model, reviewEffort: null })} />
     <SelectRow title="Review Effort" value={value.reviewEffort ?? AUTO} badge={badge?.("reviewEffort")}

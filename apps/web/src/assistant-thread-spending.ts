@@ -8,10 +8,10 @@ export type ThreadSpendingState = (
 ) & {
   used: number;
   limit: number;
-};
+} | { kind: "launch_paused"; used: number; limit: number | null };
 
 /** Blocking limits come before advisory warnings. The same order feeds the badge and the slot. */
-export function threadSpendingStates(thread: Pick<AssistantThread, "status" | "usage" | "launchLimitRefusal">): ThreadSpendingState[] {
+export function threadSpendingStates(thread: Pick<AssistantThread, "status" | "usage" | "launchLimitRefusal" | "launchPaused">): ThreadSpendingState[] {
   if (!thread.usage || thread.status === "archived") return [];
   const { costUsd, launchedSessions } = thread.usage;
   const states: ThreadSpendingState[] = [];
@@ -20,13 +20,15 @@ export function threadSpendingStates(thread: Pick<AssistantThread, "status" | "u
     states.push({ kind: costUsd.used > budget ? "over_budget" : "budget_used_up", used: costUsd.used, limit: budget });
   }
   const launchLimitReached = launchedSessions.limit != null && launchedSessions.used >= launchedSessions.limit;
-  if (launchedSessions.limit != null && launchLimitReached) {
+  if (thread.launchPaused) {
+    states.push({ kind: "launch_paused", ...launchedSessions });
+  } else if (launchedSessions.limit != null && launchLimitReached) {
     states.push({ kind: "launch_limit", used: launchedSessions.used, limit: launchedSessions.limit });
   }
   if (budget == null || costUsd.used >= budget) return states;
-  // The server reports the launch-count refusal first. Otherwise a refusal below actual spend's
-  // budget threshold means live work has already reserved the remaining budget.
-  if (!launchLimitReached && thread.launchLimitRefusal) {
+  // The server tests pause and the launch count before budget. A refusal below the spending
+  // threshold once those are ruled out means live work has already reserved the rest.
+  if (!thread.launchPaused && !launchLimitReached && thread.launchLimitRefusal) {
     states.push({ kind: "budget_committed", used: costUsd.used, limit: budget, refusal: thread.launchLimitRefusal });
   } else if (costUsd.used >= budget * 0.8) {
     states.push({ kind: "near_budget", used: costUsd.used, limit: budget });
@@ -35,6 +37,9 @@ export function threadSpendingStates(thread: Pick<AssistantThread, "status" | "u
 }
 
 export function threadSpendingCopy(state: ThreadSpendingState) {
+  if (state.kind === "launch_paused") {
+    return { title: statusMeta("assistantThreadSpending", state.kind).label, message: "New launches are paused. The assistant can still answer you." };
+  }
   const { kind, used, limit } = state;
   const label = statusMeta("assistantThreadSpending", kind).label;
   const budget = formatUsd(limit);

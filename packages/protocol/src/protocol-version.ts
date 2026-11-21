@@ -1558,6 +1558,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 405: Structured Wollipog prompt origins in session history (#4800).
   405,
   // v406 slot
+  // 406: Preserve Assistant thread launch limits while new launches are paused (Refs #4811).
+  406,
   // v407 slot
   // v408 slot
   // v409 slot

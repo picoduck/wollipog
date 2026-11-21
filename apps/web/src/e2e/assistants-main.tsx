@@ -455,6 +455,7 @@ if (limitsScenario) {
       launchedSessions: { used: item.launchedSessionIds.length, limit: limitsScenario === "stress" ? null : 10 },
     };
     if (item.status !== "archived" && limitsScenario !== "old") item.limitsEditable = true;
+    if (limitsScenario !== "old" && limitsScenario !== "legacy-pause") item.launchPaused = false;
     if (item.id === "thr_triage" && limitsScenario === "budget") {
       item.launchLimitRefusal = "This Wollipog Assistant thread has spent or committed its whole $25 budget, so it cannot launch another session.";
       if (overBudgetBar) {
@@ -462,6 +463,12 @@ if (limitsScenario) {
         item.launchedSessionIds = ["sess-flaky"];
         item.usage.launchedSessions.used = item.launchedSessionIds.length;
       }
+    }
+    if (item.id === "thr_triage" && delegationScenario === "settings") {
+      item.decisionDelegation = { revision: 1, grant: {
+        categories: ["pr_merge"], selectionMode: "all", projects: "all", campaigns: "all",
+        expiresAt: NOW + 6 * 24 * 60 * minute,
+      } };
     }
     const backing = sessions.get(item.sessionId);
     if (backing && limitsScenario !== "old") {
@@ -488,6 +495,16 @@ if (spendingScenario) {
   second.usage = { costUsd: { used: 21.40, limit: 25 }, launchedSessions: { used: 1, limit: 10 } };
   second.launchedSessionIds = ["sess-unrelated-active"];
   sessions.set("sess-unrelated-active", session("sess-unrelated-active", "Unrelated Running Session", { status: "running" }));
+}
+
+if (params.has("recorded-thread-model")) {
+  for (const item of threads) {
+    const backing = sessions.get(item.sessionId);
+    if (backing) {
+      backing.model = "claude-opus-4-6";
+      backing.effort = "high";
+    }
+  }
 }
 
 if (panelScenario) {
@@ -745,7 +762,10 @@ const client = {
       costUsd: { used: current.usage!.costUsd.used, limit: limits.costUsd },
       launchedSessions: { used: current.usage!.launchedSessions.used, limit: limits.launchedSessions },
     };
-    if (limits.costUsd !== 25) delete current.launchLimitRefusal;
+    if (current.launchPaused !== undefined && limits.launchPaused !== undefined) current.launchPaused = limits.launchPaused;
+    if (current.launchPaused) current.launchLimitRefusal = "This Wollipog Assistant thread has paused new launches.";
+    else if (limits.costUsd !== 25 || limitsScenario !== "budget") delete current.launchLimitRefusal;
+    document.body.dataset.threadLimits = JSON.stringify(limits);
     const backing = sessions.get(current.sessionId)!;
     upsert({ ...backing, assistantThreadBudget: { threadId, limitUsd: limits.costUsd }, costBudgetUsd: limits.costUsd });
     publish(current);
@@ -799,6 +819,7 @@ const client = {
     };
     if (limitsScenario && limitsScenario !== "old") {
       created.limitsEditable = true;
+      if (limitsScenario !== "legacy-pause") created.launchPaused = false;
       created.usage = {
         costUsd: { used: 0, limit: limitDefaults.costUsd },
         launchedSessions: { used: 0, limit: limitDefaults.launchedSessions },
@@ -978,6 +999,14 @@ Object.assign(window, {
     publish(threads.find((candidate) => candidate.id === "thr_triage")!);
   },
   assistantsActivity: backingActivity,
+  assistantsReplaceConversation: () => {
+    const current = found("thr_triage");
+    const sessionId = "sess-triage-replacement";
+    upsert({ ...sessions.get(current.sessionId)!, id: sessionId });
+    const changed = { ...current, sessionId };
+    threads = threads.map((thread) => thread.id === changed.id ? changed : thread);
+    publish(changed);
+  },
   /** A thread is renamed elsewhere and the control plane publishes it. */
   assistantsRenameElsewhere: (threadId: string, title: string) => {
     threads = threads.map((candidate) => candidate.id === threadId ? { ...candidate, title } : candidate);

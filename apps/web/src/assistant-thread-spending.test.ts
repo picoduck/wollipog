@@ -51,3 +51,11 @@ test("the over-budget title shows the difference and budget copy uses the config
     message: "Sessions this thread launched kept running after its $25.00 budget ran out, and their cost counts toward it. The assistant can't launch more until you raise the budget.",
   });
 });
+
+test("a paused thread classifies the launch refusal as a pause even with budget remaining", () => {
+  const states = threadSpendingStates({
+    status: "done", launchPaused: true, launchLimitRefusal: "This Wollipog Assistant thread has paused new launches.",
+    usage: { costUsd: { used: 8.13, limit: 25 }, launchedSessions: { used: 2, limit: null } },
+  });
+  assert.deepEqual(states, [{ kind: "launch_paused", used: 2, limit: null }]);
+});

@@ -175,6 +175,7 @@ const session: SessionView = {
 const driverName = params.get("driver") === "claude-code" || contextChoice ? "claude-code" : "codex-app-server";
 session.driver = driverName as SessionView["driver"];
 if (contextChoice) {
+  const resolvedChoice = params.get("resolved") === "1";
   runner.agents = [{
     id: "claude",
     name: "Claude Code",
@@ -191,6 +192,11 @@ if (contextChoice) {
         { id: "opus[1m]", displayName: "Opus 5 (1M Context)", baseModelId: "opus", contextWindow: 1_000_000, description: "Opus 5 with 1M context", efforts: ["low", "medium", "high", "xhigh", "max"] },
         { id: "sonnet", displayName: "Sonnet 5", description: "Sonnet 5 · Efficient for routine tasks", efforts: ["low", "medium", "high", "xhigh", "max"] },
         { id: "haiku", displayName: "Haiku 4.5", contextWindow: 200_000, description: "Haiku 4.5 · Fastest for quick answers" },
+        ...(resolvedChoice ? [
+          { id: "claude-opus-5-5", displayName: "Opus 5.5", contextWindow: 200_000 },
+          { id: "claude-opus-5-5[1m]", baseModelId: "claude-opus-5-5", displayName: "Opus 5.5 (1M Context)", contextWindow: 1_000_000 },
+          { id: "claude-sonnet-5", displayName: "Sonnet 5" },
+        ] : []),
       ],
       effortLevels: ["low", "medium", "high", "xhigh", "max"],
       slashCommands: [],
@@ -202,6 +208,7 @@ if (contextChoice) {
   session.agentId = "claude";
   session.agentName = "Claude Code";
   session.model = params.get("model") ?? "opus[1m]";
+  if (resolvedChoice) session.resolvedModel = "claude-opus-5-5[1m]";
   session.effort = "high";
   session.contextWindow = servedWindow > 0 ? servedWindow : undefined;
 }

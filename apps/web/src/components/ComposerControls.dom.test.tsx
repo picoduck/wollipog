@@ -234,11 +234,15 @@ test("Tab from a row the arrow keys reached stays inside Model Settings and move
     assert.ok(domWindow.document.activeElement === named("Close Model Settings"),
       "Tab from the last group wraps to Close instead of leaving the popover");
     await press("Tab");
+    assert.ok(domWindow.document.activeElement === named("Search Models"));
+    await press("Tab");
     await press("ArrowDown");
     assert.ok(domWindow.document.activeElement === named("GPT Mini"));
     await press("Tab", true);
-    assert.ok(domWindow.document.activeElement === named("Close Model Settings"),
-      "Shift+Tab from an arrowed-to model goes back one stop, not to the end");
+    assert.ok(domWindow.document.activeElement === named("Search Models"),
+      "Shift+Tab from an arrowed-to model goes back to search");
+    await press("Tab", true);
+    assert.ok(domWindow.document.activeElement === named("Close Model Settings"));
     await press("Tab", true);
     assert.ok(domWindow.document.activeElement === named("Low"), "Shift+Tab from the first stop wraps to the last group");
     assert.ok(domWindow.document.querySelector('[role="dialog"]'), "still open");

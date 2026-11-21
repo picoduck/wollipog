@@ -137,6 +137,8 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // with the trailing check, as radios in labelled radio groups. It is a dialog rather than a menu
   // because its Context Window is a SegmentedControl, which a menu cannot hold.
   ["components/ComposerControls.tsx", "raw-radiogroup", 3],
+  // The named group in the shared expandable model picker. Its rows use the MenuItem primitive.
+  ["components/ModelPicker.tsx", "raw-radiogroup", 2],
   // View Options (#1961) is §9.1's radio-like menu: MenuItem rows with the trailing check, one per
   // Show and Group By choice, which reset with the page. A view switch in a menu, not a form choice.
   ["components/SkillList.tsx", "raw-radiogroup", 2],
