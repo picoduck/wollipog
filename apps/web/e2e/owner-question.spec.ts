@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { installInboxFixture } from "./inbox-production-fixture.js";
+import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizontalOverflow } from "./layout-invariants.js";
 import type { WorkflowDecisionView } from "@wollipog/protocol";
 
 /** An Owner Question (#4270): a Full Control root's design question for its campaign's owner, asked
@@ -28,6 +29,24 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "
       expect.objectContaining({ answers: {}, action: "dismiss" }),
     ]);
   });
+
+  test(`a long campaign handoff keeps Acknowledge in view (${viewport.name})`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/agent-questions-e2e.html?set=owner-question&style=composer&handoffs=true&handoffStress=1");
+    const card = page.locator(".request-card");
+    const acknowledge = card.getByRole("button", { name: "Acknowledge", exact: true });
+    await expect(card.getByRole("listitem")).toHaveCount(8);
+    await expectNoHorizontalOverflow(card);
+    await expectPageNoHorizontalOverflow(page);
+    await expectFullyInViewport(acknowledge);
+    await expectFullyInViewport(page.getByRole("textbox", { name: "Composer" }));
+    if (process.env.WOLLIPOG_CAPTURE_HANDOFFS) await page.screenshot({ path: testInfo.outputPath("long-handoff.png") });
+    const last = card.getByRole("listitem").last();
+    await expect(last).toContainText("Review Work Item 8");
+    await last.scrollIntoViewIfNeeded();
+    await expect(last).toBeInViewport();
+    await expectFullyInViewport(acknowledge);
+  });
 }
 
 for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844 }]) {
@@ -55,6 +74,11 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "
     await expect(row).toBeVisible();
     await expect(row.getByText("Handoffs to Acknowledge", { exact: true })).toBeVisible();
     if (process.env.WOLLIPOG_CAPTURE_HANDOFFS) await page.screenshot({ path: `/tmp/4541-inbox-${viewport.name}.png`, fullPage: true });
+    if (viewport.name === "desktop") {
+      await page.getByRole("grid").focus();
+      await page.keyboard.press("a");
+      await expect(page.getByRole("heading", { name: "Campaign Handoffs" })).toBeVisible();
+    }
   });
 
   test(`campaign handoffs are shown as a status update (${viewport.name})`, async ({ page }) => {

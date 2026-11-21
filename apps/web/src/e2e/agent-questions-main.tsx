@@ -231,12 +231,18 @@ const ownerDecision: OwnerDecisionSnapshot = {
   ],
 };
 const campaignHandoff = params.get("handoffs") === "true";
+const handoffItems = params.has("handoffStress") ? Array.from({ length: 8 }, (_, index) =>
+  `- Review Work Item ${index + 1} (human)\n` +
+    "  Reason: A prerequisite needs the owner to review the remaining work against the existing design.\n" +
+    "  Next action: Confirm the delivery plan and record the next step in Campaign Status."
+) : [
+  "- picoduck/wollipog#4541: Owner Handoff (human)\n  Reason: A design decision is outside campaign authority.\n  Next action: Choose the supported delivery path.",
+  "- picoduck/wollipog#4540: External Review (external)\n  Reason: Awaiting the maintainer's review.\n  Next action: Review the proposed change.",
+];
 const ownerQuestionSnapshot = campaignHandoff ? {
   category: "owner_decision" as const, kind: "question" as const,
   question: "This campaign handed work to you. What should happen next?", options: [],
-  material: "- picoduck/wollipog#4541: Owner Handoff (human)\n  Reason: A design decision is outside campaign authority.\n  Next action: Choose the supported delivery path.\n\n" +
-    "- picoduck/wollipog#4540: External Review (external)\n  Reason: Awaiting the maintainer's review.\n  Next action: Review the proposed change.\n\n" +
-    "This question authorizes nothing. Your answer grants no action authority.",
+  material: [...handoffItems, "This question authorizes nothing. Your answer grants no action authority."].join("\n\n"),
 } : { ...ownerDecision, kind: "question" as const };
 const ownerQuestionSet = ownerQuestionAgentQuestions(ownerQuestionSnapshot);
 const ownerRaw = params.get("set") === "owner-raw";

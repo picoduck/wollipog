@@ -85,6 +85,8 @@ export interface RequestCardProps {
   concealed?: boolean;
   /** Explicit reading mode on the session dock, shared with expanded questions (#2874). */
   onReadingChange?: (reading: boolean) => void;
+  /** Opens this status update in the full session when A is pressed in an Inbox preview. */
+  onOpenHandoff?: () => void;
   /** Someone else answers this request (an Orchestrator-owned child request, #2206): the card says
    * so in a neutral notice under its title and shows the request's facts, with no actions. */
   readOnlyNotice?: string;
@@ -117,6 +119,7 @@ export function RequestCard({
   headingRef,
   concealed = false,
   onReadingChange,
+  onOpenHandoff,
   readOnlyNotice: suppliedReadOnlyNotice,
   accountUnknown = false,
 }: RequestCardProps) {
@@ -219,18 +222,26 @@ export function RequestCard({
     });
   };
 
-  const acknowledge = () => sendResponse("acknowledge", () => api.answerQuestion(session.id, {
-    requestId: request.requestId, occurrenceId: request.occurrenceId, answers: {}, action: "dismiss",
-  }));
+  const acknowledge = () => {
+    if (reason !== null) return;
+    return sendResponse("acknowledge", () => api.answerQuestion(session.id, {
+      requestId: request.requestId, occurrenceId: request.occurrenceId, answers: {}, action: "dismiss",
+    }));
+  };
 
-  const decideRef = useRef(decide);
-  decideRef.current = decide;
+  const actionsRef = useRef({ decide, acknowledge, onOpenHandoff });
+  actionsRef.current = { decide, acknowledge, onOpenHandoff };
   useEffect(() => {
     if (!intentRef) return;
     const handler: RequestIntentHandler = (intent) => {
       if (readOnlyNotice) return true;
+      if (handoff) {
+        if (intent === "deny" && !classificationHeld) void actionsRef.current.acknowledge();
+        else actionsRef.current.onOpenHandoff?.();
+        return true;
+      }
       const option = requestOptionForIntent(cardOptions, intent);
-      if (option) void decideRef.current(option);
+      if (option) void actionsRef.current.decide(option);
       // The expanded request owns A and D even when it cannot act on them, so the key never falls
       // through to a different request.
       return true;
@@ -239,7 +250,7 @@ export function RequestCard({
     return () => {
       if (intentRef.current === handler) intentRef.current = null;
     };
-  }, [intentRef, readOnlyNotice, cardOptions]);
+  }, [intentRef, readOnlyNotice, cardOptions, handoff, classificationHeld]);
 
   const signIn = request.kind === "authentication";
   // Every kind marks the edges its scrolling body can still scroll past (#2715).
@@ -639,7 +650,9 @@ export function RequestCard({
         {handoff && !classificationHeld && (
           <BusyButton className="btn primary" busy={busy === "acknowledge"} disabled={busy !== null || reason !== null}
             aria-describedby={reason !== null ? reasonId : undefined} data-session-request-control="acknowledge"
-            progress="Acknowledging the handoffs…" onClick={() => void acknowledge()}>Acknowledge</BusyButton>
+            progress="Acknowledging the handoffs…" onClick={() => void acknowledge()}>
+            Acknowledge{showKeyHints && <kbd aria-hidden="true">D</kbd>}
+          </BusyButton>
         )}
         {method && (
           <BusyButton

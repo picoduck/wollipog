@@ -1030,6 +1030,9 @@ test("stuck campaigns report handoffs once across retries and service recreation
     assert.equal(h.db.campaignHandoffQuestion("root")!.occurrenceId, question.occurrenceId);
     assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 0);
     assert.equal(h.db.campaignProjection("root")!.handoffs?.total, 1, "acknowledgment preserves the handoff");
+    const resume = h.db.raw().prepare("SELECT resume_state FROM workflow_decisions WHERE occurrence_id=?")
+      .get(question.occurrenceId) as { resume_state: string | null };
+    assert.equal(resume.resume_state, null, "acknowledgment leaves no resume to deliver");
     assert.ok(!messages.some(message => message.type === "prompt_session" && message.text.includes(question.occurrenceId)),
       "acknowledgment does not send the campaign a prompt");
   } finally { h.db.close(); }

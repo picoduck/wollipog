@@ -444,6 +444,7 @@ export function RequestDock({
             request={expanded}
             runnerOnline={runnerOnline}
             presentation="dock"
+            onOpenHandoff={onAnswerInSession ? () => onAnswerInSession(expanded.requestId) : undefined}
             owner={owner}
             createdAt={createdAt?.(expanded)}
             headTrailing={headTrailing}

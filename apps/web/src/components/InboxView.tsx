@@ -3,7 +3,7 @@ import type { AssistantThreadConfirmations } from "../assistant-confirmations.js
 import { AssistantConfirmationsNotice } from "./AssistantConfirmationCard.js";
 import { AssistantDecisionHistoryDialog } from "./AssistantDecisionHistory.js";
 import { lazy, Suspense, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { presentOwnerQuestionRequest, prioritizedPendingRequests, providerSupportsConversationFork, type BoardColumn, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
+import { isCampaignHandoffQuestion, presentOwnerQuestionRequest, prioritizedPendingRequests, providerSupportsConversationFork, type BoardColumn, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
 import { archiveAndStopMessage, archiveResultMessage, archiveResultTone, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 import {
@@ -1374,12 +1374,13 @@ export function InboxView({
         if (reads.get(sessionId) === pending) reads.delete(sessionId);
       }
     }
-    // An Owner Question (#4270) triages as a question: A opens it in the session, D dismisses it.
     const first = targetSession ? prioritizedPendingRequests(targetSession.pendingApproval)[0] : undefined;
     const approval = first ? presentOwnerQuestionRequest(first) : undefined;
     if (!targetSession || !approval) return;
-    // Opening a question to read it stays available; answering and deciding do not (#1857).
-    const refusal = approval.kind === "question" && intent === "approve"
+    const handoff = isCampaignHandoffQuestion(approval.workflowDecision);
+    const canOpen = approval.kind === "question" || handoff;
+    // Opening a question or status update stays available to read-only viewers (#1857).
+    const refusal = canOpen && intent === "approve"
       ? null
       : sessionCommandRefusal(targetSession, "respond");
     if (refusal !== null) {
@@ -1392,9 +1393,8 @@ export function InboxView({
     if (!approval.ownerToolUseId && decideDockedRequest(targetSession.id, intent)) return;
     if (!beginBusy(targetSession.id)) return;
     try {
-      if (approval.kind === "question") {
-        if (intent === "approve") {
-          // A question is answered in the session, where the transcript gives it its context.
+      if (canOpen) {
+        if (intent === "approve" || handoff && approval.workflowDecision?.authorityEvaluation?.reason === "credential_screen_review") {
           openRequest(targetSession, approval.requestId);
           return;
         }
