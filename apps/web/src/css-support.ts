@@ -108,6 +108,7 @@ export type CssFeature = RequiresFloor | Downlevelled | Degrades;
  * Deliberately absent, because they are older than every version below and so cannot raise the
  * floor: `:is()`, `:where()`, `content-visibility`, `accent-color`, `inert`, `dvh` units, and `@layer`
  * (cascade layers: Chrome and Edge 99, Firefox 97, Safari 15.4; emitted unchanged by the build).
+ * Grid track fit-content() also predates the floor (Chrome 57, Edge 16, Firefox 52, Safari 10.1).
  */
 export const CSS_FEATURES: readonly CssFeature[] = [
   {
@@ -280,7 +281,7 @@ export const CSS_SURFACE = {
   /** Function names appearing in declaration values. */
   functions: [
   "attr", "calc", "color-mix", "conic-gradient", "counter",
-  "cubic-bezier", "env", "format", "inset", "linear-gradient", "max", "min", "minmax", "rect",
+  "cubic-bezier", "env", "fit-content", "format", "inset", "linear-gradient", "max", "min", "minmax", "rect",
   "repeat", "rgb", "rgba", "rotate", "scale", "scaley", "translatex", "translatey", "url", "var",
   ],
 } as const;

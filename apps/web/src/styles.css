@@ -18333,6 +18333,26 @@ button.setting-row { cursor: pointer; }
 .setting-row-value-part { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
 .setting-row-link-word { color: var(--text-dim); font: var(--type-small); white-space: nowrap; }
 .setting-row-chevron { display: inline-flex; color: var(--text-dim); }
+/* A default's current value is its edit button. Keep long account labels inside the control column. */
+.assistant-thread-defaults .setting-row-control > .btn {
+  display: block;
+  min-width: var(--control-h);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@container (max-width: 559px) {
+  .assistant-thread-defaults .setting-row { grid-template-columns: minmax(0, 1fr) fit-content(51%); }
+}
+.assistant-default-dialog .choice-rows { gap: var(--space-2); }
+@media (max-width: 560px) {
+  .assistant-connections-group .settings-group-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: var(--space-1);
+  }
+  .assistant-connections-group .settings-group-action { grid-column: 2; grid-row: 1 / 3; }
+}
 /* The switch row is the Switch button itself, so its track and Saved check are the row's own
    children: both in the control column, the track at its right edge and Saved just before it. */
 .setting-row-switch > .ui-switch,

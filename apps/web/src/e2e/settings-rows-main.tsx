@@ -19,7 +19,7 @@ import {
   type VideoReviewSettingsStatus,
 } from "@wollipog/protocol";
 import { AgentDefaultsPanel } from "../components/AgentDefaultsPanel.js";
-import { AssistantConnectionsPanel } from "../components/AssistantConnectionsPanel.js";
+import { AssistantConnectionsGroup } from "../components/AssistantConnectionsGroup.js";
 import { AssistantDelegationPanel } from "../components/AssistantDelegationPanel.js";
 import { AssistantThreadDefaultsPanel } from "../components/AssistantThreadDefaultsPanel.js";
 import { ArchivedHistoryRetentionPanel } from "../components/ArchivedHistoryRetentionPanel.js";
@@ -314,9 +314,14 @@ const harnessDefaultsTransport: ApiTransport = {
     if (path === "/api/assistant-threads/defaults") return Response.json({
       harness: "claude-code",
       launchDefaults: { harness: "claude-code", providerAccount: null },
+      decisionDefault: null,
       harnesses: [{ id: "claude-code", label: "Claude Code", available: true }, { id: "codex", label: "Codex", available: true }],
     });
     if (path === "/api/assistant-threads/defaults/limits") return Response.json({ costUsd: 25, launchedSessions: 10 });
+    if (path === "/api/assistant-connections") return Response.json({
+      connections: [], installation: { id: "settings-fixture", name: "Home Studio", canRename: true },
+      operations: [], projects: [],
+    });
     // Behavior › Evidence (#3023). Unstubbed, the read fell through to the agent defaults below and
     // every Behavior capture showed a load failure. `artifact=save-fails` makes a change fail the way
     // a dropped connection does, for the danger notice and its Retry.
@@ -735,9 +740,9 @@ function Harness() {
                 </FeedbackProvider>
               ),
               assistant: <FeedbackProvider><ApiProvider client={harnessDefaultsApi}>
-                <AssistantThreadDefaultsPanel onOpenThreads={() => navigate({ name: "assistants" })} />
-                <AssistantConnectionsPanel />
-                <AssistantDelegationPanel onOpenGrant={(threadId) => navigate({ name: "assistants", threadId, delegation: true })} />
+                <AssistantThreadDefaultsPanel />
+                <AssistantDelegationPanel />
+                <AssistantConnectionsGroup />
               </ApiProvider></FeedbackProvider>,
               network: (
                 <ApiProvider client={harnessDefaultsApi}><NetworkPanel

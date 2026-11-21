@@ -14,7 +14,7 @@ for (const theme of ["dark", "light"] as const) {
       await page.addInitScript(({origin, ownerCredential}) => { (window as unknown as {assistantTest: unknown}).assistantTest = {origin, ownerCredential}; },
         {origin: server.origin, ownerCredential: server.ownerCredential});
       await page.goto(`/assistant-connections-e2e.html?theme=${theme}`);
-      await page.getByRole("button", {name: /Manage Assistant Connections/}).click();
+      await page.getByRole("button", {name: /All Connections/}).click();
       await page.getByRole("button", {name: /Fixture Observer/}).click();
       await page.getByRole("button", {name: "Refresh Activity"}).click();
       const label = page.getByText("Target: Assistant Connection · Fixture Destination", {exact: true});
@@ -37,12 +37,14 @@ for (const theme of ["dark", "light"] as const) {
     try {
       await page.addInitScript(({origin, ownerCredential}) => { (window as unknown as {assistantTest: unknown}).assistantTest = {origin, ownerCredential}; }, {origin: server.origin, ownerCredential: server.ownerCredential});
       await page.goto(`/assistant-connections-e2e.html?theme=${theme}`);
-      await page.getByRole("button", {name: /Manage Assistant Connections/}).click();
-      await expect(page.getByRole("button", {name: "New Connection", exact: true})).toBeVisible();
+      await page.getByRole("button", {name: /All Connections/}).click();
+      const dialog = page.getByRole("dialog", {name: "Assistant Connections"});
+      const newConnection = dialog.getByRole("button", {name: "New Connection", exact: true});
+      await expect(newConnection).toBeVisible();
       await page.getByLabel("Installation Display Name").fill("Workbench");
       await page.getByRole("button", {name: "Save Installation Name"}).click();
       await expect(page.getByRole("status")).toContainText("Installation name saved");
-      await page.getByRole("button", {name: "New Connection", exact: true}).click();
+      await newConnection.click();
       await page.getByLabel("Connection Name", {exact: true}).fill("OpenClaw Desktop");
       await expect(page.getByRole("button", {name: /^Management Access:/})).toContainText("Full Access");
       await expect(page.getByRole("button", {name: /^Destructive Confirmation:/})).toContainText("None");
@@ -135,7 +137,7 @@ for (const theme of ["dark", "light"] as const) {
       expect(server.db.assistantConnections.authenticate(token)).toBeNull();
       expect(server.db.assistantConnections.authenticate(rotated)).not.toBeNull();
       await page.getByRole("button", {name: "Done", exact: true}).click();
-      await page.getByRole("button", {name: /Manage Assistant Connections/}).click();
+      await page.getByRole("button", {name: /All Connections/}).click();
       await expect(secret).toHaveCount(0);
       await page.getByRole("button", {name: /OpenClaw Remote/}).click();
       await page.getByRole("button", {name: "Revoke Connection", exact: true}).click();
@@ -168,8 +170,8 @@ test("non-owner refusal offers no grant controls", async ({page}) => {
   try {
     await page.addInitScript(({origin}) => { (window as unknown as {assistantTest: unknown}).assistantTest = {origin, ownerCredential: "unrecognized-fixture"}; }, {origin: server.origin});
     await page.goto("/assistant-connections-e2e.html");
-    await page.getByRole("button", {name: /Manage Assistant Connections/}).click();
     await expect(page.getByRole("alert")).toBeVisible();
+    await expect(page.getByRole("button", {name: /All Connections/})).toHaveCount(0);
     await expect(page.getByRole("button", {name: "New Connection", exact: true})).toHaveCount(0);
   } finally { await server.close(); }
 });
@@ -179,9 +181,9 @@ test("switching real control planes clears shown credentials and keeps connectio
   try {
     await page.addInitScript(({origin, ownerCredential}) => { (window as unknown as {assistantTest: unknown}).assistantTest = {origin, ownerCredential}; }, {origin: first.origin, ownerCredential: first.ownerCredential});
     await page.goto("/assistant-connections-e2e.html");
-    const open = () => page.getByRole("button", {name: /Manage Assistant Connections/}).click();
+    const open = () => page.getByRole("button", {name: /All Connections/}).click();
     await open();
-    await page.getByRole("button", {name: "New Connection", exact: true}).click();
+    await page.getByRole("dialog", {name: "Assistant Connections"}).getByRole("button", {name: "New Connection", exact: true}).click();
     await page.getByLabel("Connection Name", {exact: true}).fill("First Connection");
     await page.getByRole("button", {name: "Create Connection", exact: true}).click();
     const secret = page.getByLabel("Assistant Credential", {exact: true});
@@ -206,8 +208,8 @@ test("stale owner editor cannot restore a grant narrowed by another client", asy
   try {
     await page.addInitScript(({origin, ownerCredential}) => { (window as unknown as {assistantTest: unknown}).assistantTest = {origin, ownerCredential}; }, {origin: server.origin, ownerCredential: server.ownerCredential});
     await page.goto("/assistant-connections-e2e.html");
-    await page.getByRole("button", {name: /Manage Assistant Connections/}).click();
-    await page.getByRole("button", {name: "New Connection", exact: true}).click();
+    await page.getByRole("button", {name: /All Connections/}).click();
+    await page.getByRole("dialog", {name: "Assistant Connections"}).getByRole("button", {name: "New Connection", exact: true}).click();
     await page.getByLabel("Connection Name", {exact: true}).fill("Concurrent Owner");
     await page.getByRole("button", {name: "Create Connection", exact: true}).click();
     const secret = page.getByLabel("Assistant Credential", {exact: true});

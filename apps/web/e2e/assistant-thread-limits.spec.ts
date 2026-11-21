@@ -32,21 +32,26 @@ async function editThread(page: Page) {
   return page.getByRole("dialog", { name: "Thread Settings", exact: true });
 }
 
-async function editDefaults(page: Page) {
+async function editDefault(page: Page, name: string) {
   const group = page.getByRole("region", { name: "Thread Defaults" });
-  await group.getByRole("button", { name: /Edit Limits/ }).click();
-  return page.getByRole("dialog", { name: "Default Thread Limits" });
+  await group.getByRole("button", { name: new RegExp(name + "$") }).click();
+  return page.getByRole("dialog", { name, exact: true });
 }
 
 test("the owner edits future defaults from Settings and an existing thread from its header", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await open(page, SETTINGS);
-  const defaults = await editDefaults(page);
-  await defaults.getByRole("textbox", { name: "Cost Budget (USD)" }).fill("40");
-  await defaults.getByRole("textbox", { name: "Session Launch Limit" }).fill("4");
-  await defaults.getByRole("button", { name: "Save Limits" }).click();
-  await expect(defaults).toHaveCount(0);
-  await expect(page.getByRole("region", { name: "Thread Defaults" })).toContainText("$40.00 budget · 4 session launches");
+  const budget = await editDefault(page, "Budget per Thread");
+  await budget.getByRole("radio", { name: "Custom…" }).check();
+  await budget.getByRole("textbox", { name: "Custom Amount (USD)" }).fill("40");
+  await budget.getByRole("button", { name: "Save Default" }).click();
+  const launches = await editDefault(page, "Session Launches per Thread");
+  await launches.getByRole("textbox", { name: "Session Launch Limit" }).fill("4");
+  await launches.getByRole("button", { name: "Save Default" }).click();
+  await expect(launches).toHaveCount(0);
+  const defaults = page.getByRole("region", { name: "Thread Defaults" });
+  await expect(defaults.getByRole("button", { name: "$40.00 Budget per Thread" })).toBeVisible();
+  await expect(defaults.getByRole("button", { name: "4 Session Launches per Thread" })).toBeVisible();
 
   await page.getByRole("link", { name: "Assistants", exact: true }).click();
   await page.getByRole("button", { name: "New Thread", exact: true }).first().click();
@@ -77,17 +82,23 @@ test("the owner edits future defaults from Settings and an existing thread from 
 test("a new thread uses the saved harness, provider account and both unlimited defaults", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await open(page, SETTINGS);
-  await page.getByRole("button", { name: /Edit Harness and Account/ }).click();
-  const launch = page.getByRole("dialog", { name: "Default Harness and Account" });
-  await launch.getByRole("radio", { name: "Codex", exact: true }).check();
-  await launch.getByRole("radio", { name: "Codex Studio", exact: true }).check();
-  await launch.getByRole("button", { name: "Save Defaults" }).click();
-  const limits = await editDefaults(page);
-  await limits.getByRole("checkbox", { name: "No Limit" }).first().check();
-  await limits.getByRole("checkbox", { name: "No Limit" }).last().check();
-  await limits.getByRole("button", { name: "Save Limits" }).click();
-  await expect(page.getByRole("region", { name: "Thread Defaults" })).toContainText("No Budget · No Launch Limit");
-  await page.getByRole("button", { name: /^Existing Threads/ }).click();
+  const harness = await editDefault(page, "Harness");
+  await harness.getByRole("radio", { name: "Codex", exact: true }).check();
+  await harness.getByRole("button", { name: "Save Default" }).click();
+  const account = await editDefault(page, "Account");
+  await account.getByRole("radio", { name: "Codex Studio", exact: true }).check();
+  await account.getByRole("button", { name: "Save Default" }).click();
+  const budget = await editDefault(page, "Budget per Thread");
+  await budget.getByRole("radio", { name: "No Limit" }).check();
+  await budget.getByRole("button", { name: "Save Default" }).click();
+  const launches = await editDefault(page, "Session Launches per Thread");
+  await launches.getByRole("checkbox", { name: "No Limit" }).check();
+  await launches.getByRole("button", { name: "Save Default" }).click();
+  await expect(launches).toHaveCount(0);
+  const defaults = page.getByRole("region", { name: "Thread Defaults" });
+  await expect(defaults.getByRole("button", { name: /^No Limit/ })).toHaveCount(2);
+  await expect(defaults.getByText("Existing Threads", { exact: true })).toHaveCount(0);
+  await page.getByRole("link", { name: "Assistants", exact: true }).click();
   await page.getByRole("button", { name: "New Thread" }).first().click();
   const newThread = page.getByRole("dialog", { name: "New Thread" });
   await expect(newThread.getByRole("radio", { name: /^Codex$/, exact: true })).toBeChecked();
@@ -173,20 +184,20 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await open(page, OLD_SETTINGS, theme, "stress");
       expect(new URL(page.url()).searchParams.get("path")).toBe(SETTINGS);
       const group = page.getByRole("region", { name: "Thread Defaults" });
-      const action = group.getByRole("button", { name: /Edit Limits/ });
+      const action = group.getByRole("button", { name: /Budget per Thread/ });
       await action.scrollIntoViewIfNeeded();
       await expectFullyInViewport(action, "Edit Default Thread Limits");
-      await expect(page.getByRole("region", { name: "Delegation" })).toContainText("No Delegation Grants");
+      await expect(page.getByRole("region", { name: "Active Delegations" })).toContainText("No Delegation Grants");
       await expect(page.getByRole("alert")).toHaveCount(0);
       await expectPageNoHorizontalOverflow(page);
       await capture(page, "assistant-settings");
       if (layout === "desktop" && theme === "light") await capture(page, "redirected-assistant-settings");
-      const defaults = await editDefaults(page);
-      await expect(defaults.getByRole("checkbox", { name: "No Limit" })).toHaveCount(2);
-      await expectFullyInViewport(defaults.getByRole("button", { name: "Save Limits" }), "Save Default Thread Limits");
+      const defaults = await editDefault(page, "Budget per Thread");
+      await expect(defaults.getByRole("radio", { name: "No Limit" })).toBeVisible();
+      await expectFullyInViewport(defaults.getByRole("button", { name: "Save Default" }), "Save Default Thread Limits");
       if (layout === "phone" && theme === "light") await capture(page, "default-no-limit-choices");
       await defaults.getByRole("button", { name: "Cancel", exact: true }).click();
-      await page.getByRole("button", { name: /Manage Assistant Connections/ }).click();
+      await page.getByRole("button", { name: /All Connections/ }).click();
       const connections = page.getByRole("dialog", { name: "Assistant Connections" });
       await expect(connections.getByRole("region", { name: "Your Connections" }).getByRole("button")).toHaveCount(10);
       await expectFullyInViewport(connections.getByRole("button", { name: "Done", exact: true }), "Done with Assistant Connections");
@@ -207,44 +218,12 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       }
     });
 
-    test(`Assistant settings list delegation grants and open the shared editor on ${layout} in ${theme}`, async ({ page }) => {
+    test(`Thread Settings opens the shared delegation editor on ${layout} in ${theme}`, async ({ page }) => {
       await page.clock.setFixedTime(new Date("2025-11-19T18:00:00Z"));
       await page.setViewportSize({ width, height });
-      await open(page, SETTINGS, theme);
-      const group = page.getByRole("region", { name: "Delegation", exact: true });
-      await expect(group).toContainText("No Delegation Grants");
-      await group.scrollIntoViewIfNeeded();
-      await capture(page, "assistant-delegation-empty");
-
-      await open(page, SETTINGS, theme, "enabled", "many", "available");
-      const active = group.getByRole("button", { name: /^Triage Open Issues Active · Expires / });
-      const expired = group.getByRole("button", { name: /^Ship the release notes .* Expired / });
-      await expect(group.getByRole("button")).toHaveCount(10);
-      await expect(active).toBeVisible();
-      await expect(expired).toBeVisible();
-      await expect(active.locator("time")).toHaveAttribute("datetime", "2025-11-30T18:00:00.000Z");
-      await expect(expired.locator("time")).toHaveAttribute("datetime", "2025-11-19T17:59:00.000Z");
-      await expect(group.getByRole("button", { name: "Delegated Release Review 2 Active", exact: true })).toBeVisible();
-      await group.getByRole("heading", { name: "Delegation", exact: true }).evaluate((heading) => heading.scrollIntoView({ block: "start" }));
-      await expectPageNoHorizontalOverflow(page);
-      await capture(page, "assistant-delegation-many");
-
-      await expired.click();
       const editor = page.getByRole("dialog", { name: "Decision Delegation" });
       const approval = editor.getByRole("checkbox", { name: "Approve UI Evidence", exact: true });
       const checkedCategories = editor.locator(".delegation-category").getByRole("checkbox", { checked: true });
-      await expect(editor.getByRole("checkbox", { name: "Answer Owner Questions" })).toBeChecked();
-      await expect(editor.getByRole("checkbox", { name: "Merge Pull Requests" })).toBeChecked();
-      await expect(checkedCategories).toHaveCount(2);
-      await expect(approval).toBeEnabled();
-      await expect(approval).not.toBeChecked();
-      await approval.scrollIntoViewIfNeeded();
-      await expectFullyInViewport(editor.getByRole("button", { name: "Revoke Delegation" }), "Revoke the existing grant");
-      expect(new URL(page.url()).searchParams.get("path")).toMatch(/\/delegation$/);
-      await capture(page, "listed-grant-editor");
-      await editor.getByRole("button", { name: "Cancel", exact: true }).click();
-      await expect(editor).toHaveCount(0);
-
       await open(page, THREAD, theme, "enabled", "many", "available");
       const threadSettings = await editThread(page);
       const link = threadSettings.getByRole("link", { name: "Decision Delegation", exact: true });

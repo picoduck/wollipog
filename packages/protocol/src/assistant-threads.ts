@@ -76,6 +76,18 @@ export interface AssistantDecisionGrant {
   evidenceDisclosureDigest?: string;
 }
 
+export const ASSISTANT_DECISION_DEFAULT_DURATIONS = {
+  hour: 60 * 60_000,
+  week: 7 * 24 * 60 * 60_000,
+  month: 30 * 24 * 60 * 60_000,
+  never: null,
+} as const;
+
+/** Owner preference for future threads. A duration starts when each thread is created. */
+export interface AssistantDecisionDefault extends Omit<AssistantDecisionGrant, "expiresAt" | "evidenceDisclosureDigest"> {
+  expiresAfterMs: number | null;
+}
+
 export interface AssistantDecisionDelegation {
   revision: number;
   grant: AssistantDecisionGrant | null;
@@ -221,12 +233,18 @@ export interface AssistantThreadDefaultsResponse {
   harnesses: AssistantThreadHarnessOption[];
   /** Absent on control planes that use the Orchestrator's harness and the Machine account policy. */
   launchDefaults?: AssistantThreadLaunchDefaults;
+  /** Absent on older control planes. Null means Ask Me. */
+  decisionDefault?: AssistantDecisionDefault | null;
 }
 
 export interface AssistantThreadLaunchDefaults {
   harness: AssistantThreadHarness;
   providerAccount: { runnerId: string; accountRef: string } | null;
 }
+
+export type AssistantThreadLaunchDefaultsPatch =
+  | Pick<AssistantThreadLaunchDefaults, "harness">
+  | (Pick<AssistantThreadLaunchDefaults, "providerAccount"> & { expectedHarness: AssistantThreadHarness });
 
 /** A thread credential authenticates for this long after the runner registers it. The runner
  * proxy registers a fresh one at each launch and before half of this has passed (#4663). */

@@ -6,9 +6,11 @@ import {
   type AssistantDecisionCategory,
   removePendingRequest,
   type AgentHarnessDefaultsView,
+  type AssistantDecisionDefault,
   type AssistantDecisionDelegation,
   type AssistantThreadLimits,
   type AssistantThreadLaunchDefaults,
+  type AssistantThreadLaunchDefaultsPatch,
   type ControlPlaneToUi,
   type PendingApproval,
   type ProjectView,
@@ -396,15 +398,16 @@ let threads: AssistantThread[] = scenario === "long" ? [
   thread("thr_retired", "sess-cleanup", { title: "Retire the Old Runner", status: "archived", archivedAt: NOW - 2 * 24 * 60 * minute,
     lastActivityAt: NOW - 3 * 24 * 60 * minute }),
 ] : [];
-if (delegationScenario === "many") {
+if (delegationScenario === "many" || delegationScenario === "active-expired") {
   const grant: Omit<NonNullable<AssistantDecisionDelegation["grant"]>, "expiresAt"> = {
     categories: ["owner_question", "pr_merge"], campaigns: "all", projects: "all",
   };
   const future = NOW + 11 * 24 * 60 * minute;
-  threads[0]!.decisionDelegation = { revision: 1, grant: { ...grant, expiresAt: future } };
-  for (let index = 1; index <= 9; index += 1) {
+  threads[0]!.decisionDelegation = { revision: 1, grant: { ...grant, ...(delegationScenario === "active-expired" ? { selectionMode: "all" as const } : {}), expiresAt: future } };
+  const count = delegationScenario === "many" ? 9 : 1;
+  for (let index = 1; index <= count; index += 1) {
     threads.push(thread(`thr_grant_${index}`, "sess-release", {
-      title: index === 1 ? longTitle(index + 1) : `Delegated Release Review ${index}`,
+      title: index === 1 ? count > 1 ? longTitle(index + 1) : "Release Follow-Up" : `Delegated Release Review ${index}`,
       decisionDelegation: { revision: 1, grant: { ...grant, expiresAt: index % 2 ? NOW - minute : null } },
     }));
   }
@@ -486,7 +489,10 @@ const defaults: AssistantThreadDefaults = {
     { id: "codex", label: "Codex", available: true },
   ],
 };
-if (limitsScenario && limitsScenario !== "old") defaults.launchDefaults = { harness: "claude-code", providerAccount: null };
+if (limitsScenario && limitsScenario !== "old") {
+  defaults.launchDefaults = { harness: "claude-code", providerAccount: null };
+  if (limitsScenario !== "older-defaults") defaults.decisionDefault = null;
+}
 if (accountScenario || defaults.launchDefaults) {
   for (const harness of defaults.harnesses) {
     harness.accountSelection = { ...fixtureAccountChoices(harness.id), runnerId: "runner-1", workspaceId: "workspace-1" };
@@ -692,14 +698,26 @@ const client = {
     defaults.launchDefaults = next;
     return structuredClone(defaults);
   },
+  patchAssistantThreadLaunchDefaults: async (update: AssistantThreadLaunchDefaultsPatch) => {
+    const current = defaults.launchDefaults!;
+    defaults.launchDefaults = "harness" in update
+      ? { harness: update.harness, providerAccount: current.harness === update.harness ? current.providerAccount : null }
+      : { ...current, providerAccount: update.providerAccount };
+    defaults.harness = defaults.launchDefaults.harness;
+    return structuredClone(defaults);
+  },
+  setAssistantThreadDecisionDefault: async (grant: AssistantDecisionDefault | null) => {
+    defaults.decisionDefault = grant;
+    return { grant: structuredClone(grant) };
+  },
   assistantConnections: async () => ({
     installation: { id: "fixture-installation", name: "Home Studio", canRename: true },
-    connections: Array.from({ length: limitsScenario === "stress" ? 9 : 1 }, (_, index) => ({
+    connections: Array.from({ length: limitsScenario === "stress" ? 9 : 3 }, (_, index) => ({
       id: `asst_${index}`,
-      name: limitsScenario === "stress" ? longTitle(index + 1) : "Release Assistant",
+      name: limitsScenario === "stress" ? longTitle(index + 1) : ["Release Assistant", "Issue Triage", "Documentation"][index]!,
       ownerUserId: "usr_owner", organizationId: "org_fixture",
-      grant: { operations: "all", projects: "all", destructiveConfirmation: "confirm" },
-      revision: 1, revoked: false,
+      grant: { operations: index === 1 ? ["projects_list"] : "all", projects: "all", destructiveConfirmation: "confirm" },
+      revision: 1, revoked: index === 2, lastUsedAt: index === 0 ? NOW : null,
     })),
     operations: [], projects: [],
   }),
@@ -707,6 +725,10 @@ const client = {
     ? Promise.resolve(structuredClone(limitDefaults)) : unavailable()),
   setAssistantThreadLimitDefaults: async (limits: AssistantThreadLimits) => {
     limitDefaults = limits;
+    return structuredClone(limitDefaults);
+  },
+  patchAssistantThreadLimitDefaults: async (update: Partial<AssistantThreadLimits>) => {
+    limitDefaults = { ...limitDefaults, ...update };
     return structuredClone(limitDefaults);
   },
   setAssistantThreadLimits: async (threadId: string, limits: AssistantThreadLimits) => {
@@ -773,6 +795,12 @@ const client = {
     };
     if (limitsScenario && limitsScenario !== "old") {
       created.limitsEditable = true;
+      if (defaults.decisionDefault) {
+        const { expiresAfterMs, ...scope } = defaults.decisionDefault;
+        created.decisionDelegation = { revision: 1, grant: {
+          ...scope, expiresAt: expiresAfterMs === null ? null : created.createdAt + expiresAfterMs,
+        } };
+      }
       created.usage = {
         costUsd: { used: 0, limit: limitDefaults.costUsd },
         launchedSessions: { used: 0, limit: limitDefaults.launchedSessions },
