@@ -19467,7 +19467,8 @@ a.tab { text-decoration: none; }
 .settings-detail .settings-panel-head:not(:has(> .settings-panel-scope, > .settings-panel-action)) { display: none; }
 
 .assistant-connections-page > .detail-bar {
-  margin-inline: calc(-1 * var(--page-gutter));
+  margin-left: calc(-1 * var(--page-gutter));
+  margin-right: calc(-1 * var(--page-gutter));
 }
 .assistant-connections-list > .detail-bar {
   position: sticky;
@@ -19475,7 +19476,7 @@ a.tab { text-decoration: none; }
   z-index: var(--z-sticky);
 }
 .assistant-connections-content {
-  padding-block-start: var(--space-5);
+  padding-top: var(--space-5);
   --setting-control-w: 264px;
 }
 .assistant-connections-content .assistant-installation-row {
