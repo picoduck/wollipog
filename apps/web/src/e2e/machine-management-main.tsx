@@ -14,7 +14,7 @@ import {
   type RunnerView,
   type UiSnapshotMessage,
 } from "@wollipog/protocol";
-import { providerAccountPolicyFixedId, resolveProviderAccountSelection, RUNNER_CAPABILITY_MIN_PROTOCOL, type SubscriptionUsageSnapshot } from "@wollipog/protocol";
+import { ANTIGRAVITY_AGENT_ID, providerAccountPolicyFixedId, resolveProviderAccountSelection, RUNNER_CAPABILITY_MIN_PROTOCOL, type SubscriptionUsageSnapshot } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
@@ -187,7 +187,7 @@ if (runner) {
     // A 300+ character path with a 200-character unbroken segment: the longest variable detail.
     path: longName
       ? `/home/design-workstation-operator-with-a-very-long-account-name/.local/share/google-antigravity/${"releases".repeat(25)}/stable/bin/agy`
-      : "/home/misko/.local/bin/agy",
+      : "/home/fixture/.local/bin/agy",
     version: "1.4.2",
   };
   const base = { version: 1 as const, checkedAt, credentialStore: "shared_os_keyring" as const };
@@ -212,6 +212,17 @@ if (runner) {
                         models: [{ id: "fixture-pro", name: "Gemini 3 Pro (Fixture)" }, { id: "fixture-flash", name: "Gemini 3 Flash (Fixture)" }] }
                         : antigravityFixture === "update-runner" ? undefined
                           : { ...base, status: "unsupported", failure: "unsupported_platform" };
+  // `?antigravityAgent=1` (#4779): the runner also advertises the Google Antigravity agent it derives
+  // from the setup (apps/runner/src/antigravity-session.ts), as a runner with Antigravity sessions does.
+  if (runner.antigravitySetup?.executable && new URLSearchParams(window.location.search).has("antigravityAgent")) {
+    const ready = runner.antigravitySetup.status === "ready";
+    runner.agents.push({ id: ANTIGRAVITY_AGENT_ID, name: "Google Antigravity", command: runner.antigravitySetup.executable.path,
+      args: ["acp"], env: {}, driver: "acp", context: { kind: "native" }, source: "discovered", acpTransport: "stdio",
+      version: runner.antigravitySetup.executable.version, available: ready,
+      authStatus: runner.antigravitySetup.status === "sign_in_required" ? "unauthenticated" : ready ? "authenticated" : "unknown",
+      capabilities: { models: (ready ? runner.antigravitySetup.models ?? [] : []).map((model) => ({ id: model.id, displayName: model.name })),
+        effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true } });
+  }
   if (longName) runner.displayName = "Design Workstation in the Third-Floor Studio Rack Used for Long-Running Builds";
   // `?manyModels`: the most models a ready report carries (64), each with a long unbroken name.
   if (runner.antigravitySetup?.status === "ready" && new URLSearchParams(window.location.search).has("manyModels")) {
