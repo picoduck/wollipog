@@ -101,7 +101,8 @@ test("captures streaming reply states at both widths and themes", async ({ brows
   for (const theme of ["light", "dark"] as const) {
     for (const phone of [false, true]) {
       const context = await browser.newContext({
-        ...(phone ? devices["iPhone 13"] : { viewport: { width: 1440, height: 900 } }),
+        ...(phone ? devices["iPhone 13"] : {}),
+        viewport: phone ? { width: 390, height: 844 } : { width: 1440, height: 900 },
         colorScheme: theme, reducedMotion: "reduce", deviceScaleFactor: 1,
       });
       try {
