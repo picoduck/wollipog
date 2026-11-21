@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { AcpLaunchRefusedError } from "./acp-compatibility.js";
 import type { Driver, DriverOptions } from "./drivers/driver.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
@@ -71,6 +72,32 @@ test("a launch refusal from preparation fails the session without spawning a pro
     assert.equal(store.readMeta("refused")?.status, "failed");
     const errors = store.readEvents("refused").flatMap((event) => event.payload.kind === "error" ? [event.payload.message] : []);
     assert.deepEqual(errors, ["agent init failed: Google Antigravity could not be started on this machine. Check its setup in Connections."]);
+  } finally {
+    manager.shutdownAll();
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+// Nothing launchable any more when the client was about to spawn (#4779): the session fails with the
+// same launch failure as a refusal at preparation, not as a process that could not be created.
+test("a refusal at spawn time fails the session with the agent's start failure", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-acp-spawn-refusal-"));
+  const store = new SessionStore(root);
+  const sentence = "Google Antigravity could not be started on this machine. Check its setup in Connections.";
+  const manager = new SessionManager(
+    () => {}, () => {}, store, "compat-runner", undefined,
+    () => { throw new AcpLaunchRefusedError(sentence); },
+    undefined, 4, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, [],
+    () => ({ acpCompatibility: { profile: "antigravity", resumable: false, resolveLaunch: () => null } }),
+  );
+  try {
+    await manager.start({
+      sessionId: "spawn-refused", workspaceId: "workspace", workspacePath: root, agentId: "google-antigravity",
+      driver: "acp", command: "agy", args: ["acp"], env: {}, useWorktree: false, title: "", titleSource: "generated",
+    });
+    assert.equal(store.readMeta("spawn-refused")?.status, "failed");
+    const errors = store.readEvents("spawn-refused").flatMap((event) => event.payload.kind === "error" ? [event.payload.message] : []);
+    assert.deepEqual(errors, [`agent init failed: ${sentence}`]);
   } finally {
     manager.shutdownAll();
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });

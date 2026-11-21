@@ -36,6 +36,33 @@ export interface AcpCompatibility {
   /** Bounds for the handshake and for opening or resuming the session: a process that never
    * answers fails the launch with the profile's error instead of leaving it starting. */
   deadlines?: { handshakeMs: number; sessionMs: number };
+  /** What the launch runs, asked at the moment the client spawns it rather than when the launch was
+   * prepared: an update can replace the executable while preparation awaits. The answer's command
+   * and pinned values replace the prepared ones; null refuses the launch with the start failure,
+   * and nothing is spawned. */
+  resolveLaunch?: () => { command: string; pinnedEnvironment?: Readonly<Record<string, string>> } | null;
+}
+
+/** A launch the profile refused when it was about to spawn (nothing verified to run). Its message
+ * is the profile's start failure. */
+export class AcpLaunchRefusedError extends Error {
+  override readonly name = "AcpLaunchRefusedError";
+}
+
+/** The command and profile a launch spawns with: `resolveLaunch`'s answer when the profile has one.
+ * Throws `AcpLaunchRefusedError` when it answers that nothing may run. */
+export function resolveAcpLaunch(
+  command: string,
+  compatibility: AcpCompatibility | undefined,
+): { command: string; compatibility: AcpCompatibility | undefined } {
+  const resolve = compatibility?.resolveLaunch;
+  if (!compatibility || !resolve) return { command, compatibility };
+  const target = resolve();
+  if (!target) throw new AcpLaunchRefusedError(acpCompatibilityFailure(compatibility, "start"));
+  const { pinnedEnvironment: _prepared, ...profile } = compatibility;
+  const pinned = target.pinnedEnvironment && Object.keys(target.pinnedEnvironment).length
+    ? { pinnedEnvironment: { ...target.pinnedEnvironment } } : {};
+  return { command: target.command, compatibility: { ...profile, ...pinned } };
 }
 
 /** Whether the client's `fs/write_text_file` service is offered. A profiled agent never gets it: the

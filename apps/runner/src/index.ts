@@ -188,6 +188,7 @@ import {
   antigravityAgentDefinition,
   antigravitySessionLaunch,
   antigravitySignOutSuperseded,
+  antigravityLaunchResolver,
   withAntigravityAgent,
   withoutAntigravityAgent,
 } from "./antigravity-session.js";
@@ -1014,6 +1015,17 @@ const antigravitySetup = new AntigravitySetupSupervisor({
   },
 });
 metadata.antigravitySetup = antigravitySetupForControlPlane(antigravitySetup.current(), false);
+/** On `registered`: the register frame carried the setup as it was then, and its frames are
+ * connection-local, so the current setup goes up once more in case it changed before the reply. */
+function publishAntigravitySetupOnRegistration(): void {
+  if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySetup")) return;
+  sendUp({ type: "antigravity_setup_updated", runnerId: config.runnerId, setup: antigravitySetupForPeer(antigravitySetup.current()) });
+}
+/** A control plane before v404 refuses the managed install fields, so they are left out for it. */
+function antigravitySetupForPeer(setup: ReturnType<AntigravitySetupSupervisor["current"]>) {
+  return antigravitySetupForControlPlane(setup, runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravityManagedInstall"));
+}
+const providerCredentialImportSupported = providerCredentialImportHostSupported();
 /** The executable an Antigravity launch runs and its credential context (#4779): the setup's
  * checked copy, managed or on PATH, with the managed copy's self-updater off. */
 function antigravityLaunchContext(): ReturnType<AntigravitySetupSupervisor["credentialContext"]> {
@@ -1053,9 +1065,9 @@ async function prepareAntigravityLaunch(
 ): Promise<Pick<SessionLaunchPreparation, "scrubInheritedEnv" | "acpCompatibility" | "launchRefusal"> | undefined> {
   if (meta.agentId !== ANTIGRAVITY_AGENT_ID || configuredAgentIds.has(ANTIGRAVITY_AGENT_ID) ||
       meta.driver !== "acp" || meta.context.kind !== "native") return undefined;
-  // Only what the last ready check verified, once no install, update or check is running: a
-  // managed copy by its resolved generation path, which no later update rewrites, so an update
-  // that moves `current` before verifying its candidate can never put that candidate here.
+  // Only what a ready check verified and its install committed, once no install, update or check
+  // is running: a managed copy by its resolved generation path, never `current/agy`, which an
+  // update moves before verifying its candidate. The client asks again when it spawns (below).
   const target = await antigravitySetup.verifiedLaunchTarget();
   const launch = antigravitySessionLaunch(antigravitySetup.current(), target?.context ?? antigravitySetup.credentialContext(),
     config.executionIsolation);
@@ -1067,19 +1079,11 @@ async function prepareAntigravityLaunch(
   const env = { ...meta.env };
   for (const name of launch.scrubInheritedEnv) delete env[name];
   meta.env = { ...env, ...launch.env };
-  return { scrubInheritedEnv: launch.scrubInheritedEnv, acpCompatibility: launch.acpCompatibility };
+  // Isolation and preparation await before the spawn, and updates can commit meanwhile: the
+  // executable is resolved once more at the spawn itself, so it is always one the store keeps.
+  return { scrubInheritedEnv: launch.scrubInheritedEnv,
+    acpCompatibility: { ...launch.acpCompatibility, resolveLaunch: antigravityLaunchResolver(antigravitySetup) } };
 }
-/** On `registered`: the register frame carried the setup as it was then, and its frames are
- * connection-local, so the current setup goes up once more in case it changed before the reply. */
-function publishAntigravitySetupOnRegistration(): void {
-  if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySetup")) return;
-  sendUp({ type: "antigravity_setup_updated", runnerId: config.runnerId, setup: antigravitySetupForPeer(antigravitySetup.current()) });
-}
-/** A control plane before v404 refuses the managed install fields, so they are left out for it. */
-function antigravitySetupForPeer(setup: ReturnType<AntigravitySetupSupervisor["current"]>) {
-  return antigravitySetupForControlPlane(setup, runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravityManagedInstall"));
-}
-const providerCredentialImportSupported = providerCredentialImportHostSupported();
 const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSupervisor({
   dataDir: config.dataDir,
   configPath: providerAccountsConfigPath,

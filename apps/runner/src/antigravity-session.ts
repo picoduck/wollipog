@@ -148,3 +148,14 @@ export function antigravitySessionLaunch(
       deadlines: { ...ANTIGRAVITY_LAUNCH_DEADLINES } },
   };
 }
+
+/** The spawn-time answer to what an Antigravity launch runs (`AcpCompatibility.resolveLaunch`):
+ * the setup's launchable executable and its pinned values at that moment, or null to refuse. */
+export function antigravityLaunchResolver(
+  setup: { launchableTarget(): { command: string; context: AntigravityCredentialContext } | null },
+): NonNullable<AcpCompatibility["resolveLaunch"]> {
+  return () => {
+    const target = setup.launchableTarget();
+    return target ? { command: target.command, pinnedEnvironment: { ...target.context.env } } : null;
+  };
+}

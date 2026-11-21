@@ -73,6 +73,7 @@ import {
   acpStderrMirrored,
   compatibleAcpEnvironment,
   compatibleAcpNegotiation,
+  resolveAcpLaunch,
   type AcpCompatibility,
 } from "./acp-compatibility.js";
 import { materializeAcpMcpServers } from "./acp-session-context.js";
@@ -171,20 +172,23 @@ export class AcpClient {
     deps: Partial<AcpClientDeps> = {},
   ) {
     this.artifactGuidance = opts.artifactGuidance;
-    this.compatibility = opts.compatibility;
+    // Resolved at the spawn below, with no await between: what the launch runs is decided now, not
+    // when it was prepared. A refusal throws before anything is spawned.
+    const launch = resolveAcpLaunch(opts.command, opts.compatibility);
+    this.compatibility = launch.compatibility;
     this.orchestrator = opts.orchestrator === true;
     // `||`, not `??`: the role can only ever widen the assertion. An explicit `false` alongside the
     // coupled preset must not be able to switch the pinned-identity check off.
     this.orchestratorRole = opts.orchestratorRole === true || this.orchestrator;
     this.commands = this.orchestrator ? [] : normalizeAcpCommands(opts.initialCommands);
     this.sessionContext = opts.sessionContext;
-    const env = compatibleAcpEnvironment(opts.env, opts.compatibility);
+    const env = compatibleAcpEnvironment(opts.env, launch.compatibility);
     this.mcpEnvironment = { ...process.env, ...env };
     const context = opts.context ?? { kind: "native" as const };
     this.filesystem = new AcpFilesystemService(opts.cwd, context);
     this.terminals = new AcpTerminalService(this.filesystem, context, opts.isolation, { cgroup: opts.reviewWriterCgroup });
     this.kill = deps.kill ?? killTree;
-    this.child = (deps.spawn ?? spawnAgent)({ ...opts, env });
+    this.child = (deps.spawn ?? spawnAgent)({ ...opts, command: launch.command, env });
     this.peer = new JsonRpcPeer(this.child.stdin, this.child.stdout, (err) =>
       this.ev.onStderr(`transport: ${err.message}`),
     );

@@ -52,6 +52,7 @@ import { normalizeAcpConfigOptions, optionForCategory } from "./acp-session-stat
 import { resolveNativeCandidates } from "./discovery/resolve.js";
 import { JsonRpcPeer } from "./jsonrpc.js";
 import { killTreeAndWait, spawnAgent, type AgentProcess } from "./spawn.js";
+import { AntigravityLaunchLedger, type VerifiedAntigravityLaunch } from "./antigravity-launch-ledger.js";
 
 /** Ambient settings that would let the CLI pick another account or billing route than the
  * runner's own Google sign-in: an API key (with `modelProvider: gemini`), a custom endpoint, or
@@ -161,7 +162,7 @@ const CONTROL = /[\u0000-\u001f\u007f]/u;
 
 /** Outcome of the access check. `models` is set only for `ready`. */
 export type AntigravityAccessResult =
-  | { status: "ready"; models: Array<{ id: string; name: string }> }
+  | { status: "ready"; models: Array<{ id: string; name: string }>; observedAt: number }
   | { status: "sign_in_required" }
   | { status: "verification_failed"; failure: AntigravitySetupFailure };
 
@@ -373,9 +374,11 @@ export async function checkAntigravityAccess(
       return { status: "verification_failed", failure: timedOut(error) ? "timed_out" : "handshake_failed" };
     }
     let response: unknown;
+    let observedAt: number;
     try {
       response = await peer.request("session/new", { cwd: options.cwd, mcpServers: [] },
         { deadlineAt: now() + (options.sessionTimeoutMs ?? SESSION_TIMEOUT_MS) });
+      observedAt = now();
     } catch (error) {
       if (isAgentAuthRequiredError(error)) return { status: "sign_in_required" };
       return { status: "verification_failed", failure: timedOut(error) ? "timed_out" : "session_check_failed" };
@@ -385,7 +388,8 @@ export async function checkAntigravityAccess(
     if (!boundedText(sessionId, 1_024) || models.length === 0) {
       return { status: "verification_failed", failure: "session_check_failed" };
     }
-    return { status: "ready", models };
+    // Stamped when access was seen working, before the cleanup below awaits the process's exit.
+    return { status: "ready", models, observedAt };
   } finally {
     peer.dispose("Antigravity access check finished");
     await options.kill(child).catch(() => false);
@@ -472,8 +476,8 @@ export class AntigravitySetupSupervisor {
   private checking: Promise<AntigravitySetupView> | null = null;
   private signIn: ActiveSignIn | null = null;
   private installing: Promise<void> | null = null;
-  /** What the last ready check verified for session launches (#4779); null otherwise. */
-  private verifiedLaunch: { command: string; managed: boolean; accessObservedAt: number } | null = null;
+  /** What session launches may run (#4779): see `antigravity-launch-ledger.ts`. */
+  private readonly launches = new AntigravityLaunchLedger();
   private installAbort: AbortController | null = null;
   private managed: ManagedState = {};
   /** Why the last install failed before its rollback failed too. Once a later restore succeeds,
@@ -529,26 +533,34 @@ export class AntigravitySetupSupervisor {
     return { command: executable.path, context: this.credentialContext(executable.source === "managed") };
   }
 
-  /** What a session launch may run (#4779): the executable the last check verified as ready,
-   * once no install, update or check is running. A managed copy is named by its resolved
-   * generation path, which no later update rewrites, never by the movable `current/agy`. Null when
-   * nothing is verified (a failed check, or a rejected release a rollback could not undo). */
-  async verifiedLaunchTarget(): Promise<{ command: string; context: AntigravityCredentialContext; accessObservedAt: number } | null> {
-    while (this.installing || this.checking) {
-      await this.installing?.catch(() => {});
-      await this.checking?.catch(() => {});
-    }
-    const verified = this.verifiedLaunch;
+  /** What a session launch may run right now (#4779): the executable a ready check verified whose
+   * activation is committed, with its credential context. A managed copy is named by its resolved
+   * generation path, never by the movable `current/agy`; the store keeps that generation through
+   * the next update's commit. Null when nothing is verified (a failed check, or a rejected release
+   * a rollback could not undo). Synchronous, so a launch resolves it at the moment it spawns. */
+  launchableTarget(): { command: string; context: AntigravityCredentialContext; accessObservedAt: number } | null {
+    const verified = this.launches.launchable();
     return verified
       ? { command: verified.command, context: this.credentialContext(verified.managed), accessObservedAt: verified.accessObservedAt }
       : null;
   }
 
-  /** When the last ready check observed the sign-in working, or undefined without one. A check
-   * publishes after slower work (Google's release lookup), so its `checkedAt` can be later than
-   * what it observed. */
+  /** `launchableTarget` once no install, update or check is running, for a launch's preparation:
+   * a launch that begins during an update or check takes its outcome into account. The launch
+   * still resolves its executable again when it spawns. */
+  async verifiedLaunchTarget(): Promise<{ command: string; context: AntigravityCredentialContext; accessObservedAt: number } | null> {
+    while (this.installing || this.checking) {
+      await this.installing?.catch(() => {});
+      await this.checking?.catch(() => {});
+    }
+    return this.launchableTarget();
+  }
+
+  /** When the last ready check observed the sign-in working, or undefined after one that was not.
+   * A check publishes after slower work (Google's release lookup), so its `checkedAt` can be later
+   * than what it observed. */
   accessObservedAt(): number | undefined {
-    return this.verifiedLaunch?.accessObservedAt;
+    return this.launches.accessObservedAt();
   }
 
   /** Check the runtime and its sign-in. Concurrent calls share one check. While a sign-in or an
@@ -702,6 +714,7 @@ export class AntigravitySetupSupervisor {
    * still pending (its restore failed again). */
   private recoverPendingActivation(): boolean {
     const recovered = this.store.recoverPending();
+    if (recovered.restored) this.launches.discard();
     if (recovered.found) {
       this.options.log?.(recovered.restored
         ? "Google Antigravity: restored the managed version an unverified update replaced."
@@ -835,13 +848,12 @@ export class AntigravitySetupSupervisor {
       executable = { path: pathCopy, ...(versioned.version ? { version: versioned.version } : {}), source: "path" };
     }
     const access = await this.checkAccess(executable.path, executable.source === "managed");
-    const accessObservedAt = this.now();
     await latestRead;
     if (access.status === "ready") {
       const isManaged = executable.source === "managed";
-      this.verifiedLaunch = { command: isManaged ? managedGeneration ?? executable.path : executable.path, managed: isManaged,
-        accessObservedAt };
-      return this.settleCheck({ ...base, status: "ready", executable, models: access.models, checkedAt: this.now() });
+      return this.settleCheck({ ...base, status: "ready", executable, models: access.models, checkedAt: this.now() },
+        { command: isManaged ? managedGeneration ?? executable.path : executable.path, managed: isManaged,
+          accessObservedAt: access.observedAt });
     }
     return this.settleCheck({ ...base, status: access.status, executable,
       ...(access.status === "verification_failed" ? { failure: access.failure } : {}), checkedAt: this.now() });
@@ -943,6 +955,8 @@ export class AntigravitySetupSupervisor {
       }
       try {
         await this.store.confirm();
+        // Committed: what the candidate's check verified may now be launched.
+        this.launches.commit();
       } catch {
         // The activation can't be committed (its pending record can't be removed), so the next
         // check would undo it anyway: undo it now and report the failure.
@@ -980,6 +994,8 @@ export class AntigravitySetupSupervisor {
   /** The install is over: a check, sign-in or install that starts once its outcome is published
    * runs normally. */
   private endInstall(): void {
+    // A candidate the install did not commit is never launched.
+    this.launches.discard();
     this.installing = null;
     this.installAbort = null;
   }
@@ -1022,9 +1038,11 @@ export class AntigravitySetupSupervisor {
     return join(this.options.dataDir, "antigravity-setup");
   }
 
-  private settleCheck(view: AntigravitySetupView): AntigravitySetupView {
+  private settleCheck(view: AntigravitySetupView, verified?: VerifiedAntigravityLaunch): AntigravitySetupView {
     // Only a ready check verifies what a session may launch (#4779); any other result withdraws it.
-    if (view.status !== "ready") this.verifiedLaunch = null;
+    // A ready candidate whose activation is uncommitted is held until the install commits it.
+    this.launches.settle(view.status === "ready" && verified ? verified : null,
+      antigravitySetupPlatformSupported(this.platform) && this.releasePlatform() ? this.store.pendingGeneration() : null);
     // A sign-in's progress during the check is newer than the check's copy of it.
     const { signIn: _stale, ...rest } = view;
     this.view = { ...rest, ...(this.view.signIn ? { signIn: this.view.signIn } : {}) };

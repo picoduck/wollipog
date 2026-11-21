@@ -173,6 +173,7 @@ import type {
   DriverSubscriptionUsageUpdate,
   StopReason,
 } from "./drivers/driver.js";
+import { AcpLaunchRefusedError } from "./acp-compatibility.js";
 import { coalesceDriverTextDeltas, type TextDeltaCoalescer } from "./text-delta-coalescer.js";
 import { CodexAppServerResumeError, CodexCommandSandboxUnavailableError } from "./drivers/codex-app-server.js";
 import type { CodexPromptTemplate } from "./discovery/codex-prompts.js";
@@ -11047,7 +11048,10 @@ export class SessionManager {
       // Only the driver's own lease acquisition can refuse with a lease code here. Keep the
       // established prefix: older web clients use it to recognize account failures in transcripts.
       const refusal = !driverConstructionStarted ? providerHomeLaunchRefusal(error, meta) : undefined;
-      const prefix = refusal ? "provider account unavailable" : "agent process could not be created";
+      // An ACP profile that found nothing verified to run when it was about to spawn (#4779) fails
+      // the launch the way a launch-preparation refusal does.
+      const prefix = refusal ? "provider account unavailable"
+        : error instanceof AcpLaunchRefusedError ? "agent init failed" : "agent process could not be created";
       this.emitEvent(sessionId, { kind: "error", message: `${prefix}: ${errText(error)}` });
       this.emitStatus(sessionId, "failed", errText(error));
       if (refusal) this.recordProviderHomeRefusal(sessionId, refusal);

@@ -1585,15 +1585,23 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   replaced. Antigravity is not Orchestrator-eligible: only the audited Claude Agent ACP release is
   (`orchestrator-preset.ts`), and nothing here changes that.
 - **One credential context.** Every launch (new session, restart, fork) re-reads the setup: it
-  runs the executable the setup currently resolves (`launchTarget()`: the managed copy's
-  `current/agy`, with `AGY_CLI_DISABLE_AUTO_UPDATE=true`, or else the PATH copy) as `agy acp`, with
+  runs the executable the setup resolves (the managed copy, with
+  `AGY_CLI_DISABLE_AUTO_UPDATE=true`, or else the PATH copy) as `agy acp`, with
   exactly that copy's `antigravityCredentialContext()` environment, pinned over every later layer
   (a worktree setup environment cannot turn the managed copy's updater back on). A launch runs
-  only what the last ready check verified (`verifiedLaunchTarget()`), once no install, update or
-  check is running: a managed copy by its resolved generation path, which no later update
-  rewrites, so a candidate that an update moved `current` to before verifying it is never
-  launched. With nothing verified (a failed check, or a rejected release a rollback could not
-  undo) the launch is refused with the start failure below and nothing is spawned. It passes
+  only what a ready check verified and its install committed (`antigravity-launch-ledger.ts`): a
+  managed copy by its resolved generation path, never `current/agy`. An update moves `current` to
+  its candidate before verifying it, so a ready result for that candidate is held, not
+  launchable, until the install commits the activation; a failed commit, a rollback (including
+  one that fails) or a recovered activation discards it, and the committed generation keeps
+  launching. Preparation waits for a running install or check (`verifiedLaunchTarget()`), and the
+  client resolves the executable once more at the spawn itself (`AcpCompatibility.resolveLaunch`,
+  with no await in between), so updates that commit while the launch prepares can never leave it
+  naming a pruned generation: the store keeps `current` and `previous` through every commit. With
+  nothing verified (a failed check, or a rejected release a rollback could not undo) the launch is
+  refused with the start failure below, at preparation or at the spawn, and nothing is spawned.
+  `antigravity-launch-ledger.test.ts` checks every ordering of an update's activation, an access
+  probe, its check settling, a launch and a session's sign-out report. It passes
   the context's scrub list to `spawnAgent`, which
   removes those variables from the inherited environment. The profile also withholds every ambient
   credential name and `GOOGLE_CLOUD_*` prefix from the explicit launch environment, whatever layer
@@ -1612,7 +1620,8 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   isolation, `session/resume`. agy's stderr is never mirrored into the transcript or runner log,
   because its fallback log names the signed-in account. An auth-required error from `session/new`,
   `session/resume` or `session/prompt` marks the agent signed out until a setup check whose
-  access probe ran after the report confirms the sign-in, judged by when it observed access
+  access probe ran after the report confirms the sign-in, judged by when it observed access (its
+  `session/new` succeeding, stamped before the probe's process and folder are cleaned up)
   rather than when it published (which re-runs the setup check, and once more if the check it
   joined had probed before the report, so
   New Session and Connections follow) and fails with "needs sign-in on this machine. Sign in from

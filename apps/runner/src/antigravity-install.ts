@@ -681,6 +681,17 @@ export class AntigravityManagedStore {
     return { found: true, restored: true };
   }
 
+  /** The folder of the generation an uncommitted activation made current, or null with none
+   * pending. A record that can't be read could name any generation, so the generations folder
+   * itself is returned: nothing managed counts as committed until it is recovered. */
+  pendingGeneration(): string | null {
+    let record: unknown;
+    try { record = JSON.parse(readFileSync(this.pendingPath(), "utf8")); } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : join(this.root, "generations");
+    }
+    return validPending(record) ? join(this.root, "generations", record.generation) : join(this.root, "generations");
+  }
+
   private pendingPath(): string {
     return join(this.root, PENDING_RECORD);
   }

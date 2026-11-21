@@ -13,6 +13,9 @@ import {
   type AntigravitySetupSupervisorOptions,
 } from "./antigravity-setup.js";
 import { FakeReleaseServer, fakeAgyWrapper, fakeInstallerScript, fakeTarGz } from "./fixtures/antigravity/fake-release.js";
+import { resolveAcpLaunch } from "./acp-compatibility.js";
+import { antigravityLaunchResolver, antigravitySignOutSuperseded } from "./antigravity-session.js";
+import { killTreeAndWait } from "./spawn.js";
 
 // Every test installs fake releases from fake origins (fixtures/antigravity/fake-release.ts) whose
 // binary runs the credential-free fake CLI (fixtures/antigravity/fake-agy.mjs). No network is used.
@@ -554,6 +557,15 @@ test("an update that passes its check but can't be committed is not reported as 
     assert.notEqual(failed.managedInstall?.operation?.status, "succeeded");
     assert.equal(failed.managedInstall?.operation?.failure, "rollback_failed");
     assert.ok(existsSync(join(managedRoot, "pending-activation.json")));
+    // The candidate passed its checks, the one after the failed rollback included, but was never
+    // committed (#4779): sessions keep launching the committed generation, which is still kept.
+    const candidate = realpathSync(join(managedRoot, "current", "agy"));
+    const committed = realpathSync(join(managedRoot, working, "agy"));
+    assert.notEqual(candidate, committed);
+    assert.equal(setup.current().status, "ready");
+    assert.equal((await setup.verifiedLaunchTarget())?.command, committed);
+    assert.equal(setup.launchableTarget()?.command, committed);
+    assert.ok(existsSync(committed));
   } finally {
     blocked.unblock();
   }
@@ -714,4 +726,49 @@ test("a session launch waits for a running install to verify before reading its 
   assert.equal(target?.command, generation);
   assert.equal(target?.context.env.AGY_CLI_DISABLE_AUTO_UPDATE, "true", "the managed copy launches with its updater off");
   assert.ok((target?.accessObservedAt ?? 0) > 0);
+});
+
+test("a launch resolves its executable when it spawns, so two updates after its preparation can't remove it (#4779)", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  const { setup, managedRoot } = supervisor(server);
+  await install(setup);
+  // The launch is prepared against 1.5.14, then awaits (isolation, provider home) while two
+  // updates commit: the second prunes 1.5.14.
+  const prepared = await setup.verifiedLaunchTarget();
+  assert.ok(prepared && existsSync(prepared.command));
+  for (const version of ["1.6.0", "1.7.0"]) {
+    server.publish({ platform: PLATFORM, version, archive: release(version) });
+    assert.equal((await install(setup)).managedInstall?.operation?.status, "succeeded");
+  }
+  assert.equal(existsSync(prepared.command), false, "the generation chosen at preparation is gone");
+  const resolveLaunch = antigravityLaunchResolver(setup);
+  const spawned = resolveAcpLaunch(prepared.command, { profile: "antigravity", resumable: false, resolveLaunch });
+  assert.equal(spawned.command, realpathSync(join(managedRoot, "current", "agy")), "the committed 1.7.0, by its generation path");
+  assert.ok(existsSync(spawned.command));
+  assert.deepEqual(spawned.compatibility?.pinnedEnvironment, { [ANTIGRAVITY_DISABLE_AUTO_UPDATE_ENV]: "true" });
+});
+
+test("access is observed when the probe's session opens, before its cleanup, so a sign-out during cleanup stands (#4779)", async () => {
+  // Wall-clock based: request deadlines are computed on it.
+  let clock = Date.now();
+  const kills: number[] = [];
+  const { setup } = supervisor(new FakeReleaseServer(), {
+    resolveExecutable: async () => pathAgy,
+    now: () => clock,
+    // Every process cleanup takes a while on this clock.
+    kill: async (child) => {
+      kills.push(clock);
+      clock += 1_000;
+      return killTreeAndWait(child);
+    },
+  });
+  const view = await setup.check("never");
+  assert.equal(view.status, "ready");
+  const observed = setup.accessObservedAt();
+  const probeCleanup = kills.at(-1)!;
+  assert.ok(observed !== undefined && observed <= probeCleanup, "stamped before the access probe's cleanup began");
+  // A session reported the sign-out while the probe was being cleaned up: that check doesn't clear it.
+  assert.equal(antigravitySignOutSuperseded(view, observed, probeCleanup + 500), false);
+  assert.equal(antigravitySignOutSuperseded(view, observed, observed - 1), true);
 });

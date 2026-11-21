@@ -7,7 +7,14 @@ import { fileURLToPath } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 import type { AcpRuntimeCapabilities, AgentCapabilities, AgentDefinition, AntigravitySetupView, SessionConfig, SessionEventPayload } from "@wollipog/protocol";
 import { negotiateAcpInitialize } from "./acp-contract.js";
-import { acpCompatibilityFailure, compatibleAcpEnvironment, compatibleAcpNegotiation, redactAccountIdentifiers } from "./acp-compatibility.js";
+import {
+  AcpLaunchRefusedError,
+  acpCompatibilityFailure,
+  compatibleAcpEnvironment,
+  compatibleAcpNegotiation,
+  redactAccountIdentifiers,
+  type AcpCompatibility,
+} from "./acp-compatibility.js";
 import {
   ANTIGRAVITY_AGENT_ID,
   ANTIGRAVITY_UNAVAILABLE,
@@ -82,7 +89,8 @@ function launchDriver(
   isolation: { mode: "provider" | "bwrap" },
   cwd: string,
   resumeId?: string,
-  overrides: { layeredEnv?: Record<string, string>; deadlines?: { handshakeMs: number; sessionMs: number }; config?: SessionConfig } = {},
+  overrides: { layeredEnv?: Record<string, string>; deadlines?: { handshakeMs: number; sessionMs: number }; config?: SessionConfig;
+    resolveLaunch?: AcpCompatibility["resolveLaunch"] } = {},
 ): { driver: AcpDriver; seen: Observed } {
   const context = antigravityCredentialContext();
   const launch = antigravitySessionLaunch(view, context, isolation);
@@ -93,7 +101,8 @@ function launchDriver(
     // A layer the session manager adds after launch preparation (an approved worktree setup).
     env: { ...launch.env, ...overrides.layeredEnv },
     scrubInheritedEnv: launch.scrubInheritedEnv,
-    acpCompatibility: { ...launch.acpCompatibility, ...(overrides.deadlines ? { deadlines: overrides.deadlines } : {}) },
+    acpCompatibility: { ...launch.acpCompatibility, ...(overrides.deadlines ? { deadlines: overrides.deadlines } : {}),
+      ...(overrides.resolveLaunch ? { resolveLaunch: overrides.resolveLaunch } : {}) },
     cwd,
     config: overrides.config ?? {},
     context: { kind: "native" },
@@ -460,6 +469,27 @@ test("agy is never offered, and never given, client-side file writes outside its
   const response = calls().find((call) => call.method === "fs/write_text_file response") as { error?: string | null };
   assert.ok(response?.error, "the write request is refused");
   assert.equal(readFileSync(gitLink, "utf8"), "gitdir: /repo/.git/worktrees/s1\n", "the registration file is untouched");
+});
+
+test("the client spawns what the setup resolves at that moment, or refuses without spawning anything", async () => {
+  signIn();
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  // Prepared against an executable an update has since removed; the spawn asks again.
+  const prepared = setup({ executable: { path: join(root, "pruned-generation", "agy") } });
+  const resolved = launchDriver(prepared, PROVIDER, cwd, undefined,
+    { resolveLaunch: () => ({ command: agy, pinnedEnvironment: { AGY_CLI_DISABLE_AUTO_UPDATE: "true" } }) });
+  await resolved.driver.initialize();
+  await resolved.driver.newSession(cwd);
+  const environments = readFileSync(join(state, "environments.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(environments.at(-1).autoUpdateDisabled, "true", "the resolved copy's pinned values apply");
+
+  const before = calls().length;
+  assert.throws(() => launchDriver(prepared, PROVIDER, cwd, undefined, { resolveLaunch: () => null }), (error: Error) => {
+    assert.ok(error instanceof AcpLaunchRefusedError);
+    assert.equal(error.message, "Google Antigravity could not be started on this machine. Check its setup in Connections.");
+    return true;
+  });
+  assert.equal(calls().length, before, "nothing was spawned");
 });
 
 test("external session discovery and adoption never probe the setup-derived Antigravity agent", () => {
