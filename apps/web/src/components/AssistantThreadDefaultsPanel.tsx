@@ -7,6 +7,7 @@ import { assistantThreadHarnessLabel, assistantThreadsOwnerOnly, assistantThread
 import { formatUsd, parseCount, parseUsd } from "../guardrail-values.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { accountLabelText } from "../personal-identifiers.js";
+import { AssistantBudgetPresets, assistantBudgetSelection } from "./AssistantBudgetPresets.js";
 import { AssistantDecisionDelegationDialog } from "./AssistantDecisionDelegationDialog.js";
 import { AssistantThreadAccountField, MACHINE_ACCOUNT_POLICY } from "./AssistantThreadAccountField.js";
 import { Modal } from "./Modal.js";
@@ -14,13 +15,6 @@ import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { Checkbox, ChoiceRows } from "./ui/ChoiceControls.js";
 import { ActionRow, SettingsGroup } from "./ui/SettingsRows.js";
-
-const budgetPresets = ["25", "50", "100", "250"];
-const budgetOptions = [
-  ...budgetPresets.map((value) => ({ value, title: `$${value}` })),
-  { value: "custom", title: "Custom…" },
-  { value: "unlimited", title: "No Limit" },
-];
 
 const titles = {
   harness: "Harness",
@@ -96,8 +90,8 @@ function AssistantThreadDefaultsGroup() {
         }} />}
     </>}
     {limits && <>
-      {row("budget", limits.costUsd === null ? "No Limit" : budgetPresets.includes(String(limits.costUsd))
-        ? `$${limits.costUsd}` : formatUsd(limits.costUsd))}
+      {row("budget", limits.costUsd === null ? "No Limit" : assistantBudgetSelection(limits.costUsd) === "custom"
+        ? formatUsd(limits.costUsd) : `$${limits.costUsd}`)}
       {row("launches", limits.launchedSessions === null ? "No Limit" : String(limits.launchedSessions))}
       {(editing === "budget" || editing === "launches") && <LimitDefaultDialog field={editing} limits={limits}
         onClose={close} onSave={async (update) => setLimits(decisionDefault !== undefined
@@ -194,13 +188,13 @@ function LimitDefaultDialog({ field, limits, onClose, onSave }: {
   onSave: (update: Partial<AssistantThreadLimits>) => Promise<void>;
 }) {
   const [cost, setCost] = useState(limits.costUsd?.toString() ?? "");
-  const [preset, setPreset] = useState(limits.costUsd === null ? "unlimited" : budgetPresets.includes(cost) ? cost : "custom");
+  const [preset, setPreset] = useState(() => assistantBudgetSelection(limits.costUsd));
   const [launches, setLaunches] = useState(limits.launchedSessions?.toString() ?? "");
   const [noLaunchLimit, setNoLaunchLimit] = useState(limits.launchedSessions === null);
   const save = async () => {
     if (field === "budget") {
-      if (preset === "unlimited") return onSave({ costUsd: null });
-      const budget = parseUsd(preset === "custom" ? cost : preset);
+      if (preset === "none") return onSave({ costUsd: null });
+      const budget = parseUsd(cost);
       if (!budget.ok) throw new Error(budget.error);
       if (budget.value === null) throw new Error("Enter an amount or choose No Limit.");
       if (!Number.isSafeInteger(Math.round(budget.value * 100)) || Number(budget.value.toFixed(2)) !== budget.value) {
@@ -214,13 +208,9 @@ function LimitDefaultDialog({ field, limits, onClose, onSave }: {
     await onSave({ launchedSessions: count.value });
   };
   return <DefaultEditDialog title={titles[field]} onClose={onClose} onSave={save}>
-    {(busy) => field === "budget" ? <>
-      <ChoiceRows label="Budget Presets" value={preset} onChange={setPreset}
-        options={budgetOptions.map((option) => ({ ...option, disabled: busy }))} />
-      {preset === "custom" && <label className="field"><span>Custom Amount (USD)</span>
-        <input value={cost} inputMode="decimal" disabled={busy} onChange={(event) => setCost(event.target.value)} />
-      </label>}
-    </> : <>
+    {(busy) => field === "budget" ? <AssistantBudgetPresets value={cost} selection={preset} disabled={busy}
+      onChange={(value, selection) => { setCost(value); setPreset(selection); }} />
+      : <>
       <label className="field"><span>Session Launch Limit</span>
         <input value={noLaunchLimit ? "" : launches} inputMode="numeric" disabled={busy || noLaunchLimit}
           onChange={(event) => setLaunches(event.target.value)} />

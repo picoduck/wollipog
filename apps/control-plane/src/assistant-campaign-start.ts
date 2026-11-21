@@ -215,7 +215,7 @@ export function registerAssistantCampaignStart(operations: AssistantOperations, 
       }
       const thread = db.assistantThreads.forConnection(live.id);
       if (!thread) throw new AssistantRefusal("The Assistant thread is no longer active.");
-      const limitRefusal = sessions.assistantThreadLaunchLimitRefusal(thread.id, thread.launch_limit);
+      const limitRefusal = sessions.assistantThreadLaunchLimitRefusal(thread);
       if (limitRefusal) throw new AssistantRefusal(limitRefusal);
       const binding = bindingFor(live, args, proposed.digest);
       if (!approvedId) {

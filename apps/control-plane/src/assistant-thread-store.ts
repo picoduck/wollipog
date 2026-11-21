@@ -31,6 +31,7 @@ export interface ThreadRow {
   archived_at: number | null;
   cost_limit_usd: number | null;
   launch_limit: number | null;
+  launch_paused: number;
   decision_grant: string | null;
   decision_grant_revision: number;
 }
@@ -126,6 +127,7 @@ export class AssistantThreadStore {
     // Fixed historical defaults for rows created before owners could set limits. NULL is unlimited.
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN cost_limit_usd REAL DEFAULT 25"); } catch { /* column already present */ }
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN launch_limit INTEGER DEFAULT 10"); } catch { /* column already present */ }
+    try { db.exec("ALTER TABLE assistant_threads ADD COLUMN launch_paused INTEGER NOT NULL DEFAULT 0"); } catch { /* column already present */ }
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN decision_grant TEXT"); } catch { /* column already present */ }
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN decision_grant_revision INTEGER NOT NULL DEFAULT 0"); } catch { /* column already present */ }
     // All earlier launches were subject to a budget, even when their allowance was not recorded.
@@ -315,8 +317,8 @@ export class AssistantThreadStore {
   }
 
   setLimits(threadId: string, limits: AssistantThreadLimits): void {
-    this.db.prepare("UPDATE assistant_threads SET cost_limit_usd=?, launch_limit=? WHERE id=?")
-      .run(limits.costUsd, limits.launchedSessions, threadId);
+    this.db.prepare("UPDATE assistant_threads SET cost_limit_usd=?, launch_limit=?, launch_paused=COALESCE(?, launch_paused) WHERE id=?")
+      .run(limits.costUsd, limits.launchedSessions, limits.launchPaused === undefined ? null : Number(limits.launchPaused), threadId);
   }
 
   setDecisionGrant(threadId: string, expectedRevision: number, grant: AssistantDecisionGrant | null): boolean {

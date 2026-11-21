@@ -50,13 +50,13 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
         for (const name of budgetValues) await expect(dialog.getByRole("radio", { name, exact: true })).toBeVisible();
         const saveBudget = dialog.getByRole("button", { name: "Save Default" });
         await expectFullyInViewport(saveBudget, "Save Default");
-        await capture(dialog, "budget-presets", "Exactly $25, $50, $100, $250, Custom… and No Limit are available. Save Default is fully visible.", "button, label.choice-row");
-        await dialog.getByRole("radio", { name: "Custom…", exact: true }).check();
-        const amount = dialog.getByRole("textbox", { name: "Custom Amount (USD)" });
+        await capture(dialog, "budget-presets", "Exactly $25, $50, $100, $250, Custom… and No Limit are available. Save Default is fully visible.", "button");
+        await dialog.getByRole("radio", { name: "Custom…", exact: true }).click();
+        const amount = dialog.getByRole("textbox", { name: "Custom Budget (USD)" });
         await amount.fill("73.50");
         await expect(amount).toHaveValue("73.50");
         await expectFullyInViewport(saveBudget, "Save Default");
-        await capture(dialog, "budget-custom", "Custom… shows the amount field populated with 73.50 and Save Default remains fully visible.", "button, label.choice-row, input:not([type=radio])");
+        await capture(dialog, "budget-custom", "Custom… shows the amount field populated with 73.50 and Save Default remains fully visible.", "button, input:not([type=radio])");
         await saveBudget.click();
         await expect(defaults.getByRole("button", { name: "$73.50 Budget per Thread", exact: true })).toBeVisible();
 

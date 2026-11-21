@@ -125,6 +125,7 @@ function CategoryGroup({ label, categories, selected, unavailable, disclosure, o
 type DelegationEditorProps = { onClose: () => void } & (
   | {
     delegation: AssistantDecisionDelegation;
+    draft?: boolean;
     evidenceReview?: AssistantEvidenceReviewAvailability;
     onSave: (value: AssistantDecisionDelegation) => Promise<void>;
   }
@@ -137,6 +138,7 @@ type DelegationEditorProps = { onClose: () => void } & (
 export function AssistantDecisionDelegationDialog(props: DelegationEditorProps) {
   const { onClose } = props;
   const isDefault = "defaultGrant" in props;
+  const draft = !isDefault && props.draft === true;
   const threadGrant = isDefault ? null : props.delegation.grant;
   const grant = isDefault ? props.defaultGrant : threadGrant;
   const evidenceReview = isDefault ? undefined : props.evidenceReview;
@@ -250,11 +252,11 @@ export function AssistantDecisionDelegationDialog(props: DelegationEditorProps) 
       : "Choose which decisions this Assistant thread may resolve on your behalf. Its decisions are attributed to the thread."}
     onClose={busy ? () => {} : onClose}
     footer={<>
-      {threadGrant && <button className="btn ghost danger delegation-revoke" type="button" disabled={busy}
+      {threadGrant && !draft && <button className="btn ghost danger delegation-revoke" type="button" disabled={busy}
         onClick={() => void revoke()}>Revoke Delegation</button>}
       <button className="btn" type="button" disabled={busy} onClick={onClose}>Cancel</button>
       <BusyButton className="btn primary" form={form} type="submit" busy={busy}
-        progress="Saving delegation…">Save Delegation</BusyButton>
+        progress="Saving delegation…">{draft ? "Use Delegation Settings" : "Save Delegation"}</BusyButton>
     </>}>
     <form id={form} onSubmit={(event) => { event.preventDefault(); void save(); }}>
       <fieldset className="assistant-fields form" disabled={busy}>
