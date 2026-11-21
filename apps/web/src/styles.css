@@ -5730,34 +5730,90 @@ body.shell-dock-dragging * {
   gap: var(--space-6);
   min-width: 0;
 }
-/* Campaign sections keep their live bodies mounted while disclosures hide them. */
+/* Campaign sections keep their live bodies mounted while disclosures hide them. The index is one
+   row (#4781): a menu button naming the section you are in, an attention chip, and Collapse All /
+   Expand All as icons. Only the section name gives way to a narrow panel. The row takes the panel's
+   width rather than lending its own: a long section name would otherwise widen every section.
+   An inline-size container gives it no intrinsic width; its menu is portalled, so the layout
+   containment that comes with it does not move the menu.
+   Every control here is a small one, 36px on touch with a borrowed 44px hit area (§2.8): they sit
+   8px apart so no hit area takes a neighbour's taps. On touch the row is 36 + 4 + 2 + its 1px rule
+   = 43px: the 4px above is the hit area's borrowed top, which the panel's scrollport would clip
+   at the top of the panel, and the 1px it borrows below the rule lies over the content, where it
+   still takes the tap. */
 .campaign-section-index {
   position: sticky;
   top: 0;
   z-index: var(--z-sticky);
-  display: grid;
+  display: flex;
+  align-items: center;
   gap: var(--space-2);
   min-width: 0;
-  padding: var(--space-2);
+  padding: var(--space-0-5) 0;
   background: var(--bg);
   border-bottom: 1px solid var(--border);
+  container-type: inline-size;
 }
-.campaign-section-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
+@media (pointer: coarse) {
+  .campaign-section-index { padding: var(--space-1) 0 var(--space-0-5); }
+}
+.campaign-section-trigger.btn {
+  flex: 0 1 auto;
+  justify-content: flex-start;
   min-width: 0;
-  max-height: 30dvh;
-  overflow-y: auto;
+  max-width: 100%;
+  padding-left: var(--space-1);
 }
-.campaign-section-links button {
-  white-space: normal;
+.campaign-section-trigger svg { flex: none; color: var(--text-dim); }
+@media (forced-colors: active) {
+  .campaign-section-trigger svg { color: inherit; }
+}
+.campaign-section-trigger-label {
+  flex: none;
+  color: var(--text-faint);
+}
+/* At the right panel's usual width and on a phone, the prefix leaves the section's name too little
+   room ("Section: Waiting for Y…"), so it shows only in a wider panel. The name alone stays inside
+   the trigger's accessible name, so dropping the prefix keeps the two consistent. */
+@container (max-width: 420px) {
+  .campaign-section-trigger-label { display: none; }
+}
+.campaign-section-current {
   min-width: 0;
-  text-align: left;
+  overflow: hidden;
+  font-weight: var(--weight-semibold);
+  text-overflow: ellipsis;
 }
-.campaign-section-links [aria-current="location"] {
-  border-color: var(--accent);
+/* A small button (its size and touch hit area come from `.btn.sm`) drawn as an amber pill. */
+.campaign-section-attention.btn {
+  border-color: color-mix(in srgb, var(--amber) 32%, transparent);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--amber) 7%, var(--bg-elev));
+  color: var(--amber-on-tint);
+  font: var(--type-micro);
 }
+@media (hover: hover) {
+  .campaign-section-attention.btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--amber) 14%, var(--bg-elev));
+  }
+}
+.campaign-section-dot {
+  flex: none;
+  width: var(--space-2);
+  height: var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--amber);
+}
+.campaign-section-tools {
+  display: inline-flex;
+  flex: none;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+.campaign-section-menu { min-width: 240px; }
+.campaign-section-menu .menu-trail .count { color: var(--text-dim); }
+.campaign-section-menu .campaign-section-empty .menu-text,
+.campaign-section-menu .campaign-section-empty .menu-trail .count { color: var(--text-faint); }
 .campaign-section-heading button {
   display: flex;
   align-items: center;

@@ -57,7 +57,7 @@ export function CampaignScopeGrantSection({ grant, edit, ceilingsShown = false }
   const repository = grant.ceilings.repositories[0] ?? "";
   const selection = grant.selection;
   const target = grant.target;
-  return <CampaignSection title="Scope Grant" count={1} className="campaign-detail-section">
+  return <CampaignSection title="Scope Grant" className="campaign-detail-section">
     {grant.status === "uncertain" && <Notice tone="warning" title="Scope Grant Uncertain">
       The Decision Model couldn't tell which issues your first message asks for, so it granted none. The Orchestrator's scope proposal comes to you for approval.
     </Notice>}

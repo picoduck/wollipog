@@ -339,7 +339,8 @@ for (const theme of ["dark", "light"] as const) {
       if (device === "phone") {
         // The repository section is actionable and now precedes Summary. Reach it through the
         // sticky index rather than assuming it can be wheeled below its natural top position.
-        await page.getByRole("navigation", { name: "Campaign Sections" }).getByRole("button", { name: /^Repositories/ }).click();
+        await page.getByRole("navigation", { name: "Campaign Sections" }).getByRole("button", { name: /^Go to Section/ }).click();
+        await page.getByRole("menu", { name: "Go to Section" }).getByRole("menuitem", { name: /^Repositories/ }).click();
         await expect(section.getByRole("heading", { name: "Repositories", exact: true })).toBeInViewport();
         expect(await page.locator("aside.rpanel").evaluate((panel) => panel.scrollTop)).toBe(0);
         // Nothing of the row is under the tab bar band.

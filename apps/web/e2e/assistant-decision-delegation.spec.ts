@@ -350,7 +350,8 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await capture(page, "release-inbox-history");
 
     await page.goto("/campaign-status-e2e.html?scenario=campaign&delegation=stress&release-history");
-    await page.getByRole("navigation", { name: "Campaign Sections" }).getByRole("button", { name: /Delegated Decisions/ }).click();
+    await page.getByRole("navigation", { name: "Campaign Sections" }).getByRole("button", { name: /^Go to Section/ }).click();
+    await page.getByRole("menu", { name: "Go to Section" }).getByRole("menuitem", { name: /^Delegated Decisions/ }).click();
     await expectReleaseEntry(page.locator('[data-campaign-section="Delegated Decisions"]'));
     await capture(page, "release-campaign-history");
   });
@@ -427,7 +428,8 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await expect(history).toContainText("picoduck/wollipog#126");
 
     await page.goto("/campaign-status-e2e.html?scenario=campaign&delegation=stress");
-    await page.getByRole("navigation", { name: "Campaign Sections" }).getByRole("button", { name: /Delegated Decisions/ }).click();
+    await page.getByRole("navigation", { name: "Campaign Sections" }).getByRole("button", { name: /^Go to Section/ }).click();
+    await page.getByRole("menu", { name: "Go to Section" }).getByRole("menuitem", { name: /^Delegated Decisions/ }).click();
     const section = page.locator('[data-campaign-section="Delegated Decisions"]');
     await expect(section.getByText("The required checks passed and the review covered the current head.")).toBeVisible();
     await expect(section.getByRole("listitem")).toHaveCount(5);

@@ -112,7 +112,7 @@ export function CampaignScopeProposalSection({ grant, proposals, ceilingsShown =
   ceilingsShown?: boolean;
 }) {
   const repository = grant.ceilings.repositories[0] ?? "";
-  return <CampaignSection title="Scope Proposal" count={1} className="campaign-detail-section">
+  return <CampaignSection title="Scope Proposal" className="campaign-detail-section">
     {!proposals.length && <Notice tone="info" title="Waiting for the Orchestrator's Proposal">
       The Orchestrator reads your first message and proposes the campaign's issue scope. Nothing is dispatched until it is admitted.
     </Notice>}
