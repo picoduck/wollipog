@@ -12,15 +12,16 @@ import { BusyButton } from "./ui/BusyButton.js";
 export function AssistantThreadHistory({ entries }: { entries: AssistantThreadHistoryEntry[] }) {
   const [open, setOpen] = useState<AssistantThreadHistoryEntry | null>(null);
   return <>
-    <div className="form assistant-thread-history" role="region" aria-label="Earlier Conversations"
-      tabIndex={entries.length > 1 ? 0 : undefined}>
-      {entries.map((entry) => <div key={entry.sessionId}>
+    <div className="form" role="region" aria-label="Earlier Conversations">
+      <h3 className="group-label">Earlier Conversations</h3>
+      {entries.map((entry) => <div className="assistant-history-row" key={entry.sessionId}>
         <p className="muted">
           Switched from {assistantThreadHarnessLabel(entry.harness)} to {assistantThreadHarnessLabel(entry.nextHarness)}
           {" · "}{formatCalendarTime(entry.switchedAt)}
         </p>
-        <button type="button" className="btn sm" onClick={() => setOpen(entry)}>
-          Earlier Conversation ({assistantThreadHarnessLabel(entry.harness)})
+        <button type="button" className="btn sm" onClick={() => setOpen(entry)}
+          aria-label={`Open Earlier Conversation (${assistantThreadHarnessLabel(entry.harness)})`}>
+          Open
         </button>
       </div>)}
     </div>

@@ -221,9 +221,10 @@ test("the owner grants and revokes exact typed resolution, and Assistant calls n
     assert.equal(h.db.workflowDecisionByOccurrence(occurrenceId)?.status, "revoked");
     const history = await h.ownerCall("GET", `/api/assistant-decision-history?threadId=${thread.id}&campaignId=root`);
     assert.equal(history.status, 200);
+    assert.equal(history.body.total, 1);
     assert.deepEqual(history.body.entries.map((item: { delegation: unknown }) => item.delegation), [recorded.assistantDelegation]);
-    const otherOwnerHistory = h.db.assistantDecisionHistory({ ...h.owner, userId: "other-owner" }, {});
-    assert.deepEqual(otherOwnerHistory.entries, []);
+    const otherOwnerHistory = h.db.assistantDecisionHistory({ ...h.owner, userId: "other-owner" }, { threadId: thread.id });
+    assert.deepEqual(otherOwnerHistory, { entries: [], total: 0 });
     await setGrant(6, grant);
     const evidence = h.svc.createWorkflowDecision("child", { requestId: "evidence", resourceKey: "screenshots",
       resourceSnapshot: { category: "ui_evidence_approval", evidence: [{ evidenceId: "preview",

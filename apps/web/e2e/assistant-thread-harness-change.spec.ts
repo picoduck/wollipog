@@ -8,6 +8,17 @@ const evidenceDir = process.env.ASSISTANT_HARNESS_EVIDENCE_DIR;
 const captureStates = process.env.ASSISTANT_HARNESS_EVIDENCE_STATES?.split(",");
 const accountName = "Engineering Shared Subscription With a Long Account Display Name 1";
 
+async function openDetails(page: Page) {
+  const panel = page.locator("#right-panel");
+  if (!(await panel.isVisible())) await page.getByRole("button", { name: "Side Panel", exact: true }).click();
+  await panel.getByRole("tab", { name: "Details", exact: true }).click();
+  return panel.getByRole("tabpanel", { name: "Details", exact: true });
+}
+
+async function closeDetails(page: Page) {
+  await page.locator("#right-panel").getByRole("button", { name: "Close Panel" }).click();
+}
+
 async function open(page: Page, theme: "dark" | "light", scenario: "ready" | "fail" | "old" | "history-stress") {
   await page.emulateMedia({ colorScheme: theme });
   await page.goto(`/assistants-e2e.html?harness-change=${scenario}&limits=enabled&path=${encodeURIComponent(threadPath)}`);
@@ -60,9 +71,11 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await confirmation.getByRole("button", { name: "Change Harness", exact: true }).click();
       await expect(confirmation.getByText(/The original conversation is kept until/)).toBeVisible();
       await page.evaluate(() => Reflect.get(window, "finishAssistantHarnessChange")());
-      const history = page.getByRole("region", { name: "Earlier Conversations" });
+      const details = await openDetails(page);
+      const history = details.getByRole("region", { name: "Earlier Conversations" });
       await expect(history.getByRole("button")).toHaveCount(20);
-      expect(await history.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+      expect(await details.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+      await closeDetails(page);
       await expectFullyInViewport(page.locator(".composer"), "The composer with 20 earlier conversations");
       await capture(page, "history-stress");
     });
@@ -83,18 +96,18 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await capture(page, "in-progress");
       await page.evaluate(() => Reflect.get(window, "finishAssistantHarnessChange")());
       await expect(confirmation).toHaveCount(0);
-      await expect(page.getByText(/Switched from Claude Code to Codex/)).toBeVisible();
       await expect(page.getByText("Codex App Server is ready on Shared Engineering Machine.")).toBeVisible();
-      await expect(page.getByLabel("Thread Details")).toContainText("$8.13 of $25.00 spent");
-      await expect(page.getByLabel("Thread Details")).toContainText("2 of 10 sessions launched");
-      await expectFullyInViewport(page.locator(".composer"), "The new conversation composer");
+      await expect(await openDetails(page)).toContainText("$8.13 of $25.00 spent");
+      await expect(await openDetails(page)).toContainText("2 of 10 sessions launched");
+      if (layout === "desktop") await expectFullyInViewport(page.locator(".composer"), "The new conversation composer");
       await capture(page, "success");
-      await page.getByRole("button", { name: "Earlier Conversation (Claude Code)" }).click();
+      await page.getByRole("button", { name: "Open Earlier Conversation (Claude Code)" }).click();
       const history = page.getByRole("dialog", { name: "Earlier Conversation (Claude Code)" });
       await expect(history).toContainText("Last night's CI had two failures.");
       await expect(history.getByRole("textbox")).toHaveCount(0);
       await capture(page, "history");
       await history.getByRole("button", { name: "Done" }).click();
+      await closeDetails(page);
       await (await settings(page)).getByText("Decision Delegation", { exact: true }).click();
       const delegation = page.getByRole("dialog", { name: "Decision Delegation" });
       await expect(delegation.getByText("Confirm Provider Disclosure")).toBeVisible();
@@ -109,9 +122,10 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       let confirmation = await confirmChange(page);
       await confirmation.getByRole("button", { name: "Cancel" }).click();
       await expect(confirmation).toHaveCount(0);
-      await expect(page.getByLabel("Thread Details")).toContainText("Claude Code");
+      await expect(await openDetails(page)).toContainText("Claude Code");
       await expect(page.getByRole("button", { name: /Earlier Conversation/ })).toHaveCount(0);
       await capture(page, "cancelled");
+      await closeDetails(page);
 
       await chooseHarness(page);
       confirmation = await confirmChange(page);
@@ -121,7 +135,8 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await expect(confirmation.getByRole("alert")).toContainText("The original conversation is ready to use.");
       await capture(page, "rollback");
       await confirmation.getByRole("button", { name: "Cancel" }).click();
-      await expect(page.getByLabel("Thread Details")).toContainText("Claude Code");
+      await expect(await openDetails(page)).toContainText("Claude Code");
+      await closeDetails(page);
       await expectFullyInViewport(page.locator(".composer"), "The original conversation composer");
       await expect(page.getByText(/Switched from/)).toHaveCount(0);
 

@@ -118,8 +118,17 @@ for (const theme of ["dark", "light"] as const) {
         await capture(page, `${prefix}-change-default`);
 
         await open(page, theme, "accounts=stress", path);
-        const details = page.getByRole("list", { name: "Thread Details" });
+        const panel = page.locator("#right-panel");
+        const toggle = page.getByRole("button", { name: "Side Panel", exact: true });
+        const details = panel.getByRole("tabpanel", { name: "Details" });
+        const revealAccount = async () => {
+          await toggle.click();
+          await panel.getByRole("tab", { name: "Details" }).click();
+          await details.getByRole("button", { name: "Show Account" }).click();
+        };
+        await revealAccount();
         await expect(details).toContainText("DesignResearchAndEngineering");
+        await panel.getByRole("button", { name: "Close Panel" }).click();
         await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
         await expectFullyInViewport(page.locator(".composer"), "Thread composer");
         await expectPageNoHorizontalOverflow(page);
@@ -130,7 +139,9 @@ for (const theme of ["dark", "light"] as const) {
         await captureAccountList(page, change, changeButton, `${prefix}-change-stress`, 9);
         await changeButton.click();
         await expect(page.locator("body")).toHaveAttribute("data-changed-account", "acct:0000000000000001");
+        await revealAccount();
         await expect(details).toContainText("Studio Subscription");
+        await panel.getByRole("button", { name: "Close Panel" }).click();
         await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
         await expect(page.locator(".assistant-launched-toggle")).toHaveText("2 Sessions · 1 Needs You");
       });
@@ -157,14 +168,13 @@ for (const theme of ["dark", "light"] as const) {
       await capture(page, `assistants-list-${theme}-desktop`);
     });
 
-    test("an open thread shows its transcript, composer, access level, launched counts and the waiting approval", async ({ page }) => {
+    test("an open thread shows its transcript, composer, launched counts and the waiting approval", async ({ page }) => {
       await open(page, theme, "", "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA");
       const head = page.locator(".assistant-thread-head");
       // One bar across the thread pane, as on the session page (#4776); the facts head the column.
       const bar = page.locator(".assistant-thread-bar");
       await expect(bar.getByRole("heading", { level: 2, name: "Triage Open Issues" })).toBeVisible();
-      await expect(head.getByRole("list", { name: "Thread Details" })).toContainText("Full Access · Ask Before Destructive");
-      await expect(head.getByRole("list", { name: "Thread Details" })).toContainText("Claude Code");
+      await expect(head).not.toContainText("Full access.");
       // The backing session's transcript and composer.
       await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
       await expect(page.locator(".composer")).toBeVisible();
@@ -372,7 +382,7 @@ for (const theme of ["dark", "light"] as const) {
       await threadRow(page, "Triage Open Issues").click();
       await expect(page.getByRole("button", { name: "Back to Assistants" })).toBeVisible();
       await expect(threadsList(page)).toBeHidden();
-      await expect(page.getByRole("list", { name: "Thread Details" })).toContainText("Full Access · Ask Before Destructive");
+      await expect(page.locator(".assistant-thread-head")).not.toContainText("Full access.");
       await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
       await expect(page.getByRole("region", { name: "Waiting for You" }).getByRole("button", { name: "Approve Once" })).toBeVisible();
       // The waiting approval is whole on the screen: its title, its command and all three buttons sit
