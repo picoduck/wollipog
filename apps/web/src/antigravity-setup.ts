@@ -1,4 +1,5 @@
 import {
+  ANTIGRAVITY_AGENT_ID,
   ANTIGRAVITY_SETUP_GUIDANCE,
   ANTIGRAVITY_SIGN_IN_ACTIVE_STATUSES,
   runnerCapabilityRequirement,
@@ -58,6 +59,22 @@ export function antigravitySetupPresentation(
   const verifying = setup.signIn?.status === "verifying";
   const phase: AntigravitySetupPhase = antigravitySignInRunning(setup) || verifying ? "signing_in" : setup.status;
   return { phase, setup, blocked };
+}
+
+/** Whether people can start Google Antigravity sessions on this machine (#4779), from the agent the
+ * runner advertises beside its setup. A ready setup without that agent is an older runner. */
+export function antigravitySessions(runner: Pick<RunnerView, "agents" | "antigravitySetup">, machineName: string): { label: string; sentence: string } {
+  const agent = runner.agents.find((candidate) => candidate.id === ANTIGRAVITY_AGENT_ID);
+  if (agent?.available === true) {
+    return { label: "Available in New Session", sentence: "Available in New Session." };
+  }
+  if (agent && runner.antigravitySetup?.status === "ready") {
+    return { label: "Not in New Session", sentence: "Not available, because this machine's execution isolation denies the network access Antigravity needs." };
+  }
+  if (!agent && runner.antigravitySetup?.status === "ready") {
+    return { label: "Setup Only", sentence: `Update Wollipog on ${machineName} to start Antigravity sessions.` };
+  }
+  return { label: "Not in New Session", sentence: "Available in New Session once setup is ready." };
 }
 
 /** One sentence for a failed check. Sentence case: this is helper text. */

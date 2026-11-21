@@ -227,6 +227,10 @@ export interface DriverOptions {
   args: string[];
   cwd: string;
   env: Record<string, string>;
+  /** ACP only: inherited variables the agent must not see, from the agent's credential context. */
+  scrubInheritedEnv?: string[];
+  /** ACP only: narrow handling for one agent (see `acp-compatibility.ts`). */
+  acpCompatibility?: import("../acp-compatibility.js").AcpCompatibility;
   projectMemoryDirectory?: string;
   /** Non-secret per-turn notes (artifact capability/policy, then zsh rules when commands run in zsh),
    * re-created at launch/resume. */

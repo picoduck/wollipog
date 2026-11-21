@@ -507,6 +507,10 @@ export interface SessionLaunchPreparation {
   sessionCommandCatalogProvenance?: string;
   /** Codex App Server custom prompts read for this launch. Bodies never enter session metadata. */
   codexPrompts?: CodexPromptTemplate[];
+  /** ACP only: inherited variables this launch's agent must not see (its credential context). */
+  scrubInheritedEnv?: string[];
+  /** ACP only: narrow handling this launch's agent needs (see `acp-compatibility.ts`). */
+  acpCompatibility?: DriverOptions["acpCompatibility"];
 }
 
 /** Transcript text for an invoked provider command, spelled the way the harness expects: a
@@ -10762,6 +10766,8 @@ export class SessionManager {
           args: preparedProjectMemoryArgs ?? launchPreparation?.codexLaunchArgs ?? meta.args,
           cwd,
           env: meta.env,
+          ...(launchPreparation?.scrubInheritedEnv?.length ? { scrubInheritedEnv: launchPreparation.scrubInheritedEnv } : {}),
+          ...(launchPreparation?.acpCompatibility ? { acpCompatibility: launchPreparation.acpCompatibility } : {}),
           config: meta.config,
           artifactGuidance: meta.review ? "" : [artifactGuidance(meta, this.controlPlaneProtocolVersion()), shellGuidance(meta)].filter(Boolean).join(" "),
           ...(meta.review ? { review: true } : {}),
@@ -18378,6 +18384,8 @@ export class SessionManager {
             args: launchPreparation?.codexLaunchArgs ?? source.args,
             cwd: source.worktreePath,
             env: source.env,
+            ...(launchPreparation?.scrubInheritedEnv?.length ? { scrubInheritedEnv: launchPreparation.scrubInheritedEnv } : {}),
+            ...(launchPreparation?.acpCompatibility ? { acpCompatibility: launchPreparation.acpCompatibility } : {}),
             config: source.config,
             context: source.context,
             capabilities: source.capabilities,

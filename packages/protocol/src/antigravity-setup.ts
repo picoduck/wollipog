@@ -2,16 +2,20 @@
  *
  * The runner checks whether Google's `agy` CLI is installed, whether its ACP server answers, and
  * whether the runner's own sign-in can open an ACP session. It also supervises Google's remote
- * `agy acp --login` paste-code sign-in. This is setup only: Antigravity is not an agent the runner
- * advertises for New Session, and sessions are a separate feature (#4779). Session launch reuses
- * the same credential context (`antigravityCredentialContext` on the runner) when it lands.
+ * `agy acp --login` paste-code sign-in. A runner with Antigravity sessions (#4779) advertises the
+ * agent `ANTIGRAVITY_AGENT_ID` from this setup: choosable in New Session only while the setup is
+ * `ready`, and launched with the same executable and credential context
+ * (`antigravityCredentialContext` on the runner). An older runner advertises no such agent.
  *
  * Wollipog never installs or updates Antigravity. A missing runtime shows Google's documented
  * install command for a person to run in the machine's terminal.
  *
- * The behavior of `agy` behind these checks (its sign-in output, exit codes and session errors) is
- * verified only against credential-free fixtures. Anything the runner does not recognize reports
- * `sign_in_required` or `verification_failed`, never `ready`. */
+ * The sign-in output and exit codes are verified only against a credential-free fixture. The ACP
+ * session behavior was also observed with real agy 1.5.14 on Linux. Anything the runner does not
+ * recognize reports `sign_in_required` or `verification_failed`, never `ready`. */
+
+/** The agent id of Google Antigravity sessions in a runner's agent list (#4779). */
+export const ANTIGRAVITY_AGENT_ID = "google-antigravity";
 
 /** Where the setup stands on one Machine.
  * - `checking`: the runner is checking the runtime and its sign-in.

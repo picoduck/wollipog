@@ -3,7 +3,7 @@ import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, type AntigravitySetupView, type RunnerView } from "@wollipog/protocol";
+import { ANTIGRAVITY_AGENT_ID, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, type AgentDefinition, type AntigravitySetupView, type RunnerView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -83,7 +83,7 @@ async function openSetup(body: HTMLElement): Promise<HTMLElement> {
   return opened!;
 }
 
-test("only people who may manage the machine see the setup row, and it says it is setup only", async () => {
+test("only people who may manage the machine see the setup row, and it says Antigravity is not in New Session yet", async () => {
   const hidden = await mount(runner(setup({}), { canManage: false }));
   try { assertNoDomNode(row(hidden.body), "setup row"); } finally { await hidden.unmount(); }
   // Account Setup reuses the Agents section for provider accounts and leaves setup out.
@@ -94,8 +94,38 @@ test("only people who may manage the machine see the setup row, and it says it i
     const setupRow = row(shown.body)!;
     assert.equal(setupRow.querySelector(".row-title")?.textContent, "Google Antigravity");
     assert.equal(setupRow.querySelector(".status")?.textContent, "Sign-In Required");
-    assert.match(setupRow.querySelector(".row-sub")?.textContent ?? "", /^Setup Only/u);
+    assert.match(setupRow.querySelector(".row-sub")?.textContent ?? "", /^Not in New Session/u);
+    const opened = await openSetup(shown.body);
+    assert.match(opened.textContent ?? "", /SessionsAvailable in New Session once setup is ready\./u);
   } finally { await shown.unmount(); }
+});
+
+test("a ready setup says whether its runner offers Antigravity in New Session, and the agent is not listed twice", async () => {
+  const antigravity: AgentDefinition = { id: ANTIGRAVITY_AGENT_ID, name: "Google Antigravity", command: executable.path, args: ["acp"],
+    env: {}, driver: "acp", source: "discovered", available: true, authStatus: "authenticated" };
+  const ready = setup({ status: "ready", models: [{ id: "fixture-pro", name: "Fixture Pro" }] });
+  const offered = await mount(runner(ready, { agents: [antigravity] }));
+  try {
+    assert.match(row(offered.body)!.querySelector(".row-sub")?.textContent ?? "", /^Available in New Session/u);
+    const agentRows = [...offered.body.querySelectorAll('ul[aria-label="Agents"] .row-title')].map((title) => title.textContent);
+    assert.equal(agentRows.includes("Google Antigravity"), false, "the setup row stands for the agent");
+    assert.equal(offered.body.textContent?.includes("No Agents Ready"), false, "it still counts as a ready agent");
+    assert.match((await openSetup(offered.body)).textContent ?? "", /SessionsAvailable in New Session\./u);
+  } finally { await offered.unmount(); }
+
+  // A runner from before Antigravity sessions reports a ready setup but no agent.
+  const older = await mount(runner(ready));
+  try {
+    assert.match(row(older.body)!.querySelector(".row-sub")?.textContent ?? "", /^Setup Only/u);
+    assert.match((await openSetup(older.body)).textContent ?? "", /Update Wollipog on Studio Mac to start Antigravity sessions\./u);
+  } finally { await older.unmount(); }
+
+  // Without the setup row (Account Setup), the advertised agent is listed like any other.
+  const accountSetup = await mount(runner(ready, { agents: [antigravity] }), {}, false);
+  try {
+    const agentRows = [...accountSetup.body.querySelectorAll('ul[aria-label="Agents"] .row-title')].map((title) => title.textContent);
+    assert.ok(agentRows.includes("Google Antigravity"));
+  } finally { await accountSetup.unmount(); }
 });
 
 test("a missing runtime shows Google's install command and never offers to install it", async () => {
@@ -171,7 +201,7 @@ test("sign-in required starts Google's remote sign-in", async () => {
     const opened = await openSetup(view.body);
     assert.match(opened.textContent ?? "", /Sign-In Required/u);
     assert.match(opened.textContent ?? "", /system keyring/u);
-    assert.match(opened.textContent ?? "", /Not available yet/u);
+    assert.match(opened.textContent ?? "", /Available in New Session once setup is ready/u);
     await act(async () => buttonNamed(opened, "Sign In with Google")!.click());
     assert.equal(started, 1);
   } finally { await view.unmount(); }

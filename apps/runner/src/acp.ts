@@ -64,6 +64,12 @@ import {
   type SafeAcpModeState,
 } from "./acp-session-state.js";
 import { AcpFilesystemService, AcpTerminalService } from "./acp-client-services.js";
+import {
+  acpCompatibilityFailure,
+  acpStderrMirrored,
+  compatibleAcpNegotiation,
+  type AcpCompatibility,
+} from "./acp-compatibility.js";
 import { materializeAcpMcpServers } from "./acp-session-context.js";
 import {
   assertClaudeAgentAcpOrchestratorIdentity,
@@ -151,11 +157,16 @@ export class AcpClient {
       /** Discovery probes negotiate only the ACP initialize response and must not expose client
        * filesystem, terminal, permission, or session-update services to the launched adapter. */
       initializeOnly?: boolean;
+      /** Inherited variables the agent process must not see (an agent's credential context). */
+      scrubInheritedEnv?: string[];
+      /** Narrow handling for one agent (see `acp-compatibility.ts`). */
+      compatibility?: AcpCompatibility;
     },
     private readonly ev: AcpEvents,
     deps: Partial<AcpClientDeps> = {},
   ) {
     this.artifactGuidance = opts.artifactGuidance;
+    this.compatibility = opts.compatibility;
     this.orchestrator = opts.orchestrator === true;
     // `||`, not `??`: the role can only ever widen the assertion. An explicit `false` alongside the
     // coupled preset must not be able to switch the pinned-identity check off.
@@ -174,7 +185,7 @@ export class AcpClient {
 
     this.child.stderr.setEncoding("utf8");
     this.child.stderr.on("data", (t: string) => {
-      if (this.disposed) return;
+      if (this.disposed || !acpStderrMirrored(this.compatibility)) return;
       const text = String(t).trim();
       if (text) this.ev.onStderr(text);
     });
@@ -204,6 +215,7 @@ export class AcpClient {
   }
 
   private readonly sessionContext: AcpSessionContextConfig | undefined;
+  private readonly compatibility: AcpCompatibility | undefined;
   private readonly mcpEnvironment: NodeJS.ProcessEnv;
   private readonly orchestrator: boolean;
   private readonly orchestratorRole: boolean;
@@ -245,13 +257,30 @@ export class AcpClient {
   /* ----------------------------- Lifecycle ------------------------------- */
 
   async initialize(): Promise<void> {
-    const res = await this.peer.request("initialize", acpInitializeRequest());
-    this.negotiation = negotiateAcpInitialize(res);
+    try {
+      const res = await this.peer.request("initialize", acpInitializeRequest());
+      this.negotiation = compatibleAcpNegotiation(negotiateAcpInitialize(res), this.compatibility);
+    } catch (error) {
+      // A profiled agent that cannot complete the handshake is an installation problem.
+      throw this.compatibilityError("start") ?? error;
+    }
     // Keyed on the role, not the preset: only the exact audited adapter release may ever carry
     // Orchestrator authority, whichever launch shape asked for it.
     if (this.orchestratorRole) assertClaudeAgentAcpOrchestratorIdentity(this.negotiation.agentInfo);
     this.supportsImages = this.negotiation.stable.promptImage;
     this.ev.onAcpCapabilities?.(runtimeCapabilities(this.negotiation));
+  }
+
+  private compatibilityError(stage: "start" | "resume" | "turn", detail?: string): Error | undefined {
+    const message = acpCompatibilityFailure(this.compatibility, stage, detail);
+    return message ? new Error(message) : undefined;
+  }
+
+  /** A profiled agent signs in from the machine's setup, never from a session: report the
+   * session's agent as signed out and say where to sign in. */
+  private signInRequired(): Error {
+    this.ev.onAuthStatus?.("unauthenticated");
+    return new Error(acpCompatibilityFailure(this.compatibility, "sign_in"));
   }
 
   negotiatedCapabilities(): AcpNegotiation | null {
@@ -281,6 +310,7 @@ export class AcpClient {
       } catch (error) {
         this.establishingSession = false;
         this.pendingSessionStateUpdates = [];
+        if (this.compatibility && !this.transportClosed && isAgentAuthRequiredError(error)) throw this.signInRequired();
         if (this.transportClosed || !isAgentAuthRequiredError(error) || !this.negotiation?.authMethods.length) throw error;
         await this.authenticate();
       }
@@ -320,6 +350,9 @@ export class AcpClient {
       this.sessionId = null;
       this.replaySuppressedStateUpdates = [];
       if (error instanceof Error && error.message.startsWith("ACP agent does not advertise")) throw error;
+      if (this.compatibility) {
+        throw isAgentAuthRequiredError(error) && !this.transportClosed ? this.signInRequired() : this.compatibilityError("resume");
+      }
       throw new Error(this.negotiation?.stable.sessionResume ? "ACP session resume failed" : "ACP session load failed");
     }
     this.reportAuthenticated();
@@ -588,10 +621,17 @@ export class AcpClient {
     if (content.length === 0) content.push({ type: "text", text: "" });
     this.streamedAgentResponse = false;
     try {
-      const res = (await this.peer.request("session/prompt", {
-        sessionId: this.sessionId,
-        prompt: content,
-      })) as PromptResponse;
+      let res: PromptResponse;
+      try {
+        res = (await this.peer.request("session/prompt", {
+          sessionId: this.sessionId,
+          prompt: content,
+        })) as PromptResponse;
+      } catch (error) {
+        if (!this.compatibility || this.transportClosed) throw error;
+        throw isAgentAuthRequiredError(error) ? this.signInRequired()
+          : this.compatibilityError("turn", errorMessage(error)) ?? error;
+      }
       const stopReason = res.stopReason as StopReason;
       // ACP publishes response text only as chunks. Mirror the native streaming drivers' durable,
       // content-free completion fence so transcript consumers can settle the last text item.
@@ -616,6 +656,15 @@ export class AcpClient {
 
   cancel(): void {
     if (this.sessionId) this.peer.notify("session/cancel", { sessionId: this.sessionId });
+    // ACP: after session/cancel the client answers every pending permission request as
+    // `cancelled`, so the agent never waits on an approval for a stopped turn. Like the native
+    // drivers, nothing is emitted here: settling the turn settles its approval card. A sign-in
+    // choice is not part of a turn and stays pending.
+    for (const [requestId, resolve] of [...this.permPending]) {
+      if (!requestId.startsWith("perm_")) continue;
+      this.permPending.delete(requestId);
+      resolve(null);
+    }
   }
 
   resolvePermission(requestId: string, optionId: string | null): boolean {
@@ -952,6 +1001,12 @@ export function isAgentAuthRequiredError(value: unknown): value is RpcError {
     (value as RpcError).code === -32000 &&
     (value as RpcError).transportFailure !== true
   );
+}
+
+/** The message of a thrown Error or JSON-RPC error object. */
+function errorMessage(error: unknown): string | undefined {
+  const message = error && typeof error === "object" ? (error as { message?: unknown }).message : undefined;
+  return typeof message === "string" ? message : undefined;
 }
 
 function runtimeCapabilities(negotiation: AcpNegotiation): AcpRuntimeCapabilities {

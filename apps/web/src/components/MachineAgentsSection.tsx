@@ -1,5 +1,5 @@
 import React, { useId, useRef, useState } from "react";
-import { runnerCapabilityRequirement, runnerSupportsProtocol, type AgentDefinition, type RunnerView } from "@wollipog/protocol";
+import { ANTIGRAVITY_AGENT_ID, runnerCapabilityRequirement, runnerSupportsProtocol, type AgentDefinition, type RunnerView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import {
   agentContextLabel,
@@ -252,8 +252,12 @@ export function MachineAgentsSection({ runner, online, machineName, canFindSessi
   const [openAgentId, setOpenAgentId] = useState<string | null>(null);
   const [findingSessionsFor, setFindingSessionsFor] = useState<string | null>(null);
   const opener = useRef<HTMLElement | null>(null);
-  const agents = runner.agents;
-  const { listed, notInstalled, anyReady } = machineAgentGroups(agents, online);
+  // Where its setup row shows, that row stands for Google Antigravity (#4779): its advertised agent
+  // is not listed a second time, though it still counts as a ready agent.
+  const showsAntigravitySetup = antigravitySetup && antigravitySetupVisible(runner);
+  const agents = showsAntigravitySetup ? runner.agents.filter((agent) => agent.id !== ANTIGRAVITY_AGENT_ID) : runner.agents;
+  const { listed, notInstalled } = machineAgentGroups(agents, online);
+  const { anyReady } = machineAgentGroups(runner.agents, online);
   const nameOf = (agent: AgentDefinition) => agentDisplayName(agent, agents);
   const open = (agentId: string) => (button: HTMLButtonElement) => {
     opener.current = button;
@@ -326,7 +330,7 @@ export function MachineAgentsSection({ runner, online, machineName, canFindSessi
           )}
         </>
       )}
-      {antigravitySetup && antigravitySetupVisible(runner) && <AntigravitySetupRow runner={runner} online={online} machineName={machineName} />}
+      {showsAntigravitySetup && <AntigravitySetupRow runner={runner} online={online} machineName={machineName} />}
       {openAgent && (
         <AgentDetailsDialog
           agent={openAgent}

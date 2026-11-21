@@ -3,6 +3,7 @@ import { ANTIGRAVITY_SETUP_GUIDANCE, type AntigravitySetupView, type RunnerView 
 import { useApi } from "../api-context.js";
 import {
   antigravityCheckFailureSentence,
+  antigravitySessions,
   antigravityTerminalSetup,
   antigravitySetupPresentation,
   antigravitySignInEnding,
@@ -25,13 +26,14 @@ const NAME = "Google Antigravity";
 
 type Running = "check" | "start" | "submit" | "cancel" | null;
 
-/** Google Antigravity's row in a machine's Agents section (#4780). It is setup only: Antigravity is
- * not offered in New Session yet, so the row says so instead of listing it as an agent. */
+/** Google Antigravity's setup row in a machine's Agents section (#4780). It also says whether the
+ * setup makes Antigravity available in New Session (#4779). */
 export function AntigravitySetupRow({ runner, online, machineName }: { runner: RunnerView; online: boolean; machineName: string }) {
   const [open, setOpen] = useState(false);
   const opener = useRef<HTMLElement | null>(null);
   const presentation = antigravitySetupPresentation(runner, online);
   const setup = presentation.setup;
+  const sessions = antigravitySessions(runner, machineName);
   return (
     <>
       <ul className="machine-agent-list" aria-label="Agent Setup">
@@ -46,7 +48,7 @@ export function AntigravitySetupRow({ runner, online, machineName }: { runner: R
                   className="machine-agent-status" />
               </span>
               <span className="row-sub machine-agent-meta">
-                <span>Setup Only</span>
+                <span>{sessions.label}</span>
                 {setup && setup.status !== "checking" && <span className="machine-agent-meta-extra">Checked {relativeTime(setup.checkedAt)}</span>}
                 {setup?.executable?.version && <span className="machine-agent-meta-extra">v{setup.executable.version}</span>}
               </span>
@@ -130,7 +132,7 @@ export function AntigravitySetupDialog({ runner, presentation, machineName, retu
           <dt>Sign-In</dt>
           <dd>Shared by everything that runs as this machine's runner user, because Antigravity keeps it in that user's system keyring.</dd>
         </div>
-        <div><dt>Sessions</dt><dd>Not available yet. Wollipog can set up Antigravity here, but can't start Antigravity sessions.</dd></div>
+        <div><dt>Sessions</dt><dd>{antigravitySessions(runner, machineName).sentence}</dd></div>
         {setup && setup.status !== "checking" && <div><dt>Last Check</dt><dd>{relativeTime(setup.checkedAt)}</dd></div>}
       </dl>
     </Modal>
