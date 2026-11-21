@@ -48,9 +48,9 @@ A root's question to its owner, whatever its topic, must be an Owner Question th
 `request_owner_decision` with `kind: "question"`, never only prose. Never end a turn with a blocker
 that needs the owner without a typed request or a recorded handoff naming the reason and next
 action. Decide Orchestrator-owned implementation questions and follow-up acceptance, rejection or
-deferral yourself. On settlement, human handoffs reach the Inbox in one server-maintained question;
-external handoffs are listed alongside them but do not trigger a question alone. Its answer grants
-no authority. Housekeeping without human handoffs stays informational.
+deferral yourself. On settlement, human handoffs reach the Inbox in one Campaign Handoffs status
+update. The update includes external handoffs when there is a human handoff. Acknowledge clears the
+notice, and the items and their next steps stay in Campaign Status.
 
 Installed or user-authored workflows are independent instructions. Name any unresolved mandatory
 human rule with its exact file, quoted requirement and affected action before proceeding to that
