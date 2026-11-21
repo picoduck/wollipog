@@ -612,6 +612,39 @@ test("a runner that starts stopping during verification never confirms the new v
   assert.equal(existsSync(join(managedRoot, "pending-activation.json")), false);
 });
 
+test("updates beside a broken managed copy keep the working PATH fallback in use", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  const { setup, managedRoot, published } = supervisor(server, { resolveExecutable: async () => pathAgy });
+  await setup.check("never");
+  await install(setup);
+  // The managed copy breaks with a definite version failure; the signed-in PATH copy is in use.
+  writeFileSync(join(managedRoot, "current", "agy"), "#!/bin/sh\nexit 3\n");
+  const broken = readlinkSync(join(managedRoot, "current"));
+  const fallback = await setup.check("never");
+  assert.equal(fallback.status, "ready");
+  assert.equal(fallback.executable?.source, "path");
+
+  // An update that stops before activation (a tampered archive) leaves the PATH copy selected.
+  server.publish({ platform: PLATFORM, version: "1.6.0", archive: release("1.6.0"), manifestSha512: "0".repeat(128) });
+  const tampered = await install(setup);
+  assert.equal(tampered.managedInstall?.operation?.failure, "checksum_mismatch");
+  assert.equal(tampered.status, "ready");
+  assert.equal(tampered.executable?.source, "path");
+  assert.equal(tampered.managedInstall?.activeCheckFailed, true);
+  assert.equal(setup.launchTarget()?.command, pathAgy);
+
+  // A candidate that asks for a sign-in is worse than the signed-in PATH copy: it is rolled back.
+  server.publish({ platform: PLATFORM, version: "1.6.1", archive: release("1.6.1", "session_auth_required") });
+  const refused = await install(setup);
+  assert.equal(refused.managedInstall?.operation?.failure, "access_check_failed");
+  assert.equal(readlinkSync(join(managedRoot, "current")), broken);
+  assert.equal(refused.status, "ready");
+  assert.equal(refused.executable?.source, "path");
+  assert.equal(setup.launchTarget()?.command, pathAgy);
+  assertAllValid(published);
+});
+
 test("a PATH copy can't stand in for a managed copy whose baseline check timed out", async () => {
   const server = new FakeReleaseServer();
   server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });

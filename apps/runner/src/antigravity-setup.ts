@@ -477,6 +477,8 @@ export class AntigravitySetupSupervisor {
   /** Why the last install failed before its rollback failed too. Once a later restore succeeds,
    * the outcome reads this cause again. */
   private rollbackCause: AntigravityInstallFailure | undefined;
+  /** Why the managed copy's version check failed in the last check that fell back to the PATH copy. */
+  private managedVersionFailure: AntigravitySetupFailure | undefined;
   private releasePlatformKey: string | null | undefined;
   private stopped = false;
   private readonly store: AntigravityManagedStore;
@@ -771,6 +773,7 @@ export class AntigravitySetupSupervisor {
       .find((candidate) => !this.insideManagedStore(candidate)) ?? null;
     this.managed.pathExecutable = pathCopy ?? undefined;
     this.managed.activeCheckFailed = undefined;
+    this.managedVersionFailure = undefined;
     const version = (path: string, isManaged: boolean) => checkAntigravityVersion({ command: path, args: [], cwd: this.options.dataDir,
       context: this.credentialContext(isManaged), spawn: this.spawn, kill: this.kill, timeoutMs: this.options.versionTimeoutMs });
 
@@ -788,6 +791,7 @@ export class AntigravitySetupSupervisor {
           executable: { path, source: "managed" }, checkedAt: this.now() });
       } else {
         this.managed.activeCheckFailed = true;
+        this.managedVersionFailure = versioned.failure;
       }
     }
     if (!executable) {
@@ -819,14 +823,16 @@ export class AntigravitySetupSupervisor {
     const setStage = (stage: AntigravityInstallStage) => this.updateOperation(operation.operationId, { stage });
     this.rollbackCause = undefined;
     try {
-      // What the copy the update replaces achieves now (the last report may be stale, or name a
-      // version a recovery just replaced). The new version must do at least as well. With a
-      // managed copy that is the managed copy alone: a PATH copy's result must not stand in for it.
-      const baseline = await this.runCheck("never", { managedOnly: !!this.readManaged() });
-      // A check that timed out proves nothing about the copy in use: it may still work once the
-      // service answers. Judging the new version against it could replace a working copy, so the
-      // update stops here, before anything is downloaded or activated.
-      if (baseline.status === "verification_failed" && baseline.failure === "timed_out") {
+      // What Antigravity on this machine achieves now, by the ordinary check (the last report may
+      // be stale, or name a version a recovery just replaced). The new version must do at least as
+      // well, so a working PATH fallback is never displaced by a worse managed copy, and the
+      // ordinary selection stays published if the install stops before activation.
+      const baseline = await this.runCheck("never");
+      // A check that timed out proves nothing: the copy may still work once the service answers.
+      // That includes a managed copy whose version check timed out while the PATH copy stood in.
+      // Judging the new version against it could replace a working copy, so the update stops
+      // here, before anything is downloaded or activated.
+      if ((baseline.status === "verification_failed" && baseline.failure === "timed_out") || this.managedVersionFailure === "timed_out") {
         throw new AntigravityInstallError("timed_out", "The copy in use couldn't be checked in time, so the update didn't start.");
       }
       const before = accessRank(baseline.status);
