@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { AntigravityManagedStore } from "./antigravity-install.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, beforeEach, test } from "node:test";
@@ -378,6 +379,8 @@ test("an update that fails the access check its predecessor passed is rolled bac
   assert.equal(removed.status, "ready");
   assert.equal(removed.executable?.source, "path");
   assert.equal(existsSync(join(beside.managedRoot, "current")), false);
+  // Every report during the rollback is valid: none names the removed copy as the managed release.
+  assertAllValid(beside.published);
 
   // Without a sign-in, a first install that only needs one succeeds: nothing worked before it.
   rmSync(join(state, "signed-in"));
@@ -430,4 +433,115 @@ test("a PATH entry leading into the managed folder doesn't hide a separate copy 
   assert.equal(fallback.executable?.source, "path");
   assert.equal(fallback.executable?.path, pathAgy);
   assert.equal(fallback.managedInstall?.activeCheckFailed, true);
+});
+
+test("an update is verified by itself: a working PATH copy can't pass it on the new version's behalf", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  const { setup, managedRoot, published } = supervisor(server, { resolveExecutable: async () => pathAgy });
+  await setup.check("never");
+  assert.equal((await install(setup)).executable?.source, "managed");
+  const working = readlinkSync(join(managedRoot, "current"));
+
+  // 1.6.0 passes every staged check, but its version check fails in the runner user's own HOME.
+  server.publish({ platform: PLATFORM, version: "1.6.0", archive: release("1.6.0", "version_fail_outside_staging") });
+  const failed = await install(setup);
+  assert.equal(failed.managedInstall?.operation?.failure, "access_check_failed");
+  assert.equal(readlinkSync(join(managedRoot, "current")), working);
+  assert.equal(failed.executable?.source, "managed");
+  assert.equal(failed.executable?.version, "1.5.14");
+  assert.equal(failed.status, "ready");
+  assertAllValid(published);
+});
+
+test("a rollback that fails is reported as such, and the next check restores the version it replaced", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  let blockAfterActivation = false;
+  let managedRootRef = "";
+  const views: AntigravitySetupView[] = [];
+  const { setup, managedRoot } = supervisor(server, {
+    onUpdate: (view) => {
+      views.push(view);
+      // The candidate's own check has started: the pointers already moved. Make the folder
+      // unwritable so the rollback's new symlinks can't be created.
+      if (blockAfterActivation && view.managedInstall?.operation?.stage === "activating" && view.status === "checking") {
+        blockAfterActivation = false;
+        chmodSync(managedRootRef, 0o500);
+      }
+    },
+  });
+  managedRootRef = managedRoot;
+  await install(setup);
+  const working = readlinkSync(join(managedRoot, "current"));
+
+  server.publish({ platform: PLATFORM, version: "1.6.0", archive: release("1.6.0", "session_error") });
+  blockAfterActivation = true;
+  setup.startInstall();
+  const failed = await until(setup, (view) => view.managedInstall?.operation?.status === "failed" && view.status !== "checking");
+  try {
+    assert.equal(failed.managedInstall?.operation?.failure, "rollback_failed");
+    assert.notEqual(readlinkSync(join(managedRoot, "current")), working, "the rejected version is still current");
+    assert.ok(existsSync(join(managedRoot, "pending-activation.json")), "the pending record stays for a retry");
+  } finally {
+    chmodSync(managedRoot, 0o700);
+  }
+  const recovered = await setup.check("never");
+  assert.equal(readlinkSync(join(managedRoot, "current")), working);
+  assert.equal(existsSync(join(managedRoot, "pending-activation.json")), false);
+  assert.equal(recovered.status, "ready");
+  assert.equal(recovered.executable?.version, "1.5.14");
+  assert.equal(recovered.managedInstall?.active?.version, "1.5.14");
+  assertAllValid(views);
+});
+
+test("a runner that exits mid-verification restores the replaced version when it starts again", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  const first = supervisor(server);
+  await install(first.setup);
+  const working = readlinkSync(join(first.managedRoot, "current"));
+  first.setup.shutdown();
+
+  // The runner activated 1.6.0 and exited before verifying it: the pending record remains.
+  const store = new AntigravityManagedStore(first.managedRoot);
+  const staging = await store.createStaging(Date.now());
+  writeFileSync(join(staging.directory, "agy"), fakeAgyWrapper({ fixture: FIXTURE, version: "1.6.0", mode: "session_hang" }), { mode: 0o755 });
+  const activation = await store.activate(staging, { ...store.read("current")!.release, version: "1.6.0" });
+  assert.equal(readlinkSync(join(first.managedRoot, "current")), `generations/${activation.generation.id}`);
+
+  const restarted = new AntigravitySetupSupervisor({
+    dataDir: first.dataDir, platform: "linux", arch: "x64", musl: () => false, resolveExecutable: async () => null,
+    fetch: server.fetch, onUpdate: () => {},
+  });
+  supervisors.push(restarted);
+  assert.equal(readlinkSync(join(first.managedRoot, "current")), working, "restored before the first check");
+  assert.equal(existsSync(activation.generation.directory), false);
+  assert.equal(restarted.current().managedInstall?.active?.version, "1.5.14");
+  assert.equal((await restarted.check("never")).executable?.version, "1.5.14");
+});
+
+test("a runner that starts stopping during verification never confirms the new version", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  let stopDuringCheck = false;
+  let target: AntigravitySetupSupervisor | undefined;
+  const { setup, managedRoot } = supervisor(server, {
+    onUpdate: (view) => {
+      if (stopDuringCheck && view.managedInstall?.operation?.stage === "activating" && view.status === "checking") {
+        stopDuringCheck = false;
+        target?.shutdown();
+      }
+    },
+  });
+  target = setup;
+  await install(setup);
+  const working = readlinkSync(join(managedRoot, "current"));
+  server.publish({ platform: PLATFORM, version: "1.6.0", archive: release("1.6.0") });
+  stopDuringCheck = true;
+  setup.startInstall();
+  const stopped = await until(setup, (view) => view.managedInstall?.operation?.status === "failed");
+  assert.equal(stopped.managedInstall?.operation?.failure, "activation_failed");
+  assert.equal(readlinkSync(join(managedRoot, "current")), working);
+  assert.equal(existsSync(join(managedRoot, "pending-activation.json")), false);
 });

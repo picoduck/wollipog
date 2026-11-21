@@ -489,13 +489,22 @@ export class AntigravitySetupSupervisor {
     this.platform = options.platform ?? process.platform;
     this.store = new AntigravityManagedStore(join(options.dataDir, "antigravity-managed"));
     this.view = { version: 1, status: "checking", checkedAt: this.now(), credentialStore: "shared_os_keyring" };
-    if (antigravitySetupPlatformSupported(this.platform) && this.releasePlatform()) this.readManaged();
+    // An activation the runner never verified (it exited mid-update) is undone before anything
+    // reads `current`.
+    if (antigravitySetupPlatformSupported(this.platform) && this.releasePlatform()) this.recoverPendingActivation();
   }
 
   current(): AntigravitySetupView {
     const view = structuredClone(this.view);
     if (!antigravitySetupPlatformSupported(this.platform)) return view;
-    return { ...view, managedInstall: this.managedInstallView() };
+    const managedInstall = this.managedInstallView();
+    // While a rollback removes a managed copy, the last report can still name it: it is then no
+    // longer the managed release, so it is reported without a source until the next check settles.
+    if (view.executable?.source === "managed" && !managedInstall.active) {
+      const { source: _source, ...executable } = view.executable;
+      view.executable = executable;
+    }
+    return { ...view, managedInstall };
   }
 
   /** The credential context for this runner's Antigravity processes. `managed` turns the CLI's
@@ -655,6 +664,17 @@ export class AntigravitySetupSupervisor {
     return this.releasePlatformKey;
   }
 
+  /** Undo an unverified activation, then re-read the managed pointers. */
+  private recoverPendingActivation(): void {
+    const recovered = this.store.recoverPending();
+    if (recovered.found) {
+      this.options.log?.(recovered.restored
+        ? "Google Antigravity: restored the managed version an unverified update replaced."
+        : "Google Antigravity: an unverified update couldn't be undone yet; it will be retried at the next check.");
+    }
+    this.readManaged();
+  }
+
   /** Re-read the managed pointers from disk. Returns the current generation, if intact. */
   private readManaged() {
     const current = this.store.read("current");
@@ -716,7 +736,9 @@ export class AntigravitySetupSupervisor {
     }
   }
 
-  private async runCheck(latest: AntigravityLatestRefresh): Promise<AntigravitySetupView> {
+  /** `managedOnly` checks the managed copy alone, without falling back to the PATH copy: an
+   * install verifies its own candidate that way. */
+  private async runCheck(latest: AntigravityLatestRefresh, options: { managedOnly?: boolean } = {}): Promise<AntigravitySetupView> {
     const signIn = this.view.signIn;
     const base = { version: 1 as const, credentialStore: "shared_os_keyring" as const, ...(signIn ? { signIn } : {}) };
     this.view = { ...base, status: "checking", checkedAt: this.now(), ...(this.view.executable ? { executable: this.view.executable } : {}) };
@@ -724,6 +746,8 @@ export class AntigravitySetupSupervisor {
     if (!antigravitySetupPlatformSupported(this.platform)) {
       return this.settleCheck({ ...base, status: "unsupported", failure: "unsupported_platform", checkedAt: this.now() });
     }
+    // Outside an install, retry undoing an unverified activation first (a rollback that failed).
+    if (this.releasePlatform() && !this.installing) this.recoverPendingActivation();
     const managed = this.releasePlatform() ? this.readManaged() : null;
     const latestRead = this.refreshLatest(latest, !!managed);
     const pathCopy = (await this.resolvePathCandidates().catch(() => [] as string[]))
@@ -741,7 +765,7 @@ export class AntigravitySetupSupervisor {
       const versioned = await version(path, true);
       if (versioned.ok) {
         executable = { path, ...(versioned.version ? { version: versioned.version } : {}), source: "managed" };
-      } else if (!pathCopy) {
+      } else if (!pathCopy || options.managedOnly) {
         await latestRead;
         return this.settleCheck({ ...base, status: "verification_failed", failure: versioned.failure,
           executable: { path, source: "managed" }, checkedAt: this.now() });
@@ -750,7 +774,7 @@ export class AntigravitySetupSupervisor {
       }
     }
     if (!executable) {
-      if (!pathCopy) {
+      if (!pathCopy || options.managedOnly) {
         await latestRead;
         return this.settleCheck({ ...base, status: "missing_runtime", checkedAt: this.now() });
       }
@@ -831,15 +855,25 @@ export class AntigravitySetupSupervisor {
           : new AntigravityInstallError("activation_failed", "The runner couldn't activate the new release.");
       }
       this.readManaged();
-      // The activated version runs the ordinary check with the runner user's sign-in. If it does
-      // worse than the version before it (or the runner is stopping), that version is restored.
-      const verified = this.stopped ? undefined : await this.runCheck("never");
-      if (!verified || accessRank(verified.status) < before) {
-        await this.store.rollback(activation).catch(() => {});
+      // The activated version itself (never the PATH copy) runs the ordinary check with the runner
+      // user's sign-in. It must get past its version check and do at least as well as the copy in
+      // use before; otherwise, or if the runner began stopping, what it replaced is restored.
+      const verified = this.stopped ? undefined : await this.runCheck("never", { managedOnly: true });
+      const passed = !!verified && !this.stopped && verified.executable?.source === "managed" &&
+        accessRank(verified.status) >= Math.max(before, 1);
+      if (!passed) {
+        let restored = true;
+        try {
+          await this.store.rollback(activation);
+        } catch {
+          // The pending record stays: the next check or runner start retries the restore.
+          restored = false;
+        }
         this.readManaged();
         if (!this.stopped) await this.runCheck("never");
-        throw new AntigravityInstallError(verified ? "access_check_failed" : "activation_failed",
-          "The new release didn't pass the access check its predecessor passed, so it was rolled back.");
+        throw new AntigravityInstallError(!restored ? "rollback_failed" : verified && !this.stopped ? "access_check_failed" : "activation_failed",
+          restored ? "The new release didn't pass its check with this machine's sign-in, so it was rolled back."
+            : "The new release didn't pass its check, and restoring the version before it failed.");
       }
       await this.store.confirm().catch(() => {});
       this.readManaged();
@@ -856,7 +890,9 @@ export class AntigravitySetupSupervisor {
       const failure: AntigravityInstallFailure = error instanceof AntigravityInstallError ? error.failure : "activation_failed";
       await this.store.discardStaging();
       this.readManaged();
-      this.options.log?.(`Google Antigravity ${operation.kind} failed (${failure}); the active version is unchanged.`);
+      this.options.log?.(failure === "rollback_failed"
+        ? `Google Antigravity ${operation.kind} failed and couldn't be undone yet; the restore is retried at the next check.`
+        : `Google Antigravity ${operation.kind} failed (${failure}); the active version is unchanged.`);
       this.endInstall();
       this.finishOperation(operation.operationId, "failed", failure);
       return false;

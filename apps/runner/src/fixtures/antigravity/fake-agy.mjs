@@ -32,6 +32,8 @@ function recordEnvironment(label) {
 if (args[0] === "--version") {
   recordEnvironment("version");
   if (modes.has("version_fail")) process.exit(3);
+  // A release that works only in the install's staging scratch HOME, not the runner user's own.
+  if (modes.has("version_fail_outside_staging") && !(process.env.HOME ?? "").includes("/antigravity-managed/staging/")) process.exit(3);
   process.stdout.write(modes.has("version_garbled") ? "antigravity cli\n" : `agy ${process.env.FAKE_AGY_VERSION ?? "1.4.2"} (fixture)\n`);
   process.exit(0);
 }

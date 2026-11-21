@@ -21,7 +21,10 @@
  * shell profiles or PATH. */
 
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, createWriteStream, existsSync, lstatSync, readFileSync, readlinkSync, type WriteStream } from "node:fs";
+import {
+  createReadStream, createWriteStream, existsSync, lstatSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync,
+  type WriteStream,
+} from "node:fs";
 import { chmod, mkdir, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -505,7 +508,25 @@ export async function extractAntigravityBinary(
 // Generations
 
 const GENERATION_ID = /^[0-9]{1,16}-[0-9a-f]{8}$/u;
+const GENERATION_TARGET = /^generations\/[0-9]{1,16}-[0-9a-f]{8}$/u;
 const RELEASE_RECORD = "release.json";
+const PENDING_RECORD = "pending-activation.json";
+
+interface PendingActivation {
+  generation: string;
+  replaced: { current?: string; previous?: string };
+}
+
+function validPending(value: unknown): value is PendingActivation {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const replaced = record.replaced as Record<string, unknown> | undefined;
+  const target = (candidate: unknown) => candidate === undefined || (typeof candidate === "string" && GENERATION_TARGET.test(candidate));
+  return typeof record.generation === "string" && GENERATION_ID.test(record.generation) &&
+    !!replaced && typeof replaced === "object" && !Array.isArray(replaced) &&
+    Object.keys(replaced).every((key) => key === "current" || key === "previous") &&
+    target(replaced.current) && target(replaced.previous);
+}
 
 export interface AntigravityGeneration {
   id: string;
@@ -569,7 +590,11 @@ export class AntigravityManagedStore {
   /** Make a validated staging folder the current generation, and the old current `previous`. Each
    * pointer is swapped by renaming a new symlink over it. `proceed` is asked before each pointer
    * changes (the runner may be stopping): a refusal undoes what changed and activates nothing.
-   * Nothing is removed until `confirm`. */
+   *
+   * Before any pointer changes, a pending-activation record names what they pointed at. Until
+   * `confirm` removes it, the activation is unverified: `recoverPending` (at runner start and before
+   * each check) restores those pointers, so a runner that exits mid-verification never keeps an
+   * unverified version. Nothing is removed until `confirm`. */
   async activate(
     staging: { id: string; directory: string },
     release: AntigravityManagedRelease,
@@ -585,6 +610,7 @@ export class AntigravityManagedStore {
     const replaced = { ...this.target("current"), ...this.target("previous") };
     const activation: AntigravityActivation = { generation: { id: staging.id, directory, release }, replaced };
     try {
+      await this.writePending({ generation: staging.id, replaced });
       if (!proceed()) throw stopped();
       if (replaced.current) await this.swap("previous", replaced.current);
       if (!proceed()) throw stopped();
@@ -596,20 +622,74 @@ export class AntigravityManagedStore {
     return activation;
   }
 
-  /** Keep an activation: remove generations neither pointer names, so one previous remains. */
+  /** Keep a verified activation: drop its pending record, then remove generations neither pointer
+   * names, so one previous remains. */
   async confirm(): Promise<void> {
+    await rm(this.pendingPath(), { force: true });
     await this.prune();
   }
 
   /** Undo an activation: restore both pointers to what they named before, then remove the new
-   * generation. With nothing before it, `current` is removed, so the PATH copy is used again. */
+   * generation. With nothing before it, `current` is removed, so the PATH copy is used again. The
+   * pending record is removed only once both pointers are restored, so a failed rollback is retried
+   * by `recoverPending`. */
   async rollback(activation: AntigravityActivation): Promise<void> {
     for (const pointer of ["current", "previous"] as const) {
       const target = activation.replaced[pointer];
       if (target) await this.swap(pointer, target);
       else await rm(join(this.root, pointer), { force: true });
     }
+    await rm(this.pendingPath(), { force: true });
     await this.prune();
+  }
+
+  /** Finish an activation that was never verified (the runner exited, or a rollback failed):
+   * restore the pointers its pending record names and remove its generation. Synchronous, so the
+   * runner can recover before it reads `current`. Returns whether a pending activation was found;
+   * a record it can't parse, or a restore that fails, stays for the next attempt. */
+  recoverPending(): { found: boolean; restored: boolean } {
+    let record: unknown;
+    try { record = JSON.parse(readFileSync(this.pendingPath(), "utf8")); } catch (error) {
+      return { found: (error as NodeJS.ErrnoException).code !== "ENOENT", restored: false };
+    }
+    const pending = validPending(record) ? record : undefined;
+    if (!pending) return { found: true, restored: false };
+    try {
+      for (const pointer of ["current", "previous"] as const) {
+        const target = pending.replaced[pointer];
+        if (target) this.swapSync(pointer, target);
+        else rmSync(join(this.root, pointer), { force: true });
+      }
+      rmSync(this.pendingPath(), { force: true });
+      const keep = new Set([pending.replaced.current, pending.replaced.previous]);
+      if (!keep.has(`generations/${pending.generation}`)) {
+        rmSync(join(this.root, "generations", pending.generation), { recursive: true, force: true });
+      }
+      return { found: true, restored: true };
+    } catch {
+      return { found: true, restored: false };
+    }
+  }
+
+  private pendingPath(): string {
+    return join(this.root, PENDING_RECORD);
+  }
+
+  private async writePending(pending: PendingActivation): Promise<void> {
+    const temporary = join(this.root, `.${PENDING_RECORD}-${randomUUID()}`);
+    await writeFile(temporary, `${JSON.stringify(pending)}\n`, { mode: 0o600, flag: "wx" });
+    await rename(temporary, this.pendingPath());
+  }
+
+  private swapSync(pointer: "current" | "previous", target: string): void {
+    const temporary = join(this.root, `.${pointer}-${randomUUID()}`);
+    symlinkSync(target, temporary);
+    try {
+      renameSync(temporary, join(this.root, pointer));
+    } catch (error) {
+      rmSync(temporary, { force: true });
+      throw error;
+    }
   }
 
   async discardStaging(): Promise<void> {

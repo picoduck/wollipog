@@ -188,6 +188,37 @@ for (const [peer, expectManaged] of [[RUNNER_CAPABILITY_MIN_PROTOCOL.antigravity
   }
 });
 
+test("the register frame's Antigravity setup always has the v403 shape, whatever the peer", () => {
+  // The production wiring of the supervisor and the register metadata, with a fake supervisor that
+  // reports a managed install.
+  const managed = {
+    version: 1, status: "ready", checkedAt: 1, credentialStore: "shared_os_keyring",
+    executable: { path: "/fixture/antigravity-managed/current/agy", version: "1.5.14", source: "managed" },
+    models: [{ id: "m", name: "Model" }],
+    managedInstall: { available: true },
+  };
+  let options: { onUpdate: (setup: typeof managed) => void } | undefined;
+  const scope: Record<string, unknown> = {
+    AntigravitySetupSupervisor: class {
+      constructor(given: typeof options) { options = given; }
+      current() { return managed; }
+    },
+    antigravitySetupForControlPlane, runnerSupportsProtocol,
+    config: { dataDir: "/fixture", runnerId: "fixture" }, log: () => {}, metadata: {} as Record<string, unknown>,
+    registered: false, controlPlaneProtocolVersion: undefined, sendUp: () => {},
+  };
+  install(slice(runnerSource, "const antigravitySetup = new AntigravitySetupSupervisor({", "/** On `registered`: the register frame"), scope);
+  const metadata = scope.metadata as { antigravitySetup?: Record<string, unknown> };
+  const assertLegacy = (label: string) => {
+    const setup = metadata.antigravitySetup!;
+    assert.equal("managedInstall" in setup, false, `${label}: no managed install fields`);
+    assert.equal("source" in (setup.executable as Record<string, unknown>), false, `${label}: no executable source`);
+  };
+  assertLegacy("initial register metadata");
+  options!.onUpdate(managed);
+  assertLegacy("register metadata after an update");
+});
+
 test("registered Location lookup keeps timeouts and socket loss distinct from a correlated refusal", async t => {
   const f = fixture(t);
   const target = { occurrenceId: "switch", workspaceId: "registered", repository: "owner/docs" };

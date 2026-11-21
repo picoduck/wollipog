@@ -118,7 +118,9 @@ export function AntigravitySetupDialog({ runner, presentation, machineName, retu
   const failedUpdate = install?.failed?.keptVersion ? install.failed : undefined;
   // A first managed install that failed beside a working PATH copy: the PATH copy stays in use.
   // Without a runtime, the status notice itself reports the failure.
-  const failedBeside = install?.failed && !failedUpdate && setup?.executable && phase !== "installing" ? install.failed : undefined;
+  // An update whose rollback failed claims no kept version, so it is reported here too.
+  const failedBeside = install?.failed && !failedUpdate && setup?.executable && phase !== "installing" && phase !== "updating"
+    ? install.failed : undefined;
 
   return (
     <Modal title={NAME} description={`On ${machineName}`} onClose={onClose} returnFocusRef={returnFocusRef}
@@ -132,8 +134,12 @@ export function AntigravitySetupDialog({ runner, presentation, machineName, retu
         </Notice>
       )}
       {failedBeside && (
-        <Notice tone="danger" title="Install Failed" role="alert" actions={installButton("Try Again")}>
-          <p>{antigravityInstallFailureSentence(failedBeside.operation.failure)} The copy Wollipog found keeps working.</p>
+        <Notice tone="danger" title={failedBeside.operation.kind === "update" ? "Update Failed" : "Install Failed"} role="alert"
+          actions={installButton("Try Again")}>
+          <p>
+            {antigravityInstallFailureSentence(failedBeside.operation.failure)}
+            {failedBeside.operation.failure === "rollback_failed" ? "" : " The copy Wollipog found keeps working."}
+          </p>
         </Notice>
       )}
       {install?.updateTo && !failedUpdate && (

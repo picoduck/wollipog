@@ -289,6 +289,24 @@ test("activation swaps current atomically, keeps exactly one previous generation
   assert.equal(existsSync(join(store.root, "staging")), false);
   assert.equal(store.read("current")?.id, third.id, "discarding staging never touches the active generation");
 
+  // An activation stays pending until confirmed; recovery undoes a pending one, and an unreadable
+  // record is left for the next attempt rather than guessed at.
+  const pending = await store.activate(await stage(store, 8, "pending"), release("1.3.0"));
+  assert.ok(existsSync(join(store.root, "pending-activation.json")));
+  assert.deepEqual(store.recoverPending(), { found: true, restored: true });
+  assert.equal(store.read("current")?.id, third.id);
+  assert.equal(store.read("previous")?.id, second.id);
+  assert.equal(existsSync(pending.generation.directory), false);
+  assert.deepEqual(store.recoverPending(), { found: false, restored: false });
+  writeFileSync(join(store.root, "pending-activation.json"), JSON.stringify({ generation: "../escape", replaced: {} }));
+  assert.deepEqual(store.recoverPending(), { found: true, restored: false });
+  assert.equal(store.read("current")?.id, third.id);
+  rmSync(join(store.root, "pending-activation.json"));
+  const confirmed = await store.activate(await stage(store, 9, "confirmed"), release("1.3.1"));
+  await store.confirm();
+  assert.equal(existsSync(join(store.root, "pending-activation.json")), false);
+  assert.equal(store.read("current")?.id, confirmed.generation.id);
+
   // Undoing a first activation removes current, so the PATH copy is used again.
   const firstStore = new AntigravityManagedStore(fresh("first"));
   const only = await firstStore.activate(await stage(firstStore, 1, "one"), release("1.0.0"));
@@ -297,6 +315,6 @@ test("activation swaps current atomically, keeps exactly one previous generation
   assert.equal(existsSync(join(firstStore.root, "current")), false);
 
   // A damaged generation is not reported as installed.
-  writeFileSync(join(third.directory, "release.json"), JSON.stringify({ ...release("1.2.0"), archiveUrl: "https://example.com/x.tar.gz" }));
+  writeFileSync(join(confirmed.generation.directory, "release.json"), JSON.stringify({ ...release("1.3.1"), archiveUrl: "https://example.com/x.tar.gz" }));
   assert.equal(store.read("current"), null);
 });

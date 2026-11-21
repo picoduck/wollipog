@@ -149,8 +149,11 @@ export const ANTIGRAVITY_INSTALL_STAGES: readonly AntigravityInstallStage[] = [
  *   single regular `antigravity` file.
  * - `validation_failed`: the staged CLI failed `--version`, `acp --help` or the ACP handshake.
  * - `activation_failed`: the runner could not stage or activate the files, or it stopped first.
- * - `access_check_failed`: the new version was activated, but it failed the access check the version
- *   before it passed, so the runner restored that version. */
+ * - `access_check_failed`: the new version was activated, but its own check with the runner user's
+ *   sign-in did worse than the copy before it (or didn't get past its version check), so the runner
+ *   restored what it replaced.
+ * - `rollback_failed`: as above, but restoring failed. The new version may still be active; the
+ *   runner tries the restore again at its next check or start. */
 export type AntigravityInstallFailure =
   | "platform_not_supported"
   | "installer_not_recognized"
@@ -161,11 +164,13 @@ export type AntigravityInstallFailure =
   | "archive_invalid"
   | "validation_failed"
   | "activation_failed"
-  | "access_check_failed";
+  | "access_check_failed"
+  | "rollback_failed";
 
 export const ANTIGRAVITY_INSTALL_FAILURES: readonly AntigravityInstallFailure[] = [
   "platform_not_supported", "installer_not_recognized", "redirect_refused", "download_failed", "timed_out",
   "checksum_mismatch", "archive_invalid", "validation_failed", "activation_failed", "access_check_failed",
+  "rollback_failed",
 ];
 
 /** The provenance of one managed release: what was fetched and verified before activation. */

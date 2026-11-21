@@ -1481,18 +1481,26 @@ Antigravity agent, so Antigravity is not offered in New Session, and nothing her
      complete an ACP `initialize` handshake. It still runs as the runner's user without an
      operating-system sandbox. The manifest's SHA-512 is what establishes it is Google's build.
   6. Activate: rename the staging folder to `generations/<id>/` with a `release.json` provenance
-     record, point `previous` at the old generation, and swap the `current` symlink by renaming a new
-     link over it. A runner that begins stopping before a pointer changes activates nothing.
-  7. Verify: run the ordinary check, with the runner user's sign-in, against the activated version.
-     If it does worse than the copy in use before the install (`ready` over `sign_in_required` over
-     anything else), restore both pointers, so the previous managed version (or, for a first
-     install, the PATH copy) is used again, and report `access_check_failed`. Only then are
-     generations other than `current` and `previous` removed, keeping exactly one previous.
+     record, write `pending-activation.json` naming what both pointers named, point `previous` at the
+     old generation, and swap the `current` symlink by renaming a new link over it. A runner that
+     begins stopping before a pointer changes activates nothing.
+  7. Verify: run the ordinary check, with the runner user's sign-in, against the activated managed
+     copy alone (never falling back to the PATH copy). It must get past its version check
+     (`sign_in_required` at least), and do no worse than the copy in use before the install
+     (`ready` over `sign_in_required` over anything else). Otherwise, or if the runner began
+     stopping, both pointers are restored, so the previous managed version (or, for a first install,
+     the PATH copy) is used again, and the install reports `access_check_failed` (`activation_failed`
+     when stopping). Only a verified activation removes the pending record, and then the generations
+     other than `current` and `previous`, keeping exactly one previous.
+  8. Recover: a pending record means an activation was never verified (the runner exited mid-check,
+     or a restore failed). The runner restores the pointers it names at startup, before anything
+     reads `current`, and before each check. A restore that fails reports `rollback_failed` and
+     claims no kept version; the record stays for the next attempt.
 
   Any failure removes the staging folder, leaves `current` untouched and reports a distinct
   `managedInstall.operation.failure` (`platform_not_supported`, `installer_not_recognized`,
   `redirect_refused`, `download_failed`, `timed_out`, `checksum_mismatch`, `archive_invalid`,
-  `validation_failed`, `activation_failed` or `access_check_failed`). The card then shows the version still active. The
+  `validation_failed`, `activation_failed`, `access_check_failed` or `rollback_failed`). The card then shows the version still active. The
   provenance (installer SHA-256, manifest URL, version, archive URL and SHA-512) is recorded in the
   setup (`managedInstall.active`), in the generation's `release.json` and in the runner log.
   Operations are kept in memory, so a finished install's outcome lasts until the runner restarts.

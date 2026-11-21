@@ -94,7 +94,8 @@ function antigravityInstallPresentation(
   const activeVersion = managed.active?.version;
   const running = operation?.status === "running" ? operation : undefined;
   const failed = operation?.status === "failed"
-    ? { operation, ...(operation.kind === "update" && activeVersion ? { keptVersion: activeVersion } : {}) }
+    // After a failed rollback the active version is the rejected one, so nothing is claimed kept.
+    ? { operation, ...(operation.kind === "update" && activeVersion && operation.failure !== "rollback_failed" ? { keptVersion: activeVersion } : {}) }
     : undefined;
   const newer = activeVersion && managed.latest ? antigravityVersionNewer(managed.latest.version, activeVersion) : undefined;
   return {
@@ -139,7 +140,9 @@ export function antigravityInstallFailureSentence(failure: AntigravityInstallFai
     case "validation_failed":
       return "The new version didn't pass Wollipog's checks: its version, its ACP help and an ACP handshake.";
     case "access_check_failed":
-      return "The new version couldn't open a session with this machine's sign-in, which the copy before it could, so Wollipog went back to that copy.";
+      return "The new version didn't pass Wollipog's check with this machine's sign-in, so Wollipog didn't keep it.";
+    case "rollback_failed":
+      return "The new version didn't pass Wollipog's check, and Wollipog couldn't restore the version before it yet. It tries again at the next check.";
     case "activation_failed":
     default:
       return "Wollipog couldn't write the new version to the runner's data folder.";
