@@ -157,7 +157,7 @@ import {
   useOffscreenReceipts,
   useRecoveryAnnouncement,
 } from "./TranscriptTailControl.js";
-import { ApprovalsControl, ComposerButton, ModelEffortControl, useModelSettingsAvailable } from "./ComposerControls.js";
+import { agentOwnsPermissionModes, nativePlanModeActive, ApprovalsControl, ComposerButton, ModelEffortControl, useModelSettingsAvailable } from "./ComposerControls.js";
 import { reportRenderProbe, SESSION_DETAIL_PROBE, SESSION_VIEW_PROBE, TRANSCRIPT_PROBE } from "./render-probe.js";
 import {
   ComposerIdlePreview,
@@ -5556,7 +5556,10 @@ function SessionDetailLoaded({
   // Plan mode is only safe where the driver actually advertises the `plan` approval mode (Claude).
   // Codex silently falls back to a writable sandbox for an unknown mode, so exposing it there would
   // let "plan" edit files despite the "no edits" copy — only offer it when the driver supports it.
-  const planSupported = (agentCaps?.permissionModes ?? []).includes("plan");
+  // An ACP agent's own `plan` mode (#4779) is one of its modes in the Permission Mode menu, described
+  // in its words; it is never offered as Wollipog's read-only Plan Mode.
+  const planSupported = (agentCaps?.permissionModes ?? []).includes("plan") &&
+    !agentOwnsPermissionModes(session.driver, agentCaps);
   const composerAgentLabel = sessionAgentLabel(session.agentName, session.driver, session.agentId);
   const composerCommands = useMemo(() => buildComposerCommandRegistry({
     context: { planSupported, canStopTurn, canRespond: canAnswerPendingQuestion, agentLabel: composerAgentLabel },
@@ -6144,7 +6147,7 @@ function SessionDetailLoaded({
     [api, configRefusal, session.assistantThreadBudget, sessionId],
   );
 
-  const planActive = session.permissionMode === "plan";
+  const planActive = nativePlanModeActive(session, agentCaps);
   const togglePlan = (on = !planActive) => {
     if (!planSupported) return; // never set an unsupported "plan" mode (would map to a writable sandbox)
     applyConfig({ permissionMode: on ? "plan" : "" });

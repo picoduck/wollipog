@@ -1,6 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import {
+  ANTIGRAVITY_AGENT_ID,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
   type AgentHarnessDefaultsView,
@@ -110,6 +111,45 @@ const savedAgent = fixtureParams.get("savedAgent");
 const agentSetup = fixtureParams.get("agentSetup") === "1";
 const noPreset = fixtureParams.get("noPreset") === "1";
 if (savedAgent) saveAgentDefault({}, "runner-1", savedAgent);
+
+/**
+ * #4779: the Google Antigravity row the runner advertises from its Antigravity setup
+ * (apps/runner/src/antigravity-session.ts), in the shape it advertises it. `?antigravity=` is one of
+ * `ready` (choosable, with the setup's models), `signin` (setup needs sign-in), `check-failed` (setup
+ * check failed) or `network-denied` (ready, but this runner's execution isolation denies network).
+ * One runner advertises one row with one id, so each Needs Setup reason is its own page. Without the
+ * parameter the runner advertises no row, as it does when the runtime is missing.
+ */
+const antigravityState = fixtureParams.get("antigravity");
+const antigravityAgent: RunnerView["agents"][number] | null = antigravityState ? {
+  id: ANTIGRAVITY_AGENT_ID,
+  name: "Google Antigravity",
+  command: "/home/fixture/.local/bin/agy",
+  args: ["acp"],
+  env: {},
+  driver: "acp",
+  context: { kind: "native" },
+  source: "discovered",
+  acpTransport: "stdio",
+  version: "1.5.14",
+  available: antigravityState === "ready",
+  authStatus: antigravityState === "signin" ? "unauthenticated" : antigravityState === "check-failed" ? "unknown" : "authenticated",
+  ...(antigravityState === "network-denied"
+    ? { unavailableReason: "Google Antigravity needs network access, which this runner's execution isolation denies." }
+    : antigravityState === "check-failed" ? { unavailableReason: "The Google Antigravity check failed on this runner." } : {}),
+  capabilities: {
+    models: antigravityState === "ready" ? [
+      ["gemini-4-neon", "Gemini 4 Neon"], ["gemini-4-argon", "Gemini 4 Argon"], ["gemini-4-hydrogen", "Gemini 4 Hydrogen"],
+      ["orchestrator-neon", "Orchestrator (Neon)"], ["orchestrator-argon", "Orchestrator (Argon)"],
+      ["gemini-3-8-flash", "Gemini 3.8 Flash"], ["claude-opus-5-5", "Claude Opus 5.5"],
+      ["claude-sonnet-5-5", "Claude Sonnet 5.5"], ["gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"],
+    ].map(([id, displayName]) => ({ id: id!, displayName })) : [],
+    effortLevels: [],
+    slashCommands: [],
+    supportsImages: true,
+    supportsApprovals: true,
+  },
+} : null;
 
 /**
  * #2955: a current control plane and a single account, the plain state New Session's 700px budget is
@@ -227,6 +267,7 @@ const runner: RunnerView = {
       },
       acp: { logout: false, loadSession: false, sessionList: false, sessionDelete: false, sessionResume: false, sessionClose: false },
     }] : []),
+    ...(antigravityAgent ? [antigravityAgent] : []),
   ],
   ...(fixtureParams.has("accountPriority") ? { providerAccountDefaults: [{ provider: "claude" as const, accountId: null, revision: 2, mode: "priority" as const,
     schemaVersion: 1, fixedAccountId: null, priorityAccountIds: ["claude-work", "claude-personal"] }] } : {}),
@@ -253,6 +294,9 @@ const runner: RunnerView = {
   // A bubblewrap runner, as an ACP Orchestrator's Strict Project Isolation needs.
   ...(acpAgent ? { runtime: { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
     executionIsolation: { mode: "bwrap" as const, network: "inherit" as const } } } : {}),
+  // #4779: the isolation that keeps Google Antigravity out of New Session.
+  ...(antigravityState === "network-denied" && !acpAgent ? { runtime: { dataDir: "/runner", worktreeRoot: "/runner/worktrees",
+    maxConcurrentSessions: 4, executionIsolation: { mode: "bwrap" as const, network: "deny" as const } } } : {}),
   connectedAt: 1,
   lastSeen: 1,
   // A current runner, so `sessionOrchestration` is advertised and the Orchestrator preset is a real
