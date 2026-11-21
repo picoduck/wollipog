@@ -9030,7 +9030,7 @@ textarea {
   gap: var(--space-2);
   min-width: 0;
   padding: var(--space-2) 0;
-  border-block-start: 1px solid var(--border);
+  border-top: 1px solid var(--border);
   color: var(--text);
   font: var(--type-body);
 }
