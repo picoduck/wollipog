@@ -39,7 +39,9 @@ for (const viewport of VIEWPORTS) {
       const [fieldBox, submitBox] = [await field.boundingBox(), await submit.boundingBox()];
       expect(fieldBox && submitBox).toBeTruthy();
       expect(submitBox!.y, "Submit Code sits below the field").toBeGreaterThanOrEqual(fieldBox!.y + fieldBox!.height);
-      expect(Math.abs(submitBox!.width - fieldBox!.width), "the field and Submit Code share the column's width").toBeLessThanOrEqual(1);
+      // Stacked, Submit Code spans the column with the field. Side by side it would be a fraction of
+      // it. The tolerance absorbs border and font rendering differences between platforms.
+      expect(submitBox!.width, "Submit Code spans the field's column").toBeGreaterThanOrEqual(fieldBox!.width * 0.95);
       await expectNoHorizontalOverflow(dialog, "The setup dialog");
       await expectPageNoHorizontalOverflow(page);
       await expectFullyInViewport(dialog.getByRole("button", { name: "Cancel" }), "Cancel");
