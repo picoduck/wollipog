@@ -96,7 +96,11 @@ test("worker terminal job dispatches health with literal command and scoped toke
 
 // Run the entry module itself: importing main() hides pending top-level-await cycles.
 test("rolling CLI retries a short listing after its real terminal worker handoff", () => {
-  const preload = `let queuedReads = 0;
+  const preload = `import timers from "node:timers/promises";
+  import { syncBuiltinESMExports } from "node:module";
+  timers.setTimeout = async () => {};
+  syncBuiltinESMExports();
+  let queuedReads = 0;
   globalThis.fetch = async (url, options) => {
     const path = new URL(url).pathname;
     let status = 200, body;

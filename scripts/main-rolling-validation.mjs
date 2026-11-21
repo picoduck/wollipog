@@ -23,6 +23,8 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const ZERO = "0".repeat(40);
 const ACTIVE = ["queued", "in_progress", "waiting", "pending", "requested"];
+const LISTING_BACKOFFS = [5000, 10000, 20000, 30000];
+const LISTING_WAIT_MS = LISTING_BACKOFFS.reduce((sum, ms) => sum + ms, 0);
 // Unit-test shards appended before the aggregator (#3770), so the established positions hold.
 export const UNIT_SHARDS = [1, 2, 3, 4].map((i) => `Unit Tests (${i})`);
 export const REQUIRED = [
@@ -170,22 +172,43 @@ export async function writeState(api, repository, previous, value) {
 }
 
 async function listRuns(api, repository, query, complete = true) {
-  // Page boundaries and total_count can disagree while runs change status. Retry only
-  // a short census, from page 1; never combine different attempts to invent completeness.
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt) await delay(attempt * 1000);
-    const runs = new Map();
-    let total = 0;
-    for (let page = 1; page <= 10; page++) {
-      const payload = await api(`/repos/${repository}/actions/workflows/main-rolling-validation.yml/runs?branch=main&event=workflow_dispatch&per_page=100&page=${page}${query}`);
-      if (!Array.isArray(payload?.workflow_runs) || !Number.isSafeInteger(payload.total_count)) throw new RollingFailure("unreadable-worker-listing", "Unreadable worker listing");
-      total = Math.max(total, payload.total_count);
-      for (const run of payload.workflow_runs) runs.set(run.id, run);
-      if (!complete || runs.size >= total) return [...runs.values()];
-      if (payload.workflow_runs.length === 0) break;
-    }
+  const runs = new Map();
+  let total = 0;
+  for (let page = 1; page <= 10; page++) {
+    const payload = await api(`/repos/${repository}/actions/workflows/main-rolling-validation.yml/runs?branch=main&event=workflow_dispatch&per_page=100&page=${page}${query}`);
+    if (!Array.isArray(payload?.workflow_runs) || !Number.isSafeInteger(payload.total_count)) throw new RollingFailure("unreadable-worker-listing", "Unreadable worker listing");
+    total = Math.max(total, payload.total_count);
+    for (const run of payload.workflow_runs) runs.set(run.id, run);
+    if (!complete || runs.size >= total) return [...runs.values()];
+    if (payload.workflow_runs.length === 0) break;
   }
   throw new RollingFailure("worker-listing-truncated-operator-reconciliation-required", "Worker listing truncated; operator reconciliation required");
+}
+
+async function listActiveRuns(api, repository, sleep) {
+  // Restart the whole active census: status/page boundaries can shift while workers
+  // finish. Never combine incomplete traversals or multiply the delay by five statuses.
+  for (let attempt = 0; ; attempt++) {
+    if (attempt) await sleep(LISTING_BACKOFFS[attempt - 1]);
+    try {
+      const active = [];
+      for (const status of ACTIVE) active.push(...await listRuns(api, repository, `&status=${status}`));
+      return active;
+    } catch (cause) {
+      if (!(cause instanceof RollingFailure) || cause.failureClass !== "worker-listing-truncated-operator-reconciliation-required" ||
+          attempt === LISTING_BACKOFFS.length) throw cause;
+    }
+  }
+}
+
+function boundedListingSleep(sleep) {
+  let waited = 0;
+  return async (ms) => {
+    // Share one delay allowance across optional observations and CAS retries too.
+    if (waited + ms > LISTING_WAIT_MS) throw new RollingFailure("worker-listing-truncated-operator-reconciliation-required");
+    waited += ms;
+    await sleep(ms);
+  };
 }
 
 async function readRun(api, repository, id) {
@@ -228,12 +251,11 @@ async function readRecords(api, repository, run, cache = new Map()) {
 }
 
 /** All active runs are read independently of the bounded completed-history window. */
-export async function observe(api, repository, state, { targetSha, report = false, mainSha } = {}) {
+export async function observe(api, repository, state, { targetSha, report = false, mainSha, sleep = delay } = {}) {
   mainSha ??= (await api(`/repos/${repository}/git/ref/heads/main`))?.object?.sha;
   if (!SHA.test(mainSha)) throw new RollingFailure("main-ancestry-unavailable", "Main ancestry unavailable");
   targetSha ??= mainSha;
-  const active = [];
-  for (const status of ACTIVE) active.push(...await listRuns(api, repository, `&status=${status}`));
+  const active = await listActiveRuns(api, repository, sleep);
   // Recent completions reconstruct missing/rewritten state. Old no-change evidence is re-read by id.
   const recent = await listRuns(api, repository, "&status=completed", false);
   // Inspect at most one live/queued allocation. Terminal receipts remain historical hints;
@@ -381,14 +403,15 @@ export function plan(state, observation, mainSha, now, claimId = randomUUID(), r
   return { next, dispatch: due && pending.dispatchCount < 3 };
 }
 
-export async function reconcile(repository, { api, now = () => new Date().toISOString(), log = console.log } = {}) {
+export async function reconcile(repository, { api, now = () => new Date().toISOString(), log = console.log, sleep = delay } = {}) {
+  sleep = boundedListingSleep(sleep);
   for (let retry = 0; retry < 3; retry++) {
     const previous = await readState(api, repository);
     const main = await api(`/repos/${repository}/git/ref/heads/main`);
     if (!SHA.test(main?.object?.sha)) throw new RollingFailure("invalid-main-head", "Invalid main head");
     // Candidate history is optional overhead. Missing/large old candidate evidence must not
     // prevent the main scheduler from queuing its next snapshot.
-    let observation = await observe(api, repository, { ...previous.value, candidates: undefined }, { mainSha: main.object.sha });
+    let observation = await observe(api, repository, { ...previous.value, candidates: undefined }, { mainSha: main.object.sha, sleep });
     let decision = plan(previous.value, observation, main.object.sha, now(), randomUUID(), previous.recovered);
     if (previous.value.candidates) {
       const pendingCandidate = previous.value.candidates.requests.find((r) => r.claimId === previous.value.pending?.claimId && r.dispatchedAt);
@@ -401,7 +424,7 @@ export async function reconcile(repository, { api, now = () => new Date().toISOS
         const optionalApi = budgetApi(api, { limit: 48, reserve: 0 });
         const mainComplete = !decision.dispatch && (decision.next.pending === null || pendingCandidate) &&
           decisive(latestAttempt(observation.records, main.object.sha) ?? {});
-        if (mainComplete) observation = await observe(optionalApi, repository, previous.value, { mainSha: main.object.sha });
+        if (mainComplete) observation = await observe(optionalApi, repository, previous.value, { mainSha: main.object.sha, sleep });
         const suiteVersion = await candidateSuiteVersion(optionalApi, repository, main.object.sha);
         const candidate = candidatePlan(previous.value.candidates, observation, suiteVersion, now(), mainComplete);
         const retained = candidate.next.requests.find((r) => r.dispatchedAt && r.claimId === previous.value.pending?.claimId &&
@@ -446,7 +469,8 @@ export async function reconcile(repository, { api, now = () => new Date().toISOS
   }
 }
 
-export async function admit(repository, event, runId, attempt, { api, now = () => new Date().toISOString() } = {}) {
+export async function admit(repository, event, runId, attempt, { api, now = () => new Date().toISOString(), sleep = delay } = {}) {
+  sleep = boundedListingSleep(sleep);
   const targetSha = event?.inputs?.target_sha, claimId = event?.inputs?.claim_id;
   if (event?.ref !== "refs/heads/main" || !SHA.test(targetSha) || !UUID.test(claimId)) throw new RollingFailure("invalid-worker-dispatch", "Invalid worker dispatch");
   const run = await readRun(api, repository, runId);
@@ -466,7 +490,7 @@ export async function admit(repository, event, runId, attempt, { api, now = () =
     const currentMain = candidate ? (await api(`/repos/${repository}/git/ref/heads/main`))?.object?.sha : null;
     if (candidate && !SHA.test(currentMain)) return false;
     const observation = await observe(api, repository, candidate ? previous.value : { ...previous.value, candidates: undefined },
-      { targetSha: currentMain ?? targetSha, ...(candidate ? { mainSha: currentMain } : {}) });
+      { sleep, targetSha: currentMain ?? targetSha, ...(candidate ? { mainSha: currentMain } : {}) });
     if (candidate && (attempt !== 1 || candidate.suiteVersion !== await candidateSuiteVersion(api, repository, run.head_sha))) return false;
     if (candidate && !decisive(latestAttempt(observation.records, currentMain) ?? {})) return false;
     const alreadyDone = attempt === 1 && decisive(latestAttempt(observation.records.filter((r) =>
@@ -533,7 +557,7 @@ export async function requestCandidate(repository, targetSha, { purpose = "relea
 }
 
 export async function main(argv, { env = process.env, log = console.log, error = console.error, api,
-  waitForWorker = awaitWorkerTerminal } = {}) {
+  waitForWorker = awaitWorkerTerminal, sleep = delay } = {}) {
   try {
     const repository = env.GITHUB_REPOSITORY;
     if (!REPOSITORY.test(repository ?? "") || !env.GITHUB_TOKEN || env.GITHUB_REF !== "refs/heads/main") throw new RollingFailure("invalid-controller-environment", "Invalid controller environment");
@@ -556,14 +580,14 @@ export async function main(argv, { env = process.env, log = console.log, error =
       if (handoff.status !== "completed") throw new RollingFailure("worker-handoff-pending");
     }
     if (mode === "reconcile" || mode === "report") {
-      const result = mode === "reconcile" ? await reconcile(repository, { api, log })
+      const result = mode === "reconcile" ? await reconcile(repository, { api, log, sleep })
         : { state: (await readState(api, repository)).value };
-      if (mode === "report") log(JSON.stringify(await observe(api, repository, result.state, { report: true })));
+      if (mode === "report") log(JSON.stringify(await observe(api, repository, result.state, { report: true, sleep })));
       if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY,
         `Main rolling validation: ${result.state.status}\n\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\`\n`);
     } else if (mode === "admit") {
       const allowed = await admit(repository, JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8")),
-        Number(env.GITHUB_RUN_ID), Number(env.GITHUB_RUN_ATTEMPT), { api });
+        Number(env.GITHUB_RUN_ID), Number(env.GITHUB_RUN_ATTEMPT), { api, sleep });
       if (!env.GITHUB_OUTPUT) throw new RollingFailure("worker-output-unavailable", "Worker output unavailable");
       appendFileSync(env.GITHUB_OUTPUT, `admitted=${allowed}\nreconcile=${allowed}\n`);
       log(JSON.stringify({ event: "main_rolling_admission", runId: Number(env.GITHUB_RUN_ID), admitted: allowed }));
