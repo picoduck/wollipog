@@ -231,14 +231,15 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
 
       await expired.click();
       const editor = page.getByRole("dialog", { name: "Decision Delegation" });
-      const approval = editor.getByRole("checkbox", { name: "UI Evidence Approval", exact: true });
-      await expect(editor.getByRole("checkbox", { name: "Owner Questions" })).toBeChecked();
-      await expect(editor.getByRole("checkbox", { name: "Pull Request Merge" })).toBeChecked();
-      await expect(editor.getByRole("checkbox", { checked: true })).toHaveCount(2);
+      const approval = editor.getByRole("checkbox", { name: "Approve UI Evidence", exact: true });
+      const checkedCategories = editor.locator(".delegation-category").getByRole("checkbox", { checked: true });
+      await expect(editor.getByRole("checkbox", { name: "Answer Owner Questions" })).toBeChecked();
+      await expect(editor.getByRole("checkbox", { name: "Merge Pull Requests" })).toBeChecked();
+      await expect(checkedCategories).toHaveCount(2);
       await expect(approval).toBeEnabled();
       await expect(approval).not.toBeChecked();
       await approval.scrollIntoViewIfNeeded();
-      await expectFullyInViewport(editor.getByRole("button", { name: "Revoke Grant" }), "Revoke the existing grant");
+      await expectFullyInViewport(editor.getByRole("button", { name: "Revoke Delegation" }), "Revoke the existing grant");
       expect(new URL(page.url()).searchParams.get("path")).toMatch(/\/delegation$/);
       await capture(page, "listed-grant-editor");
       await editor.getByRole("button", { name: "Cancel", exact: true }).click();
@@ -253,13 +254,15 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await capture(page, "thread-settings-delegation-link");
       await link.click();
       await expect(threadSettings).toHaveCount(0);
-      await expect(editor.getByRole("checkbox", { checked: true })).toHaveCount(2);
+      await expect(editor.getByRole("checkbox", { name: "Answer Owner Questions" })).toBeChecked();
+      await expect(editor.getByRole("checkbox", { name: "Merge Pull Requests" })).toBeChecked();
+      await expect(checkedCategories).toHaveCount(2);
       await expect(approval).not.toBeChecked();
       await approval.check();
       await expect(approval).toHaveAccessibleDescription(/Claude Code.*claude-opus-5-5.*provider may retain/);
       await expectNoHorizontalOverflow(editor, "Decision Delegation opened from Thread Settings");
-      await expectFullyInViewport(editor.getByRole("button", { name: "Save Grant" }), "Save the selected approval grant");
-      await expectFullyInViewport(editor.getByRole("button", { name: "Revoke Grant" }), "Revoke the thread's grant");
+      await expectFullyInViewport(editor.getByRole("button", { name: "Save Delegation" }), "Save the selected approval grant");
+      await expectFullyInViewport(editor.getByRole("button", { name: "Revoke Delegation" }), "Revoke the thread's grant");
       await capture(page, "thread-delegation-editor");
     });
 

@@ -12356,6 +12356,55 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   flex-wrap: wrap;
   gap: var(--space-2);
 }
+.delegation-dialog :is(.delegation-category, .form) > p { margin: 0; }
+.delegation-dialog .modal-foot > .delegation-revoke { margin-right: auto; }
+.delegation-groups,
+.delegation-scopes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  align-items: start;
+}
+.delegation-dialog .delegation-group {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.checkbox.delegation-group-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  padding-inline: var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev-2);
+  font: var(--type-body-strong);
+}
+.delegation-group-toggle .checkbox-helper { grid-column: auto; }
+.delegation-category {
+  display: grid;
+  gap: var(--space-2);
+}
+.delegation-dialog .seg {
+  display: grid;
+  grid-auto-flow: row;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+  height: auto;
+}
+.delegation-dialog .delegation-presets {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+.delegation-dialog .delegation-scope-choice {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.delegation-dialog .seg-option { min-height: var(--control-h); }
+.delegation-dialog .assistant-decision-choices {
+  display: grid;
+  gap: var(--space-2);
+}
 @media (max-width: 760px) {
   /* Grant restrictions must remain readable in full, including operation inventory details. */
   .assistant-fields .choice-row-desc {
@@ -12363,6 +12412,10 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     overflow: visible;
     white-space: normal;
   }
+  .delegation-groups,
+  .delegation-scopes { grid-template-columns: minmax(0, 1fr); }
+  .delegation-dialog .delegation-presets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .delegation-dialog .modal-foot > .btn { padding-inline: var(--space-2); }
 }
 .assistant-id-control {
   display: flex;
@@ -19239,6 +19292,13 @@ a.tab { text-decoration: none; }
 .checkbox-mark > input { border-radius: var(--radius-xs); }
 .radio-mark > input { border-radius: var(--radius-pill); }
 .checkbox-mark > input:checked { border-color: var(--accent); background: var(--accent); }
+.checkbox-mark:has(> input:indeterminate)::after {
+  content: "";
+  position: absolute;
+  width: var(--space-2);
+  border-top: 2px solid currentColor;
+  pointer-events: none;
+}
 /* Radio: an accent ring plus a dot. */
 .radio-mark > input:checked { border-color: var(--accent); }
 .checkbox-check,

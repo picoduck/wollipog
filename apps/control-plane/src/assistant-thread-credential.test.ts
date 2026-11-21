@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import Fastify from "fastify";
 import {
+  ASSISTANT_DECISION_CATEGORIES,
   ASSISTANT_THREAD_CREDENTIAL_TTL_MS,
   ASSISTANT_EVIDENCE_INSPECT,
   ASSISTANT_EVIDENCE_PREPARE,
@@ -177,8 +178,13 @@ test("the owner grants and revokes exact typed resolution, and Assistant calls n
       const saved = await h.ownerCall("PUT", path, { revision, grant: next });
       assert.equal(saved.status, 200, JSON.stringify(saved.body));
       assert.equal(saved.body.thread.decisionDelegation.revision, revision + 1);
+      assert.deepEqual(saved.body.thread.decisionDelegation.grant, next);
     };
-    await setGrant(0, { ...grant, categories: ["owner_question"] });
+    // A Delegate All grant saved against a previous catalog has no wildcard authority.
+    // Simulate a newly supported merged-branch deletion and an unaccepted evidence disclosure.
+    const previousCategories = (Object.keys(ASSISTANT_DECISION_CATEGORIES) as AssistantDecisionGrant["categories"])
+      .filter((category) => category !== "merged_branch_deletion" && category !== "ui_evidence_review");
+    await setGrant(0, { ...grant, selectionMode: "all", categories: previousCategories });
     await refuse(/outside the thread's decision delegation grant/u);
     await setGrant(1, { ...grant, campaigns: ["different-root"] });
     await refuse(/campaign is outside/u);
