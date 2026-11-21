@@ -5,6 +5,12 @@ async function select(page: Page, title: string, option: string) {
   await page.getByRole("button", { name: new RegExp(`^${title}:`) }).click();
   await page.getByRole("option", { name: option, exact: true }).click();
 }
+async function selectReviewModel(page: Page, model: string) {
+  await page.getByRole("button", { name: /^Review Model:/ }).click();
+  const picker = page.getByRole("dialog", { name: "Review Model", exact: true });
+  await picker.getByRole("searchbox", { name: "Search Models" }).fill(model);
+  await picker.getByRole("radio", { name: model, exact: true }).click();
+}
 async function captureSettings(page: Page, info: TestInfo, name: string) {
   const viewport = page.viewportSize()!;
   const height = await page.locator(".main-body").evaluate(e => e.scrollHeight);
@@ -25,7 +31,7 @@ for (const width of [1280, 390]) {
     }
     await captureSettings(page, info, `review-policy-default-${width}.png`);
     await select(page, "Review Harness", "Codex");
-    await select(page, "Review Model", "GPT-6.1 Sol");
+    await selectReviewModel(page, "GPT-6.1 Sol");
     await select(page, "Review Effort", "High");
     await select(page, "Review Round Budget", "2");
     await expect(page.getByText(/Same-family reviews still require explicit consent/)).toBeVisible();
@@ -63,7 +69,7 @@ for (const width of [1280, 390]) {
     await expect(policy).toBeVisible();
     await dialogMotionSettled(page);
     await select(page, "Review Harness", "Claude Code");
-    await select(page, "Review Model", "Claude Opus");
+    await selectReviewModel(page, "Claude Opus");
     await select(page, "Review Effort", "High");
     await select(page, "Review Round Budget", "3");
     const round = policy.locator(".setting-row").filter({ has: page.getByRole("button", { name: "Review Round Budget: 3", exact: true }) });
