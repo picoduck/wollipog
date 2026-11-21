@@ -38,14 +38,15 @@ test("actual CLI settles its worker back-import and emits bounded unknown eviden
       "x-ratelimit-limit": "1000", "x-ratelimit-remaining": "900" } });
   };`;
   try {
-    for (const mode of ["report", "reconcile"]) {
-      const output = join(directory, mode + ".json");
+    for (const [mode, handoff] of [["report", false], ["reconcile", false], ["reconcile", true]]) {
+      const output = join(directory, `${mode}-${handoff}.json`);
       const child = spawnSync(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(preload),
         new URL("./main-ci-health.mjs", import.meta.url).pathname, mode], {
         encoding: "utf8", timeout: 10_000,
         env: { ...process.env, GITHUB_REPOSITORY: repository, GITHUB_REF: "refs/heads/main",
-          GITHUB_TOKEN: "test-token", GITHUB_EVENT_NAME: "workflow_dispatch", MAIN_CI_HEALTH_OUTPUT: output,
-          MAIN_CI_HEALTH_WORKER_RUN_ID: "10", MAIN_CI_HEALTH_WORKER_ATTEMPT: "1" },
+          GITHUB_TOKEN: "test-token", GITHUB_EVENT_NAME: handoff ? "workflow_dispatch" : "schedule",
+          MAIN_CI_HEALTH_OUTPUT: output, MAIN_CI_HEALTH_WORKER_RUN_ID: handoff ? "10" : "",
+          MAIN_CI_HEALTH_WORKER_ATTEMPT: handoff ? "1" : "" },
       });
       assert.ifError(child.error); assert.equal(child.signal, null);
       assert.equal(child.status, mode === "report" ? 1 : 0, child.stderr);
@@ -53,7 +54,7 @@ test("actual CLI settles its worker back-import and emits bounded unknown eviden
       const health = JSON.parse(mode === "report" ? child.stdout : readFileSync(output, "utf8"));
       assert.equal(health.status, "unknown"); assert.equal(health.fullCertification, null);
       assert.deepEqual(health.reasons, ["forge-api-unavailable"]);
-      if (mode === "reconcile") {
+      if (handoff) {
         assert.equal(health.workerHandoff.status, "completed");
         assert.equal(health.workerHandoff.targetSha, sha);
       }
