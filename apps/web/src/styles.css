@@ -2031,8 +2031,11 @@ button.status { cursor: pointer; }
   align-items: center;
   gap: var(--space-1);
 }
-/* A 28px control in a 20px title line: the row keeps the title's height. */
-.notice-head > .notice-trailing { margin-top: calc(var(--space-1) * -1); margin-bottom: calc(var(--space-1) * -1); }
+/* Let small controls overhang the first 20px text line equally in both directions. */
+.notice-head > .notice-trailing,
+.notice:not(.compact) > .notice-trailing:not(:has(> .notice-dismiss:first-child:last-child)) {
+  margin: calc((1lh - var(--control-h-sm)) / 2) 0;
+}
 .notice-body { min-width: 0; }
 .notice-body > p { margin: 0; }
 .notice-body > p + p { margin-top: var(--space-1); }
@@ -2080,8 +2083,10 @@ button.status { cursor: pointer; }
 .notice:not(.page-banner) > .notice-content > .notice-actions > .notice-details-toggle:first-child {
   margin-inline-start: calc(-1 * (var(--space-2) + 1px));
 }
-.notice-dismiss { margin: calc(var(--space-1) * -1) calc(var(--space-2) * -1) 0 0; }
-.notice-head .notice-dismiss { margin: 0 calc(var(--space-2) * -1) 0 0; }
+.notice-dismiss { margin-right: calc(var(--space-2) * -1); }
+.notice:not(.compact) > .notice-trailing > .notice-dismiss:first-child:last-child {
+  margin: calc((20px - var(--control-h-sm)) / 2) calc(var(--space-2) * -1) calc((20px - var(--control-h-sm)) / 2) 0;
+}
 /* One line for field-group and composer notices: icon, sentence, one trailing action.
    Its parts line up on their first baselines rather than their centers, so once a notice wraps (a
    title beside or over a sentence of several lines, a sentence over two lines) the icon and an
@@ -2119,7 +2124,7 @@ button.status { cursor: pointer; }
 }
 .notice.compact .notice-body { flex: 1 1 12rem; }
 .notice.compact .notice-actions { margin-top: 0; }
-.notice.compact .notice-dismiss { margin: 0; }
+.notice.compact .notice-dismiss { margin-right: 0; }
 /* Opened details take the line under the sentence and its row; the icon stays on the first line. */
 .notice.compact .notice-details-body { flex-basis: 100%; margin-top: var(--space-2); }
 /* The page banner spans the top of the main area (§13.3): no radius, no side edges, a hairline
@@ -4230,14 +4235,17 @@ textarea {
   min-height: 0;
   padding: 0;
 }
-/* The panel notice slot on a phone (#2861, §13.2): its notices' buttons, "+N More" included, are
-   44px touch targets, and the resolving action fills the action row as in the session slot. A 44px
-   "+N More" overhangs its 20px title line by 8px each way, so the body stays close to the title. */
+/* The panel notice slot on a phone (#2861, §13.2): resolving actions keep their 44px visible
+   height. On coarse pointers, the title row's small buttons borrow their 44px hit area. */
 @media (max-width: 760px) {
+  .panel-notice-slot .notice-actions {
+    --control-h-sm: 44px;
+  }
+}
+@media (max-width: 760px) and (not (pointer: coarse)) {
   .panel-notice-slot .notice {
     --control-h-sm: 44px;
   }
-  .panel-notice-slot .notice-head > .notice-trailing { margin-top: calc(var(--space-2) * -1); margin-bottom: calc(var(--space-2) * -1); }
 }
 .agents-page {
   display: flex;
@@ -12254,7 +12262,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   display: flex;
   align-items: center;
   gap: var(--space-1);
-  margin: calc(var(--space-1) * -1) calc(var(--space-1) * -1) calc(var(--space-1) * -1) 0;
+  margin: calc((1lh - var(--control-h-sm)) / 2) 0;
 }
 /* Older toasts wait behind one control above the stack; their list opens upward from it. */
 .toast-region > .toast { flex-shrink: 0; }
@@ -19818,6 +19826,8 @@ a.tab { text-decoration: none; }
     inset: -4px;
   }
   :is(.btn.sm, button.chip, .composer-btn)::after { inset: -5px; }
+  .toast-actions, .notice-trailing { gap: var(--space-2); }
+  .notice.compact > .notice-trailing::before { margin-right: calc(var(--space-2) * -1); }
   /* A segmented option cannot borrow from its neighbours, so it borrows the track's inset and edge
      instead: 38px option + 2px inset + 1px edge on each side = 44px, plus the option's own 1px
      border for the padding-edge reason above. A dense toolbar's track is a full control tall on
