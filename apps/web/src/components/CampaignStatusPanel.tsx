@@ -461,7 +461,7 @@ function CampaignRecoveryAutomation({ campaign }: { campaign: CampaignStatusData
   const notice = campaignRecoveryAutomationNotice(campaign?.status, campaign?.recovery?.automation);
   if (!notice) return null;
   return (
-    <CampaignSection title="Recovery Automation" count={1} attention={notice.tone === "warning" ? `${notice.title}:${notice.body}` : ""}><Notice tone={notice.tone} title={notice.title} role={notice.tone === "neutral" ? "status" : undefined}>
+    <CampaignSection title="Recovery Automation" attention={notice.tone === "warning" ? `${notice.title}:${notice.body}` : ""}><Notice tone={notice.tone} title={notice.title} role={notice.tone === "neutral" ? "status" : undefined}>
       {notice.body}
     </Notice></CampaignSection>
   );
@@ -614,7 +614,7 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
   }
   const view = campaignSummaryView(summary.summary, summary.campaign, now);
   return (
-    <CampaignSection title="Summary" count={1} defaultOpen className="campaign-status-summary">
+    <CampaignSection title="Summary" defaultOpen className="campaign-status-summary">
       {summary.error && (
         <Notice tone="danger" compact role="alert" title="Couldn't Refresh Campaign Summary"
           actions={<button type="button" className="btn sm" onClick={data.retry}>Retry</button>}>

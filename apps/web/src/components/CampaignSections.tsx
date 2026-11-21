@@ -1,7 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDownIcon, ChevronRightIcon } from "./Icons.js";
+import { ChevronDownIcon, ChevronRightIcon, CollapseAllIcon, ExpandAllIcon, ListIcon } from "./Icons.js";
+import { useAccessibleMenu } from "./interactions.js";
+import { MenuItem, MenuSurface } from "./Menu.js";
 
-interface Entry { title: string; count: number; attention: string; heading: HTMLHeadingElement | null; open: () => void }
+/** `count` is absent for a section that is always one thing (Summary), where a count says nothing. */
+interface Entry { title: string; count?: number; attention: string; heading: HTMLHeadingElement | null; open: () => void }
 const attentionMemory = new Map<string, Map<string, string>>();
 const sectionMemory = new Map<string, Map<string, boolean>>();
 export function forgetCampaignSections(): void { sectionMemory.clear(); attentionMemory.clear(); }
@@ -11,6 +14,14 @@ const Context = createContext<{
   register: (id: string, entry: Entry | null) => void;
   all: { value: boolean; revision: number } | null;
 } | null>(null);
+
+/** A jump leaves its heading 12px below the index; the current section is the last heading within this of it. */
+const CURRENT_SLACK = 16;
+
+/** The menu item's accessible name: its visible title, then what the trailing count and dot show. */
+function sectionName(entry: Entry): string {
+  return `${entry.title}${entry.count === undefined ? "" : `, ${entry.count}`}${entry.attention ? ", Needs Attention" : ""}`;
+}
 
 /** Sections register only when rendered, including those loaded independently from older servers. */
 export function CampaignSections({ campaignId, targetTitle, targetKey, onTargetReached, children }: {
@@ -35,20 +46,83 @@ export function CampaignSections({ campaignId, targetTitle, targetKey, onTargetR
   }), []);
   const context = useMemo(() => ({ memory, attentionMemory: attention, register, all }), [memory, attention, register, all]);
   const indexRef = useRef<HTMLElement>(null);
-  const [selectedTitle, setSelectedTitle] = useState<string | null>(null);
+  const ordered = [...entries].sort((a, b) => {
+    const position = a[1].heading?.compareDocumentPosition(b[1].heading!);
+    return position && position & 4 ? -1 : 1;
+  });
+  const orderedRef = useRef(ordered);
+  orderedRef.current = ordered;
+  const [currentTitle, setCurrentTitle] = useState<string | null>(null);
+  // A jump to a section near the end cannot scroll its heading up to the index, so the section it
+  // chose stays current while the panel stays where the jump left it and that heading is still on
+  // screen below the index. `top` is null from the jump until its scroll has been applied, so a
+  // measurement queued before the jump cannot hand the label back to another section.
+  const jumped = useRef<{ title: string; top: number | null } | null>(null);
+  const scroller = useCallback(() => indexRef.current?.closest<HTMLElement>(".campaign-status") ?? null, []);
+  const updateCurrent = useCallback(() => {
+    const index = indexRef.current;
+    const panel = scroller();
+    const list = orderedRef.current;
+    if (!index || !list.length) return;
+    const pin = jumped.current;
+    const pinned = pin ? list.find(([, entry]) => entry.title === pin.title)?.[1] : undefined;
+    if (pin && pinned) {
+      if (pin.top === null) { setCurrentTitle(pin.title); return; }
+      const top = pinned.heading?.getBoundingClientRect().top;
+      if (panel && top !== undefined && Math.abs(panel.scrollTop - pin.top) <= 2
+        && top >= index.getBoundingClientRect().bottom - 1 && top < panel.getBoundingClientRect().bottom) {
+        setCurrentTitle(pin.title);
+        return;
+      }
+    }
+    jumped.current = null;
+    let current = list[0]![1].title;
+    // At the top of the panel nothing has scrolled under the index yet.
+    if (!panel || panel.scrollTop > 0) {
+      const line = index.getBoundingClientRect().bottom + CURRENT_SLACK;
+      for (const [, entry] of list) if (entry.heading && entry.heading.getBoundingClientRect().top <= line) current = entry.title;
+    }
+    setCurrentTitle(current);
+  }, [scroller]);
+  useEffect(() => {
+    const panel = scroller();
+    if (!panel) return;
+    // One measurement per frame, however many scroll events arrive in it.
+    let pending = false;
+    let live = true;
+    const onScroll = () => {
+      if (pending) return;
+      pending = true;
+      requestAnimationFrame(() => { pending = false; if (live) updateCurrent(); });
+    };
+    panel.addEventListener("scroll", onScroll, { passive: true });
+    // Sections folding, unfolding or growing with live data move headings without any scroll
+    // (the panel turns scroll anchoring off), so a change in the content's size measures again.
+    const content = indexRef.current?.parentElement;
+    const observer = typeof ResizeObserver === "undefined" || !content ? null : new ResizeObserver(onScroll);
+    if (content) observer?.observe(content);
+    return () => { live = false; panel.removeEventListener("scroll", onScroll); observer?.disconnect(); };
+  }, [scroller, updateCurrent]);
+  // Sections arriving, leaving, folding or unfolding move headings without any scroll.
+  useEffect(() => { requestAnimationFrame(updateCurrent); }, [entries, all, updateCurrent]);
   const reveal = useCallback((entry: Entry) => {
-    setSelectedTitle(entry.title);
+    jumped.current = { title: entry.title, top: null };
+    setCurrentTitle(entry.title);
     entry.open();
     requestAnimationFrame(() => {
-      if (!entry.heading) return;
       // Scroll only this panel. scrollIntoView also scrolls overflow-hidden ancestors, which
       // can move the phone sheet and its chrome. Account for the index's actual text size.
-      const scroller = indexRef.current?.closest<HTMLElement>(".campaign-status");
-      if (scroller) scroller.scrollTo({ top: scroller.scrollTop + entry.heading.getBoundingClientRect().top
-        - scroller.getBoundingClientRect().top - (indexRef.current?.getBoundingClientRect().height ?? 0) - 12 });
-      entry.heading.focus({ preventScroll: true });
+      const panel = scroller();
+      if (panel && entry.heading) {
+        panel.scrollTo({ top: panel.scrollTop + entry.heading.getBoundingClientRect().top
+          - panel.getBoundingClientRect().top - (indexRef.current?.getBoundingClientRect().height ?? 0) - 12 });
+      }
+      // Pinned at wherever the scroll settled, including a scroll the panel's end clamped to nothing.
+      if (jumped.current?.title === entry.title) jumped.current = { title: entry.title, top: panel?.scrollTop ?? 0 };
+      setCurrentTitle(entry.title);
+      entry.heading?.focus({ preventScroll: true });
     });
-  }, []);
+  }, [scroller]);
   const reached = useRef<string | undefined>(undefined);
   useEffect(() => {
     const key = targetKey ?? targetTitle;
@@ -59,28 +133,75 @@ export function CampaignSections({ campaignId, targetTitle, targetKey, onTargetR
     onTargetReached?.();
     reveal(entry);
   }, [entries, targetTitle, targetKey, reveal, onTargetReached]);
-  const ordered = [...entries].sort((a, b) => {
-    const position = a[1].heading?.compareDocumentPosition(b[1].heading!);
-    return position && position & 4 ? -1 : 1;
-  });
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menu = useAccessibleMenu(menuOpen, setMenuOpen, "campaign-section-menu");
+  const { menuRef, close: closeMenu } = menu;
+  // Declared after the menu hook, so it runs after the hook's opening focus: the menu opens on
+  // the section you are in, not on the first one.
+  useEffect(() => {
+    if (menuOpen) menuRef.current?.querySelector<HTMLElement>('[aria-current="location"]')?.focus();
+  }, [menuOpen, menuRef]);
+  // A live refresh can remove the section whose item has focus (a cleared recovery hold). Focus
+  // would fall to the page, where Escape and Tab no longer reach the menu, so it moves to the
+  // current item instead, and a menu left with no sections closes.
+  useEffect(() => {
+    const surface = menuRef.current;
+    if (!menuOpen || !surface) return;
+    if (!entries.size) { closeMenu(true); return; }
+    if (surface.contains(document.activeElement)) return;
+    (surface.querySelector<HTMLElement>('[aria-current="location"]') ?? surface.querySelector<HTMLElement>('[role="menuitem"]'))?.focus();
+  }, [entries, menuOpen, menuRef, closeMenu]);
+  const current = ordered.find(([, entry]) => entry.title === currentTitle)?.[1] ?? ordered[0]?.[1];
+  const needing = ordered.filter(([, entry]) => entry.attention).map(([, entry]) => entry);
+  const setEvery = (value: boolean) => setAll(previous => ({ value, revision: (previous?.revision ?? 0) + 1 }));
   return <Context.Provider value={context}>
     <nav ref={indexRef} className="campaign-section-index" aria-label="Campaign Sections">
-      <span className="section-title">Go to Section</span>
-      <div className="campaign-section-links" role="group" aria-label="Go to Section">
-        {ordered.map(([id, entry]) => <button key={id} type="button" className="btn sm"
-          aria-current={selectedTitle === entry.title ? "location" : undefined} onClick={() => reveal(entry)}>
-          {entry.title} · {entry.count}{entry.attention ? " · Attention" : ""}
-        </button>)}
-      </div>
-      <div><button type="button" className="btn sm" onClick={() => setAll(current => ({ value: false, revision: (current?.revision ?? 0) + 1 }))}>Collapse All</button>{" "}
-        <button type="button" className="btn sm" onClick={() => setAll(current => ({ value: true, revision: (current?.revision ?? 0) + 1 }))}>Expand All</button></div>
+      <button ref={menu.triggerRef} type="button" className="btn ghost sm campaign-section-trigger" title="Go to Section"
+        aria-label={current ? `Go to Section, Current Section: ${current.title}` : "Go to Section"}
+        aria-haspopup="menu" aria-expanded={menuOpen} aria-controls={menuOpen ? menu.menuId : undefined}
+        disabled={!current} onClick={menu.toggle} onKeyDown={menu.onTriggerKeyDown}>
+        <ListIcon size={14} />
+        {current ? <>
+          <span className="campaign-section-trigger-label">Section:</span>
+          <span className="campaign-section-current">{current.title}</span>
+        </> : <span className="campaign-section-current">Go to Section</span>}
+        <ChevronDownIcon size={14} />
+      </button>
+      {needing.length > 0 && <button type="button" className="btn sm campaign-section-attention"
+        title="Go to the first section that needs attention" onClick={() => reveal(needing[0]!)}>
+        <span className="campaign-section-dot" aria-hidden="true" />
+        {needing.length} {needing.length === 1 ? "Needs" : "Need"} Attention
+      </button>}
+      <span className="campaign-section-tools">
+        <button type="button" className="icon-btn sm" aria-label="Collapse All" title="Collapse All" onClick={() => setEvery(false)}>
+          <CollapseAllIcon size={14} />
+        </button>
+        <button type="button" className="icon-btn sm" aria-label="Expand All" title="Expand All" onClick={() => setEvery(true)}>
+          <ExpandAllIcon size={14} />
+        </button>
+      </span>
     </nav>
+    {menuOpen && <MenuSurface surfaceRef={menuRef} anchor={{ trigger: menu.triggerRef }} id={menu.menuId}
+      label="Go to Section" boundary=".campaign-status" className="campaign-section-menu"
+      onDismiss={() => menu.close(true)} onKeyDown={menu.onMenuKeyDown}>
+      {ordered.map(([id, entry]) => <MenuItem key={id} aria-label={sectionName(entry)}
+        aria-current={entry === current ? "location" : undefined}
+        className={[entry === current ? "is-active" : "", entry.count === 0 ? "campaign-section-empty" : ""].filter(Boolean).join(" ") || undefined}
+        icon={entry.attention ? <span className="campaign-section-dot" /> : undefined}
+        trail={entry.count === undefined ? undefined : <span className="count">{entry.count}</span>}
+        onClick={() => { menu.close(false); reveal(entry); }}>
+        {entry.title}
+      </MenuItem>)}
+    </MenuSurface>}
     {children}
   </Context.Provider>;
 }
 
-/** Keep bodies mounted while folded: polling, in-progress controls and new attention still work. */
-export function CampaignSection({ title, count = 0, attention = "", defaultOpen = false, className, children }: {
+/**
+ * Keep bodies mounted while folded: polling, in-progress controls and new attention still work.
+ * Omit `count` for a section that is always one thing (Summary, Campaign Pause): it shows none.
+ */
+export function CampaignSection({ title, count, attention = "", defaultOpen = false, className, children }: {
   title: string; count?: number; attention?: string; defaultOpen?: boolean; className?: string; children: ReactNode;
 }) {
   const context = useContext(Context);
@@ -119,7 +240,7 @@ export function CampaignSection({ title, count = 0, attention = "", defaultOpen 
     <h3 aria-label={title} id={id} ref={heading} tabIndex={-1} className="section-title campaign-section-heading">
       <button type="button" aria-expanded={expanded} aria-controls={`${id}-body`} onClick={() => { setOpen(!expanded); setFresh(false); }}>
         {expanded ? <ChevronDownIcon size={14} /> : <ChevronRightIcon size={14} />}
-        <span>{title} · {count}{attention && <span> · Attention</span>}{fresh && <span> · New</span>}</span>
+        <span>{title}{count === undefined ? "" : ` · ${count}`}{attention && <span> · Attention</span>}{fresh && <span> · New</span>}</span>
       </button>
     </h3>
     <div id={`${id}-body`} hidden={!expanded}>{children}</div>

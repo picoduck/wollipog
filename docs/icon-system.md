@@ -63,6 +63,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ChevronUpIcon` | Lucide | `ChevronUp` | Expand on the request dock's reading-back strip. |
 | `ChevronsDownIcon` | Lucide | `ChevronsDown` | Show Context: Answer Mode shrinks to its head so the transcript shows. |
 | `ChevronsUpIcon` | Lucide | `ChevronsUp` | Show Answer: Answer Mode's panel opens again. |
+| `CollapseAllIcon` | Lucide | `ChevronsDownUp` | Collapse All: every Campaign Status section folds to its heading. |
+| `ExpandAllIcon` | Lucide | `ChevronsUpDown` | Expand All: every Campaign Status section unfolds. |
 | `PlusIcon` | Lucide | `Plus` | Generic add action. |
 | `PinIcon` | Lucide | `Pin` | Pinned session state. |
 | `UnpinIcon` | Lucide | `PinOff` | Unpin Session in the Sessions context menu (#2214). |
