@@ -95,14 +95,21 @@ test("worker terminal job dispatches health with literal command and scoped toke
 });
 
 // Run the entry module itself: importing main() hides pending top-level-await cycles.
-test("rolling CLI reconciles successfully after its real terminal worker handoff", () => {
-  const preload = `globalThis.fetch = async (url, options) => {
+test("rolling CLI retries a short listing after its real terminal worker handoff", () => {
+  const preload = `import timers from "node:timers/promises";
+  import { syncBuiltinESMExports } from "node:module";
+  timers.setTimeout = async () => {};
+  syncBuiltinESMExports();
+  let queuedReads = 0;
+  globalThis.fetch = async (url, options) => {
     const path = new URL(url).pathname;
     let status = 200, body;
     if (path === "/repos/${repository}/actions/runs/10") body = ${JSON.stringify(run({ status: "completed", conclusion: "success" }))};
     else if (path.endsWith("/git/ref/heads/ci/main-rolling-state")) { status = 404; body = {}; }
     else if (path.endsWith("/git/ref/heads/main")) body = { object: { sha: "${target}" } };
-    else if (path.endsWith("/runs")) body = { total_count: 0, workflow_runs: [] };
+    else if (path.endsWith("/runs")) body = {
+      total_count: new URL(url).searchParams.get("status") === "queued" && ++queuedReads === 1 ? 1 : 0,
+      workflow_runs: [] };
     else if (path.endsWith("/git/trees") || path.endsWith("/git/commits")) body = { sha: "${target}" };
     else if (path === "/repos/${repository}") body = { node_id: "repo" };
     else if (path === "/graphql") body = { data: { updateRefs: {} } };
