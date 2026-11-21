@@ -819,9 +819,10 @@ export class AntigravitySetupSupervisor {
     const setStage = (stage: AntigravityInstallStage) => this.updateOperation(operation.operationId, { stage });
     this.rollbackCause = undefined;
     try {
-      // What the copy in use achieves now (the last report may be stale, or name a version a
-      // recovery just replaced). The new version must do at least as well.
-      const baseline = await this.runCheck("never");
+      // What the copy the update replaces achieves now (the last report may be stale, or name a
+      // version a recovery just replaced). The new version must do at least as well. With a
+      // managed copy that is the managed copy alone: a PATH copy's result must not stand in for it.
+      const baseline = await this.runCheck("never", { managedOnly: !!this.readManaged() });
       // A check that timed out proves nothing about the copy in use: it may still work once the
       // service answers. Judging the new version against it could replace a working copy, so the
       // update stops here, before anything is downloaded or activated.

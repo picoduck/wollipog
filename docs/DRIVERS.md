@@ -1486,8 +1486,9 @@ Antigravity agent, so Antigravity is not offered in New Session, and nothing her
      begins stopping before a pointer changes activates nothing.
   7. Verify: run the ordinary check, with the runner user's sign-in, against the activated managed
      copy alone (never falling back to the PATH copy). It must get past its version check
-     (`sign_in_required` at least), and do no worse than the copy in use before the install, as a
-     fresh check at the start of the install found it (`ready` over `sign_in_required` over
+     (`sign_in_required` at least), and do no worse than the copy it replaces, as a fresh check at
+     the start of the install found it (the managed copy alone when there is one, so a PATH copy's
+     result never stands in for it) (`ready` over `sign_in_required` over
      anything else). A fresh check that times out proves nothing, so the update stops there with
      `timed_out`, before anything is downloaded. Otherwise, or if the runner began
      stopping, both pointers are restored, so the previous managed version (or, for a first install,

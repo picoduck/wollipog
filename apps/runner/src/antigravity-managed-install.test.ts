@@ -612,6 +612,32 @@ test("a runner that starts stopping during verification never confirms the new v
   assert.equal(existsSync(join(managedRoot, "pending-activation.json")), false);
 });
 
+test("a PATH copy can't stand in for a managed copy whose baseline check timed out", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  // A separate PATH copy that asks for a sign-in even though the managed copy's sign-in works.
+  const unsignedPath = join(root, "path-agy-unsigned");
+  writeFileSync(unsignedPath, `#!/bin/sh\nFAKE_AGY_MODE=session_auth_required exec ${JSON.stringify(process.execPath)} ${JSON.stringify(FIXTURE)} "$@"\n`);
+  chmodSync(unsignedPath, 0o755);
+  const { setup, managedRoot } = supervisor(server, { resolveExecutable: async () => unsignedPath, versionTimeoutMs: 1_000 });
+  assert.equal((await install(setup)).status, "ready");
+  const working = readlinkSync(join(managedRoot, "current"));
+
+  const { archiveUrl, manifestUrl } = server.publish({ platform: PLATFORM, version: "1.6.0", archive: release("1.6.0", "session_auth_required") });
+  // The managed copy's version check stalls once during the update's baseline.
+  writeFileSync(join(state, "hang-next-version"), "");
+  const requestsBefore = server.requests.length;
+  const stopped = await install(setup);
+  assert.equal(stopped.managedInstall?.operation?.failure, "timed_out");
+  assert.equal(readlinkSync(join(managedRoot, "current")), working);
+  const requested = server.requests.slice(requestsBefore);
+  assert.ok(!requested.includes(manifestUrl) && !requested.includes(archiveUrl), "no release was read");
+  const checked = await setup.check("never");
+  assert.equal(checked.status, "ready");
+  assert.equal(checked.executable?.source, "managed");
+  assert.equal(checked.executable?.version, "1.5.14");
+});
+
 test("an update stops before it starts when the copy in use can't be checked in time", async () => {
   const server = new FakeReleaseServer();
   server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });

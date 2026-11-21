@@ -392,6 +392,18 @@ test("an update rolled back after a failed access check names the version kept",
   } finally { await view.unmount(); }
 });
 
+test("a first install stopped by a timed-out check doesn't claim the found copy works", async () => {
+  const view = await mount(runner(setup({ status: "verification_failed", failure: "timed_out", executable: { ...executable, source: "path" },
+    managedInstall: { available: true, pathExecutable: executable.path,
+      operation: { operationId: "agy_install_1", kind: "install", status: "failed", startedAt: NOW, finishedAt: NOW, failure: "timed_out" } } })));
+  try {
+    const opened = await openSetup(view.body);
+    const notice = [...opened.querySelectorAll('[role="alert"]')].find((node) => /Install Failed/u.test(node.textContent ?? ""));
+    assert.match(notice?.textContent ?? "", /took too long, so nothing was changed/u);
+    assert.doesNotMatch(opened.textContent ?? "", /keeps working/u);
+  } finally { await view.unmount(); }
+});
+
 test("an update whose rollback failed claims no kept version", async () => {
   const view = await mount(runner(managedReady({ active: managedRelease("1.6.0"), latest: { version: "1.6.0", checkedAt: NOW },
     operation: failedOperation("update", "rollback_failed", "1.6.0") })));

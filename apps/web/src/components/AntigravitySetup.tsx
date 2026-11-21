@@ -138,7 +138,9 @@ export function AntigravitySetupDialog({ runner, presentation, machineName, retu
           actions={installButton("Try Again")}>
           <p>
             {antigravityInstallFailureSentence(failedBeside.operation.failure)}
-            {failedBeside.operation.failure === "rollback_failed" ? "" : " The copy Wollipog found keeps working."}
+            {/* Claimed only for a copy whose last check got through: a timed-out or failed check proves nothing. */}
+            {failedBeside.operation.failure !== "rollback_failed" && (setup?.status === "ready" || setup?.status === "sign_in_required")
+              ? " The copy Wollipog found keeps working." : ""}
           </p>
         </Notice>
       )}
