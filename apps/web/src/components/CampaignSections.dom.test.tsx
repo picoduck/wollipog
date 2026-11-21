@@ -183,3 +183,66 @@ test("the one-row jump menu: contents, current section, attention chip and keybo
   await act(async () => new Promise(resolve => setTimeout(resolve, 20)));
   await act(async () => root.unmount()); container.remove();
 });
+
+/** Frames that run only when flushed, in the order they were queued, as a browser runs them. */
+function queuedFrames() {
+  const queue: (() => void)[] = [];
+  const original = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = ((callback: () => void) => { queue.push(callback); return queue.length; }) as typeof requestAnimationFrame;
+  return {
+    flush: async () => act(async () => { while (queue.length) queue.shift()!(); }),
+    restore: () => { globalThis.requestAnimationFrame = original; },
+  };
+}
+
+test("a targeted jump the panel cannot scroll keeps its section current despite an earlier measurement", async () => {
+  forgetCampaignSections();
+  const frames = queuedFrames();
+  const container = document.createElement("div"); container.className = "campaign-status"; document.body.append(container);
+  container.scrollTo = () => {}; // everything fits: the jump's scroll is clamped to nothing
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <CampaignSections campaignId="clamped-target" targetTitle="Decisions" targetKey="request-one">
+        <CampaignSection title="Summary" defaultOpen>Progress</CampaignSection>
+        <CampaignSection title="Decisions" count={2}>History</CampaignSection>
+      </CampaignSections>));
+    await frames.flush();
+    assert.equal(document.activeElement, container.querySelector('[data-campaign-section="Decisions"] h3'));
+    assert.equal(container.querySelector(".campaign-section-trigger")!.getAttribute("aria-label"),
+      "Go to Section, Current Section: Decisions");
+  } finally {
+    frames.restore();
+    await act(async () => root.unmount()); container.remove();
+  }
+});
+
+test("removing the focused section's item keeps focus in the open menu, so Escape still closes it", async () => {
+  forgetCampaignSections();
+  const container = document.createElement("div"); container.className = "campaign-status"; document.body.append(container);
+  container.scrollTo = () => {};
+  const root = createRoot(container);
+  const render = async (withHold: boolean) => act(async () => root.render(
+    <CampaignSections campaignId="live-removal">
+      <CampaignSection title="Summary" defaultOpen>Progress</CampaignSection>
+      {withHold && <CampaignSection title="Recovery Automation" attention="hold">Hold</CampaignSection>}
+      <CampaignSection title="Decisions" count={2}>History</CampaignSection>
+    </CampaignSections>));
+  await render(true);
+  const trigger = container.querySelector<HTMLButtonElement>(".campaign-section-trigger")!;
+  await act(async () => trigger.click());
+  const removed = document.querySelector<HTMLElement>('[role="menu"] [aria-label="Recovery Automation, Needs Attention"]')!;
+  await act(async () => removed.focus());
+  assert.equal(document.activeElement, removed);
+  await render(false); // a refresh clears the hold, and its section goes
+  const menu = document.querySelector<HTMLElement>('[role="menu"]')!;
+  assert.equal(menu.querySelectorAll('[role="menuitem"]').length, 2);
+  assert.ok(menu.contains(document.activeElement), "focus stays on an item of the open menu");
+  await act(async () => {
+    document.activeElement!.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as unknown as Event);
+  });
+  await act(async () => new Promise(resolve => setTimeout(resolve, 20)));
+  assertNoDomNode(document.querySelector('[role="menu"]'));
+  assert.equal(document.activeElement, trigger);
+  await act(async () => root.unmount()); container.remove();
+});

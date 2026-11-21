@@ -112,6 +112,22 @@ for (const width of [1440, 390]) test(`large campaign sections at ${width}px (#4
   await expect(menu.getByRole("menuitem", { name: "Decisions, 30", exact: true })).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(trigger).toBeFocused();
+  // Expanding everything above the jumped section pushes it off screen without scrolling the
+  // panel: the label moves on to the heading now under the index.
+  await page.getByRole("button", { name: "Expand All", exact: true }).click();
+  await expect(section("Decisions").getByRole("heading")).not.toBeInViewport();
+  const underIndex = () => page.locator(".campaign-status").evaluate(scroller => {
+    const line = scroller.querySelector(".campaign-section-index")!.getBoundingClientRect().bottom + 16;
+    let title = "";
+    for (const heading of scroller.querySelectorAll<HTMLElement>("[data-campaign-section] > h3")) {
+      if (heading.getBoundingClientRect().top <= line) title = heading.getAttribute("aria-label")!;
+    }
+    return title;
+  });
+  await expect.poll(async () => (await trigger.getAttribute("aria-label")) === `Go to Section, Current Section: ${await underIndex()}`).toBe(true);
+  await expect(trigger).not.toHaveAccessibleName("Go to Section, Current Section: Decisions");
+  await page.getByRole("button", { name: "Collapse All", exact: true }).click();
+  await jump("Decisions, 30");
   await section("Decisions").getByRole("button", { name: "Show All (30)", exact: true }).click();
   await expect(section("Decisions").locator(".campaign-decision-item")).toHaveCount(30);
   await jump("Recovery Records, 5");
@@ -134,4 +150,40 @@ for (const width of [1440, 390]) test(`large campaign sections at ${width}px (#4
   await expect(section("Decisions").getByRole("button", { name: /Decisions · 30/ })).toHaveAttribute("aria-expanded", "true");
   await page.goto("/campaign-status-e2e.html?scenario=campaign&largeCampaign=1&workItemId=cwi_3");
   await expect(page.getByRole("heading", { name: "Ledger Read API", exact: true })).toBeFocused();
+});
+
+test.describe("on a touch screen", () => {
+  test.use({ hasTouch: true });
+  for (const width of [385, 390]) test(`the section index stays within 44px and its hit areas stay apart at ${width}px (#4781)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&largeCampaign=1");
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+    const index = page.locator(".campaign-section-index");
+    await expect(index.getByRole("button", { name: /^\d+ Needs? Attention$/ })).toBeVisible();
+    const layout = await index.evaluate(element => {
+      const controls = [...element.querySelectorAll<HTMLElement>("button")].map(button => button.getBoundingClientRect());
+      return {
+        height: element.getBoundingClientRect().height,
+        controlHeights: controls.map(rect => rect.height),
+        gaps: controls.slice(1).map((rect, i) => rect.left - controls[i]!.right),
+        // The index's own scrollWidth counts the last button's borrowed hit area; the panel's does not.
+        overflow: (() => { const panel = element.closest(".campaign-status")!; return panel.scrollWidth > panel.clientWidth + 1; })(),
+        label: element.querySelector<HTMLElement>(".campaign-section-trigger")!.innerText.trim(),
+      };
+    });
+    // Too narrow for the "Section:" prefix: the section's own name keeps the room.
+    expect(layout.label).toBe("Waiting for You");
+    expect(layout.height).toBeLessThanOrEqual(44);
+    expect(layout.controlHeights.every(height => height === 36)).toBe(true);
+    // Each small control borrows 4px a side for its 44px target, so neighbours sit 8px apart.
+    expect(Math.min(...layout.gaps)).toBeGreaterThanOrEqual(8);
+    expect(layout.overflow).toBe(false);
+    // A tap just inside Collapse All's right edge, and in its borrowed margin, is Collapse All's.
+    const collapse = await index.getByRole("button", { name: "Collapse All", exact: true }).boundingBox();
+    for (const dx of [-1, 3]) {
+      const hit = await page.evaluate(([x, y]) => document.elementFromPoint(x!, y!)?.closest("button")?.getAttribute("aria-label"),
+        [collapse!.x + collapse!.width + dx, collapse!.y + collapse!.height / 2]);
+      expect(hit).toBe("Collapse All");
+    }
+  });
 });

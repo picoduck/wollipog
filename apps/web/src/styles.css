@@ -5735,16 +5735,19 @@ body.shell-dock-dragging * {
    Expand All as icons. Only the section name gives way to a narrow panel. The row takes the panel's
    width rather than lending its own: a long section name would otherwise widen every section.
    An inline-size container gives it no intrinsic width; its menu is portalled, so the layout
-   containment that comes with it does not move the menu. */
+   containment that comes with it does not move the menu.
+   Every control here is a small one, 36px on touch with a borrowed 44px hit area (§2.8): they sit
+   8px apart so no hit area takes a neighbour's taps, and 2px of padding keeps the row (36 + 2 + 2
+   + its 1px rule) inside 44px on touch. */
 .campaign-section-index {
   position: sticky;
   top: 0;
   z-index: var(--z-sticky);
   display: flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--space-2);
   min-width: 0;
-  padding: var(--space-1) 0;
+  padding: var(--space-0-5) 0;
   background: var(--bg);
   border-bottom: 1px solid var(--border);
   container-type: inline-size;
@@ -5764,29 +5767,30 @@ body.shell-dock-dragging * {
   flex: none;
   color: var(--text-faint);
 }
+/* At the right panel's usual width and on a phone, the prefix leaves the section's name too little
+   room ("Section: Waiting for Y…"), so it shows only in a wider panel. The name alone stays inside
+   the trigger's accessible name, so dropping the prefix keeps the two consistent. */
+@container (max-width: 420px) {
+  .campaign-section-trigger-label { display: none; }
+}
 .campaign-section-current {
   min-width: 0;
   overflow: hidden;
   font-weight: var(--weight-semibold);
   text-overflow: ellipsis;
 }
-.campaign-section-attention {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  gap: var(--space-1);
-  height: var(--control-h-sm);
-  padding: 0 var(--space-2);
-  border: 1px solid color-mix(in srgb, var(--amber) 32%, transparent);
+/* A small button (its size and touch hit area come from `.btn.sm`) drawn as an amber pill. */
+.campaign-section-attention.btn {
+  border-color: color-mix(in srgb, var(--amber) 32%, transparent);
   border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--amber) 7%, var(--bg-elev));
   color: var(--amber-on-tint);
   font: var(--type-micro);
-  white-space: nowrap;
-  cursor: pointer;
 }
 @media (hover: hover) {
-  .campaign-section-attention:hover { background: color-mix(in srgb, var(--amber) 14%, var(--bg-elev)); }
+  .campaign-section-attention.btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--amber) 14%, var(--bg-elev));
+  }
 }
 .campaign-section-dot {
   flex: none;
@@ -5798,6 +5802,7 @@ body.shell-dock-dragging * {
 .campaign-section-tools {
   display: inline-flex;
   flex: none;
+  gap: var(--space-2);
   margin-left: auto;
 }
 .campaign-section-menu { min-width: 240px; }

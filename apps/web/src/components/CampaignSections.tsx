@@ -54,8 +54,10 @@ export function CampaignSections({ campaignId, targetTitle, targetKey, onTargetR
   orderedRef.current = ordered;
   const [currentTitle, setCurrentTitle] = useState<string | null>(null);
   // A jump to a section near the end cannot scroll its heading up to the index, so the section it
-  // chose stays current until the panel scrolls away from where the jump left it.
-  const jumped = useRef<{ title: string; top: number } | null>(null);
+  // chose stays current while the panel stays where the jump left it and that heading is still on
+  // screen below the index. `top` is null from the jump until its scroll has been applied, so a
+  // measurement queued before the jump cannot hand the label back to another section.
+  const jumped = useRef<{ title: string; top: number | null } | null>(null);
   const scroller = useCallback(() => indexRef.current?.closest<HTMLElement>(".campaign-status") ?? null, []);
   const updateCurrent = useCallback(() => {
     const index = indexRef.current;
@@ -63,9 +65,15 @@ export function CampaignSections({ campaignId, targetTitle, targetKey, onTargetR
     const list = orderedRef.current;
     if (!index || !list.length) return;
     const pin = jumped.current;
-    if (pin && panel && Math.abs(panel.scrollTop - pin.top) <= 2 && list.some(([, entry]) => entry.title === pin.title)) {
-      setCurrentTitle(pin.title);
-      return;
+    const pinned = pin ? list.find(([, entry]) => entry.title === pin.title)?.[1] : undefined;
+    if (pin && pinned) {
+      if (pin.top === null) { setCurrentTitle(pin.title); return; }
+      const top = pinned.heading?.getBoundingClientRect().top;
+      if (panel && top !== undefined && Math.abs(panel.scrollTop - pin.top) <= 2
+        && top >= index.getBoundingClientRect().bottom - 1 && top < panel.getBoundingClientRect().bottom) {
+        setCurrentTitle(pin.title);
+        return;
+      }
     }
     jumped.current = null;
     let current = list[0]![1].title;
@@ -88,24 +96,31 @@ export function CampaignSections({ campaignId, targetTitle, targetKey, onTargetR
       requestAnimationFrame(() => { pending = false; if (live) updateCurrent(); });
     };
     panel.addEventListener("scroll", onScroll, { passive: true });
-    return () => { live = false; panel.removeEventListener("scroll", onScroll); };
+    // Sections folding, unfolding or growing with live data move headings without any scroll
+    // (the panel turns scroll anchoring off), so a change in the content's size measures again.
+    const content = indexRef.current?.parentElement;
+    const observer = typeof ResizeObserver === "undefined" || !content ? null : new ResizeObserver(onScroll);
+    if (content) observer?.observe(content);
+    return () => { live = false; panel.removeEventListener("scroll", onScroll); observer?.disconnect(); };
   }, [scroller, updateCurrent]);
   // Sections arriving, leaving, folding or unfolding move headings without any scroll.
   useEffect(() => { requestAnimationFrame(updateCurrent); }, [entries, all, updateCurrent]);
   const reveal = useCallback((entry: Entry) => {
+    jumped.current = { title: entry.title, top: null };
     setCurrentTitle(entry.title);
     entry.open();
     requestAnimationFrame(() => {
-      if (!entry.heading) return;
       // Scroll only this panel. scrollIntoView also scrolls overflow-hidden ancestors, which
       // can move the phone sheet and its chrome. Account for the index's actual text size.
       const panel = scroller();
-      if (panel) {
+      if (panel && entry.heading) {
         panel.scrollTo({ top: panel.scrollTop + entry.heading.getBoundingClientRect().top
           - panel.getBoundingClientRect().top - (indexRef.current?.getBoundingClientRect().height ?? 0) - 12 });
-        jumped.current = { title: entry.title, top: panel.scrollTop };
       }
-      entry.heading.focus({ preventScroll: true });
+      // Pinned at wherever the scroll settled, including a scroll the panel's end clamped to nothing.
+      if (jumped.current?.title === entry.title) jumped.current = { title: entry.title, top: panel?.scrollTop ?? 0 };
+      setCurrentTitle(entry.title);
+      entry.heading?.focus({ preventScroll: true });
     });
   }, [scroller]);
   const reached = useRef<string | undefined>(undefined);
@@ -120,12 +135,22 @@ export function CampaignSections({ campaignId, targetTitle, targetKey, onTargetR
   }, [entries, targetTitle, targetKey, reveal, onTargetReached]);
   const [menuOpen, setMenuOpen] = useState(false);
   const menu = useAccessibleMenu(menuOpen, setMenuOpen, "campaign-section-menu");
-  const { menuRef } = menu;
+  const { menuRef, close: closeMenu } = menu;
   // Declared after the menu hook, so it runs after the hook's opening focus: the menu opens on
   // the section you are in, not on the first one.
   useEffect(() => {
     if (menuOpen) menuRef.current?.querySelector<HTMLElement>('[aria-current="location"]')?.focus();
   }, [menuOpen, menuRef]);
+  // A live refresh can remove the section whose item has focus (a cleared recovery hold). Focus
+  // would fall to the page, where Escape and Tab no longer reach the menu, so it moves to the
+  // current item instead, and a menu left with no sections closes.
+  useEffect(() => {
+    const surface = menuRef.current;
+    if (!menuOpen || !surface) return;
+    if (!entries.size) { closeMenu(true); return; }
+    if (surface.contains(document.activeElement)) return;
+    (surface.querySelector<HTMLElement>('[aria-current="location"]') ?? surface.querySelector<HTMLElement>('[role="menuitem"]'))?.focus();
+  }, [entries, menuOpen, menuRef, closeMenu]);
   const current = ordered.find(([, entry]) => entry.title === currentTitle)?.[1] ?? ordered[0]?.[1];
   const needing = ordered.filter(([, entry]) => entry.attention).map(([, entry]) => entry);
   const setEvery = (value: boolean) => setAll(previous => ({ value, revision: (previous?.revision ?? 0) + 1 }));
@@ -142,7 +167,7 @@ export function CampaignSections({ campaignId, targetTitle, targetKey, onTargetR
         </> : <span className="campaign-section-current">Go to Section</span>}
         <ChevronDownIcon size={14} />
       </button>
-      {needing.length > 0 && <button type="button" className="campaign-section-attention"
+      {needing.length > 0 && <button type="button" className="btn sm campaign-section-attention"
         title="Go to the first section that needs attention" onClick={() => reveal(needing[0]!)}>
         <span className="campaign-section-dot" aria-hidden="true" />
         {needing.length} {needing.length === 1 ? "Needs" : "Need"} Attention
