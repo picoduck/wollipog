@@ -7,6 +7,16 @@ import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizont
 const evidence = process.env.ASSISTANT_DELEGATION_EVIDENCE_DIR;
 const thread = viewPath({ name: "assistants", threadId: "thr_triage" });
 
+async function openDecisions(page: Page) {
+  const panel = page.locator("#right-panel");
+  if (!(await panel.isVisible())) await page.getByRole("button", { name: "Side Panel", exact: true }).click();
+  await panel.getByRole("tab", { name: /^Decisions/ }).click();
+  return panel.getByRole("tabpanel", { name: /^Decisions/ });
+}
+async function closeDecisions(page: Page) {
+  await page.locator("#right-panel").getByRole("button", { name: "Close Panel" }).click();
+}
+
 async function openAssistantFixture(page: Page, path: string, supported = true) {
   await page.goto(`/assistants-e2e.html?delegation=${supported ? "stress" : "old"}&path=${encodeURIComponent(path)}`);
 }
@@ -112,6 +122,10 @@ test("a control plane without delegation support offers no grant or history acti
   await page.getByRole("button", { name: "Thread Actions", exact: true }).click();
   await expect(page.getByRole("menuitem", { name: "Decision Delegation" })).toHaveCount(0);
   await expect(page.getByRole("menuitem", { name: "Delegated Decisions" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  const decisions = await openDecisions(page);
+  await expect(decisions).toContainText("This control plane does not support delegated decision history.");
+  await expect(page.locator("body")).not.toHaveAttribute("data-assistant-decision-history-requested");
 });
 
 for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 844]] as const) {
@@ -124,10 +138,10 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await page.setViewportSize({ width, height });
     await page.clock.install({ time: new Date("2026-11-19T16:00:00Z") });
     await page.goto(`/assistants-e2e.html?delegation=expires&path=${encodeURIComponent(thread)}`);
-    const details = page.getByLabel("Thread Details");
-    await expect(details).toContainText("Decision Delegation Set");
+    const details = await openDecisions(page);
+    await expect(details).toContainText("Active");
     await page.clock.fastForward(61_000);
-    await expect(details).toContainText("Decision Delegation Expired");
+    await expect(details).toContainText("Expired");
     await expectPageNoHorizontalOverflow(page);
     await capture(page, "thread-grant-expired");
   });
@@ -137,8 +151,6 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await threadAction(page, "Decision Delegation");
     const settings = page.getByRole("dialog", { name: "Decision Delegation" });
     const save = settings.getByRole("button", { name: "Save Grant" });
-    const details = page.getByLabel("Thread Details");
-    await expect(details).toContainText("Decision Delegation Off");
     await expect(settings.getByRole("checkbox", { checked: true })).toHaveCount(0);
     await expect(settings.getByRole("checkbox", { name: /ui evidence approval/i })).toHaveCount(0);
     const ciRerun = settings.getByRole("checkbox", { name: "CI Rerun", exact: true });
@@ -169,7 +181,8 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await capture(page, "thread-campaign-scope");
     await save.click();
     await expect(settings).toHaveCount(0);
-    await expect(details).toContainText("Decision Delegation Set");
+    await expect(await openDecisions(page)).toContainText("Active");
+    await closeDecisions(page);
     await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", JSON.stringify({
       categories: ["ci_rerun", "owner_question", "pr_merge"], projects: ["project_0"], campaigns: ["campaign_0"], expiresAt: null,
     }));
@@ -182,10 +195,9 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await revoke.click();
     await expect(settings).toHaveCount(0);
     await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", "null");
-    await expect(details).toContainText("Decision Delegation Off");
+    await expect(await openDecisions(page)).toContainText("Not Delegated");
     await capture(page, "thread-grant-revoked");
-    await threadAction(page, "Delegated Decisions");
-    const history = page.getByRole("dialog", { name: "Delegated Decisions" });
+    const history = page.locator("#right-panel").getByRole("tabpanel", { name: /^Decisions/ });
     await expect(history).toContainText("under your delegation.");
     await expect(history).toContainText("Triage Open Issues");
     await expect(history.getByRole("listitem")).toHaveCount(5);

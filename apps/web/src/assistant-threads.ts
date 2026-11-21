@@ -157,11 +157,13 @@ export function assistantThreadHarnessLabel(
   return options?.find((option) => option.id === harness)?.label || ASSISTANT_THREAD_HARNESS_LABELS[harness] || harness;
 }
 
-/** "Full Access · Ask Before Destructive": the thread's access level as its header shows it. */
-export function assistantThreadAccessLabel(access: AssistantThreadAccess): string {
-  const level = access.level === "full_access" ? "Full Access" : "Limited Access";
-  const destructive = access.destructive === "ask" ? "Ask Before Destructive" : "Destructive Allowed";
-  return `${level} · ${destructive}`;
+/** The thread's access level and destructive-action setting in Details. */
+export function assistantThreadAccessSentence(access: AssistantThreadAccess): string {
+  const level = access.level === "full_access" ? "Full access." : "Limited access.";
+  const destructive = access.destructive === "ask"
+    ? "Asks before destructive actions."
+    : "Can take destructive actions without asking.";
+  return level + " " + destructive;
 }
 
 /** The thread list's order: newest activity first, as the server sends it, and stable on ties. */

@@ -30,7 +30,6 @@ import {
   campaignFact,
   decisionsFact,
   filesFact,
-  launchedSessionsFact,
   requestsFact,
   reviewFact,
   sessionToolAvailability,
@@ -52,10 +51,8 @@ import {
   HistoryIcon,
   InboxIcon,
   JobsIcon,
-  ListIcon,
   MessageSquareIcon,
 } from "./Icons.js";
-import { launchedWorkGroup, launchedWorkIds, type LaunchedWork } from "../assistant-launched-work.js";
 import { Notice } from "./Notice.js";
 import { commitsAheadFact } from "./ReviewSummary.js";
 import { StatusBadge } from "./StatusBadge.js";
@@ -79,7 +76,6 @@ export const SESSION_TOOL_ICONS: Record<SessionToolId, (props: { size?: number }
   campaign: CampaignIcon,
   requests: InboxIcon,
   decisions: HistoryIcon,
-  launched: ListIcon,
 };
 
 export function SessionToolIcon({ id, size = 16 }: { id: SessionToolId; size?: number }) {
@@ -101,8 +97,6 @@ export interface SessionToolsListProps {
   decisionStatus: "loading" | "error" | "ready";
   descendantRequests: readonly DescendantRequestView[];
   descendantRequestStatus: DescendantRequestStatus;
-  /** An Assistant thread's launched sessions, which the Launched Sessions row counts (#4776). */
-  launchedWork?: LaunchedWork;
   /** `keyboard` when Enter or Space chose the tool, rather than a pointer. */
   onChoose: (tool: SessionToolId, keyboard: boolean) => void;
 }
@@ -126,13 +120,7 @@ export function SessionToolsList(props: SessionToolsListProps) {
   const runner = useOptionalStoreSelector((s) => s.runners.get(props.session.runnerId));
   const campaignWork = campaignSessionId === props.session.id ? props.session.orchestratorCampaign?.work ?? null : storedWork ?? null;
   const machine = runnerDisplay(runner, undefined, props.session.runnerId).name || null;
-  // The thread header toggle's counts (#4776). The selector returns a number, so a store change that
-  // moves no session into or out of Needs You re-renders nothing.
-  const launchedIds = useMemo(() => props.launchedWork ? launchedWorkIds(props.launchedWork) : [], [props.launchedWork]);
-  const launchedNeedsYou = useOptionalStoreSelector((s) =>
-    launchedIds.filter((id) => launchedWorkGroup(s.sessions.get(id)) === "needsYou").length) ?? 0;
-  return <SessionToolsListView {...props} campaignWork={campaignWork} machine={machine}
-    launchedCounts={{ total: launchedIds.length, needsYou: launchedNeedsYou }} />;
+  return <SessionToolsListView {...props} campaignWork={campaignWork} machine={machine} />;
 }
 
 /**
@@ -239,11 +227,9 @@ function SessionToolsListView({
   onChoose,
   campaignWork,
   machine,
-  launchedCounts,
 }: SessionToolsListProps & {
   campaignWork: CampaignWorkSummary | null;
   machine: string | null;
-  launchedCounts: { total: number; needsYou: number };
 }) {
   const coarsePointer = useIsCoarsePointer();
   const groupId = useId();
@@ -319,10 +305,6 @@ function SessionToolsListView({
         badge: waitingForYou > 0 ? <CountBadge count={waitingForYou} /> : undefined,
       };
       case "decisions": return { text: decisionsFact(decisionCount, decisionsHaveMore, decisionStatus) };
-      case "launched": return {
-        text: launchedSessionsFact(launchedCounts),
-        badge: launchedCounts.needsYou > 0 ? <CountBadge count={launchedCounts.needsYou} /> : undefined,
-      };
       case "launcher": return { text: "" };
     }
   };

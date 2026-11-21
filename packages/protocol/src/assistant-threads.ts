@@ -106,6 +106,8 @@ export interface AssistantDecisionHistoryEntry {
 }
 
 export interface AssistantDecisionHistoryPage {
+  /** Total for the whole filter, on the first page of a thread history. */
+  total?: number;
   entries: AssistantDecisionHistoryEntry[];
   nextBefore?: string;
 }

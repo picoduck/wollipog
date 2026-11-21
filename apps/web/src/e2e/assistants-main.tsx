@@ -2,6 +2,8 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import {
   PROTOCOL_VERSION,
+  ASSISTANT_DECISION_CATEGORIES,
+  type AssistantDecisionCategory,
   removePendingRequest,
   type AgentHarnessDefaultsView,
   type AssistantDecisionDelegation,
@@ -24,6 +26,7 @@ import type { AssistantThread, AssistantThreadDefaults, CreateAssistantThreadReq
 import type { AssistantOwnerConfirmation, AssistantThreadAccountChoices, ChangeAssistantThreadAccountRequest, ChangeAssistantThreadHarnessRequest, OrchestratorCampaignBudgetDefault } from "@wollipog/protocol";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { assistantDecisionHistoryFixture } from "./assistant-decision-fixture.js";
+import { campaignProjection, workSummary } from "./campaign-status-fixtures.js";
 import { confirmationResultFixture, longConfirmationTarget } from "./wollipog-prompt-fixture.js";
 import { ThemeProvider } from "../components/ThemeProvider.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
@@ -52,6 +55,7 @@ const streamingReply = params.has("streaming-reply");
 const scenario = params.get("threads") ?? "some";
 const attentionCount = Number(params.get("attention") ?? 0);
 const limitsScenario = params.get("limits");
+const panelScenario = params.get("thread-panel");
 const campaignScenario = params.has("campaign");
 const resultScenario = params.get("confirmation-result");
 const delegationScenario = params.get("delegation");
@@ -421,7 +425,11 @@ if (params.get("launched") === "many") {
   for (let index = 1; index <= 40; index += 1) {
     const id = `sess-many-${index}`;
     const status = index % 5 === 0 ? "running" : index % 7 === 0 ? "failed" : "completed";
-    sessions.set(id, session(id, `${tasks[index % tasks.length]} Package ${index}`, { status, updatedAt: NOW - (60 - index) * minute }));
+    const title = `${tasks[index % tasks.length]} Package ${index}`;
+    sessions.set(id, session(id, panelScenario ? `${title} · ${longTitle(index)}` : title, {
+      status, createdAt: NOW - (60 - index) * minute, updatedAt: NOW - (60 - index) * minute,
+      costUsd: index / 5,
+    }));
     earlier.push(id);
   }
   if (current) current.launchedSessionIds = [...earlier, ...current.launchedSessionIds];
@@ -442,6 +450,20 @@ if (limitsScenario) {
       backing.costBudgetUsd = 15;
     }
   }
+}
+
+if (panelScenario) {
+  const current = threads[0]!;
+  current.title = (current.title + " now and report what remains").slice(0, 120);
+  current.usage = { costUsd: { used: 8.13, limit: 25 }, launchedSessions: { used: 42, limit: 60 } };
+  current.earlierConversations = [{ sessionId: "sess-cleanup", harness: "codex", nextHarness: "claude-code", switchedAt: NOW - minute }];
+  current.decisionDelegation = { revision: 1, grant: panelScenario === "delegated" ? {
+    categories: Object.keys(ASSISTANT_DECISION_CATEGORIES) as AssistantDecisionCategory[],
+    campaigns: "all", projects: "all", expiresAt: NOW + 8 * 24 * 60 * minute,
+  } : null };
+  const backing = sessions.get(current.sessionId)!;
+  backing.model = "claude-opus-4-6";
+  backing.effort = "high";
 }
 
 let limitDefaults: AssistantThreadLimits = { costUsd: 25, launchedSessions: 10 };
@@ -526,7 +548,7 @@ function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false,
-      projects: delegationScenario === "stress", ...(showDelegation ? { assistantDecisionHistory: true as const } : {}),
+      projects: delegationScenario === "stress", ...(showDelegation || panelScenario ? { assistantDecisionHistory: true as const } : {}),
       ...(delegationScenario === "stress" || delegationScenario === "release-old" || migrationScenario && migrationScenario !== "old"
         ? { assistantCiRerunDecisions: true as const } : {}),
       ...(delegationScenario === "stress" || migrationScenario && migrationScenario !== "old"
@@ -567,6 +589,9 @@ function upsert(next: SessionView) {
  * began, but only once `assistantsReleaseList()` lets it, as a slow read would. */
 let holdNextList = false;
 let releaseHeldList: (() => void) | null = null;
+let initialListGate = params.has("hold-initial-list") ? new Promise<void>((resolve) => {
+  releaseHeldList = resolve;
+}) : undefined;
 let slowListMs = 0;
 
 /** `?threads=unavailable`: the control plane's answer for routes it lacks. */
@@ -591,7 +616,9 @@ function settleConfirmation(threadId: string, confirmationId: string, intent: "a
     : { ...asked, status: "denied", resolvedAt: Date.now(), outcome: { reason: "The owner denied it." } };
   document.body.dataset.confirmationAnswer = `${confirmationId}:${intent}`;
   const confirmations = (current.confirmations ?? []).filter((candidate) => candidate.id !== confirmationId);
-  if (campaignId) upsert(session(campaignId, "Plan the Release", { role: "orchestrator", status: "running" }));
+  if (campaignId) upsert(session(campaignId, "Plan the Release", {
+    role: "orchestrator", status: "running", orchestratorCampaign: campaignProjection(workSummary(NOW)),
+  }));
   const settled = { ...current, status: confirmations.length ? "needs_you" as const : "working" as const, confirmations,
     ...(campaignId ? { launchedCampaignIds: [...(current.launchedCampaignIds ?? []), campaignId] } : {}) };
   threads = threads.map((candidate) => candidate.id === threadId ? settled : candidate);
@@ -630,6 +657,10 @@ const client = {
     const refusal = refused();
     if (refusal) return refusal;
     const read = { threads: structuredClone(threads.filter((candidate) => options.includeArchived || candidate.status !== "archived")) };
+    if (initialListGate) {
+      document.body.dataset.listHeld = "true";
+      return initialListGate.then(() => read);
+    }
     // `assistantsSlowLists(ms)`: every later read answers after `ms`, with the threads as they were
     // when it began, as a slow control plane would.
     if (slowListMs > 0 && !holdNextList) return new Promise((resolve) => window.setTimeout(() => resolve(read), slowListMs));
@@ -690,8 +721,12 @@ const client = {
     publish(current);
     return { thread: structuredClone(current) };
   },
-  assistantDecisionHistory: async (filter: { threadId?: string; before?: string }) =>
-    assistantDecisionHistoryFixture("campaign_0", filter.before, params.has("release-history")),
+  assistantDecisionHistory: async (filter: { threadId?: string; before?: string }) => {
+    document.body.dataset.assistantDecisionHistoryRequested = "true";
+    if (filter.threadId && panelScenario === "not-delegated") return { entries: [], total: 0 };
+    const history = assistantDecisionHistoryFixture("campaign_0", filter.before, params.has("release-history"));
+    return filter.threadId && panelScenario && !filter.before ? { ...history, total: 24 } : history;
+  },
   setConfig: async (sessionId: string, patch: SessionConfig) => {
     const current = threads.find((thread) => thread.sessionId === sessionId);
     if (current?.usage && patch.costBudgetUsd !== undefined) {
@@ -920,6 +955,7 @@ Object.assign(window, {
   assistantsHoldNextList: () => { holdNextList = true; },
   assistantsSlowLists: (ms: number) => { slowListMs = ms; },
   assistantsReleaseList: () => {
+    initialListGate = undefined;
     releaseHeldList?.();
     releaseHeldList = null;
   },
