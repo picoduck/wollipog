@@ -72,7 +72,7 @@ async function capture(page: Page, surface: string, dimensions: string, theme: s
 }
 
 const { defaultBrowserType: _browser, ...phone } = devices["iPhone 13"]!;
-for (const theme of ["light", "dark"]) {
+for (const theme of ["light", "dark"] as const) {
   for (const [width, height] of [[1440, 900], [390, 844]] as const) {
     const dimensions = width + "x" + height;
     test(theme + " " + dimensions + " confirmation results, older events and busy transcripts", async ({ browser }) => {
@@ -80,6 +80,7 @@ for (const theme of ["light", "dark"]) {
       const context = await browser.newContext({
         ...(width === 390 ? phone : {}),
         viewport: { width, height },
+        colorScheme: theme,
         deviceScaleFactor: 1,
         timezoneId: "America/Chicago",
       });
