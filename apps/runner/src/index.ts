@@ -972,9 +972,10 @@ function defaultCodexImportSource(): ProviderCredentialImportSourceHome | undefi
   const keys = new Set(sources.map((source) => `${source.layout}\u0000${source.home}`));
   return keys.size === 1 ? sources[0] : undefined;
 }
-/** Google Antigravity setup (#4780). Setup only: Antigravity is not an advertised agent, and the
- * runner checks it at startup and on an explicit refresh or check, never on periodic discovery,
- * because the access check opens an ACP session with the runner's Google sign-in. */
+/** Google Antigravity setup (#4780). Setup only: Antigravity is not an advertised agent. The access
+ * check opens an ACP session with the runner's Google sign-in, so it runs at runner start and on a
+ * person's Check Again or sign-in only: never on periodic discovery or Rediscover, which the
+ * Assistant may also send. */
 const antigravitySetup = new AntigravitySetupSupervisor({
   dataDir: config.dataDir,
   onUpdate: (setup) => {
@@ -1655,7 +1656,10 @@ function sendUp(msg: RunnerToControlPlane): void {
   }
   // A provider-reported email answers one live request. Never hold it in the reconnect buffer:
   // the waiting HTTP request cannot outlive this socket, so a buffered copy has no recipient.
-  const ephemeral = msg.type === "inspect_provider_authentication_result";
+  // Google Antigravity setup frames are connection-local too (#4780): registration republishes the
+  // current setup, so a buffered copy could only reach an older peer or overwrite a newer report.
+  const ephemeral = msg.type === "inspect_provider_authentication_result" ||
+    msg.type === "antigravity_setup_updated" || msg.type === "antigravity_setup_result";
   if (ws && ws.readyState === WebSocket.OPEN && registered) {
     let projected: RunnerToControlPlane | null;
     try {
@@ -3331,7 +3335,6 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "rediscover":
       log("rediscover requested");
       void runDiscovery(true);
-      void antigravitySetup.check();
       break;
     case "antigravity_setup": {
       if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySetup")) break;

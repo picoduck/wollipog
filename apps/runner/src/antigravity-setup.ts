@@ -79,7 +79,9 @@ const SIGN_IN_LINK_TIMEOUT_MS = 15_000;
 const OUTPUT_LIMIT = 64 * 1024;
 const CODE_LIMIT = 4_096;
 const MODEL_LIMIT = 64;
-const URL_PATTERN = /https:\/\/[^\s<>"'\u0000-\u001f\u007f]+/giu;
+// A link counts only once a terminator follows it: output arrives in chunks, and a link cut at a
+// chunk's end is still a valid URL, just the wrong one.
+const COMPLETE_URL_PATTERN = /https:\/\/[^\s<>"'\u0000-\u001f\u007f]+(?=[\s<>"'\u0000-\u001f\u007f])/giu;
 const ANSI_ESCAPE_PATTERN = /\u001b(?:\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\[[0-?]*[ -/]*[@-~])|\u009b[0-?]*[ -/]*[@-~]/gu;
 const VERSION_PATTERN = /(?:^|[^0-9A-Za-z.])v?(\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.+_-]+)?)/u;
 const CONTROL = /[\u0000-\u001f\u007f]/u;
@@ -121,9 +123,10 @@ export function parseAntigravityVersion(output: string): string | undefined {
   return match && match.length <= 64 ? match : undefined;
 }
 
-/** The first credential-free HTTPS link in sign-in output, trimmed of trailing punctuation. */
+/** The first complete, credential-free HTTPS link in sign-in output, trimmed of trailing
+ * punctuation. A link still at the end of the output may be cut short, so it is not one yet. */
 export function parseAntigravitySignInUrl(output: string): string | undefined {
-  for (const candidate of stripAnsi(output).match(URL_PATTERN) ?? []) {
+  for (const candidate of stripAnsi(output).match(COMPLETE_URL_PATTERN) ?? []) {
     const trimmed = candidate.replace(/[),.;]+$/u, "");
     if (safeAntigravitySignInUrl(trimmed)) return trimmed;
   }
@@ -143,7 +146,8 @@ export function advertisedAntigravityModels(response: unknown): Array<{ id: stri
     const id = boundedText(rawId, 256);
     if (!id || ids.has(id) || models.length >= MODEL_LIMIT) return;
     ids.add(id);
-    models.push({ id, name: boundedText(rawName, 160) ?? id });
+    // A nameless model is shown by its id, cut to the 160 characters a name may have.
+    models.push({ id, name: boundedText(rawName, 160) ?? (id.length <= 160 ? id : `${id.slice(0, 159)}…`) });
   };
   const value = response && typeof response === "object" ? response as Record<string, unknown> : {};
   const option = optionForCategory(normalizeAcpConfigOptions(value.configOptions), "model");
@@ -243,7 +247,11 @@ function timedOut(error: unknown): boolean {
 interface ActiveSignIn {
   view: AntigravitySignInView;
   child: AgentProcess;
-  output: string;
+  /** Output per stream, kept only until the link is found: each stream frames its own lines. */
+  output: { stdout: string; stderr: string };
+  /** The link was published. Output is never read again, so nothing printed after it (such as a
+   * diagnostic that echoes the submitted code) can be published or reopen the code step. */
+  linkPublished: boolean;
   timer: ReturnType<typeof setTimeout>;
   linkTimer?: ReturnType<typeof setTimeout>;
   codeSubmitted: boolean;
@@ -328,22 +336,22 @@ export class AntigravitySetupSupervisor {
     const active: ActiveSignIn = {
       view,
       child,
-      output: "",
+      output: { stdout: "", stderr: "" },
+      linkPublished: false,
       codeSubmitted: false,
       ended: false,
       timer: setTimeout(() => this.endSignIn(active, "timed_out"), this.options.signInTimeoutMs ?? SIGN_IN_TIMEOUT_MS),
     };
     active.timer.unref?.();
     active.linkTimer = setTimeout(() => {
-      if (!active.view.verificationUrl) this.endSignIn(active, "failed", "link_unavailable");
+      if (!active.linkPublished) this.endSignIn(active, "failed", "link_unavailable");
     }, this.options.signInLinkTimeoutMs ?? SIGN_IN_LINK_TIMEOUT_MS);
     active.linkTimer.unref?.();
     this.signIn = active;
-    // The output may hold the link and, after submission, provider messages. It stays in memory,
-    // bounded, and is read only for the link: never logged, published or retained after the sign-in.
-    const capture = (chunk: Buffer) => this.capture(active, chunk);
-    child.stdout.on("data", capture);
-    child.stderr.on("data", capture);
+    // Output is read only until the link appears, stays in memory and bounded, and is never logged,
+    // published or retained. After the link, both streams are drained unread.
+    child.stdout.on("data", (chunk: Buffer) => this.capture(active, "stdout", chunk));
+    child.stderr.on("data", (chunk: Buffer) => this.capture(active, "stderr", chunk));
     child.stdin.on("error", () => {
       if (!active.ended && active.view.status === "awaiting_code") this.endSignIn(active, "failed", "input_closed");
     });
@@ -451,12 +459,13 @@ export class AntigravitySetupSupervisor {
     return this.current();
   }
 
-  private capture(active: ActiveSignIn, chunk: Buffer): void {
-    if (active.ended || active.view.verificationUrl) return;
-    active.output = `${active.output}${chunk.toString("utf8")}`.slice(-OUTPUT_LIMIT);
-    const verificationUrl = parseAntigravitySignInUrl(active.output);
+  private capture(active: ActiveSignIn, stream: "stdout" | "stderr", chunk: Buffer): void {
+    if (active.ended || active.linkPublished || active.view.status !== "starting") return;
+    active.output[stream] = `${active.output[stream]}${chunk.toString("utf8")}`.slice(-OUTPUT_LIMIT);
+    const verificationUrl = parseAntigravitySignInUrl(active.output[stream]);
     if (!verificationUrl) return;
-    active.output = "";
+    active.linkPublished = true;
+    active.output = { stdout: "", stderr: "" };
     if (active.linkTimer) clearTimeout(active.linkTimer);
     this.updateSignIn(active, { operationId: active.view.operationId, status: "awaiting_code",
       startedAt: active.view.startedAt, verificationUrl });
@@ -487,7 +496,7 @@ export class AntigravitySetupSupervisor {
   private endSignIn(active: ActiveSignIn, status: "failed" | "cancelled" | "timed_out", failure?: AntigravitySignInFailure): void {
     if (active.ended) return;
     active.ended = true;
-    active.output = "";
+    active.output = { stdout: "", stderr: "" };
     this.clearTimers(active);
     this.updateSignIn(active, { operationId: active.view.operationId, status, startedAt: active.view.startedAt,
       ...(failure ? { failure } : {}) });

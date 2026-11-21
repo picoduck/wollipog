@@ -212,6 +212,12 @@ if (runner) {
                         : antigravityFixture === "update-runner" ? undefined
                           : { ...base, status: "unsupported", failure: "unsupported_platform" };
   if (longName) runner.displayName = "Design Workstation in the Third-Floor Studio Rack Used for Long-Running Builds";
+  // `?manyModels`: the most models a ready report carries (64), each with a long unbroken name.
+  if (runner.antigravitySetup?.status === "ready" && new URLSearchParams(window.location.search).has("manyModels")) {
+    runner.antigravitySetup.models = Array.from({ length: 64 }, (_, index) => ({
+      id: `fixture-model-${index}`, name: `gemini-fixture-experimental-long-context-preview-model-${index}-${"x".repeat(80)}`,
+    }));
+  }
   if (new URLSearchParams(window.location.search).has("manyAgents")) {
     for (let index = 1; index <= 12; index++) {
       runner.agents.push({ id: `fixture-acp-${index}`, name: `Fixture ACP Agent ${index}`, command: `fixture-acp-${index}`, args: [],

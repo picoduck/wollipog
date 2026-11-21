@@ -56,11 +56,11 @@ test("a runner's setup is validated, version-gated, cleared on reconnect, and sh
   }
 });
 
-function harness(options: { canManage?: boolean; online?: boolean; protocolVersion?: number; reply?: (msg: AntigravitySetupCommandMessage) => unknown } = {}) {
+function harness(options: { canManage?: boolean | (() => boolean); online?: boolean; protocolVersion?: number; reply?: (msg: AntigravitySetupCommandMessage) => unknown } = {}) {
   const sent: AntigravitySetupCommandMessage[] = [];
   const stored: unknown[] = [];
   const db = {
-    canManageRunner: () => options.canManage ?? true,
+    canManageRunner: () => typeof options.canManage === "function" ? options.canManage() : options.canManage ?? true,
     getRunner: (id: string) => id === "runner-1" ? { runnerId: id, protocolVersion: options.protocolVersion ?? SUPPORTED } : null,
     updateRunnerAntigravitySetup: (_id: string, setup: unknown) => { stored.push(setup); },
   } as unknown as ControlPlaneDb;
@@ -96,6 +96,24 @@ test("routes relay each setup action to the runner and record the setup it retur
       ["cancel_sign_in", operationId, undefined],
     ]);
     assert.equal(stored.length, 4);
+  } finally {
+    await app.close();
+  }
+});
+
+test("manage access revoked while the runner answers withholds the reply and its sign-in link", async () => {
+  let managing = true;
+  const pending: AntigravitySetupView = { ...signInRequired, signIn: {
+    operationId: "agy_login_1", status: "awaiting_code", startedAt: 1, verificationUrl: "https://accounts.google.com/o?state=fixture",
+  } };
+  const { app } = harness({ canManage: () => managing, reply: (msg) => {
+    managing = false;
+    return { type: "antigravity_setup_result", requestId: msg.requestId, ok: true, setup: pending };
+  } });
+  try {
+    const response = await app.inject({ method: "POST", url: "/api/runners/runner-1/antigravity-setup/check" });
+    assert.equal(response.statusCode, 403);
+    assert.ok(!response.body.includes("accounts.google.com"));
   } finally {
     await app.close();
   }

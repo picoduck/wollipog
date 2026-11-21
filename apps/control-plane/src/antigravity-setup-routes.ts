@@ -59,6 +59,11 @@ export function registerAntigravitySetupRoutes(
         // The runner's own antigravity_setup_updated frame remains authoritative.
       }
     }
+    // Manage access may have been revoked while the runner answered (a Machine transfer, say). The
+    // reply can carry the bearer-like sign-in link, so authority is checked again before it leaves.
+    if (!db.canManageRunner(principal, id)) {
+      return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
+    }
     if (!result.ok) return reply.code(409).send({ error: result.error ?? "Google Antigravity setup could not continue." });
     return { setup };
   };

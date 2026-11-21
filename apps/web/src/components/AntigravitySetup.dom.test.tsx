@@ -172,6 +172,33 @@ test("a pending sign-in links to Google, submits the pasted code once, and offer
   } finally { await view.unmount(); }
 });
 
+test("a submitted code leaves the field at once, stays out of it while the request runs and after it fails", async () => {
+  const sent: string[] = [];
+  let reject!: (error: Error) => void;
+  const view = await mount(runner(setup({ signIn: {
+    operationId: "agy_login_fixture-2", status: "awaiting_code", startedAt: NOW,
+    verificationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=fixture",
+  } })), {
+    submitAntigravitySignInCode: (_runnerId, _id, code) => {
+      sent.push(code);
+      return new Promise((_resolve, fail) => { reject = fail; });
+    },
+  });
+  try {
+    const opened = await openSetup(view.body);
+    const input = opened.querySelector<HTMLInputElement>("input")!;
+    await act(async () => fireDomEvent.change(input, { target: { value: "FIXTURE-HELD-CODE" } }));
+    await act(async () => fireDomEvent.submit(opened.querySelector("form")!));
+    assert.deepEqual(sent, ["FIXTURE-HELD-CODE"]);
+    assert.equal(input.value, "", "the code is not in the live value while the request runs");
+    await act(async () => reject(new Error("The sign-in is no longer waiting for an authorization code.")));
+    assert.equal(input.value, "", "nor after it fails");
+    assert.ok(!opened.outerHTML.includes("FIXTURE-HELD-CODE"));
+    assert.match(opened.textContent ?? "", /Paste the code again\./u);
+    assert.deepEqual(sent, ["FIXTURE-HELD-CODE"], "sent exactly once");
+  } finally { await view.unmount(); }
+});
+
 test("a failed or expired sign-in never reads as success and offers Try Again", async () => {
   for (const [signIn, title] of [
     [{ operationId: "agy_login_x", status: "failed", startedAt: NOW, failure: "not_completed" }, "Sign-In Failed"],

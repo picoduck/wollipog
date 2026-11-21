@@ -228,6 +228,9 @@ export class JsonRpcPeer {
     } catch {
       return; // skip non-JSON noise (some agents print logs to stdout)
     }
+    // A JSON value that is not an object (`null`, a number, a string, an array) is noise too:
+    // dispatching it would throw in the stdout listener, outside every caller's error handling.
+    if (!msg || typeof msg !== "object" || Array.isArray(msg)) return;
     this.dispatch(msg);
   }
 

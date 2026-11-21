@@ -1458,9 +1458,12 @@ Antigravity agent, so Antigravity is not offered in New Session, and nothing her
   process right after. An authentication error (-32000) reports `sign_in_required`. A session with
   at least one advertised model (the stable `model` config option, or session model state) reports
   `ready` with those models. Anything else reports `verification_failed` with the failing step. It
-  runs at runner start, on Rediscover and on Check Again, never on periodic discovery.
+  runs at runner start and on a person's Check Again or sign-in, never on periodic discovery or
+  Rediscover, which the Assistant can also send.
 - **Remote sign-in.** The runner runs Google's `agy acp --login` in the same context and publishes
-  the first credential-free HTTPS link it prints. The pasted code is written to the command's stdin
+  the first complete, credential-free HTTPS link it prints. A link counts only once a terminator
+  follows it, since output arrives in chunks. No output is read after that link, so nothing the command
+  prints later (such as a diagnostic echoing the code) can be published. The pasted code is written to the command's stdin
   once and never stored, logged or published. The command's output stays in memory, bounded, and is
   read only for that link. A successful exit is not success: the sign-in ends `succeeded` only if the
   access check then reports `ready`, and otherwise `failed` with `not_verified`. A missing link,

@@ -233,18 +233,21 @@ function AntigravitySignIn({ runnerId, setup, blocked, running, act }: {
       Cancel
     </BusyButton>
   );
+  // The code leaves the field the moment it is submitted: it is held only by this request, never
+  // left in the field's live value while the request runs or after it fails. A failure asks for
+  // the code again.
   const submit = async () => {
     const input = inputRef.current;
     const code = input?.value ?? "";
     if (running || !input || !code.trim()) return;
+    input.value = "";
+    setHasCode(false);
     setCodeError(null);
     await act("submit", async () => {
       try {
         await api.submitAntigravitySignInCode(runnerId, signIn.operationId, code);
-        input.value = "";
-        setHasCode(false);
       } catch (cause) {
-        setCodeError((cause as Error).message);
+        setCodeError(`${(cause as Error).message} Paste the code again.`);
         inputRef.current?.focus();
       }
     });

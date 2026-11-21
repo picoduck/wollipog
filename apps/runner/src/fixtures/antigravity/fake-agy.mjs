@@ -35,17 +35,29 @@ if (args[0] === "acp" && args[1] === "--login") {
     process.stdout.write("Starting sign-in...\n");
     setInterval(() => {}, 1_000);
   } else {
-    process.stdout.write("\u001b[1mSign in with Google\u001b[0m\nOpen this link in a browser:\n" +
-      "https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture-client&state=fixture-state.\n" +
-      "Paste the authorization code: ");
+    const link = "https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture-client&state=fixture-state";
+    const prompt = () => process.stdout.write(".\nPaste the authorization code: ");
+    process.stdout.write("\u001b[1mSign in with Google\u001b[0m\nOpen this link in a browser:\n");
+    if (modes.has("login_split_url")) {
+      // The link arrives in two writes, cut inside its query string.
+      process.stdout.write(link.slice(0, 50));
+      setTimeout(() => { process.stdout.write(link.slice(50)); prompt(); }, 300);
+    } else {
+      process.stdout.write(link);
+      prompt();
+    }
     const lines = createInterface({ input: process.stdin });
     lines.once("line", (code) => {
       lines.close();
+      // A diagnostic that echoes the submitted code inside another link.
+      if (modes.has("login_echo_code")) process.stdout.write(`Verifying at https://accounts.google.com/debug?code=${code.trim()}\n`);
       if (modes.has("login_exit0_unverified")) { process.stdout.write("Done.\n"); process.exit(0); }
       if (code.trim() === "FIXTURE-GOOD-CODE") {
         if (signedInMarker) writeFileSync(signedInMarker, "fixture");
         process.stdout.write("Signed in.\n");
-        process.exit(0);
+        // Exit after a pause, so a link printed above has time to be read before the exit settles.
+        setTimeout(() => process.exit(0), modes.has("login_echo_code") ? 200 : 0);
+        return;
       }
       process.stdout.write("The code was rejected or has expired.\n");
       process.exit(1);
@@ -60,6 +72,8 @@ if (args[0] === "acp" && args[1] === "--login") {
     const request = JSON.parse(line);
     if (request.id === undefined) return;
     if (request.method === "initialize") {
+      // Valid JSON that is not a JSON-RPC message.
+      if (modes.has("acp_null")) process.stdout.write("null\n5\n[]\n");
       if (modes.has("handshake_hang")) return;
       if (modes.has("handshake_bad")) return send({ id: request.id, result: { protocolVersion: 99 } });
       return send({ id: request.id, result: {
@@ -76,6 +90,11 @@ if (args[0] === "acp" && args[1] === "--login") {
         return send({ id: request.id, error: { code: -32000, message: "Authentication required" } });
       }
       if (modes.has("session_no_models")) return send({ id: request.id, result: { sessionId: "fixture-session" } });
+      if (modes.has("session_long_model")) {
+        return send({ id: request.id, result: { sessionId: "fixture-session", models: {
+          currentModelId: "m".repeat(161), availableModels: [{ modelId: "m".repeat(161) }],
+        } } });
+      }
       if (modes.has("session_model_state")) {
         return send({ id: request.id, result: { sessionId: "fixture-session", models: {
           currentModelId: "fixture-pro",

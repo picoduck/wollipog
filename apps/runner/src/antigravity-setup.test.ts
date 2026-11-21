@@ -265,9 +265,57 @@ test("access checks run in a private empty folder that is removed afterwards", a
   assert.deepEqual((await import("node:fs")).readdirSync(scratch), []);
 });
 
-test("parsers accept only safe links, versions and bounded models", () => {
-  assert.equal(parseAntigravitySignInUrl("visit http://insecure.example/x then https://user:pw@accounts.google.com/x"), undefined);
-  assert.equal(parseAntigravitySignInUrl("\u001b[4mhttps://accounts.google.com/o?x=1\u001b[0m)."), "https://accounts.google.com/o?x=1");
+test("output after the link is never read: an echoed code is not published and the code step never reopens", async () => {
+  mode("login_echo_code");
+  const { setup, published } = supervisor();
+  await setup.check();
+  setup.startSignIn();
+  const waiting = await until(setup, (view) => view.signIn?.status === "awaiting_code");
+  const operationId = waiting.signIn!.operationId;
+  setup.submitCode(operationId, "FIXTURE-GOOD-CODE");
+  assert.throws(() => setup.submitCode(operationId, "FIXTURE-GOOD-CODE"), /not waiting/);
+  const ready = await until(setup, (view) => view.signIn?.status === "succeeded");
+  assert.equal(ready.status, "ready");
+  assert.ok(!JSON.stringify(published).includes("FIXTURE-GOOD-CODE"));
+  const statuses = published.map((view) => view.signIn?.status).filter(Boolean);
+  assert.equal(statuses.lastIndexOf("awaiting_code") < statuses.indexOf("waiting_for_provider"), true,
+    "the operation never returns to awaiting its code");
+});
+
+test("a link split across writes is published only once it is complete", async () => {
+  mode("login_split_url");
+  const { setup, published } = supervisor();
+  await setup.check();
+  setup.startSignIn();
+  const waiting = await until(setup, (view) => view.signIn?.status === "awaiting_code");
+  assert.equal(waiting.signIn!.verificationUrl,
+    "https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture-client&state=fixture-state");
+  assert.equal(published.filter((view) => view.signIn?.verificationUrl).length, 1);
+});
+
+test("JSON that is not a JSON-RPC message is ignored rather than crashing the check", async () => {
+  writeFileSync(join(state, "signed-in"), "fixture");
+  mode("acp_null");
+  const { setup } = supervisor();
+  const view = await setup.check();
+  assert.equal(view.status, "ready");
+});
+
+test("a nameless model with a long id still produces a ready report the control plane accepts", async () => {
+  writeFileSync(join(state, "signed-in"), "fixture");
+  mode("session_long_model");
+  const { setup, published } = supervisor();
+  const view = await setup.check();
+  assert.equal(view.status, "ready");
+  assert.equal(view.models?.[0]?.id, "m".repeat(161));
+  assert.equal(view.models?.[0]?.name.length, 160);
+  assertAllValid(published);
+});
+
+test("parsers accept only safe, complete links, versions and bounded models", () => {
+  assert.equal(parseAntigravitySignInUrl("visit http://insecure.example/x then https://user:pw@accounts.google.com/x\n"), undefined);
+  assert.equal(parseAntigravitySignInUrl("\u001b[4mhttps://accounts.google.com/o?x=1\u001b[0m).\n"), "https://accounts.google.com/o?x=1");
+  assert.equal(parseAntigravitySignInUrl("https://accounts.google.com/o?state=par"), undefined, "a link at the end may be cut short");
   assert.equal(parseAntigravityVersion("\u001b[32mAntigravity CLI v2.0.1-beta.3\u001b[0m"), "2.0.1-beta.3");
   assert.equal(parseAntigravityVersion("no version here"), undefined);
   assert.deepEqual(advertisedAntigravityModels({ models: { availableModels: [
