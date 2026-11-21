@@ -53,9 +53,11 @@ test("the over-budget title shows the difference and budget copy uses the config
 });
 
 test("a paused thread classifies the launch refusal as a pause even with budget remaining", () => {
+  const refusal = "This Wollipog Assistant thread has paused new launches.";
   const states = threadSpendingStates({
-    status: "done", launchPaused: true, launchLimitRefusal: "This Wollipog Assistant thread has paused new launches.",
+    status: "done", launchPaused: true, launchLimitRefusal: refusal,
     usage: { costUsd: { used: 8.13, limit: 25 }, launchedSessions: { used: 2, limit: null } },
   });
-  assert.deepEqual(states, [{ kind: "launch_paused", used: 2, limit: null }]);
+  assert.deepEqual(states, [{ kind: "launch_paused", used: 2, limit: null, refusal }]);
+  assert.deepEqual(threadSpendingCopy(states[0]!), { title: "Launches Paused", message: refusal });
 });

@@ -8,7 +8,7 @@ export type ThreadSpendingState = (
 ) & {
   used: number;
   limit: number;
-} | { kind: "launch_paused"; used: number; limit: number | null };
+} | { kind: "launch_paused"; used: number; limit: number | null; refusal?: string };
 
 /** Blocking limits come before advisory warnings. The same order feeds the badge and the slot. */
 export function threadSpendingStates(thread: Pick<AssistantThread, "status" | "usage" | "launchLimitRefusal" | "launchPaused">): ThreadSpendingState[] {
@@ -21,7 +21,7 @@ export function threadSpendingStates(thread: Pick<AssistantThread, "status" | "u
   }
   const launchLimitReached = launchedSessions.limit != null && launchedSessions.used >= launchedSessions.limit;
   if (thread.launchPaused) {
-    states.push({ kind: "launch_paused", ...launchedSessions });
+    states.push({ kind: "launch_paused", ...launchedSessions, refusal: thread.launchLimitRefusal });
   } else if (launchedSessions.limit != null && launchLimitReached) {
     states.push({ kind: "launch_limit", used: launchedSessions.used, limit: launchedSessions.limit });
   }
@@ -38,7 +38,10 @@ export function threadSpendingStates(thread: Pick<AssistantThread, "status" | "u
 
 export function threadSpendingCopy(state: ThreadSpendingState) {
   if (state.kind === "launch_paused") {
-    return { title: statusMeta("assistantThreadSpending", state.kind).label, message: "New launches are paused. The assistant can still answer you." };
+    return {
+      title: statusMeta("assistantThreadSpending", state.kind).label,
+      message: state.refusal ?? "This thread has paused new launches.",
+    };
   }
   const { kind, used, limit } = state;
   const label = statusMeta("assistantThreadSpending", kind).label;

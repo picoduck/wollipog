@@ -376,6 +376,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
         onStop={() => void stopLaunched(selected)}
         onBreakdown={() => panel.show("Details")}
         onDismiss={() => {
+          if (state.kind !== "near_budget") return;
           const budgets = new Map(dismissedBudgets).set(selected.id, state.limit);
           dismissedBudgetsByClient.set(api, budgets);
           setBudgetDismissal({ client: api, budgets });
