@@ -237,7 +237,7 @@ function AgentDetailsDialog({ agent, name, machineName, runner, online, returnFo
  * Agent Details, the agents not installed folded into a closed disclosure at the end, and, while no
  * agent is ready, how to install one.
  */
-export function MachineAgentsSection({ runner, online, machineName, canFindSessions, onChooseInstallation }: {
+export function MachineAgentsSection({ runner, online, machineName, canFindSessions, onChooseInstallation, antigravitySetup = false }: {
   runner: RunnerView;
   /** The machine's agent reports are current: its runner (and an SSH machine's connection) is up. */
   online: boolean;
@@ -246,6 +246,8 @@ export function MachineAgentsSection({ runner, online, machineName, canFindSessi
   canFindSessions: boolean;
   /** Opens Machine Settings at its installations; absent for those who may not open it. */
   onChooseInstallation?: () => void;
+  /** Shows the Google Antigravity setup row (#4780): on the machine's own page, not in Account Setup. */
+  antigravitySetup?: boolean;
 }) {
   const [openAgentId, setOpenAgentId] = useState<string | null>(null);
   const [findingSessionsFor, setFindingSessionsFor] = useState<string | null>(null);
@@ -324,7 +326,7 @@ export function MachineAgentsSection({ runner, online, machineName, canFindSessi
           )}
         </>
       )}
-      {antigravitySetupVisible(runner) && <AntigravitySetupRow runner={runner} online={online} machineName={machineName} />}
+      {antigravitySetup && antigravitySetupVisible(runner) && <AntigravitySetupRow runner={runner} online={online} machineName={machineName} />}
       {openAgent && (
         <AgentDetailsDialog
           agent={openAgent}

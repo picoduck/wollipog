@@ -53,7 +53,7 @@ function runner(antigravitySetup: AntigravitySetupView | undefined, overrides: P
   };
 }
 
-async function mount(view: RunnerView, client: Partial<ApiClient> = {}) {
+async function mount(view: RunnerView, client: Partial<ApiClient> = {}, antigravitySetup = true) {
   const mountPoint = domWindow.document.createElement("div");
   domWindow.document.body.appendChild(mountPoint);
   const root = createRoot(mountPoint as unknown as HTMLElement);
@@ -61,7 +61,8 @@ async function mount(view: RunnerView, client: Partial<ApiClient> = {}) {
     root.render(
       <ApiProvider client={{ ...api, ...client } as ApiClient}>
         <FeedbackProvider>
-          <MachineAgentsSection runner={view} online={view.status === "online"} machineName="Studio Mac" canFindSessions />
+          <MachineAgentsSection runner={view} online={view.status === "online"} machineName="Studio Mac" canFindSessions
+            antigravitySetup={antigravitySetup} />
         </FeedbackProvider>
       </ApiProvider>,
     );
@@ -85,6 +86,9 @@ async function openSetup(body: HTMLElement): Promise<HTMLElement> {
 test("only people who may manage the machine see the setup row, and it says it is setup only", async () => {
   const hidden = await mount(runner(setup({}), { canManage: false }));
   try { assertNoDomNode(row(hidden.body), "setup row"); } finally { await hidden.unmount(); }
+  // Account Setup reuses the Agents section for provider accounts and leaves setup out.
+  const accountSetup = await mount(runner(setup({})), {}, false);
+  try { assertNoDomNode(row(accountSetup.body), "setup row in Account Setup"); } finally { await accountSetup.unmount(); }
   const shown = await mount(runner(setup({})));
   try {
     const setupRow = row(shown.body)!;

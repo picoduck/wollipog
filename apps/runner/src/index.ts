@@ -2517,13 +2517,14 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       backoff = INITIAL_BACKOFF_MS;
       registered = true;
       controlPlaneProtocolVersion = msg.protocolVersion ?? null;
-      if (runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySetup")) {
-        sendUp({ type: "antigravity_setup_updated", runnerId: config.runnerId, setup: antigravitySetup.current() });
-      }
       sessions.reconcileRunnerRestartRecovery(msg.rootOrchestratorSessionIds);
       skillStateReporter.resumeRequests(runnerSupportsProtocol(controlPlaneProtocolVersion, "skillRequestResumption")
         ? msg.pendingSkillRequests : undefined);
       harnessInstallationChoices = synchronizedHarnessChoices(controlPlaneProtocolVersion, msg.harnessInstallationChoices);
+      // Google Antigravity setup frames are connection-local (#4780): republish the current setup.
+      if (runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySetup")) {
+        sendUp({ type: "antigravity_setup_updated", runnerId: config.runnerId, setup: antigravitySetup.current() });
+      }
       {
         // Before any flush or re-publication, so this control plane's grants decide what it sees.
         const stale = providerProfileGrants.synchronize(controlPlaneProtocolVersion, msg.providerProfileGrants);
