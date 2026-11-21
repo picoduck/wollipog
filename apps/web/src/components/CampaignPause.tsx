@@ -28,7 +28,7 @@ export function CampaignPause({ campaignId, pause, canEdit, onChanged }: {
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not change campaign pause."); }
     finally { setBusy(false); }
   };
-  return <CampaignSection title="Campaign Pause" count={1} attention={paused ? String(pause.pausedAt) : ""} className="campaign-detail-section">
+  return <CampaignSection title="Campaign Pause" attention={paused ? String(pause.pausedAt) : ""} className="campaign-detail-section">
     {pause && <dl className="facts">
       <div><dt>Paused</dt><dd>{formatRecordedTimestamp(pause.pausedAt)?.label} by {pause.pausedBy}</dd></div>
       {paused && <div><dt>Resumes At</dt><dd>{pause.resumeAt === null ? "When the owner resumes"

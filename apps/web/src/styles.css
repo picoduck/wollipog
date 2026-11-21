@@ -5730,34 +5730,80 @@ body.shell-dock-dragging * {
   gap: var(--space-6);
   min-width: 0;
 }
-/* Campaign sections keep their live bodies mounted while disclosures hide them. */
+/* Campaign sections keep their live bodies mounted while disclosures hide them. The index is one
+   row (#4781): a menu button naming the section you are in, an attention chip, and Collapse All /
+   Expand All as icons. Only the section name gives way to a narrow panel. The row takes the panel's
+   width rather than lending its own: a long section name would otherwise widen every section.
+   An inline-size container gives it no intrinsic width; its menu is portalled, so the layout
+   containment that comes with it does not move the menu. */
 .campaign-section-index {
   position: sticky;
   top: 0;
   z-index: var(--z-sticky);
-  display: grid;
-  gap: var(--space-2);
-  min-width: 0;
-  padding: var(--space-2);
-  background: var(--bg);
-  border-bottom: 1px solid var(--border);
-}
-.campaign-section-links {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
   gap: var(--space-1);
   min-width: 0;
-  max-height: 30dvh;
-  overflow-y: auto;
+  padding: var(--space-1) 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  container-type: inline-size;
 }
-.campaign-section-links button {
-  white-space: normal;
+.campaign-section-trigger.btn {
+  flex: 0 1 auto;
+  justify-content: flex-start;
   min-width: 0;
-  text-align: left;
+  max-width: 100%;
+  padding-left: var(--space-1);
 }
-.campaign-section-links [aria-current="location"] {
-  border-color: var(--accent);
+.campaign-section-trigger svg { flex: none; color: var(--text-dim); }
+@media (forced-colors: active) {
+  .campaign-section-trigger svg { color: inherit; }
 }
+.campaign-section-trigger-label {
+  flex: none;
+  color: var(--text-faint);
+}
+.campaign-section-current {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: var(--weight-semibold);
+  text-overflow: ellipsis;
+}
+.campaign-section-attention {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--control-h-sm);
+  padding: 0 var(--space-2);
+  border: 1px solid color-mix(in srgb, var(--amber) 32%, transparent);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--amber) 7%, var(--bg-elev));
+  color: var(--amber-on-tint);
+  font: var(--type-micro);
+  white-space: nowrap;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .campaign-section-attention:hover { background: color-mix(in srgb, var(--amber) 14%, var(--bg-elev)); }
+}
+.campaign-section-dot {
+  flex: none;
+  width: var(--space-2);
+  height: var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--amber);
+}
+.campaign-section-tools {
+  display: inline-flex;
+  flex: none;
+  margin-left: auto;
+}
+.campaign-section-menu { min-width: 240px; }
+.campaign-section-menu .menu-trail .count { color: var(--text-dim); }
+.campaign-section-menu .campaign-section-empty .menu-text,
+.campaign-section-menu .campaign-section-empty .menu-trail .count { color: var(--text-faint); }
 .campaign-section-heading button {
   display: flex;
   align-items: center;
