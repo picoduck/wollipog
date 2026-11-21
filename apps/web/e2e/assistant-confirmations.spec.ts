@@ -116,7 +116,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await threadRow(page, RELEASE).getByRole("button", { name: "Review", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`path=${encodeURIComponent("/assistants/")}`));
     await expect(page.getByRole("list", { name: "Approvals Needed" }).getByRole("listitem")).toHaveCount(2);
-    if (viewport.width > 760) await expect(page.locator(".assistant-thread-head").getByRole("heading", { level: 2 })).toHaveText(RELEASE);
+    if (viewport.width > 760) await expect(page.locator(".assistant-thread-bar").getByRole("heading", { level: 2 })).toHaveText(RELEASE);
     else await expect(page.locator(".detail-bar-title")).toHaveText(RELEASE);
   });
 }

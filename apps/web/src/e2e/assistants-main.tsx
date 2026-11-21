@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import {
   PROTOCOL_VERSION,
+  removePendingRequest,
   type AgentHarnessDefaultsView,
   type AssistantDecisionDelegation,
   type AssistantThreadLimits,
@@ -138,6 +139,25 @@ function session(id: string, title: string, overrides: Partial<SessionView> = {}
   } as SessionView;
 }
 
+/** The Vite bump's install approval. `?deps=question` adds a nonblocking question beside it, which the
+ * card shows once the approval is answered (#4776). */
+function depsApproval(occurrenceId: string): PendingApproval {
+  return {
+    requestId: "req-1",
+    occurrenceId,
+    title: "Run pnpm install --frozen-lockfile",
+    options: [
+      { optionId: "allow", name: "Allow Once", kind: "allow_once" },
+      { optionId: "reject", name: "Deny", kind: "reject_once" },
+    ],
+    kind: "permission",
+    ...(params.get("deps") === "question" ? { additionalRequests: [{
+      requestId: "req-lockfile", occurrenceId: "occ-lockfile", kind: "question", async: true,
+      title: "Which lockfile should I keep?", options: [],
+    } as PendingApproval] } : {}),
+  } as PendingApproval;
+}
+
 const sessions = new Map<string, SessionView>([
   ["sess-triage", session("sess-triage", "Triage Open Issues", { status: "idle" })],
   ["sess-release", session("sess-release", "Ship the Release Notes", { status: "running", agentId: "codex", agentName: "Codex", driver: "codex-app-server" })],
@@ -145,15 +165,7 @@ const sessions = new Map<string, SessionView>([
   ["sess-flaky", session("sess-flaky", "Fix the Flaky Upload Test", { status: "running", updatedAt: NOW - minute })],
   ["sess-deps", session("sess-deps", "Bump the Vite Group", {
     status: "input_required",
-    pendingApproval: {
-      requestId: "req-1",
-      title: "Run pnpm install --frozen-lockfile",
-      options: [
-        { optionId: "allow", name: "Allow Once", kind: "allow_once" },
-        { optionId: "reject", name: "Deny", kind: "reject_once" },
-      ],
-      kind: "permission",
-    },
+    pendingApproval: depsApproval("occ-deps-1"),
   })],
 ]);
 
@@ -386,6 +398,20 @@ if (limitsScenario === "stress") {
     sessions.set(id, session(id, longTitle(index)));
     current.launchedSessionIds.push(id);
   }
+}
+/** `?launched=many`: the triage thread launched 40 more sessions before its two, most of them
+ * finished, every fifth still running and every seventh failed (#4776). */
+if (params.get("launched") === "many") {
+  const current = threads.find((candidate) => candidate.id === "thr_triage");
+  const tasks = ["Fix the Lint Warnings in", "Update the Snapshot Tests for", "Rerun the Nightly Checks on", "Review the Dependency Bump in"];
+  const earlier: string[] = [];
+  for (let index = 1; index <= 40; index += 1) {
+    const id = `sess-many-${index}`;
+    const status = index % 5 === 0 ? "running" : index % 7 === 0 ? "failed" : "completed";
+    sessions.set(id, session(id, `${tasks[index % tasks.length]} Package ${index}`, { status, updatedAt: NOW - (60 - index) * minute }));
+    earlier.push(id);
+  }
+  if (current) current.launchedSessionIds = [...earlier, ...current.launchedSessionIds];
 }
 if (limitsScenario) {
   for (const item of threads) {
@@ -775,7 +801,9 @@ const client = {
   session: async (id: string) => ({ session: structuredClone(sessions.get(id)!) }),
   approve: async (id: string, body: { requestId: string; optionId: string | null }) => {
     const current = sessions.get(id)!;
-    const next = { ...current, status: "running" as const, pendingApproval: null, updatedAt: Date.now() };
+    // Only the answered request leaves; another one waiting beside it stays.
+    const remaining = removePendingRequest(current.pendingApproval, body.requestId);
+    const next = { ...current, status: remaining ? current.status : "running" as const, pendingApproval: remaining, updatedAt: Date.now() };
     document.body.dataset.approved = `${id}:${body.requestId}:${body.optionId}`;
     upsert(next);
     // The thread no longer waits on anyone once its only approval is answered.
@@ -886,6 +914,8 @@ const navigation: ViewNavigation = {
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root element");
 createRoot(root).render(
+  // As the app's own entry point renders it, so effects run twice on mount here too.
+  <React.StrictMode>
   <InstanceScopeProvider instanceScope={SCOPE}>
     <ApiProvider client={client}>
       <FeedbackProvider>
@@ -894,5 +924,6 @@ createRoot(root).render(
         </StoreProvider>
       </FeedbackProvider>
     </ApiProvider>
-  </InstanceScopeProvider>,
+  </InstanceScopeProvider>
+  </React.StrictMode>,
 );

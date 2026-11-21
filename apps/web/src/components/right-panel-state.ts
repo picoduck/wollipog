@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { RIGHT_PANEL_DEFAULT_WIDTH, parseStoredRightPanelExpanded, parseStoredRightPanelMode, parseStoredRightPanelWidth, type RightPanelMode } from "../right-panel.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
 import { SESSION_TOOLS, type SessionToolId } from "../session-tools.js";
-import { matchesShortcut, type KeyboardLike } from "../shortcuts.js";
+import { matchesShortcut, type KeyboardLike, type ShortcutId } from "../shortcuts.js";
 import { requestGoToFileFocus } from "./go-to-file-focus.js";
 import { requestSideChatFocus } from "./side-chat-focus.js";
 
@@ -105,6 +105,15 @@ export function sessionToolForShortcut(event: KeyboardLike): SessionToolId | nul
     candidate.shortcut && !TOOLS_WITH_OWN_CHORD.has(candidate.id) && matchesShortcut(event, candidate.shortcut));
   return tool?.id ?? null;
 }
+
+/**
+ * The chords `handleSidePanelChord` answers: Ctrl/⌘+\ and each tool's that only opens it. An open
+ * Assistant thread's side panel answers these and no other Session shortcut (#4776).
+ */
+export const SIDE_PANEL_CHORDS: ReadonlySet<ShortcutId> = new Set<ShortcutId>([
+  "toggle-side-panel",
+  ...SESSION_TOOLS.flatMap((tool) => tool.shortcut && !TOOLS_WITH_OWN_CHORD.has(tool.id) ? [tool.shortcut] : []),
+]);
 
 /** Focus the open panel's tool switcher once it has rendered, so Escape closes the panel again and the
  * arrow keys reach every other tool (#2843). */

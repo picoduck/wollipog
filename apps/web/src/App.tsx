@@ -33,6 +33,7 @@ import { sessionVisibleForReminderMode } from "./session-reminders.js";
 import { InboxView } from "./components/InboxView.js";
 import {
   handleSidePanelChord,
+  SIDE_PANEL_CHORDS,
   openGoToFile,
   openSideChat,
   terminalToolShowing,
@@ -265,6 +266,9 @@ export function Shell() {
   const view = useStoreSelector((s) => s.view);
   const [reportedEntityTitle, reportEntityTitle] = useEntityTitleState();
   const entityTitle = reportedTitleFor(reportedEntityTitle, view);
+  // An Assistant thread showing its session's side panel (#4776): the thread page reports its title
+  // only while the thread is loaded, never for a missing one's placeholder.
+  const threadPanelShown = view.name === "assistants" && view.threadId !== undefined && entityTitle !== undefined;
   const viewRef = useRef(view);
   viewRef.current = view;
   const settingsReturnView = useStoreSelector((s) => s.settingsReturnView);
@@ -702,10 +706,17 @@ export function Shell() {
 
   // Session-view panel shortcuts (Codex bindings). Registered without deps on purpose: the
   // handler closes over this render's view/rightPanel, and re-registering per render keeps the
-  // mode toggle's "same mode → close" check reading fresh state.
+  // mode toggle's "same mode → close" check reading fresh state. An open Assistant thread shows its
+  // session's side panel with the session bar's Side Panel toggle (#4776), so the side panel's own
+  // chords work there too; Files, Side Chat and Terminal stay the session page's.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || shortcutLayerActive(document, false, e) || xtermOwnsKey(e.target) || view.name !== "session") return;
+      if (e.defaultPrevented || shortcutLayerActive(document, false, e) || xtermOwnsKey(e.target)) return;
+      if (threadPanelShown) {
+        handleSidePanelChord(e, rightPanel);
+        return;
+      }
+      if (view.name !== "session") return;
       // Go to File: opens the panel on Files when needed and never closes it (#2852).
       if (matchesShortcut(e, "open-files")) {
         e.preventDefault();
@@ -1022,6 +1033,7 @@ export function Shell() {
             sessionReading: view.name === "session" && !isMobile,
           })}
           sessionOpen={view.name === "session"}
+          sidePanelShortcuts={threadPanelShown ? SIDE_PANEL_CHORDS : undefined}
           terminalSupported={terminalSupported}
           filesSupported={filesSupported}
           conversationSteeringSupported={conversationSteeringSupported}

@@ -286,6 +286,7 @@ export function DetailBar({
   menu = [],
   menuLabel,
   searchInMenu = false,
+  controls,
 }: {
   title: string;
   /** "Back to <Destination>" — the button's accessible name and tooltip. */
@@ -301,6 +302,8 @@ export function DetailBar({
   menuLabel?: string;
   /** Keep the phone title readable when there is another action that needs a dedicated button. */
   searchInMenu?: boolean;
+  /** Panel toggles after ⋯, as the session bar ends with its own (an Assistant thread's Side Panel). */
+  controls?: ReactNode;
 }) {
   const compact = useIsCompact();
   const phone = useIsMobile();
@@ -372,12 +375,13 @@ export function DetailBar({
         <h1 id="page-title" className="detail-bar-title" tabIndex={-1} title={title}>{title}</h1>
         {status && <span className="detail-bar-status">{status}</span>}
       </div>
-      {(onSearch || primary || secondary || actions.length > 0) && (
+      {(onSearch || primary || secondary || actions.length > 0 || controls) && (
         <div className="detail-bar-actions">
           {onSearch && !menuSearch && <AppBarSearch onSearch={onSearch} />}
           {secondary && action(secondary, "btn")}
           {actions.length > 0 && <ActionsMenu overflow="always" label={menuLabel} items={actions} />}
           {primary && action(primary, "btn primary")}
+          {controls}
         </div>
       )}
     </header>

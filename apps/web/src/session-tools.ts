@@ -36,6 +36,7 @@ export const SESSION_TOOLS: readonly SessionTool[] = [
   { id: "sidechat", name: "Side Chat", group: "Work", shortcut: "open-side-chat" },
   { id: "background", name: "Background Work", group: "Work", shortcut: "open-background-work" },
   { id: "campaign", name: "Campaign Status", group: "Work", shortcut: "open-campaign-status" },
+  { id: "launched", name: "Launched Sessions", group: "Work" },
   { id: "requests", name: "Requests", group: "Decisions", shortcut: "open-requests" },
   { id: "decisions", name: "Decision History", group: "Decisions", shortcut: "open-decision-history" },
 ];
@@ -55,6 +56,8 @@ export interface SessionToolContext {
   terminalHint: string;
   backgroundAvailable: boolean;
   campaignAvailability: CampaignStatusAvailability;
+  /** Whether the panel's host is an Assistant thread, whose launched sessions the panel lists (#4776). */
+  launchedSessions?: boolean;
 }
 
 export const BACKGROUND_WORK_UNAVAILABLE = "No background-work capability or history is available for this session.";
@@ -80,6 +83,9 @@ export function sessionToolAvailability(
         listed: true,
         unavailableReason: context.campaignAvailability.kind === "unavailable" ? context.campaignAvailability.reason : null,
       };
+    case "launched":
+      // Only an Assistant thread launches sessions; a session page never lists the tool.
+      return context.launchedSessions ? { listed: true, unavailableReason: null } : { listed: false };
     default:
       return { listed: true, unavailableReason: null };
   }
@@ -224,6 +230,16 @@ export function backgroundFact(states: readonly string[] | BackgroundInventoryGa
 /** Campaign Status: delivered of committed work, when this browser holds the campaign's summary. */
 export function campaignFact(work: { counts: { delivered: number; committed: number } } | null | undefined): string {
   return work ? `${work.counts.delivered} of ${work.counts.committed} delivered` : "Progress of this session's campaign";
+}
+
+/**
+ * Launched Sessions (#4776): how many sessions the thread launched, and how many wait for you, the
+ * same counts as the thread header's toggle.
+ */
+export function launchedSessionsFact(counts: { total: number; needsYou: number }): string {
+  if (counts.total === 0) return "No sessions launched yet";
+  const launched = `${count(counts.total, "session", "sessions")} launched`;
+  return counts.needsYou > 0 ? `${launched}, ${counts.needsYou} waiting for you` : launched;
 }
 
 /** What kind of request it is, as a phrase inside a sentence ("a question", "a PR merge"). */

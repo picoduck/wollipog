@@ -136,6 +136,7 @@ import { TURN_RETRY_IN_FLIGHT_REASON, turnRetryPlan } from "../turn-retry.js";
 import { ConversationHandoffDialog } from "./ConversationHandoffDialog.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 import { RightPanel, type RightPanelState } from "./RightPanel.js";
+import type { LaunchedWork } from "../assistant-launched-work.js";
 import { useDiffFileFocus } from "../review-focus.js";
 import { useCampaignStatusAvailability } from "./useCampaignStatus.js";
 import { useGitStatus, useGitSummary } from "./useGitStatus.js";
@@ -644,6 +645,12 @@ export type SessionDetailProps = {
   /** Replaces the expanded session bar with the host's own (#4664): an assistant thread shows its
    * transcript, requests and composer under the thread's header. The host then owns the page title. */
   header?: ReactNode;
+  /** An assistant thread's launched sessions, for the side panel's Launched Sessions tool (#4776). */
+  launchedWork?: LaunchedWork;
+  /** Heads the expanded chat column, under the bar and beside the side panel (#4776): an assistant
+   * thread's facts and what waits on its owner, so the panel spans the page under the bar as it does
+   * beside a session's. */
+  columnLead?: ReactNode;
   /** Transport-owned policy seam. Native passthrough commands default to the existing send path. */
   providerCommandAttachmentPolicy?: ProviderComposerCommand["attachmentPolicy"];
   /** Registers preview-only paging ownership and live-follow actions with the Inbox key layer. */
@@ -1166,6 +1173,8 @@ function SessionDetailLoaded({
   onOpenRequest,
   topbarControls,
   header,
+  launchedWork,
+  columnLead,
   providerCommandAttachmentPolicy = "send",
   onPreviewNavigationReady,
   onPreviewForkReady,
@@ -3604,6 +3613,8 @@ function SessionDetailLoaded({
   // takes the composer's place (#2866). A draft that changed while it was hidden had no width to
   // measure, so revealing it grows it again.
   const phonePanelOpen = isMobile && rightPanel.open;
+  // Whether the side panel overlays the conversation; only a column lead reads it (#4776).
+  const [panelOverlay, setPanelOverlay] = useState(false);
   const composerHiddenOnPhone = phonePanelOpen || phoneTerminalOpen;
   const toastComposerRef = useToastChrome<HTMLDivElement>();
   useLayoutEffect(() => {
@@ -7361,6 +7372,11 @@ function SessionDetailLoaded({
               onFocusLost={() => scrollRef.current?.focus({ preventScroll: true })}
             />
           )}
+          {/* Behind an overlaying panel's scrim the lead is out of reach of the pointer, so it is out
+              of the tab order too: its approvals are answered once the panel closes (#4776). */}
+          {mode === "expanded" && columnLead !== undefined && (
+            <div className="detail-column-lead" inert={panelOverlay || undefined}>{columnLead}</div>
+          )}
           {/* Campaign notices, not session notices (§13.2; #2036): they describe the campaign, not
               whether this session can take its next turn, so they head the chat column directly
               under the session bar, in this order, on its edges (#2157), rather than in the notice
@@ -8275,6 +8291,8 @@ function SessionDetailLoaded({
           onOpenMachine={() => navigate({ name: "runners", section: "machines" })}
           backgroundInventoryError={backgroundInventoryError}
           onRetryBackgroundInventory={retryBackgroundInventory}
+          launchedWork={launchedWork}
+          onOverlayChange={columnLead !== undefined ? setPanelOverlay : undefined}
         />}
       </div>
       {/* A phone opens the summary as a bottom sheet (§7.5, §9.2), so the transcript never sits

@@ -40,7 +40,7 @@ test("the open thread shows its owner confirmation first, and Approve Once settl
   await expect(request.getByRole("definition").filter({ hasText: "Fix the Flaky Upload Test (sess-flaky)" })).toBeVisible();
   await expect(request.locator("dl[aria-label='Arguments']")).toContainText("sess-flaky");
   // Drawn ahead of the work cards it would unblock.
-  const first = page.getByRole("region", { name: "Launched Work" }).getByRole("listitem").first();
+  const first = page.getByRole("region", { name: "Waiting for You" }).getByRole("listitem").first();
   await expect(first).toHaveAccessibleName("Stop Session");
   for (const name of ["Open Session", "Deny", "Approve Once"]) await expect(request.getByRole("button", { name, exact: true })).toBeVisible();
   await request.getByRole("button", { name: "Approve Once", exact: true }).click();

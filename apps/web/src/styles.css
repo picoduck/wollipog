@@ -3864,6 +3864,12 @@ textarea {
   display: flex;
   flex-direction: column;
 }
+/* A host's lead at the head of the chat column (an Assistant thread's facts and waiting work,
+   #4776): its own height, never squeezed by the transcript below. */
+.detail-column-lead {
+  flex: none;
+  min-width: 0;
+}
 /* The side panel (#2843; docs/design-system.md §2.5, §2.10): a docked column, flush with the frame,
    the full height under the session bar, with one hairline on its leading edge. Its content answers
    to the panel's own width through the `rp` container, never to the viewport. */
@@ -7568,8 +7574,12 @@ body.shell-dock-dragging * {
     overflow: visible;
   }
   .assistant-work-confirmations > .request-card { width: auto; }
-  /* Tall enough to show a whole request and the start of what follows. */
+  /* Tall enough to show a whole request and the start of what follows. The Launched Sessions
+     toggle's row above it (#4776) comes out of the same allowance, so the transcript keeps its room. */
   .assistant-work:has(> .assistant-work-confirmations) { max-height: 60vh; }
+  .assistant-thread-toggle-row ~ .assistant-work:has(> .assistant-work-confirmations) {
+    max-height: calc(60vh - var(--control-h-sm) - var(--space-2));
+  }
   .assistant-work:has(> .assistant-work-confirmations) > .assistant-work-cards {
     max-height: none;
     overflow-y: visible;
@@ -12819,7 +12829,11 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: 0;
   list-style: none;
 }
-/* The thread's header, in the session bar's place: the title row, the facts, then the work cards. */
+/* The thread's bar (#4776), on the session bar's geometry (`.detail-bar.session-bar`): the title
+   gives way first, and the status badge and the actions never shrink. */
+.assistant-thread-bar > .status { flex: none; }
+/* The head of the thread's conversation column, under the bar and beside the side panel: the facts,
+   then what waits on the owner. */
 .assistant-thread-head {
   display: grid;
   flex: none;
@@ -12827,22 +12841,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: var(--space-3) var(--page-gutter) var(--space-3) var(--space-6);
   border-bottom: 1px solid var(--border);
 }
-.assistant-thread-title-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  min-width: 0;
-}
-.assistant-thread-title {
-  flex: 0 1 auto;
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  font: var(--type-title);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.assistant-thread-title-row > :last-child { margin-left: auto; }
 /* Neutral facts (§11.3), as a project's meta line draws them. */
 .assistant-thread-meta {
   display: flex;
@@ -12865,8 +12863,9 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   max-height: 6rem;
   overflow-y: auto;
 }
-/* AssistantWorkCards.tsx: one scrolling row of cards, so many launches never push the transcript
-   off the pane; each card opens its session, and a waiting approval rides on its card. */
+/* AssistantWorkCards.tsx: in the thread header, what waits on the owner as one scrolling row of
+   cards; each card opens its session, and a waiting approval rides on its card. Every other launched
+   session is in the side panel's Launched Sessions tool (#4776). */
 /* Pending requests (#4665) and the work cards share one row when both fit, the work cards keeping at
    least a card's width; otherwise the row wraps and the work cards take the next line. */
 .assistant-work {
@@ -12946,6 +12945,48 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
+}
+/* The header's Launched Sessions toggle (#4776): its counts read whole, never squeezed by the title. */
+.assistant-launched-toggle {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.assistant-thread-toggle-row {
+  display: flex;
+  min-width: 0;
+}
+/* The side panel's Launched Sessions tool (#4776): Needs You, Active, then the folding Finished group,
+   each a column of cards at the panel's width. The panel body is the one scroller. */
+.launched-sessions {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.launched-sessions-group {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.launched-sessions-group > .group-label { padding: 0; }
+.launched-sessions-fold {
+  display: flex;
+  margin: 0;
+  font: inherit;
+}
+.launched-sessions-fold .count {
+  margin-left: var(--space-1);
+  color: var(--text-faint);
+}
+.launched-sessions-cards {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.launched-sessions-cards > .assistant-work-card {
+  min-width: 0;
+  max-width: none;
 }
 @media (max-width: 760px) {
   .assistant-thread-head { padding: var(--space-2) var(--page-gutter); }
