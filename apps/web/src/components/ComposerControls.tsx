@@ -596,6 +596,7 @@ export function ModelEffortMenuChoices({
   const modelOption = modelChoices.find(option => option.value === modelVal) ?? modelChoices[0];
   const modelGroup = modelChoices.length > 0 && (
     <SettingsRadioGroup label={modelSource === "cached" ? "Model (Cached)" : "Model"}>
+      {!exactModels.length && <MenuNote>This harness reports model aliases only. Rediscover it in Connections to check for specific models.</MenuNote>}
       <ModelPickerList options={modelChoices} value={modelVal} context={{ mode: "exact", driver: modelDriver }}
         renderOption={option => <SettingsRadioOption
           key={option.value}

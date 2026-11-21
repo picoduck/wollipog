@@ -11844,6 +11844,45 @@ test("ordinary createSession applies one capability-valid per-user Agent Harness
     "a runner without current capability discovery fails closed instead of receiving the preference");
 });
 
+test("a managed Codex model default resolves at each launch and stores only the exact choice in the session", () => {
+  const { db, hub, svc } = makeHarness();
+  const model = "wollipog:latest:sol";
+  const identity = { agentId: CODEX_APP_AGENT_ID, driver: "codex-app-server", context: { kind: "native" } } as const;
+  const userId = db.localIdentityContext().userId;
+  db.setAgentHarnessDefault(userId, identity, { model, effort: "high" });
+  const advertise = (models: NonNullable<RunnerMetadata["agents"][number]["capabilities"]>["models"]) => {
+    db.updateRunnerAgents(RUNNER_ID, runnerMeta().agents.map(agent => agent.id === CODEX_APP_AGENT_ID ? {
+      ...agent,
+      capabilities: {
+        models, modelSource: "live" as const, effortLevels: ["high"], permissionModes: ["default"],
+        slashCommands: [], supportsImages: true, supportsApprovals: true,
+      },
+    } : agent), Date.now());
+  };
+  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID };
+  const launch = () => svc.createSession(request, undefined, undefined, false, false, false, { defaultOwnerUserId: userId });
+
+  advertise([{ id: "gpt-6.2-sol" }, { id: "gpt-6.3-astra" }, { id: "gpt-6.4-sol", hidden: true }]);
+  const first = launch();
+  assert.ok(first.ok && first.data, first.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config?.model, "gpt-6.2-sol");
+  assert.equal(first.data.model, "gpt-6.2-sol");
+
+  advertise([{ id: "gpt-6.10-sol" }, { id: "gpt-6.2-sol" }]);
+  const second = launch();
+  assert.ok(second.ok && second.data, second.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config?.model, "gpt-6.10-sol");
+  assert.equal(db.getSession(first.data.id)?.model, "gpt-6.2-sol");
+  assert.equal(db.getAgentHarnessDefault(userId, identity)?.config.model, model);
+
+  advertise([{ id: "gpt-6.10-astra" }]);
+  assert.equal(launch().status, 409);
+  const explicit = svc.createSession({ ...request, config: { model: "gpt-6.10-astra", effort: "high" } },
+    undefined, undefined, false, false, false, { defaultOwnerUserId: userId });
+  assert.ok(explicit.ok, explicit.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config?.model, "gpt-6.10-astra");
+});
+
 test("createSession online → 201 and sends start_session with the right launch spec", () => {
   const { hub, svc, db } = makeHarness();
 

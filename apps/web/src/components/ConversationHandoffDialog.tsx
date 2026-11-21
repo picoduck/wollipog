@@ -143,7 +143,7 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceAgentId,
           setAgentId(value); setConfig(seedConfig(next, sourceServiceTier));
         }} /></div>
       <div className="field-row">
-        <div className="field"><span>Model</span><ModelPicker context={{ mode: "exact", driver: agent?.driver }} label="Model" value={config.model ?? ""} disabled={busy}
+        <div className="field"><span>Model</span><ModelPicker context={{ mode: "launch", driver: agent?.driver }} label="Model" value={config.model ?? ""} disabled={busy}
           options={modelChoices.map((item) => ({ value: item.id, label: modelOptionLabel(item, modelChoices) }))}
           onChange={(value) => setConfig({ ...config, model: value, effort: undefined })} /></div>
         <div className="field"><span>Effort</span><Select label="Effort" value={config.effort ?? ""} disabled={busy}

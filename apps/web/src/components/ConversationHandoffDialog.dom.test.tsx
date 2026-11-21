@@ -378,3 +378,23 @@ test("a refusal that arrives after a failed attempt is still stated beside the e
     mountPoint.remove();
   }
 });
+
+
+test("handoff to an alias-only Claude catalog lets the user choose the destination model", async () => {
+  const agent = claude();
+  agent.capabilities!.models = [
+    { id: "default", displayName: "Default", default: true },
+    { id: "opus", displayName: "Opus" },
+    { id: "sonnet", displayName: "Sonnet" },
+  ];
+  const fixture = await mount(agent);
+  try {
+    await act(async () => { fixture.button(/^Model:/)!.click(); });
+    const latest = [...fixture.container.querySelectorAll<HTMLButtonElement>('[data-model-choice]')]
+      .find(button => button.querySelector(".menu-text")?.textContent === "Sonnet Latest");
+    assert.ok(latest);
+    await act(async () => { latest.click(); });
+    await act(async () => { fixture.create().click(); });
+    assert.deepEqual(fixture.created.map(entry => entry.config), [{ model: "sonnet", effort: undefined }]);
+  } finally { await fixture.unmount(); }
+});

@@ -46,3 +46,16 @@ test("catalog edits must have unique names and exact IDs, with only supported na
   assert.equal(parseModelPickerCatalog({ version: 2, families: [family, { ...family, label: "Other" }] }), null);
   assert.equal(parseModelPickerCatalog({ version: 2, families: [{ ...family, alias: "gpt-latest" }] }), null);
 });
+
+
+test("a server-advertised managed Codex choice leads its group and stays out of exact picks", () => {
+  const options = [
+    { value: "gpt-6.2-sol", label: "GPT-6.2 Sol" },
+    { value: "wollipog:latest:sol", label: "Sol Latest", description: "Wollipog chooses the available release at launch." },
+  ];
+  const picker = buildModelPicker(options, null, { mode: "launch", driver: "codex-app-server" });
+  assert.deepEqual(picker.groups[0]?.options.map(row => row.value), ["wollipog:latest:sol", "gpt-6.2-sol"]);
+  const exact = buildModelPicker(options, null, { mode: "exact", driver: "codex-app-server" });
+  assert.deepEqual(exact.trailing, []);
+  assert.deepEqual(exact.groups[0]?.options.map(row => row.value), ["gpt-6.2-sol"]);
+});

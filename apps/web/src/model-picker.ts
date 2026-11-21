@@ -1,5 +1,5 @@
 import { useEffect, useSyncExternalStore } from "react";
-import type { AgentDriverKind } from "@wollipog/protocol";
+import { isManagedModelChoice, managedModelChoiceId, type AgentDriverKind } from "@wollipog/protocol";
 import bundledCatalog from "./model-picker-catalog.json";
 import type { SelectOption } from "./components/ui/ChoiceControls.js";
 
@@ -38,7 +38,7 @@ const movableRoutes = new Set([
 const claudeRoutes = new Set(["opus", "best", "fable", "sonnet", "haiku", "opusplan"]);
 
 export function isExactModelChoice(id: string, driver?: AgentDriverKind): boolean {
-  if (id === "default" || movableRoutes.has(id)) return false;
+  if (id === "default" || isManagedModelChoice(id) || movableRoutes.has(id)) return false;
   return driver !== "claude-code" || !claudeRoutes.has(id.split("[", 1)[0]!);
 }
 
@@ -75,6 +75,11 @@ export function buildModelPicker(
         selectedLabel: family.label + " Latest",
         description: "Follows the version selected by the harness for new launches.",
       });
+    }
+    if (mode === "launch" && driver === "codex-app-server") {
+      const id = managedModelChoiceId(family.label);
+      const option = id ? take(id) : undefined;
+      if (option) rows.push(option);
     }
     let foundCurrent = false;
     for (const id of family.releases) {
@@ -154,7 +159,10 @@ function refreshModelPickerCatalog() {
   attemptedAt = Date.now();
   try {
     const cached = localStorage.getItem(cacheKey);
-    if (cached && cached.length <= 128_000) replaceCatalog(JSON.parse(cached));
+    if (cached && cached.length <= 128_000) {
+      const value = JSON.parse(cached) as { bundleVersion?: unknown; catalog?: unknown } | null;
+      if (value?.bundleVersion === bundledCatalog.version) replaceCatalog(value.catalog);
+    }
   } catch { /* Storage may be unavailable. */ }
   void fetch("/model-picker-catalog.json", { signal: AbortSignal.timeout(5_000) }).then(async response => {
     if (!response.ok || !response.headers.get("content-type")?.includes("application/json")) return;
@@ -162,7 +170,7 @@ function refreshModelPickerCatalog() {
     if (contentLength > 128_000) return;
     const content = await response.text();
     if (content.length <= 128_000 && replaceCatalog(JSON.parse(content))) {
-      localStorage.setItem(cacheKey, content);
+      localStorage.setItem(cacheKey, JSON.stringify({ bundleVersion: bundledCatalog.version, catalog: current }));
     }
   }).catch(() => { /* Keep the last usable catalog. */ });
 }

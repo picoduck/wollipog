@@ -224,7 +224,7 @@ export function AgentDefaultsDialog({
                 describedBy={HELPER_ID}
                 options={[
                   { value: UNSET, label: "Wollipog Default", description: "The model the agent picks for itself." },
-                  ...models.map((model) => ({ value: model.id, label: modelOptionLabel(model, models) })),
+                  ...models.map((model) => ({ value: model.id, label: modelOptionLabel(model, models), description: model.description })),
                 ]}
                 onChange={(model) => {
                   const next: AgentHarnessDefaultConfig = { ...draft };

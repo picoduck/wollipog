@@ -13,6 +13,7 @@ import {
 import {
   ARCHIVED_HISTORY_RETENTION_LIMITS,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
+  managedModelChoices,
   type AgentHarnessDefaultConfig,
   type AgentHarnessDefaultsView,
   type ArchivedHistoryRetentionView,
@@ -518,6 +519,18 @@ const harnessDefaultsTransport: ApiTransport = {
     const body = mode === "agent-repair" && window.location.hash === "#repair"
       ? harnessDefaultsRepairedView
       : harnessDefaultsState;
+    if (mode === "agent-managed") {
+      const view = structuredClone(body);
+      const installation = view.defaults[0]?.installations[0];
+      if (installation) {
+        const models = [
+          { id: "gpt-6.2-sol", displayName: "GPT-6.2 Sol", efforts: ["high"] },
+          { id: "gpt-6.1-sol", displayName: "GPT-6.1 Sol", efforts: ["high"] },
+        ];
+        installation.models.push(...models, ...managedModelChoices("codex-app-server", { models, modelSource: "live" }));
+      }
+      return Response.json(view);
+    }
     return new Response(JSON.stringify(body), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -556,7 +569,7 @@ function Harness() {
   const askedFor = params.get("topology") as Topology | null;
   const topology: Topology = askedFor && TOPOLOGIES.includes(askedFor) ? askedFor : "full";
   const requestedSection = params.get("section") as SettingsSection | null;
-  const showAgentDefaults = ["agent", "agent-missing", "agent-repair", "agent-loading", "agent-empty", "agent-save-fails"]
+  const showAgentDefaults = ["agent", "agent-missing", "agent-repair", "agent-loading", "agent-empty", "agent-save-fails", "agent-managed"]
     .includes(params.get("defaults") ?? "");
   // #1646's and #3028's desktop update states; absent, the About panel renders as it does in a browser.
   const requestedUpdates = params.get("updates");

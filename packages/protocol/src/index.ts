@@ -13456,3 +13456,5 @@ export type { MediaDispatchFenceIdentity, MediaNeverDispatchedFence } from "./me
 export type { MediaActiveStopIdentity, MediaActiveStopRequest, MediaActiveStopAcknowledgement } from "./media-active-stop.js";
 export { mediaActiveStopIdentityBody, mediaActiveStopRequestBody, mediaActiveStopAcknowledgementBody } from "./media-active-stop.js";
 export { validMediaDispatchFenceIdentity, mediaDispatchFenceBody, validMediaNeverDispatchedFence } from "./media-dispatch-fence.js";
+
+export { isManagedModelChoice, managedModelChoiceId, managedModelChoices, resolveManagedModelChoice } from "./managed-model-choice.js";

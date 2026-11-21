@@ -1,3 +1,4 @@
+import { isManagedModelChoice, resolveManagedModelChoice } from "@wollipog/protocol";
 import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
 import { personalRuleDelegation } from "./personal-rule-delegation.js";
 import { scheduledAssistantOwner, type AssistantAutomationAuthorization } from "./assistant-automation-authority.js";
@@ -4825,19 +4826,31 @@ export class SessionsService {
           requestedConfig.effort = campaignBehavior.childEffort;
         }
       }
-      const preference = creationContext?.defaultOwnerUserId
+      if (isManagedModelChoice(requestedConfig.model)) {
+        return fail("Choose a specific model for this session. Latest applies through saved Agent Defaults.", 409);
+      }
+      const savedPreference = creationContext?.defaultOwnerUserId
         ? this.db.getAgentHarnessDefault(
           creationContext.defaultOwnerUserId,
           agentHarnessIdentityFor({ id: req.agentId, driver: launch.driver, context: launch.context }),
         )?.config
         : undefined;
+      const managedId = savedPreference?.model;
+      const managed = isManagedModelChoice(managedId);
+      const managedModel = managed && managedId ? resolveManagedModelChoice(launch.driver, agentCapabilities, managedId) : undefined;
+      const preference = managed ? (managedModel && { ...savedPreference, model: managedModel.id }) : savedPreference;
+
       // Saved defaults are all-or-nothing under capability drift. A stale combination is never
       // partially sent to a harness, while explicit per-session knobs retain field-level priority.
-      if (preference && agentCapabilities && installationSupportsDefault({
+      const compatible = preference && agentCapabilities && installationSupportsDefault({
         models: agentCapabilities.models.filter((model) => model.id !== "default" && !model.hidden),
         effortLevels: agentCapabilities.effortLevels ?? [],
         permissionModes: agentCapabilities.permissionModes ?? [],
-      }, preference)) {
+      }, preference);
+      if (managed && !compatible && requestedConfig.model === undefined && requestedConfig.effort === undefined) {
+        return fail("The saved Latest model is unavailable with these defaults. Choose a specific model or update Agent Defaults.", 409);
+      }
+      if (preference && compatible) {
         if (requestedConfig.model === undefined && requestedConfig.effort === undefined) {
           if (preference.model !== undefined) requestedConfig.model = preference.model;
           if (preference.effort !== undefined) requestedConfig.effort = preference.effort;
