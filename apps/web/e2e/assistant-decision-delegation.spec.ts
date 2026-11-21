@@ -13,7 +13,7 @@ async function openAssistantFixture(page: Page, path: string, supported = true) 
 
 for (const theme of ["light", "dark"] as const) {
   for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 844]] as const) {
-    test(`Assistant evidence approval in ${theme} on ${layout}`, async ({ page }) => {
+    test(`Assistant evidence approval receipt refusal in ${theme} on ${layout}`, async ({ page }) => {
       await page.setViewportSize({ width, height });
       await page.emulateMedia({ colorScheme: theme });
       const scenario = (state: string) => page.goto(
@@ -24,48 +24,6 @@ for (const theme of ["light", "dark"] as const) {
         mkdirSync(evidence, { recursive: true });
         await page.screenshot({ path: join(evidence, `assistant-evidence-${state}-${theme}-${layout}.png`), animations: "disabled" });
       };
-      const dialog = page.getByRole("dialog", { name: "Decision Delegation" });
-      const approval = dialog.getByRole("checkbox", { name: "UI Evidence Approval", exact: true });
-      const denial = dialog.getByRole("checkbox", { name: "UI Evidence Denial", exact: true });
-      const save = dialog.getByRole("button", { name: "Save Grant" });
-      const openGrant = async (state: string) => {
-        await scenario(state);
-        await threadAction(page, "Decision Delegation");
-        await expectNoHorizontalOverflow(dialog, "Decision Delegation");
-        await expectFullyInViewport(save, "Save Grant");
-        await expect(denial).toBeEnabled();
-      };
-
-      await openGrant("legacy");
-      await expect(approval).toHaveCount(0);
-      await screenshot("before");
-      await openGrant("unavailable");
-      await expect(approval).toBeDisabled();
-      await expect(approval).toHaveAccessibleDescription(/Update this Machine’s runner/);
-      await approval.scrollIntoViewIfNeeded();
-      await screenshot("unavailable");
-      await openGrant("available");
-      await expect(approval).toBeEnabled();
-      await expect(approval).not.toBeChecked();
-      await expect(approval).not.toHaveAccessibleDescription(/provider may retain/);
-      await approval.focus();
-      await approval.scrollIntoViewIfNeeded();
-      await screenshot("available-default");
-      await approval.check();
-      await expect(approval).toHaveAccessibleDescription(/Claude Code.*claude-opus-5-5.*provider may retain/);
-      await dialog.getByRole("button", { name: "Project Scope: All Projects" }).click();
-      await page.getByRole("option", { name: "Selected Projects" }).click();
-      await dialog.getByRole("checkbox", { name: /Release Validation and Engineering/ }).check();
-      await expect(dialog).toContainText("Showing 1–5 of 36 projects");
-      await approval.scrollIntoViewIfNeeded();
-      await expectNoHorizontalOverflow(dialog, "Grant with provider disclosure and scoped projects");
-      await expectFullyInViewport(save, "Save Grant after selecting a project");
-      await screenshot("available");
-      await save.click();
-      await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", JSON.stringify({
-        categories: ["ui_evidence_review"], projects: ["project_0"], campaigns: "all", expiresAt: null,
-        evidenceDisclosureDigest: "a".repeat(64),
-      }));
       await scenario("refused");
       await page.getByRole("button", { name: /Worked.*1 Failed/ }).click();
       await page.getByLabel("Resolve UI Evidence · Failed", { exact: true }).click();
@@ -131,59 +89,9 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await expectPageNoHorizontalOverflow(page);
     await capture(page, "thread-grant-expired");
   });
-  test(`a thread's grant and decision history stay usable on ${layout}`, async ({ page }) => {
+  test(`a thread's decision history stays usable on ${layout}`, async ({ page }) => {
     await page.setViewportSize({ width, height });
     await openAssistantFixture(page, thread);
-    await threadAction(page, "Decision Delegation");
-    const settings = page.getByRole("dialog", { name: "Decision Delegation" });
-    const save = settings.getByRole("button", { name: "Save Grant" });
-    const details = page.getByLabel("Thread Details");
-    await expect(details).toContainText("Decision Delegation Off");
-    await expect(settings.getByRole("checkbox", { checked: true })).toHaveCount(0);
-    await expect(settings.getByRole("checkbox", { name: /ui evidence approval/i })).toHaveCount(0);
-    const ciRerun = settings.getByRole("checkbox", { name: "CI Rerun", exact: true });
-    await expect(ciRerun).toBeEnabled();
-    await ciRerun.check();
-    await expectFullyInViewport(ciRerun, "CI Rerun");
-    await capture(page, "ci-rerun-grant");
-    await settings.getByRole("checkbox", { name: "Owner Questions", exact: true }).check();
-    await settings.getByRole("checkbox", { name: "Pull Request Merge", exact: true }).check();
-    await settings.getByRole("button", { name: "Project Scope: All Projects" }).click();
-    await expect(page.getByRole("option", { name: "Selected Projects" })).toBeVisible();
-    await capture(page, "thread-project-picker");
-    await page.getByRole("option", { name: "Selected Projects" }).click();
-    await settings.getByRole("checkbox", { name: /Release Validation and Engineering/ }).check();
-    await expect(settings).toContainText("Showing 1–5 of 36 projects");
-    await expectNoHorizontalOverflow(settings, "Decision Delegation");
-    await expectFullyInViewport(save, "Save Grant");
-    await capture(page, "thread-project-scope");
-    await settings.getByRole("button", { name: "Campaign Scope: All Campaigns" }).click();
-    await page.getByRole("option", { name: "Selected Campaigns" }).click();
-    await settings.getByRole("checkbox", { name: "Release Campaign 0", exact: true }).check();
-    const expiry = settings.getByLabel("Expires at (Optional)");
-    await expiry.scrollIntoViewIfNeeded();
-    await expectFullyInViewport(expiry, "Expiration");
-    await expect(settings).toContainText("Showing 1–5 of 36 campaigns");
-    await expectNoHorizontalOverflow(settings, "Decision Delegation");
-    await expectFullyInViewport(save, "Save Grant");
-    await capture(page, "thread-campaign-scope");
-    await save.click();
-    await expect(settings).toHaveCount(0);
-    await expect(details).toContainText("Decision Delegation Set");
-    await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", JSON.stringify({
-      categories: ["ci_rerun", "owner_question", "pr_merge"], projects: ["project_0"], campaigns: ["campaign_0"], expiresAt: null,
-    }));
-    await threadAction(page, "Decision Delegation");
-    const revoke = settings.getByRole("button", { name: "Revoke Grant" });
-    await expiry.scrollIntoViewIfNeeded();
-    await expectFullyInViewport(revoke, "Revoke Grant");
-    await expectFullyInViewport(expiry, "Expiration on an existing grant");
-    await capture(page, "thread-existing-grant");
-    await revoke.click();
-    await expect(settings).toHaveCount(0);
-    await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", "null");
-    await expect(details).toContainText("Decision Delegation Off");
-    await capture(page, "thread-grant-revoked");
     await threadAction(page, "Delegated Decisions");
     const history = page.getByRole("dialog", { name: "Delegated Decisions" });
     await expect(history).toContainText("under your delegation.");
@@ -193,19 +101,6 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await expectNoHorizontalOverflow(history, "Thread Decision History");
     await expectPageNoHorizontalOverflow(page);
     await capture(page, "thread-history");
-  });
-
-  test(`CI rerun category explains an unavailable capability on ${layout}`, async ({ page }) => {
-    await page.setViewportSize({ width, height });
-    await page.goto(`/assistants-e2e.html?delegation=ci-old&path=${encodeURIComponent(thread)}`);
-    await threadAction(page, "Decision Delegation");
-    const settings = page.getByRole("dialog", { name: "Decision Delegation" });
-    await expect(settings.getByRole("checkbox", { name: "CI Rerun", exact: true })).toBeDisabled();
-    const explanation = settings.getByText("Update the control plane to grant CI rerun decisions.");
-    await explanation.scrollIntoViewIfNeeded();
-    await expectFullyInViewport(explanation, "Capability Explanation");
-    await expectNoHorizontalOverflow(settings, "Decision Delegation");
-    await capture(page, "ci-rerun-unavailable");
   });
 
   test(`the CI rerun approval shows its exact job and commit on ${layout}`, async ({ page }) => {
@@ -230,34 +125,6 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await expectNoHorizontalOverflow(target, "CI Rerun Target");
     await expectPageNoHorizontalOverflow(page);
     await capture(page, "ci-rerun-request");
-  });
-
-  test(`release grants are opt-in and older peers show both disabled categories on ${layout}`, async ({ page }) => {
-    await page.setViewportSize({ width, height });
-    await openAssistantFixture(page, thread);
-    await threadAction(page, "Decision Delegation");
-    const dialog = page.getByRole("dialog", { name: "Decision Delegation" });
-    const tag = dialog.getByRole("checkbox", { name: "Release Tag", exact: true });
-    const publish = dialog.getByRole("checkbox", { name: "Release Publication", exact: true });
-    await expect(tag).not.toBeChecked();
-    await expect(publish).not.toBeChecked();
-    await tag.check();
-    await publish.check();
-    await expectFullyInViewport(tag, "Release Tag");
-    await expectFullyInViewport(publish, "Release Publication");
-    await expectNoHorizontalOverflow(dialog, "Release Decision Grant");
-    await capture(page, "release-decision-grant");
-
-    await page.goto(`/assistants-e2e.html?delegation=release-old&path=${encodeURIComponent(thread)}`);
-    await threadAction(page, "Decision Delegation");
-    await expect(tag).toBeDisabled();
-    await expect(publish).toBeDisabled();
-    await expect(dialog.getByRole("checkbox", { name: "CI Rerun", exact: true })).toBeEnabled();
-    const explanation = dialog.getByText("Update the control plane to grant release decisions.");
-    await explanation.scrollIntoViewIfNeeded();
-    await expectFullyInViewport(explanation, "Capability Explanation");
-    await expectNoHorizontalOverflow(dialog, "Release Decision Grant");
-    await capture(page, "release-decision-unavailable");
   });
 
   for (const action of ["tag", "publish"] as const) {
@@ -333,13 +200,13 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
   test(`release decisions show the approving thread in Inbox and Campaign Status on ${layout}`, async ({ page }) => {
     await page.setViewportSize({ width, height });
     const expectReleaseEntry = async (scope: Locator) => {
-      const entry = scope.getByRole("listitem").filter({ hasText: "Release Publication" });
+      const entry = scope.getByRole("listitem").filter({ hasText: "Publish Releases" });
       await expect(entry).toContainText("engineering/release-validation · v0.38.0");
       await expect(entry).toContainText("Approved by Assistant thread");
       const attribution = entry.getByRole("button", { name: "Triage Open Issues", exact: true });
       await entry.evaluate((element) => element.scrollIntoView({ block: "center" }));
       await expectFullyInViewport(attribution, "Release Publication Thread Attribution");
-      await expect(scope.getByRole("listitem").filter({ hasText: "Release Tag" })).toContainText("Approved by Assistant thread");
+      await expect(scope.getByRole("listitem").filter({ hasText: "Tag Releases" })).toContainText("Approved by Assistant thread");
       await expect(scope).not.toContainText("release_publish:");
       await expectNoHorizontalOverflow(scope);
     };

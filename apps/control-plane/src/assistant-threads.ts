@@ -83,6 +83,7 @@ function decisionDelegation(body: unknown, now: number): AssistantDecisionDelega
   }
   return { revision: input.revision!, grant: {
     categories: [...new Set<AssistantDecisionCategory>(categories)],
+    ...(grant?.selectionMode === "all" || grant?.selectionMode === "choose" ? { selectionMode: grant.selectionMode } : {}),
     projects: scope(grant?.projects), campaigns: scope(grant?.campaigns), expiresAt,
     ...(categories.includes("ui_evidence_review") && typeof grant?.evidenceDisclosureDigest === "string"
       ? { evidenceDisclosureDigest: grant.evidenceDisclosureDigest } : {}),

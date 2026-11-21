@@ -52,6 +52,7 @@ const limitsScenario = params.get("limits");
 const campaignScenario = params.has("campaign");
 const delegationScenario = params.get("delegation");
 const showDelegation = delegationScenario === "stress" || delegationScenario === "ci-old" || delegationScenario === "release-old";
+const longScopes = params.has("long-scopes");
 const evidenceScenario = params.get("evidence");
 const migrationScenario = params.get("harness-change");
 const stressHarnessLabel = "Codex App Server With a Long Installation Label on the Shared Engineering Machine";
@@ -233,13 +234,18 @@ if (releaseScenario === "tag" || releaseScenario === "publish") {
 }
 
 const delegationProjects: ProjectView[] = delegationScenario === "stress" ? Array.from({ length: 36 }, (_, index) => ({
-  id: `project_${index}`, name: index === 0 ? "Release Validation and Engineering " + "Dependencies".repeat(10) : `Project ${index}`,
+  id: `project_${index}`, name: longScopes
+    ? `Project ${index} · Release Validation, Engineering Infrastructure and Cross-Platform Compatibility`
+    : index === 0 ? "Release Validation and Engineering " + "Dependencies".repeat(10) : `Project ${index}`,
   hidden: false, locations: [], activeSessionCount: 1, unarchivedSessionCount: 1, totalSessionCount: 1,
   createdAt: NOW, updatedAt: NOW,
 })) : [];
 for (const [index, project] of delegationProjects.entries()) {
   const id = `campaign_${index}`;
-  sessions.set(id, session(id, `Release Campaign ${index}`, { role: "orchestrator", projectId: project.id }));
+  const title = longScopes
+    ? `Campaign ${index} · Review Long-Running Queue Checks and Coordinate Cross-Repository Deployment`
+    : `Release Campaign ${index}`;
+  sessions.set(id, session(id, title, { role: "orchestrator", projectId: project.id }));
 }
 
 const question: PendingApproval = {

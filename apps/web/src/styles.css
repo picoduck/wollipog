@@ -12255,6 +12255,60 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   flex-wrap: wrap;
   gap: var(--space-2);
 }
+.delegation-dialog :is(.delegation-category, .form) > p { margin: 0; }
+.delegation-dialog .modal-foot > .delegation-revoke { margin-right: auto; }
+.delegation-groups,
+.delegation-scopes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  align-items: start;
+}
+.delegation-dialog .delegation-group {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.delegation-group-toggle {
+  justify-content: flex-start;
+}
+.delegation-group-toggle > :last-child { margin-left: auto; }
+.delegation-group-mark {
+  display: grid;
+  place-items: center;
+  width: var(--space-4);
+  height: var(--space-4);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-xs);
+}
+.delegation-group-toggle[aria-checked="true"],
+.delegation-group-toggle[aria-checked="mixed"] {
+  border-color: var(--accent);
+}
+.delegation-category {
+  display: grid;
+  gap: var(--space-2);
+}
+.delegation-dialog .seg {
+  display: grid;
+  grid-auto-flow: row;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+  height: auto;
+}
+.delegation-dialog .delegation-presets {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+.delegation-dialog .delegation-scope-choice {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.delegation-dialog .seg-option { min-height: var(--control-h); }
+.delegation-dialog .assistant-decision-choices {
+  display: grid;
+  gap: var(--space-2);
+}
 @media (max-width: 760px) {
   /* Grant restrictions must remain readable in full, including operation inventory details. */
   .assistant-fields .choice-row-desc {
@@ -12262,6 +12316,12 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     overflow: visible;
     white-space: normal;
   }
+  .delegation-groups,
+  .delegation-scopes { grid-template-columns: minmax(0, 1fr); }
+  .delegation-dialog .delegation-presets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .delegation-dialog :is(.seg-option, .checkbox, .field input, .btn) { min-height: 44px; }
+  .delegation-dialog .modal-back { min-width: 44px; min-height: 44px; }
+  .delegation-dialog .modal-foot > .btn { padding-inline: var(--space-2); }
 }
 .assistant-id-control {
   display: flex;
