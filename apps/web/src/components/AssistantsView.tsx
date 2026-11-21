@@ -165,6 +165,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   });
   const effort = useStoreSelector((state) => selected ? state.sessions.get(selected.sessionId)?.effort : undefined);
   const canTogglePanel = useStoreSelector((state) => Boolean(selected && state.sessions.has(selected.sessionId)));
+  const decisionHistorySupported = useStoreSelector((state) => state.assistantDecisionHistorySupported);
   const togglePanel = panel.toggle;
   useEffect(() => {
     // There is no key listener on the loading or missing view, even when a saved panel is open.
@@ -293,7 +294,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
     // In ⋯ as the session bar keeps its settings (#4776); it opens limits, harness and account.
     { label: "Thread Settings", onClick: () => openThreadSettings(thread.id) },
     { label: "Open as Session", onClick: () => navigate({ name: "session", id: thread.sessionId }) },
-    ...(thread.decisionDelegation && canTogglePanel ? [{ label: "Delegated Decisions", onClick: () => panel.show("Decisions") }] : []),
+    ...(decisionHistorySupported && canTogglePanel ? [{ label: "Delegated Decisions", onClick: () => panel.show("Decisions") }] : []),
     ...(thread.status === "archived" ? [] : [
       ...(thread.accountChangeSupported ? [{ label: "Change Account", onClick: () => setChangingAccount(thread) }] : []),
       { label: "Rename", onClick: () => setRenaming(thread) },

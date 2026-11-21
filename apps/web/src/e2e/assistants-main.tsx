@@ -522,7 +522,7 @@ function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false,
-      projects: delegationScenario === "stress", ...(showDelegation ? { assistantDecisionHistory: true as const } : {}),
+      projects: delegationScenario === "stress", ...(showDelegation || panelScenario ? { assistantDecisionHistory: true as const } : {}),
       ...(delegationScenario === "stress" || delegationScenario === "release-old" || migrationScenario && migrationScenario !== "old"
         ? { assistantCiRerunDecisions: true as const } : {}),
       ...(delegationScenario === "stress" || migrationScenario && migrationScenario !== "old"
@@ -696,6 +696,7 @@ const client = {
     return { thread: structuredClone(current) };
   },
   assistantDecisionHistory: async (filter: { threadId?: string; before?: string }) => {
+    document.body.dataset.assistantDecisionHistoryRequested = "true";
     if (filter.threadId && panelScenario === "not-delegated") return { entries: [], total: 0 };
     const history = assistantDecisionHistoryFixture("campaign_0", filter.before, params.has("release-history"));
     return filter.threadId && panelScenario && !filter.before ? { ...history, total: 24 } : history;

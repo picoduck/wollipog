@@ -7,6 +7,7 @@ import { formatCalendarTime } from "../format.js";
 import { formatUsd } from "../guardrail-values.js";
 import { RIGHT_PANEL_DEFAULT_WIDTH } from "../right-panel.js";
 import { shortcutLayerActive } from "../shortcuts.js";
+import { useStoreSelector } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { AssistantThreadDecisionHistory } from "./AssistantDecisionHistory.js";
 import { AssistantThreadHistory } from "./AssistantThreadHistory.js";
@@ -37,6 +38,7 @@ export function AssistantThreadPanel({ state, thread, work, model, effort, onSet
   const returnFocus = useRef<HTMLElement | null>(null);
   const wasOpen = useRef(false);
   const [decisionCount, setDecisionCount] = useState<string | null>(null);
+  const decisionHistorySupported = useStoreSelector((store) => store.assistantDecisionHistorySupported);
   useLayoutEffect(() => {
     onOverlayChange(overlay);
     return () => onOverlayChange(false);
@@ -59,7 +61,7 @@ export function AssistantThreadPanel({ state, thread, work, model, effort, onSet
   }, [asideRef, state.open, covering]);
 
   if (!state.open) return null;
-  const labels = { Work: launchedWorkIds(work).length, Decisions: decisionCount, Details: null };
+  const labels = { Work: launchedWorkIds(work).length, Decisions: decisionHistorySupported ? decisionCount : null, Details: null };
   const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const current = ASSISTANT_PANEL_TABS.indexOf(state.tab);
     let next: number;
@@ -107,7 +109,9 @@ export function AssistantThreadPanel({ state, thread, work, model, effort, onSet
         id={id + tab + "-panel"} aria-labelledby={id + tab} tabIndex={state.tab === tab ? 0 : -1} hidden={state.tab !== tab}>
         {tab === "Decisions" && <>
           <DelegationSummary thread={thread} onDelegation={onDelegation} />
-          <AssistantThreadDecisionHistory threadId={thread.id} onCount={setDecisionCount} />
+          {decisionHistorySupported
+            ? <AssistantThreadDecisionHistory threadId={thread.id} onCount={setDecisionCount} />
+            : <p className="muted">This control plane does not support delegated decision history.</p>}
         </>}
         {tab === "Work" && <AssistantWorkPanel work={work} beforeReview={() => {
           if (covering) flushSync(state.close);

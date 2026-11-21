@@ -122,6 +122,10 @@ test("a control plane without delegation support offers no grant or history acti
   await page.getByRole("button", { name: "Thread Actions", exact: true }).click();
   await expect(page.getByRole("menuitem", { name: "Decision Delegation" })).toHaveCount(0);
   await expect(page.getByRole("menuitem", { name: "Delegated Decisions" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  const decisions = await openDecisions(page);
+  await expect(decisions).toContainText("This control plane does not support delegated decision history.");
+  await expect(page.locator("body")).not.toHaveAttribute("data-assistant-decision-history-requested");
 });
 
 for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 844]] as const) {
