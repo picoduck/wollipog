@@ -21,7 +21,8 @@ async function checkRows(rows: Locator, parts: typeof TOAST, touch: boolean, wra
       const copy = element.querySelector(selectors.content)!.getBoundingClientRect();
       const icon = element.querySelector(selectors.icon)!.getBoundingClientRect();
       const style = getComputedStyle(element);
-      const controls = Array.from(element.querySelectorAll(selectors.controls), (control) => {
+      const buttons = Array.from(element.querySelectorAll(selectors.controls));
+      const controls = buttons.map((control) => {
         const box = control.getBoundingClientRect();
         const style = getComputedStyle(control);
         const after = getComputedStyle(control, "::after");
@@ -40,7 +41,8 @@ async function checkRows(rows: Locator, parts: typeof TOAST, touch: boolean, wra
         iconOffset: Math.abs(icon.top + icon.height / 2 - center),
         top: copy.top - card.top - parseFloat(style.borderTopWidth),
         bottom: card.bottom - copy.bottom - parseFloat(style.borderBottomWidth),
-        padding: [style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft],
+        left: icon.left - card.left - parseFloat(style.borderLeftWidth),
+        right: card.right - buttons.at(-1)!.getBoundingClientRect().right - parseFloat(style.borderRightWidth),
         controls,
       };
     }, parts);
@@ -49,7 +51,10 @@ async function checkRows(rows: Locator, parts: typeof TOAST, touch: boolean, wra
     expect(layout.iconOffset, "icon center against first text line").toBeLessThanOrEqual(1);
     const padding = Math.abs(layout.top - layout.bottom);
     expect(padding, "space above and below the copy").toBeLessThanOrEqual(1);
-    if (parts === TOAST) expect(new Set(layout.padding).size, "equal padding on all four sides").toBe(1);
+    if (parts === TOAST) {
+      const sides = [layout.top, layout.right, layout.bottom, layout.left];
+      expect(Math.max(...sides) - Math.min(...sides), "equal space on all four sides").toBeLessThanOrEqual(1);
+    }
     expect(layout.controls.length).toBeGreaterThan(0);
     for (const [index, control] of layout.controls.entries()) {
       expect(control.offset, "control center against first text line").toBeLessThanOrEqual(1);
@@ -140,6 +145,20 @@ for (const profile of [mouse, phone]) {
         await expect(notices.first().getByRole("button", { name: "Dismiss" })).toBeVisible();
         await check(page, notices, "notice", "title-and-trailing");
       });
+
+      if (profile.hasTouch && theme === "light") {
+        test("phone panel notices borrow the trailing hit area and keep the resolving action full size", async ({ page }) => {
+          await page.goto("/agents-e2e.html?mixed=1&registry-retry=exhaust");
+          const notice = page.locator(".panel-notice-slot .notice");
+          await expect(notice.locator(".notice-title")).toHaveText("Couldn't Load Recorded Workers");
+          await notice.getByRole("button", { name: "+1 More" }).tap();
+          await page.getByRole("menuitem", { name: "3 Workers Need You", exact: true }).tap();
+          const resolve = notice.getByRole("button", { name: "Review in Session", exact: true });
+          await expect(resolve).toBeVisible();
+          expect((await resolve.boundingBox())!.height).toBe(44);
+          await checkRows(notice, NOTICE, true);
+        });
+      }
 
       test("Approve Once shows the aligned confirmation toast in the Assistant thread", async ({ page }) => {
         await page.goto(`/assistants-e2e.html?theme=${theme}&confirm=1&path=%2Fassistants%2F~dABoAHIAXwB0AHIAaQBhAGcAZQA`);
