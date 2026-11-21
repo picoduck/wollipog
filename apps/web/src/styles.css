@@ -12272,21 +12272,16 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   border-radius: var(--radius-md);
 }
 .delegation-group-toggle {
-  justify-content: flex-start;
-}
-.delegation-group-toggle > :last-child { margin-left: auto; }
-.delegation-group-mark {
   display: grid;
-  place-items: center;
-  width: var(--space-4);
-  height: var(--space-4);
-  border: 1px solid currentColor;
-  border-radius: var(--radius-xs);
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  padding-inline: var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev-2);
+  font: var(--type-body-strong);
 }
-.delegation-group-toggle[aria-checked="true"],
-.delegation-group-toggle[aria-checked="mixed"] {
-  border-color: var(--accent);
-}
+.delegation-group-toggle .checkbox-helper { grid-column: auto; }
 .delegation-category {
   display: grid;
   gap: var(--space-2);
@@ -12319,8 +12314,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .delegation-groups,
   .delegation-scopes { grid-template-columns: minmax(0, 1fr); }
   .delegation-dialog .delegation-presets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .delegation-dialog :is(.seg-option, .checkbox, .field input, .btn) { min-height: 44px; }
-  .delegation-dialog .modal-back { min-width: 44px; min-height: 44px; }
   .delegation-dialog .modal-foot > .btn { padding-inline: var(--space-2); }
 }
 .assistant-id-control {
@@ -19127,6 +19120,13 @@ a.tab { text-decoration: none; }
 .checkbox-mark > input { border-radius: var(--radius-xs); }
 .radio-mark > input { border-radius: var(--radius-pill); }
 .checkbox-mark > input:checked { border-color: var(--accent); background: var(--accent); }
+.checkbox-mark:has(> input:indeterminate)::after {
+  content: "";
+  position: absolute;
+  width: var(--space-2);
+  border-top: 2px solid currentColor;
+  pointer-events: none;
+}
 /* Radio: an accent ring plus a dot. */
 .radio-mark > input:checked { border-color: var(--accent); }
 .checkbox-check,

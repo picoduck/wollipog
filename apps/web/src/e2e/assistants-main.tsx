@@ -328,6 +328,9 @@ function thread(id: string, sessionId: string, overrides: Partial<AssistantThrea
     connectionId: `conn-${id}`, launchedSessionIds: [], lastActivityAt: backing.updatedAt, createdAt: backing.createdAt,
     ...(showDelegation || (limitsScenario && limitsScenario !== "old")
       ? { decisionDelegation: { revision: 0, grant: null } } : {}),
+    ...(params.has("saved-narrow") && id === "thr_triage" ? { decisionDelegation: { revision: 1, grant: {
+      categories: ["pr_merge"], selectionMode: "all", campaigns: "all", projects: "all", expiresAt: null,
+    } } } : {}),
     ...(evidenceScenario === "refused-stress" && id === "thr_triage" ? { decisionDelegation: { revision: 1, grant: {
       categories: ["ui_evidence_review"], campaigns: "all", projects: "all", expiresAt: null, evidenceDisclosureDigest: "a".repeat(64),
     } } } : {}),

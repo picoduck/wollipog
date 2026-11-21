@@ -24,6 +24,28 @@ async function alignTop(locator: Locator) {
   await locator.evaluate((element) => element.scrollIntoView({ block: "start" }));
 }
 
+test("upgrading capabilities does not widen a saved Delegate All grant", async ({ page }) => {
+  await page.clock.setFixedTime(now);
+  await page.goto(`/assistants-e2e.html?delegation=stress&evidence=available&saved-narrow&path=${encodeURIComponent(thread)}`);
+  const dialog = await openEditor(page);
+  await expect(dialog.getByRole("radio", { name: "Delegate All" })).toBeChecked();
+  await expect(dialog).toContainText("1 of 11 categories included.");
+  await dialog.getByRole("radio", { name: "1 Hour", exact: true }).click();
+  await dialog.getByRole("button", { name: "Save Delegation" }).click();
+  await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", JSON.stringify({
+    categories: ["pr_merge"], selectionMode: "all", projects: "all", campaigns: "all", expiresAt: now.getTime() + 3600_000,
+  }));
+});
+
+test("a control plane can offer CI reruns before it supports release grants", async ({ page }) => {
+  await page.goto(`/assistants-e2e.html?delegation=release-old&path=${encodeURIComponent(thread)}`);
+  const dialog = await openEditor(page);
+  await dialog.getByRole("radio", { name: "Choose" }).click();
+  await expect(dialog.getByRole("checkbox", { name: "Rerun CI", exact: true })).toBeEnabled();
+  await expect(dialog.getByRole("checkbox", { name: "Tag Releases", exact: true })).toBeDisabled();
+  await expect(dialog.getByRole("checkbox", { name: "Publish Releases", exact: true })).toBeDisabled();
+});
+
 async function expectEditorLayout(dialog: Locator, width: number) {
   await expectNoHorizontalOverflow(dialog, editorName);
   await expectPageNoHorizontalOverflow(dialog.page());
@@ -92,197 +114,200 @@ async function expectEditorLayout(dialog: Locator, width: number) {
 for (const theme of ["light", "dark"] as const) {
   for (const [width, height] of [[1440, 900], [390, 844]] as const) {
     const suffix = `${width}x${height}-${theme}`;
-    const screenshot = async (page: Page, state: string) => {
-      if (!evidence) return;
-      mkdirSync(evidence, { recursive: true });
-      const sizes = width === 390 ? "-target44csspx-gap8csspx" : "-target24csspx";
-      await page.screenshot({ path: join(evidence, `delegation-${suffix}-${state}${sizes}.png`), animations: "disabled" });
-    };
-    const start = async (page: Page, params = "delegation=stress&evidence=available&long-scopes") => {
-      await page.setViewportSize({ width, height });
-      await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
-      await page.clock.setFixedTime(now);
-      await page.goto(`/assistants-e2e.html?theme=${theme}&${params}&path=${encodeURIComponent(thread)}`);
-      return openEditor(page);
-    };
+    test.describe(suffix, () => {
+      test.use({ hasTouch: width === 390 });
+      const screenshot = async (page: Page, state: string) => {
+        if (!evidence) return;
+        mkdirSync(evidence, { recursive: true });
+        const sizes = width === 390 ? "-target44csspx-gap8csspx" : "-target24csspx";
+        await page.screenshot({ path: join(evidence, `delegation-${suffix}-${state}${sizes}.png`), animations: "disabled" });
+      };
+      const start = async (page: Page, params = "delegation=stress&evidence=available&long-scopes") => {
+        await page.setViewportSize({ width, height });
+        await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
+        await page.clock.setFixedTime(now);
+        await page.goto(`/assistants-e2e.html?theme=${theme}&${params}&path=${encodeURIComponent(thread)}`);
+        return openEditor(page);
+      };
 
-    test(`Delegate All uses explicit categories and requires disclosure on ${suffix}`, async ({ page }) => {
-      const dialog = await start(page);
-      const details = page.getByLabel("Thread Details");
-      const save = dialog.getByRole("button", { name: "Save Delegation" });
-      const all = dialog.getByRole("radio", { name: "Delegate All" });
-      const ask = dialog.getByRole("radio", { name: "Ask Me" });
-      const consent = dialog.getByRole("checkbox", { name: "I accept the provider disclosure." });
-      const expiresAt = now.getTime() + 7 * 24 * 3600_000;
-      const grant = { categories, selectionMode: "all", projects: "all", campaigns: "all", expiresAt };
-      const saved = page.locator("body");
-      await expect(ask).toBeChecked();
-      await expect(dialog.getByText("Decisions stay with you.")).toBeVisible();
-      await expect(details).toContainText("Decision Delegation Off");
-      await expectFullyInViewport(save, "Save Delegation");
-      await expectEditorLayout(dialog, width);
-      await screenshot(page, "ask-me");
-
-      await all.click();
-      await expect(dialog).toContainText("10 of 11 categories included.");
-      await expect(dialog).toContainText("Excluded until you accept the provider disclosure.");
-      await expect(dialog).toContainText(/Claude Code.*provider may retain/);
-      await expectEditorLayout(dialog, width);
-      await screenshot(page, "all-before-disclosure");
-      await save.click();
-      await expect(saved).toHaveAttribute("data-delegation-grant", JSON.stringify(grant));
-      await openEditor(page);
-      await expect(all).toBeChecked();
-      const status = dialog.getByRole("status").filter({ hasText: "Active Delegation" });
-      await expect(status).toContainText("Delegate All · Expires in 7 days");
-      await expectFullyInViewport(save, "Save Delegation");
-      await expectEditorLayout(dialog, width);
-      await screenshot(page, "active-grant");
-
-      await consent.check();
-      await expect(dialog).toContainText("11 of 11 categories included.");
-      await expect(dialog).toContainText("Included. You accepted the provider disclosure.");
-      await expectEditorLayout(dialog, width);
-      await screenshot(page, "all-after-disclosure");
-      await save.click();
-      const persisted = JSON.parse((await saved.getAttribute("data-delegation-grant"))!);
-      expect(persisted).toEqual({ ...grant, categories: expect.arrayContaining([...categories, "ui_evidence_review"]),
-        evidenceDisclosureDigest: "a".repeat(64) });
-      expect(persisted.categories).toHaveLength(11);
-
-      await openEditor(page);
-      await expect(dialog).toContainText("11 of 11 categories included.");
-      const revoke = dialog.getByRole("button", { name: "Revoke Delegation" });
-      await expectFullyInViewport(revoke, "Revoke Delegation");
-      await revoke.click();
-      const confirmation = page.getByRole("dialog", { name: "Revoke Delegation" });
-      await expect(confirmation).toContainText("This thread will lose permission");
-      await expect(saved).not.toHaveAttribute("data-delegation-grant", "null");
-      await expectEditorLayout(confirmation, width);
-      await screenshot(page, "revoke-confirmation");
-      await confirmation.getByRole("button", { name: "Cancel" }).click();
-      await expect(dialog).toBeVisible();
-      await revoke.click();
-      await confirmation.getByRole("button", { name: "Revoke Delegation" }).click();
-      await expect(saved).toHaveAttribute("data-delegation-grant", "null");
-      await expect(details).toContainText("Decision Delegation Off");
-
-      await openEditor(page);
-      await all.click();
-      await save.click();
-      await openEditor(page);
-      await ask.click();
-      await save.click();
-      await expect(saved).toHaveAttribute("data-delegation-grant", "null");
-    });
-
-    test(`Choose, expiry and scoped lists work on ${suffix}`, async ({ page }) => {
-      const dialog = await start(page);
-      const save = dialog.getByRole("button", { name: "Save Delegation" });
-      await dialog.getByRole("radio", { name: "Choose" }).click();
-      const groupNames = ["Pull Requests", "CI and Releases", "Issues", "Cleanup", "Questions", "UI Evidence"];
-      for (const name of groupNames) await expect(dialog.getByRole("group", { name, exact: true })).toBeVisible();
-      const pullRequests = dialog.getByRole("checkbox", { name: "Pull Requests", exact: true });
-      const merge = dialog.getByRole("checkbox", { name: "Merge Pull Requests" });
-      const extend = dialog.getByRole("checkbox", { name: "Extend Review Rounds" });
-      await merge.check();
-      await expect(pullRequests).toHaveAttribute("aria-checked", "mixed");
-      await expect(pullRequests).toHaveAccessibleDescription("1 of 2");
-      await expectEditorLayout(dialog, width);
-      await screenshot(page, "choose-mixed");
-      const evidenceGroup = dialog.getByRole("group", { name: "UI Evidence", exact: true });
-      if (width === 390) {
-        await alignTop(dialog.getByRole("group", { name: "Cleanup", exact: true }));
-        await expectFullyInViewport(evidenceGroup, "UI Evidence Group");
-        await screenshot(page, "choose-remaining-groups");
-      }
-      const approve = evidenceGroup.getByRole("checkbox", { name: "Approve UI Evidence" });
-      const sendBack = evidenceGroup.getByRole("checkbox", { name: "Send Back UI Evidence" });
-      await expect(sendBack).toBeEnabled();
-      await expect(approve).toBeEnabled();
-      await expect(approve).not.toBeChecked();
-      await pullRequests.click();
-      await expect(merge).toBeChecked();
-      await expect(extend).toBeChecked();
-      await expect(pullRequests).toHaveAccessibleDescription("2 of 2");
-      await pullRequests.click();
-      await expect(merge).not.toBeChecked();
-      await expect(extend).not.toBeChecked();
-      await merge.check();
-
-      const expiry = dialog.getByRole("group", { name: "Expiry", exact: true });
-      await alignTop(expiry);
-      await expect(expiry.getByRole("radio", { name: "7 Days" })).toBeChecked();
-      await expect(expiry).toContainText(/Delegation ends on Nov 26, 2026.*4:00 PM/);
-      await expectFullyInViewport(save, "Save Delegation");
-      await screenshot(page, "expiry-seven-days");
-      for (const [preset, help] of [
-        ["1 Hour", /Nov 19, 2026.*5:00 PM/], ["Today", /midnight at the end of Nov 19/],
-        ["30 Days", /Dec 19, 2026.*4:00 PM/], ["Never", /until you revoke it/],
-      ] as const) {
-        await expiry.getByRole("radio", { name: preset, exact: true }).click();
-        await expect(expiry).toContainText(help);
-      }
-      await expiry.getByRole("radio", { name: "Custom…" }).click();
-      await expect(expiry).toContainText("Choose when delegation ends in your device’s local time.");
-      await expiry.getByLabel("Ends At").fill("2026-12-05T12:30");
-      await expect(expiry).toContainText(/Delegation ends on Dec 5, 2026.*12:30 PM/);
-      await expectEditorLayout(dialog, width);
-      await screenshot(page, "expiry-custom");
-
-      for (const [scope, name, first] of [["Projects", "Project", "Release Validation"], ["Campaigns", "Campaign", "Long-Running Queue Checks"]] as const) {
-        const picker = dialog.getByRole("group", { name: scope, exact: true });
-        await picker.getByRole("radio", { name: `Selected ${scope}` }).click();
-        await expect(picker).toContainText(`Showing 1–5 of 36 ${scope.toLowerCase()}.`);
-        const items = picker.getByRole("checkbox", { name: new RegExp(first) });
-        await expect(items).toHaveCount(5);
-        await items.first().check();
-        const filter = picker.getByLabel(`Filter ${scope}`);
-        await filter.fill(`${name} 35`);
-        await expect(items).toHaveCount(1);
-        await filter.clear();
-        await expect(items.first()).toBeChecked();
-        await alignTop(picker);
+      test(`Delegate All uses explicit categories and requires disclosure on ${suffix}`, async ({ page }) => {
+        const dialog = await start(page);
+        const details = page.getByLabel("Thread Details");
+        const save = dialog.getByRole("button", { name: "Save Delegation" });
+        const all = dialog.getByRole("radio", { name: "Delegate All" });
+        const ask = dialog.getByRole("radio", { name: "Ask Me" });
+        const consent = dialog.getByRole("checkbox", { name: "I accept the provider disclosure." });
+        const expiresAt = now.getTime() + 7 * 24 * 3600_000;
+        const grant = { categories, selectionMode: "all", projects: "all", campaigns: "all", expiresAt };
+        const saved = page.locator("body");
+        await expect(ask).toBeChecked();
+        await expect(dialog.getByText("Decisions stay with you.")).toBeVisible();
+        await expect(details).toContainText("Decision Delegation Off");
         await expectFullyInViewport(save, "Save Delegation");
-        await expectFullyInViewport(items.last().locator("xpath=../.."), "Last Long Scope Row");
         await expectEditorLayout(dialog, width);
-        await screenshot(page, `selected-${scope.toLowerCase()}-stress`);
-      }
-      await save.click();
-      await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", JSON.stringify({
-        categories: ["pr_merge"], selectionMode: "choose", projects: ["project_0"], campaigns: ["campaign_0"],
-        expiresAt: Date.parse("2026-12-05T12:30:00Z"),
-      }));
-    });
+        await screenshot(page, "ask-me");
 
-    test(`Unavailable categories keep their own reasons on ${suffix}`, async ({ page }) => {
-      let dialog = await start(page, "delegation=stress&evidence=unavailable");
-      await dialog.getByRole("radio", { name: "Choose" }).click();
-      const approval = dialog.getByRole("checkbox", { name: "Approve UI Evidence" });
-      await expect(approval).toBeDisabled();
-      await expect(approval).toHaveAccessibleDescription(/Update this Machine’s runner/);
-      await alignTop(dialog.getByRole("group", { name: "UI Evidence" }));
-      await expectEditorLayout(dialog, width);
-      await screenshot(page, "unavailable");
-      dialog = await start(page, "delegation=ci-old&evidence=legacy");
-      await dialog.getByRole("radio", { name: "Choose" }).click();
-      const ci = dialog.getByRole("group", { name: "CI and Releases", exact: true });
-      for (const name of ["Rerun CI", "Tag Releases", "Publish Releases"]) {
-        const row = ci.getByRole("checkbox", { name, exact: true });
-        await expect(row).toBeDisabled();
-        await expect(row).toHaveAccessibleDescription(/Update the control plane/);
-      }
-      await alignTop(ci);
-      await expectFullyInViewport(ci, "CI and Releases Group");
-      await expectEditorLayout(dialog, width);
-      await screenshot(page, "older-control-plane");
-      await dialog.getByRole("radio", { name: "Delegate All" }).click();
-      await expect(dialog).toContainText("7 of 11 categories included.");
-      await dialog.getByRole("button", { name: "Save Delegation" }).click();
-      await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", JSON.stringify({
-        categories: categories.filter((category) => !["ci_rerun", "release_tag", "release_publish"].includes(category)),
-        selectionMode: "all", projects: "all", campaigns: "all", expiresAt: now.getTime() + 7 * 24 * 3600_000,
-      }));
+        await all.click();
+        await expect(dialog).toContainText("10 of 11 categories included.");
+        await expect(dialog).toContainText("Excluded until you accept the provider disclosure.");
+        await expect(dialog).toContainText(/Claude Code.*provider may retain/);
+        await expectEditorLayout(dialog, width);
+        await screenshot(page, "all-before-disclosure");
+        await save.click();
+        await expect(saved).toHaveAttribute("data-delegation-grant", JSON.stringify(grant));
+        await openEditor(page);
+        await expect(all).toBeChecked();
+        const status = dialog.getByRole("status").filter({ hasText: "Active Delegation" });
+        await expect(status).toContainText("Delegate All · Expires in 7 days");
+        await expectFullyInViewport(save, "Save Delegation");
+        await expectEditorLayout(dialog, width);
+        await screenshot(page, "active-grant");
+
+        await consent.check();
+        await expect(dialog).toContainText("11 of 11 categories included.");
+        await expect(dialog).toContainText("Included. You accepted the provider disclosure.");
+        await expectEditorLayout(dialog, width);
+        await screenshot(page, "all-after-disclosure");
+        await save.click();
+        const persisted = JSON.parse((await saved.getAttribute("data-delegation-grant"))!);
+        expect(persisted).toEqual({ ...grant, categories: expect.arrayContaining([...categories, "ui_evidence_review"]),
+          evidenceDisclosureDigest: "a".repeat(64) });
+        expect(persisted.categories).toHaveLength(11);
+
+        await openEditor(page);
+        await expect(dialog).toContainText("11 of 11 categories included.");
+        const revoke = dialog.getByRole("button", { name: "Revoke Delegation" });
+        await expectFullyInViewport(revoke, "Revoke Delegation");
+        await revoke.click();
+        const confirmation = page.getByRole("dialog", { name: "Revoke Delegation" });
+        await expect(confirmation).toContainText("This thread will lose permission");
+        await expect(saved).not.toHaveAttribute("data-delegation-grant", "null");
+        await expectEditorLayout(confirmation, width);
+        await screenshot(page, "revoke-confirmation");
+        await confirmation.getByRole("button", { name: "Cancel" }).click();
+        await expect(dialog).toBeVisible();
+        await revoke.click();
+        await confirmation.getByRole("button", { name: "Revoke Delegation" }).click();
+        await expect(saved).toHaveAttribute("data-delegation-grant", "null");
+        await expect(details).toContainText("Decision Delegation Off");
+
+        await openEditor(page);
+        await all.click();
+        await save.click();
+        await openEditor(page);
+        await ask.click();
+        await save.click();
+        await expect(saved).toHaveAttribute("data-delegation-grant", "null");
+      });
+
+      test(`Choose, expiry and scoped lists work on ${suffix}`, async ({ page }) => {
+        const dialog = await start(page);
+        const save = dialog.getByRole("button", { name: "Save Delegation" });
+        await dialog.getByRole("radio", { name: "Choose" }).click();
+        const groupNames = ["Pull Requests", "CI and Releases", "Issues", "Cleanup", "Questions", "UI Evidence"];
+        for (const name of groupNames) await expect(dialog.getByRole("group", { name, exact: true })).toBeVisible();
+        const pullRequests = dialog.getByRole("checkbox", { name: "Pull Requests", exact: true });
+        const merge = dialog.getByRole("checkbox", { name: "Merge Pull Requests" });
+        const extend = dialog.getByRole("checkbox", { name: "Extend Review Rounds" });
+        await merge.check();
+        await expect(pullRequests).toBeChecked({ indeterminate: true });
+        await expect(pullRequests).toHaveAccessibleDescription("1 of 2");
+        await expectEditorLayout(dialog, width);
+        await screenshot(page, "choose-mixed");
+        const evidenceGroup = dialog.getByRole("group", { name: "UI Evidence", exact: true });
+        if (width === 390) {
+          await alignTop(dialog.getByRole("group", { name: "Cleanup", exact: true }));
+          await expectFullyInViewport(evidenceGroup, "UI Evidence Group");
+          await screenshot(page, "choose-remaining-groups");
+        }
+        const approve = evidenceGroup.getByRole("checkbox", { name: "Approve UI Evidence" });
+        const sendBack = evidenceGroup.getByRole("checkbox", { name: "Send Back UI Evidence" });
+        await expect(sendBack).toBeEnabled();
+        await expect(approve).toBeEnabled();
+        await expect(approve).not.toBeChecked();
+        await pullRequests.click();
+        await expect(merge).toBeChecked();
+        await expect(extend).toBeChecked();
+        await expect(pullRequests).toHaveAccessibleDescription("2 of 2");
+        await pullRequests.click();
+        await expect(merge).not.toBeChecked();
+        await expect(extend).not.toBeChecked();
+        await merge.check();
+
+        const expiry = dialog.getByRole("group", { name: "Expiry", exact: true });
+        await alignTop(expiry);
+        await expect(expiry.getByRole("radio", { name: "7 Days" })).toBeChecked();
+        await expect(expiry).toContainText(/Delegation ends on Nov 26, 2026.*4:00 PM/);
+        await expectFullyInViewport(save, "Save Delegation");
+        await screenshot(page, "expiry-seven-days");
+        for (const [preset, help] of [
+          ["1 Hour", /Nov 19, 2026.*5:00 PM/], ["Today", /midnight at the end of Nov 19/],
+          ["30 Days", /Dec 19, 2026.*4:00 PM/], ["Never", /until you revoke it/],
+        ] as const) {
+          await expiry.getByRole("radio", { name: preset, exact: true }).click();
+          await expect(expiry).toContainText(help);
+        }
+        await expiry.getByRole("radio", { name: "Custom…" }).click();
+        await expect(expiry).toContainText("Choose when delegation ends in your device’s local time.");
+        await expiry.getByLabel("Ends At").fill("2026-12-05T12:30");
+        await expect(expiry).toContainText(/Delegation ends on Dec 5, 2026.*12:30 PM/);
+        await expectEditorLayout(dialog, width);
+        await screenshot(page, "expiry-custom");
+
+        for (const [scope, name, first] of [["Projects", "Project", "Release Validation"], ["Campaigns", "Campaign", "Long-Running Queue Checks"]] as const) {
+          const picker = dialog.getByRole("group", { name: scope, exact: true });
+          await picker.getByRole("radio", { name: `Selected ${scope}` }).click();
+          await expect(picker).toContainText(`Showing 1–5 of 36 ${scope.toLowerCase()}.`);
+          const items = picker.getByRole("checkbox", { name: new RegExp(first) });
+          await expect(items).toHaveCount(5);
+          await items.first().check();
+          const filter = picker.getByLabel(`Filter ${scope}`);
+          await filter.fill(`${name} 35`);
+          await expect(items).toHaveCount(1);
+          await filter.clear();
+          await expect(items.first()).toBeChecked();
+          await alignTop(picker);
+          await expectFullyInViewport(save, "Save Delegation");
+          await expectFullyInViewport(items.last().locator("xpath=../.."), "Last Long Scope Row");
+          await expectEditorLayout(dialog, width);
+          await screenshot(page, `selected-${scope.toLowerCase()}-stress`);
+        }
+        await save.click();
+        await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", JSON.stringify({
+          categories: ["pr_merge"], selectionMode: "choose", projects: ["project_0"], campaigns: ["campaign_0"],
+          expiresAt: Date.parse("2026-12-05T12:30:00Z"),
+        }));
+      });
+
+      test(`Unavailable categories keep their own reasons on ${suffix}`, async ({ page }) => {
+        let dialog = await start(page, "delegation=stress&evidence=unavailable");
+        await dialog.getByRole("radio", { name: "Choose" }).click();
+        const approval = dialog.getByRole("checkbox", { name: "Approve UI Evidence" });
+        await expect(approval).toBeDisabled();
+        await expect(approval).toHaveAccessibleDescription(/Update this Machine’s runner/);
+        await alignTop(dialog.getByRole("group", { name: "UI Evidence" }));
+        await expectEditorLayout(dialog, width);
+        await screenshot(page, "unavailable");
+        dialog = await start(page, "delegation=ci-old&evidence=legacy");
+        await dialog.getByRole("radio", { name: "Choose" }).click();
+        const ci = dialog.getByRole("group", { name: "CI and Releases", exact: true });
+        for (const name of ["Rerun CI", "Tag Releases", "Publish Releases"]) {
+          const row = ci.getByRole("checkbox", { name, exact: true });
+          await expect(row).toBeDisabled();
+          await expect(row).toHaveAccessibleDescription(/Update the control plane/);
+        }
+        await alignTop(ci);
+        await expectFullyInViewport(ci, "CI and Releases Group");
+        await expectEditorLayout(dialog, width);
+        await screenshot(page, "older-control-plane");
+        await dialog.getByRole("radio", { name: "Delegate All" }).click();
+        await expect(dialog).toContainText("7 of 11 categories included.");
+        await dialog.getByRole("button", { name: "Save Delegation" }).click();
+        await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", JSON.stringify({
+          categories: categories.filter((category) => !["ci_rerun", "release_tag", "release_publish"].includes(category)),
+          selectionMode: "all", projects: "all", campaigns: "all", expiresAt: now.getTime() + 7 * 24 * 3600_000,
+        }));
+      });
     });
   }
 }

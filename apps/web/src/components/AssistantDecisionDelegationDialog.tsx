@@ -18,6 +18,7 @@ import {
   type DelegationExpiry,
 } from "../assistant-decision-delegation.js";
 import { useTimelineClock } from "../timeline-clock.js";
+import { useFeedback } from "./FeedbackProvider.js";
 import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -72,8 +73,8 @@ function SelectionScope({ name, value, items, onChange }: {
       {choices.length > pageSize && <>
         <p className="muted">Showing {start + 1}–{start + shown.length} of {choices.length} {name.toLowerCase()}.</p>
         <div className="assistant-decision-pagination">
-          <button type="button" className="btn sm" disabled={start === 0} onClick={() => setPage(currentPage - 1)}>Previous {name}</button>
-          <button type="button" className="btn sm" disabled={start + pageSize >= choices.length} onClick={() => setPage(currentPage + 1)}>Next {name}</button>
+          <button type="button" className="btn" disabled={start === 0} onClick={() => setPage(currentPage - 1)}>Previous {name}</button>
+          <button type="button" className="btn" disabled={start + pageSize >= choices.length} onClick={() => setPage(currentPage + 1)}>Next {name}</button>
         </div>
       </>}
     </>}
@@ -95,25 +96,19 @@ function CategoryGroup({ label, categories, selected, unavailable, disclosure, o
   onToggle: (categories: readonly AssistantDecisionCategory[], checked: boolean) => void;
   evidenceConsent: ReactNode;
 }) {
-  const description = useId();
   const enabled = categories.filter((category) => !unavailable[category]);
   const count = categories.filter((category) => selected.includes(category)).length;
-  const all = enabled.length > 0 && count === enabled.length;
-  const state = count === categories.length ? true : count > 0 ? "mixed" : false;
+  const all = enabled.length > 0 && enabled.every((category) => selected.includes(category));
   return <fieldset className="assistant-fields delegation-group" aria-label={label}>
-    <button type="button" className="btn block delegation-group-toggle" role="checkbox" aria-checked={state}
-      aria-labelledby={`${description}-label`} aria-describedby={description}
-      disabled={!enabled.length} onClick={() => onToggle(enabled, !all)}>
-      <span className="delegation-group-mark" aria-hidden="true">{state === true ? "✓" : state === "mixed" ? "−" : ""}</span>
-      <span id={`${description}-label`}>{label}</span>
-      <span id={description}>{count} of {categories.length}</span>
-    </button>
+    <Checkbox className="delegation-group-toggle" label={label} checked={count === categories.length}
+      indeterminate={count > 0 && count < categories.length} helper={`${count} of ${categories.length}`}
+      disabled={!enabled.length} onChange={() => onToggle(enabled, !all)} />
     {categories.map((category) => {
       const checked = selected.includes(category);
       const review = category === "ui_evidence_review";
       return <div key={category} className="delegation-category">
         <Checkbox label={ASSISTANT_DECISION_CATEGORIES[category]} checked={checked}
-          disabled={Boolean(unavailable[category])}
+          disabled={Boolean(unavailable[category]) && !checked}
           helper={unavailable[category] ?? (review && checked ? disclosure : undefined)}
           onChange={(next) => onToggle([category], next)} />
         {review && checked && evidenceConsent}
@@ -130,6 +125,7 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
 }) {
   const form = useId();
   const expiryHelp = useId();
+  const { confirm } = useFeedback();
   const projects = useStoreSelector((state) => state.projects);
   const sessions = useStoreSelector((state) => state.sessions);
   const grant = delegation.grant;
@@ -145,7 +141,6 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
   const [preset, setPreset] = useState<DelegationExpiry>(grant ? grant.expiresAt === null ? "never" : "custom" : "week");
   const [customTime, setCustomTime] = useState(localDateTime(grant?.expiresAt));
   const [expiryStart, setExpiryStart] = useState(Date.now);
-  const [confirmRevoke, setConfirmRevoke] = useState(false);
   const [busy, setBusy] = useState(false);
   const ciRerunSupported = useStoreSelector((state) => state.assistantCiRerunDecisionsSupported);
   const releaseSupported = useStoreSelector((state) => state.assistantReleaseDecisionsSupported);
@@ -167,8 +162,12 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
   }
   const allCategories = Object.keys(ASSISTANT_DECISION_CATEGORIES) as AssistantDecisionCategory[];
   const allCandidates = refreshAll ? allCategories : categories;
-  const selected = (mode === "all" ? allCandidates : categories).filter((category) => !unavailable[category] &&
-    (mode !== "all" || category !== "ui_evidence_review" || disclosed));
+  const selected = (mode === "all" ? allCandidates : categories).filter((category) => {
+    if (category === "ui_evidence_review" && mode === "all") return disclosed;
+    // Retain an existing category when editing a saved grant on an older control plane.
+    // Selecting Delegate All explicitly starts a fresh list of available categories.
+    return !unavailable[category] || ((mode !== "all" || !refreshAll) && Boolean(grant?.categories.includes(category)));
+  });
   const evidenceSelected = selected.includes("ui_evidence_review");
   const evidenceConsent = disclosure && <Checkbox label="I accept the provider disclosure." consent checked={disclosed}
     onChange={(checked) => {
@@ -179,10 +178,24 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
   const expiresAt = preset === "custom" && grant?.expiresAt != null && customTime === localDateTime(grant.expiresAt)
     ? grant.expiresAt : delegationExpiryAt(preset, customTime, expiryStart);
 
-  const save = async (revoke = false) => {
+  const revoke = async () => {
+    const revoked = await confirm({
+      title: "Revoke Delegation",
+      message: "This thread will lose permission to resolve decisions on your behalf.",
+      confirmLabel: "Revoke Delegation",
+      tone: "danger",
+      progress: "Revoking delegation…",
+      cancelWhileRunning: false,
+      onConfirm: () => onSave({ revision: delegation.revision, grant: null }),
+    });
+    if (revoked) onClose();
+  };
+
+  const save = async () => {
     if (busy) return;
-    if (!revoke && mode !== "ask") {
+    if (mode !== "ask") {
       if (!selected.length) return setError("Select at least one decision category.");
+      if (evidenceSelected && !digest) return setError("Clear Approve UI Evidence to save while it is unavailable.");
       if (evidenceSelected && !disclosed) return setError("Accept the provider disclosure to grant Approve UI Evidence.");
       if (!projectScope.length || !campaignScope.length) return setError("Select at least one item in each selected scope, or choose All.");
       if (expiresAt !== null && (!Number.isFinite(expiresAt) || expiresAt <= Date.now())) return setError("Choose a future expiration time.");
@@ -191,7 +204,7 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
     setBusy(true);
     try {
       await onSave({ revision: delegation.revision,
-        grant: revoke || mode === "ask" ? null : {
+        grant: mode === "ask" ? null : {
           categories: selected, selectionMode: mode, projects: projectScope, campaigns: campaignScope, expiresAt,
           ...(evidenceSelected && disclosed ? { evidenceDisclosureDigest: digest } : {}),
         } });
@@ -202,16 +215,16 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
     }
   };
 
-  const excluded = allCategories.filter((category) => !selected.includes(category));
+  const categoryNotes = allCategories.filter((category) => !selected.includes(category) || unavailable[category]);
 
-  return <><Modal title="Decision Delegation" size="lg" className="delegation-dialog" phoneSheet="full"
+  return <Modal title="Decision Delegation" size="lg" className="delegation-dialog" phoneSheet="full"
     description="Choose which decisions this Assistant thread may resolve on your behalf. Its decisions are attributed to the thread."
     onClose={busy ? () => {} : onClose}
     footer={<>
       {grant && <button className="btn ghost danger delegation-revoke" type="button" disabled={busy}
-        onClick={() => { setError(null); setConfirmRevoke(true); }}>Revoke Delegation</button>}
+        onClick={() => void revoke()}>Revoke Delegation</button>}
       <button className="btn" type="button" disabled={busy} onClick={onClose}>Cancel</button>
-      <BusyButton className="btn primary" form={form} type="submit" busy={busy && !confirmRevoke}
+      <BusyButton className="btn primary" form={form} type="submit" busy={busy}
         progress="Saving delegation…">Save Delegation</BusyButton>
     </>}>
     <form id={form} onSubmit={(event) => { event.preventDefault(); void save(); }}>
@@ -231,7 +244,7 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
         {mode === "all" && <fieldset className="assistant-fields form">
           <legend>Decision Categories</legend>
           <p aria-live="polite">{selected.length} of {allCategories.length} categories included.</p>
-          {excluded.map((category) => <div key={category} className="delegation-category">
+          {categoryNotes.map((category) => <div key={category} className="delegation-category">
             <strong>{ASSISTANT_DECISION_CATEGORIES[category]}</strong>
             <p className="muted">{unavailable[category] ?? (category === "ui_evidence_review" && !disclosed
               ? "Excluded until you accept the provider disclosure."
@@ -278,20 +291,9 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
                 .map(({ id, title }) => ({ id, title }))} />
           </div>
         </>}
-        {!confirmRevoke && error && <Notice tone="danger" role="alert"
+        {error && <Notice tone="danger" role="alert"
           noticeRef={(node) => node?.scrollIntoView({ block: "nearest" })}>{error}</Notice>}
       </fieldset>
     </form>
-  </Modal>
-  {confirmRevoke && <Modal title="Revoke Delegation" tone="danger" size="sm" closeButton={false} className="delegation-dialog"
-    onClose={() => { if (!busy) setConfirmRevoke(false); }}
-    footer={<>
-      <button className="btn" type="button" disabled={busy} onClick={() => setConfirmRevoke(false)}>Cancel</button>
-      <BusyButton className="btn danger" type="button" busy={busy} progress="Revoking delegation…"
-        onClick={() => void save(true)}>Revoke Delegation</BusyButton>
-    </>}>
-    <p className="confirmation-message">This thread will lose permission to resolve decisions on your behalf.</p>
-    {error && <Notice tone="danger" role="alert">{error}</Notice>}
-  </Modal>}
-  </>;
+  </Modal>;
 }
