@@ -115,6 +115,7 @@ import {
   canonicalAgentHarnessIdentity,
   agentContextKey,
   runnerSupportsProtocol,
+  validAntigravitySetupView,
   normalizeBackgroundFollowUp,
   scopeAudienceContained,
   validatePromptImageInputs,
@@ -500,6 +501,12 @@ function boundedProviderLoginError(error: string): string {
   const characters = Array.from(error);
   return characters.length <= PROVIDER_LOGIN_ERROR_LIMIT ? error
     : `${characters.slice(0, PROVIDER_LOGIN_ERROR_LIMIT - 1).join("")}…`;
+}
+
+/** A stored setup is revalidated on read; anything unreadable is treated as not yet reported. */
+function antigravitySetupFromRow(value: string | null): RunnerView["antigravitySetup"] {
+  const parsed = parseJson<unknown>(value);
+  return validAntigravitySetupView(parsed) ? parsed : undefined;
 }
 
 function safeProviderLogins(value: RunnerView["providerLogins"]): ProviderLoginView[] {
@@ -3429,6 +3436,7 @@ interface RunnerRow {
   capacity_status: string | null;
   provider_accounts: string | null;
   provider_logins: string | null;
+  antigravity_setup: string | null;
 }
 
 interface RunnerCredentialRow {
@@ -7903,6 +7911,8 @@ export class ControlPlaneDb {
       "provider_accounts TEXT",
       // Protocol v171 secret-free supervised provider sign-in projections.
       "provider_logins TEXT",
+      // Protocol v403 secret-free Google Antigravity setup projection (Refs #4780).
+      "antigravity_setup TEXT",
     ]) {
       try {
         db.exec(`ALTER TABLE runners ADD COLUMN ${col}`);
@@ -8785,6 +8795,12 @@ export class ControlPlaneDb {
       const providerLogins = runnerSupportsProtocol(protocolVersion, "providerLogin")
         ? JSON.stringify(safeProviderLogins(meta.providerLogins ?? []))
         : null;
+      // v403 (#4780): the register frame's setup replaces the previous connection's. Anything a
+      // supported runner sends that does not validate is stored as not yet reported.
+      const antigravitySetup = runnerSupportsProtocol(protocolVersion, "antigravitySetup") &&
+          validAntigravitySetupView(meta.antigravitySetup)
+        ? JSON.stringify(meta.antigravitySetup)
+        : null;
       let containerTargets: string | null = null;
       if (runnerSupportsProtocol(protocolVersion, "containerExecutionTargets")) {
         const advertised = meta.executionTargets ?? [];
@@ -8807,16 +8823,16 @@ export class ControlPlaneDb {
         this.stmt(
             `UPDATE runners SET hostname=?, os=?, version=?, protocol_version=?, status='online',
                 connected_at=?, last_seen=?, updated_at=?, agents_refreshed_at=NULL,
-                editors=COALESCE(?, editors), runtime=?, container_targets=?, provider_accounts=?, provider_logins=?, capacity_status=NULL WHERE runner_id=?`,
+                editors=COALESCE(?, editors), runtime=?, container_targets=?, provider_accounts=?, provider_logins=?, antigravity_setup=?, capacity_status=NULL WHERE runner_id=?`,
           )
-          .run(meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, editors, runtime, containerTargets, providerAccounts, providerLogins, meta.runnerId);
+          .run(meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, editors, runtime, containerTargets, providerAccounts, providerLogins, antigravitySetup, meta.runnerId);
       } else {
         this.stmt(
             `INSERT INTO runners
-               (runner_id, hostname, os, version, protocol_version, status, connected_at, last_seen, created_at, updated_at, editors, runtime, container_targets, provider_accounts, provider_logins)
-             VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               (runner_id, hostname, os, version, protocol_version, status, connected_at, last_seen, created_at, updated_at, editors, runtime, container_targets, provider_accounts, provider_logins, antigravity_setup)
+             VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .run(meta.runnerId, meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, now, editors, runtime, containerTargets, providerAccounts, providerLogins);
+          .run(meta.runnerId, meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, now, editors, runtime, containerTargets, providerAccounts, providerLogins, antigravitySetup);
       }
       // A runner that cannot prove provider retirement now serves its sessions' live generations,
       // so their slots stay held whatever it, or a later runner, attests for them (#3788).
@@ -8990,6 +9006,18 @@ export class ControlPlaneDb {
     const safe = safeReviewSessionCapability(capability);
     const next = safe ? { ...rest, reviewSession: safe } : rest;
     this.stmt("UPDATE runners SET runtime=? WHERE runner_id=?").run(JSON.stringify(next), runnerId);
+  }
+
+  /** Replace one runner's Google Antigravity setup with its validated report (Refs #4780). */
+  updateRunnerAntigravitySetup(runnerId: string, setup: unknown, now: number): void {
+    const protocol = this.stmt("SELECT protocol_version FROM runners WHERE runner_id=?")
+      .get(runnerId) as { protocol_version: number | null } | undefined;
+    if (!runnerSupportsProtocol(protocol?.protocol_version, "antigravitySetup")) {
+      throw new Error("runner does not support Google Antigravity setup");
+    }
+    if (!validAntigravitySetupView(setup)) throw new Error("runner Google Antigravity setup is invalid");
+    this.stmt("UPDATE runners SET antigravity_setup=?, updated_at=? WHERE runner_id=?")
+      .run(JSON.stringify(setup), now, runnerId);
   }
 
   updateRunnerProviderLogins(runnerId: string, logins: ProviderLoginView[], now: number): void {
@@ -10758,7 +10786,7 @@ export class ControlPlaneDb {
 
   getRunner(runnerId: string): RunnerView | null {
     const row = this.stmt(
-        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status, provider_accounts, provider_logins FROM runners WHERE runner_id=?",
+        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status, provider_accounts, provider_logins, antigravity_setup FROM runners WHERE runner_id=?",
       )
       .get(runnerId) as unknown as RunnerRow | undefined;
     return row ? this.runnerView(row) : null;
@@ -10766,7 +10794,7 @@ export class ControlPlaneDb {
 
   listRunners(): RunnerView[] {
     const rows = this.stmt(
-        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status, provider_accounts, provider_logins FROM runners ORDER BY runner_id",
+        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status, provider_accounts, provider_logins, antigravity_setup FROM runners ORDER BY runner_id",
       )
       .all() as unknown as RunnerRow[];
     return rows.map((r) => this.runnerView(r));
@@ -13762,6 +13790,8 @@ export class ControlPlaneDb {
           // Verification URLs and device codes are bearer-like authentication material. Keep the
           // complete operation projection available only to principals who can mutate this Machine.
           providerLogins: canManage ? this.providerLoginsForPrincipal(principal, runner) : undefined,
+          // The sign-in link is bearer-like and the executable path is host detail: managers only.
+          antigravitySetup: canManage ? runner.antigravitySetup : undefined,
         };
       });
   }
@@ -16017,6 +16047,9 @@ export class ControlPlaneDb {
         : undefined,
       providerLogins: runnerSupportsProtocol(row.protocol_version, "providerLogin")
         ? (parseJson<ProviderLoginView[]>(row.provider_logins) ?? [])
+        : undefined,
+      antigravitySetup: runnerSupportsProtocol(row.protocol_version, "antigravitySetup")
+        ? antigravitySetupFromRow(row.antigravity_setup)
         : undefined,
       workspaces,
       // The editors COLUMN survives re-registers by design (COALESCE), so gate the VIEW on

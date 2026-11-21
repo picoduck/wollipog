@@ -438,6 +438,17 @@ const VOCABULARY = {
     /** A ready agent on a machine that is not online: its last report, not a current one. */
     ready_when_last_seen: neutral("Ready When Last Seen", { hollow: true }),
   },
+  /** Google Antigravity setup on a machine (#4780), by `antigravitySetupPresentation()`. */
+  antigravitySetup: {
+    checking: info("Checking", { pulse: true }),
+    missing_runtime: neutral("Not Installed", { hollow: true }),
+    unsupported: neutral("Not Available"),
+    update_runner: warning("Update Runner"),
+    sign_in_required: warning("Sign-In Required"),
+    signing_in: info("Signing In", { pulse: true }),
+    verification_failed: danger("Check Failed"),
+    ready: success("Ready"),
+  },
 } as const satisfies Record<string, Record<string, Entry>>;
 
 export type StatusDomain = keyof typeof VOCABULARY;
