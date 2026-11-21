@@ -667,14 +667,18 @@ export class AntigravityManagedStore {
         else rmSync(join(this.root, pointer), { force: true });
       }
       rmSync(this.pendingPath(), { force: true });
+    } catch {
+      return { found: true, restored: false };
+    }
+    // The pointers are restored: removing the rejected generation is best effort, and a leftover
+    // is removed by the next confirm.
+    try {
       const keep = new Set([pending.replaced.current, pending.replaced.previous]);
       if (!keep.has(`generations/${pending.generation}`)) {
         rmSync(join(this.root, "generations", pending.generation), { recursive: true, force: true });
       }
-      return { found: true, restored: true };
-    } catch {
-      return { found: true, restored: false };
-    }
+    } catch { /* best effort */ }
+    return { found: true, restored: true };
   }
 
   private pendingPath(): string {

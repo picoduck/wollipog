@@ -504,12 +504,36 @@ test("a rollback that fails is reported as such, blocks new installs, and the ne
   assertAllValid(views);
 });
 
-test("Try Again after a failed rollback first restores the last working version", async () => {
+test("a restore whose only failure is removing the rejected folder counts as restored", async () => {
   const blocked = await updateWithBlockedFolder(release("1.6.0", "session_error"));
   const { setup, managedRoot, working, failed } = blocked;
   assert.equal(failed.managedInstall?.operation?.failure, "rollback_failed");
+  const rejected = join(managedRoot, readlinkSync(join(managedRoot, "current")));
   blocked.unblock();
-  // The same broken release, retried before any check.
+  // The pointers and the record can be restored; the rejected folder's contents can't be removed.
+  chmodSync(rejected, 0o500);
+  try {
+    const recovered = await setup.check("never");
+    assert.equal(readlinkSync(join(managedRoot, "current")), working);
+    assert.equal(existsSync(join(managedRoot, "pending-activation.json")), false);
+    assert.equal(recovered.managedInstall?.operation?.failure, "access_check_failed");
+    assert.equal(recovered.executable?.version, "1.5.14");
+    // Nothing is pending, so an install isn't refused.
+    assert.doesNotThrow(() => setup.startInstall());
+    await until(setup, settled);
+  } finally {
+    chmodSync(rejected, 0o700);
+  }
+});
+
+test("Try Again after a failed rollback first restores the last working version and holds the retry to it", async () => {
+  const blocked = await updateWithBlockedFolder(release("1.6.0", "session_error"));
+  const { setup, managedRoot, working, failed, server } = blocked;
+  assert.equal(failed.managedInstall?.operation?.failure, "rollback_failed");
+  blocked.unblock();
+  // Retried before any check, with a release that asks for a new sign-in. The restored version
+  // works with the existing sign-in, so asking for one is worse and the retry is refused.
+  server.publish({ platform: PLATFORM, version: "1.6.1", archive: release("1.6.1", "session_auth_required") });
   const retried = await install(setup);
   assert.equal(retried.managedInstall?.operation?.failure, "access_check_failed");
   assert.equal(readlinkSync(join(managedRoot, "current")), working);
@@ -533,6 +557,8 @@ test("an update that passes its check but can't be committed is not reported as 
   const recovered = await setup.check("never");
   assert.equal(readlinkSync(join(managedRoot, "current")), working);
   assert.equal(recovered.executable?.version, "1.5.14");
+  // The candidate passed its check: once restored, the outcome is the failed commit.
+  assert.equal(recovered.managedInstall?.operation?.failure, "activation_failed");
 });
 
 test("a runner that exits mid-verification restores the replaced version when it starts again", async () => {

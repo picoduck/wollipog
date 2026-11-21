@@ -110,6 +110,8 @@ if (args[0] === "acp" && args[1] === "--login") {
     if (request.method === "session/new") {
       if (modes.has("session_hang")) return;
       if (modes.has("session_error")) return send({ id: request.id, error: { code: -32603, message: "internal error" } });
+      // A release that asks for a new sign-in even where the existing one works.
+      if (modes.has("session_auth_required")) return send({ id: request.id, error: { code: -32000, message: "Authentication required" } });
       if (!signedInMarker || !existsSync(signedInMarker)) {
         return send({ id: request.id, error: { code: -32000, message: "Authentication required" } });
       }

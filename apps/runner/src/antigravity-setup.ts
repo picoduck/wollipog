@@ -474,6 +474,9 @@ export class AntigravitySetupSupervisor {
   private installing: Promise<void> | null = null;
   private installAbort: AbortController | null = null;
   private managed: ManagedState = {};
+  /** Why the last install failed before its rollback failed too. Once a later restore succeeds,
+   * the outcome reads this cause again. */
+  private rollbackCause: AntigravityInstallFailure | undefined;
   private releasePlatformKey: string | null | undefined;
   private stopped = false;
   private readonly store: AntigravityManagedStore;
@@ -682,7 +685,8 @@ export class AntigravitySetupSupervisor {
     // failed check it began with, and the restored version is reported as kept.
     const operation = this.managed.operation;
     if (recovered.restored && operation?.status === "failed" && operation.failure === "rollback_failed") {
-      this.managed.operation = { ...operation, failure: "access_check_failed" };
+      this.managed.operation = { ...operation, failure: this.rollbackCause ?? "activation_failed" };
+      this.rollbackCause = undefined;
     }
     this.readManaged();
     return !recovered.found || recovered.restored;
@@ -812,10 +816,13 @@ export class AntigravitySetupSupervisor {
    * Any failure removes the staging folder and leaves the active version as it was. */
   private async runInstall(operation: AntigravityInstallOperationView, platformKey: string, signal: AbortSignal): Promise<boolean> {
     const fetch = this.options.fetch ?? defaultFetch;
-    // What the copy in use achieved before the install. The new version must do at least as well.
-    const before = accessRank(this.view.status);
     const setStage = (stage: AntigravityInstallStage) => this.updateOperation(operation.operationId, { stage });
+    this.rollbackCause = undefined;
     try {
+      // What the copy in use achieves now (the last report may be stale, or name a version a
+      // recovery just replaced). The new version must do at least as well.
+      const baseline = await this.runCheck("never");
+      const before = accessRank(baseline.status);
       const release = await resolveAntigravityRelease(platformKey, {
         fetch, signal, timeoutMs: this.options.installerTimeoutMs ?? INSTALLER_TIMEOUT_MS, onStage: setStage,
       });
@@ -884,7 +891,9 @@ export class AntigravitySetupSupervisor {
         }
         this.readManaged();
         if (!this.stopped) await this.runCheck("never");
-        throw new AntigravityInstallError(!restored ? "rollback_failed" : verified && !this.stopped ? "access_check_failed" : "activation_failed",
+        const cause = verified && !this.stopped ? "access_check_failed" : "activation_failed";
+        if (!restored) this.rollbackCause = cause;
+        throw new AntigravityInstallError(restored ? cause : "rollback_failed",
           restored ? "The new release didn't pass its check with this machine's sign-in, so it was rolled back."
             : "The new release didn't pass its check, and restoring the version before it failed.");
       }
@@ -897,6 +906,7 @@ export class AntigravitySetupSupervisor {
         try { await this.store.rollback(activation); } catch { restored = false; }
         this.readManaged();
         if (!this.stopped) await this.runCheck("never");
+        if (!restored) this.rollbackCause = "activation_failed";
         throw new AntigravityInstallError(restored ? "activation_failed" : "rollback_failed",
           "The runner couldn't commit the new release.");
       }

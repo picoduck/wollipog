@@ -1486,8 +1486,9 @@ Antigravity agent, so Antigravity is not offered in New Session, and nothing her
      begins stopping before a pointer changes activates nothing.
   7. Verify: run the ordinary check, with the runner user's sign-in, against the activated managed
      copy alone (never falling back to the PATH copy). It must get past its version check
-     (`sign_in_required` at least), and do no worse than the copy in use before the install
-     (`ready` over `sign_in_required` over anything else). Otherwise, or if the runner began
+     (`sign_in_required` at least), and do no worse than the copy in use before the install, as a
+     fresh check at the start of the install found it (`ready` over `sign_in_required` over
+     anything else). Otherwise, or if the runner began
      stopping, both pointers are restored, so the previous managed version (or, for a first install,
      the PATH copy) is used again, and the install reports `access_check_failed` (`activation_failed`
      when stopping). Only a verified activation removes the pending record, and then the generations
@@ -1497,8 +1498,9 @@ Antigravity agent, so Antigravity is not offered in New Session, and nothing her
      pointers it names at startup, before anything reads `current`, before each check and before
      each install. An install refuses to start while a record it can't restore remains, and an
      activation never replaces one. A restore that fails reports `rollback_failed` and claims no
-     kept version; once a later restore succeeds, the outcome reads `access_check_failed` (the
-     previous version kept). A verified activation whose record can't be removed is rolled back and
+     kept version; once a later restore succeeds (removing the rejected folder is best effort),
+     the outcome reads the failure the install began with, `access_check_failed` or
+     `activation_failed`, with the previous version kept. A verified activation whose record can't be removed is rolled back and
      reported as failed, never as a success.
 
   Any failure removes the staging folder, leaves `current` untouched and reports a distinct
