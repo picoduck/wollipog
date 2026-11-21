@@ -5978,7 +5978,7 @@ function SessionDetailLoaded({
     onFailure: showHiddenColumnFailure,
   });
   const composerIdleCollapsed = isMobile && !composerExpanded && !composerMultiline &&
-    images.length === 0 && session.pendingApproval == null &&
+    images.length === 0 && session.pendingApproval == null && queuedPromptControls.length === 0 &&
     !historyQuarantine && !queuedEdit && composerErrorEntries.length === 0 && !retitleFeedback && !dictation.recording &&
     !dragActive && !paletteOpen && !workspacePickerOpen;
   // Where focus goes when the notice slot or the queue tray removes the control that held it: the
@@ -7742,26 +7742,6 @@ function SessionDetailLoaded({
                   ? "Rename failed. Couldn't rename this session."
                   : ""}
             </span>
-            <QueuedMessages
-              sessionId={session.id}
-              prompts={queuedPromptControls}
-              queueHeld={session.queueHeld === true}
-              queueHold={queueHoldTrayView(session, runnerOnline)}
-              agent={composerAgent}
-              steering={steeringAvailabilityInput}
-              requestBusy={composerRequestBusy}
-              refusal={queueRefusal}
-              steeringPending={queueSteeringPending}
-              editingPromptId={queuedEdit?.promptId ?? null}
-              editOpen={queuedEdit !== null}
-              pendingAction={pendingPromptAction}
-              onSteer={(prompt) => void promoteQueuedPrompt(prompt)}
-              onEdit={(prompt) => void beginQueuedPromptEdit(prompt)}
-              onCancel={(prompt) => void api.cancelQueuedPrompt(session.id, prompt.id)
-                .catch((cause: unknown) => showActionError("cancelQueuedMessage", cause))}
-              onDismiss={(prompt) => void resolvePendingPrompt(prompt.id, "dismiss")}
-              onFocusLost={focusComposerOrTitle}
-            />
             <div
               ref={composerBoxRef}
               className={`composer-box${dragActive ? imagesRefused ? " is-drop is-refused" : " is-drop" : ""}${composerAnswerActive ? " answer-mode" : ""}${composerIdleCollapsed ? " idle-collapsed" : ""}${canPrompt ? "" : " is-disabled"}`}
@@ -7810,7 +7790,7 @@ function SessionDetailLoaded({
             >
               {queuedEdit && !composerAnswerActive && (
                 /* Editing is a mode of the card (#2194): a 40px strip at its top names the mode and
-                   holds the way out. The tray marks which row is being edited, so this doesn't. */
+                   holds the way out. The queue below marks the row being edited. */
                 <div className={`composer-mode${queuedEditRecovered ? " is-recovered" : ""}`} role="status">
                   <span className="composer-mode-icon" aria-hidden="true">
                     {queuedEditRecovered ? <WarningIcon size={16} /> : <EditIcon size={16} />}
@@ -7853,6 +7833,26 @@ function SessionDetailLoaded({
                   )}
                 </div>
               )}
+              <QueuedMessages
+                sessionId={session.id}
+                prompts={queuedPromptControls}
+                queueHeld={session.queueHeld === true}
+                queueHold={queueHoldTrayView(session, runnerOnline)}
+                agent={composerAgent}
+                steering={steeringAvailabilityInput}
+                requestBusy={composerRequestBusy}
+                refusal={queueRefusal}
+                steeringPending={queueSteeringPending}
+                editingPromptId={queuedEdit?.promptId ?? null}
+                editOpen={queuedEdit !== null}
+                pendingAction={pendingPromptAction}
+                onSteer={(prompt) => void promoteQueuedPrompt(prompt)}
+                onEdit={(prompt) => void beginQueuedPromptEdit(prompt)}
+                onCancel={(prompt) => void api.cancelQueuedPrompt(session.id, prompt.id)
+                  .catch((cause: unknown) => showActionError("cancelQueuedMessage", cause))}
+                onDismiss={(prompt) => void resolvePendingPrompt(prompt.id, "dismiss")}
+                onFocusLost={focusComposerOrTitle}
+              />
               {pendingQuestion && (
                 <ComposerQuestionResponse
                   sessionId={session.id}

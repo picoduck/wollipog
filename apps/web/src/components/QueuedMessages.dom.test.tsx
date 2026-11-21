@@ -113,7 +113,7 @@ test("two ordinary queued messages read 2 Queued Messages and carry no status ba
   const tray = await render({ prompts: [queued("a"), queued("b")] });
   try {
     assert.equal(tray.container.querySelector(".queue-count")?.textContent, "2 Queued Messages");
-    assert.equal(tray.container.querySelector("section.queue")?.getAttribute("aria-label"), "Queued Messages");
+    assert.equal(tray.container.querySelector("section.composer-queue")?.getAttribute("aria-label"), "Queued Messages");
     assertNoDomNode(tray.container.querySelector(".queue-rows .status"), "an ordinary row has no badge");
     assert.deepEqual(tray.notes(), [], "nothing is shared to explain");
     for (const id of ["a", "b"]) {
@@ -539,7 +539,8 @@ test("one queued message is its own row in place of the summary, and Steer takes
     assertNoDomNode(tray.summary(), "no count to expand");
     const rows = tray.container.querySelector(".queue-rows") as HTMLElement;
     assert.equal(rows.hidden, false);
-    assert.ok(tray.container.querySelector("section.queue")?.classList.contains("is-single"));
+    assert.ok(tray.container.querySelector("section.composer-queue")?.classList.contains("is-single"));
+    assert.ok(tray.row("a").querySelector(".queue-clock"));
     assert.equal(tray.row("a").querySelector(".queue-text")?.textContent, "Message a");
     assert.deepEqual([...tray.row("a").querySelectorAll("button")].map((button) => button.getAttribute("aria-label")),
       ["Steer Queued Message", "Edit Queued Message", "Cancel Queued Message"]);

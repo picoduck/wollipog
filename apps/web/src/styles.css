@@ -6908,16 +6908,16 @@ body.shell-dock-dragging * {
   padding-left: max(var(--space-3), calc((100% - var(--chat-max)) / 2));
   padding-right: max(var(--space-3), calc((100% - var(--chat-max)) / 2));
 }
-/* The queue tray (#2178): messages waiting behind the turn, docked on the composer card so they read
-   as lined up behind the one being written. Inset from the card's edges, solid edge, open at the
-   bottom where the card takes over, and a hairline between rows. Collapsed, it is only its summary. */
-.queue {
-  margin: 0 var(--space-3);
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-bottom: none;
-  border-top-left-radius: var(--radius-md);
-  border-top-right-radius: var(--radius-md);
+/* The queued messages share the card's edge and the editing strip's full-width position. */
+.composer-queue {
+  min-width: 0;
+  margin-inline: calc(-1 * var(--space-3));
+  border-bottom: 1px solid var(--border);
+}
+.composer-queue:first-child {
+  margin-top: calc(-1 * var(--space-2) - var(--space-0-5));
+  border-start-start-radius: inherit;
+  border-start-end-radius: inherit;
 }
 /* The tray starts as this one line (#2788): the §5.5 disclosure across the tray's full width, with
    the Held badge and the most severe row status after the count. It stays one line on a phone; the
@@ -6962,6 +6962,11 @@ body.shell-dock-dragging * {
   padding: 0;
   list-style: none;
 }
+.composer-queue:not(.is-single) .queue-rows {
+  max-block-size: 50dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .queue-row {
   position: relative;
   display: flex;
@@ -6992,6 +6997,11 @@ body.shell-dock-dragging * {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+.composer-queue:not(.is-single) .queue-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.queue-clock { flex: none; }
 .queue-clip {
   display: inline-block;
   margin-right: var(--space-1);
@@ -7012,10 +7022,10 @@ body.shell-dock-dragging * {
 }
 /* Phones (#2178): each row is its text and one 44px actions button. A status that differs moves under
    the text, so the words keep the line. */
-.queue.is-phone .queue-status {
+.composer-queue.is-phone .queue-status {
   order: 1;
 }
-.queue.is-phone .queue-status + .queue-text {
+.composer-queue.is-phone:not(.is-single) .queue-status + .queue-text {
   flex-basis: calc(100% - var(--space-2) - 44px);
 }
 .queue-more {
@@ -7025,9 +7035,10 @@ body.shell-dock-dragging * {
 /* A lone queued message is the tray's one line in place of the summary (#3962): no hairline above
    it, the queue's Held badge after its words, and on a phone a Steer as tall as the actions button
    beside it, so one tap steers. */
-.queue.is-single .queue-row { border-top: none; }
+.composer-queue.is-single .queue-row { border-top: none; }
+.composer-queue.is-phone .queue-row { padding-block: 0; }
 .queue-held { flex: none; }
-.queue.is-phone .queue-steer { height: 44px; }
+.composer-queue.is-phone .queue-steer { height: 44px; }
 /* The composer's mode strip (#2194): editing a queued message is a state of the card, so it is the
    card's first row, full bleed across its 10px/12px padding, 40px tall at every width. Its actions
    are `.btn.sm.ghost`, 8px apart so each keeps its 44px touch area (§2.8). A recovered edit takes
@@ -7081,9 +7092,7 @@ body.shell-dock-dragging * {
   background: color-mix(in srgb, var(--tone) 7%, var(--bg-elev));
 }
 .composer-mode.is-recovered .composer-mode-icon { color: var(--tone); }
-/* The queue tray docks on the card, so the row above sits close to the strip. On a coarse pointer the
-   strip's actions take the strip's bottom edge, 8px from the row's actions above. Every 44px touch
-   area stays its own (§2.8); the strip stays 40px. */
+/* The editing strip's controls extend into the gap below it on touch. */
 @media (pointer: coarse) {
   .composer-mode-actions { align-self: end; }
 }

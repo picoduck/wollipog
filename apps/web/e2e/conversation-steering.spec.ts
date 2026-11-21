@@ -1,6 +1,188 @@
 import { waitForSessionPreview } from "./session-readiness.js";
-import { expect, test, type Page } from "@playwright/test";
+import { devices, expect, test, type Page } from "@playwright/test";
+import { join } from "node:path";
 import { TRAY_IMAGE, TRAY_REFERENCE } from "./fixtures/composer-tray.js";
+import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizontalOverflow } from "./layout-invariants.js";
+
+/** A strip wholly inside its card and above the input, with no overlaid sibling taking its taps. */
+async function measureQueueLayout(page: Page) {
+  const queue = tray(page);
+  await expectFullyInViewport(queue, "Queue strip");
+  await expectNoHorizontalOverflow(queue, "Queue strip");
+  await expectPageNoHorizontalOverflow(page);
+  const geometry = await queue.evaluate((element) => {
+    const card = element.closest(".composer-box")!;
+    const inner = element.getBoundingClientRect();
+    const outer = card.getBoundingClientRect();
+    const input = card.querySelector(".composer-input")!.getBoundingClientRect();
+    const covered: Array<[number, number]> = [];
+    // Sample along both edges and throughout the strip. Stay inside the rounded top corners.
+    for (const x of [inner.left + 8, inner.left + inner.width / 2, inner.right - 8]) {
+      for (let y = inner.top + 2; y < inner.bottom; y += 4) {
+        if (!element.contains(document.elementFromPoint(x, y))) covered.push([x, y]);
+      }
+    }
+    const targets = [...element.querySelectorAll("button")].flatMap((button) => {
+      const rect = button.getBoundingClientRect();
+      return rect.width && rect.height ? [Math.min(rect.width, rect.height)] : [];
+    });
+    return {
+      outside: Math.max(0, outer.left - inner.left, outer.top - inner.top,
+        inner.right - outer.right, inner.bottom - outer.bottom),
+      beforeInput: input.top - inner.bottom,
+      covered,
+      minTarget: targets.length ? Math.min(...targets) : null,
+    };
+  });
+  expect(geometry.outside).toBe(0);
+  expect(geometry.beforeInput).toBeGreaterThanOrEqual(0);
+  expect(geometry.covered).toEqual([]);
+  return geometry;
+}
+
+const queueFixture = Array.from({ length: 8 }, (_, index) => ({
+  id: "layout-queue-" + (index + 1),
+  text: [
+    "Run the integration tests.",
+    "Summarize the test failures.",
+    "Check the log for retries.",
+    "Review the updated migration.",
+    "Verify the staging deployment.",
+    "Include the timing for each test, the exact retry count, the result before and after the migration, and the links to any failures we need to revisit.",
+    "Update the release notes.",
+    "Send the handoff summary.",
+  ][index]!,
+  steerable: true,
+  liveQueueObserved: true,
+  editable: true,
+  editRevision: "r1",
+}));
+
+async function captureQueueEvidence(page: Page, theme: string, state: string, geometry?: Awaited<ReturnType<typeof measureQueueLayout>>) {
+  const dir = process.env.WOLLIPOG_4805_EVIDENCE_DIR;
+  if (!dir) return;
+  const { width, height } = page.viewportSize()!;
+  const target = geometry?.minTarget == null ? "" : "-target" + Math.floor(geometry.minTarget) + "csspx";
+  const inside = geometry === undefined ? "" : "-insidecard" + geometry.outside + "px";
+  const id = ["4805", state === "stack" ? "assistant" : "composer", width + "x" + height, theme, state].join("-");
+  await page.screenshot({ path: join(dir, id + target + inside + ".png"), animations: "disabled" });
+}
+
+for (const theme of ["light", "dark"] as const) {
+  for (const phone of [false, true]) {
+    test.describe(theme + " " + (phone ? "phone" : "desktop") + " composer layout (#4805)", () => {
+      test.use({
+        ...(phone ? {
+          userAgent: devices["iPhone 13"].userAgent,
+          deviceScaleFactor: devices["iPhone 13"].deviceScaleFactor,
+          isMobile: devices["iPhone 13"].isMobile,
+          hasTouch: devices["iPhone 13"].hasTouch,
+        } : {}),
+        viewport: phone ? { width: 390, height: 844 } : { width: 1440, height: 900 },
+        colorScheme: theme,
+      });
+
+      test("the queue stays inside the shared card across sizes and states", async ({ page }) => {
+        await page.evaluate((theme) => {
+          document.documentElement.dataset.theme = theme;
+          window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(99);
+        }, theme);
+        expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(phone);
+        const composer = page.locator(".composer-input");
+        const setQueue = async (count: number, held = false) => page.evaluate(({ queued, held }) => {
+          window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { queued, queueHeld: held });
+        }, { queued: queueFixture.slice(0, count), held });
+        await setQueue(0);
+        if (phone) await page.locator(".composer-idle-preview").tap();
+        await expect(composer).toBeVisible();
+        await expect(composer).toHaveAttribute("placeholder",
+          "Add a message. It sends when this turn ends; Ctrl+Enter steers now.");
+        await captureQueueEvidence(page, theme, "working-placeholder");
+        await composer.blur();
+
+        await setQueue(1);
+        const queue = tray(page);
+        const row = queue.locator(".queue-row");
+        await expect(row).toContainText("Run the integration tests.");
+        await expect(row.locator(".queue-clock")).toBeVisible();
+        const steer = row.getByRole("button", { name: "Steer Queued Message" });
+        await expect(steer).toHaveText("Steer Now");
+        const one = await measureQueueLayout(page);
+        await captureQueueEvidence(page, theme, "queue1", one);
+
+        if (phone) {
+          expect(one.minTarget).toBeGreaterThanOrEqual(44);
+          await row.getByRole("button", { name: "Queued Message Actions" }).tap();
+          const menu = page.getByRole("menu", { name: "Queued Message Actions" });
+          await expect(menu.getByRole("menuitem").locator(".menu-text")).toHaveText(["Edit Message", "Cancel Message"]);
+          for (const item of await menu.getByRole("menuitem").all()) {
+            await expect(item).toBeEnabled();
+            await expectFullyInViewport(item);
+            const { width, height } = (await item.boundingBox())!;
+            expect(Math.min(width, height)).toBeGreaterThanOrEqual(44);
+          }
+          await captureQueueEvidence(page, theme, "queue1-menu", one);
+          await page.keyboard.press("Escape");
+          await expect(menu).toHaveCount(0);
+        } else {
+          await expect(row.getByRole("button", { name: "Edit Queued Message" })).toBeEnabled();
+          await expect(row.getByRole("button", { name: "Cancel Queued Message" })).toBeEnabled();
+        }
+
+        await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextSteeringResult());
+        await steer.click();
+        await expect(row.locator(".spinner")).toBeVisible();
+        await captureQueueEvidence(page, theme, "steering", await measureQueueLayout(page));
+        await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredSteeringResult({
+          state: "accepted", reason: "accepted", emitCanonicalEvent: false,
+        }));
+        await expect(queue).toHaveCount(0);
+        await expect(page.locator(".detail-scroll .tl-receipt-row")).toContainText("Steered the Current Turn");
+
+        await setQueue(3, true);
+        const summary = queue.locator(".queue-summary");
+        await expect(summary).toHaveText("3 Queued MessagesHeld");
+        await captureQueueEvidence(page, theme, "held", await measureQueueLayout(page));
+
+        await setQueue(3);
+        await expect(summary).toHaveText("3 Queued Messages");
+        await expect(summary).toHaveAttribute("aria-expanded", "false");
+        await captureQueueEvidence(page, theme, "queue3-collapsed", await measureQueueLayout(page));
+        await summary.click();
+        await expect(queue.getByRole("listitem")).toHaveCount(3);
+        await captureQueueEvidence(page, theme, "queue3-expanded", await measureQueueLayout(page));
+
+        await setQueue(8);
+        await expect(queue.getByRole("listitem")).toHaveCount(8);
+        const wrapped = await queue.getByTestId("queued-prompt-layout-queue-6").locator(".queue-text").evaluate((text) =>
+          text.getBoundingClientRect().height > parseFloat(getComputedStyle(text).lineHeight));
+        expect(wrapped, "the long message wraps inside its row").toBe(true);
+        await expectFullyInViewport(queue.getByRole("listitem").last(), "Eighth queued message");
+        await captureQueueEvidence(page, theme, "queue8", await measureQueueLayout(page));
+        const height = page.viewportSize()!.height;
+        for (const width of phone ? [320, 390, 430, 760] : [320, 760, 761, 1024, 1440]) {
+          await page.setViewportSize({ width, height });
+          await measureQueueLayout(page);
+        }
+      });
+
+      test("an Assistant thread has room for its waiting dock, notice, and queue", async ({ page }) => {
+        await page.goto("/assistants-e2e.html?queuedMessage&theme=" + theme +
+          "&path=%2Fassistants%2F~dABoAHIAXwB0AHIAaQBhAGcAZQA");
+        const dock = page.getByRole("region", { name: "Waiting for You" });
+        const notice = page.getByRole("alert", { name: "Message Not Delivered" });
+        const card = page.locator(".composer-box");
+        await expectFullyInViewport(dock, "Waiting for You");
+        await expectFullyInViewport(notice, "Session notice");
+        await expectFullyInViewport(card, "Composer card");
+        const [dockBox, noticeBox, cardBox] = await Promise.all([dock.boundingBox(), notice.boundingBox(), card.boundingBox()]);
+        expect(dockBox!.y + dockBox!.height).toBeLessThanOrEqual(noticeBox!.y);
+        expect(noticeBox!.y + noticeBox!.height).toBeLessThanOrEqual(cardBox!.y);
+        await captureQueueEvidence(page, theme, "stack", await measureQueueLayout(page));
+      });
+    });
+  }
+}
 
 const fixtureUrl = "/command-inbox-projects-e2e.html?scenario=conversation-steering";
 
@@ -47,9 +229,9 @@ test.beforeEach(async ({ page }) => {
   await openSteeringSession(page);
 });
 
-/** The composer's queue tray (#2178). */
+/** The shared composer card's queue strip. */
 function tray(page: Page) {
-  return page.getByRole("region", { name: "Queued Messages" });
+  return page.locator(".composer-box").getByRole("region", { name: "Queued Messages" });
 }
 
 /** The tray starts as one collapsed summary (#2788); a test that works with its rows opens it. One
@@ -568,6 +750,7 @@ test("queued promotion uses stable queue identity and reconciles one canonical a
   const queued = page.getByTestId("queued-prompt-queue-promote-stable");
   await queued.getByRole("button", { name: "Steer Queued Message" }).click();
   await expect(queued.locator(".status")).toHaveText("Steering…");
+  await expect(queued.locator(".spinner")).toBeVisible();
   await expect(queued.getByRole("button", { name: "Steer Queued Message" })).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests()[0]?.promotePromptId))
     .toBe("queue-promote-stable");
@@ -896,10 +1079,10 @@ test.describe("on a coarse pointer", () => {
     }
   }
 
-  // The tray docks on the card above the strip, and a pending question's card waits on the dock with
-  // its Answer. A tap meant for any of them must never cancel the edit (§2.8).
+  // The queue follows the editing strip inside the card. A pending question's card waits on the
+  // dock with its Answer. A tap meant for either must never cancel the edit (§2.8).
   for (const width of [1000, 390]) {
-    test(`at ${width}px the strip's touch areas stay clear of the queued row above and a waiting question (#2194)`, async ({ page }) => {
+    test(`at ${width}px the strip's touch areas stay clear of the queue and a waiting question (#2194)`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       await seedEditableQueue(page);
       if (width <= 760) {
@@ -1355,7 +1538,7 @@ test.describe("the collapsed queue tray (#2788)", () => {
       // Hidden rows take no focus: Tab leaves the summary for whatever follows the tray.
       await summary.focus();
       await page.keyboard.press("Tab");
-      expect(await page.evaluate(() => document.activeElement?.closest(".queue") === null)).toBe(true);
+      expect(await page.evaluate(() => document.activeElement?.closest(".composer-queue") === null)).toBe(true);
 
       await summary.focus();
       await page.keyboard.press("Enter");
@@ -1452,6 +1635,7 @@ test.describe("a lone queued message steers in one tap (#3962)", () => {
     const row = page.getByTestId("queued-prompt-queue-lone");
     await expect(row).toBeVisible();
     await expect(tray(page).locator(".queue-summary")).toHaveCount(0);
+    await expect(row.getByRole("button", { name: "Steer Queued Message" })).toHaveText("Steer Now");
     await page.screenshot({ path: test.info().outputPath("queue-lone-1280.png") });
     await row.getByRole("button", { name: "Steer Queued Message" }).click();
     await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests()[0]?.promotePromptId))
@@ -1468,6 +1652,7 @@ test.describe("a lone queued message steers in one tap (#3962)", () => {
       await expect(row).toBeVisible();
       await expect(tray(page).locator(".queue-summary")).toHaveCount(0);
       const steer = row.getByRole("button", { name: "Steer Queued Message" });
+      await expect(steer).toHaveText("Steer Now");
       const more = row.getByRole("button", { name: "Queued Message Actions" });
       const steerBox = (await steer.boundingBox())!;
       const moreBox = (await more.boundingBox())!;
@@ -1482,6 +1667,10 @@ test.describe("a lone queued message steers in one tap (#3962)", () => {
       await more.tap();
       const sheet = page.getByRole("menu", { name: "Queued Message Actions" });
       await expect(sheet.getByRole("menuitem").locator(".menu-text")).toHaveText(["Edit Message", "Cancel Message"]);
+      for (const item of await sheet.getByRole("menuitem").all()) {
+        const box = (await item.boundingBox())!;
+        expect(Math.min(box.width, box.height)).toBeGreaterThanOrEqual(44);
+      }
       await page.keyboard.press("Escape");
       await expect(sheet).toHaveCount(0);
 

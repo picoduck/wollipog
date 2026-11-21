@@ -2471,12 +2471,13 @@ The queued-message labels were the composer's and the pending bubble's own table
 drawn in red and is now the warning tone, and every label now renders in Title Case instead of an
 uppercase transform.
 
-**Queue tray** (`QueuedMessages`, #2178). Messages not yet sent wait in `.queue`, docked on the
-composer card: inset `--space-3` from its edges with no gap, a solid `--border` edge, top corners
-`--radius-md`, and a hairline between rows. Two or more messages start collapsed to one summary line
+**Composer queue** (`QueuedMessages`, #2178). Messages not yet sent wait in `.composer-queue`,
+the full-width top strip inside the composer card, with a hairline between rows. When editing,
+the editing strip comes first so its controls stay visible. Two or more messages start collapsed to one summary line
 (#2788): a full-width §5.5 disclosure trigger, `--control-h` tall, reading "<n> Queued Messages" and
 carrying the one Held badge when the whole queue is held. While collapsed it also
-carries the most severe row status that needs the person (Delivery Failed, else Delivery Uncertain).
+carries the most severe row status that needs the person (Delivery Failed, else Delivery Uncertain)
+or the spinner while steering.
 Only the summary opens or closes the tray: arrivals, removals and status changes never do, the choice
 lasts while the session stays open, and every session starts collapsed. A queue held behind a
 worktree or account handoff (#3752) says why in one sentence-case `.queue-note` right under the
@@ -2491,7 +2492,7 @@ in sentence case what holds for every row: the held explanation, a steering reas
 them can use, or a Viewer's refusal. A row carries
 a badge only where it differs from "Queued" (Steering…, Pending Delivery, Delivery Uncertain,
 Delivery Failed), reads its first line (an image-only message reads "Image attachment" after the
-paperclip icon), and ends in Steer (`.btn.sm.ghost`, only where steering works for that row), Edit
+paperclip icon), and ends in Steer Now (`.btn.sm`, only where steering works for that row), Edit
 and Cancel or Dismiss (`.icon-btn.sm`). A cancel that is not available stays, disabled, with its
 reason referenced by `aria-describedby`. Below 760px a row is its text and one 44px "Queued Message
 Actions" ⋯ button whose menu sheet lists Steer into This Turn, Edit Message and Cancel Message (or
@@ -2499,10 +2500,10 @@ Dismiss Message), each disabled one with its reason as the second line. A delive
 is a notice of the slot (§13.2), not part of the row.
 
 One queued message is its own row in place of the summary (#3962), so steering it takes one tap:
-the same single line, with the Held badge after its words when the queue is held. On desktop its
+the same single line with a clock, and the Held badge after its words when the queue is held. On desktop its
 row is the expanded row above, and what the expanded tray would say about it is said under it. Below
-760px, while the message can be steered and the reader may manage the queue, a 44px Steer
-(`.btn.sm.ghost`) sits before the ⋯ button and the sheet leaves Steer into This Turn out; otherwise
+760px, while the message can be steered and the reader may manage the queue, a 44px Steer Now
+button sits before the ⋯ button and the sheet leaves Steer into This Turn out; otherwise
 there is no Steer button and the sheet lists Steer into This Turn, disabled, with its reason. When a
 second message arrives the summary returns as the person last left it, opened only if focus was in
 the lone row, so the control they hold stays shown; when the queue drops back to one, focus on the
@@ -3332,7 +3333,7 @@ follows these rules so it never crowds out the conversation it asks about:
   place underneath, hidden (`visibility: hidden`, so it takes no pointer, focus or screen reader),
   and is where it was when the question collapses. While it is read, the dock keeps that question's
   card: a request that arrives ahead of it waits behind "+N More", and reading back does not shrink
-  the dock to its strip. The composer and the one-line queue tray (§11.2) stay below it.
+  the dock to its strip. The composer card, including its queue (§11.2), stays below it.
   **Workflow decision reading mode** (#2874): a docked workflow decision, including UI evidence,
   offers **Expand Decision** in its head line (`.btn.sm.ghost`, chevron, icon-only below 760px with
   the same accessible name). It becomes **Collapse Decision** in place, preserving focus, with
@@ -3924,7 +3925,7 @@ written.
 - **Sessions:** `.srow`, `.activity`, `.bar-picker`, `.bar-strip`, `.board`/`.bcol`/`.bcard`,
   `.notice.inset`, `.preset-grid`.
 - **Session Chrome:** `.ps` family, `--summary-w`.
-- **Composer:** `--composer-ctl`, `.composer-btn`, `.model-chip`, `.picker*`, `.queue`,
+- **Composer:** `--composer-ctl`, `.composer-btn`, `.model-chip`, `.picker*`, `.composer-queue`,
   `.composer-mode`.
 - **Approvals:** `.request`, the decision record row, evidence tiles and viewer, `.policy-row`.
 - **Right Panel:** `.seg.fit`, `.selbar`, `.outdated`.
