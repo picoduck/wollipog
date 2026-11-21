@@ -248,8 +248,9 @@ export class AssistantThreads {
 
   patchLimitDefaults(owner: HumanPrincipal, body: unknown): AssistantThreadLimits {
     const input = body as Partial<AssistantThreadLimits> | null;
-    if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).length !== 1) {
-      throw new AssistantThreadRefusal("Specify one thread limit to update.", 400);
+    if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).length !== 1 ||
+        (!Object.hasOwn(input, "costUsd") && !Object.hasOwn(input, "launchedSessions"))) {
+      throw new AssistantThreadRefusal("Specify either costUsd or launchedSessions to update.", 400);
     }
     const existing = this.store.defaultLimits(owner);
     const limits = threadLimits({ ...existing, ...input }, Object.hasOwn(input, "costUsd") ? undefined : existing.costUsd);

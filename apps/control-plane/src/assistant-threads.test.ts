@@ -132,6 +132,7 @@ test("saved limits belong to the owner and only apply on thread creation", async
     const defaults = `${path}/defaults/limits`;
     const original = (await h.call("POST", path, {})).body.thread as AssistantThread;
     assert.deepEqual((await h.call("GET", defaults)).body, { costUsd: 25, launchedSessions: 10 });
+    assert.equal((await h.call("PATCH", defaults, { launchPaused: true })).status, 400);
     assert.deepEqual((await h.call("PATCH", defaults, { costUsd: 12.34 })).body, { costUsd: 12.34, launchedSessions: 10 });
     assert.deepEqual((await h.call("PATCH", defaults, { launchedSessions: 0 })).body, { costUsd: 12.34, launchedSessions: 0 });
     const next = (await h.call("POST", path, {})).body.thread as AssistantThread;
