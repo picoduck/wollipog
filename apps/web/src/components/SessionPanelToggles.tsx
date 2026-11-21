@@ -85,15 +85,15 @@ export function SidePanelToggle({ small, open, onToggle, waitingSessions }: {
 }) {
   const coarsePointer = useIsCoarsePointer();
   const waiting = waitingSessions ?? 0;
-  const label = waiting === 0 ? "Side Panel"
-    : `${open ? "Hide" : "Show"} Side Panel, ${waiting} ${waiting === 1 ? "Session Needs" : "Sessions Need"} You`;
+  const waitingLabel = `${open ? "Hide" : "Show"} Side Panel, ${waiting} ${waiting === 1 ? "Session Needs" : "Sessions Need"} You`;
+  const label = waiting > 0 ? waitingLabel : "Side Panel";
   return (
     <button
       type="button"
       className={small ? "icon-btn sm" : "icon-btn"}
       onClick={onToggle}
       title={coarsePointer ? label : `${label} (${shortcutDisplay("toggle-side-panel")})`}
-      aria-label={label}
+      aria-label={waiting > 0 ? waitingLabel : "Side Panel"}
       data-assistant-panel-toggle={waitingSessions !== undefined ? "" : undefined}
       aria-keyshortcuts={shortcutAriaKeys("toggle-side-panel")}
       aria-pressed={open}

@@ -12990,7 +12990,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .assistant-bar-title-tooltip {
   position: absolute;
   z-index: var(--z-popover);
-  inset-block-start: 100%;
+  top: 100%;
   inset-inline-start: 0;
   width: max-content;
   max-width: min(280px, calc(100vw - 2 * var(--page-gutter) - var(--control-h) - var(--space-2)));
@@ -13006,15 +13006,15 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 .assistant-bar-title[data-open] > .assistant-bar-title-tooltip { visibility: visible; }
 @media (hover: hover) {
-  .assistant-bar-title:hover:not([data-dismissed]) > .assistant-bar-title-tooltip {
+  .assistant-bar-title:hover:not([data-open], [data-dismissed]) > .assistant-bar-title-tooltip {
     visibility: visible;
-    transition: visibility 0s var(--delay-tooltip);
+    transition: visibility var(--dur-fast) var(--ease-out) var(--delay-tooltip);
   }
 }
 [data-assistant-panel-toggle] { position: relative; }
 .assistant-side-panel-dot {
   position: absolute;
-  inset-block-start: calc(50% - 11px);
+  top: calc(50% - 11px);
   inset-inline-end: calc(50% - 11px);
   width: 6px;
   height: 6px;
