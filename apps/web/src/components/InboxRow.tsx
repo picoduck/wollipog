@@ -1,5 +1,5 @@
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
-import { memo, type MouseEvent } from "react";
+import { memo, useLayoutEffect, useRef, type MouseEvent } from "react";
 import { useLongPress } from "./interactions.js";
 import { sessionArchiveControlLabel } from "../archive-actions.js";
 import { showsActivityStrip, type SessionActivity } from "../activity.js";
@@ -17,6 +17,7 @@ import { ActivityStrip } from "./ActivityStrip.js";
 import { SessionPinIndicator, ThreadDot } from "./common.js";
 import { AlarmClockIcon, ArchiveIcon, BranchIcon, ChevronRightIcon, MoreHorizontalIcon, PullRequestIcon } from "./Icons.js";
 import { SessionRowStatusBadge } from "./SessionRowStatusBadge.js";
+import { fitStatusLine, observeStatusLine } from "./status-line-fit.js";
 import { SessionTypeIcon } from "./SessionTypeIcon.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { inboxThreadChildrenLabel, type InboxThreadChildren } from "../inbox.js";
@@ -144,6 +145,16 @@ function InboxRowInner({
   onArchive,
 }: InboxRowProps) {
   const longPress = useLongPress(({ x, y }) => onSessionMenu(session.id, { x, y }));
+  /* The phone card's status line never wraps (#4791). It re-fits after every render, since what it
+     holds may have changed, and whenever its width changes. */
+  const statusLineRef = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    if (threeRow && statusLineRef.current) fitStatusLine(statusLineRef.current);
+  });
+  useLayoutEffect(() => {
+    const line = statusLineRef.current;
+    return threeRow && line ? observeStatusLine(line) : undefined;
+  }, [threeRow]);
   // A surface without a store (a harness page) cannot see the runner, so it keeps the conservative
   // delivery wording rather than claiming the runner is offline.
   const runnerOnline = useOptionalStoreSelector((state) => state.runners.get(session.runnerId)?.status !== "offline") ?? true;
@@ -227,7 +238,7 @@ function InboxRowInner({
       )}
     </span>
   ) : null;
-  const badge = <SessionRowStatusBadge status={status} />;
+  const badge = <SessionRowStatusBadge status={status} collapsible={threeRow} />;
   const activityStrip = strip
     ? <ActivityStrip activity={activity} now={activityNow} compact animate={runnerOnline} className="inbox-row-activity" />
     : null;
@@ -353,14 +364,15 @@ function InboxRowInner({
           {/* Two shapes (#2209), each in reading order. Desktop and tablet: the status line (the
               sender, which gives up width first, the branch, then the badge, the strip, the flags
               and the time), then the title line, which holds the title and the family chip and
-              nothing else. A phone keeps its three-line card: the sender with the flags, the title,
-              then the status line with the badge, the strip, the branch and the time. The strip is
-              on the status line in both, never on the title line. */}
+              nothing else. A phone keeps its three-line card (#4791): the sender, with the time and
+              the flags trailing it above ⋯; the title, beside ⋯; then the status line across the
+              whole card with the badge, the strip and the branch, on one line that gives way rather
+              than wraps. The strip is on the status line in both, never on the title line. */}
           {threeRow ? (
             <>
-              <span className="inbox-row-line inbox-row-sender-line">{sender}{flags}</span>
+              <span className="inbox-row-line inbox-row-sender-line">{sender}<span className="inbox-row-trail">{time}{flags}</span></span>
               {titleLine}
-              <span className="inbox-row-line inbox-row-status-line">{badge}{activityStrip}{branch}{time}</span>
+              <span ref={statusLineRef} className="inbox-row-line inbox-row-status-line">{badge}{activityStrip}{branch}</span>
             </>
           ) : (
             <>

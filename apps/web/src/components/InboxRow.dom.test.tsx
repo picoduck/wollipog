@@ -429,7 +429,7 @@ test("selected, unread, and selected-and-unread rows each show their own treatme
   }, { selected: true, threeRow: true });
 });
 
-test("the relative time renders once, trailing the status line on both shapes", async () => {
+test("the relative time renders once: trailing the desktop status line, and on a phone's line one", async () => {
   const session = baseSession({ status: "running", lastEventAt: Date.now(),
     attention: { version: 1, meaningfulAt: Date.now() - 15 * 60_000, humanActions: [], result: null } });
   for (const threeRow of [true, false]) {
@@ -437,8 +437,49 @@ test("the relative time renders once, trailing the status line on both shapes", 
       const times = container.querySelectorAll("time");
       assert.equal(times.length, 1, "one element, so the instant is never said twice");
       assert.equal(times[0]!.textContent, "15m ago");
-      assert.notEqual(times[0]!.closest(".inbox-row-status-line"), null);
-      assert.equal(times[0]!.parentElement?.lastElementChild, times[0], "trailing");
+      if (threeRow) {
+        // #4791: the time leaves the status line for line one's trailing cluster, before the flags.
+        const trail = times[0]!.parentElement!;
+        assert.ok(trail.classList.contains("inbox-row-trail"));
+        assert.equal(trail.parentElement?.classList.contains("inbox-row-sender-line"), true);
+        assert.equal(trail.firstElementChild, times[0], "the time leads the flags");
+        assert.equal(trail.parentElement?.lastElementChild, trail, "trailing line one");
+        assertNoDomNode(container.querySelector(".inbox-row-status-line time"), "never on the status line");
+      } else {
+        assert.notEqual(times[0]!.closest(".inbox-row-status-line"), null);
+        assert.equal(times[0]!.parentElement?.lastElementChild, times[0], "trailing");
+      }
+    }, { threeRow });
+  }
+});
+
+test("a phone card's line one carries the time, then the pin and the unread dot (#4791)", async () => {
+  await withRow(baseSession(), (container) => {
+    const lineOne = container.querySelector<HTMLElement>(".inbox-row-sender-line")!;
+    const trail = lineOne.querySelector<HTMLElement>(":scope > .inbox-row-trail")!;
+    assert.deepEqual([...trail.children].map((child) => child.className.split(" ")[0]), ["inbox-row-time", "inbox-row-flags"]);
+    assert.equal(trail.querySelector(".inbox-unread-dot")?.getAttribute("aria-label"), "Unread Activity");
+    assert.notEqual(trail.querySelector(".inbox-row-flags > *:first-child"), trail.querySelector(".inbox-unread-dot"),
+      "the pin comes before the dot");
+    assertNoDomNode(container.querySelector(".inbox-row-status-line .inbox-row-flags"));
+  }, { threeRow: true, unread: true, pinned: true });
+});
+
+test("only a phone card's status badge can fold its secondary into a count, which names what it covers", async () => {
+  const session = baseSession({ status: "running", backgroundWorkState: "orphaned" });
+  for (const threeRow of [false, true]) {
+    await withRow(session, (container) => {
+      const folded = container.querySelector<HTMLElement>(".row-status-collapsed");
+      if (!threeRow) {
+        assertNoDomNode(folded, "desktop rows have room for both badges");
+        return;
+      }
+      const [lifecycle, secondary] = allBadges(container);
+      assert.ok(lifecycle && secondary, "lifecycle and secondary");
+      assert.equal(folded!.querySelector("[aria-hidden]")?.textContent, "+1");
+      assert.match(folded!.textContent ?? "", new RegExp(`1 More: ${secondary!.getAttribute("aria-label") ?? secondary!.textContent}`));
+      assert.equal(container.querySelector(".inbox-row-status-line")!.hasAttribute("data-fit"), false,
+        "nothing gives way until the line is measured too narrow");
     }, { threeRow });
   }
 });
