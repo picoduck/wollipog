@@ -451,6 +451,7 @@ export function ModelSettingsPopover({
 
 interface MenuModelChoice {
   id: string;
+  baseModelId?: string;
   displayName?: string;
   description?: string;
   defaultEffort?: string;
@@ -588,10 +589,12 @@ export function ModelEffortMenuChoices({
   const exactModels = models.filter(model => isExactModelChoice(model.id, modelDriver));
   const modelChoices = exactModels.map(model => ({
     value: model.id, label: modelOptionLabel(model, exactModels), description: plainModelDescription(model),
+    baseModelId: model.baseModelId,
   }));
   const savedChoice = models.find(model => model.id === modelVal) ?? selectedModel;
   if (savedChoice && !modelChoices.some(option => option.value === modelVal)) {
-    modelChoices.push({ value: modelVal, label: savedChoice.displayName ?? modelVal, description: plainModelDescription(savedChoice) });
+    modelChoices.push({ value: modelVal, label: savedChoice.displayName ?? modelVal,
+      description: plainModelDescription(savedChoice), baseModelId: savedChoice.baseModelId });
   }
   const modelOption = modelChoices.find(option => option.value === modelVal) ?? modelChoices[0];
   const modelGroup = modelChoices.length > 0 && (

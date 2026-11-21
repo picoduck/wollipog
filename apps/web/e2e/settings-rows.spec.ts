@@ -2489,7 +2489,7 @@ test("Codex Agent Defaults save a managed Latest choice independently of the dis
   await picker.getByRole("button", { name: "Sol", exact: true }).click();
   const latest = picker.getByRole("radio", { name: "Sol Latest", exact: true });
   await expect(latest).toHaveAccessibleDescription(/Currently GPT-6.2 Sol/);
-  await expect(picker.getByRole("radio", { name: "GPT-6.2 Sol", exact: true })).toBeVisible();
+  await expect(picker.getByRole("radio", { name: "GPT-6.2 Sol", exact: true })).toBeInViewport({ ratio: 1 });
   await expect(picker.getByRole("radio", { name: "GPT-6.1 Sol", exact: true })).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("codex-managed-family.png") });
   await latest.click();

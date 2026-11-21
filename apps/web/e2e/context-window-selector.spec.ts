@@ -135,7 +135,7 @@ test("a running session shows the resolved Opus model and offers only specific r
   await trigger.click();
   const picker = page.getByRole("dialog", { name: "Model Settings" });
   const models = picker.getByRole("radiogroup", { name: "Model", exact: true });
-  await expect(models.getByRole("radio")).toHaveCount(2);
+  await expect(models.getByRole("radio")).toHaveText(["Opus 5.5", "Sonnet 5"]);
   await expect(models.getByRole("radio", { name: "Opus 5.5", exact: true })).toBeChecked();
   await expect(picker.getByRole("radiogroup", { name: "Context Window" }).getByRole("radio", { name: "1M" })).toBeChecked();
   await page.screenshot({ path: testInfo.outputPath("running-session-exact-model.png") });

@@ -1,17 +1,17 @@
-import React, { Fragment, useState, type ReactNode } from "react";
+import React, { Fragment, useRef, useState, type ReactNode, type Ref } from "react";
 import { buildModelPicker, useModelPickerCatalog, type ModelPickerContext, type ModelPickerOption } from "../model-picker.js";
 import { ChevronDownIcon, ChevronRightIcon } from "./Icons.js";
 import { MenuItem, MenuSurface } from "./Menu.js";
 import { handleRovingChoiceKeyDown, useDismissiblePopover } from "./interactions.js";
-import type { SelectOption } from "./ui/ChoiceControls.js";
 
 interface ChoiceProps {
-  options: readonly SelectOption<string>[];
+  options: readonly ModelPickerOption[];
   value: string | null;
   context: ModelPickerContext;
 }
 
-export function ModelPickerList({ options, value, context, renderOption }: ChoiceProps & {
+export function ModelPickerList({ options, value, context, renderOption, contentRef }: ChoiceProps & {
+  contentRef?: Ref<HTMLDivElement>;
   renderOption: (option: ModelPickerOption) => ReactNode;
 }) {
   const catalog = useModelPickerCatalog();
@@ -28,7 +28,7 @@ export function ModelPickerList({ options, value, context, renderOption }: Choic
   const after = trailing.filter(option => matches(option));
   const found = groups.map(group => ({ ...group, options: group.options.filter(option => matches(option, group.name)) }))
     .filter(group => group.options.length > 0);
-  return <div data-model-picker-list>
+  return <div ref={contentRef} data-model-picker-list>
     <input className="model-picker-search" type="search" aria-label="Search Models" placeholder="Search models"
       value={query} onChange={event => setQuery(event.currentTarget.value)} />
     {before.map(renderOption)}
@@ -92,6 +92,7 @@ export function ModelPicker({ label, value, options, context, onChange, disabled
   const selectedLabel = selected?.selectedLabel ?? selected?.label ?? placeholder ?? "Select…";
   const [open, setOpen] = useState(false);
   const popover = useDismissiblePopover(open, setOpen, "model-picker");
+  const contentRef = useRef<HTMLDivElement>(null);
   return <div className="ui-select" onBlur={event => {
     if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) popover.close(false);
   }}>
@@ -104,11 +105,11 @@ export function ModelPicker({ label, value, options, context, onChange, disabled
       <span className="ui-select-value">{selectedLabel}</span><ChevronDownIcon size={14} />
     </button>
     {open && <MenuSurface inline role="dialog" id={popover.panelId} label={label} tabIndex={-1}
-      width={320} surfaceRef={popover.panelRef} anchor={{ trigger: popover.triggerRef }}
+      width={320} surfaceRef={popover.panelRef} contentRef={contentRef} anchor={{ trigger: popover.triggerRef }}
       onDismiss={() => popover.close(true)} onKeyDown={popover.onPanelKeyDown}>
       <div role="radiogroup" aria-label={label} onKeyDown={event =>
         handleRovingChoiceKeyDown(event, "radio", { activate: false })}>
-        <ModelPickerList options={options} value={value} context={context} renderOption={option =>
+        <ModelPickerList options={options} value={value} context={context} contentRef={contentRef} renderOption={option =>
           <ModelOption key={option.value} option={option} selected={option.value === value} onSelect={() => {
             onChange(option.value);
             popover.close(true);

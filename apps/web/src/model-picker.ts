@@ -24,6 +24,7 @@ export interface ModelPickerOption extends SelectOption<string> {
   /** A saved route can be shown without becoming a choice. */
   retained?: boolean;
   legacy?: boolean;
+  baseModelId?: string;
 }
 
 export interface ModelPickerFamily {
@@ -43,7 +44,7 @@ export function isExactModelChoice(id: string, driver?: AgentDriverKind): boolea
 }
 
 export function buildModelPicker(
-  options: readonly SelectOption<string>[],
+  options: readonly ModelPickerOption[],
   value: string | null,
   { mode, driver }: ModelPickerContext,
   catalog: ModelPickerCatalog = bundledCatalog,
@@ -83,13 +84,15 @@ export function buildModelPicker(
     }
     let foundCurrent = false;
     for (const id of family.releases) {
-      const option = take(id);
-      if (!option) continue;
-      // The parenthetical id disambiguated this row from the alias before it was named Latest.
-      const suffix = " (" + id + ")";
-      const label = aliasName && option.label === aliasName + suffix ? aliasName : option.label;
-      rows.push({ ...option, label, legacy: !family.siblings && foundCurrent });
-      foundCurrent = true;
+      const releaseOptions = [...byId.values()].filter(option => option.value === id || option.baseModelId === id);
+      for (const release of releaseOptions) {
+        const option = take(release.value)!;
+        // The parenthetical id disambiguated this row from the alias before it was named Latest.
+        const suffix = " (" + option.value + ")";
+        const label = aliasName && option.label === aliasName + suffix ? aliasName : option.label;
+        rows.push({ ...option, label, legacy: !family.siblings && foundCurrent });
+      }
+      if (releaseOptions.length) foundCurrent = true;
     }
     if (rows.length) groups.push({ name: family.label, options: rows });
   }
