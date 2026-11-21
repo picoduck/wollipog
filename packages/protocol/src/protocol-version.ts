@@ -1549,6 +1549,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 402: Verify a prepared backing session before switching an Assistant thread’s harness (Refs #4765).
   402,
   // v403 slot
+  // 403: Set up Google Antigravity from Connections: runtime check, remote sign-in and access verification (Refs #4780).
+  403,
   // v404 slot
   // v405 slot
   // v406 slot

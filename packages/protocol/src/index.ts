@@ -64,6 +64,7 @@ export * from "./review-session.js";
 export * from "./pull-request-watch.js";
 export * from "./session-waits.js";
 export * from "./workspace-removal.js";
+export * from "./antigravity-setup.js";
 export * from "./forge-decision-action.js";
 export * from "./release-decision.js";
 export * from "./merge-closure-watch.js";
@@ -328,6 +329,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v338 (#4353): a run names an account per member. An older control plane ignores it on a run. */
   // Capability floor 338 for per-run-member account choice is retired.
   providerLogin: 171,
+  /** v403 (Refs #4780): Google Antigravity runtime and sign-in setup from Connections. */
+  antigravitySetup: 403,
   providerAccountRemoval: 188,
   accountScopedAgentSkills: 172,
   piHarness: 155,
@@ -3491,6 +3494,8 @@ export interface RunnerMetadata {
   providerAccounts?: ProviderAccountDefinition[];
   /** Protocol v171 active/recent runner-owned login operations. */
   providerLogins?: ProviderLoginView[];
+  /** Protocol v403 Google Antigravity setup (Refs #4780). */
+  antigravitySetup?: import("./antigravity-setup.js").AntigravitySetupView;
   workspaces: WorkspaceInfo[];
   /** Editors found on the host (discovery fills this; absent on pre-v22 runners). */
   editors?: EditorInfo[];
@@ -3714,6 +3719,8 @@ export interface RunnerView {
   /** Saved choices remain visible if an account disappears, so the UI can explain the conflict. */
   providerAccountDefaults?: RunnerProviderAccountDefault[];
   providerLogins?: ProviderLoginView[];
+  /** v403 Google Antigravity setup. Only principals who can manage the Machine receive it. */
+  antigravitySetup?: import("./antigravity-setup.js").AntigravitySetupView;
   workspaces: WorkspaceInfo[];
   /** Editors found on the host (for "Open in …"); absent/empty hides the control. */
   editors?: EditorInfo[];
@@ -10463,6 +10470,8 @@ export type RunnerToControlPlane =
   | AgentsUpdatedMessage
   | ProviderLoginsUpdatedMessage
   | ProviderLoginResultMessage
+  | import("./antigravity-setup.js").AntigravitySetupUpdatedMessage
+  | import("./antigravity-setup.js").AntigravitySetupResultMessage
   | RemoveProviderAccountResultMessage
   | import("./workspace-removal.js").RemoveWorkspaceResultMessage
   | AdoptProviderProfileResultMessage
@@ -12679,6 +12688,7 @@ export type ControlPlaneToRunner =
   | StartProviderLoginMessage
   | SubmitProviderLoginCodeMessage
   | CancelProviderLoginMessage
+  | import("./antigravity-setup.js").AntigravitySetupCommandMessage
   | RemoveProviderAccountMessage
   | import("./workspace-removal.js").RemoveWorkspaceMessage
   | AdoptProviderProfileMessage

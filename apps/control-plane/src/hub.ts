@@ -399,6 +399,7 @@ export type RunnerRequestResult =
   | GithubIssueClosureResultMessage
   | CampaignForgeObserveResultMessage
   | ProviderLoginResultMessage
+  | import("@wollipog/protocol").AntigravitySetupResultMessage
   | RemoveProviderAccountResultMessage
   | import("@wollipog/protocol").RemoveWorkspaceResultMessage
   | import("@wollipog/protocol").AdoptProviderProfileResultMessage

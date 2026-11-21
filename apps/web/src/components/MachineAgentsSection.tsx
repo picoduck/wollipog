@@ -23,6 +23,8 @@ import { agentInstallHints, harnessUpdateGuidance } from "../runners.js";
 import { statusMeta } from "../status-meta.js";
 import { providerReadinessSentence, providerReadinessLabel } from "../provider-readiness.js";
 import { AgentIcon } from "./AgentIcon.js";
+import { antigravitySetupVisible } from "../antigravity-setup.js";
+import { AntigravitySetupRow } from "./AntigravitySetup.js";
 import { agentSessionDiscoveryUnavailableReason, agentSupportsSessionDiscovery, AgentSessionDiscoveryDialog } from "./AgentSessionDiscoveryDialog.js";
 import { CopyButton, Modal } from "./common.js";
 import { DetailSection } from "./DetailSection.js";
@@ -322,6 +324,7 @@ export function MachineAgentsSection({ runner, online, machineName, canFindSessi
           )}
         </>
       )}
+      {antigravitySetupVisible(runner) && <AntigravitySetupRow runner={runner} online={online} machineName={machineName} />}
       {openAgent && (
         <AgentDetailsDialog
           agent={openAgent}

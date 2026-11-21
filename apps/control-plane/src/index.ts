@@ -290,6 +290,7 @@ import { registerAssistantSessionLifecycle } from "./assistant-session-lifecycle
 import { registerAssistantSessionContent } from "./assistant-session-content.js";
 import { createOwnerRunnerManagement } from "./owner-runner-management.js";
 import { createOwnerMachineManagement } from "./owner-machine-management.js";
+import { registerAntigravitySetupRoutes } from "./antigravity-setup-routes.js";
 import { readProviderAccountSelection } from "./owner-provider-selection.js";
 import { createOwnerProjectManagement } from "./owner-project-management.js";
 import { projectName, requestedAccessScope, accessScopeOwnerFromQuery,
@@ -1752,6 +1753,20 @@ app.register(async (instance) => {
           );
         }
         break;
+      case "antigravity_setup_updated":
+        if (runnerId !== msg.runnerId) {
+          app.log.warn(`runner ${runnerId} sent a mismatched Google Antigravity setup`);
+          break;
+        }
+        try {
+          db.updateRunnerAntigravitySetup(msg.runnerId, msg.setup, Date.now());
+          hub.runnerChanged(msg.runnerId);
+        } catch (error) {
+          app.log.warn(
+            `runner ${runnerId} sent an unusable Google Antigravity setup — ${error instanceof Error ? error.message : "ignored"}`,
+          );
+        }
+        break;
       case "runner_capacity_status":
         if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "machineRunnerCapacity")) {
           app.log.warn(`runner ${runnerId} sent capacity status without negotiated support`);
@@ -1940,6 +1955,7 @@ app.register(async (instance) => {
       case "read_queued_prompt_result":
       case "edit_queued_prompt_result":
       case "provider_login_result":
+      case "antigravity_setup_result":
       case "remove_provider_account_result":
       case "remove_workspace_result":
       case "adopt_provider_profile_result":
@@ -3051,6 +3067,8 @@ app.delete("/api/runners/:id/provider-logins/:operationId", async (req, reply) =
     return reply.code(504).send({ error: (error as Error).message });
   }
 });
+
+registerAntigravitySetupRoutes(app, db, hub, requestHuman);
 
 app.delete("/api/runners/:id/provider-accounts/:accountId", async (req, reply) => {
   const { id, accountId } = req.params as { id: string; accountId: string };

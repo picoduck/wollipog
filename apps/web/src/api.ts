@@ -70,6 +70,7 @@ import type {
   PromptImageInput,
   PromptImageReference,
   ProviderLoginView,
+  AntigravitySetupView,
   ProviderCredentialImportSource,
   ProviderHomeLeaseInspection,
   QueuedPromptDraft,
@@ -1462,6 +1463,28 @@ export function createApiClient(transport: ApiTransport) {
   cancelProviderLogin: (runnerId: string, operationId: string) =>
     req<{ login: ProviderLoginView }>(
       `/api/runners/${encodeURIComponent(runnerId)}/provider-logins/${encodeURIComponent(operationId)}`,
+      { method: "DELETE" },
+    ),
+
+  /** Google Antigravity setup (#4780). Each returns the runner's setup after the action; the
+   * authorization code is sent once and never kept. */
+  checkAntigravitySetup: (runnerId: string) =>
+    req<{ setup?: AntigravitySetupView }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/antigravity-setup/check`, { method: "POST" }),
+
+  startAntigravitySignIn: (runnerId: string) =>
+    req<{ setup?: AntigravitySetupView }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/antigravity-setup/sign-in`, { method: "POST" }),
+
+  submitAntigravitySignInCode: (runnerId: string, operationId: string, code: string) =>
+    req<{ setup?: AntigravitySetupView }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/antigravity-setup/sign-in/${encodeURIComponent(operationId)}/code`,
+      { method: "POST", body: JSON.stringify({ code }) },
+    ),
+
+  cancelAntigravitySignIn: (runnerId: string, operationId: string) =>
+    req<{ setup?: AntigravitySetupView }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/antigravity-setup/sign-in/${encodeURIComponent(operationId)}`,
       { method: "DELETE" },
     ),
 

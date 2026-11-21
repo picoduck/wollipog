@@ -104,6 +104,10 @@ export function humanGlobalResourceAuthorizationError(method: string, routePath:
     routePath === "/api/runners/:id/provider-logins/:operationId/code" ||
     routePath === "/api/runners/:id/provider-logins/:operationId/dismiss" ||
     routePath === "/api/runners/:id/provider-logins/:operationId" ||
+    routePath === "/api/runners/:id/antigravity-setup/check" ||
+    routePath === "/api/runners/:id/antigravity-setup/sign-in" ||
+    routePath === "/api/runners/:id/antigravity-setup/sign-in/:operationId/code" ||
+    routePath === "/api/runners/:id/antigravity-setup/sign-in/:operationId" ||
     routePath === "/api/runners/:id/skills/sync" ||
     routePath === "/api/runners/:id/skill-snapshots" ||
     routePath.startsWith("/api/skill-machine/") ||

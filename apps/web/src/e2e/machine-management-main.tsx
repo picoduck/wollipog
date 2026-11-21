@@ -174,6 +174,51 @@ if (signInFixture && runner.providerAccounts) {
     },
   ];
 }
+// Google Antigravity setup (#4780), with `?antigravity=`: `missing`, `unsupported`, `update-runner`,
+// `checking`, `signin-required`, `signin-pending`, `signin-waiting`, `verifying`, `signin-failed`,
+// `signin-expired`, `verification-failed` or `ready`. Every state but `unsupported` is a Linux
+// runner. Without it this Windows runner reports `unsupported`. `?longName` gives the machine a long
+// name and the executable a long path; `?manyAgents` adds a dozen more agent rows. No real codes.
+const antigravityFixture = new URLSearchParams(window.location.search).get("antigravity");
+if (runner) {
+  const longName = new URLSearchParams(window.location.search).has("longName");
+  const checkedAt = Date.now();
+  const executable = {
+    path: longName
+      ? "/home/design-workstation-operator-with-a-very-long-account-name/.local/share/google-antigravity/releases/stable/bin/agy"
+      : "/home/misko/.local/bin/agy",
+    version: "1.4.2",
+  };
+  const base = { version: 1 as const, checkedAt, credentialStore: "shared_os_keyring" as const };
+  const signIn = (status: "awaiting_code" | "waiting_for_provider" | "verifying" | "failed" | "timed_out") => ({
+    operationId: "agy_login_fixture-design-workstation", status, startedAt: checkedAt,
+    ...(status === "awaiting_code" ? { verificationUrl: "https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture&state=fixture" } : {}),
+    ...(status === "failed" ? { failure: "not_completed" as const } : {}),
+  });
+  if (antigravityFixture && antigravityFixture !== "unsupported") runner.os = "linux";
+  if (antigravityFixture === "update-runner") runner.protocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.antigravitySetup - 1;
+  runner.antigravitySetup =
+    antigravityFixture === "missing" ? { ...base, status: "missing_runtime" }
+      : antigravityFixture === "checking" ? { ...base, status: "checking" }
+        : antigravityFixture === "signin-required" ? { ...base, status: "sign_in_required", executable }
+          : antigravityFixture === "signin-pending" ? { ...base, status: "sign_in_required", executable, signIn: signIn("awaiting_code") }
+            : antigravityFixture === "signin-waiting" ? { ...base, status: "sign_in_required", executable, signIn: signIn("waiting_for_provider") }
+              : antigravityFixture === "verifying" ? { ...base, status: "checking", executable, signIn: signIn("verifying") }
+                : antigravityFixture === "signin-failed" ? { ...base, status: "sign_in_required", executable, signIn: signIn("failed") }
+                  : antigravityFixture === "signin-expired" ? { ...base, status: "sign_in_required", executable, signIn: signIn("timed_out") }
+                    : antigravityFixture === "verification-failed" ? { ...base, status: "verification_failed", failure: "session_check_failed", executable }
+                      : antigravityFixture === "ready" ? { ...base, status: "ready", executable,
+                        models: [{ id: "fixture-pro", name: "Gemini 3 Pro (Fixture)" }, { id: "fixture-flash", name: "Gemini 3 Flash (Fixture)" }] }
+                        : antigravityFixture === "update-runner" ? undefined
+                          : { ...base, status: "unsupported", failure: "unsupported_platform" };
+  if (longName) runner.displayName = "Design Workstation in the Third-Floor Studio Rack Used for Long-Running Builds";
+  if (new URLSearchParams(window.location.search).has("manyAgents")) {
+    for (let index = 1; index <= 12; index++) {
+      runner.agents.push({ id: `fixture-acp-${index}`, name: `Fixture ACP Agent ${index}`, command: `fixture-acp-${index}`, args: [],
+        env: {}, driver: "acp", context: { kind: "native" }, source: "config", available: true, authStatus: "authenticated", version: `1.${index}.0` });
+    }
+  }
+}
 // Successful new-sign-in scenarios need compatible CLIs, even with no ready default account.
 if (new URLSearchParams(window.location.search).get("providerSetup") === "installed") {
   runner.agents.push({ id: "claude", name: "Claude Code", command: "claude", args: [], env: {},
@@ -844,6 +889,33 @@ const client = {
     runner.providerLogins = [cancelled];
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { login: cancelled };
+  },
+  // Google Antigravity setup (#4780): Check Again keeps the fixture's state; Sign In opens the
+  // pending step; the fixture code completes it; Cancel ends it.
+  checkAntigravitySetup: async () => ({ setup: runner?.antigravitySetup }),
+  startAntigravitySignIn: async () => {
+    if (!runner?.antigravitySetup) throw new Error("runner not found");
+    runner.antigravitySetup = { ...runner.antigravitySetup, signIn: {
+      operationId: "agy_login_fixture-design-workstation", status: "awaiting_code", startedAt: Date.now(),
+      verificationUrl: "https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture&state=fixture",
+    } };
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { setup: runner.antigravitySetup };
+  },
+  submitAntigravitySignInCode: async () => {
+    if (!runner?.antigravitySetup?.signIn) throw new Error("sign-in not found");
+    runner.antigravitySetup = { ...runner.antigravitySetup, status: "ready",
+      models: [{ id: "fixture-pro", name: "Gemini 3 Pro (Fixture)" }],
+      signIn: { ...runner.antigravitySetup.signIn, status: "succeeded", verificationUrl: undefined } };
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { setup: runner.antigravitySetup };
+  },
+  cancelAntigravitySignIn: async () => {
+    if (!runner?.antigravitySetup?.signIn) throw new Error("sign-in not found");
+    runner.antigravitySetup = { ...runner.antigravitySetup,
+      signIn: { ...runner.antigravitySetup.signIn, status: "cancelled", verificationUrl: undefined } };
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { setup: runner.antigravitySetup };
   },
   // The control plane leaves a dismissed sign-in out of this person's snapshots (#2487).
   dismissProviderLoginNotice: async (_runnerId: string, operationId: string) => {

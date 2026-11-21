@@ -181,6 +181,7 @@ import { inspectProviderHomeLeaseCommand, recoverProviderHomeLeaseCommand, type 
 import { ProviderProfileGrants } from "./provider-profile-grants.js";
 import { managedProviderProfileRoot } from "./provider-profile-home.js";
 import { providerLoginStartFailure } from "./provider-login-start-failure.js";
+import { AntigravitySetupSupervisor } from "./antigravity-setup.js";
 import { createProviderProfileLoginSettlement } from "./provider-profile-login-settlement.js";
 import { runnerCredentialRoots, setCampaignCredentialRoots } from "./campaign-operation-evidence.js";
 import {
@@ -971,6 +972,17 @@ function defaultCodexImportSource(): ProviderCredentialImportSourceHome | undefi
   const keys = new Set(sources.map((source) => `${source.layout}\u0000${source.home}`));
   return keys.size === 1 ? sources[0] : undefined;
 }
+/** Google Antigravity setup (#4780). Setup only: Antigravity is not an advertised agent, and the
+ * runner checks it at startup and on an explicit refresh or check, never on periodic discovery,
+ * because the access check opens an ACP session with the runner's Google sign-in. */
+const antigravitySetup = new AntigravitySetupSupervisor({
+  dataDir: config.dataDir,
+  onUpdate: (setup) => {
+    if (registered && runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySetup")) {
+      sendUp({ type: "antigravity_setup_updated", runnerId: config.runnerId, setup });
+    }
+  },
+});
 const providerCredentialImportSupported = providerCredentialImportHostSupported();
 const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSupervisor({
   dataDir: config.dataDir,
@@ -2501,6 +2513,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       backoff = INITIAL_BACKOFF_MS;
       registered = true;
       controlPlaneProtocolVersion = msg.protocolVersion ?? null;
+      if (runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySetup")) {
+        sendUp({ type: "antigravity_setup_updated", runnerId: config.runnerId, setup: antigravitySetup.current() });
+      }
       sessions.reconcileRunnerRestartRecovery(msg.rootOrchestratorSessionIds);
       skillStateReporter.resumeRequests(runnerSupportsProtocol(controlPlaneProtocolVersion, "skillRequestResumption")
         ? msg.pendingSkillRequests : undefined);
@@ -3316,7 +3331,34 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "rediscover":
       log("rediscover requested");
       void runDiscovery(true);
+      void antigravitySetup.check();
       break;
+    case "antigravity_setup": {
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySetup")) break;
+      const reply = (result: { ok: true } | { ok: false; error: string }) => sendUp({
+        type: "antigravity_setup_result", requestId: msg.requestId, ...result, setup: antigravitySetup.current(),
+      });
+      if (msg.runnerId !== config.runnerId) { reply({ ok: false, error: "Google Antigravity setup targeted a different machine." }); break; }
+      try {
+        if (msg.action === "check") {
+          // The reply confirms the check started; its outcome arrives as antigravity_setup_updated.
+          void antigravitySetup.check();
+        } else if (msg.action === "start_sign_in") {
+          antigravitySetup.startSignIn();
+        } else if (msg.action === "submit_code") {
+          antigravitySetup.submitCode(msg.operationId ?? "", msg.code ?? "");
+        } else if (msg.action === "cancel_sign_in") {
+          antigravitySetup.cancelSignIn(msg.operationId ?? "");
+        } else {
+          reply({ ok: false, error: "Unknown Google Antigravity setup action." });
+          break;
+        }
+        reply({ ok: true });
+      } catch (error) {
+        reply({ ok: false, error: errText(error) });
+      }
+      break;
+    }
     case "configure_runner_capacity":
       if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "machineRunnerCapacity")) break;
       if (sessions.configureCapacity(msg)) {
@@ -4684,6 +4726,7 @@ function shutdown(exitCode = 0): void {
   });
   bestEffort("stop subscription usage", () => subscriptionUsage.shutdown());
   bestEffort("stop provider sign-ins", () => providerLoginSupervisor.shutdown());
+  bestEffort("stop Google Antigravity sign-in", () => antigravitySetup.shutdown());
   // Track whether every provider driver was disposed. If not (a dispose threw), a provider may still
   // be alive with no registered kill, so we must NOT release its provider-home lease below even if
   // waitForPendingKills reports "reaped" — releasing it could let a replacement runner share the HOME.
@@ -4791,6 +4834,7 @@ log(
 // Probe installed agents in the background; results are advertised on register or
 // pushed via agents_updated once discovery completes.
 void runDiscovery();
+void antigravitySetup.check();
 // Claude Code can update itself while the runner remains connected. A bounded periodic pass
 // notices the new version and refreshes its flags/auth/slash commands; model discovery is already
 // keyed by version, so a changed binary automatically bypasses the prior version's cache entry.

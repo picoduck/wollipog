@@ -1433,6 +1433,49 @@ Protocol v100 provisions native host sessions with the session-scoped Wollipog C
 Code, the equivalent general stdio MCP server. See [Agent Control CLI and MCP](./agent-control.md)
 for the credential lifecycle, route/audit boundary, commands, and compatibility contract.
 
+### 4.2 Google Antigravity setup (protocol v403)
+
+Protocol v403 (Refs #4780) lets a person who can manage a Machine set up Google's `agy` CLI from
+**Connections**, ahead of Antigravity sessions (#4779). It is setup only. The runner advertises no
+Antigravity agent, so Antigravity is not offered in New Session, and nothing here launches a turn.
+
+- **Runtime.** The runner resolves `agy` for its own user (PATH, `~/.local/bin` and the other
+  discovery locations) and runs `agy --version`. Wollipog never installs or updates it. A missing
+  runtime shows Google's documented install command for a person to run in the machine's terminal.
+  Managed install and update, with the last working version preserved, wait for a verifiable release
+  artifact: Google publishes only a `curl | bash` installer, with no checksums or update contract.
+- **Credential context.** `antigravityCredentialContext()` (`apps/runner/src/antigravity-setup.ts`)
+  is the single launch environment for the version check, sign-in and access check, and it is
+  exported for #4779's session launch. It keeps the runner user's HOME and drops ambient
+  credentials that could change the account or billing: `GEMINI_API_KEY`, `GOOGLE_API_KEY`,
+  `GOOGLE_GEMINI_BASE_URL`, `AGY_ADC_AUTH`, `GOOGLE_APPLICATION_CREDENTIALS`,
+  `GOOGLE_GENAI_USE_VERTEXAI` and every `GOOGLE_CLOUD_*` variable. Antigravity stores its sign-in in
+  the OS keyring, which every process of that user shares. The setup therefore reports
+  `credentialStore: "shared_os_keyring"`, and the card calls it a shared sign-in. No per-account
+  isolation is claimed.
+- **Access check.** The runner sends ACP `initialize`, then `session/new` in a fresh, empty,
+  runner-private directory under `<dataDir>/antigravity-setup`, without a prompt, and terminates the
+  process right after. An authentication error (-32000) reports `sign_in_required`. A session with
+  at least one advertised model (the stable `model` config option, or session model state) reports
+  `ready` with those models. Anything else reports `verification_failed` with the failing step. It
+  runs at runner start, on Rediscover and on Check Again, never on periodic discovery.
+- **Remote sign-in.** The runner runs Google's `agy acp --login` in the same context and publishes
+  the first credential-free HTTPS link it prints. The pasted code is written to the command's stdin
+  once and never stored, logged or published. The command's output stays in memory, bounded, and is
+  read only for that link. A successful exit is not success: the sign-in ends `succeeded` only if the
+  access check then reports `ready`, and otherwise `failed` with `not_verified`. A missing link,
+  rejected code, timeout or Cancel ends it without changing the setup.
+- **Exposure.** The control plane keeps the setup only for principals who can manage the Machine,
+  because its sign-in link is bearer-like. The routes accept only human principals, and the
+  Assistant has no route to them. A runner reconnect clears the stored setup until the runner
+  republishes it.
+
+These outputs are undocumented: the link format, the exit codes and the session errors. They are
+verified only against the credential-free fixture `apps/runner/src/fixtures/antigravity/fake-agy.mjs`,
+not against a real signed-in runner. Every unrecognized outcome therefore fails closed to
+`sign_in_required` or `verification_failed`. Setup from Connections supports Linux and macOS runners;
+others report `unsupported` and show the terminal commands.
+
 ---
 
 ## 5. Quick reference — config flag mapping across drivers
