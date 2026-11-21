@@ -16,7 +16,7 @@ export function AssistantSpendingNotice({ state, trailing, onRaise, onSettings, 
   const { kind, used, limit } = state;
   const launches = kind === "launch_limit";
   const over = kind === "over_budget";
-  const exhausted = kind === "budget_used_up";
+  const exhausted = kind === "budget_used_up" || kind === "budget_committed";
   const near = kind === "near_budget";
   const stopReason = useId();
   const { title, message } = threadSpendingCopy(state);

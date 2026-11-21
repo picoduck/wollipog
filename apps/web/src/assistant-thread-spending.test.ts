@@ -27,10 +27,22 @@ test("a blocked launch outranks a budget advisory and an exhausted budget outran
 });
 
 test("archived threads and peers without usage do not acquire spending state", () => {
-  assert.deepEqual(threadSpendingStates({ status: "done" }), []);
+  assert.deepEqual(threadSpendingStates({ status: "done", launchLimitRefusal: "Budget unavailable." }), []);
   assert.deepEqual(threadSpendingStates({ status: "archived", usage: {
     costUsd: { used: 79.93, limit: 25 }, launchedSessions: { used: 10, limit: 10 },
   } }), []);
+});
+
+test("a launch refusal below the budget shows the server's explanation without inflating actual spend", () => {
+  const refusal = "This Wollipog Assistant thread has spent or committed its whole $25 budget, so it cannot launch another session.";
+  for (const used of [8.13, 21.40]) {
+    const states = threadSpendingStates({
+      status: "done", launchLimitRefusal: refusal,
+      usage: { costUsd: { used, limit: 25 }, launchedSessions: { used: 2, limit: 10 } },
+    });
+    assert.deepEqual(states, [{ kind: "budget_committed", used, limit: 25, refusal }]);
+    assert.deepEqual(threadSpendingCopy(states[0]!), { title: "Budget Committed", message: refusal });
+  }
 });
 
 test("the over-budget title shows the difference and budget copy uses the configured amount", () => {

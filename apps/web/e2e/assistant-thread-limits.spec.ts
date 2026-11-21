@@ -172,6 +172,18 @@ test("a control plane without thread usage shows no spending notice", async ({ p
   await expect(threadBar(page).locator(".status")).toHaveText("Needs You");
 });
 
+test("a committed budget explains the launch refusal without overstating the spend", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, THREAD, "light", "budget");
+  const notice = spendingNotice(page);
+  await expect(notice.locator(".notice-title")).toHaveText("Budget Committed");
+  await expect(notice).toContainText("has spent or committed its whole $25 budget, so it cannot launch another session.");
+  await expect(notice.getByRole("meter")).toHaveAttribute("aria-valuetext", "$8.13 of $25.00 spent");
+  await expect(threadRow(page).locator(".status")).toHaveText("Budget Committed");
+  await expect(threadBar(page).locator(".status")).toHaveText("Budget Committed");
+  await expect(notice.getByRole("button", { name: "Dismiss Near Budget" })).toHaveCount(0);
+});
+
 async function openDetails(page: Page) {
   const panel = page.locator("#right-panel");
   if (!(await panel.isVisible())) await page.getByRole("button", { name: /Side Panel/ }).click();

@@ -473,6 +473,7 @@ if (limitsScenario) {
 
 if (spendingScenario) {
   const current = threads.find((candidate) => candidate.id === "thr_triage")!;
+  delete current.launchLimitRefusal;
   const isLaunchLimit = spendingScenario === "launch-limit";
   if (isLaunchLimit) current.launchedSessionIds = current.launchedSessionIds.slice(-10);
   current.title = (longTitle(1) + " and report what remains").slice(0, 120);

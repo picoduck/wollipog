@@ -368,6 +368,7 @@ const VOCABULARY = {
   assistantThreadSpending: {
     near_budget: warning("Near Budget"),
     budget_used_up: warning("Budget Used Up"),
+    budget_committed: warning("Budget Committed"),
     over_budget: danger("Over Budget"),
     launch_limit: warning("Launch Limit Reached"),
   },
