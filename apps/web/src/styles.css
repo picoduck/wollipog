@@ -413,6 +413,7 @@
   --control-h-sm: 28px;
   --control-h: 32px;
   --control-h-lg: 40px;
+  --queue-action-h: 44px;
   --row-h: 40px;
   --row-h-2: 56px;
   --row-h-dense: 32px;
@@ -6908,16 +6909,16 @@ body.shell-dock-dragging * {
   padding-left: max(var(--space-3), calc((100% - var(--chat-max)) / 2));
   padding-right: max(var(--space-3), calc((100% - var(--chat-max)) / 2));
 }
-/* The queue tray (#2178): messages waiting behind the turn, docked on the composer card so they read
-   as lined up behind the one being written. Inset from the card's edges, solid edge, open at the
-   bottom where the card takes over, and a hairline between rows. Collapsed, it is only its summary. */
-.queue {
-  margin: 0 var(--space-3);
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-bottom: none;
-  border-top-left-radius: var(--radius-md);
-  border-top-right-radius: var(--radius-md);
+/* The queued messages share the card's edge and the editing strip's full-width position. */
+.composer-queue {
+  min-width: 0;
+  margin: 0 calc(-1 * var(--space-3));
+  border-bottom: 1px solid var(--border);
+}
+.composer-queue:first-child {
+  margin-top: calc(-1 * var(--space-2) - var(--space-0-5));
+  border-top-left-radius: inherit;
+  border-top-right-radius: inherit;
 }
 /* The tray starts as this one line (#2788): the §5.5 disclosure across the tray's full width, with
    the Held badge and the most severe row status after the count. It stays one line on a phone; the
@@ -6962,6 +6963,12 @@ body.shell-dock-dragging * {
   padding: 0;
   list-style: none;
 }
+.composer-queue:not(.is-single) .queue-rows {
+  /* Keep the transcript in view when a long queue is expanded. */
+  max-height: min(30dvh, calc(4 * (var(--control-h) + 2 * var(--space-1) + 1px)));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .queue-row {
   position: relative;
   display: flex;
@@ -6992,6 +6999,13 @@ body.shell-dock-dragging * {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+.composer-queue:not(.is-single) .queue-text {
+  /* Preserve the inset of a line centred beside the controls when the text wraps. */
+  padding-block: max(0px, calc((var(--control-h-sm) - 1lh) / 2));
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.queue-clock { flex: none; }
 .queue-clip {
   display: inline-block;
   margin-right: var(--space-1);
@@ -7012,22 +7026,27 @@ body.shell-dock-dragging * {
 }
 /* Phones (#2178): each row is its text and one 44px actions button. A status that differs moves under
    the text, so the words keep the line. */
-.queue.is-phone .queue-status {
+.composer-queue.is-phone:not(.is-single) .queue-text {
+  padding-block: max(0px, calc((var(--queue-action-h) - 1lh) / 2));
+}
+.composer-queue.is-phone .queue-status {
   order: 1;
 }
-.queue.is-phone .queue-status + .queue-text {
-  flex-basis: calc(100% - var(--space-2) - 44px);
+.composer-queue.is-phone:not(.is-single) .queue-status + .queue-text {
+  flex-basis: calc(100% - var(--space-2) - var(--queue-action-h));
 }
 .queue-more {
-  width: 44px;
-  height: 44px;
+  width: var(--queue-action-h);
+  height: var(--queue-action-h);
 }
-/* A lone queued message is the tray's one line in place of the summary (#3962): no hairline above
-   it, the queue's Held badge after its words, and on a phone a Steer as tall as the actions button
-   beside it, so one tap steers. */
-.queue.is-single .queue-row { border-top: none; }
+/* A lone message replaces the summary (#3962). On touch the actions button sets the row's
+   height and the smaller Steer Now borrows its 44px hit area vertically. */
+.composer-queue.is-single .queue-row { border-top: none; }
+.composer-queue.is-phone.is-single .queue-row { padding-block: 0; }
 .queue-held { flex: none; }
-.queue.is-phone .queue-steer { height: 44px; }
+@media (pointer: coarse) {
+  .composer-queue.is-phone .queue-steer::after { left: 0; right: 0; }
+}
 /* The composer's mode strip (#2194): editing a queued message is a state of the card, so it is the
    card's first row, full bleed across its 10px/12px padding, 40px tall at every width. Its actions
    are `.btn.sm.ghost`, 8px apart so each keeps its 44px touch area (§2.8). A recovered edit takes
@@ -7081,9 +7100,7 @@ body.shell-dock-dragging * {
   background: color-mix(in srgb, var(--tone) 7%, var(--bg-elev));
 }
 .composer-mode.is-recovered .composer-mode-icon { color: var(--tone); }
-/* The queue tray docks on the card, so the row above sits close to the strip. On a coarse pointer the
-   strip's actions take the strip's bottom edge, 8px from the row's actions above. Every 44px touch
-   area stays its own (§2.8); the strip stays 40px. */
+/* The editing strip's controls extend into the gap below it on touch. */
 @media (pointer: coarse) {
   .composer-mode-actions { align-self: end; }
 }
@@ -13720,18 +13737,54 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   font: var(--type-small);
 }
 .inbox-row-sender > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The phone card's first line: the sender and, trailing, the flags. */
-.inbox-row-sender-line > .inbox-row-flags { margin-left: auto; }
-/* The phone card's status line: the time is trailing, and the branch between gives way. */
-/* So does one with a pull request attention badge (#604), rather than clip its reason or the branch. */
-.stacked .inbox-row-status-line:has(.status + .status),
-.stacked .inbox-row-status-line:has(.inbox-row-pr .status) { height: auto; min-height: var(--space-5); flex-wrap: wrap; }
-.inbox-row-shell.stacked .inbox-row-status-line > .inbox-row-time { margin-left: auto; }
-/* Dense phone cards grow a status line rather than clipping either lifecycle or secondary label. */
-.inbox-row-shell.stacked .inbox-row-status-line > .row-status { flex: 0 1 auto; min-width: 0; max-width: 100%; flex-wrap: wrap; }
+/* The phone card's first line (#4791): the sender, then the time and the flags trailing it at the
+   card's right edge, above ⋯. The sender gives up width; the time and the flags never do. */
+.inbox-row-sender-line > .inbox-row-trail { gap: var(--space-1); }
+/* The phone card's status line (#4791) is one line across the whole card and never wraps, so every
+   card stays three lines. The branch gives way long before the status does, as the sender does on
+   the desktop status line; past that, `fitStatusLine()` drops the branch (keeping a pull request
+   that needs the person, #604), then the strip, then folds the secondary badge into its count, and
+   last ends that pull request in an ellipsis. The lifecycle badge always stays. */
 .inbox-row-shell.stacked .row-status > .status { flex: none; padding-inline: var(--space-1); }
-/* The branch gives way long before the status does, as the sender does on the desktop status line. */
 .inbox-row-shell.stacked .inbox-row-status-line > .inbox-row-git { flex-shrink: 100000; }
+/* Once its branch has gone, the group holds only a pull request that needs the person, which no longer
+   shrinks: the line overflows instead, so the later steps run. */
+.inbox-row-shell.stacked .inbox-row-status-line[data-fit~="branch"] > .inbox-row-git { flex: none; }
+/* A dropped branch and strip leave the eye only: the card's accessible name still says them, as
+   `.sr-only` text does. The folded secondary badge is named by its count instead. */
+.inbox-row-status-line[data-fit~="branch"] > .inbox-row-git:not(:has(.inbox-row-pr .status)),
+.inbox-row-status-line[data-fit~="branch"] > .inbox-row-git > :is(.inbox-row-branch, .inbox-row-base),
+.inbox-row-status-line[data-fit~="strip"] > .inbox-row-activity {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.inbox-row-status-line[data-fit~="badge"] .row-status > .status + .status,
+.inbox-row-status-line[data-fit~="badge"] .row-status-more { display: none; }
+.row-status-collapsed { display: none; }
+.inbox-row-status-line[data-fit~="badge"] .row-status-collapsed { display: inline; }
+/* Last, a pull request that needs the person ends in an ellipsis rather than being cut off; its
+   whole label stays in the card's name and its tooltip. */
+.inbox-row-shell.stacked .inbox-row-status-line[data-fit~="pr"] > .inbox-row-git { flex: 0 1 auto; }
+.inbox-row-status-line[data-fit~="pr"] .inbox-row-pr { flex: 0 1 auto; min-width: calc(var(--icon-sm) + var(--space-1) + 3em); overflow: hidden; }
+.inbox-row-status-line[data-fit~="pr"] .inbox-row-pr > .status {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.inbox-row-status-line[data-fit~="pr"] .inbox-row-pr > .status::before {
+  display: inline-block;
+  margin-right: var(--space-1);
+  vertical-align: 1px;
+}
 /* Meta (§11.3): plain text, each item after its 14px icon, 12px apart. */
 .inbox-row-git {
   display: flex;
@@ -13786,7 +13839,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 /* The one status (#2209, §11.1): the badge and a neutral "+N". */
 .row-status { display: inline-flex; flex: none; align-items: center; gap: var(--space-1); }
-.row-status-more {
+.row-status-more,
+.row-status-collapsed {
   color: var(--text-dim);
   font: var(--type-micro);
   font-variant-numeric: tabular-nums;
@@ -13854,7 +13908,10 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .inbox-row-action:not(.inbox-row-more) { display: none; }
   .icon-btn.inbox-row-more { width: var(--control-h); height: var(--control-h); }
   .inbox-row-shell .inbox-row { padding-right: var(--control-h); }
-  .inbox-row-shell.stacked .inbox-row { padding-right: calc(var(--control-h) + var(--space-2)); }
+  /* A phone card keeps the column for ⋯ on its title line only (#4791): the time and the flags above
+     ⋯ and the status line below it run to the card's own padding. */
+  .inbox-row-shell.stacked .inbox-row { padding-right: var(--inbox-row-pad-x); }
+  .inbox-row-shell.stacked .inbox-row-copy { padding-right: calc(var(--control-h) + var(--space-2) - var(--inbox-row-pad-x)); }
 }
 /* A wide list's rows (#2218, docs/design-system.md §6.3 "Rows use the width"). At 880px and wider the
    two lines keep their height. The status line's trailing cluster becomes fixed columns, the same on
