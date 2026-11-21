@@ -100,6 +100,19 @@ test("#4403 campaign PR identities include other work, and incomplete ledger rea
   } finally { h.db.close(); }
 });
 
+test("#4792 a failed ledger page read returns unknown campaign PRs despite known history", () => {
+  const h = harness();
+  try {
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id,
+      stage: { stage: "in_review", pullRequests: [{ repository: "team/repo", number: 77 }, { repository: "team/repo", number: 88 }] } }).ok);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id, stage: null }).ok);
+    const root = h.db.getSession("root")!;
+    assert.deepEqual(closureCampaignPullRequests(h.db, root, "team/repo"), [77, 88], "a successful read returns the complete retained history");
+    h.db.campaignWorkLedger.page = () => ({ ok: false, status: 500, error: "Ledger page unavailable" });
+    assert.equal(closureCampaignPullRequests(h.db, root, "team/repo"), undefined, "a failed page read cannot return partial history or an empty array");
+  } finally { h.db.close(); }
+});
+
 test("#4403 an upgraded campaign cannot exclude an outside PR when historical membership is unknown", async () => {
   const h = harness(true, 5, [100, 101]);
   try {
