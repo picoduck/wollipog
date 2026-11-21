@@ -49,30 +49,64 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "
   });
 }
 
+async function openInboxHandoff(page: Page) {
+  const fixture = await installInboxFixture(page);
+  await page.goto("/index.html");
+  await expect(page.locator(".inbox-row").first()).toBeVisible();
+  const decision: WorkflowDecisionView = {
+    requestId: "campaign_handoffs_synthetic", occurrenceId: "workflow_handoffs", sessionId: "synthetic-1",
+    controllingSessionId: "synthetic-1", category: "owner_decision", resourceKey: "campaign_handoffs:owner",
+    resourceDigest: "synthetic", authority: "human", policyRevision: 3, status: "pending", createdAt: Date.now(),
+    resourceSnapshot: { category: "owner_decision", kind: "question", options: [],
+      question: "This campaign handed work to you. What should happen next?",
+      material: "picoduck/wollipog#4541: Owner Handoff. Reason: A design decision is outside campaign authority. Next action: Choose the supported delivery path. Your answer grants no action authority." },
+  };
+  fixture.updateSession("synthetic-1", {
+    title: "Owner Handoffs — Campaign #4541", fullControlCampaignStatus: "waiting_human",
+    pendingApproval: { requestId: decision.occurrenceId, occurrenceId: decision.occurrenceId, title: "Owner Question",
+      kind: "workflow_decision", async: true, options: [], workflowDecision: decision },
+    attention: { version: 1, revision: 1, meaningfulAt: Date.now(), result: null,
+      humanActions: [{ requestId: decision.occurrenceId, rank: 3, requestedAt: Date.now() }] },
+  });
+  const row = page.locator(".inbox-row-shell", { hasText: "Owner Handoffs — Campaign #4541" });
+  await expect(row).toBeVisible();
+  await expect(row.getByText("Handoffs to Acknowledge", { exact: true })).toBeVisible();
+  return { decision, row };
+}
+
+test("D acknowledges the selected Inbox handoff without opening a preview", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const { decision, row } = await openInboxHandoff(page);
+  const sessionPath = "/api/sessions/synthetic-1";
+  const session = await page.evaluate(async (path) => {
+    const response = await fetch(path);
+    return (await response.json()).session;
+  }, sessionPath);
+  const responses: unknown[] = [];
+  await page.route(`**${sessionPath}/answer`, async (route) => {
+    responses.push(route.request().postDataJSON());
+    await route.fulfill({ json: {
+      ...session,
+      pendingApproval: null,
+      attention: { ...session.attention, revision: 2, humanActions: [] },
+    } });
+  });
+
+  await expect(page.locator(".request-card")).toHaveCount(0);
+  await page.getByRole("grid").focus();
+  await page.keyboard.press("d");
+  await expect.poll(() => responses).toEqual([{
+    requestId: decision.occurrenceId, occurrenceId: decision.occurrenceId, answers: {}, action: "dismiss",
+  }]);
+  await expect(row).toBeVisible();
+  await expect(row.getByText("Handoffs to Acknowledge", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".request-card")).toHaveCount(0);
+});
+
 for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844 }]) {
   test(`campaign handoffs appear in the Inbox as Handoffs to Acknowledge (${viewport.name})`, async ({ page }) => {
     await page.setViewportSize(viewport);
-    const fixture = await installInboxFixture(page);
-    await page.goto("/index.html");
-    await expect(page.locator(".inbox-row").first()).toBeVisible();
-    const decision: WorkflowDecisionView = {
-      requestId: "campaign_handoffs_synthetic", occurrenceId: "workflow_handoffs", sessionId: "synthetic-1",
-      controllingSessionId: "synthetic-1", category: "owner_decision", resourceKey: "campaign_handoffs:owner",
-      resourceDigest: "synthetic", authority: "human", policyRevision: 3, status: "pending", createdAt: Date.now(),
-      resourceSnapshot: { category: "owner_decision", kind: "question", options: [],
-        question: "This campaign handed work to you. What should happen next?",
-        material: "picoduck/wollipog#4541: Owner Handoff. Reason: A design decision is outside campaign authority. Next action: Choose the supported delivery path. Your answer grants no action authority." },
-    };
-    fixture.updateSession("synthetic-1", {
-      title: "Owner Handoffs — Campaign #4541", fullControlCampaignStatus: "waiting_human",
-      pendingApproval: { requestId: decision.occurrenceId, occurrenceId: decision.occurrenceId, title: "Owner Question",
-        kind: "workflow_decision", async: true, options: [], workflowDecision: decision },
-      attention: { version: 1, revision: 1, meaningfulAt: Date.now(), result: null,
-        humanActions: [{ requestId: decision.occurrenceId, rank: 3, requestedAt: Date.now() }] },
-    });
-    const row = page.locator(".inbox-row-shell", { hasText: "Owner Handoffs — Campaign #4541" });
-    await expect(row).toBeVisible();
-    await expect(row.getByText("Handoffs to Acknowledge", { exact: true })).toBeVisible();
+    await openInboxHandoff(page);
     if (process.env.WOLLIPOG_CAPTURE_HANDOFFS) await page.screenshot({ path: `/tmp/4541-inbox-${viewport.name}.png`, fullPage: true });
     if (viewport.name === "desktop") {
       await page.getByRole("grid").focus();
