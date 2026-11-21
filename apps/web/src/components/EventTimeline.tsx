@@ -1,4 +1,5 @@
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
+import { WollipogPromptRow } from "./WollipogPromptRow.js";
 import { useShowAgentLogs } from "../agent-logs.js";
 import type { AgentDefinition, AgentDriverKind, InPlaceHandoffTurn, ArtifactView } from "@wollipog/protocol";
 import { Profiler, createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
@@ -2475,7 +2476,12 @@ function TimelineRowContent({
             : "Earlier messages were summarized to free context."}
         />
       );
+    case "wollipog_prompt":
+      return <WollipogPromptRow origin={item.promptOrigin} text={item.text} createdAt={item.createdAt} open={disclosureOpen} onToggle={onDisclosureToggle} />;
     case "user_message":
+      if (item.promptOrigin) {
+        return <WollipogPromptRow origin={item.promptOrigin} text={item.text} createdAt={item.createdAt} open={disclosureOpen} onToggle={onDisclosureToggle} />;
+      }
       return (
         <div className="tl-row user">
           <div className="tl-message-stack user">
@@ -3133,7 +3139,7 @@ function TurnFailedNotice({ message, prompt }: { message: string; prompt?: UserM
   const raw = withoutPromptFailedPrefix(message);
   const reason = prompt?.commandInvocation ? RETRY_TURN_COMMAND_REASON : retry?.unavailableReason;
   const retrying = prompt !== undefined && retry?.pendingPromptId === prompt.id;
-  const actions = retry && prompt && (
+  const actions = retry && prompt && !prompt.promptOrigin && (
     <BusyButton
       className="btn sm"
       busy={retrying}
@@ -3292,7 +3298,7 @@ function TurnFooter({ summary, onFork, forkAvailability, prompt, alone = false, 
   const fork = actions.find((action) => action.key === "fork");
   const forkUsable = fork !== undefined && transcriptActionAvailable(fork);
   const groups = [
-    ...(prompt ? [{ label: "Your Message", actions: messageActions(prompt, messageInput) }] : []),
+    ...(prompt && !prompt.promptOrigin ? [{ label: "Your Message", actions: messageActions(prompt, messageInput) }] : []),
     { label: "This Turn", actions },
   ];
   return (

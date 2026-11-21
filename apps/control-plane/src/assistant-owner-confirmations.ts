@@ -1,3 +1,4 @@
+import type { WollipogPromptOrigin } from "@wollipog/protocol";
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import {
@@ -405,7 +406,7 @@ export interface AssistantOwnerConfirmationServiceDeps {
   /** Tells the thread's assistant how its request ended, as a message in its own conversation.
    * `delivered` once its session admitted it; `retry` when it could not now (its runner is
    * offline, say); `gone` when the thread or its session ended, so nobody can hear it. */
-  tell(threadId: string, text: string): "delivered" | "retry" | "gone";
+  tell(threadId: string, text: string, origin: WollipogPromptOrigin): "delivered" | "retry" | "gone";
   now?(): number;
 }
 
@@ -490,7 +491,15 @@ export class AssistantOwnerConfirmationService {
       const view = this.deps.store.get(id), command = this.deps.store.command(id);
       if (!view || !command) continue;
       let delivery: "delivered" | "retry" | "gone";
-      try { delivery = this.deps.tell(view.threadId, this.notice(view, command.commandId)); } catch { delivery = "retry"; }
+      const outcome = view.status === "executed" ? "approved" : view.status;
+      if (outcome === "pending" || view.status === "approved") continue;
+      try {
+        delivery = this.deps.tell(view.threadId, this.notice(view, command.commandId), {
+          kind: "owner_confirmation", confirmationId: id, outcome, title: view.title, target: view.target,
+          ...(view.outcome?.receiptStatus ? { receiptStatus: view.outcome.receiptStatus } : {}),
+          resolvedAt,
+        });
+      } catch { delivery = "retry"; }
       if (delivery !== "retry" || now - resolvedAt >= OWNER_CONFIRMATION_NOTICE_RETRY_MS) this.deps.store.markNotified(id, now);
     }
   }

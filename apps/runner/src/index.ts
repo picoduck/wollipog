@@ -2903,7 +2903,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }
       if (msg.artifactUploads) sessions.setArtifactUploads(msg.sessionId, msg.artifactUploads);
       if (msg.projectMemory) sessions.setProjectMemory(msg.sessionId, msg.projectMemory);
-      sessions.prompt(msg.sessionId, msg.text, msg.images, msg.slashCommand, msg.config);
+      sessions.promptFromControlPlane(msg);
       break;
     case "steer_session": {
       handleSteerSessionMessage(msg, sessions, sendUp);
@@ -2998,21 +2998,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         startTrackedSession(msg.command, lifecycle);
       } else if (msg.command.type === "prompt_session") {
         try {
-          sessions.prompt(
-            msg.command.sessionId,
-            msg.command.text,
-            msg.command.images,
-            msg.command.slashCommand,
-            msg.command.config,
-            lifecycle,
-            false,
-            undefined,
-            false,
-            undefined,
-            undefined,
-            undefined,
-            Boolean(msg.command.campaignContinuation || msg.command.reviewContinuation),
-          );
+          sessions.promptFromControlPlane(msg.command, lifecycle);
         } catch (error) {
           lifecycle.failed(`prompt acceptance failed: ${errText(error)}`);
         }
