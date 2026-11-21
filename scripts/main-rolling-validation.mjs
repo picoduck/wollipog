@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
 import { awaitWorkerTerminal, budgetApi, githubApi } from "./main-ci-health.mjs";
 import { attemptRecord, listJobs } from "./merge-queue-wait-report.mjs";
 import { candidateReceipt, candidatePlan, cleanCandidates, queueCandidate, validCandidates } from "./main-validation-candidates.mjs";
@@ -169,12 +170,20 @@ export async function writeState(api, repository, previous, value) {
 }
 
 async function listRuns(api, repository, query, complete = true) {
-  const runs = [];
-  for (let page = 1; page <= 10; page++) {
-    const payload = await api(`/repos/${repository}/actions/workflows/main-rolling-validation.yml/runs?branch=main&event=workflow_dispatch&per_page=100&page=${page}${query}`);
-    if (!Array.isArray(payload?.workflow_runs) || !Number.isSafeInteger(payload.total_count)) throw new RollingFailure("unreadable-worker-listing", "Unreadable worker listing");
-    runs.push(...payload.workflow_runs);
-    if (!complete || runs.length >= payload.total_count) return runs;
+  // Page boundaries and total_count can disagree while runs change status. Retry only
+  // a short census, from page 1; never combine different attempts to invent completeness.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt) await delay(attempt * 1000);
+    const runs = new Map();
+    let total = 0;
+    for (let page = 1; page <= 10; page++) {
+      const payload = await api(`/repos/${repository}/actions/workflows/main-rolling-validation.yml/runs?branch=main&event=workflow_dispatch&per_page=100&page=${page}${query}`);
+      if (!Array.isArray(payload?.workflow_runs) || !Number.isSafeInteger(payload.total_count)) throw new RollingFailure("unreadable-worker-listing", "Unreadable worker listing");
+      total = Math.max(total, payload.total_count);
+      for (const run of payload.workflow_runs) runs.set(run.id, run);
+      if (!complete || runs.size >= total) return [...runs.values()];
+      if (payload.workflow_runs.length === 0) break;
+    }
   }
   throw new RollingFailure("worker-listing-truncated-operator-reconciliation-required", "Worker listing truncated; operator reconciliation required");
 }
