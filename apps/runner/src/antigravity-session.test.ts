@@ -20,6 +20,7 @@ import {
   ANTIGRAVITY_UNAVAILABLE,
   antigravityAgentDefinition,
   antigravitySessionLaunch,
+  antigravitySessionEnvironment,
   antigravitySignOutSuperseded,
   withAntigravityAgent,
   withoutAntigravityAgent,
@@ -490,6 +491,61 @@ test("the client spawns what the setup resolves at that moment, or refuses witho
     return true;
   });
   assert.equal(calls().length, before, "nothing was spawned");
+});
+
+test("a PATH copy resolved at the spawn of a launch prepared for the managed copy keeps its own updater setting", async () => {
+  signIn();
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const managed = antigravityCredentialContext({}, { managed: true });
+  // The New Session row and the managed context both carry the updater pin; preparation stores none.
+  const prepared = antigravitySessionEnvironment({ AGY_CLI_DISABLE_AUTO_UPDATE: "true", FIXTURE_KEPT: "1", GEMINI_API_KEY: "x" },
+    managed.scrubInheritedEnv, managed);
+  assert.deepEqual(prepared, { FIXTURE_KEPT: "1" });
+  const launchWith = () => {
+    const launch = antigravitySessionLaunch(setup({ executable: { path: agy, source: "managed" } }), managed, PROVIDER);
+    const driver = new AcpDriver({
+      command: launch.command!, args: launch.args, env: prepared, scrubInheritedEnv: launch.scrubInheritedEnv,
+      // Between preparation and the spawn, a check verified the PATH copy instead.
+      acpCompatibility: { ...launch.acpCompatibility, resolveLaunch: () => ({ command: agy, pinnedEnvironment: {} }) },
+      cwd, config: {}, context: { kind: "native" },
+    }, { onEvent: () => {}, onStderr: () => {}, onExit: () => {} } as never);
+    cleanup.push(() => driver.dispose());
+    return driver;
+  };
+  const updaterSetting = async () => {
+    const driver = launchWith();
+    await driver.initialize();
+    await driver.newSession(cwd);
+    const environments = readFileSync(join(state, "environments.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    return environments.at(-1).autoUpdateDisabled;
+  };
+  delete process.env.AGY_CLI_DISABLE_AUTO_UPDATE;
+  assert.equal(await updaterSetting(), null, "absent: the PATH copy updates itself as it would anywhere");
+  process.env.AGY_CLI_DISABLE_AUTO_UPDATE = "false";
+  try {
+    assert.equal(await updaterSetting(), "false", "an explicit setting from the runner's environment is kept");
+  } finally {
+    delete process.env.AGY_CLI_DISABLE_AUTO_UPDATE;
+  }
+});
+
+test("a launch keeps its resolved executable only until its agent answers the handshake", async () => {
+  signIn();
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  let releases = 0;
+  const answered = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined,
+    { resolveLaunch: () => ({ command: agy, release: () => { releases++; } }) });
+  assert.equal(releases, 0, "held from the spawn");
+  await answered.driver.initialize();
+  assert.equal(releases, 1, "released once the agent answered");
+  answered.driver.dispose();
+  assert.equal(releases, 1, "released only once");
+
+  let abandoned = 0;
+  const disposed = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined,
+    { resolveLaunch: () => ({ command: agy, release: () => { abandoned++; } }) });
+  disposed.driver.dispose();
+  assert.equal(abandoned, 1, "a launch disposed before its handshake releases it too");
 });
 
 test("external session discovery and adoption never probe the setup-derived Antigravity agent", () => {

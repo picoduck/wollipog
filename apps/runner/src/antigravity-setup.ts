@@ -478,6 +478,8 @@ export class AntigravitySetupSupervisor {
   private installing: Promise<void> | null = null;
   /** What session launches may run (#4779): see `antigravity-launch-ledger.ts`. */
   private readonly launches = new AntigravityLaunchLedger();
+  /** Executables launches resolved and still need kept (until their agent answers), with counts. */
+  private readonly launchesInUse = new Map<string, number>();
   private installAbort: AbortController | null = null;
   private managed: ManagedState = {};
   /** Why the last install failed before its rollback failed too. Once a later restore succeeds,
@@ -499,6 +501,7 @@ export class AntigravitySetupSupervisor {
     this.now = options.now ?? Date.now;
     this.platform = options.platform ?? process.platform;
     this.store = new AntigravityManagedStore(join(options.dataDir, "antigravity-managed"));
+    this.store.keepInUse(() => [...this.launchesInUse.keys()]);
     this.view = { version: 1, status: "checking", checkedAt: this.now(), credentialStore: "shared_os_keyring" };
     // An activation the runner never verified (it exited mid-update) is undone before anything
     // reads `current`.
@@ -543,6 +546,27 @@ export class AntigravitySetupSupervisor {
     return verified
       ? { command: verified.command, context: this.credentialContext(verified.managed), accessObservedAt: verified.accessObservedAt }
       : null;
+  }
+
+  /** `launchableTarget` for a launch about to spawn, held until `release`: no update removes its
+   * generation meanwhile, so a launcher that opens the executable after the spawn (bwrap, the cgroup
+   * helper) still finds it. Release once the agent answered its handshake, failed or exited. */
+  acquireLaunchTarget(): { command: string; context: AntigravityCredentialContext; release: () => void } | null {
+    const target = this.launchableTarget();
+    if (!target) return null;
+    const { command } = target;
+    this.launchesInUse.set(command, (this.launchesInUse.get(command) ?? 0) + 1);
+    let released = false;
+    return {
+      command, context: target.context,
+      release: () => {
+        if (released) return;
+        released = true;
+        const remaining = (this.launchesInUse.get(command) ?? 1) - 1;
+        if (remaining > 0) this.launchesInUse.set(command, remaining);
+        else this.launchesInUse.delete(command);
+      },
+    };
   }
 
   /** `launchableTarget` once no install, update or check is running, for a launch's preparation:

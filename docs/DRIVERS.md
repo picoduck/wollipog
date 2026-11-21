@@ -1597,9 +1597,16 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   launching. Preparation waits for a running install or check (`verifiedLaunchTarget()`), and the
   client resolves the executable once more at the spawn itself (`AcpCompatibility.resolveLaunch`,
   with no await in between), so updates that commit while the launch prepares can never leave it
-  naming a pruned generation: the store keeps `current` and `previous` through every commit. With
-  nothing verified (a failed check, or a rejected release a rollback could not undo) the launch is
-  refused with the start failure below, at preparation or at the spawn, and nothing is spawned.
+  naming a pruned generation: the store keeps `current` and `previous` through every commit, and
+  no prune removes a generation a launch resolved until its agent answers the handshake (a
+  launcher such as bwrap or the cgroup helper opens the executable after the runner spawned it).
+  The managed copy's updater switch is applied at that spawn, never stored in the session's
+  environment, so a PATH copy resolved instead keeps its own setting. With nothing verified (a
+  failed check, or a rejected release a rollback could not undo) the launch is refused with the
+  start failure below, at preparation or at the spawn, and nothing is spawned; a refusal at the
+  spawn releases the launch's provider-HOME reference. New Session offers Antigravity only while
+  something committed is launchable: a ready check of an uncommitted first install leaves the row
+  under Needs Setup as a failed check.
   `antigravity-launch-ledger.test.ts` checks every ordering of an update's activation, an access
   probe, its check settling, a launch and a session's sign-out report. It passes
   the context's scrub list to `spawnAgent`, which

@@ -39,8 +39,9 @@ export interface AcpCompatibility {
   /** What the launch runs, asked at the moment the client spawns it rather than when the launch was
    * prepared: an update can replace the executable while preparation awaits. The answer's command
    * and pinned values replace the prepared ones; null refuses the launch with the start failure,
-   * and nothing is spawned. */
-  resolveLaunch?: () => { command: string; pinnedEnvironment?: Readonly<Record<string, string>> } | null;
+   * and nothing is spawned. `release` is called once the agent no longer needs the executable kept
+   * where it is: it answered the handshake, failed it, exited, or the client was disposed. */
+  resolveLaunch?: () => { command: string; pinnedEnvironment?: Readonly<Record<string, string>>; release?: () => void } | null;
 }
 
 /** A launch the profile refused when it was about to spawn (nothing verified to run). Its message
@@ -54,7 +55,7 @@ export class AcpLaunchRefusedError extends Error {
 export function resolveAcpLaunch(
   command: string,
   compatibility: AcpCompatibility | undefined,
-): { command: string; compatibility: AcpCompatibility | undefined } {
+): { command: string; compatibility: AcpCompatibility | undefined; release?: () => void } {
   const resolve = compatibility?.resolveLaunch;
   if (!compatibility || !resolve) return { command, compatibility };
   const target = resolve();
@@ -62,7 +63,7 @@ export function resolveAcpLaunch(
   const { pinnedEnvironment: _prepared, ...profile } = compatibility;
   const pinned = target.pinnedEnvironment && Object.keys(target.pinnedEnvironment).length
     ? { pinnedEnvironment: { ...target.pinnedEnvironment } } : {};
-  return { command: target.command, compatibility: { ...profile, ...pinned } };
+  return { command: target.command, compatibility: { ...profile, ...pinned }, ...(target.release ? { release: target.release } : {}) };
 }
 
 /** Whether the client's `fs/write_text_file` service is offered. A profiled agent never gets it: the

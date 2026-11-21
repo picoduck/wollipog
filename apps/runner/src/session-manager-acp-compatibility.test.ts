@@ -103,3 +103,38 @@ test("a refusal at spawn time fails the session with the agent's start failure",
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
+
+// A refusal at spawn comes before any process exists (#4779), so the launch's provider-HOME
+// reference is released rather than kept until shutdown, as it is when a constructor may have started one.
+test("a refusal at spawn releases the launch's provider-HOME reference; another construction failure keeps it", async () => {
+  for (const refused of [true, false]) {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-acp-refusal-home-"));
+    const store = new SessionStore(root);
+    const settled: string[] = [];
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "compat-runner", undefined,
+      () => { throw refused ? new AcpLaunchRefusedError("Google Antigravity could not be started on this machine. Check its setup in Connections.")
+        : new Error("constructor failed after a spawn"); },
+      undefined, 4, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, [],
+      () => ({ acpCompatibility: { profile: "antigravity", resumable: false, resolveLaunch: () => null } }),
+    );
+    (manager as unknown as { providerHomeLeases: unknown }).providerHomeLeases = {
+      stopAcquisitions() {},
+      async acquire() {},
+      async acquireReference() {
+        return { first: true, release: async () => { settled.push("released"); return true; }, retain: async () => { settled.push("retained"); } };
+      },
+    };
+    try {
+      await manager.start({
+        sessionId: "home", workspaceId: "workspace", workspacePath: root, agentId: "google-antigravity",
+        driver: "acp", command: "agy", args: ["acp"], env: {}, useWorktree: false, title: "", titleSource: "generated",
+      });
+      assert.equal(store.readMeta("home")?.status, "failed");
+      assert.equal(settled.at(-1), refused ? "released" : "retained", refused ? "no process used the HOME" : "a process may have");
+    } finally {
+      manager.shutdownAll();
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  }
+});

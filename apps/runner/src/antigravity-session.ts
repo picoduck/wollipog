@@ -41,11 +41,12 @@ export function antigravityResumable(isolation: Pick<RunnerExecutionIsolation, "
 }
 
 /** The New Session row for a settled setup (any status but `checking`), or null when the runner
- * advertises none. */
+ * advertises none. `launchable` is whether the setup has a committed executable a launch may run. */
 export function antigravityAgentDefinition(
   setup: AntigravitySetupView,
   context: AntigravityCredentialContext,
   isolation: Pick<RunnerExecutionIsolation, "mode" | "network">,
+  launchable = true,
 ): AgentDefinition | null {
   const executable = setup.executable?.path;
   if (!executable || setup.status === "missing_runtime" || setup.status === "unsupported" || setup.status === "checking") {
@@ -53,7 +54,10 @@ export function antigravityAgentDefinition(
   }
   const ready = setup.status === "ready";
   const networkDenied = isolation.network === "deny";
-  const available = ready && !networkDenied;
+  // A ready check of an update's candidate that was never committed, with nothing committed before
+  // it, leaves nothing a launch may run: every attempt would be refused, so nothing is offered.
+  const uncommitted = ready && !launchable;
+  const available = ready && !networkDenied && !uncommitted;
   return {
     id: ANTIGRAVITY_AGENT_ID,
     name: ANTIGRAVITY_AGENT_NAME,
@@ -69,7 +73,7 @@ export function antigravityAgentDefinition(
     authStatus: setup.status === "sign_in_required" ? "unauthenticated" : ready ? "authenticated" : "unknown",
     ...(networkDenied
       ? { unavailableReason: ANTIGRAVITY_UNAVAILABLE.networkDenied }
-      : setup.status === "verification_failed" ? { unavailableReason: ANTIGRAVITY_UNAVAILABLE.checkFailed } : {}),
+      : setup.status === "verification_failed" || uncommitted ? { unavailableReason: ANTIGRAVITY_UNAVAILABLE.checkFailed } : {}),
     capabilities: {
       // The account's models from the setup's last check; a live session replaces them with the
       // model choices its own session advertises.
@@ -150,12 +154,26 @@ export function antigravitySessionLaunch(
 }
 
 /** The spawn-time answer to what an Antigravity launch runs (`AcpCompatibility.resolveLaunch`):
- * the setup's launchable executable and its pinned values at that moment, or null to refuse. */
+ * the setup's launchable executable and its pinned values at that moment, held until the client
+ * releases it, or null to refuse. */
 export function antigravityLaunchResolver(
-  setup: { launchableTarget(): { command: string; context: AntigravityCredentialContext } | null },
+  setup: { acquireLaunchTarget(): { command: string; context: AntigravityCredentialContext; release: () => void } | null },
 ): NonNullable<AcpCompatibility["resolveLaunch"]> {
   return () => {
-    const target = setup.launchableTarget();
-    return target ? { command: target.command, pinnedEnvironment: { ...target.context.env } } : null;
+    const target = setup.acquireLaunchTarget();
+    return target ? { command: target.command, pinnedEnvironment: { ...target.context.env }, release: target.release } : null;
   };
+}
+
+/** A prepared launch's explicit environment: without the credential context's scrubbed names, and
+ * without the values a context pins (the managed copy's updater switch, read from `managedContext`).
+ * Those belong to whichever copy the spawn resolves and are applied there (`pinnedEnvironment`), so
+ * a PATH copy resolved instead keeps the setting its own environment gives it. */
+export function antigravitySessionEnvironment(
+  env: Readonly<Record<string, string>>,
+  scrubInheritedEnv: readonly string[],
+  managedContext: AntigravityCredentialContext,
+): Record<string, string> {
+  const removed = new Set([...scrubInheritedEnv, ...Object.keys(managedContext.env)]);
+  return Object.fromEntries(Object.entries(env).filter(([name]) => !removed.has(name)));
 }

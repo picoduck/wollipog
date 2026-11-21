@@ -176,6 +176,9 @@ export class AcpClient {
     // when it was prepared. A refusal throws before anything is spawned.
     const launch = resolveAcpLaunch(opts.command, opts.compatibility);
     this.compatibility = launch.compatibility;
+    // The resolved executable is held until the agent answers the handshake (it has then opened
+    // it), so a launcher that opens it after this spawn (bwrap, the cgroup helper) still finds it.
+    this.releaseLaunch = launch.release;
     this.orchestrator = opts.orchestrator === true;
     // `||`, not `??`: the role can only ever widen the assertion. An explicit `false` alongside the
     // coupled preset must not be able to switch the pinned-identity check off.
@@ -188,7 +191,13 @@ export class AcpClient {
     this.filesystem = new AcpFilesystemService(opts.cwd, context);
     this.terminals = new AcpTerminalService(this.filesystem, context, opts.isolation, { cgroup: opts.reviewWriterCgroup });
     this.kill = deps.kill ?? killTree;
-    this.child = (deps.spawn ?? spawnAgent)({ ...opts, command: launch.command, env });
+    try {
+      this.child = (deps.spawn ?? spawnAgent)({ ...opts, command: launch.command, env });
+    } catch (error) {
+      this.finishLaunch();
+      throw error;
+    }
+    this.child.once("close", () => this.finishLaunch());
     this.peer = new JsonRpcPeer(this.child.stdin, this.child.stdout, (err) =>
       this.ev.onStderr(`transport: ${err.message}`),
     );
@@ -226,6 +235,7 @@ export class AcpClient {
 
   private readonly sessionContext: AcpSessionContextConfig | undefined;
   private readonly compatibility: AcpCompatibility | undefined;
+  private releaseLaunch: (() => void) | undefined;
   private readonly mcpEnvironment: NodeJS.ProcessEnv;
   private readonly orchestrator: boolean;
   private readonly orchestratorRole: boolean;
@@ -274,12 +284,21 @@ export class AcpClient {
     } catch (error) {
       // A profiled agent that cannot complete the handshake is an installation problem.
       throw this.compatibilityError("start") ?? error;
+    } finally {
+      this.finishLaunch();
     }
     // Keyed on the role, not the preset: only the exact audited adapter release may ever carry
     // Orchestrator authority, whichever launch shape asked for it.
     if (this.orchestratorRole) assertClaudeAgentAcpOrchestratorIdentity(this.negotiation.agentInfo);
     this.supportsImages = this.negotiation.stable.promptImage;
     this.ev.onAcpCapabilities?.(runtimeCapabilities(this.negotiation));
+  }
+
+  /** The launch no longer needs its resolved executable kept (answered, failed or gone). */
+  private finishLaunch(): void {
+    const release = this.releaseLaunch;
+    this.releaseLaunch = undefined;
+    release?.();
   }
 
   private compatibilityError(stage: "start" | "resume" | "turn", detail?: string): Error | undefined {
@@ -694,6 +713,7 @@ export class AcpClient {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.finishLaunch();
     this.transportClosed = true;
     this.terminals.dispose();
     this.settlePendingPermissions();

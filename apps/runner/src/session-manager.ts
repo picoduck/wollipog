@@ -11036,7 +11036,8 @@ export class SessionManager {
       if (reviewWriter) this.driverReviewWriterTokens.set(client, reviewWriter);
     } catch (error) {
       if (launchHome) {
-        if (driverConstructionStarted) await this.retainProviderHomeReference(launchHome);
+        // An ACP profile's refusal comes before its spawn (#4779): no process used the HOME.
+        if (driverConstructionStarted && !(error instanceof AcpLaunchRefusedError)) await this.retainProviderHomeReference(launchHome);
         else await this.releaseProviderHomeReference(launchHome);
       }
       if (worktreeLeaseOwner) this.store.releaseWorktreeLease(sessionId, worktreeLeaseOwner);
@@ -18242,6 +18243,8 @@ export class SessionManager {
     // driver's own reference holds the HOME, or when the fork gives up before that.
     const forkPreparationHome = this.launchPreparationProviderHome();
     let forkConstructionStarted = false;
+    // An ACP profile refused before spawning (#4779): no process ever used the provider HOME.
+    let forkRefusedBeforeSpawn = false;
     // The Claude target fork's reference: settled on the fork probe's own tree proof once
     // forkSession returns or throws; released unproven only if forkSession was never called.
     let claudeForkHome: ProviderHomeReference | null = null;
@@ -18785,6 +18788,7 @@ export class SessionManager {
         ...(retainedPrompt ? { retainedPrompt } : {}),
       };
     } catch (err) {
+      if (err instanceof AcpLaunchRefusedError) forkRefusedBeforeSpawn = true;
       if (forkedThreadId && client?.archiveSession) {
         try {
           await client.archiveSession(forkedThreadId);
@@ -18861,7 +18865,7 @@ export class SessionManager {
       } else if (forkHome) {
         const unused = forkHome;
         forkHome = null;
-        if (forkConstructionStarted) await this.retainProviderHomeReference(unused);
+        if (forkConstructionStarted && !forkRefusedBeforeSpawn) await this.retainProviderHomeReference(unused);
         else await this.releaseProviderHomeReference(unused);
       }
       if (claudeForkHome) {

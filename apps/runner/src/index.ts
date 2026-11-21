@@ -189,6 +189,7 @@ import {
   antigravitySessionLaunch,
   antigravitySignOutSuperseded,
   antigravityLaunchResolver,
+  antigravitySessionEnvironment,
   withAntigravityAgent,
   withoutAntigravityAgent,
 } from "./antigravity-session.js";
@@ -1040,7 +1041,8 @@ const configuredAgentIds = new Set(config.agents.map((agent) => agent.id));
 function publishAntigravityAgent(setup: AntigravitySetupView): void {
   // An operator's configured agent owns the id, its row and its auth status; the setup touches none.
   if (setup.status === "checking" || configuredAgentIds.has(ANTIGRAVITY_AGENT_ID)) return;
-  const row = antigravityAgentDefinition(setup, antigravityLaunchContext(), config.executionIsolation);
+  const row = antigravityAgentDefinition(setup, antigravityLaunchContext(), config.executionIsolation,
+    antigravitySetup.launchableTarget() !== null);
   // A sign-in confirmed by a check that finished after a session's sign-out report replaces it.
   const runtime = acpAuthStatus.get(ANTIGRAVITY_AGENT_ID);
   const staleSignOut = runtime?.status !== undefined &&
@@ -1076,9 +1078,7 @@ async function prepareAntigravityLaunch(
   if (!target) return { launchRefusal: acpCompatibilityFailure(launch.acpCompatibility, "start")! };
   meta.command = target.command;
   meta.args = [...launch.args];
-  const env = { ...meta.env };
-  for (const name of launch.scrubInheritedEnv) delete env[name];
-  meta.env = { ...env, ...launch.env };
+  meta.env = antigravitySessionEnvironment(meta.env, launch.scrubInheritedEnv, antigravitySetup.credentialContext(true));
   // Isolation and preparation await before the spawn, and updates can commit meanwhile: the
   // executable is resolved once more at the spawn itself, so it is always one the store keeps.
   return { scrubInheritedEnv: launch.scrubInheritedEnv,
