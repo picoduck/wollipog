@@ -16,6 +16,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentDriverKind } from "@wollipog/protocol";
 import type { RunnerConfig } from "./config.js";
+import { codexLauncherBootstrap } from "./codex-plugins.js";
 import { runContextCommand, type ContextCommandResult } from "./context-command.js";
 import { supportsStructuredCodexDeviceLogin } from "./discovery/codex-app-server.js";
 import {
@@ -251,7 +252,7 @@ function credentialEnvNames(meta: SessionMeta, provider: "claude" | "codex"): st
   return names.filter((name) => !!meta.env[name]);
 }
 
-function launchFingerprint(meta: SessionMeta): { command: string; bootstrap: string[] } {
+function legacyLaunchFingerprint(meta: SessionMeta): { command: string; bootstrap: string[] } {
   // Version-manager launches use `node /absolute/provider-cli.js`; the script is part of the
   // installation identity. Provider turn/model flags are deliberately not credential selectors.
   const bootstrap = meta.args.length && /(?:^|[\\/])node(?:\.exe)?$/i.test(meta.command)
@@ -260,8 +261,32 @@ function launchFingerprint(meta: SessionMeta): { command: string; bootstrap: str
   return { command: meta.command, bootstrap };
 }
 
+function launchFingerprint(meta: SessionMeta) {
+  const legacy = legacyLaunchFingerprint(meta);
+  if (providerFamily(meta.driver) !== "codex") return legacy;
+  try {
+    const bootstrap = codexRecoveryBootstrap(meta);
+    // Preserve old evidence only where it already described the complete installation.
+    // Never alias the lossy package/env/flagged-Node identity to a newly distinguished launch.
+    return JSON.stringify(bootstrap) === JSON.stringify(legacy.bootstrap)
+      ? legacy
+      : { version: 2, command: meta.command, bootstrap };
+  } catch {
+    // Keep a scope (and therefore durable blocks), but never run an unrecognized launcher.
+    return { version: 2, command: meta.command, bootstrap: [], unsupported: true };
+  }
+}
+
+function codexRecoveryBootstrap(meta: SessionMeta): string[] {
+  // Match account sign-in: selected direct executables (including discovered codex.js
+  // targets) with no arguments need no prefix. Nonempty launchers require the shared grammar.
+  return meta.args.length === 0 ? [] : codexLauncherBootstrap(meta.command, meta.args);
+}
+
 function providerArgs(meta: SessionMeta, tail: string[]): string[] {
-  return [...launchFingerprint(meta).bootstrap, ...tail];
+  return [...(providerFamily(meta.driver) === "codex"
+    ? codexRecoveryBootstrap(meta)
+    : legacyLaunchFingerprint(meta).bootstrap), ...tail];
 }
 
 function contextIdentity(meta: SessionMeta): unknown {
@@ -304,7 +329,8 @@ export function describeProviderCredentialScope(
     id,
     provider,
     configuredCredential,
-    canStartLogin: loginAvailable && !configuredCredential && meta.context.kind === "native",
+    canStartLogin: loginAvailable && !configuredCredential && meta.context.kind === "native" &&
+      !("unsupported" in launchFingerprint(meta)),
   };
 }
 
@@ -379,7 +405,11 @@ function codexIdentity(meta: SessionMeta, digestKey?: DigestKey): string | undef
   const credentialNames = credentialEnvNames(meta, "codex");
   if (credentialNames.length) {
     // Only the digest is persisted. Raw values never leave this function or enter logs/events.
-    return digest(credentialNames.map((name) => [name, meta.env[name]]), digestKey);
+    const credentials = credentialNames.map((name) => [name, meta.env[name]]);
+    const launch = launchFingerprint(meta);
+    // Old key-only evidence cannot authorize a package/env/flagged-Node installation that
+    // the old fingerprint could not distinguish. No metadata or legacy aliases are rewritten.
+    return digest("version" in launch ? { version: 2, launch, credentials } : credentials, digestKey);
   }
   // Codex's documented `login status` currently proves method/readiness but exposes no stable
   // account identifier. Hashing auth.json would identify a token rotation, not an account, so
