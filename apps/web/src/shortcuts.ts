@@ -752,13 +752,20 @@ export type ShortcutAvailability = {
   turnInterruptionSupported?: boolean;
   /** Rail destinations hidden by preference (#385); their digits are unassigned, not dead. */
   hiddenRailViews?: ReadonlySet<string>;
+  /**
+   * With no session open, the Session shortcuts that work here all the same: an open Assistant
+   * thread's side panel answers its own chords (#4776). The Session group is then usable, and its
+   * other rows say they need a session.
+   */
+  sidePanelShortcuts?: ReadonlySet<ShortcutId>;
 };
 
 /** Why a whole group cannot be used here, said once under its heading, or null. */
 export function shortcutGroupUnavailableReason(
   group: ShortcutGroup,
-  context: Pick<ShortcutAvailability, "sessionOpen">,
+  context: Pick<ShortcutAvailability, "sessionOpen" | "sidePanelShortcuts">,
 ): string | null {
+  if (group === "Session" && !context.sessionOpen && (context.sidePanelShortcuts?.size ?? 0) > 0) return null;
   if ((group === "Session" || group === "Session Reading") && !context.sessionOpen) {
     return "Open a session to use these.";
   }
@@ -767,6 +774,11 @@ export function shortcutGroupUnavailableReason(
 
 /** Why this one binding cannot be used here, beyond what its group already says, or null. */
 export function shortcutUnavailableReason(definition: ShortcutDefinition, context: ShortcutAvailability): string | null {
+  // A Session group usable for its side panel alone (an Assistant thread): the rest need a session.
+  if (definition.group === "Session" && !context.sessionOpen && context.sidePanelShortcuts &&
+      !context.sidePanelShortcuts.has(definition.id)) {
+    return "Open a session to use this";
+  }
   const railView = railViewForShortcut(definition.id);
   if (railView && context.hiddenRailViews?.has(railView)) {
     return "Hidden in Settings → Appearance";

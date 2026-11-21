@@ -146,6 +146,18 @@ for (const theme of ["dark", "light"] as const) {
       await expect(panel(page)).toHaveCount(0);
     });
 
+    test("on a missing thread's placeholder the side panel's chords change nothing", async ({ page }) => {
+      await page.clock.setFixedTime(FIXED_NOW);
+      await page.goto(`/assistants-e2e.html?theme=${theme}&path=${encodeURIComponent("/assistants/~bgBvAHAAZQA")}`);
+      await expect(page.getByRole("heading", { name: "Thread Not Found" })).toBeVisible();
+      await page.keyboard.press("Control+Backslash");
+      await expect(panel(page)).toHaveCount(0);
+      // The preference the chord would have saved is untouched: a real thread still opens closed.
+      await page.goto(`/assistants-e2e.html?theme=${theme}&path=${encodeURIComponent(TRIAGE_PATH)}`);
+      await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
+      await expect(panel(page)).toHaveCount(0);
+    });
+
     test("a focused card that changes group keeps focus in the panel", async ({ page }) => {
       await open(page, theme);
       await toggle(page).click();
@@ -275,6 +287,20 @@ for (const theme of ["dark", "light"] as const) {
 
   test.describe(`${theme} at 1000×800`, () => {
     test.use({ viewport: { width: 1000, height: 800 }, colorScheme: theme, timezoneId: "UTC", locale: "en-US" });
+
+    test("behind an overlaying panel the column's waiting approval is out of the tab order until it closes", async ({ page }) => {
+      await open(page, theme);
+      const approve = waitingInHeader(page).getByRole("button", { name: "Approve Once" });
+      await toggle(page).click();
+      await expect(panel(page)).toHaveAttribute("data-presentation", "overlay");
+      await expect(page.locator(".detail-column-lead")).toHaveAttribute("inert", "");
+      await approve.focus();
+      await expect(approve).not.toBeFocused();
+      await panel(page).getByRole("button", { name: "Close Panel" }).click();
+      await expect(page.locator(".detail-column-lead")).not.toHaveAttribute("inert", "");
+      await approve.focus();
+      await expect(approve).toBeFocused();
+    });
 
     test("an overlaying panel closes as a waiting card opens its request, so nothing covers it", async ({ page }) => {
       await open(page, theme);

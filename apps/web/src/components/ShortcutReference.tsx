@@ -9,6 +9,7 @@ import {
   shortcutReferenceGroups,
   type ShortcutDefinition,
   type ShortcutReferenceGroup,
+  type ShortcutId,
   type ShortcutScope,
 } from "../shortcuts.js";
 import { railDigits, visibleRailViews } from "../rail-preferences.js";
@@ -75,6 +76,7 @@ export function ShortcutReference({
   filesSupported,
   conversationSteeringSupported,
   turnInterruptionSupported,
+  sidePanelShortcuts,
 }: {
   onClose: () => void;
   /** The shortcut scope of the page and focus the reference was opened from. */
@@ -84,6 +86,8 @@ export function ShortcutReference({
   filesSupported: boolean;
   conversationSteeringSupported: boolean;
   turnInterruptionSupported: boolean;
+  /** With no session open, the Session shortcuts an Assistant thread's side panel answers (#4776). */
+  sidePanelShortcuts?: ReadonlySet<ShortcutId>;
 }) {
   const [query, setQuery] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
@@ -107,6 +111,7 @@ export function ShortcutReference({
       conversationSteeringSupported,
       turnInterruptionSupported,
       hiddenRailViews: railPreferences.hidden,
+      ...(sidePanelShortcuts ? { sidePanelShortcuts } : {}),
     },
     keys,
     query,

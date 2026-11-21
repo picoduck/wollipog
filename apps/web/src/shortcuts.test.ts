@@ -21,6 +21,7 @@ import {
 } from "./shortcuts.js";
 import { GLOBAL_VIEW_ITEMS } from "./navigation.js";
 import { SESSION_TOOLS } from "./session-tools.js";
+import { SIDE_PANEL_CHORDS } from "./components/right-panel-state.js";
 
 function key(
   value: string,
@@ -363,6 +364,25 @@ test("the reference puts the current page's group first and marks only that one"
   }
   assert.equal(shortcutGroupForScope("Sessions"), null);
   assert.equal(shortcutGroupForScope("Run dialog"), null);
+});
+
+test("on an Assistant thread the side panel's chords are available and the rest of Session needs a session (#4776)", () => {
+  const groups = shortcutReferenceGroups({
+    scope: "Global",
+    availability: { ...AVAILABLE, sessionOpen: false, sidePanelShortcuts: SIDE_PANEL_CHORDS },
+    keys: referenceKeys,
+  });
+  const session = groups.find((group) => group.group === "Session")!;
+  assert.equal(session.note, null);
+  const reason = (id: string) => session.rows.find((row) => row.id === id)?.reason;
+  assert.equal(reason("toggle-side-panel"), null);
+  assert.equal(reason("open-review"), null);
+  assert.equal(reason("open-files"), "Open a session to use this");
+  assert.equal(reason("open-side-chat"), "Open a session to use this");
+  // Session Reading is the transcript's, which a thread's side panel does not answer.
+  assert.equal(groups.find((group) => group.group === "Session Reading")!.note, "Open a session to use these.");
+  assert.ok(SIDE_PANEL_CHORDS.has("toggle-side-panel"));
+  assert.equal(SIDE_PANEL_CHORDS.has("open-files"), false);
 });
 
 test("without a session the Session groups carry one note and no per-row session reason", () => {

@@ -3864,6 +3864,12 @@ textarea {
   display: flex;
   flex-direction: column;
 }
+/* A host's lead at the head of the chat column (an Assistant thread's facts and waiting work,
+   #4776): its own height, never squeezed by the transcript below. */
+.detail-column-lead {
+  flex: none;
+  min-width: 0;
+}
 /* The side panel (#2843; docs/design-system.md §2.5, §2.10): a docked column, flush with the frame,
    the full height under the session bar, with one hairline on its leading edge. Its content answers
    to the panel's own width through the `rp` container, never to the viewport. */

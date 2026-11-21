@@ -3613,6 +3613,8 @@ function SessionDetailLoaded({
   // takes the composer's place (#2866). A draft that changed while it was hidden had no width to
   // measure, so revealing it grows it again.
   const phonePanelOpen = isMobile && rightPanel.open;
+  // Whether the side panel overlays the conversation; only a column lead reads it (#4776).
+  const [panelOverlay, setPanelOverlay] = useState(false);
   const composerHiddenOnPhone = phonePanelOpen || phoneTerminalOpen;
   const toastComposerRef = useToastChrome<HTMLDivElement>();
   useLayoutEffect(() => {
@@ -7370,7 +7372,11 @@ function SessionDetailLoaded({
               onFocusLost={() => scrollRef.current?.focus({ preventScroll: true })}
             />
           )}
-          {mode === "expanded" && columnLead}
+          {/* Behind an overlaying panel's scrim the lead is out of reach of the pointer, so it is out
+              of the tab order too: its approvals are answered once the panel closes (#4776). */}
+          {mode === "expanded" && columnLead !== undefined && (
+            <div className="detail-column-lead" inert={panelOverlay || undefined}>{columnLead}</div>
+          )}
           {/* Campaign notices, not session notices (§13.2; #2036): they describe the campaign, not
               whether this session can take its next turn, so they head the chat column directly
               under the session bar, in this order, on its edges (#2157), rather than in the notice
@@ -8286,6 +8292,7 @@ function SessionDetailLoaded({
           backgroundInventoryError={backgroundInventoryError}
           onRetryBackgroundInventory={retryBackgroundInventory}
           launchedWork={launchedWork}
+          onOverlayChange={columnLead !== undefined ? setPanelOverlay : undefined}
         />}
       </div>
       {/* A phone opens the summary as a bottom sheet (§7.5, §9.2), so the transcript never sits
