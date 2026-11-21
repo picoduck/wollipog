@@ -93,7 +93,7 @@ test("a new thread launches an assistant-role session whose every launch carries
       id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined, connectionId: undefined,
       assistant: "wollipog", title: "Weekly Cleanup", harness: "claude-code", status: "working",
       access: { level: "full_access", destructive: "ask" }, launchedSessionIds: [], archivedAt: null,
-      usage: { launchedSessions: { used: 0, limit: 10 }, costUsd: { used: 0, limit: 25 } }, limitsEditable: true, confirmations: [],
+      usage: { launchedSessions: { used: 0, limit: 10 }, costUsd: { used: 0, limit: 25 } }, limitsEditable: true, launchPaused: false, confirmations: [],
       decisionDelegation: { revision: 0, grant: null },
       evidenceReview: { available: false, reason: "This thread’s harness or model cannot receive verified evidence images." },
     });
@@ -162,14 +162,17 @@ test("saved limits belong to the owner and only apply on thread creation", async
   } finally { await h.close(); }
 });
 
-test("install backfills pre-existing threads with the historical fixed limits", async () => {
+test("install backfills pre-existing threads with the historical limits and an unpaused flag", async () => {
   const h = await harness();
   try {
     const created = (await h.call("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
-    h.db.raw().exec("ALTER TABLE assistant_threads DROP COLUMN cost_limit_usd; ALTER TABLE assistant_threads DROP COLUMN launch_limit");
+    h.db.raw().exec(`ALTER TABLE assistant_threads DROP COLUMN cost_limit_usd;
+      ALTER TABLE assistant_threads DROP COLUMN launch_limit;
+      ALTER TABLE assistant_threads DROP COLUMN launch_paused`);
     const { AssistantThreadStore } = await import("./assistant-thread-store.js");
     AssistantThreadStore.install(h.db.raw());
     assert.deepEqual(h.threads.get(h.owner, created.id).usage, created.usage);
+    assert.equal(h.threads.get(h.owner, created.id).launchPaused, false);
   } finally { await h.close(); }
 });
 

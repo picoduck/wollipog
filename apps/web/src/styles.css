@@ -1654,6 +1654,10 @@ kbd {
   background: var(--bg-elev-3);
   border-color: var(--control-outline);
 }
+.choice-chips > .btn[aria-checked="true"] {
+  background: var(--bg-elev-3);
+  border-color: var(--control-outline);
+}
 .btn.primary {
   background: var(--primary-bg);
   border-color: transparent;
@@ -2685,6 +2689,15 @@ button.status { cursor: pointer; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.model-picker-search {
+  width: 100%;
+  min-width: 0;
+  margin-bottom: var(--space-2);
+}
+.model-picker-family {
+  padding-inline-start: var(--space-3);
+}
+
 .menu-item {
   display: flex;
   flex: none;
@@ -12066,6 +12079,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     margin: 0 calc(-1 * var(--space-2));
     padding: 0 var(--space-2) 0 var(--space-4);
   }
+  /* The grabber's top margin and height remain reserved above the pinned Model Settings header. */
+  .model-settings .menu-head.persistent { top: var(--space-3); }
   /* Sheet rows read at the phone's reading size, like the dialog sheet's body. */
   .menu-item { font-size: var(--text-md); }
   /* A section label that only repeats the sheet's title row is dropped. */
@@ -13170,6 +13185,38 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 .assistant-thread-account-picker .choice-row-title { overflow-wrap: anywhere; }
 .assistant-thread-account-picker .choice-row-body { gap: var(--space-1); }
+.assistant-thread-settings .modal-head { gap: var(--space-2); }
+.assistant-thread-spending-row { display: block; }
+.choice-chips,
+.assistant-launch-stepper {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.choice-chips > .btn,
+.assistant-launch-stepper > .btn { min-width: var(--control-h); }
+.assistant-launch-stepper > input { width: 6rem; }
+.assistant-launch-stepper > input:disabled { background: var(--bg-elev-2); }
+.assistant-thread-defaults-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-h);
+  color: inherit;
+  text-decoration: underline;
+}
+.assistant-thread-spending-row .assistant-panel-meter > span { grid-column: 1 / -1; }
+.assistant-thread-account-label { overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .assistant-thread-settings .modal-back { display: none; }
+  .assistant-thread-settings-cancel { order: -1; }
+  .assistant-thread-account-label:not(.pid),
+  .assistant-thread-account-label .pid-value {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
+}
 .assistant-thread-head:empty { display: none; }
 .assistant-work-open {
   display: grid;

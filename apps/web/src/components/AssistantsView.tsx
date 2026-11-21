@@ -22,8 +22,6 @@ import { AssistantThreadLimitsDialog } from "./AssistantThreadLimitsDialog.js";
 import { AssistantDecisionDelegationDialog } from "./AssistantDecisionDelegationDialog.js";
 import { useLaunchedWorkGroups } from "./AssistantWorkCards.js";
 import type { LaunchedWork } from "../assistant-launched-work.js";
-import { ChangeAssistantThreadAccountDialog } from "./ChangeAssistantThreadAccountDialog.js";
-import { ChangeAssistantThreadHarnessDialog } from "./ChangeAssistantThreadHarnessDialog.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { AssistantsIcon, PlusIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
@@ -94,8 +92,6 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   const [creating, setCreating] = useState(false);
   const [renaming, setRenaming] = useState<AssistantThread | null>(null);
   const [archiving, setArchiving] = useState(false);
-  const [changingAccount, setChangingAccount] = useState<AssistantThread | null>(null);
-  const [changingHarness, setChangingHarness] = useState<AssistantThread | null>(null);
   const generation = useRef(0);
   /** A read is in flight, and whether another was asked for while it was. */
   const reading = useRef(false);
@@ -294,7 +290,6 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
     { label: "Open as Session", onClick: () => navigate({ name: "session", id: thread.sessionId }) },
     ...(decisionHistorySupported && canTogglePanel ? [{ label: "Delegated Decisions", onClick: () => panel.show("Decisions") }] : []),
     ...(thread.status === "archived" ? [] : [
-      ...(thread.accountChangeSupported ? [{ label: "Change Account", onClick: () => setChangingAccount(thread) }] : []),
       { label: "Rename", onClick: () => setRenaming(thread) },
       ...(thread.decisionDelegation ? [{
         label: "Decision Delegation", onClick: () => navigate({ name: "assistants", threadId: thread.id, delegation: true }),
@@ -440,17 +435,6 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
           }}
         />
       )}
-      {changingAccount && (
-        <ChangeAssistantThreadAccountDialog
-          thread={changingAccount}
-          onClose={() => setChangingAccount(null)}
-          onChanged={(thread) => {
-            setChangingAccount(null);
-            replace(thread);
-            showToast("Thread account changed.", { tone: "success" });
-          }}
-        />
-      )}
       {renaming && (
         <RenameThreadDialog
           thread={renaming}
@@ -462,27 +446,14 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
           }}
         />
       )}
-      {changingHarness && <ChangeAssistantThreadHarnessDialog
-        thread={changingHarness} onClose={() => setChangingHarness(null)}
-        onChanged={(thread) => { replace(thread); setChangingHarness(null); }} />}
       {limits && selected && (
         <AssistantThreadLimitsDialog
           key={selected.id}
           thread={selected}
           model={model ? resolvedModelLabel(model) : undefined}
           effort={effort ? effortLabel(effort) : undefined}
-          limits={selected.usage && { costUsd: selected.usage.costUsd.limit, launchedSessions: selected.usage.launchedSessions.limit }}
           onClose={() => navigate({ name: "assistants", threadId: selected.id }, { replace: true })}
-          onNewThread={() => {
-            navigate({ name: "assistants", threadId: selected.id }, { replace: true });
-            setCreating(true);
-          }}
-          onChangeHarness={() => {
-            navigate({ name: "assistants", threadId: selected.id }, { replace: true });
-            setChangingHarness(selected);
-          }}
-          onAccountChanged={replace}
-          onSave={async (next) => replace((await api.setAssistantThreadLimits(selected.id, next)).thread)}
+          onChanged={replace}
         />
       )}
       {delegation && selected && (selected.decisionDelegation && selected.status !== "archived"

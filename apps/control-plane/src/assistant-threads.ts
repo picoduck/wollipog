@@ -92,10 +92,11 @@ function decisionDelegation(body: unknown, now: number): AssistantDecisionDelega
 
 function threadLimits(body: unknown, existingBudget?: number | null): AssistantThreadLimits {
   if (!body || typeof body !== "object" || Array.isArray(body) ||
-      Object.keys(body).some((key) => key !== "costUsd" && key !== "launchedSessions")) {
-    throw new AssistantThreadRefusal("Only costUsd and launchedSessions are accepted.", 400);
+      Object.keys(body).some((key) => key !== "costUsd" && key !== "launchedSessions" &&
+        !(key === "launchPaused" && existingBudget !== undefined))) {
+    throw new AssistantThreadRefusal("Unsupported thread limit field.", 400);
   }
-  const { costUsd, launchedSessions } = body as Record<string, unknown>;
+  const { costUsd, launchedSessions, launchPaused } = body as Record<string, unknown>;
   if (costUsd !== null && (typeof costUsd !== "number" || costUsd <= 0 ||
       (costUsd !== existingBudget && (!Number.isSafeInteger(Math.round(costUsd * 100)) || Number(costUsd.toFixed(2)) !== costUsd)))) {
     throw new AssistantThreadRefusal("The cost budget must be a positive amount in whole cents, or null for no budget.", 400);
@@ -104,7 +105,10 @@ function threadLimits(body: unknown, existingBudget?: number | null): AssistantT
       !Number.isSafeInteger(launchedSessions) || launchedSessions < 0)) {
     throw new AssistantThreadRefusal("The session launch limit must be a nonnegative whole number, or null for no limit.", 400);
   }
-  return { costUsd, launchedSessions };
+  if (launchPaused !== undefined && typeof launchPaused !== "boolean") {
+    throw new AssistantThreadRefusal("Launch pause must be true or false.", 400);
+  }
+  return { costUsd, launchedSessions, ...(launchPaused === undefined ? {} : { launchPaused }) };
 }
 
 function threadTitle(value: unknown): string {
@@ -194,7 +198,7 @@ export class AssistantThreads {
     const launchCount = launched.length + campaigns.length;
     const costs = this.store.costs(row.id);
     const earlierConversations = this.store.history(row.id);
-    const launchLimitRefusal = status === "archived" ? null : assistantThreadLaunchLimitMessage(launchCount, row.launch_limit)
+    const launchLimitRefusal = status === "archived" ? null : assistantThreadLaunchLimitMessage(launchCount, row.launch_limit, Boolean(row.launch_paused))
       ?? (row.cost_limit_usd !== null && floorBudgetCents(row.cost_limit_usd - costs.launchedHeldUsd - costs.backingSpentUsd) < 0.01
         ? assistantThreadBudgetRefusal(row.cost_limit_usd) : null);
     return {
@@ -220,6 +224,7 @@ export class AssistantThreads {
       },
       ...(launchLimitRefusal ? { launchLimitRefusal } : {}),
       ...(status !== "archived" ? { limitsEditable: true } : {}),
+      launchPaused: Boolean(row.launch_paused),
       decisionDelegation: threadDecisionDelegation(row),
       ...(session && this.deps.evidenceReview ? { evidenceReview: this.deps.evidenceReview(session) } : {}),
       confirmations,

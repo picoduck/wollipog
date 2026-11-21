@@ -919,6 +919,40 @@ test("the owner can raise exhausted thread limits, but cannot lower the budget p
   } finally { await h.close(); }
 });
 
+test("pausing thread launches preserves the limit and blocks launch until the owner resumes", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const edit = `/api/assistant-threads/${thread.id}/limits`;
+    const env = await h.provision(thread.sessionId);
+    const run = async (id: number) => resultOf((await h.callTools(env, launch(id, h.location.id)))[0]);
+
+    const paused = await h.ownerCall("PUT", edit, { costUsd: null, launchedSessions: 1, launchPaused: true });
+    assert.equal(paused.status, 200);
+    assert.equal(paused.body.thread.launchPaused, true);
+    assert.deepEqual(paused.body.thread.usage.launchedSessions, { used: 0, limit: 1 });
+    assert.match(paused.body.thread.launchLimitRefusal, /paused new launches/);
+    assert.match((await run(55)).error, /paused new launches/);
+
+    const legacyEdit = await h.ownerCall("PUT", edit, { costUsd: null, launchedSessions: 1 });
+    assert.equal(legacyEdit.body.thread.launchPaused, true);
+    assert.match((await run(56)).error, /paused new launches/);
+
+    const resumed = await h.ownerCall("PUT", edit, { costUsd: null, launchedSessions: 1, launchPaused: false });
+    assert.equal(resumed.status, 200);
+    assert.equal(resumed.body.thread.launchPaused, false);
+    assert.equal(resumed.body.thread.launchLimitRefusal, undefined);
+    assert.deepEqual(resumed.body.thread.usage.launchedSessions, { used: 0, limit: 1 });
+    assert.ok((await run(57)).sessionId);
+    assert.match((await run(58)).error, /1 of the 1 sessions/);
+
+    const pausedUnlimited = await h.ownerCall("PUT", edit, { costUsd: null, launchedSessions: null, launchPaused: true });
+    assert.equal(pausedUnlimited.status, 200);
+    assert.equal(pausedUnlimited.body.thread.usage.launchedSessions.limit, null);
+    assert.match((await run(59)).error, /paused new launches/);
+  } finally { await h.close(); }
+});
+
 test("removing a thread budget removes implicit caps and keeps explicitly requested caps", async () => {
   const h = await harness();
   try {

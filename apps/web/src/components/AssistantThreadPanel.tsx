@@ -169,26 +169,29 @@ function ThreadDetails({ thread, model, effort, onSettings }: {
     </dl>
     {thread.usage && <>
       <ThreadUsageMeter label="Budget" value={thread.usage.costUsd} format={formatUsd} unlimited="No Budget" />
-      <ThreadUsageMeter label="Session Launches" value={thread.usage.launchedSessions} format={String} unlimited="No Launch Limit" />
+      <ThreadUsageMeter label="Session Launches" value={thread.usage.launchedSessions} format={String}
+        unlimited="No Launch Limit" paused={thread.launchPaused} />
     </>}
     {!!thread.earlierConversations?.length && <AssistantThreadHistory entries={thread.earlierConversations} />}
     <button type="button" className="btn" onClick={onSettings}>Thread Settings…</button>
   </div>;
 }
 
-function ThreadUsageMeter({ label, value: { used, limit }, format, unlimited }: {
+export function ThreadUsageMeter({ label, value: { used, limit }, format, unlimited, paused, hideLabel }: {
   label: string;
   value: { used: number; limit: number | null };
   format: (value: number) => string;
   unlimited: string;
+  paused?: boolean;
+  hideLabel?: boolean;
 }) {
   const total = limit == null ? unlimited : format(limit);
   const summary = label === "Budget"
     ? limit == null ? `${format(used)} spent · ${total}` : `${format(used)} of ${total} spent`
-    : limit == null ? `${used} launched · ${total}`
-      : limit === 0 ? `${used} launched · Launches Paused` : `${used} of ${total} sessions launched`;
+    : paused || limit === 0 ? `${used} launched · Launches Paused`
+      : limit == null ? `${used} launched · ${total}` : `${used} of ${total} sessions launched`;
   return <div className="assistant-panel-meter">
-    <strong>{label}</strong>
+    {!hideLabel && <strong>{label}</strong>}
     <span>{summary}</span>
     {limit != null && limit > 0 && <div className="meter is-progress" role="meter" aria-label={label}
       aria-valuemin={0} aria-valuemax={limit} aria-valuenow={Math.min(used, limit)} aria-valuetext={summary}>

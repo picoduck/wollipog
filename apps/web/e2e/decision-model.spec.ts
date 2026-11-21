@@ -65,7 +65,7 @@ for (const viewport of VIEWPORTS) {
       const dialog = page.getByRole("dialog", { name: "Agent for Decisions" });
       await expect(dialog).toBeVisible();
       await dialog.getByRole("button", { name: /^Model:/ }).click();
-      await page.getByRole("option", { name: /^Haiku/ }).click();
+      await page.getByRole("radio", { name: "Haiku Latest", exact: true }).click();
       await dialog.getByRole("button", { name: /^Reasoning Effort:/ }).click();
       await page.getByRole("option", { name: /^Low/ }).click();
       await capture(page, `${viewport.label}-admin-agent-dialog`, testInfo);

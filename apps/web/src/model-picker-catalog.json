@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "families": [
+    { "label": "Fable", "alias": "fable", "releases": ["claude-fable-5-2", "claude-fable-5-1", "claude-fable-5"] },
+    { "label": "Opus", "alias": "opus", "releases": ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5"] },
+    { "label": "Sonnet", "alias": "sonnet", "releases": ["claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4-5"] },
+    { "label": "Haiku", "alias": "haiku", "releases": ["claude-haiku-5-5", "claude-haiku-4-5"] },
+    { "label": "Astra", "releases": ["gpt-6.2-astra", "gpt-6-astra"] },
+    { "label": "Sol", "releases": ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"] },
+    { "label": "Terra", "releases": ["gpt-6.1-terra", "gpt-5.6-terra"] },
+    { "label": "Luna", "releases": ["gpt-6-luna", "gpt-5.6-luna"] },
+    { "label": "Gemini 4", "siblings": true, "releases": ["gemini-4-neon", "gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen"] },
+    { "label": "Gemini Flash", "releases": ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"] },
+    { "label": "Muse Spark", "releases": ["muse-spark-1.3", "muse-spark-1.2", "muse-spark-1.1"] },
+    { "label": "Kimi K3", "releases": ["k3.1-pro", "k3", "kimi-k3.1-pro", "kimi-k3"] },
+    { "label": "GLM Flagship", "releases": ["glm-5.3", "glm-5.2", "glm-5.1", "glm-5"] }
+  ]
+}
