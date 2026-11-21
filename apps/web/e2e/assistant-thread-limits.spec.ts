@@ -171,12 +171,27 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       if (layout === "phone" && theme === "light") await capture(page, "default-no-limit-choices");
       await defaults.getByRole("button", { name: "Cancel", exact: true }).click();
       await page.getByRole("button", { name: /Manage Assistant Connections/ }).click();
-      const connections = page.getByRole("dialog", { name: "Assistant Connections" });
-      await expect(connections.getByRole("region", { name: "Your Connections" }).getByRole("button")).toHaveCount(10);
-      await expectFullyInViewport(connections.getByRole("button", { name: "Done", exact: true }), "Done with Assistant Connections");
+      await expect(page.getByRole("heading", { name: "Assistant Connections", exact: true })).toBeVisible();
+      expect(new URL(page.url()).searchParams.get("path")).toBe("/settings/assistant/connections");
+      const connections = page.getByRole("region", { name: "Connections", exact: true });
+      const rows = connections.getByRole("button");
+      await expect(rows).toHaveCount(9);
+      if (layout === "phone") {
+        const title = rows.first().locator(".setting-row-title");
+        await expect(title).toHaveCSS("-webkit-line-clamp", "2");
+        expect(await title.evaluate(element => {
+          const line = Number.parseFloat(getComputedStyle(element).lineHeight);
+          return element.clientHeight === Math.round(line * 2) && element.scrollHeight > element.clientHeight;
+        })).toBe(true);
+      }
+      const create = page.getByRole("button", { name: "New Connection", exact: true });
+      await expectFullyInViewport(create, "New Connection");
       await expectNoHorizontalOverflow(connections, "Assistant Connections");
       await expectPageNoHorizontalOverflow(page);
       if (theme === "dark") await capture(page, "assistant-connections-stress");
+      await rows.last().scrollIntoViewIfNeeded();
+      await expectFullyInViewport(rows.last(), "The final connection");
+      await expectFullyInViewport(create, "New Connection after scrolling");
 
       if (layout === "phone") {
         await open(page, "/settings", theme);
