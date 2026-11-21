@@ -26,6 +26,8 @@ export interface AssistantThreadAccess {
 export interface AssistantThreadLimits {
   costUsd: number | null;
   launchedSessions: number | null;
+  /** Per-thread only. Omission leaves the existing pause state alone. */
+  launchPaused?: boolean;
 }
 
 /** Saved on creation, so changing the owner's defaults never changes an existing thread. */
@@ -161,6 +163,8 @@ export interface AssistantThread {
   usage?: AssistantThreadUsage;
   /** Advertises the dedicated owner limits write route. Absent on older control planes. */
   limitsEditable?: true;
+  /** An explicit boolean advertises support for pausing without changing the launch limit. */
+  launchPaused?: boolean;
   /** Absent on older control planes. A null grant gives the thread no decision authority. */
   decisionDelegation?: AssistantDecisionDelegation;
   /** An owner-facing refusal when the current thread cannot launch more work. */

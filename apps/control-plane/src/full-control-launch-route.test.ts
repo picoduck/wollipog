@@ -302,6 +302,28 @@ test("an Assistant campaign uses the reviewed New Session settings and its own f
   }
 });
 
+test("an Assistant launch pause blocks campaign previews and previously prepared campaign starts", async () => {
+  const h = await assistantCampaignFixture();
+  try {
+    saveBudget(h, { costUsd: 40, toolCalls: 400 });
+    const count = sessionCount(h);
+    await h.call(h.args);
+    const [card] = h.pending();
+    h.threads.setLimits(h.human, h.thread.id, { costUsd: 25, launchedSessions: 1, launchPaused: true });
+    await assert.rejects(h.call({ ...h.args, commandId: "paused-preview" }), /paused new launches/);
+    const paused = await h.answer(card!.id, "approve-campaign", { digest: card!.campaign!.digest });
+    assert.equal(paused.json().confirmation.status, "refused", paused.body);
+    assert.equal(sessionCount(h), count);
+
+    h.threads.setLimits(h.human, h.thread.id, { costUsd: 25, launchedSessions: 1, launchPaused: false });
+    await h.call({ ...h.args, commandId: "resumed" });
+    const [resumed] = h.pending();
+    const approved = await h.answer(resumed!.id, "approve-campaign", { digest: resumed!.campaign!.digest });
+    assert.equal(approved.json().confirmation.outcome.receiptStatus, "succeeded", approved.body);
+    assert.deepEqual(approved.json().thread.usage.launchedSessions, { used: 1, limit: 1 });
+  } finally { await h.close(); }
+});
+
 test("campaign confirmation rejects agent approval, forged settings, stale plans, denial and expiry", async () => {
   const h = await assistantCampaignFixture();
   try {

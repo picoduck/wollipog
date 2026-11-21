@@ -377,6 +377,7 @@ export function SegmentedControl<T extends string>({
   className,
   describedBy,
   invalid,
+  appearance = "segments",
 }: {
   options: readonly SegmentedOption<T>[];
   value: T | null;
@@ -388,6 +389,7 @@ export function SegmentedControl<T extends string>({
   describedBy?: string;
   /** A form's error is about this choice (§8.5); `describedBy` names it. */
   invalid?: boolean;
+  appearance?: "segments" | "chips";
 }) {
   // One stop for the whole group, computed by `rovingChoiceStop`. The rule was inline here across
   // three rounds and each round fixed one branch of it: nothing selected, then selected but
@@ -421,7 +423,7 @@ export function SegmentedControl<T extends string>({
   return (
     <>
       <div
-        className={`seg${className ? ` ${className}` : ""}`}
+        className={[appearance === "segments" ? "seg" : "choice-chips", className].filter(Boolean).join(" ")}
         role="radiogroup"
         aria-label={label}
         aria-invalid={invalid || undefined}
@@ -444,7 +446,7 @@ export function SegmentedControl<T extends string>({
               // `disabled` would remove it from the roving order, so a disabled option becomes
               // invisible to keyboard users rather than explained to them.
               tabIndex={index === stopAt ? 0 : -1}
-              className="seg-option"
+              className={appearance === "segments" ? "seg-option" : "btn"}
               title={option.disabled ? option.disabledReason ?? option.title : option.title}
               onClick={() => { if (!option.disabled) onChange(option.value); }}
             >

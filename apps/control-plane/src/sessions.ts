@@ -2245,7 +2245,8 @@ export function assistantThreadBudgetRefusal(costUsd: number): string {
   return `This Wollipog Assistant thread has spent or committed its whole $${costUsd} budget, so it cannot launch another session.`;
 }
 
-export function assistantThreadLaunchLimitMessage(launched: number, limit: number | null): string | null {
+export function assistantThreadLaunchLimitMessage(launched: number, limit: number | null, paused = false): string | null {
+  if (paused) return "This Wollipog Assistant thread has paused new launches.";
   return limit !== null && launched >= limit
     ? `This Wollipog Assistant thread has launched ${launched} of the ${limit} sessions it may launch, so it cannot launch another.`
     : null;
@@ -3751,7 +3752,7 @@ export class SessionsService {
     const call = assistantCallContext.getStore();
     const thread = call ? this.db.assistantThreads.forConnection(call.connectionId) : null;
     if (!thread) return null;
-    const refusal = this.assistantThreadLaunchLimitRefusal(thread.id, thread.launch_limit);
+    const refusal = this.assistantThreadLaunchLimitRefusal(thread);
     if (refusal) return { refusal };
     const launch = { threadId: thread.id, backingSessionId: thread.session_id };
     const limitUsd = thread.cost_limit_usd;
@@ -3767,17 +3768,18 @@ export class SessionsService {
     return { ...launch, budget: { limitUsd, heldUsd: launchedHeldUsd, remainingUsd } };
   }
 
-  assistantThreadLaunchLimitRefusal(threadId: string, limit: number | null): string | null {
-    if (limit === null) return null;
-    const launched = this.db.assistantThreads.launchedSessionIds(threadId).length +
-      this.db.assistantOwnerConfirmations.launchedCampaignIds(threadId).length;
-    const message = assistantThreadLaunchLimitMessage(launched, limit);
-    return message ? `${message} The owner can change the launch limit in Thread Settings.` : null;
+  assistantThreadLaunchLimitRefusal(thread: Pick<import("./assistant-thread-store.js").ThreadRow, "id" | "launch_limit" | "launch_paused">): string | null {
+    const paused = Boolean(thread.launch_paused);
+    if (thread.launch_limit === null && !paused) return null;
+    const launched = this.db.assistantThreads.launchedSessionIds(thread.id).length +
+      this.db.assistantOwnerConfirmations.launchedCampaignIds(thread.id).length;
+    const message = assistantThreadLaunchLimitMessage(launched, thread.launch_limit, paused);
+    return message ? `${message} The owner can change when launches are allowed in Thread Settings.` : null;
   }
 
   /** Both owner-facing editors write the thread limit. Existing spend and launches take priority. */
   updateAssistantThreadLimits(
-    row: Pick<import("./assistant-thread-store.js").ThreadRow, "id" | "session_id" | "cost_limit_usd" | "launch_limit">,
+    row: Pick<import("./assistant-thread-store.js").ThreadRow, "id" | "session_id" | "cost_limit_usd" | "launch_limit" | "launch_paused">,
     limits: AssistantThreadLimits,
     edit?: { config: SessionConfig; actor: GovernanceActor },
   ): ServiceResult<SessionView> {
@@ -3804,7 +3806,9 @@ export class SessionsService {
       if (edit || changed) {
         const { costBudgetUsd: _threadBudget, ...other } = edit?.config ?? {};
         const result = this.applySessionConfig(backing.id, { ...other, ...(changed ? { costBudgetUsd: target ?? 0 } : {}) }, edit?.actor);
-        if (!result.ok) this.db.assistantThreads.setLimits(row.id, { costUsd: row.cost_limit_usd, launchedSessions: row.launch_limit });
+        if (!result.ok) this.db.assistantThreads.setLimits(row.id, {
+          costUsd: row.cost_limit_usd, launchedSessions: row.launch_limit, launchPaused: Boolean(row.launch_paused),
+        });
         return result;
       }
       const updated = this.db.getSession(backing.id)!;

@@ -4,7 +4,7 @@ import { useApi } from "../api-context.js";
 import { assistantThreadHarnessLabel, assistantThreadsOwnerOnly, assistantThreadsUnavailable, type AssistantThreadDefaults } from "../assistant-threads.js";
 import { formatUsd } from "../guardrail-values.js";
 import { useInstanceScope } from "../instance-scope.js";
-import { AssistantThreadLimitsDialog } from "./AssistantThreadLimitsDialog.js";
+import { AssistantThreadDefaultLimitsDialog } from "./AssistantThreadDefaultLimitsDialog.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
 import { AssistantThreadAccountField, MACHINE_ACCOUNT_POLICY } from "./AssistantThreadAccountField.js";
 import { Modal } from "./Modal.js";
@@ -67,7 +67,7 @@ function AssistantThreadDefaultsGroup({ onOpenThreads }: { onOpenThreads: () => 
           actionLabel="Edit Limits…"
           onAction={() => setEditing("limits")}
         />
-        {editing === "limits" && <AssistantThreadLimitsDialog defaults limits={limits} onClose={close}
+        {editing === "limits" && <AssistantThreadDefaultLimitsDialog limits={limits} onClose={close}
           onSave={async (next) => setLimits(await api.setAssistantThreadLimitDefaults(next))} />}
       </>}
       {(limits || launch?.launchDefaults) && <LinkRow title="Existing Threads"

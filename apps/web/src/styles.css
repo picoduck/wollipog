@@ -1654,6 +1654,10 @@ kbd {
   background: var(--bg-elev-3);
   border-color: var(--control-outline);
 }
+.choice-chips > .btn[aria-checked="true"] {
+  background: var(--bg-elev-3);
+  border-color: var(--control-outline);
+}
 .btn.primary {
   background: var(--primary-bg);
   border-color: transparent;
@@ -13085,6 +13089,38 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 .assistant-thread-account-picker .choice-row-title { overflow-wrap: anywhere; }
 .assistant-thread-account-picker .choice-row-body { gap: var(--space-1); }
+.assistant-thread-settings .modal-head { gap: var(--space-2); }
+.assistant-thread-spending-row { display: block; }
+.choice-chips,
+.assistant-launch-stepper {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.choice-chips > .btn,
+.assistant-launch-stepper > .btn { min-width: var(--control-h); }
+.assistant-launch-stepper > input { width: 6rem; }
+.assistant-launch-stepper > input:disabled { background: var(--bg-elev-2); }
+.assistant-thread-defaults-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-h);
+  color: inherit;
+  text-decoration: underline;
+}
+.assistant-thread-spending-row .assistant-panel-meter > span { grid-column: 1 / -1; }
+.assistant-thread-account-label { overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .assistant-thread-settings .modal-back { display: none; }
+  .assistant-thread-settings-cancel { order: -1; }
+  .assistant-thread-account-label:not(.pid),
+  .assistant-thread-account-label .pid-value {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
+}
 .assistant-thread-head:empty { display: none; }
 /* AssistantWorkCards.tsx: in the thread header, what waits on the owner as one scrolling row of
    cards; each card opens its session, and a waiting approval rides on its card. Every other launched
