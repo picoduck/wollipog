@@ -10184,13 +10184,29 @@ textarea {
 .md :is(h4, h5, h6) {
   font: var(--type-body-strong);
 }
-.md a {
+.md :is(a, .md-streaming-link) {
   color: var(--accent);
   text-decoration: none;
   overflow-wrap: anywhere;
 }
 .md a:hover {
   text-decoration: underline;
+}
+.md-streaming-caret {
+  display: inline-block;
+  width: 2px;
+  height: 0.9em;
+  margin-inline-start: var(--space-0-5);
+  vertical-align: -0.1em;
+  background: currentColor;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .md-streaming-caret {
+    animation: md-streaming-caret-blink 1s step-end infinite;
+  }
+}
+@keyframes md-streaming-caret-blink {
+  50% { opacity: 0; }
 }
 .md strong {
   font-weight: var(--weight-semibold);

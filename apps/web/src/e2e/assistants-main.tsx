@@ -44,9 +44,11 @@ import "../styles.css";
  * `window.assistantsAdvance()` finishes the running launched session, as its stream would.
  * `?confirm=N` (1–8) gives the first thread N owner confirmations waiting for its owner (#4665).
  * `?attention=N` gives the first thread a confirmation, the second a question, and extra threads confirmations (#4723).
+ * `?streaming-reply` opens a running turn fed by `window.assistantsReplyChunk`.
  */
 const SCOPE = "assistants-e2e";
 const params = new URLSearchParams(location.search);
+const streamingReply = params.has("streaming-reply");
 const scenario = params.get("threads") ?? "some";
 const attentionCount = Number(params.get("attention") ?? 0);
 const limitsScenario = params.get("limits");
@@ -169,7 +171,7 @@ const sessions = new Map<string, SessionView>([
       durableDeliveryState: "failed",
       durableDeliveryError: "The machine restarted before accepting this message.",
     }],
-  } : { status: "idle" })],
+  } : { status: streamingReply ? "running" : "idle" })],
   ["sess-release", session("sess-release", "Ship the Release Notes", { status: "running", agentId: "codex", agentName: "Codex", driver: "codex-app-server" })],
   ["sess-cleanup", session("sess-cleanup", "Weekly Cleanup", { status: "idle", updatedAt: NOW - 26 * 60 * minute })],
   ["sess-flaky", session("sess-flaky", resultScenario === "stress" ? longConfirmationTarget : "Fix the Flaky Upload Test", { status: "running", updatedAt: NOW - minute })],
@@ -371,7 +373,7 @@ let threads: AssistantThread[] = scenario === "long" ? [
     title: longTitle(index + 2), status: index % 3 === 0 ? "working" : "done", lastActivityAt: NOW - (index + 2) * minute,
   })),
 ] : scenario === "some" ? [
-  triage(),
+  triage(streamingReply ? { status: "working", launchedSessionIds: [] } : {}),
   thread("thr_release", "sess-release", { status: attentionCount > 1 ? "needs_you" : "working", harness: "codex", lastActivityAt: NOW - 3 * minute }),
   thread("thr_cleanup", "sess-cleanup", { status: "done" }),
   // Archived: the list leaves it out, and a link to it opens it on its own.
@@ -491,6 +493,13 @@ const events: Record<string, SessionEvent[]> = {
       event("sess-flaky", NOW - 15 * minute + index * minute, payload)),
   } : {}),
 };
+if (streamingReply) {
+  seq = 0;
+  events["sess-triage"] = [
+    event("sess-triage", NOW - minute, { kind: "user_message", text: "What did you find in the tracker review?", images: [] }),
+    event("sess-triage", NOW - minute + 1_000, { kind: "checkpoint", turn: 1, tree: "" }),
+  ];
+}
 
 class FixtureSocket implements UiSocket {
   readonly readyState = UI_SOCKET_OPEN;
@@ -848,6 +857,20 @@ function backingActivity() {
 }
 
 Object.assign(window, {
+  assistantsReplyChunk: (text: string, settle: boolean) => {
+    if (!streamingReply) return;
+    const id = "sess-triage";
+    const next = settle
+      ? event(id, Date.now(), { kind: "conversation_checkpoint", turn: 1 })
+      : event(id, Date.now(), { kind: "agent_message", messageId: "tracker-answer", text });
+    events[id]!.push(next);
+    socket?.push({ type: "session_event", event: next });
+    upsert({ ...sessions.get(id)!, messageCount: events[id]!.length, status: settle ? "idle" : "running" });
+    if (settle) {
+      threads = threads.map((thread) => thread.sessionId === id ? { ...thread, status: "done" } : thread);
+      publish(threads.find((thread) => thread.sessionId === id)!);
+    }
+  },
   /** The running launched session finishes, as its stream would report it. */
   assistantsAdvance: () => upsert({ ...sessions.get("sess-flaky")!, status: "completed", updatedAt: Date.now() }),
   /** Mid-turn, the assistant launches another session: the thread's status stays as it was, and
