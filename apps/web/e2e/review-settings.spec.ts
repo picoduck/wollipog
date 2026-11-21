@@ -22,7 +22,8 @@ for (const width of [1280, 390]) test(`review defaults, same-family consent and 
   await capture(page, testInfo, `reviews-default-${width}.png`);
 
   await claude.getByRole("button", { name: "Reviewer Model: Automatic", exact: true }).click();
-  await page.getByRole("option", { name: "GPT-6.1 Sol", exact: true }).click();
+  await page.getByRole("searchbox", { name: "Search Models" }).fill("GPT-6.1 Sol");
+  await page.getByRole("radio", { name: "GPT-6.1 Sol", exact: true }).click();
   await page.getByRole("spinbutton", { name: "Valid Rounds", exact: true }).fill("7");
   await page.getByRole("button", { name: "Save Defaults", exact: true }).click();
   await expect(page.locator(".save-bar")).toHaveCount(0);

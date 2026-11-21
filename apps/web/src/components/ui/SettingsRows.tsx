@@ -1,3 +1,5 @@
+import { ModelPicker } from "../ModelPicker.js";
+import type { ModelPickerContext } from "../../model-picker.js";
 import React, { useId, useLayoutEffect, useRef, type ReactNode, type Ref } from "react";
 import { CopyButton, Spinner } from "../common.js";
 import { FieldError } from "../FieldError.js";
@@ -351,6 +353,7 @@ export function SelectRow({
   label,
   menuWidth,
   estimatedOptionHeight,
+  modelPicker,
   badge,
   busy,
   busyLabel,
@@ -373,6 +376,7 @@ export function SelectRow({
   label?: string;
   menuWidth?: number;
   estimatedOptionHeight?: number;
+  modelPicker?: ModelPickerContext;
 }) {
   // The trigger names the setting and its value; the sentence beside it is pointed at, so tabbing
   // straight to the control still reaches it. `useId` rather than the title: two pickers titled the
@@ -397,7 +401,8 @@ export function SelectRow({
       />
       {/* A `.field` while invalid, for the field's red edge (§8.5). */}
       <span className={error ? "setting-row-control field" : "setting-row-control"}>
-        <Select
+        {modelPicker ? <ModelPicker label={label ?? title} options={options} value={value}
+          onChange={onChange} describedBy={describedBy} disabled={disabled} invalid={Boolean(error)} context={modelPicker} /> : <Select
           label={label ?? title}
           options={options}
           value={value}
@@ -408,7 +413,7 @@ export function SelectRow({
           invalid={Boolean(error)}
           menuWidth={menuWidth ?? (options.some((option) => option.description) ? DESCRIBED_MENU_WIDTH_PX : undefined)}
           estimatedOptionHeight={estimatedOptionHeight}
-        />
+        />}
         {error && <FieldError id={errorId}>{error}</FieldError>}
         {reason &&<small id={reasonId} className="setting-row-reason">{reason}</small>}
       </span>

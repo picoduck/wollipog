@@ -180,7 +180,7 @@ function pill(scope: ParentNode, group: string, label: string): HTMLButtonElemen
 async function choose(scope: ParentNode, select: string, option: RegExp | string) {
   const trigger = scope.querySelector<HTMLButtonElement>(`[aria-label^="${select}:"]`)!;
   await act(async () => trigger.click());
-  const match = [...scope.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+  const match = [...scope.querySelectorAll<HTMLButtonElement>('[role="option"], [data-model-choice]')]
     .find((node) => typeof option === "string" ? node.textContent?.startsWith(option) : option.test(node.textContent ?? ""));
   assert.ok(match, `${select} offers ${String(option)}`);
   await act(async () => match.click());
@@ -608,7 +608,7 @@ test("Child Harness precedes and scopes model and effort while clearing incompat
 
     const effort = container.querySelector<HTMLButtonElement>('[aria-label^="Child Effort:"]')!;
     await act(async () => effort.click());
-    const effortText = [...container.querySelectorAll('[role="option"]')].map((option) => option.textContent).join(" ");
+    const effortText = [...container.querySelectorAll('[role="option"], [data-model-choice]')].map((option) => option.textContent).join(" ");
     assert.match(effortText, /Low/);
     assert.doesNotMatch(effortText, /High/);
     await act(async () => effort.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never));
@@ -633,7 +633,7 @@ test("each Child Harness option names the harness once and says how many machine
     const { container } = view;
     const trigger = container.querySelector<HTMLButtonElement>('[aria-label^="Child Harness:"]')!;
     await act(async () => trigger.click());
-    const options = [...container.querySelectorAll('[role="option"]')].map((node) => node.textContent ?? "");
+    const options = [...container.querySelectorAll('[role="option"], [data-model-choice]')].map((node) => node.textContent ?? "");
     assert.equal(options.filter((text) => text.startsWith("Codex App Server")).length, 1);
     assert.ok(options.some((text) => /^Codex App Server · Native.*Available on 2 connected machines\./.test(text)), options.join(" | "));
     assert.ok(options.some((text) => /^Pi · Native.*Available on 1 connected machine\./.test(text)), options.join(" | "));
@@ -1282,7 +1282,7 @@ test("a saved retired exec Child Harness remains visible as unavailable while de
     assert.ok(trigger);
     assert.match(trigger.getAttribute("aria-label") ?? "", /Codex Non-Interactive.*Unavailable/);
     await act(async () => trigger.click());
-    const option = [...view.container.querySelectorAll<HTMLElement>('[role="option"]')]
+    const option = [...view.container.querySelectorAll<HTMLElement>('[role="option"], [data-model-choice]')]
       .find((candidate) => candidate.textContent?.includes("Codex Non-Interactive"));
     assert.ok(option, "the saved retired harness stays listed");
     assert.match(option.textContent ?? "", /Unavailable/);

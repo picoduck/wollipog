@@ -18,6 +18,8 @@ import type {
   SessionView,
 } from "@wollipog/protocol";
 import { runnerSupportsProtocol } from "@wollipog/protocol";
+import { ModelPickerList } from "./ModelPicker.js";
+import { isExactModelChoice } from "../model-picker.js";
 import { modelOptionLabel } from "../agent-presentation.js";
 import {
   permissionModeDescription,
@@ -25,6 +27,7 @@ import {
   permissionModeForDisplay,
   permissionModeLabel,
   effortLabel,
+  resolvedModelLabel,
 } from "../format.js";
 import {
   defaultPermissionMode,
@@ -123,8 +126,13 @@ function useSessionConfig(session: SessionView) {
   const { permModes, permVal, showDefaultPermissionMode } = sessionPermissionModeControls(session, caps);
 
   const effective = effectiveModelEffortForDisplay(effectiveCaps, session.driver, session.model, session.effort, caps);
-  const modelVal = effective.model?.id ?? "";
-  const selectedModel = effective.model;
+  const configuredModel = effective.model?.id ?? "";
+  const resolved = session.resolvedModel && (!session.model || !isExactModelChoice(session.model, session.driver))
+    ? session.resolvedModel : null;
+  const modelVal = resolved ?? configuredModel;
+  const selectedModel = resolved
+    ? listedModels.find(model => model.id === resolved) ?? { id: resolved, displayName: resolvedModelLabel(resolved) }
+    : effective.model;
   const modelEfforts = effective.efforts;
   const effortVal = effective.effort ?? "";
   // Context-window variants of one base (`opus` / `opus[1m]`) are one Model entry plus a Context
@@ -256,14 +264,16 @@ const MODEL_SETTINGS_TWO_COLUMN_WIDTH = 536;
 function keepTabInside(event: ReactKeyboardEvent<HTMLDivElement>): void {
   if (event.key !== "Tab") return;
   // A disclosure's <summary> is focusable without a tabindex, though not every DOM reports it so.
-  const stops = [...event.currentTarget.querySelectorAll<HTMLElement>("button, summary, a[href], [tabindex]")]
+  const stops = [...event.currentTarget.querySelectorAll<HTMLElement>("button, input, summary, a[href], [tabindex]")]
     .filter((element) => (element.tabIndex >= 0 || (element.localName === "summary" && !element.hasAttribute("tabindex")))
       && !(element instanceof HTMLButtonElement && element.disabled));
   if (stops.length === 0) return;
   const active = event.currentTarget.ownerDocument.activeElement as HTMLElement | null;
-  // Each group's container: its radio rows, or the segmented Context Window.
-  const group = active?.closest(".model-settings-group") ?? null;
-  const current = stops.findIndex((stop) => stop === active || (group !== null && group.contains(stop)));
+  // When focus is on an arrowed-to radio, use the corresponding group's roving Tab stop.
+  // Search and disclosure controls within a model group have their own stops.
+  const exact = stops.findIndex(stop => stop === active);
+  const group = active?.closest("[role=radiogroup]");
+  const current = exact >= 0 ? exact : stops.findIndex(stop => stop.getAttribute("role") === "radio" && group?.contains(stop));
   const next = current < 0
     ? (event.shiftKey ? stops.length - 1 : 0)
     : (current + (event.shiftKey ? -1 : 1) + stops.length) % stops.length;
@@ -473,7 +483,7 @@ export function plainModelDescription(model: MenuModelChoice): string | undefine
 }
 
 /** One Model Settings choice: §9.1's row with its trailing check, as a radio in its group. */
-function SettingsRadioOption({ checked, tabStop, title, ariaLabel, description, icon, onSelect, children }: {
+function SettingsRadioOption({ checked, tabStop, title, ariaLabel, description, icon, disabled, onSelect, children }: {
   checked: boolean;
   /** The group's one Tab stop (roving): the checked option, or the first when none is. */
   tabStop: boolean;
@@ -481,12 +491,14 @@ function SettingsRadioOption({ checked, tabStop, title, ariaLabel, description, 
   ariaLabel?: string;
   description?: ReactNode;
   icon?: ReactNode;
+  disabled?: boolean;
   onSelect: () => void;
   children: ReactNode;
 }) {
   return (
     <MenuItem
       role="radio"
+      aria-disabled={disabled || undefined}
       checked={checked}
       tabIndex={tabStop ? 0 : -1}
       aria-label={ariaLabel}
@@ -524,6 +536,7 @@ function SettingsRadioGroup({ label, children }: { label: string; children: Reac
 /** Pure leaf so the independent radio groups retain an executable semantic contract. */
 export function ModelEffortMenuChoices({
   models,
+  modelDriver,
   modelSource,
   modelVal,
   selectedModel,
@@ -539,6 +552,7 @@ export function ModelEffortMenuChoices({
   apply,
 }: {
   models: MenuModelChoice[];
+  modelDriver?: AgentDriverKind;
   modelSource?: string;
   modelVal: string;
   selectedModel?: MenuModelChoice;
@@ -571,26 +585,29 @@ export function ModelEffortMenuChoices({
     if (orphaned) detail?.back();
   }, [orphaned, detail]);
   if (detailOpen && !orphaned) return <div className="model-settings-detail">{sessionUsage}</div>;
-  const modelListed = models.some((model) => model.id === modelVal);
-  const modelGroup = models.length > 0 && (
-    <SettingsRadioGroup label={`Model${modelSource === "cached" ? " (Cached)" : ""}`}>
-      {models.map((model, index) => {
-        const description = plainModelDescription(model);
-        const label = modelOptionLabel(model, models);
-        return (
-          <SettingsRadioOption
-            key={model.id}
-            checked={model.id === modelVal}
-            tabStop={modelListed ? model.id === modelVal : index === 0}
-            title={description}
-            ariaLabel={label}
-            description={description}
-            onSelect={() => apply({ model: model.id, effort: "", serviceTier: "" })}
-          >
-            {label}
-          </SettingsRadioOption>
-        );
-      })}
+  const exactModels = models.filter(model => isExactModelChoice(model.id, modelDriver));
+  const modelChoices = exactModels.map(model => ({
+    value: model.id, label: modelOptionLabel(model, exactModels), description: plainModelDescription(model),
+  }));
+  const savedChoice = models.find(model => model.id === modelVal) ?? selectedModel;
+  if (savedChoice && !modelChoices.some(option => option.value === modelVal)) {
+    modelChoices.push({ value: modelVal, label: savedChoice.displayName ?? modelVal, description: plainModelDescription(savedChoice) });
+  }
+  const modelOption = modelChoices.find(option => option.value === modelVal) ?? modelChoices[0];
+  const modelGroup = modelChoices.length > 0 && (
+    <SettingsRadioGroup label={modelSource === "cached" ? "Model (Cached)" : "Model"}>
+      <ModelPickerList options={modelChoices} value={modelVal} context={{ mode: "exact", driver: modelDriver }}
+        renderOption={option => <SettingsRadioOption
+          key={option.value}
+          checked={option.value === modelVal}
+          tabStop={option.value === modelOption?.value}
+          title={option.description}
+          ariaLabel={option.label}
+          description={option.description}
+          disabled={option.retained || option.disabled}
+          onSelect={() => { if (!option.retained && !option.disabled) apply({ model: option.value, effort: "", serviceTier: "" }); }}
+        >{option.label}</SettingsRadioOption>}
+      />
     </SettingsRadioGroup>
   );
   const contextGroup = contextChoice && (
@@ -748,6 +765,7 @@ export function ModelEffortControl(
       {(close) => (
         <ModelEffortMenuChoices
           models={models}
+          modelDriver={session.driver}
           modelSource={modelSource}
           modelVal={modelVal}
           selectedModel={selectedModel}

@@ -141,7 +141,7 @@ async function choose(label: string, option: string): Promise<void> {
   const trigger = body().querySelector<HTMLButtonElement>(`[role="dialog"] [aria-label^="${label}:"]`);
   assert.ok(trigger, `expected ${label} select`);
   await act(async () => trigger.click());
-  const choice = [...body().querySelectorAll<HTMLButtonElement>('[role="option"]')].find((candidate) =>
+  const choice = [...body().querySelectorAll<HTMLButtonElement>('[role="option"], [data-model-choice]')].find((candidate) =>
     (candidate.textContent ?? "").startsWith(option));
   assert.ok(choice, `expected ${option} option in ${label}`);
   await act(async () => choice.click());

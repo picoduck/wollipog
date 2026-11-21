@@ -345,7 +345,7 @@ async function chooseSelectOption(container: HTMLDivElement, label: string, opti
   const trigger = container.querySelector<HTMLButtonElement>(`[aria-label^="${label}:"]`);
   assert.ok(trigger, `${label} select is rendered`);
   await act(async () => { trigger.click(); });
-  const option = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+  const option = [...container.querySelectorAll<HTMLButtonElement>('[role="option"], [data-model-choice]')]
     .find((candidate) => candidate.textContent?.includes(optionLabel));
   assert.ok(option, `${label} offers ${optionLabel}`);
   await act(async () => { option.click(); });
@@ -546,7 +546,7 @@ test("touch Project selection opens a non-editable list without summoning a keyb
 
       const listbox = fixture.container.querySelector('[role="listbox"][aria-label="Project"]');
       assert.ok(listbox, "the Project choices open without focusing a text field");
-      const option = [...listbox.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+      const option = [...listbox.querySelectorAll<HTMLButtonElement>('[role="option"], [data-model-choice]')]
         .find((candidate) => candidate.textContent?.startsWith(project.name));
       assert.ok(option);
       await act(async () => { option.click(); });
@@ -1312,7 +1312,7 @@ test("Codex App Server that failed its check needs setup with a plain reason, no
 function agentGroups(listbox: Element): Array<{ label: string; options: string[] }> {
   return [...listbox.querySelectorAll('[role="group"]')].map((group) => ({
     label: ariaReferencedText(group as HTMLElement, "aria-labelledby") ?? "",
-    options: [...group.querySelectorAll<HTMLElement>('[role="option"]')]
+    options: [...group.querySelectorAll<HTMLElement>('[role="option"], [data-model-choice]')]
       .map((option) => ariaReferencedText(option, "aria-labelledby") ?? ""),
   }));
 }
@@ -1455,7 +1455,7 @@ test("on a coarse pointer the Agent sheet shows the same groups, and arrows reac
       const listbox = fixture.container.querySelector('[role="listbox"][aria-label="Agent"]');
       assert.ok(listbox);
       assert.deepEqual(agentGroups(listbox), SETUP_GROUPS);
-      const rows = [...listbox.querySelectorAll<HTMLElement>('[role="option"]')];
+      const rows = [...listbox.querySelectorAll<HTMLElement>('[role="option"], [data-model-choice]')];
       assert.equal(rows.at(-1)?.textContent, "Account Setup…");
       const filter = fixture.container.querySelector<HTMLInputElement>('input[role="combobox"][aria-label="Search Agent Options"]');
       assert.ok(filter);
@@ -2291,7 +2291,7 @@ test("Parent Control opt-ins stay disabled on an older runner", async () => {
     assert.doesNotMatch(settingRowOf(descendant).textContent ?? "", /Compatibility Fallback|Changed/,
       "the downgrade is not a change this session made");
     await act(async () => { descendant.click(); });
-    const questions = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    const questions = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"], [data-model-choice]')]
       .find((option) => option.textContent?.includes("Questions"));
     assert.equal(questions?.getAttribute("aria-disabled"), "true");
   } finally {
@@ -3520,7 +3520,7 @@ test("Location is a Select of machines with status and folder, and an offline on
     await act(async () => { trigger().click(); });
     const listbox = fixture.container.querySelector('[role="listbox"][aria-label="Location"]');
     assert.ok(listbox, "Location opens a listbox");
-    const options = [...listbox.querySelectorAll<HTMLButtonElement>('[role="option"]')];
+    const options = [...listbox.querySelectorAll<HTMLButtonElement>('[role="option"], [data-model-choice]')];
     assert.deepEqual(optionNamesAndDescriptions(options.slice(0, -1)), [
       { name: "runner-1", description: "Available · …/repos/wollipog" },
       { name: "Build Server 02", description: "Runner Offline · …/team/wollipog" },

@@ -425,7 +425,11 @@ const harnessDefaultsTransport: ApiTransport = {
       if (mode === "machines") {
         const models = [
           { id: "opus", displayName: "Opus 5.5", efforts: ["high", "max"] },
-          { id: "claude-opus-5", displayName: "Opus 5", efforts: ["high", "max"] },
+          { id: "claude-opus-5-5", displayName: "Opus 5.5", efforts: ["high", "max"] },
+          ...[
+            ["5", "5"], ["4-8", "4.8"], ["4-7", "4.7"], ["4-6", "4.6"], ["4-5", "4.5"],
+          ].map(([id, release]) => ({ id: "claude-opus-" + id, displayName: "Opus " + release, efforts: ["high", "max"] })),
+          { id: "provider-new-model", displayName: "New Agentic Coding Model With a Very Long Name", efforts: ["high"] },
         ];
         return new Response(JSON.stringify({
           defaults,

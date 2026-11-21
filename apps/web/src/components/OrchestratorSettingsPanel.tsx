@@ -290,7 +290,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     : view?.capabilities.models ?? [];
   const modelRetired = !!selectedModel && !advertisedModels.some((model) => model.id === selectedModel);
   const modelOptions = useMemo(() => {
-    const options = [{ value: AUTO, label: "Automatic", description: "Choose from live child capabilities at creation time." }];
+    const options: Array<{ value: string; label: string; description: string; disabled?: boolean }> = [{ value: AUTO, label: "Automatic", description: "Choose from live child capabilities at creation time." }];
     const models = new Map<string, { names: Set<string>; displayName: string }>();
     for (const harness of selectedHarness ? candidateHarnesses : []) {
       for (const model of harness.models) {
@@ -323,6 +323,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         label: advertised && !selectedHarness
           ? `${advertised.displayName ?? advertised.id} (Legacy Automatic Harness)`
           : `${selected} (Unavailable)`,
+        disabled: !advertised,
         description: advertised && !selectedHarness
           ? "This legacy fixed model retains automatic harness resolution. Choose a fixed Child Harness before selecting a different model."
           : selectedHarness
@@ -588,6 +589,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       />
       <SelectRow
         title="Child Model"
+        modelPicker={{ mode: "launch", driver: selectedHarness?.driver }}
         description="Automatic lets each child's agent choose."
         options={modelOptions}
         value={draft.behavior.childModel ?? AUTO}
