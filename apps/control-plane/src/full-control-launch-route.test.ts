@@ -197,7 +197,7 @@ async function assistantCampaignFixture(protocolVersion = PROTOCOL_VERSION) {
   const reviseCampaign = registerAssistantCampaignStart(operations, { ...f, evidenceDisclosures: f.disclosures }, receipts);
   const threads = createAssistantThreads(f.db, f.hub, f.sessions);
   const notices: string[] = [];
-  const confirmations = createAssistantOwnerConfirmationService(f.db, { prompt: (_id, text) => {
+  const confirmations = createAssistantOwnerConfirmationService(f.db, { promptWollipogNotice: (_id, text) => {
     notices.push(text);
     return { ok: true };
   } }, operations);

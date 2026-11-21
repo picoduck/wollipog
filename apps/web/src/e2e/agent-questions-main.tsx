@@ -599,9 +599,28 @@ function Fixture() {
   const composerAnswers = request?.kind === "question" && !resolved && !ownerRaw && !childRaw &&
     (responseStyle === "composer" || params.get("composer") === "1") && (!recoveryRequired || recoveryCanResume);
   const answering = composerAnswers && answerActive;
-  const composerContent = answering ? (
-    <div className="composer-box answer-mode">
-      <ComposerQuestionResponse
+  const composerContent = (
+    <div className={answering ? "composer-box answer-mode" : "composer-box"}>
+      {queuedPrompts.length > 0 && (
+        <QueuedMessages
+          sessionId={SESSION_ID}
+          prompts={queuedPrompts}
+          queueHeld={false}
+          agent="Claude Code"
+          steering={queuedSteering}
+          requestBusy={false}
+          refusal={null}
+          steeringPending={new Set()}
+          editingPromptId={null}
+          editOpen={false}
+          pendingAction={undefined}
+          onSteer={() => {}}
+          onEdit={() => {}}
+          onCancel={() => {}}
+          onDismiss={() => {}}
+        />
+      )}
+      {answering ? <ComposerQuestionResponse
         sessionId={SESSION_ID}
         requestId={requestId}
         occurrenceId={request?.occurrenceId}
@@ -613,10 +632,8 @@ function Fixture() {
         inputRef={answerInputRef}
         onExit={() => setAnswerActive(false)}
         onSessionUpdate={() => setResolved(true)}
-      />
+      /> : <textarea className="composer-input" aria-label="Composer" placeholder="Do anything" />}
     </div>
-  ) : (
-    <div className="composer-box"><textarea className="composer-input" aria-label="Composer" placeholder="Do anything" /></div>
   );
 
   return (
@@ -694,25 +711,6 @@ function Fixture() {
                 )}
               </div>
               <div className="composer">
-                {queuedPrompts.length > 0 && (
-                  <QueuedMessages
-                    sessionId={SESSION_ID}
-                    prompts={queuedPrompts}
-                    queueHeld={false}
-                    agent="Claude Code"
-                    steering={queuedSteering}
-                    requestBusy={false}
-                    refusal={null}
-                    steeringPending={new Set()}
-                    editingPromptId={null}
-                    editOpen={false}
-                    pendingAction={undefined}
-                    onSteer={() => {}}
-                    onEdit={() => {}}
-                    onCancel={() => {}}
-                    onDismiss={() => {}}
-                  />
-                )}
                 {composerContent}
               </div>
             </div>

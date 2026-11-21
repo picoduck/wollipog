@@ -1411,6 +1411,9 @@ test("queued message editing loads exact content and Cancel Edit restores the di
     await resolveDraft(draft, "Unsent local draft");
     const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
     assert.ok(edit);
+    const queue = edit.closest(".composer-queue");
+    assert.equal(queue?.parentElement, fixture.composer.closest(".composer-box"));
+    assert.equal(queue?.parentElement?.firstElementChild, queue);
     await withCapturedAnimationFrames(domWindow, async (frames) => {
       await act(async () => { edit.focus(); edit.click(); });
       await flushAsyncWork();
@@ -1429,6 +1432,7 @@ test("queued message editing loads exact content and Cancel Edit restores the di
     assert.match(strip.textContent ?? "", /Editing Queued Message/);
     assert.equal(strip.parentElement?.classList.contains("composer-box"), true);
     assert.ok(strip.parentElement?.firstElementChild === strip, "the strip is the card's first child");
+    assert.equal(strip.nextElementSibling, queue, "the queue sits below the edit controls in the same card");
     assertNoDomNode(strip.querySelector(".composer-mode-reason"), "a plain edit has no reason line");
     // Save looks like Save: a check, the bar's primary, and its own name and tooltip.
     const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
@@ -6855,7 +6859,7 @@ test("a composer that can send keeps its controls enabled and its card undimmed 
       assert.equal(control?.disabled, false, `${selector} is enabled`);
     }
     await fixture.pushSession({ status: "running", activeTurnId: "turn-1" });
-    assert.equal(fixture.composer.placeholder, "Add a message. It sends when this turn ends.");
+    assert.equal(fixture.composer.placeholder, "Add a message. It sends when this turn ends; Ctrl+Enter steers now.");
     await fixture.pushSession({
       status: "input_required",
       pendingApproval: { requestId: "approval-1", kind: "permission", title: "Run a Command", options: [] },
