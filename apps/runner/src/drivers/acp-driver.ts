@@ -45,6 +45,8 @@ export class AcpDriver implements Driver {
         args: opts.args,
         cwd: opts.cwd,
         env: opts.env,
+        ...(opts.scrubInheritedEnv?.length ? { scrubInheritedEnv: opts.scrubInheritedEnv } : {}),
+        ...(opts.acpCompatibility ? { compatibility: opts.acpCompatibility } : {}),
         context: opts.context,
         initialCommands: opts.resumeId ? opts.capabilities?.slashCommands : undefined,
         sessionContext: opts.acpSessionContext,

@@ -45,6 +45,9 @@ test("ACP modes/config/commands normalize into existing session controls without
   ]);
   assert.deepEqual(state.capabilities.effortLevels, ["low", "high"]);
   assert.deepEqual(state.capabilities.permissionModes, ["default", "plan"]);
+  // The agent's own bounded names travel with its mode ids (#4779).
+  assert.deepEqual(state.capabilities.agentPermissionModes, modes!.availableModes);
+  assert.deepEqual(state.capabilities.agentPermissionModes?.map((mode) => mode.id), ["default", "plan"]);
   assert.deepEqual(state.capabilities.elicitation, {
     default: ["acp-permission"],
     plan: ["acp-permission"],
