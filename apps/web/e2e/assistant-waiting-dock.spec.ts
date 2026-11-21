@@ -222,7 +222,7 @@ for (const theme of ["light", "dark"] as const) {
         await expect(allow).toBeFocused();
         await expect(card.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
         await expect(card.getByText("The runner did not acknowledge this approval.")).toHaveCount(0);
-        await failure.scrollIntoViewIfNeeded();
+        await expectFullyInViewport(failure, "Inline approval failure");
         await capture(page, theme, "failure");
         const details = card.getByRole("button", { name: /^Show Details/ });
         await details.click();

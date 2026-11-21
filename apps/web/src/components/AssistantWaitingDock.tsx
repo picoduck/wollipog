@@ -258,6 +258,10 @@ function WaitingCard({ item, now, busy, begin, finish, onConfirmationAnswered, o
   const detailsId = useId();
   const body = useRef<HTMLDivElement>(null);
   useClipEdges(body);
+  const failureLine = useRef<HTMLParagraphElement>(null);
+  useLayoutEffect(() => {
+    if (failure) failureLine.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [failure]);
   const target = confirmation?.target;
   const openSessionId = session?.id ?? (target?.kind === "session" ? target.id : undefined);
   const refusal = session ? sessionCommandRefusal(session, "respond") ?? (!runnerOnline && question ? "The machine is offline." : null) : null;
@@ -349,7 +353,7 @@ function WaitingCard({ item, now, busy, begin, finish, onConfirmationAnswered, o
           ))}
         </fieldset>}
         {refusal && <p className="request-card-reasons">{refusal}</p>}
-        {failure && <p className="assistant-dock-failure" role="alert">{responseCopy[failure.action].failure}</p>}
+        {failure && <p className="assistant-dock-failure" ref={failureLine} role="alert">{responseCopy[failure.action].failure}</p>}
         {detailCount > 0 && <>
           <button type="button" className="btn sm ghost assistant-dock-details" aria-expanded={details} aria-controls={detailsId}
             aria-disabled={busy !== null || undefined} onClick={() => { if (!busy) setDetails(!details); }}>

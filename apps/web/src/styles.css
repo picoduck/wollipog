@@ -7709,6 +7709,7 @@ body.shell-dock-dragging * {
 }
 .assistant-dock-failure {
   margin: 0;
+  scroll-margin-bottom: var(--space-1);
   color: var(--danger-text);
   font: var(--type-body);
 }
