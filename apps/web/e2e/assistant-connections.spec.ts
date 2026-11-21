@@ -33,8 +33,9 @@ async function capture(page: Page, theme: string, state: string, focus?: Locator
   await expectNoHorizontalOverflow(page.locator(".main-body"));
   await checkLegibility(page);
   const directory = process.env.ASSISTANT_EVIDENCE_DIR;
-  if (directory) {
-    const { width, height } = page.viewportSize()!;
+  const { width, height } = page.viewportSize()!;
+  const only = process.env.ASSISTANT_EVIDENCE_STATES?.split(",");
+  if (directory && (!only || only.includes(width + ":" + state))) {
     const id = ["assistant-connections", width + "x" + height, theme, state, measurement].filter(Boolean).join("-");
     await page.screenshot({ path: directory + "/" + id + ".png", animations: "disabled" });
   }
@@ -154,6 +155,10 @@ for (const width of [1440, 390]) {
           await capture(page, theme, "list-stress", undefined, width === 390 ? "target44csspx-gap8csspx" : "target24csspx");
           await rows.last().scrollIntoViewIfNeeded();
           await expectFullyInViewport(newButton, "New Connection after scrolling");
+          if (width === 390) {
+            await expectFullyInViewport(rows.last(), "Revoked connection");
+            await capture(page, theme, "list-stress-scrolled");
+          }
 
           const copyId = page.getByRole("button", { name: "Copy Installation ID", exact: true });
           const rename = page.getByRole("button", { name: "Rename…", exact: true });
@@ -184,6 +189,12 @@ for (const width of [1440, 390]) {
           await switchControl.click();
           await expect(switchControl).toHaveAttribute("aria-checked", "true");
           await configured.click();
+          const track = await page.getByRole("radiogroup", { name: "Management Access" }).boundingBox();
+          const knob = await configured.boundingBox();
+          expect(knob!.x).toBeGreaterThan(track!.x);
+          expect(knob!.y).toBeGreaterThan(track!.y);
+          expect(knob!.x + knob!.width).toBeLessThan(track!.x + track!.width);
+          expect(knob!.y + knob!.height).toBeLessThan(track!.y + track!.height);
           const allowedOperations = page.getByRole("region", { name: "Allowed Operations" });
           await expect(allowedOperations.locator(".choice-row-title")).toHaveText([
             "Assistant Discover", "Connection List", "Connection Activity", "Project List",
@@ -213,14 +224,41 @@ for (const width of [1440, 390]) {
           // Return to Full Access so the Activity table can be reached from the compact detail.
           await fullAccess.click();
           await page.getByRole("button", { name: "Save Connection", exact: true }).click();
-          const activity = page.getByRole("table", { name: "Connection Activity" });
-          await expect(activity.getByRole("columnheader")).toHaveText(["Operation", "Target", "Outcome", "When"]);
-          await expect(activity.getByRole("cell", { name: "Assistant Connection · " + fixtures[0]!.connection.name, exact: true })).toBeVisible();
-          await expect(activity.locator("code").getByText("assistant_discover", { exact: true })).toBeVisible();
-          await expect(activity.getByText("Succeeded", { exact: true })).toBeVisible();
-          await expect(activity.getByText("Refused", { exact: true })).toBeVisible();
+          const stressProject = server.db.createProject({
+            name: "International Workspace for Long-Running Assistant Work Across Multiple Local and Remote Machines",
+            scope: { organizationId: owner.organizationId, owner: { kind: "user", userId: owner.userId } },
+          });
+          for (let index = 0; index < 24; index++) {
+            server.db.assistantConnections.record(issued.connection, "assistant_discover",
+              index % 3 === 0 ? target : { kind: "project", id: stressProject.id },
+              index % 2 === 0 ? "refused" : "succeeded");
+          }
           await page.getByRole("button", { name: "Refresh", exact: true }).click();
-          await capture(page, theme, "detail-activity", activity);
+          const activity = page.getByRole("table", { name: "Connection Activity" });
+          const activityScroll = page.getByRole("region", { name: "Recent Actions" });
+          await expect(activity.getByRole("columnheader")).toHaveText(["Operation", "Target", "Outcome", "When"]);
+          await expect(activity.locator("tbody tr")).toHaveCount(26);
+          const longTarget = activity.getByRole("cell", { name: "Assistant Connection · " + fixtures[0]!.connection.name, exact: true }).first();
+          await expect(longTarget).toBeVisible();
+          await expect(activity.locator("code").getByText("assistant_discover", { exact: true }).first()).toBeVisible();
+          await expect(activity.getByText("Succeeded", { exact: true }).first()).toBeVisible();
+          await expect(activity.getByText("Refused", { exact: true }).first()).toBeVisible();
+          await expectNoHorizontalOverflow(activityScroll);
+          expect(await activityScroll.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
+          if (width === 390) {
+            expect(await activity.locator("tbody code").evaluateAll(identifiers => identifiers.every(identifier => {
+              const range = document.createRange();
+              range.selectNodeContents(identifier);
+              return range.getClientRects().length === 1 && identifier.scrollWidth <= identifier.clientWidth;
+            }))).toBe(true);
+            const stressTarget = activity.getByRole("cell", { name: "Project · " + stressProject.name, exact: true }).first();
+            expect(await stressTarget.locator(".assistant-activity-target").evaluate(element => {
+              const style = getComputedStyle(element);
+              return style.webkitLineClamp === "2" && element.scrollHeight > element.clientHeight
+                && element.clientHeight <= Math.ceil(Number.parseFloat(style.lineHeight) * 2);
+            })).toBe(true);
+          }
+          await capture(page, theme, "detail-activity", activityScroll);
           const copyConnectionId = page.getByRole("button", { name: "Copy Connection ID", exact: true });
           await targetSize(copyConnectionId, minimum);
           await copyConnectionId.click();
@@ -242,7 +280,15 @@ for (const width of [1440, 390]) {
           expect(server.db.assistantConnections.authenticate(rotatedToken)).not.toBeNull();
           await capture(page, theme, "credential-masked", confirmation(page, "Save Your Credential"));
           await page.getByRole("button", { name: "Show Credential", exact: true }).click();
-          await expect(credentialField(page)).toHaveAttribute("type", "text");
+          if (width === 390) {
+            const field = credentialField(page);
+            await expect(field).toHaveValue(rotatedToken);
+            expect(await field.evaluate(element => element.tagName === "TEXTAREA"
+              && element.scrollWidth <= element.clientWidth && element.scrollHeight <= element.clientHeight
+              && element.textContent === "")).toBe(true);
+          } else {
+            await expect(credentialField(page)).toHaveAttribute("type", "text");
+          }
           await capture(page, theme, "credential-shown", confirmation(page, "Save Your Credential"));
           await done(page);
           await expect(credentialField(page)).toHaveCount(0);

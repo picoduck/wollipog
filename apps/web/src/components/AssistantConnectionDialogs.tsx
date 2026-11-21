@@ -3,6 +3,7 @@ import { CopyButton } from "./common.js";
 import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
 import { secretValueRef } from "./ui/secret-input.js";
+import { useIsMobile } from "./useIsMobile.js";
 
 export function RenameAssistantInstallationDialog({ initial, busy, onClose, onSave }: {
   initial: string;
@@ -37,6 +38,7 @@ export function RenameAssistantInstallationDialog({ initial, busy, onClose, onSa
 export function AssistantCredentialDialog({ token, onClose }: { token: string; onClose(): void }) {
   const [revealed, setRevealed] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
+  const phone = useIsMobile();
 
   return (
     <Modal title="Save Your Credential" onClose={onClose}
@@ -49,7 +51,12 @@ export function AssistantCredentialDialog({ token, onClose }: { token: string; o
         {copyFailed && <Notice tone="danger" role="alert">Couldn't copy the credential. Choose Show Credential, then select the text and copy it manually.</Notice>}
         <label className="field">
           <span>Assistant Credential</span>
-          <input autoComplete="off" spellCheck={false} readOnly type={revealed ? "text" : "password"} ref={secretValueRef(token)} />
+          {revealed && phone ? (
+            <textarea className="assistant-credential-revealed" rows={3} autoComplete="off" spellCheck={false}
+              readOnly ref={secretValueRef(token)} />
+          ) : (
+            <input autoComplete="off" spellCheck={false} readOnly type={revealed ? "text" : "password"} ref={secretValueRef(token)} />
+          )}
         </label>
         <button className="btn assistant-credential-visibility" type="button" onClick={() => setRevealed(value => !value)}>
           {revealed ? "Hide Credential" : "Show Credential"}

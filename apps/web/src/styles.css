@@ -19503,6 +19503,10 @@ a.tab { text-decoration: none; }
   overflow-wrap: anywhere;
   white-space: normal;
 }
+.assistant-activity-scroll {
+  max-height: 420px;
+  overflow: auto;
+}
 .assistant-activity-table {
   width: 100%;
   table-layout: fixed;
@@ -19524,6 +19528,11 @@ a.tab { text-decoration: none; }
   font-size: inherit;
 }
 .assistant-credential-visibility { align-self: flex-start; }
+.assistant-credential-revealed {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+  resize: none;
+}
 @media (max-width: 760px) {
   .assistant-connections-content .assistant-installation-row {
     grid-template-columns: minmax(0, 1fr);
@@ -19536,13 +19545,29 @@ a.tab { text-decoration: none; }
     min-width: 44px;
     min-height: 44px;
   }
-  .assistant-connections-content .seg { gap: var(--space-2); }
+  .assistant-connections-content .seg {
+    height: auto;
+    gap: var(--space-2);
+  }
   .assistant-connections-content .choice-list { gap: var(--space-2); }
   .assistant-connection-row + .assistant-connection-row { margin-top: var(--space-2); }
-  .assistant-activity-table :is(th, td) { padding-inline: var(--space-1); }
-  .assistant-activity-table th:nth-child(1) { width: 28%; }
-  .assistant-activity-table th:nth-child(2) { width: 28%; }
-  .assistant-activity-table th:nth-child(3) { width: 27%; }
+  .assistant-activity-table :is(tbody, td) { display: block; }
+  .assistant-activity-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    padding: var(--space-3);
+  }
+  .assistant-activity-table td { padding: 0; }
+  .assistant-activity-table td:nth-child(-n+2) { grid-column: 1 / -1; }
+  .assistant-activity-table code { white-space: nowrap; }
+  .assistant-activity-target {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
 }
 
 
