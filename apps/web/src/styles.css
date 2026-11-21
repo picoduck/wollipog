@@ -7720,8 +7720,7 @@ body.shell-dock-dragging * {
   .assistant-dock-slot:not(:has([data-show-all])) { max-height: 60cqh; }
 }
 @media (pointer: coarse) {
-  .assistant-dock .icon-btn.sm { min-width: 44px; min-height: 44px; }
-  .assistant-dock .btn.sm { min-height: 44px; }
+  .assistant-dock :is(.btn.sm, .icon-btn.sm) { --control-h-sm: var(--control-h); }
   .assistant-dock :is(.btn.sm, .icon-btn.sm)::after { content: none; }
 }
 .assistant-campaign-review {
