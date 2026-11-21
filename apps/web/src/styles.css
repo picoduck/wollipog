@@ -7587,15 +7587,14 @@ body.shell-dock-dragging * {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
-/* The dock uses the same column gutters and height budget as the session request slot. */
+/* Fit one request to its content while reserving room for the transcript. */
 .assistant-dock-slot {
   display: flex;
   flex: none;
   min-height: 0;
-  max-height: 40cqh;
+  max-height: 60cqh;
   padding: var(--space-1) max(var(--space-3), calc((100% - var(--chat-max)) / 2));
 }
-.assistant-dock-slot:has([data-show-all]) { max-height: 60cqh; }
 .assistant-dock {
   display: flex;
   flex-direction: column;
@@ -7721,7 +7720,7 @@ body.shell-dock-dragging * {
 }
 .assistant-dock-resolve { margin-left: auto; }
 @media (max-width: 760px) {
-  .assistant-dock-slot { max-height: 50cqh; }
+  .assistant-dock-slot:not(:has([data-show-all])) { max-height: 72cqh; }
   .assistant-dock-head { padding-inline: var(--space-2); }
   .assistant-dock-card-head,
   .assistant-dock-card-body,
@@ -7735,7 +7734,7 @@ body.shell-dock-dragging * {
   .assistant-dock-resolve:has(> [data-dock-action="approve"]) > .btn { max-width: none; }
 }
 @container chat-reading (max-height: 479px) {
-  .assistant-dock-slot { max-height: 60cqh; }
+  .assistant-dock-slot:not(:has([data-show-all])) { max-height: 60cqh; }
 }
 @media (pointer: coarse) {
   .assistant-dock .icon-btn.sm { min-width: 44px; min-height: 44px; }

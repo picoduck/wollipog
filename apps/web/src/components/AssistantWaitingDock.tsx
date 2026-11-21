@@ -214,7 +214,10 @@ function useWaitingRequest(session: SessionView | undefined, request: PendingApp
     let current = true;
     void api.session(sessionId).then(({ session: detail }) => {
       const match = prioritizedPendingRequests(detail.pendingApproval).find(candidate => assistantWorkRequestKey(sessionId, candidate) === key);
-      if (current && load.apply(detail)) setHydrated(match);
+      // An unrelated live summary can supersede this read without replacing its request.
+      // Keep the matched occurrence's options locally even if the store rejects the snapshot.
+      if (current && match) setHydrated(match);
+      load.apply(detail);
     }, () => { /* Open Session remains available. */ }).finally(() => load.cancel());
     return () => { current = false; load.cancel(); };
   }, [api, beginSessionDetailLoad, key, needsDetail, sessionId]);
@@ -253,14 +256,15 @@ function WaitingCard({ item, now, busy, begin, finish, onConfirmationAnswered, o
   const [choice, setChoice] = useState<string>();
   const [review, setReview] = useState(false);
   const [failure, setFailure] = useState<{ action: Response; detail: string }>();
-  const [details, setDetails] = useState(Boolean(confirmation && confirmation.arguments.length <= 2));
+  const [details, setDetails] = useState(Boolean(confirmation &&
+    confirmation.arguments.length + (confirmation.campaign ? confirmation.impact.length : 0) <= 2));
   const headingId = useId();
   const detailsId = useId();
   const body = useRef<HTMLDivElement>(null);
   useClipEdges(body);
-  const failureLine = useRef<HTMLParagraphElement>(null);
+  const failureDetails = useRef<HTMLButtonElement>(null);
   useLayoutEffect(() => {
-    if (failure) failureLine.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    if (failure) failureDetails.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [failure]);
   const target = confirmation?.target;
   const openSessionId = session?.id ?? (target?.kind === "session" ? target.id : undefined);
@@ -353,9 +357,9 @@ function WaitingCard({ item, now, busy, begin, finish, onConfirmationAnswered, o
           ))}
         </fieldset>}
         {refusal && <p className="request-card-reasons">{refusal}</p>}
-        {failure && <p className="assistant-dock-failure" ref={failureLine} role="alert">{responseCopy[failure.action].failure}</p>}
+        {failure && <p className="assistant-dock-failure" role="alert">{responseCopy[failure.action].failure}</p>}
         {detailCount > 0 && <>
-          <button type="button" className="btn sm ghost assistant-dock-details" aria-expanded={details} aria-controls={detailsId}
+          <button ref={failureDetails} type="button" className="btn sm ghost assistant-dock-details" aria-expanded={details} aria-controls={detailsId}
             aria-disabled={busy !== null || undefined} onClick={() => { if (!busy) setDetails(!details); }}>
             {details ? "Hide Details" : "Show Details"} <span className="count">{detailCount}</span>
           </button>

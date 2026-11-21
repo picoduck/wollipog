@@ -908,7 +908,14 @@ const client = {
     publish(archived);
     return { thread: structuredClone(archived) };
   },
-  session: async (id: string) => ({ session: structuredClone(sessions.get(id)!) }),
+  session: async (id: string) => {
+    const detail = structuredClone(sessions.get(id)!);
+    if (id === "sess-deps" && params.has("dockHydrationRace") && !document.body.dataset.dockHydrationRace) {
+      document.body.dataset.dockHydrationRace = "published";
+      upsert({ ...detail, updatedAt: detail.updatedAt + 1 });
+    }
+    return { session: detail };
+  },
   approve: async (id: string, body: { requestId: string; optionId: string | null }) => {
     if (params.has("dockFailure") && !document.body.dataset.dockAttempted) {
       document.body.dataset.dockAttempted = "true";

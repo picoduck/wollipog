@@ -16,6 +16,13 @@ async function open(page: Page, theme: string, scenario: string, params = "") {
 
 async function capture(page: Page, theme: string, state: string) {
   if (state !== "side-panel-overlaid") await expectTextContrast(dock(page));
+  if (state !== "side-panel-overlaid" && state !== "eight-show-all") {
+    for (const content of await cards(page).first().locator(
+      ".assistant-confirmation-summary, .assistant-dock-target, .code-well, .assistant-dock-facts, .assistant-dock-details, .assistant-dock-choices",
+    ).all()) {
+      await expectFullyInViewport(content, "Request content within the dock");
+    }
+  }
   if (page.viewportSize()?.width === 390) {
     const targets = await dock(page).locator("button, .assistant-dock-choices label").evaluateAll(elements => elements.map(element => {
       const { x, y, width, height } = element.getBoundingClientRect();
@@ -156,6 +163,7 @@ for (const theme of ["light", "dark"] as const) {
         await open(page, theme, "campaign", "campaign&confirm=1");
         const card = cards(page).first();
         await expect(card).toContainText("Campaign Approval");
+        await expect(card.getByRole("button", { name: /^Show Details/ })).toHaveAttribute("aria-expanded", "false");
         await actionOrder(card, ["Deny", "Review Campaign…"]);
         await layout(page);
         await capture(page, theme, "campaign-approval");
@@ -176,7 +184,6 @@ for (const theme of ["light", "dark"] as const) {
         const answer = card.getByRole("button", { name: "Send Answer" });
         await expect(answer).toBeDisabled();
         await card.getByRole("radio", { name: "Workspace Lockfile" }).check();
-        await card.getByRole("radio", { name: "Package Lockfile" }).scrollIntoViewIfNeeded();
         await layout(page);
         await capture(page, theme, "question");
         await answer.click();
@@ -223,8 +230,9 @@ for (const theme of ["light", "dark"] as const) {
         await expect(card.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
         await expect(card.getByText("The runner did not acknowledge this approval.")).toHaveCount(0);
         await expectFullyInViewport(failure, "Inline approval failure");
-        await capture(page, theme, "failure");
         const details = card.getByRole("button", { name: /^Show Details/ });
+        await expectFullyInViewport(details, "Show Details for the inline failure");
+        await capture(page, theme, "failure");
         await details.click();
         await expect(card.getByText("The runner did not acknowledge this approval.")).toBeVisible();
         await allow.click();
@@ -278,4 +286,11 @@ test("answering a request focuses the same action on the next one, then the comp
   await page.keyboard.press("Enter");
   await expect(dock(page)).toHaveCount(0);
   await expect(page.locator(".composer textarea")).toBeFocused();
+});
+
+test("a newer summary of the same request keeps its hydrated once-only actions", async ({ page }) => {
+  await open(page, "light", "tool", "dockHydrationRace");
+  await expect(page.locator("body")).toHaveAttribute("data-dock-hydration-race", "published");
+  await approve(cards(page).first()).click();
+  await expect(page.locator("body")).toHaveAttribute("data-approved", "sess-deps:req-1:allow");
 });
