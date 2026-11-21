@@ -1,7 +1,8 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { dialogMotionSettled } from "./dialog-motion.js";
+import { expectNoHorizontalOverflow } from "./layout-invariants.js";
 
 /** Reviewable captures of Google Antigravity sessions (#4779) at 1440x900 and 390x844, with the
  * layout measurements antigravity-setup-evidence.spec.ts takes: target sizes (and, on the touch
@@ -14,14 +15,15 @@ import { dialogMotionSettled } from "./dialog-motion.js";
  * (new-session-choices-e2e.html `?antigravity=`; one runner advertises one Antigravity row, so each
  * reason — sign-in, check failed, network denied — is its own capture), and the Connections setup
  * row's "Available in New Session" (machine-management-e2e.html `?antigravity=ready&antigravityAgent`).
- * Every session state (transcript-states-e2e.html `?scenario=antigravity&agState=`) is the existing
- * generic ACP session UI showing what agy 1.5.14 reports. Behaviour is asserted in unit and DOM tests. */
+ * Session states (transcript-states-e2e.html `?scenario=antigravity&agState=`) are the generic ACP
+ * session UI showing what agy 1.5.14 reports, except the Permission Mode menu in agy's own words
+ * (no Wollipog Plan Mode in Attach and Settings) and the launch-failure notices. The transcript pane
+ * and the open model picker are also checked for horizontal overflow. Behaviour is asserted in
+ * unit and DOM tests. */
 const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
 const prefix = process.env.WOLLIPOG_EVIDENCE_PREFIX ?? "after";
 const VIEWPORTS = [{ width: 1440, height: 900 }, { width: 390, height: 844 }] as const;
 const FIXED_NOW = new Date("2026-11-21T15:30:00Z");
-/** The session harness's `?agState=` fixtures (antigravity-session-fixture.tsx). */
-const SESSION_STATES = ["pickers", "modes", "streaming", "approval", "denied", "stopped", "install-failed", "signin-failed", "turn-failed"] as const;
 /** New Session's Needs Setup reasons for Google Antigravity, by `?antigravity=` fixture. */
 const NEEDS_SETUP = [
   { state: "signin", id: "needs-setup-signin", reason: "Sign in before the session can start." },
@@ -200,16 +202,39 @@ async function capture(page: Page, state: string, size: string, scope: string): 
   await page.screenshot({ path: join(evidenceDir!, `${name}.png`), animations: "disabled" });
 }
 
-/** New Session with its Agent list open, the place Google Antigravity's row appears. */
-async function openNewSessionAgents(page: Page, query: string, viewport: { width: number; height: number }): Promise<void> {
+/** New Session open on the fixture runner, its Agent list closed. */
+async function openNewSession(page: Page, query: string, viewport: { width: number; height: number }): Promise<void> {
   await page.setViewportSize(viewport);
   await page.goto(`/new-session-choices-e2e.html${query}`);
   await expect(page.getByRole("heading", { name: "New Session" })).toBeVisible();
   await dialogMotionSettled(page);
+}
+
+/** New Session with its Agent list open, the place Google Antigravity's row appears. */
+async function openNewSessionAgents(page: Page, query: string, viewport: { width: number; height: number }): Promise<Locator> {
+  await openNewSession(page, query, viewport);
   if (viewport.width < 760) await page.getByRole("button", { name: /^Agent:/ }).click();
   else await page.getByRole("combobox", { name: "Agent" }).click();
   // The phone's sheet is named Agent; the desktop combobox's list, Agent Options.
-  await expect(page.getByRole("listbox", { name: /^Agent( Options)?$/ })).toBeVisible();
+  const list = page.getByRole("listbox", { name: /^Agent( Options)?$/ });
+  await expect(list).toBeVisible();
+  return list;
+}
+
+/** What New Session draws for the chosen agent: its visible text, line by line, and the names of its
+ * controls. Recorded so the rows for Google Antigravity and Claude Code can be compared. */
+async function newSessionRows(page: Page): Promise<{ text: string[]; controls: string[] }> {
+  const dialog = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "New Session" }) });
+  return dialog.evaluate((root) => {
+    const visible = (element: Element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && getComputedStyle(element).visibility !== "hidden";
+    };
+    const text = (root as HTMLElement).innerText.split("\n").map((line) => line.trim()).filter(Boolean);
+    const controls = [...root.querySelectorAll<HTMLElement>("button, input, select, textarea, summary, [role=combobox], [role=radio], [role=tab]")]
+      .filter(visible).map((element) => `${element.getAttribute("role") ?? element.tagName.toLowerCase()}: ${(element.getAttribute("aria-label") ?? element.textContent ?? "").trim()}`);
+    return { text, controls };
+  });
 }
 
 async function openSession(page: Page, state: string, viewport: { width: number; height: number }): Promise<void> {
@@ -219,10 +244,61 @@ async function openSession(page: Page, state: string, viewport: { width: number;
   await expect(page.locator(".composer-box")).toBeVisible();
 }
 
+/** The composer bar's pickers; the phone's idle composer is a capsule that a tap opens. */
+async function openComposerBar(page: Page, viewport: { width: number }): Promise<void> {
+  if (viewport.width < 760) await page.locator(".composer-box").click();
+}
+
+async function openModelSettings(page: Page, viewport: { width: number }): Promise<Locator> {
+  await openComposerBar(page, viewport);
+  await page.getByRole("button", { name: /^Model Settings:/ }).click();
+  const picker = page.getByRole("dialog", { name: "Model Settings" });
+  await expect(picker).toBeVisible();
+  await expectNoHorizontalOverflow(picker, "The open model picker");
+  return picker;
+}
+
+/** agy's four modes, as the runner forwards them (`agentPermissionModes`), and how Wollipog attributes them. */
+const AGY_MODES = [
+  ["Default", "Ask before edits and commands, per your permission settings"],
+  ["Accept Edits", "Approve file edits in the workspace without asking"],
+  ["Auto", "Approve edits and safe commands; ask before irreversible actions"],
+  ["Plan", "Plan carefully before executing a task"],
+] as const;
+const attributed = (description: string) =>
+  `The agent describes this mode as “${description}.” You're asked only about actions the agent sends for approval.`;
+
+/** Launch failures (#4779): each has its own notice; none offers Retry Turn. */
+const LAUNCH_FAILURES = {
+  "install-failed": { title: "Google Antigravity Couldn't Start", connections: true, detail: "Google Antigravity could not be started on this machine. Check its setup in Connections." },
+  "signin-failed": { title: "Sign-In Required", connections: true, detail: "Google Antigravity needs sign-in on this machine. Sign in from Connections, then try again." },
+  "resume-failed": { title: "Conversation Can't Resume", connections: false, detail: "Google Antigravity could not resume this conversation, so its history here is read-only. Start a new session to continue." },
+} as const;
+
+/** Session captures: evidence ID, `?agState=` fixture, and the widths it is captured at. */
+const SESSION_CAPTURES: Array<{ id: string; state: string; phoneOnly?: boolean }> = [
+  { id: "pickers", state: "pickers" },
+  { id: "pickers-stress40", state: "pickers-stress40" },
+  // agy's nine models leave Reasoning Effort on the phone sheet's first screen (`pickers`); with forty
+  // the sheet must scroll to it.
+  { id: "pickers-effort", state: "pickers-stress40", phoneOnly: true },
+  { id: "modes", state: "modes" },
+  { id: "attach-menu", state: "attach-menu" },
+  { id: "streaming", state: "streaming" },
+  { id: "approval", state: "approval" },
+  { id: "denied", state: "denied" },
+  { id: "stopped", state: "stopped" },
+  { id: "install-failed", state: "install-failed" },
+  { id: "signin-failed", state: "signin-failed" },
+  { id: "resume-failed", state: "resume-failed" },
+  { id: "turn-failed", state: "turn-failed" },
+];
+
 for (const viewport of VIEWPORTS) test.describe(`${viewport.width}x${viewport.height}`, () => {
   const size = `${viewport.width}x${viewport.height}`;
+  const phone = viewport.width < 760;
   // The phone width is a touch phone: coarse-pointer sizing (44px targets) applies there.
-  if (viewport.width < 760) test.use({ hasTouch: true, isMobile: true });
+  if (phone) test.use({ hasTouch: true, isMobile: true });
 
   test(`New Session before: no Google Antigravity row, ${size}`, async ({ page }) => {
     await openNewSessionAgents(page, "", viewport);
@@ -238,6 +314,20 @@ for (const viewport of VIEWPORTS) test.describe(`${viewport.width}x${viewport.he
     await capture(page, "new-session-available", size, "body");
   });
 
+  test(`New Session: Google Antigravity chosen, list closed, ${size}`, async ({ page }) => {
+    await openNewSession(page, "?antigravity=ready", viewport);
+    // The same dialog with Claude Code, the runner's first agent, for the row comparison.
+    measurements[`new-session-rows-claude-code-${size}`] = await newSessionRows(page);
+    await openNewSession(page, "?antigravity=ready&savedAgent=google-antigravity", viewport);
+    const agent = phone ? page.getByRole("button", { name: /^Agent:/ }) : page.getByRole("combobox", { name: "Agent" });
+    await expect(agent).toHaveAccessibleName(phone ? "Agent: Google Antigravity" : "Agent");
+    if (!phone) await expect(agent).toHaveValue("Google Antigravity");
+    measurements[`new-session-rows-google-antigravity-${size}`] = await newSessionRows(page);
+    await expect(page.getByRole("button", { name: "Cancel" })).toBeInViewport();
+    await expect(page.getByRole("button", { name: "Create Session" })).toBeInViewport();
+    await capture(page, "new-session-available-closed", size, "body");
+  });
+
   for (const { state, id, reason } of NEEDS_SETUP) {
     test(`New Session: Google Antigravity needs setup (${state}), ${size}`, async ({ page }) => {
       await openNewSessionAgents(page, `?antigravity=${state}`, viewport);
@@ -248,6 +338,29 @@ for (const viewport of VIEWPORTS) test.describe(`${viewport.width}x${viewport.he
       await capture(page, `new-session-${id}`, size, "body");
     });
   }
+
+  if (phone) test(`New Session: the open list scrolls to Account Setup…, ${size}`, async ({ page }) => {
+    const list = await openNewSessionAgents(page, "?antigravity=signin", viewport);
+    const footer = list.getByRole("option", { name: "Account Setup…" });
+    await footer.scrollIntoViewIfNeeded();
+    await expect(footer).toBeInViewport({ ratio: 1 });
+    await expect(list.getByRole("option", { name: /Google Antigravity/ })).toContainText("Sign in before the session can start.");
+    await capture(page, "new-session-needs-setup-signin-scrolled", size, "body");
+  });
+
+  test(`New Session: several agents need setup, ${size}`, async ({ page }) => {
+    // Antigravity needs sign-in beside the fixture's Gemini (not installed) and OpenCode (signed out).
+    // One runner advertises one Antigravity row, so its network-denied reason is not repeated here.
+    await openNewSessionAgents(page, "?antigravity=signin&agentSetup=1", viewport);
+    const rows = page.getByRole("group", { name: "Needs Setup" }).getByRole("option");
+    await expect(rows).toHaveText([
+      /^Gemini.*Not installed on Studio Workstation\.$/,
+      /^Google Antigravity.*Sign in before the session can start\.$/,
+      /^OpenCode.*Sign in before the session can start\.$/,
+    ]);
+    await rows.last().scrollIntoViewIfNeeded();
+    await capture(page, "new-session-needs-setup-many", size, "body");
+  });
 
   test(`Connections: Google Antigravity is available in New Session, ${size}`, async ({ page }) => {
     await page.setViewportSize(viewport);
@@ -262,41 +375,71 @@ for (const viewport of VIEWPORTS) test.describe(`${viewport.width}x${viewport.he
     await capture(page, "connections-available", size, '[role="dialog"]');
   });
 
-  for (const state of SESSION_STATES) {
-    test(`Google Antigravity session, ${state}, ${size}`, async ({ page }) => {
+  for (const { id, state, phoneOnly } of SESSION_CAPTURES) {
+    if (phoneOnly && !phone) continue;
+    test(`Google Antigravity session, ${id}, ${size}`, async ({ page }) => {
       await openSession(page, state, viewport);
-      if (state === "pickers") {
-        // The phone's idle composer is a capsule: tapping it opens the bar with its pickers.
-        if (viewport.width < 760) await page.locator(".composer-box").click();
-        await page.getByRole("button", { name: /^Model Settings:/ }).click();
-        await expect(page.getByRole("dialog", { name: "Model Settings" })).toBeVisible();
+      await expectNoHorizontalOverflow(page.locator(".detail-reader"), "The transcript pane");
+      if (id === "pickers" || id === "pickers-stress40") {
+        const picker = await openModelSettings(page, viewport);
+        if (id === "pickers") {
+          for (const name of ["Gemini 4 Neon", "Gemini 4 Argon", "Orchestrator (Neon)", "Gemini 3.8 Flash", "GPT-OSS 120B (Medium)"]) {
+            await expect(picker.getByText(name, { exact: true }).first()).toBeAttached();
+          }
+        }
       }
-      if (state === "modes") {
-        if (viewport.width < 760) await page.locator(".composer-box").click();
+      if (id === "pickers-effort") {
+        const picker = await openModelSettings(page, viewport);
+        const effort = picker.getByText("Reasoning Effort", { exact: true });
+        await expect(effort).not.toBeInViewport();
+        await picker.getByText("Extra High", { exact: true }).scrollIntoViewIfNeeded();
+        await expect(effort).toBeInViewport();
+        await expect(picker.getByText("Extra High", { exact: true })).toBeInViewport();
+      }
+      if (id === "modes") {
+        await openComposerBar(page, viewport);
         await page.getByRole("button", { name: /^Permission Mode/ }).click();
         const menu = page.getByRole("menu", { name: "Permission Mode" });
         await expect(menu).toBeVisible();
-        // agy's own names (Title Cased) and meanings, never a native harness's for the same id.
-        for (const text of ["Default", "Accept Edits", "Auto", "Ask before edits and commands, per your permission settings.",
-          "Approve file edits in the workspace without asking.", "Approve edits and safe commands; ask before irreversible actions."]) {
-          await expect(menu.getByText(text, { exact: true }).first()).toBeVisible();
+        // agy's own modes in its own words, Plan included, and no separate generic Default.
+        await expect(menu.getByText("Default", { exact: true })).toHaveCount(1);
+        for (const [name, description] of AGY_MODES) {
+          await expect(menu.getByText(name, { exact: true })).toBeVisible();
+          await expect(menu.getByText(attributed(description), { exact: true })).toBeVisible();
         }
-        for (const text of [/AI-Reviewed/, /Ask Every Time/, /accept-edits/]) await expect(menu.getByText(text)).toHaveCount(0);
+        for (const text of [/AI-Reviewed/, /Ask Every Time/, /accept-edits/, /Uses the agent's own default mode/]) {
+          await expect(menu.getByText(text)).toHaveCount(0);
+        }
       }
-      if (state === "streaming") {
+      if (id === "attach-menu") {
+        await page.getByRole("button", { name: "Attach and Settings" }).click();
+        await expect(page.getByText("Attach Image…", { exact: true })).toBeVisible();
+        await expect(page.getByText("Plan Mode", { exact: true })).toHaveCount(0);
+      }
+      if (id === "streaming") {
         // Open the turn's work and the command, so its long output shows.
         await page.getByRole("button", { name: /^Worked/ }).click();
         await page.getByText("ls -la src/notes", { exact: true }).first().click();
         await expect(page.getByText(/module-48-with-a-longer-file-name/).first()).toBeAttached();
+        await expectNoHorizontalOverflow(page.locator(".detail-reader"), "The transcript pane with the output open");
       }
-      // A failure's own words wait behind Show Details: open it so the capture shows them.
-      if (state.endsWith("-failed")) await page.getByRole("button", { name: "Show Details" }).click();
-      if (state === "approval") await expect(page.getByText("touch notes.txt").first()).toBeVisible();
-      if (state === "denied") await expect(page.getByText("The command was denied, so nothing ran.")).toBeVisible();
-      if (state === "install-failed") await expect(page.getByText(/could not be started on this machine/).first()).toBeVisible();
-      if (state === "signin-failed") await expect(page.getByText(/needs sign-in on this machine/).first()).toBeVisible();
-      if (state === "turn-failed") await expect(page.getByText(/could not complete this turn: .*…$/).first()).toBeVisible();
-      await capture(page, state, size, "body");
+      if (id in LAUNCH_FAILURES) {
+        const failure = LAUNCH_FAILURES[id as keyof typeof LAUNCH_FAILURES];
+        await expect(page.getByText(failure.title, { exact: true })).toBeVisible();
+        await expect(page.getByRole("link", { name: "Open Connections" })).toHaveCount(failure.connections ? 1 : 0);
+        await expect(page.getByRole("button", { name: "Retry Turn" })).toHaveCount(0);
+        // The runner's sentence, behind Show Details, without the generic launch prefix.
+        await page.getByRole("button", { name: "Show Details" }).click();
+        await expect(page.getByText(failure.detail, { exact: true })).toBeVisible();
+        await expect(page.getByText(/agent init failed/)).toHaveCount(0);
+      }
+      if (id === "turn-failed") {
+        await page.getByRole("button", { name: "Show Details" }).click();
+        await expect(page.getByText(/could not complete this turn: .*…$/).first()).toBeVisible();
+      }
+      if (id === "approval") await expect(page.getByText("touch notes.txt").first()).toBeVisible();
+      if (id === "denied") await expect(page.getByText("The command was denied, so nothing ran.")).toBeVisible();
+      await capture(page, id, size, "body");
     });
   }
 });

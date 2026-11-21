@@ -26,22 +26,24 @@ import { SessionDetail } from "../components/SessionDetail.js";
  * and mode choices, its tool calls and permission options) and the statuses the runner's
  * Antigravity profile words (apps/runner/src/acp-compatibility.ts). `?agState=` picks one:
  *
- * - `pickers`: an idle session whose agent lists forty long model names (the fake agy's
- *   `session_many_models` stress shape), for the open Model Settings popover.
- * - `modes`: that idle session with agy's nine models, for the open Permission Mode menu, which
- *   names agy's four modes as agy does (`agentPermissionModes`).
+ * - `pickers`: an idle session with agy's nine models, for the open Model Settings popover.
+ * - `pickers-stress40`: that session whose agent lists forty long model names (the fake agy's
+ *   `session_many_models` stress shape).
+ * - `modes`, `attach-menu`: the `pickers` session, for the open Permission Mode menu (which names
+ *   agy's four modes as agy does, `agentPermissionModes`) and the Attach and Settings menu.
  * - `streaming`: a running turn with a command's long output and a reply still streaming.
  * - `approval`: the turn waits on agy's permission request for `touch notes.txt`.
  * - `denied`: that request was denied, the tool call failed and the agent said so.
  * - `stopped`: the person stopped the turn (`turn_interrupted`, then idle).
  * - `install-failed`, `signin-failed`: the launch failed (`agent init failed: …`, status failed).
+ * - `resume-failed`: an earlier exchange, then agy could not resume it (`agent init failed: …`).
  * - `turn-failed`: the turn failed with a long provider quota message, capped as the runner caps it.
  *
  * Times are fixed; the evidence spec also fixes the clock and time zone. No real account appears:
  * agy's account is the runner's redaction placeholder `[account]`.
  */
 const params = new URLSearchParams(window.location.search);
-type AntigravityState = "pickers" | "modes" | "streaming" | "approval" | "denied" | "stopped" | "install-failed" | "signin-failed" | "turn-failed";
+type AntigravityState = "pickers" | "pickers-stress40" | "modes" | "attach-menu" | "resume-failed" | "streaming" | "approval" | "denied" | "stopped" | "install-failed" | "signin-failed" | "turn-failed";
 const state = (params.get("agState") ?? "pickers") as AntigravityState;
 
 const SESSION_ID = "antigravity-session-e2e";
@@ -57,7 +59,7 @@ const REAL_MODELS: Array<[string, string]> = [
 ];
 const STRESS_MODELS: Array<[string, string]> = Array.from({ length: 40 }, (_, index) =>
   [`fixture-model-${index + 1}`, `Fixture Model ${index + 1} With a Deliberately Long Display Name for Layout (Experimental Preview)`]);
-const manyModels = state === "pickers";
+const manyModels = state === "pickers-stress40";
 const models = manyModels ? STRESS_MODELS : REAL_MODELS;
 const currentModel = models[0]![0];
 
@@ -81,7 +83,7 @@ const capabilities: AgentCapabilities = {
   elicitation: Object.fromEntries(permissionModes.map((mode) => [mode, ["acp-permission" as const]])),
 };
 
-const launchFailed = state === "install-failed" || state === "signin-failed";
+const launchFailed = state === "install-failed" || state === "signin-failed" || state === "resume-failed";
 const runner = {
   runnerId: "runner-1",
   hostname: "fixture-workstation",
@@ -141,13 +143,18 @@ const prompt = (text = PROMPT) => payloads.push({ kind: "user_message", text, im
 const touch = (status: string) => payloads.push({ kind: "tool_call", toolCallId: "call_touch", title: "touch notes.txt", toolKind: "execute", status });
 switch (state) {
   case "pickers":
+  case "pickers-stress40":
   case "modes":
+  case "attach-menu":
+  case "resume-failed":
     prompt("Summarize what this project does in two sentences.");
     payloads.push(
       { kind: "agent_thought", text: "Reading the README and package.json.", messageId: "thought-1", final: true },
       { kind: "agent_message", text: "This project is a small notes app: it stores plain-text notes in a folder and lists them in a web page.\n\nIt has a test suite for the storage layer and a script that builds the page.", messageId: "msg-1", final: true },
       { kind: "agent_response_completed" },
     );
+    // A later launch could not resume that conversation.
+    if (state === "resume-failed") payloads.push({ kind: "error", message: "agent init failed: Google Antigravity could not resume this conversation, so its history here is read-only. Start a new session to continue." });
     break;
   case "streaming":
     prompt("List the project files, then tell me which ones have tests.");
@@ -200,7 +207,7 @@ const events: SessionEvent[] = payloads.map((payload, index) => ({
 }));
 
 const statusByState: Record<AntigravityState, SessionStatus> = {
-  pickers: "idle", modes: "idle", streaming: "running", approval: "input_required", denied: "idle", stopped: "idle",
+  pickers: "idle", "pickers-stress40": "idle", modes: "idle", "attach-menu": "idle", "resume-failed": "failed", streaming: "running", approval: "input_required", denied: "idle", stopped: "idle",
   "install-failed": "failed", "signin-failed": "failed", "turn-failed": "idle",
 };
 
