@@ -167,7 +167,21 @@ An active run older than two hours reports `stalled-active-run`. The controller
 run. An operator must investigate a hung/queued run; admission resumes only after
 Actions reports it terminal. Controller restarts need no process memory. A missing
 or failed API response, truncated active listing (>1,000 per state), or >10 attempts
-on one run fails reconciliation and emits a sanitized status. The next delivered
+on one run fails reconciliation and emits a sanitized status. A short active-run
+census (fewer unique run IDs than the largest `total_count` observed in that traversal)
+restarts the entire active census from page one, at most five traversals of ten pages
+per status, with 5/10/20/30-second backoffs (65 seconds total delay). This gives margin
+over the roughly 40-second transient reported in #4789. Each traversal deduplicates run
+IDs independently; incomplete traversals are discarded. Admission and controller
+reconciliation share this retry. The 65-second delay allowance is shared across CAS
+retries and optional observations within each invocation, rather than multiplied by
+status or observation. The existing five-minute admission and eight-minute controller
+timeouts remain: even after the controller's three-minute terminal wait, 235 seconds
+remain for API/checkout work outside the listing delay. Tests inject the delay.
+Persistent short listings retain `worker-listing-truncated-operator-reconciliation-required`
+and leave durable intent unchanged for a later wake. Transport errors and unreadable
+payloads stop immediately; bounded recent-completion samples still read one page.
+The next delivered
 wake tries again; cron delivery is not guaranteed. Operators can dispatch trusted
 reconciliation without creating a duplicate full worker:
 
