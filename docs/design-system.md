@@ -2480,6 +2480,7 @@ start collapsed to one summary line (#2788): a full-width §5.5 disclosure trigg
 carrying the one Held badge when the whole queue is held. While collapsed it also
 carries the most severe row status that needs the person (Delivery Failed, else Delivery Uncertain)
 or the spinner while steering.
+The expanded list scrolls at about four rows or 30% of the viewport height, whichever fits.
 Only the summary opens or closes the tray: arrivals, removals and status changes never do, the choice
 lasts while the session stays open, and every session starts collapsed. A queue held behind a
 worktree or account handoff (#3752) says why in one sentence-case `.queue-note` right under the
@@ -2504,8 +2505,8 @@ is a notice of the slot (§13.2), not part of the row.
 One queued message is its own row in place of the summary (#3962), so steering it takes one tap:
 the same single line with a clock, and the Held badge after its words when the queue is held. On desktop its
 row is the expanded row above, and what the expanded tray would say about it is said under it. Below
-760px, while the message can be steered and the reader may manage the queue, a 44px Steer Now
-button sits before the ⋯ button and the sheet leaves Steer into This Turn out; otherwise
+760px, while the message can be steered and the reader may manage the queue, a small Steer Now
+button sits before the ⋯ button and borrows a 44px hit area on touch. The sheet leaves Steer into This Turn out; otherwise
 there is no Steer button and the sheet lists Steer into This Turn, disabled, with its reason. When a
 second message arrives the summary returns as the person last left it, opened only if focus was in
 the lone row, so the control they hold stays shown; when the queue drops back to one, focus on the

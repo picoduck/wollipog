@@ -24,7 +24,15 @@ async function measureQueueLayout(page: Page) {
     }
     const targets = [...element.querySelectorAll("button")].flatMap((button) => {
       const rect = button.getBoundingClientRect();
-      return rect.width && rect.height ? [Math.min(rect.width, rect.height)] : [];
+      if (!rect.width || !rect.height) return [];
+      const style = getComputedStyle(button);
+      const after = getComputedStyle(button, "::after");
+      const grow = (inset: string, border: string) =>
+        after.content === "none" ? 0 : Math.max(0, -(parseFloat(inset) || 0) - parseFloat(border));
+      return [Math.min(
+        rect.width + grow(after.left, style.borderLeftWidth) + grow(after.right, style.borderRightWidth),
+        rect.height + grow(after.top, style.borderTopWidth) + grow(after.bottom, style.borderBottomWidth),
+      )];
     });
     return {
       outside: Math.max(0, outer.left - inner.left, outer.top - inner.top,
@@ -155,11 +163,41 @@ for (const theme of ["light", "dark"] as const) {
 
         await setQueue(8);
         await expect(queue.getByRole("listitem")).toHaveCount(8);
-        const wrapped = await queue.getByTestId("queued-prompt-layout-queue-6").locator(".queue-text").evaluate((text) =>
-          text.getBoundingClientRect().height > parseFloat(getComputedStyle(text).lineHeight));
-        expect(wrapped, "the long message wraps inside its row").toBe(true);
-        await expectFullyInViewport(queue.getByRole("listitem").last(), "Eighth queued message");
+        const longText = await queue.getByTestId("queued-prompt-layout-queue-6").locator(".queue-text").evaluate((text) => {
+          const row = text.closest(".queue-row")!;
+          const rowBox = row.getBoundingClientRect();
+          const textBox = text.getBoundingClientRect();
+          const style = getComputedStyle(row);
+          return {
+            wraps: textBox.height > parseFloat(getComputedStyle(text).lineHeight),
+            top: textBox.top - rowBox.top - parseFloat(style.borderTopWidth),
+            bottom: rowBox.bottom - textBox.bottom - parseFloat(style.borderBottomWidth),
+          };
+        });
+        expect(longText.wraps, "the long message wraps inside its row").toBe(true);
+        expect(longText.top).toBeGreaterThanOrEqual(4);
+        expect(longText.top).toBeCloseTo(longText.bottom);
+        const rows = queue.getByRole("list");
+        const bounds = await rows.evaluate((list) => ({
+          height: list.getBoundingClientRect().height,
+          viewportHeight: window.innerHeight,
+          scrollable: list.scrollHeight > list.clientHeight,
+        }));
+        expect(bounds.height).toBeLessThanOrEqual(bounds.viewportHeight * 0.3);
+        expect(bounds.scrollable).toBe(true);
         await captureQueueEvidence(page, theme, "queue8", await measureQueueLayout(page));
+        const last = rows.getByRole("listitem").last();
+        await last.scrollIntoViewIfNeeded();
+        await expectFullyInViewport(last, "Eighth queued message after scrolling");
+        expect(await rows.evaluate((list) => list.scrollTop)).toBeGreaterThan(0);
+        await captureQueueEvidence(page, theme, "queue8-scrolled", await measureQueueLayout(page));
+        if (phone) {
+          await last.getByRole("button", { name: "Queued Message Actions" }).tap();
+          const steer = page.getByRole("menuitem", { name: "Steer into This Turn" });
+          await expect(steer).toBeEnabled();
+          await page.keyboard.press("Escape");
+          await expect(steer).toHaveCount(0);
+        }
         const height = page.viewportSize()!.height;
         for (const width of phone ? [320, 390, 430, 760] : [320, 760, 761, 1024, 1440]) {
           await page.setViewportSize({ width, height });
@@ -1657,8 +1695,12 @@ test.describe("a lone queued message steers in one tap (#3962)", () => {
       const more = row.getByRole("button", { name: "Queued Message Actions" });
       const steerBox = (await steer.boundingBox())!;
       const moreBox = (await more.boundingBox())!;
-      expect(steerBox.height).toBeGreaterThanOrEqual(44);
+      expect(steerBox.height).toBeLessThan(44);
       expect(steerBox.width).toBeGreaterThanOrEqual(44);
+      const rowBox = (await row.boundingBox())!;
+      expect(steerBox.y - rowBox.y).toBeGreaterThanOrEqual(4);
+      expect(rowBox.y + rowBox.height - steerBox.y - steerBox.height).toBeGreaterThanOrEqual(4);
+      expect((await measureQueueLayout(page)).minTarget).toBeGreaterThanOrEqual(44);
       expect(steerBox.x + steerBox.width, "Steer and ⋯ do not overlap").toBeLessThanOrEqual(moreBox.x);
       const textBox = (await row.locator(".queue-text").boundingBox())!;
       expect(Math.abs(textBox.y + textBox.height / 2 - (steerBox.y + steerBox.height / 2)), "the words keep Steer's line")
@@ -1675,7 +1717,8 @@ test.describe("a lone queued message steers in one tap (#3962)", () => {
       await page.keyboard.press("Escape");
       await expect(sheet).toHaveCount(0);
 
-      await steer.tap();
+      // Tap just outside the button's visible outline, inside its borrowed hit area.
+      await page.touchscreen.tap(steerBox.x + steerBox.width / 2, steerBox.y - 2);
       await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests()[0]?.promotePromptId))
         .toBe("queue-lone");
     });
