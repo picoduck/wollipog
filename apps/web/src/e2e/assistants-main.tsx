@@ -2,6 +2,8 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import {
   PROTOCOL_VERSION,
+  ASSISTANT_DECISION_CATEGORIES,
+  type AssistantDecisionCategory,
   removePendingRequest,
   type AgentHarnessDefaultsView,
   type AssistantDecisionDelegation,
@@ -24,6 +26,8 @@ import type { AssistantThread, AssistantThreadDefaults, CreateAssistantThreadReq
 import type { AssistantOwnerConfirmation, AssistantThreadAccountChoices, ChangeAssistantThreadAccountRequest, ChangeAssistantThreadHarnessRequest, OrchestratorCampaignBudgetDefault } from "@wollipog/protocol";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { assistantDecisionHistoryFixture } from "./assistant-decision-fixture.js";
+import { campaignProjection, workSummary } from "./campaign-status-fixtures.js";
+import { confirmationResultFixture, longConfirmationTarget } from "./wollipog-prompt-fixture.js";
 import { ThemeProvider } from "../components/ThemeProvider.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
 import { viewFromPath, viewPath, type ViewNavigation } from "../navigation.js";
@@ -43,15 +47,21 @@ import "../styles.css";
  * `window.assistantsAdvance()` finishes the running launched session, as its stream would.
  * `?confirm=N` (1–8) gives the first thread N owner confirmations waiting for its owner (#4665).
  * `?attention=N` gives the first thread a confirmation, the second a question, and extra threads confirmations (#4723).
+ * `?streaming-reply` opens a running turn fed by `window.assistantsReplyChunk`.
  */
 const SCOPE = "assistants-e2e";
 const params = new URLSearchParams(location.search);
+const streamingReply = params.has("streaming-reply");
 const scenario = params.get("threads") ?? "some";
 const attentionCount = Number(params.get("attention") ?? 0);
 const limitsScenario = params.get("limits");
+const overBudgetBar = params.get("thread-bar") === "over-budget";
+const panelScenario = params.get("thread-panel");
 const campaignScenario = params.has("campaign");
+const resultScenario = params.get("confirmation-result");
 const delegationScenario = params.get("delegation");
 const showDelegation = delegationScenario === "stress" || delegationScenario === "ci-old" || delegationScenario === "release-old";
+const longScopes = params.has("long-scopes");
 const evidenceScenario = params.get("evidence");
 const migrationScenario = params.get("harness-change");
 const stressHarnessLabel = "Codex App Server With a Long Installation Label on the Shared Engineering Machine";
@@ -159,13 +169,22 @@ function depsApproval(occurrenceId: string): PendingApproval {
 }
 
 const sessions = new Map<string, SessionView>([
-  ["sess-triage", session("sess-triage", "Triage Open Issues", { status: "idle" })],
+  ["sess-triage", session("sess-triage", "Triage Open Issues", params.has("queuedMessage") ? {
+    status: "running",
+    queued: [{
+      id: "queued-checks",
+      text: "Summarize the remaining CI checks",
+      durableDeliveryState: "failed",
+      durableDeliveryError: "The machine restarted before accepting this message.",
+    }],
+  } : { status: streamingReply ? "running" : "idle" })],
   ["sess-release", session("sess-release", "Ship the Release Notes", { status: "running", agentId: "codex", agentName: "Codex", driver: "codex-app-server" })],
   ["sess-cleanup", session("sess-cleanup", "Weekly Cleanup", { status: "idle", updatedAt: NOW - 26 * 60 * minute })],
-  ["sess-flaky", session("sess-flaky", "Fix the Flaky Upload Test", { status: "running", updatedAt: NOW - minute })],
+  ["sess-flaky", session("sess-flaky", resultScenario === "stress" ? longConfirmationTarget : "Fix the Flaky Upload Test", { status: "running", updatedAt: NOW - minute })],
   ["sess-deps", session("sess-deps", "Bump the Vite Group", {
-    status: "input_required",
-    pendingApproval: depsApproval("occ-deps-1"),
+    ...(resultScenario === "approved"
+      ? { status: "stopped", archived: true }
+      : { status: "input_required", pendingApproval: depsApproval("occ-deps-1") }),
   })],
 ]);
 
@@ -233,13 +252,18 @@ if (releaseScenario === "tag" || releaseScenario === "publish") {
 }
 
 const delegationProjects: ProjectView[] = delegationScenario === "stress" ? Array.from({ length: 36 }, (_, index) => ({
-  id: `project_${index}`, name: index === 0 ? "Release Validation and Engineering " + "Dependencies".repeat(10) : `Project ${index}`,
+  id: `project_${index}`, name: longScopes
+    ? `Project ${index} · Release Validation, Engineering Infrastructure and Cross-Platform Compatibility`
+    : index === 0 ? "Release Validation and Engineering " + "Dependencies".repeat(10) : `Project ${index}`,
   hidden: false, locations: [], activeSessionCount: 1, unarchivedSessionCount: 1, totalSessionCount: 1,
   createdAt: NOW, updatedAt: NOW,
 })) : [];
 for (const [index, project] of delegationProjects.entries()) {
   const id = `campaign_${index}`;
-  sessions.set(id, session(id, `Release Campaign ${index}`, { role: "orchestrator", projectId: project.id }));
+  const title = longScopes
+    ? `Campaign ${index} · Review Long-Running Queue Checks and Coordinate Cross-Repository Deployment`
+    : `Release Campaign ${index}`;
+  sessions.set(id, session(id, title, { role: "orchestrator", projectId: project.id }));
 }
 
 const question: PendingApproval = {
@@ -322,6 +346,12 @@ function thread(id: string, sessionId: string, overrides: Partial<AssistantThrea
     connectionId: `conn-${id}`, launchedSessionIds: [], lastActivityAt: backing.updatedAt, createdAt: backing.createdAt,
     ...(showDelegation || (limitsScenario && limitsScenario !== "old")
       ? { decisionDelegation: { revision: 0, grant: null } } : {}),
+    ...(params.has("saved-narrow") && id === "thr_triage" ? { decisionDelegation: { revision: 1, grant: {
+      categories: ["pr_merge"], selectionMode: "all", campaigns: "all", projects: "all", expiresAt: null,
+    } } } : {}),
+    ...(params.has("saved-release") && id === "thr_triage" ? { decisionDelegation: { revision: 1, grant: {
+      categories: ["release_tag"], selectionMode: "choose", campaigns: "all", projects: "all", expiresAt: null,
+    } } } : {}),
     ...(evidenceScenario === "refused-stress" && id === "thr_triage" ? { decisionDelegation: { revision: 1, grant: {
       categories: ["ui_evidence_review"], campaigns: "all", projects: "all", expiresAt: null, evidenceDisclosureDigest: "a".repeat(64),
     } } } : {}),
@@ -360,7 +390,7 @@ let threads: AssistantThread[] = scenario === "long" ? [
     title: longTitle(index + 2), status: index % 3 === 0 ? "working" : "done", lastActivityAt: NOW - (index + 2) * minute,
   })),
 ] : scenario === "some" ? [
-  triage(),
+  triage(streamingReply ? { status: "working", launchedSessionIds: [] } : {}),
   thread("thr_release", "sess-release", { status: attentionCount > 1 ? "needs_you" : "working", harness: "codex", lastActivityAt: NOW - 3 * minute }),
   thread("thr_cleanup", "sess-cleanup", { status: "done" }),
   // Archived: the list leaves it out, and a link to it opens it on its own.
@@ -408,7 +438,11 @@ if (params.get("launched") === "many") {
   for (let index = 1; index <= 40; index += 1) {
     const id = `sess-many-${index}`;
     const status = index % 5 === 0 ? "running" : index % 7 === 0 ? "failed" : "completed";
-    sessions.set(id, session(id, `${tasks[index % tasks.length]} Package ${index}`, { status, updatedAt: NOW - (60 - index) * minute }));
+    const title = `${tasks[index % tasks.length]} Package ${index}`;
+    sessions.set(id, session(id, panelScenario ? `${title} · ${longTitle(index)}` : title, {
+      status, createdAt: NOW - (60 - index) * minute, updatedAt: NOW - (60 - index) * minute,
+      costUsd: index / 5,
+    }));
     earlier.push(id);
   }
   if (current) current.launchedSessionIds = [...earlier, ...current.launchedSessionIds];
@@ -416,12 +450,17 @@ if (params.get("launched") === "many") {
 if (limitsScenario) {
   for (const item of threads) {
     item.usage = {
-      costUsd: { used: item.id === "thr_triage" ? 8.13 : 0, limit: 25 },
+      costUsd: { used: item.id === "thr_triage" ? (overBudgetBar ? 80 : 8.13) : 0, limit: 25 },
       launchedSessions: { used: item.launchedSessionIds.length, limit: limitsScenario === "stress" ? null : 10 },
     };
     if (item.status !== "archived" && limitsScenario !== "old") item.limitsEditable = true;
     if (item.id === "thr_triage" && limitsScenario === "budget") {
       item.launchLimitRefusal = "This Wollipog Assistant thread has spent or committed its whole $25 budget, so it cannot launch another session.";
+      if (overBudgetBar) {
+        item.status = "done";
+        item.launchedSessionIds = ["sess-flaky"];
+        item.usage.launchedSessions.used = item.launchedSessionIds.length;
+      }
     }
     const backing = sessions.get(item.sessionId);
     if (backing && limitsScenario !== "old") {
@@ -429,6 +468,20 @@ if (limitsScenario) {
       backing.costBudgetUsd = 15;
     }
   }
+}
+
+if (panelScenario) {
+  const current = threads[0]!;
+  current.title = (current.title + " now and report what remains").slice(0, 120);
+  current.usage = { costUsd: { used: 8.13, limit: 25 }, launchedSessions: { used: 42, limit: 60 } };
+  current.earlierConversations = [{ sessionId: "sess-cleanup", harness: "codex", nextHarness: "claude-code", switchedAt: NOW - minute }];
+  current.decisionDelegation = { revision: 1, grant: panelScenario === "delegated" ? {
+    categories: Object.keys(ASSISTANT_DECISION_CATEGORIES) as AssistantDecisionCategory[],
+    campaigns: "all", projects: "all", expiresAt: NOW + 8 * 24 * 60 * minute,
+  } : null };
+  const backing = sessions.get(current.sessionId)!;
+  backing.model = "claude-opus-4-6";
+  backing.effort = "high";
 }
 
 let limitDefaults: AssistantThreadLimits = { costUsd: 25, launchedSessions: 10 };
@@ -465,6 +518,8 @@ const events: Record<string, SessionEvent[]> = {
       costUsd: 0.21, durationMs: 118_000, model: "claude-opus-5-5",
     } as SessionEvent["payload"]),
     event("sess-triage", NOW - 28 * minute, { kind: "conversation_checkpoint", turn: 1 } as SessionEvent["payload"]),
+    ...(resultScenario ? confirmationResultFixture(resultScenario).map((payload, index) =>
+      event("sess-triage", NOW - 15 * minute + index * minute, payload)) : []),
     ...(evidenceScenario === "refused" || evidenceScenario === "refused-stress" ? [
       event("sess-triage", NOW - 2 * minute, { kind: "user_message", text: "Approve the UI evidence for the release settings.", images: [] }),
       event("sess-triage", NOW - minute, { kind: "tool_call", toolCallId: "evidence-approval", title: "Resolve UI Evidence",
@@ -473,7 +528,18 @@ const events: Record<string, SessionEvent[]> = {
         text: `The evidence decision is still pending. I need to inspect ${missingEvidenceIds.length} screenshots before I can approve it.`, final: true }),
     ] : []),
   ],
+  ...(resultScenario === "background" ? {
+    "sess-flaky": confirmationResultFixture("background").map((payload, index) =>
+      event("sess-flaky", NOW - 15 * minute + index * minute, payload)),
+  } : {}),
 };
+if (streamingReply) {
+  seq = 0;
+  events["sess-triage"] = [
+    event("sess-triage", NOW - minute, { kind: "user_message", text: "What did you find in the tracker review?", images: [] }),
+    event("sess-triage", NOW - minute + 1_000, { kind: "checkpoint", turn: 1, tree: "" }),
+  ];
+}
 
 class FixtureSocket implements UiSocket {
   readonly readyState = UI_SOCKET_OPEN;
@@ -500,7 +566,7 @@ function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
     capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false,
-      projects: delegationScenario === "stress", ...(showDelegation ? { assistantDecisionHistory: true as const } : {}),
+      projects: delegationScenario === "stress", ...(showDelegation || panelScenario ? { assistantDecisionHistory: true as const } : {}),
       ...(delegationScenario === "stress" || delegationScenario === "release-old" || migrationScenario && migrationScenario !== "old"
         ? { assistantCiRerunDecisions: true as const } : {}),
       ...(delegationScenario === "stress" || migrationScenario && migrationScenario !== "old"
@@ -509,7 +575,7 @@ function snapshot(): UiSnapshotMessage {
     runners: [structuredClone(runner)],
     boxes: [],
     // The launched sessions arrive as summaries; the backing sessions in full.
-    sessions: [...sessions.values()].map((entry) => launched(entry.id) ? summary(entry) : structuredClone(entry)),
+    sessions: [...sessions.values()].filter((entry) => !entry.archived).map((entry) => launched(entry.id) ? summary(entry) : structuredClone(entry)),
   } as UiSnapshotMessage;
 }
 
@@ -541,6 +607,9 @@ function upsert(next: SessionView) {
  * began, but only once `assistantsReleaseList()` lets it, as a slow read would. */
 let holdNextList = false;
 let releaseHeldList: (() => void) | null = null;
+let initialListGate = params.has("hold-initial-list") ? new Promise<void>((resolve) => {
+  releaseHeldList = resolve;
+}) : undefined;
 let slowListMs = 0;
 
 /** `?threads=unavailable`: the control plane's answer for routes it lacks. */
@@ -565,7 +634,9 @@ function settleConfirmation(threadId: string, confirmationId: string, intent: "a
     : { ...asked, status: "denied", resolvedAt: Date.now(), outcome: { reason: "The owner denied it." } };
   document.body.dataset.confirmationAnswer = `${confirmationId}:${intent}`;
   const confirmations = (current.confirmations ?? []).filter((candidate) => candidate.id !== confirmationId);
-  if (campaignId) upsert(session(campaignId, "Plan the Release", { role: "orchestrator", status: "running" }));
+  if (campaignId) upsert(session(campaignId, "Plan the Release", {
+    role: "orchestrator", status: "running", orchestratorCampaign: campaignProjection(workSummary(NOW)),
+  }));
   const settled = { ...current, status: confirmations.length ? "needs_you" as const : "working" as const, confirmations,
     ...(campaignId ? { launchedCampaignIds: [...(current.launchedCampaignIds ?? []), campaignId] } : {}) };
   threads = threads.map((candidate) => candidate.id === threadId ? settled : candidate);
@@ -604,6 +675,10 @@ const client = {
     const refusal = refused();
     if (refusal) return refusal;
     const read = { threads: structuredClone(threads.filter((candidate) => options.includeArchived || candidate.status !== "archived")) };
+    if (initialListGate) {
+      document.body.dataset.listHeld = "true";
+      return initialListGate.then(() => read);
+    }
     // `assistantsSlowLists(ms)`: every later read answers after `ms`, with the threads as they were
     // when it began, as a slow control plane would.
     if (slowListMs > 0 && !holdNextList) return new Promise((resolve) => window.setTimeout(() => resolve(read), slowListMs));
@@ -664,8 +739,12 @@ const client = {
     publish(current);
     return { thread: structuredClone(current) };
   },
-  assistantDecisionHistory: async (filter: { threadId?: string; before?: string }) =>
-    assistantDecisionHistoryFixture("campaign_0", filter.before, params.has("release-history")),
+  assistantDecisionHistory: async (filter: { threadId?: string; before?: string }) => {
+    document.body.dataset.assistantDecisionHistoryRequested = "true";
+    if (filter.threadId && panelScenario === "not-delegated") return { entries: [], total: 0 };
+    const history = assistantDecisionHistoryFixture("campaign_0", filter.before, params.has("release-history"));
+    return filter.threadId && panelScenario && !filter.before ? { ...history, total: 24 } : history;
+  },
   setConfig: async (sessionId: string, patch: SessionConfig) => {
     const current = threads.find((thread) => thread.sessionId === sessionId);
     if (current?.usage && patch.costBudgetUsd !== undefined) {
@@ -831,8 +910,29 @@ function backingActivity() {
 }
 
 Object.assign(window, {
+  assistantsReplyChunk: (text: string, settle: boolean) => {
+    if (!streamingReply) return;
+    const id = "sess-triage";
+    const next = settle
+      ? event(id, Date.now(), { kind: "conversation_checkpoint", turn: 1 })
+      : event(id, Date.now(), { kind: "agent_message", messageId: "tracker-answer", text });
+    events[id]!.push(next);
+    socket?.push({ type: "session_event", event: next });
+    upsert({ ...sessions.get(id)!, messageCount: events[id]!.length, status: settle ? "idle" : "running" });
+    if (settle) {
+      threads = threads.map((thread) => thread.sessionId === id ? { ...thread, status: "done" } : thread);
+      publish(threads.find((thread) => thread.sessionId === id)!);
+    }
+  },
   /** The running launched session finishes, as its stream would report it. */
   assistantsAdvance: () => upsert({ ...sessions.get("sess-flaky")!, status: "completed", updatedAt: Date.now() }),
+  /** Another launched session reaches an approval without a thread API update. */
+  assistantsWaitOnLaunch: () => upsert({
+    ...sessions.get("sess-flaky")!,
+    status: "input_required",
+    pendingApproval: depsApproval("occ-flaky-1"),
+    updatedAt: Date.now(),
+  }),
   /** Mid-turn, the assistant launches another session: the thread's status stays as it was, and
    * the control plane republishes the thread with its new launch. */
   assistantsLaunch: () => {
@@ -880,6 +980,7 @@ Object.assign(window, {
   assistantsHoldNextList: () => { holdNextList = true; },
   assistantsSlowLists: (ms: number) => { slowListMs = ms; },
   assistantsReleaseList: () => {
+    initialListGate = undefined;
     releaseHeldList?.();
     releaseHeldList = null;
   },

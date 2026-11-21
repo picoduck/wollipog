@@ -136,7 +136,6 @@ import { TURN_RETRY_IN_FLIGHT_REASON, turnRetryPlan } from "../turn-retry.js";
 import { ConversationHandoffDialog } from "./ConversationHandoffDialog.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 import { RightPanel, type RightPanelState } from "./RightPanel.js";
-import type { LaunchedWork } from "../assistant-launched-work.js";
 import { useDiffFileFocus } from "../review-focus.js";
 import { useCampaignStatusAvailability } from "./useCampaignStatus.js";
 import { useGitStatus, useGitSummary } from "./useGitStatus.js";
@@ -645,10 +644,10 @@ export type SessionDetailProps = {
   /** Replaces the expanded session bar with the host's own (#4664): an assistant thread shows its
    * transcript, requests and composer under the thread's header. The host then owns the page title. */
   header?: ReactNode;
-  /** An assistant thread's launched sessions, for the side panel's Launched Sessions tool (#4776). */
-  launchedWork?: LaunchedWork;
+  /** The Assistant thread's panel, rendered in the same row as the conversation. */
+  assistantPanel?: (onOverlayChange: (overlay: boolean) => void) => ReactNode;
   /** Heads the expanded chat column, under the bar and beside the side panel (#4776): an assistant
-   * thread's facts and what waits on its owner, so the panel spans the page under the bar as it does
+   * thread's waiting work, so the panel spans the page under the bar as it does
    * beside a session's. */
   columnLead?: ReactNode;
   /** Transport-owned policy seam. Native passthrough commands default to the existing send path. */
@@ -1173,7 +1172,7 @@ function SessionDetailLoaded({
   onOpenRequest,
   topbarControls,
   header,
-  launchedWork,
+  assistantPanel,
   columnLead,
   providerCommandAttachmentPolicy = "send",
   onPreviewNavigationReady,
@@ -5981,7 +5980,7 @@ function SessionDetailLoaded({
     onFailure: showHiddenColumnFailure,
   });
   const composerIdleCollapsed = isMobile && !composerExpanded && !composerMultiline &&
-    images.length === 0 && session.pendingApproval == null &&
+    images.length === 0 && session.pendingApproval == null && queuedPromptControls.length === 0 &&
     !historyQuarantine && !queuedEdit && composerErrorEntries.length === 0 && !retitleFeedback && !dictation.recording &&
     !dragActive && !paletteOpen && !workspacePickerOpen;
   // Where focus goes when the notice slot or the queue tray removes the control that held it: the
@@ -7363,7 +7362,7 @@ function SessionDetailLoaded({
         {/* The session body: the reader column, then the docked Pinned Summary (#2147). It is the
             `session-body` container, so docking follows the room the right panel leaves. A phone's
             side panel sheet covers it, so it is inert while the sheet is open (#2888). */}
-        <div className="detail-body" ref={setDetailBody} inert={phonePanelOpen || undefined}>
+        <div className="detail-body" ref={setDetailBody} inert={phonePanelOpen || (assistantPanel && panelOverlay) || undefined}>
         <div className="detail-chat" ref={detailChatRef}>
           {/* A preview has no composer to dock above, so its requests head the preview, right under
               the meta line, where Approve and Deny sit under the cursor that selected the row (#2210). */}
@@ -7745,26 +7744,6 @@ function SessionDetailLoaded({
                   ? "Rename failed. Couldn't rename this session."
                   : ""}
             </span>
-            <QueuedMessages
-              sessionId={session.id}
-              prompts={queuedPromptControls}
-              queueHeld={session.queueHeld === true}
-              queueHold={queueHoldTrayView(session, runnerOnline)}
-              agent={composerAgent}
-              steering={steeringAvailabilityInput}
-              requestBusy={composerRequestBusy}
-              refusal={queueRefusal}
-              steeringPending={queueSteeringPending}
-              editingPromptId={queuedEdit?.promptId ?? null}
-              editOpen={queuedEdit !== null}
-              pendingAction={pendingPromptAction}
-              onSteer={(prompt) => void promoteQueuedPrompt(prompt)}
-              onEdit={(prompt) => void beginQueuedPromptEdit(prompt)}
-              onCancel={(prompt) => void api.cancelQueuedPrompt(session.id, prompt.id)
-                .catch((cause: unknown) => showActionError("cancelQueuedMessage", cause))}
-              onDismiss={(prompt) => void resolvePendingPrompt(prompt.id, "dismiss")}
-              onFocusLost={focusComposerOrTitle}
-            />
             <div
               ref={composerBoxRef}
               className={`composer-box${dragActive ? imagesRefused ? " is-drop is-refused" : " is-drop" : ""}${composerAnswerActive ? " answer-mode" : ""}${composerIdleCollapsed ? " idle-collapsed" : ""}${canPrompt ? "" : " is-disabled"}`}
@@ -7813,7 +7792,7 @@ function SessionDetailLoaded({
             >
               {queuedEdit && !composerAnswerActive && (
                 /* Editing is a mode of the card (#2194): a 40px strip at its top names the mode and
-                   holds the way out. The tray marks which row is being edited, so this doesn't. */
+                   holds the way out. The queue below marks the row being edited. */
                 <div className={`composer-mode${queuedEditRecovered ? " is-recovered" : ""}`} role="status">
                   <span className="composer-mode-icon" aria-hidden="true">
                     {queuedEditRecovered ? <WarningIcon size={16} /> : <EditIcon size={16} />}
@@ -7856,6 +7835,26 @@ function SessionDetailLoaded({
                   )}
                 </div>
               )}
+              <QueuedMessages
+                sessionId={session.id}
+                prompts={queuedPromptControls}
+                queueHeld={session.queueHeld === true}
+                queueHold={queueHoldTrayView(session, runnerOnline)}
+                agent={composerAgent}
+                steering={steeringAvailabilityInput}
+                requestBusy={composerRequestBusy}
+                refusal={queueRefusal}
+                steeringPending={queueSteeringPending}
+                editingPromptId={queuedEdit?.promptId ?? null}
+                editOpen={queuedEdit !== null}
+                pendingAction={pendingPromptAction}
+                onSteer={(prompt) => void promoteQueuedPrompt(prompt)}
+                onEdit={(prompt) => void beginQueuedPromptEdit(prompt)}
+                onCancel={(prompt) => void api.cancelQueuedPrompt(session.id, prompt.id)
+                  .catch((cause: unknown) => showActionError("cancelQueuedMessage", cause))}
+                onDismiss={(prompt) => void resolvePendingPrompt(prompt.id, "dismiss")}
+                onFocusLost={focusComposerOrTitle}
+              />
               {pendingQuestion && (
                 <ComposerQuestionResponse
                   sessionId={session.id}
@@ -8232,7 +8231,7 @@ function SessionDetailLoaded({
         )}
         </div>
 
-        {mode === "expanded" && <RightPanel
+        {mode === "expanded" && (assistantPanel ? assistantPanel(setPanelOverlay) : <RightPanel
           state={rightPanel}
           session={session}
           earlierActivityUnloaded={isPartialHistory(eventWindow)}
@@ -8294,9 +8293,7 @@ function SessionDetailLoaded({
           onOpenMachine={() => navigate({ name: "runners", section: "machines" })}
           backgroundInventoryError={backgroundInventoryError}
           onRetryBackgroundInventory={retryBackgroundInventory}
-          launchedWork={launchedWork}
-          onOverlayChange={columnLead !== undefined ? setPanelOverlay : undefined}
-        />}
+        />)}
       </div>
       {/* A phone opens the summary as a bottom sheet (§7.5, §9.2), so the transcript never sits
           behind a nested scroll box. */}

@@ -73,7 +73,7 @@ export function ChangeAssistantThreadHarnessDialog({ thread, onClose, onChanged 
         </div>
         <p>The new conversation starts fresh. Earlier messages stay readable in this thread. Linked work, usage, budget and launch limit carry over.</p>
         {thread.decisionDelegation?.grant?.categories.includes("ui_evidence_review") &&
-          <Notice tone="warning">Confirm the provider disclosure again in Decision Delegation before using UI Evidence Approval.</Notice>}
+          <Notice tone="warning">Confirm the provider disclosure again in Decision Delegation before using Approve UI Evidence.</Notice>}
         {busy && <p role="status">Starting the selected harness. The original conversation is kept until the new harness is ready.</p>}
       </> : <>
         {!options && !error && <Skeleton rows={2} announce="Loading harnesses…" />}

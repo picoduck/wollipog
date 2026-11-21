@@ -9,7 +9,12 @@ import { Notice } from "./Notice.js";
 
 type HistoryState = { kind: "loading" } | { kind: "ready"; page: AssistantDecisionHistoryPage } | { kind: "error" };
 
-function DecisionHistory({ campaignId, threadId, onClose }: { campaignId?: string; threadId?: string; onClose?: () => void }) {
+function DecisionHistory({ campaignId, threadId, onClose, onCount }: {
+  campaignId?: string;
+  threadId?: string;
+  onClose?: () => void;
+  onCount?: (count: string | null) => void;
+}) {
   const api = useApi();
   const { navigate } = useStoreActions();
   const [cursors, setCursors] = useState<string[]>([]);
@@ -23,12 +28,16 @@ function DecisionHistory({ campaignId, threadId, onClose }: { campaignId?: strin
     void Promise.resolve().then(() => api.assistantDecisionHistory({
       ...(campaignId ? { campaignId } : {}), ...(threadId ? { threadId } : {}), ...(before ? { before } : {}),
     }, controller.signal)).then((page) => {
-      if (!controller.signal.aborted) setState({ kind: "ready", page });
+      if (controller.signal.aborted) return;
+      setState({ kind: "ready", page });
+      if (!before) onCount?.(page.total?.toString() ?? (page.entries.length + (page.nextBefore ? "+" : "")));
     }, () => {
-      if (!controller.signal.aborted) setState({ kind: "error" });
+      if (controller.signal.aborted) return;
+      setState({ kind: "error" });
+      if (!before) onCount?.(null);
     });
     return () => controller.abort();
-  }, [api, before, campaignId, threadId, retry, refreshRevision]);
+  }, [api, before, campaignId, threadId, retry, refreshRevision, onCount]);
 
   const page = state.kind === "ready" ? state.page : null;
   const next = page?.nextBefore;
@@ -65,10 +74,17 @@ function DecisionHistory({ campaignId, threadId, onClose }: { campaignId?: strin
     </ul>}
   </>;
 
-  return campaignId
-    ? <CampaignSection title="Delegated Decisions" count={page?.entries.length ?? 0}>{body}</CampaignSection>
-    : <Modal title="Delegated Decisions" onClose={onClose!}
+  return !onClose
+    ? <CampaignSection title="Delegated Decisions" count={campaignId ? page?.entries.length ?? 0 : undefined}>{body}</CampaignSection>
+    : <Modal title="Delegated Decisions" onClose={onClose}
       footer={<button className="btn" type="button" onClick={onClose}>Close</button>}>{body}</Modal>;
+}
+
+export function AssistantThreadDecisionHistory({ threadId, onCount }: {
+  threadId: string;
+  onCount: (count: string | null) => void;
+}) {
+  return <DecisionHistory threadId={threadId} onCount={onCount} />;
 }
 
 export function AssistantDecisionHistoryDialog({ threadId, onClose }: { threadId?: string; onClose: () => void }) {

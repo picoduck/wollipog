@@ -51,7 +51,7 @@ export const WOLLIPOG_ASSISTANT_SKILL = {
     "  assistant_decision_get to read the exact pending occurrence. Use assistant_decision_resolve",
     "  with its resource digest and your reason. Read the occurrence again if the response is lost.",
     "  Without a grant or when a request is refused, tell the owner where it is waiting.",
-    "- UI Evidence Approval and UI Evidence Denial are separate grant categories. To approve",
+    "- Approve UI Evidence and Send Back UI Evidence are separate grant categories. To approve",
     "  screenshots, read the exact decision, then use assistant_evidence_inspect for every item",
     "  and look at each image. The runner must record a verified delivery for each one. For a",
     "  managed review when supported, use assistant_evidence_prepare with the claims and criteria,",

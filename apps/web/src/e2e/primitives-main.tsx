@@ -246,6 +246,21 @@ function Harness() {
       </div>
     );
   }
+  if (params.get("view") === "notice-trailing") {
+    return (
+      <div style={{ minHeight: "100vh", padding: 24, background: "var(--bg)" }}>
+        <div style={{ display: "grid", gap: 16, maxWidth: 560, margin: "0 auto" }}>
+          <Notice tone="info" title="Recommended Skills" onDismiss={() => undefined}
+            trailing={<button className="btn sm ghost" type="button">+2 More</button>}>
+            Use a skill to give your sessions project-specific guidance.
+          </Notice>
+          <Notice tone="success" onDismiss={() => undefined}>
+            Your worktree is ready.
+          </Notice>
+        </div>
+      </div>
+    );
+  }
   if (params.get("view") === "compact-notices") {
     return (
       <div style={{ minHeight: "100vh", padding: 24, background: "var(--bg)" }}>

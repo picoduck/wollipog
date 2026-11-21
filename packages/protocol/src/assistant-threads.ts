@@ -45,17 +45,17 @@ export type AssistantEvidenceReviewAvailability =
   | { available: false; reason: string };
 
 export const ASSISTANT_DECISION_CATEGORIES = {
-  owner_question: "Owner Questions",
-  pr_merge: "Pull Request Merge",
-  ci_rerun: "CI Rerun",
-  release_tag: "Release Tag",
-  release_publish: "Release Publication",
-  merged_branch_deletion: "Merged Branch Deletion",
-  follow_up_issue_publication: "Follow-Up Issue Publication",
-  issue_closure: "Issue Closure",
-  ui_evidence_approval: "UI Evidence Denial",
-  ui_evidence_review: "UI Evidence Approval",
-  review_round_extension: "Review Round Extension",
+  owner_question: "Answer Owner Questions",
+  pr_merge: "Merge Pull Requests",
+  ci_rerun: "Rerun CI",
+  release_tag: "Tag Releases",
+  release_publish: "Publish Releases",
+  merged_branch_deletion: "Delete Merged Branches",
+  follow_up_issue_publication: "Publish Follow-Up Issues",
+  issue_closure: "Close Issues",
+  ui_evidence_approval: "Send Back UI Evidence",
+  ui_evidence_review: "Approve UI Evidence",
+  review_round_extension: "Extend Review Rounds",
 } as const;
 
 export type AssistantDecisionCategory = keyof typeof ASSISTANT_DECISION_CATEGORIES;
@@ -67,6 +67,8 @@ export function assistantDecisionCategory(snapshot: WorkflowDecisionResourceSnap
 
 export interface AssistantDecisionGrant {
   categories: AssistantDecisionCategory[];
+  /** How the owner picked the explicit categories. This is presentation metadata only. */
+  selectionMode?: "all" | "choose";
   projects: "all" | string[];
   campaigns: "all" | string[];
   expiresAt: number | null;
@@ -106,6 +108,8 @@ export interface AssistantDecisionHistoryEntry {
 }
 
 export interface AssistantDecisionHistoryPage {
+  /** Total for the whole filter, on the first page of a thread history. */
+  total?: number;
   entries: AssistantDecisionHistoryEntry[];
   nextBefore?: string;
 }

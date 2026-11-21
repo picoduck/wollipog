@@ -1,4 +1,5 @@
 import { isManagedModelChoice, resolveManagedModelChoice } from "@wollipog/protocol";
+import type { WollipogPromptOrigin } from "@wollipog/protocol";
 import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
 import { personalRuleDelegation } from "./personal-rule-delegation.js";
 import { scheduledAssistantOwner, type AssistantAutomationAuthorization } from "./assistant-automation-authority.js";
@@ -924,6 +925,8 @@ export interface PreStagedDeliveryPlan {
  * throwing from `stage` prevents materialization, while `activate` runs only after it completes. */
 export interface PreStagedDeliveryOptions {
   sessionId?: string;
+  /** Display provenance for a server-authored prompt. Never taken from the request. */
+  promptOrigin?: WollipogPromptOrigin;
   /** Trusted automation origin copied into every newly materialized session before it is visible. */
   automationOrigin?: SessionAutomationOrigin;
   /** Recovery-only exact commands read from the durable outbox. When present, resource
@@ -6764,6 +6767,7 @@ export class SessionsService {
     holdReader?: HoldAdviceReader,
     /** Trusted server notices may be retained unsent. Never populated from a caller's request. */
     retainNoticeDuringCampaignPause = false,
+    promptOrigin?: WollipogPromptOrigin,
   ): ServiceResult<PromptAdmissionView> {
     const pausedCampaign = this.db.campaignPaused(sessionId);
     if (pausedCampaign && (delivery || !retainNoticeDuringCampaignPause && !binding)) {
@@ -6988,10 +6992,12 @@ export class SessionsService {
       }
       commandImages = externalized.data;
     }
+    const origin = delivery?.promptOrigin ?? promptOrigin;
     const command: DurableSessionCommand = snapshotCommand ?? {
       type: "prompt_session",
       sessionId,
       text: effectiveText,
+      ...(origin ? { promptOrigin: origin } : {}),
       ...(binding?.reviewContinuation ? { reviewContinuation: true as const } : {}),
       images: nonEmpty(commandImages),
       slashCommand: effectiveSlashCommand,
@@ -7112,8 +7118,12 @@ export class SessionsService {
     });
   }
 
+  promptWollipogNotice(sessionId: string, text: string, origin?: WollipogPromptOrigin): ServiceResult<PromptAdmissionView> {
+    return this.prompt(sessionId, text, [], undefined, undefined, undefined, false, undefined, undefined, false, origin);
+  }
+
   private promptSystemNotice(sessionId: string, text: string): ServiceResult<PromptAdmissionView> {
-    return this.prompt(sessionId, text, [], undefined, undefined, undefined, false, undefined, undefined, true);
+    return this.prompt(sessionId, text, [], undefined, undefined, undefined, false, undefined, undefined, true, { kind: "system_notice" });
   }
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
@@ -9032,6 +9042,7 @@ export class SessionsService {
     const pause = this.db.campaignPause(id);
     if (!pause || pause.resumedAt !== undefined) return;
     if (pause.stoppedSessionIds.some(childId => this.db.hasSessionStopIntent(childId))) return;
+    const promptOrigin: WollipogPromptOrigin = { kind: actor === "scheduled" ? "scheduled_wake" : "system_notice" };
     const text = "The campaign has resumed. Continue the preserved work within its existing authority and budget. Main may have moved; fetch it and inspect dependencies before continuing.";
     // Restart keeps suspension active until every retained child has passed existing admission.
     // An unsuccessful restart stays in this durable list for the next sweep, without more grants.
@@ -9039,7 +9050,7 @@ export class SessionsService {
       const child = this.db.getSession(childId);
       if (!child || child.archived) continue;
       if (child.status === "stopped" && !this.restart(childId, { campaignResume: true }).ok) continue;
-      this.promptOutbox.stage(childId, child.runnerId, { type: "prompt_session", sessionId: childId, text }, now,
+      this.promptOutbox.stage(childId, child.runnerId, { type: "prompt_session", sessionId: childId, text, promptOrigin }, now,
         `campaign_resume_${id}_${pause.pausedAt}_${childId}`);
       pause.stoppedSessionIds = pause.stoppedSessionIds.filter(memberId => memberId !== childId);
       this.db.saveCampaignPause(id, pause);
@@ -9048,7 +9059,7 @@ export class SessionsService {
     for (const memberId of pause.inFlightSessionIds) {
       const member = this.db.getSession(memberId);
       if (!member || member.archived || isTerminal(member.status)) continue;
-      this.promptOutbox.stage(memberId, member.runnerId, { type: "prompt_session", sessionId: memberId, text }, now,
+      this.promptOutbox.stage(memberId, member.runnerId, { type: "prompt_session", sessionId: memberId, text, promptOrigin }, now,
         `campaign_resume_${id}_${pause.pausedAt}_${memberId}`);
     }
     pause.resumedAt = now; pause.resumedBy = actor;
@@ -18001,7 +18012,7 @@ export class SessionsService {
     }
     const { grant, revision } = threadDecisionDelegation(thread);
     if (!grant?.categories.includes("ui_evidence_review") || grant.expiresAt !== null && Date.now() >= grant.expiresAt) {
-      return fail("The thread needs a current UI Evidence Approval grant. The owner can change it in Decision Delegation.", 403);
+      return fail("The thread needs a current grant for Approve UI Evidence. The owner can change it in Decision Delegation.", 403);
     }
     const owner = this.db.operatingHumanPrincipal(thread.owner_user_id, thread.organization_id);
     const controller = this.db.getSession(decision.controllingSessionId);
@@ -18035,7 +18046,7 @@ export class SessionsService {
     const availability = assistantEvidenceReviewAvailability(this.db, session);
     if (!availability.available) return fail(availability.reason, 409);
     if (grant.evidenceDisclosureDigest !== availability.disclosureDigest) {
-      return fail("The thread’s provider, model or account changed. The owner needs to renew its UI Evidence Approval grant.", 409);
+      return fail("The thread’s provider, model or account changed. The owner needs to renew its grant for Approve UI Evidence.", 409);
     }
     const control = controller.orchestratorPolicy?.control;
     const boundary = control?.mode === "full_control" ? control.boundary : undefined;
@@ -19162,8 +19173,9 @@ export class SessionsService {
       return false;
     }
     const text = workflowDecisionResolutionPrompt(decision);
+    const origin = decision.assistantDelegation ? { kind: "delegation_notice" as const } : undefined;
     if (!runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "worktreeRecovery")) {
-      const delivered = this.prompt(child.id, text);
+      const delivered = this.promptWollipogNotice(child.id, text, origin);
       if (!delivered.ok) {
         this.log.warn(`workflow decision ${decision.occurrenceId} resolution not delivered to ${child.id}: ${delivered.error}`);
       }
@@ -19193,6 +19205,7 @@ export class SessionsService {
     let delivered: ReturnType<SessionsService["prompt"]>;
     try {
       delivered = this.prompt(child.id, text, [], undefined, undefined, {
+        promptOrigin: origin,
         ...(childIdle ? { admitAs: "queued" as const } : {}),
         // Staging is the success boundary: once the payload is durable, a failed flush is retried by
         // the outbox rather than reported, exactly as for a human's durable prompt.

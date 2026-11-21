@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import Fastify from "fastify";
 import {
+  ASSISTANT_DECISION_CATEGORIES,
   ASSISTANT_THREAD_CREDENTIAL_TTL_MS,
   ASSISTANT_EVIDENCE_INSPECT,
   ASSISTANT_EVIDENCE_PREPARE,
@@ -177,8 +178,13 @@ test("the owner grants and revokes exact typed resolution, and Assistant calls n
       const saved = await h.ownerCall("PUT", path, { revision, grant: next });
       assert.equal(saved.status, 200, JSON.stringify(saved.body));
       assert.equal(saved.body.thread.decisionDelegation.revision, revision + 1);
+      assert.deepEqual(saved.body.thread.decisionDelegation.grant, next);
     };
-    await setGrant(0, { ...grant, categories: ["owner_question"] });
+    // A Delegate All grant saved against a previous catalog has no wildcard authority.
+    // Simulate a newly supported merged-branch deletion and an unaccepted evidence disclosure.
+    const previousCategories = (Object.keys(ASSISTANT_DECISION_CATEGORIES) as AssistantDecisionGrant["categories"])
+      .filter((category) => category !== "merged_branch_deletion" && category !== "ui_evidence_review");
+    await setGrant(0, { ...grant, selectionMode: "all", categories: previousCategories });
     await refuse(/outside the thread's decision delegation grant/u);
     await setGrant(1, { ...grant, campaigns: ["different-root"] });
     await refuse(/campaign is outside/u);
@@ -205,6 +211,10 @@ test("the owner grants and revokes exact typed resolution, and Assistant calls n
     assert.equal(recorded.assistantDelegation?.reason, resolution.reason);
     assert.equal(recorded.assistantDelegation?.grantRevision, 5);
     assert.ok(decisionPrompts(h, "child").some((prompt) => prompt.includes(`Assistant thread "Release Assistant" ("${thread.id}") under your owner's delegation`)));
+    const delegatedPrompt = h.db.raw().prepare(
+      "SELECT payload_json FROM session_prompt_commands WHERE session_id=? AND json_extract(payload_json, '$.promptOrigin.kind')='delegation_notice'",
+    ).get("child") as { payload_json: string } | undefined;
+    assert.ok(delegatedPrompt, "delegation provenance persists with the durable prompt");
     const audit = h.db.listGovernanceAudit("child").find((entry) => entry.requestId === occurrenceId && entry.outcome === "allowed");
     assert.equal(audit?.actor.kind, "agent");
     assert.equal(audit?.workflowDecision?.assistantDelegation?.threadId, thread.id);
@@ -221,9 +231,10 @@ test("the owner grants and revokes exact typed resolution, and Assistant calls n
     assert.equal(h.db.workflowDecisionByOccurrence(occurrenceId)?.status, "revoked");
     const history = await h.ownerCall("GET", `/api/assistant-decision-history?threadId=${thread.id}&campaignId=root`);
     assert.equal(history.status, 200);
+    assert.equal(history.body.total, 1);
     assert.deepEqual(history.body.entries.map((item: { delegation: unknown }) => item.delegation), [recorded.assistantDelegation]);
-    const otherOwnerHistory = h.db.assistantDecisionHistory({ ...h.owner, userId: "other-owner" }, {});
-    assert.deepEqual(otherOwnerHistory.entries, []);
+    const otherOwnerHistory = h.db.assistantDecisionHistory({ ...h.owner, userId: "other-owner" }, { threadId: thread.id });
+    assert.deepEqual(otherOwnerHistory, { entries: [], total: 0 });
     await setGrant(6, grant);
     const evidence = h.svc.createWorkflowDecision("child", { requestId: "evidence", resourceKey: "screenshots",
       resourceSnapshot: { category: "ui_evidence_approval", evidence: [{ evidenceId: "preview",

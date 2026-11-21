@@ -77,7 +77,7 @@ export type ShortcutId =
 
 export type ShortcutScope = "Global" | "Sessions" | "Sessions List" | "Session" | "Session Reading" | "Run dialog" | "Follow Up dialog";
 
-export type ShortcutGroup = "Navigation" | "Sessions List" | "Session Reading" | "Session" | "Actions" | "Help";
+export type ShortcutGroup = "Navigation" | "Sessions List" | "Session Reading" | "Session" | "Actions" | "Help" | "Assistant Thread";
 
 export type ShortcutDefinition = {
   id: ShortcutId;
@@ -752,20 +752,14 @@ export type ShortcutAvailability = {
   turnInterruptionSupported?: boolean;
   /** Rail destinations hidden by preference (#385); their digits are unassigned, not dead. */
   hiddenRailViews?: ReadonlySet<string>;
-  /**
-   * With no session open, the Session shortcuts that work here all the same: an open Assistant
-   * thread's side panel answers its own chords (#4776). The Session group is then usable, and its
-   * other rows say they need a session.
-   */
-  sidePanelShortcuts?: ReadonlySet<ShortcutId>;
+  assistantThreadOpen?: boolean;
 };
 
 /** Why a whole group cannot be used here, said once under its heading, or null. */
 export function shortcutGroupUnavailableReason(
   group: ShortcutGroup,
-  context: Pick<ShortcutAvailability, "sessionOpen" | "sidePanelShortcuts">,
+  context: Pick<ShortcutAvailability, "sessionOpen">,
 ): string | null {
-  if (group === "Session" && !context.sessionOpen && (context.sidePanelShortcuts?.size ?? 0) > 0) return null;
   if ((group === "Session" || group === "Session Reading") && !context.sessionOpen) {
     return "Open a session to use these.";
   }
@@ -774,11 +768,6 @@ export function shortcutGroupUnavailableReason(
 
 /** Why this one binding cannot be used here, beyond what its group already says, or null. */
 export function shortcutUnavailableReason(definition: ShortcutDefinition, context: ShortcutAvailability): string | null {
-  // A Session group usable for its side panel alone (an Assistant thread): the rest need a session.
-  if (definition.group === "Session" && !context.sessionOpen && context.sidePanelShortcuts &&
-      !context.sidePanelShortcuts.has(definition.id)) {
-    return "Open a session to use this";
-  }
   const railView = railViewForShortcut(definition.id);
   if (railView && context.hiddenRailViews?.has(railView)) {
     return "Hidden in Settings → Appearance";
@@ -809,6 +798,7 @@ export type ShortcutReferenceRow = {
   keys: string;
   /** A row-specific reason the binding is dead here; a whole group's reason is its `note`. */
   reason: string | null;
+  description?: string;
 };
 
 export type ShortcutReferenceGroup = {
@@ -819,6 +809,12 @@ export type ShortcutReferenceGroup = {
   note: string | null;
   rows: ShortcutReferenceRow[];
 };
+
+const ASSISTANT_THREAD_SHORTCUTS = [
+  { id: "steer-turn", description: "While the assistant is working, sends your message into its current turn." },
+  { id: "stop-turn", description: "Stops the assistant's current turn. Sessions it launched keep running." },
+  { id: "toggle-side-panel", description: "Opens or closes the thread's side panel and remembers the last tab." },
+] as const;
 
 /** The two Session groups share some actions. A row there with the same label and keys as one
  * already listed is said once, in whichever of the two comes first. */
@@ -851,12 +847,27 @@ export function shortcutReferenceGroups({
   keys: (definition: ShortcutDefinition) => string;
   query?: string;
 }): ShortcutReferenceGroup[] {
-  const current = shortcutGroupForScope(scope);
+  const current = availability.assistantThreadOpen ? "Assistant Thread" : shortcutGroupForScope(scope);
   const order = current ? [current, ...SHORTCUT_GROUPS.filter((group) => group !== current)] : [...SHORTCUT_GROUPS];
   const needle = query.trim().toLowerCase();
   const listed = new Set<string>();
   const groups: ShortcutReferenceGroup[] = [];
   for (const group of order) {
+    if (availability.assistantThreadOpen && group === "Session Reading") continue;
+    if (availability.assistantThreadOpen && group === "Session") {
+      if (!needle || "session tools open as session".includes(needle)) {
+        groups.push({ group, current: false, note: "Session tools are available after Open as Session.", rows: [] });
+      }
+      continue;
+    }
+    if (group === "Assistant Thread") {
+      const rows = ASSISTANT_THREAD_SHORTCUTS.map(({ id, description }) => {
+        const definition = SHORTCUTS.find((candidate) => candidate.id === id)!;
+        return { id, label: definition.label, keys: keys(definition), description, reason: null };
+      }).filter((row) => matchesQuery(row, needle));
+      if (rows.length) groups.push({ group, current: true, note: null, rows });
+      continue;
+    }
     const note = shortcutGroupUnavailableReason(group, availability);
     const rows: ShortcutReferenceRow[] = [];
     for (const definition of SHORTCUTS) {
