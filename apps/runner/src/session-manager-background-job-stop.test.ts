@@ -285,7 +285,7 @@ test("a queued Wollipog notice records its origin and sends the original text to
     const ordinaryText = "[Wollipog Owner Confirmation] is a label discussed in this test.";
     manager.prompt(spec.sessionId, ordinaryText);
     await waitFor(() => fake.prompts.length === 3, "the ordinary prompt did not reach the provider");
-    const lastMessage = store.readEvents(spec.sessionId).findLast(({ payload }) => payload.kind === "user_message")?.payload;
+    const lastMessage = store.readEvents(spec.sessionId).filter(({ payload }) => payload.kind === "user_message").at(-1)?.payload;
     assert.equal(lastMessage?.kind, "user_message");
     assert.equal(lastMessage.text, ordinaryText);
     assert.equal(lastMessage.promptOrigin, null);
