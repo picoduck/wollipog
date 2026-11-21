@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
 import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizontalOverflow } from "./layout-invariants.js";
 
 /** Google Antigravity setup (#4780) holds a ready report's full model inventory, with long unbroken
@@ -20,6 +21,7 @@ for (const viewport of VIEWPORTS) {
       const dialog = page.getByRole("dialog", { name: "Google Antigravity" });
       await expect(dialog).toBeVisible();
       await expect(dialog).toContainText("gemini-fixture-experimental-long-context-preview-model-63");
+      await dialogMotionSettled(page);
       await expectNoHorizontalOverflow(dialog, "The setup dialog");
       await expectPageNoHorizontalOverflow(page);
       const done = dialog.getByRole("button", { name: "Done" });
@@ -34,10 +36,16 @@ for (const viewport of VIEWPORTS) {
       await page.locator('ul[aria-label="Agent Setup"] button.row').click();
       const dialog = page.getByRole("dialog", { name: "Google Antigravity" });
       const field = dialog.getByLabel("Paste the Code Google Shows");
-      const submit = dialog.getByRole("button", { name: "Submit Code" });
       await expect(field).toBeVisible();
-      const [fieldBox, submitBox] = [await field.boundingBox(), await submit.boundingBox()];
-      expect(fieldBox && submitBox).toBeTruthy();
+      await expect(dialog.getByRole("button", { name: "Submit Code" })).toBeVisible();
+      await dialogMotionSettled(page);
+      // Visibility can precede the phone sheet's entrance finishing. Read both controls in one
+      // browser snapshot so the comparison cannot mix positions from different animation frames.
+      const [fieldBox, submitBox] = await dialog.locator(".signin-code-form").evaluate((form) =>
+        [form.querySelector("input")!, form.querySelector("button")!].map((element) => {
+          const { y, width, height } = element.getBoundingClientRect();
+          return { y, width, height };
+        }));
       expect(submitBox!.y, "Submit Code sits below the field").toBeGreaterThanOrEqual(fieldBox!.y + fieldBox!.height);
       // Stacked, Submit Code spans the column with the field. Side by side it would be a fraction of
       // it. The tolerance absorbs border and font rendering differences between platforms.
@@ -54,6 +62,7 @@ for (const viewport of VIEWPORTS) {
       const dialog = page.getByRole("dialog", { name: "Google Antigravity" });
       const notice = dialog.locator(".notice", { hasText: "Check Failed" });
       await expect(notice).toContainText("Checked executable: /home/design-workstation-operator");
+      await dialogMotionSettled(page);
       await expectNoHorizontalOverflow(notice, "The Check Failed notice");
       await expectNoHorizontalOverflow(dialog, "The setup dialog");
       await expectPageNoHorizontalOverflow(page);
