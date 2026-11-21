@@ -16,7 +16,7 @@ async function open(page: Page, theme: string, scenario: string, params = "") {
 
 async function capture(page: Page, theme: string, state: string) {
   if (state !== "side-panel-overlaid") await expectTextContrast(dock(page));
-  if (state !== "side-panel-overlaid" && state !== "eight-show-all") {
+  if (state !== "side-panel-overlaid" && !state.endsWith("-show-all")) {
     for (const content of await cards(page).first().locator(
       ".assistant-confirmation-summary, .assistant-dock-target, .code-well, .assistant-dock-facts, .assistant-dock-details, .assistant-dock-choices",
     ).all()) {
@@ -124,6 +124,8 @@ for (const theme of ["light", "dark"] as const) {
         await expect(dock(page)).toHaveCSS("border-left-width", "1px");
         await expect(cards(page).first()).toHaveCSS("border-top-width", "0px");
         for (const card of await cards(page).all()) await expect(card).toHaveCSS("border-left-width", "0px");
+        await layout(page);
+        await capture(page, theme, "three-show-all");
       });
 
       test("eight requests scroll inside Show All while the composer and transcript keep their room", async ({ page }) => {
