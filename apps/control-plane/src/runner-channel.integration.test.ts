@@ -434,7 +434,7 @@ ControlPlaneDb.prototype.updateSessionsFromSnapshots = function(...args) {
 }
 
 test("2100 retained children with bidirectional bulk reconcile while real HTTP and heartbeat pongs make progress", { timeout: 180_000 }, (t) => retainedBulk(t));
-test("2444 retained children with small reconnect queue frames keep pongs and the first processing ACK responsive", { timeout: 180_000 }, (t) => retainedBulk(t, true));
+test("2444 retained children with small reconnect queue frames keep pongs and the first processing ACK responsive", { timeout: 240_000 }, (t) => retainedBulk(t, true));
 
 test("4000 durable receipts and 64 invocation receipts with 2444 retained children keep replay responsive", { timeout: 180_000 }, (t) => retainedBulk(t, true, true));
 
@@ -792,7 +792,12 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     // A finite replay can exceed a minute under suite-wide fsync contention while every
     // processing window still advances. Bound the whole replay and stalled credit separately;
     // HTTP and pong probes retain their independent two-second responsiveness deadlines.
-    const deadline = performance.now() + 120_000;
+    // The small-frame fixture also sleeps 350ms per runtime run and 2ms per queue frame,
+    // on top of the 16s registration delay. Twelve copies on two CPUs exhausted 120s
+    // while credits kept advancing; allow 180s for that finite replay (#4796). The
+    // 15s credit watchdog and all interactive latency assertions remain independent.
+    const replayBudgetMs = smallFrames && !receiptReplay ? 180_000 : 120_000;
+    const deadline = performance.now() + replayBudgetMs;
     let convergenceOutcome = "deadline";
     while (performance.now() < deadline) {
       if ((!window || window.complete) && read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-1499'").get()?.runner_snapshot_fingerprint === fingerprint) {

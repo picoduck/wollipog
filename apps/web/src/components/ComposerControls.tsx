@@ -28,6 +28,7 @@ import {
   permissionModeLabel,
   effortLabel,
   resolvedModelLabel,
+  titleCaseLabel,
 } from "../format.js";
 import {
   defaultPermissionMode,
@@ -165,8 +166,11 @@ export function sessionPermissionModeControls(
   if (session.permissionMode === "orchestrator") {
     return { permModes: ["orchestrator"], permVal: "orchestrator", showDefaultPermissionMode: true };
   }
+  // An ACP agent that names its own modes (#4779) owns them all, `plan` included: its plan mode is
+  // what the agent says, not Wollipog's read-only Plan Mode, and the menu needs no separate Default.
+  const agentOwned = agentOwnsPermissionModes(session.driver, capabilities);
   const advertised = (capabilities?.permissionModes ?? [])
-    .filter((mode) => mode !== "plan" && mode !== "orchestrator");
+    .filter((mode) => (agentOwned || mode !== "plan") && mode !== "orchestrator");
   const piWithoutHostBridge = session.driver === "pi" && session.executionTarget !== undefined &&
     session.executionTarget.adapter !== "host";
   let permModes = piWithoutHostBridge ? ["bypassPermissions"] : advertised;
@@ -182,8 +186,25 @@ export function sessionPermissionModeControls(
     permVal: piWithoutHostBridge
       ? configuredMode || "bypassPermissions"
       : unavailablePiMode ? configuredMode : displayedMode,
-    showDefaultPermissionMode: !piWithoutHostBridge,
+    showDefaultPermissionMode: !piWithoutHostBridge && !agentOwned,
   };
+}
+
+/** Whether the session is in Wollipog's read-only Plan Mode, which shows the Plan pill and its
+ * promise. An agent-owned `plan` (#4779) is one of the agent's modes, shown by Permission Mode. */
+export function nativePlanModeActive(
+  session: Pick<SessionView, "driver" | "permissionMode">,
+  capabilities: Pick<AgentCapabilities, "agentPermissionModes"> | undefined,
+): boolean {
+  return session.permissionMode === "plan" && !agentOwnsPermissionModes(session.driver, capabilities);
+}
+
+/** Whether an ACP session's agent named its own modes, so every mode is the agent's (#4779). */
+export function agentOwnsPermissionModes(
+  driver: AgentDriverKind | undefined,
+  capabilities: Pick<AgentCapabilities, "agentPermissionModes"> | undefined,
+): boolean {
+  return driver === "acp" && (capabilities?.agentPermissionModes?.length ?? 0) > 0;
 }
 
 /** Shared menu shell for the composer-bar dropdowns (bottom-anchored, click-away backdrop). */
@@ -934,11 +955,33 @@ export function permissionModeOptionDescription(
   return base;
 }
 
+/** An ACP agent's own name and meaning for one of its modes, when its session advertised them
+ * (#4779). A native harness's meaning for the same id (Claude's classifier `auto`, say) never
+ * describes an ACP agent's mode. */
+export function advertisedPermissionMode(
+  capabilities: AgentCapabilities | undefined,
+  driver: AgentDriverKind,
+  mode: string | undefined,
+): { label: string; description: string } | undefined {
+  if (driver !== "acp" || !mode) return undefined;
+  const entry = capabilities?.agentPermissionModes?.find((candidate) => candidate.id === mode);
+  if (!entry) return undefined;
+  // The agent's words, said as its own: Wollipog can't verify what an agent-owned mode permits (agy
+  // 1.5.14 edited a file without asking in its Default), only that it shows what the agent asks.
+  const claim = entry.description
+    ? `The agent describes this mode as “${entry.description.replace(/[.\s]+$/u, "")}.”`
+    : "Wollipog doesn't know what this mode permits.";
+  return { label: titleCaseLabel(entry.name), description: `${claim} You're asked only about actions the agent sends for approval.` };
+}
+
 export function approvalControlLabel(
   driver: AgentDriverKind,
   permissionMode: string,
   _status: ElicitationAvailability,
+  capabilities?: AgentCapabilities,
 ): string {
+  const advertised = advertisedPermissionMode(capabilities, driver, permissionMode);
+  if (advertised) return advertised.label;
   if (permissionMode) return permissionModeLabel(permissionMode, driver);
   if (driver === "pi") return permissionModeLabel("default", driver);
   if (driver === "claude-code") return defaultPermissionModeDisplayLabel(driver);
@@ -1000,7 +1043,7 @@ export function ApprovalsMenuChoices({
     }] : []),
     ...displayedModes.map((mode) => ({
       key: `mode-${mode}`,
-      label: permissionModeLabel(mode, driver),
+      label: advertisedPermissionMode(capabilities, driver, mode)?.label ?? permissionModeLabel(mode, driver),
       mode,
       checked: mode === permVal,
       select: () => {
@@ -1010,9 +1053,10 @@ export function ApprovalsMenuChoices({
   ];
   const described = rows.map((row) => {
     const status = elicitationAvailability(capabilities, row.mode);
+    const advertised = row.key === "default-row" ? undefined : advertisedPermissionMode(capabilities, driver, row.mode);
     return {
       ...row,
-      description: permissionModeOptionDescription(
+      description: advertised?.description ?? permissionModeOptionDescription(
         row.mode,
         driver,
         status,
@@ -1062,7 +1106,7 @@ export function ApprovalsControl({ session, apply, disabledReason = null }: {
   if (permModes.length === 0) return null;
   const currentMode = permVal || defaultPermissionMode(session.driver);
   const currentStatus = elicitationAvailability(caps, currentMode);
-  const currentLabel = approvalControlLabel(session.driver, permVal, currentStatus);
+  const currentLabel = approvalControlLabel(session.driver, permVal, currentStatus, caps);
   const unrestricted = skipsApprovals(currentMode);
   const accessibleLabel = `Permission Mode: ${currentLabel}`;
   if (permModes.length === 1 && permModes[0] === "orchestrator") {

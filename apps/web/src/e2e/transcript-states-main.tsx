@@ -46,7 +46,8 @@ import "../styles.css";
  * `?theme=light|dark` picks the theme and `?mode=preview` renders the Inbox preview. The right
  * panel records the mode it was asked to show in `body[data-right-panel-mode]`. `?failed=1` adds a
  * message sign-in recovery left unsent, with Retry and Dismiss (#2500); each action it sends is
- * recorded in `body[data-pending-prompt-actions]`. */
+ * recorded in `body[data-pending-prompt-actions]`. `?scenario=antigravity` mounts a Google
+ * Antigravity session instead (antigravity-session-fixture.tsx, #4779). */
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
 const state = params.get("state") ?? "awaiting";
@@ -380,7 +381,11 @@ const rightPanel = {
   consumeSubagentFocusRequest() {},
 };
 
-createRoot(document.getElementById("root")!).render(
+// `?scenario=antigravity&agState=…` is a Google Antigravity session instead (#4779): see
+// antigravity-session-fixture.tsx. Loaded only for that scenario.
+if (params.get("scenario") === "antigravity") {
+  void import("./antigravity-session-fixture.js").then(({ mountAntigravitySession }) => mountAntigravitySession(document.getElementById("root")!));
+} else createRoot(document.getElementById("root")!).render(
   <ApiProvider client={client}>
     <StoreProvider connection={connection} navigation={navigation}>
       <EventSeeder />

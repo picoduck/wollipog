@@ -206,6 +206,8 @@ test("the register frame's Antigravity setup always has the v403 shape, whatever
     antigravitySetupForControlPlane, runnerSupportsProtocol,
     config: { dataDir: "/fixture", runnerId: "fixture" }, log: () => {}, metadata: {} as Record<string, unknown>,
     registered: false, controlPlaneProtocolVersion: undefined, sendUp: () => {},
+    // The New Session row an update republishes (#4779) is outside this slice and this test.
+    publishAntigravityAgent: () => {},
   };
   install(slice(runnerSource, "const antigravitySetup = new AntigravitySetupSupervisor({", "/** On `registered`: the register frame"), scope);
   const metadata = scope.metadata as { antigravitySetup?: Record<string, unknown> };

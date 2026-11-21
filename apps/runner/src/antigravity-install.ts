@@ -22,11 +22,11 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import {
-  createReadStream, createWriteStream, existsSync, lstatSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync,
+  createReadStream, createWriteStream, existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync,
   type WriteStream,
 } from "node:fs";
 import { chmod, mkdir, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { Readable } from "node:stream";
 import { createGunzip } from "node:zlib";
 import {
@@ -628,7 +628,7 @@ export class AntigravityManagedStore {
   }
 
   /** Keep a verified activation: drop its pending record, then remove generations neither pointer
-   * names, so one previous remains. */
+   * names (or that a launch still needs, see `keepInUse`), so one previous remains. */
   async confirm(): Promise<void> {
     await rm(this.pendingPath(), { force: true });
     // Removing older generations is best effort: a leftover is removed by the next confirm.
@@ -681,6 +681,19 @@ export class AntigravityManagedStore {
     return { found: true, restored: true };
   }
 
+  /** The folder of the generation an uncommitted activation made current, or null with none
+   * pending. A record that can't be read could name any generation, so the generations folder
+   * itself is returned: nothing managed counts as committed until it is recovered. */
+  pendingGeneration(): string | null {
+    let record: unknown;
+    try { record = JSON.parse(readFileSync(this.pendingPath(), "utf8")); } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : join(this.root, "generations");
+    }
+    return validPending(record) ? join(this.root, "generations", record.generation) : join(this.root, "generations");
+  }
+
+  private inUse: () => readonly string[] = () => [];
+
   private pendingPath(): string {
     return join(this.root, PENDING_RECORD);
   }
@@ -721,15 +734,32 @@ export class AntigravityManagedStore {
     }
   }
 
-  /** Remove generations neither pointer names. Best effort: a leftover is retried next time. */
+  /** Executables session launches still need (#4779): a launcher (bwrap, the cgroup helper) may
+   * open one after the runner spawned it. No prune removes their generations; a later one does. */
+  keepInUse(inUse: () => readonly string[]): void {
+    this.inUse = inUse;
+  }
+
+  /** Remove generations neither pointer names nor a launch still needs. Best effort: a leftover is
+   * retried next time. */
   private async prune(): Promise<void> {
+    const inUse = this.inUse();
     const keep = new Set<string>();
     for (const pointer of ["current", "previous"] as const) {
       try { keep.add(readlinkSync(join(this.root, pointer))); } catch { /* absent */ }
     }
     const generations = join(this.root, "generations");
     for (const id of await readdir(generations).catch(() => [] as string[])) {
-      if (!keep.has(`generations/${id}`)) await rm(join(generations, id), { recursive: true, force: true }).catch(() => {});
+      if (keep.has(`generations/${id}`) || generationInUse(join(generations, id), inUse)) continue;
+      await rm(join(generations, id), { recursive: true, force: true }).catch(() => {});
     }
   }
+}
+
+/** Whether a launch still needs an executable inside this generation folder. */
+function generationInUse(directory: string, inUse: readonly string[]): boolean {
+  if (!inUse.length) return false;
+  let resolved = directory;
+  try { resolved = realpathSync(directory); } catch { /* compared as named */ }
+  return inUse.some((path) => path.startsWith(`${resolved}${sep}`) || path.startsWith(`${directory}${sep}`));
 }
