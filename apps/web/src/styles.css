@@ -10184,13 +10184,29 @@ textarea {
 .md :is(h4, h5, h6) {
   font: var(--type-body-strong);
 }
-.md a {
+.md :is(a, .md-streaming-link) {
   color: var(--accent);
   text-decoration: none;
   overflow-wrap: anywhere;
 }
 .md a:hover {
   text-decoration: underline;
+}
+.md-streaming-caret {
+  display: inline-block;
+  width: 2px;
+  height: 0.9em;
+  margin-inline-start: var(--space-0-5);
+  vertical-align: -0.1em;
+  background: currentColor;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .md-streaming-caret {
+    animation: md-streaming-caret-blink 1s step-end infinite;
+  }
+}
+@keyframes md-streaming-caret-blink {
+  50% { opacity: 0; }
 }
 .md strong {
   font-weight: var(--weight-semibold);
@@ -12143,6 +12159,17 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   flex: none;
   margin-left: auto;
 }
+.shortcut-row.has-description {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  row-gap: var(--space-1);
+  padding-block: var(--space-1);
+}
+.shortcut-description {
+  grid-column: 1 / -1;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
 /* De-emphasised by TOKEN, not by subtree opacity. An unavailable row is documentation, not an
    inactive control, so it keeps the full text contrast requirement: `opacity: 0.62` took
    --text-faint to about 2.6:1 on the light modal. */
@@ -13007,8 +13034,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 /* The thread's bar (#4776), on the session bar's geometry (`.detail-bar.session-bar`): the title
    gives way first, and the status badge and the actions never shrink. */
 .assistant-thread-bar > .status { flex: none; }
-/* The head of the thread's conversation column, under the bar and beside the side panel: the facts,
-   then what waits on the owner. */
+/* Waiting requests stay in the conversation column beside Work. */
 .assistant-thread-head {
   display: grid;
   flex: none;
@@ -13016,28 +13042,9 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: var(--space-3) var(--page-gutter) var(--space-3) var(--space-6);
   border-bottom: 1px solid var(--border);
 }
-/* Neutral facts (§11.3), as a project's meta line draws them. */
-.assistant-thread-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1) var(--space-3);
-  margin: 0;
-  padding: 0;
-  color: var(--text-dim);
-  font: var(--type-small);
-  list-style: none;
-}
-.assistant-thread-access { color: var(--text); }
-.assistant-thread-account {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
 .assistant-thread-account-picker .choice-row-title { overflow-wrap: anywhere; }
 .assistant-thread-account-picker .choice-row-body { gap: var(--space-1); }
-.assistant-thread-history {
-  max-height: 6rem;
-  overflow-y: auto;
-}
+.assistant-thread-head:empty { display: none; }
 /* AssistantWorkCards.tsx: in the thread header, what waits on the owner as one scrolling row of
    cards; each card opens its session, and a waiting approval rides on its card. Every other launched
    session is in the side panel's Launched Sessions tool (#4776). */
@@ -13130,11 +13137,50 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   display: flex;
   min-width: 0;
 }
-/* The side panel's Launched Sessions tool (#4776): Needs You, Active, then the folding Finished group,
-   each a column of cards at the panel's width. The panel body is the one scroller. */
+/* Thread tabs share the session panel's frame. */
+.assistant-thread-panel .rpanel-head > .tabs {
+  flex: 1;
+  gap: var(--space-2);
+}
+.assistant-thread-panel .tab { min-width: var(--control-h-lg); }
+.assistant-thread-panel .rpanel-head > .icon-btn { flex: none; }
+.assistant-thread-panel .rpanel-body[hidden] { display: none; }
+.assistant-thread-panel .rpanel-body { overflow-wrap: anywhere; }
+.assistant-panel-details {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-4);
+}
+.assistant-panel-details > :not(button) { width: 100%; }
+.assistant-panel-meter {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-variant-numeric: tabular-nums;
+}
+.assistant-panel-meter > .meter { grid-column: 1 / -1; }
+.assistant-history-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.assistant-history-row > .btn { flex: none; }
+.assistant-delegation-summary {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  margin-bottom: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev);
+}
+.assistant-delegation-summary p { margin: 0; }
 .launched-sessions {
   display: grid;
-  gap: var(--space-4);
+  gap: var(--space-2);
   min-width: 0;
 }
 .launched-sessions-group {
@@ -13143,26 +13189,38 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   min-width: 0;
 }
 .launched-sessions-group > .group-label { padding: 0; }
-.launched-sessions-fold {
-  display: flex;
-  margin: 0;
-  font: inherit;
-}
-.launched-sessions-fold .count {
-  margin-left: var(--space-1);
-  color: var(--text-faint);
-}
-.launched-sessions-cards {
+.launched-sessions-fold { margin: 0; font: inherit; }
+.launched-sessions-fold .disclosure-trigger { min-height: var(--control-h); }
+.launched-sessions-fold .count { color: var(--text-dim); }
+.launched-sessions-rows {
   display: grid;
-  gap: var(--space-2);
   margin: 0;
   padding: 0;
   list-style: none;
 }
-.launched-sessions-cards > .assistant-work-card {
+.assistant-work-row {
   min-width: 0;
-  max-width: none;
+  border-bottom: 1px solid var(--border);
 }
+.assistant-work-row > .assistant-work-open {
+  width: 100%;
+  min-height: var(--control-h-lg);
+  align-content: center;
+  gap: 0;
+}
+.assistant-work-review {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  justify-content: space-between;
+}
+.assistant-work-review > .assistant-work-request-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.assistant-work-review > .btn { flex: none; }
 @media (max-width: 760px) {
   .assistant-thread-head { padding: var(--space-2) var(--page-gutter); }
   .assistant-thread-pane-state { padding: var(--space-4) var(--page-gutter) var(--space-12); }

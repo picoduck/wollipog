@@ -8,6 +8,17 @@ const SETTINGS = "/settings/assistant";
 const OLD_SETTINGS = "/settings/behavior/assistant-threads";
 const EVIDENCE = process.env.ASSISTANT_LIMITS_EVIDENCE_DIR;
 
+async function openDetails(page: Page) {
+  const panel = page.locator("#right-panel");
+  if (!(await panel.isVisible())) await page.getByRole("button", { name: "Side Panel", exact: true }).click();
+  await panel.getByRole("tab", { name: "Details", exact: true }).click();
+  return panel.getByRole("tabpanel", { name: "Details", exact: true });
+}
+
+async function closeDetails(page: Page) {
+  await page.locator("#right-panel").getByRole("button", { name: "Close Panel" }).click();
+}
+
 async function open(page: Page, path: string, theme: "dark" | "light" = "dark", state = "enabled", delegation = "", evidence = "") {
   await page.emulateMedia({ colorScheme: theme });
   await page.goto(`/assistants-e2e.html?limits=${state}&accounts=stress&delegation=${delegation}&evidence=${evidence}&path=${encodeURIComponent(path)}`);
@@ -40,9 +51,11 @@ test("the owner edits future defaults from Settings and an existing thread from 
   await page.getByRole("link", { name: "Assistants", exact: true }).click();
   await page.getByRole("button", { name: "New Thread", exact: true }).first().click();
   await page.getByRole("dialog", { name: "New Thread" }).getByRole("button", { name: "Start Thread" }).click();
-  await expect(page.getByLabel("Thread Details")).toContainText("$0.00 of $40.00 spent");
+  await expect(await openDetails(page)).toContainText("$0.00 of $40.00 spent");
+  await closeDetails(page);
   await page.getByText("Triage Open Issues", { exact: true }).click();
-  await expect(page.getByLabel("Thread Details")).toContainText("$8.13 of $25.00 spent");
+  await expect(await openDetails(page)).toContainText("$8.13 of $25.00 spent");
+  await closeDetails(page);
 
   const limits = await editThread(page);
   await limits.getByRole("button", { name: /^Change Account…/ }).click();
@@ -57,8 +70,8 @@ test("the owner edits future defaults from Settings and an existing thread from 
   await limits.getByRole("button", { name: "Save Limits" }).click();
   await expect(limits).toContainText("2 launched.");
   await limits.getByRole("button", { name: "Done", exact: true }).click();
-  await expect(page.getByLabel("Thread Details")).toContainText("$8.13 spent · No Budget");
-  await expect(page.getByLabel("Thread Details")).toContainText("2 launched · Launches Paused");
+  await expect(await openDetails(page)).toContainText("$8.13 spent · No Budget");
+  await expect(await openDetails(page)).toContainText("2 launched · Launches Paused");
 });
 
 test("a new thread uses the saved harness, provider account and both unlimited defaults", async ({ page }) => {
@@ -80,8 +93,8 @@ test("a new thread uses the saved harness, provider account and both unlimited d
   await expect(newThread.getByRole("radio", { name: /^Codex$/, exact: true })).toBeChecked();
   await expect(newThread.getByRole("radio", { name: "Codex Studio", exact: true })).toBeChecked();
   await newThread.getByRole("button", { name: "Start Thread" }).click();
-  await expect(page.getByLabel("Thread Details")).toContainText("No Budget");
-  await expect(page.getByLabel("Thread Details")).toContainText("No Launch Limit");
+  await expect(await openDetails(page)).toContainText("No Budget");
+  await expect(await openDetails(page)).toContainText("No Launch Limit");
 });
 
 for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 844]] as const) {
@@ -96,8 +109,9 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await page.clock.setFixedTime(new Date("2025-11-19T18:00:00Z"));
       await page.setViewportSize({ width, height });
       await open(page, THREAD, theme);
-      const details = page.getByLabel("Thread Details");
+      const details = await openDetails(page);
       await expect(details).toContainText("2 of 10 sessions launched");
+      await closeDetails(page);
       await expectFullyInViewport(page.getByRole("button", { name: "Thread Actions", exact: true }), "Thread Actions, which holds Thread Settings");
       await expectFullyInViewport(page.locator(".composer"), "The thread composer");
       await expectPageNoHorizontalOverflow(page);
@@ -136,7 +150,8 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await limits.getByRole("button", { name: "Save Limits" }).click();
       await expect(limits.getByRole("alert")).toHaveCount(0);
       await limits.getByRole("button", { name: "Done", exact: true }).click();
-      await expect(details).toContainText("2 launched · Launches Paused");
+      await expect(await openDetails(page)).toContainText("2 launched · Launches Paused");
+      await closeDetails(page);
       await expectFullyInViewport(page.locator(".composer"), "The thread composer");
     });
 
@@ -144,7 +159,8 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await page.clock.setFixedTime(new Date("2025-11-19T18:00:00Z"));
       await page.setViewportSize({ width, height });
       await open(page, THREAD, theme, "stress");
-      await expect(page.getByLabel("Thread Details")).toContainText("40 launched · No Launch Limit");
+      await expect(await openDetails(page)).toContainText("40 launched · No Launch Limit");
+      await closeDetails(page);
       await expectFullyInViewport(page.locator(".composer"), "The thread composer");
       await expectPageNoHorizontalOverflow(page);
       const thread = await editThread(page);
@@ -295,7 +311,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await expect(remove).toHaveCount(0);
       await expect(thread.getByRole("group", { name: "Cost Budget" }).getByRole("checkbox", { name: "No Limit" })).toBeChecked();
       await thread.getByRole("button", { name: "Done", exact: true }).click();
-      await expect(page.getByLabel("Thread Details")).toContainText("$8.13 spent · No Budget");
+      await expect(await openDetails(page)).toContainText("$8.13 spent · No Budget");
     });
 
     test(`fixed budgets remain readable on ${layout} in ${theme}`, async ({ page }) => {

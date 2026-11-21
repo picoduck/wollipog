@@ -24983,14 +24983,19 @@ export class ControlPlaneDb {
   assistantDecisionHistory(owner: HumanPrincipal, filter: { campaignId?: string; threadId?: string; before?: { at: number; id: string } }): AssistantDecisionHistoryPage {
     const limit = 5;
     const time = "json_extract(assistant_delegation, '$.resolvedAt')";
-    const rows = this.stmt(`SELECT * FROM workflow_decisions WHERE assistant_delegation IS NOT NULL
+    const scope = `FROM workflow_decisions WHERE assistant_delegation IS NOT NULL
       AND json_extract(assistant_delegation, '$.ownerUserId')=? AND json_extract(assistant_delegation, '$.organizationId')=?
       ${filter.campaignId ? "AND json_extract(assistant_delegation, '$.campaignId')=?" : ""}
-      ${filter.threadId ? "AND json_extract(assistant_delegation, '$.threadId')=?" : ""}
+      ${filter.threadId ? "AND json_extract(assistant_delegation, '$.threadId')=?" : ""}`;
+    const scopeArgs = [owner.userId, owner.organizationId,
+      ...(filter.campaignId ? [filter.campaignId] : []), ...(filter.threadId ? [filter.threadId] : [])];
+    const rows = this.stmt(`SELECT * ${scope}
       ${filter.before ? `AND (${time}, occurrence_id) < (?, ?)` : ""}
-      ORDER BY ${time} DESC, occurrence_id DESC LIMIT ?`).all(owner.userId, owner.organizationId,
-        ...(filter.campaignId ? [filter.campaignId] : []), ...(filter.threadId ? [filter.threadId] : []),
+      ORDER BY ${time} DESC, occurrence_id DESC LIMIT ?`).all(...scopeArgs,
         ...(filter.before ? [filter.before.at, filter.before.id] : []), limit + 1);
+    const total = filter.threadId && !filter.before
+      ? (this.stmt(`SELECT count(*) AS total ${scope}`).get(...scopeArgs) as { total: number }).total
+      : undefined;
     const entries = rows.slice(0, limit).flatMap((row) => {
       const decision = workflowDecisionFromRow(row);
       const category = decision && assistantDecisionCategory(decision.resourceSnapshot);
@@ -25002,7 +25007,7 @@ export class ControlPlaneDb {
         delegation: decision.assistantDelegation }];
     });
     const last = entries.at(-1);
-    return { entries, ...(rows.length > limit && last ? { nextBefore: `${last.delegation.resolvedAt}:${last.occurrenceId}` } : {}) };
+    return { entries, ...(total === undefined ? {} : { total }), ...(rows.length > limit && last ? { nextBefore: `${last.delegation.resolvedAt}:${last.occurrenceId}` } : {}) };
   }
 
   pendingWorkflowDecisionsForSession(sessionId: string): WorkflowDecisionView[] {

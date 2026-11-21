@@ -145,7 +145,6 @@ for (const theme of ["light", "dark"] as const) {
 
       test(`Delegate All uses explicit categories and requires disclosure on ${suffix}`, async ({ page }) => {
         const dialog = await start(page);
-        const details = page.getByLabel("Thread Details");
         const save = dialog.getByRole("button", { name: "Save Delegation" });
         const all = dialog.getByRole("radio", { name: "Delegate All" });
         const ask = dialog.getByRole("radio", { name: "Ask Me" });
@@ -155,7 +154,6 @@ for (const theme of ["light", "dark"] as const) {
         const saved = page.locator("body");
         await expect(ask).toBeChecked();
         await expect(dialog.getByText("Decisions stay with you.")).toBeVisible();
-        await expect(details).toContainText("Decision Delegation Off");
         await expectFullyInViewport(save, "Save Delegation");
         await expectEditorLayout(dialog, width);
         await screenshot(page, "ask-me");
@@ -202,9 +200,9 @@ for (const theme of ["light", "dark"] as const) {
         await revoke.click();
         await confirmation.getByRole("button", { name: "Revoke Delegation" }).click();
         await expect(saved).toHaveAttribute("data-delegation-grant", "null");
-        await expect(details).toContainText("Decision Delegation Off");
 
         await openEditor(page);
+        await expect(ask).toBeChecked();
         await all.click();
         await save.click();
         await openEditor(page);

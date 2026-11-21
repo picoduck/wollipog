@@ -4,7 +4,7 @@ import { ApiError } from "./api.js";
 import {
   applyAssistantThreadEvents,
   ASSISTANT_THREAD_TITLE_MAX,
-  assistantThreadAccessLabel,
+  assistantThreadAccessSentence,
   assistantThreadHarnessLabel,
   assistantThreadRoutes,
   assistantThreadsOwnerOnly,
@@ -131,7 +131,7 @@ test("the store numbers each thread event and keeps only the newest", () => {
 });
 
 test("threads read in Title Case labels, newest activity first", () => {
-  assert.equal(assistantThreadAccessLabel({ level: "full_access", destructive: "ask" }), "Full Access · Ask Before Destructive");
+  assert.equal(assistantThreadAccessSentence({ level: "full_access", destructive: "ask" }), "Full access. Asks before destructive actions.");
   assert.equal(assistantThreadHarnessLabel("claude-code"), "Claude Code");
   assert.equal(assistantThreadHarnessLabel("codex"), "Codex");
   assert.equal(assistantThreadHarnessLabel("codex", [{ id: "codex", label: "Codex CLI", available: true }]), "Codex CLI");
