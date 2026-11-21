@@ -634,6 +634,7 @@ const streamingCases = [
   ["partial table", "| Check |", " Status |", "\n| --- | --- |\n| Lint | Passed |", "p", "| Check | Status |"],
   ["list, identifier and multiplication", "* A list item\n* ", "snake_case at 2 * 3", " stays literal.", "li:last-child", "snake_case at 2 * 3"],
   ["filename glob", "Match ", "*.ts files", " only.", "p", "Match *.ts files"],
+  ["globstar path", "Match src/", "**/*.ts files", " only.", "p", "Match src/**/*.ts files"],
   ["escaped marker", "This is \\*", "literal", " text.", "p", "This is *literal"],
 ] as const;
 
