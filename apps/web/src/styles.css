@@ -2689,6 +2689,15 @@ button.status { cursor: pointer; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.model-picker-search {
+  width: 100%;
+  min-width: 0;
+  margin-bottom: var(--space-2);
+}
+.model-picker-family {
+  padding-inline-start: var(--space-3);
+}
+
 .menu-item {
   display: flex;
   flex: none;
@@ -11985,6 +11994,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     margin: 0 calc(-1 * var(--space-2));
     padding: 0 var(--space-2) 0 var(--space-4);
   }
+  /* The grabber's top margin and height remain reserved above the pinned Model Settings header. */
+  .model-settings .menu-head.persistent { top: var(--space-3); }
   /* Sheet rows read at the phone's reading size, like the dialog sheet's body. */
   .menu-item { font-size: var(--text-md); }
   /* A section label that only repeats the sheet's title row is dropped. */

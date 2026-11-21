@@ -91,9 +91,9 @@ export function ReviewSettingsPanel() {
         <SelectRow title="Reviewer Harness" options={harnesses} value={rule.harness} disabled={busy}
           error={refused ? "This reviewer belongs to the implementer's model family. Choose another harness or explicitly allow it below." : null}
           onChange={harness => changeRule(rule, { harness: harness as ReviewReviewerRule["harness"], model: null, effort: null })} />
-        <SelectRow title="Reviewer Model" value={rule.model ?? AUTO} disabled={busy}
+        <SelectRow modelPicker={{ mode: "launch", driver: rule.harness }} title="Reviewer Model" value={rule.model ?? AUTO} disabled={busy}
           options={[...automatic, ...[...models.values()].map(m => ({ value: m.id, label: modelOptionLabel(m, models.values()) })),
-            ...(rule.model && !models.has(rule.model) ? [{ value: rule.model, label: `${rule.model} (Unavailable)` }] : [])]}
+            ...(rule.model && !models.has(rule.model) ? [{ value: rule.model, label: `${rule.model} (Unavailable)`, disabled: true }] : [])]}
           description="Automatic uses the selected reviewer's discovered default model. A missing configured model refuses the review."
           onChange={model => changeRule(rule, { model: model === AUTO ? null : model, effort: null })} />
         <SelectRow title="Reviewer Effort" value={rule.effort ?? AUTO} disabled={busy}

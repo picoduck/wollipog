@@ -1,3 +1,4 @@
+import { ModelPicker } from "./ModelPicker.js";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   AutomationAction,
@@ -702,7 +703,8 @@ function AutomationEditorForm({
                     {modelOptions.length > 0 && (
                       <div className="field">
                         <span className="field-label">Model</span>
-                        <Select label="Model" value={form.model}
+                        <ModelPicker label="Model" value={form.model}
+                          context={{ mode: "launch", driver: selectedRunner?.agents.find(agent => agent.id === form.agentId)?.driver }}
                           onChange={(value) => setForm((current) => withModel(current, value, agentCapabilities))}
                           options={[{ value: "", label: "Agent Default" },
                             ...modelOptions.map((model) => ({

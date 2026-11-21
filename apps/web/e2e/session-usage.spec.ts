@@ -931,7 +931,9 @@ test.describe("mobile: the Session Usage group opens its breakdowns inside Model
     await page.keyboard.press("Enter");
     const menu = page.getByRole("dialog", { name: "Model Settings" });
     await expect(menu.getByRole("radio", { name: "GPT Tiered" })).toBeFocused();
-    // The group comes before the model choices, so Shift+Tab from the current model reaches it.
+    // Search sits between the current model and the Session Usage group.
+    await page.keyboard.press("Shift+Tab");
+    await expect(menu.getByRole("searchbox", { name: "Search Models" })).toBeFocused();
     await page.keyboard.press("Shift+Tab");
     const cost = menu.getByRole("button", { name: "Session Cost" });
     await expect(cost).toBeFocused();
