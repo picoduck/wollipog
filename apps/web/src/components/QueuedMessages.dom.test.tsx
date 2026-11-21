@@ -434,10 +434,18 @@ test("the collapsed summary carries Held and the most severe row status, which e
       queueHeld: false,
       steering: STEERING,
     });
-    assert.deepEqual(badges(), ["Delivery Uncertain"], "Steering… is not an exception the summary raises");
+    assert.deepEqual(badges(), ["Delivery Uncertain"], "Delivery Uncertain takes precedence over Steering…");
     await act(async () => { tray.summary()!.click(); });
     assert.deepEqual(badges(), [], "expanded, each row carries its own status");
     assert.equal(tray.row("uncertain").querySelector(".status")?.textContent, "Delivery Uncertain");
+    await act(async () => { tray.summary()!.click(); });
+    await tray.draw({
+      prompts: [queued("plain", { steeringState: "promoting" }), queued("next")],
+      queueHeld: false,
+      steering: STEERING,
+    });
+    assert.deepEqual(badges(), ["Steering…"]);
+    assert.ok(tray.summary()?.querySelector(".status.no-dot .spinner"));
   } finally {
     await tray.unmount();
   }

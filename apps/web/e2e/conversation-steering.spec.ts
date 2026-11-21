@@ -107,6 +107,7 @@ for (const theme of ["light", "dark"] as const) {
         await expect(row.locator(".queue-clock")).toBeVisible();
         const steer = row.getByRole("button", { name: "Steer Queued Message" });
         await expect(steer).toHaveText("Steer Now");
+        await expect(composer, "The phone card stays tall enough for both the queue and the input").toBeVisible();
         const one = await measureQueueLayout(page);
         await captureQueueEvidence(page, theme, "queue1", one);
 

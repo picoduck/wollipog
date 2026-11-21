@@ -2473,8 +2473,10 @@ uppercase transform.
 
 **Composer queue** (`QueuedMessages`, #2178). Messages not yet sent wait in `.composer-queue`,
 the full-width top strip inside the composer card, with a hairline between rows. When editing,
-the editing strip comes first so its controls stay visible. Two or more messages start collapsed to one summary line
-(#2788): a full-width §5.5 disclosure trigger, `--control-h` tall, reading "<n> Queued Messages" and
+the editing strip comes first so its controls stay visible. On a phone, a nonempty queue keeps
+the composer expanded so the input and the queue remain visible together. Two or more messages
+start collapsed to one summary line (#2788): a full-width §5.5 disclosure trigger,
+`--control-h` tall, reading "<n> Queued Messages" and
 carrying the one Held badge when the whole queue is held. While collapsed it also
 carries the most severe row status that needs the person (Delivery Failed, else Delivery Uncertain)
 or the spinner while steering.
