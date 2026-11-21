@@ -8,7 +8,7 @@
 // FAKE_AGY_VERSION: the version `--version` prints. A fake managed release (fake-release.ts) sets
 // it, and its own FAKE_AGY_MODE, in the wrapper script inside its archive.
 // FAKE_AGY_LABEL: names the copy (for example a managed release) in environments.jsonl.
-import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -109,6 +109,9 @@ if (args[0] === "acp" && args[1] === "--login") {
     }
     if (request.method === "session/new") {
       if (modes.has("session_hang")) return;
+      // A one-time service interruption: the next session request, from any copy, goes unanswered.
+      const hangOnce = state ? join(state, "hang-next-session") : undefined;
+      if (hangOnce && existsSync(hangOnce)) { unlinkSync(hangOnce); return; }
       if (modes.has("session_error")) return send({ id: request.id, error: { code: -32603, message: "internal error" } });
       // A release that asks for a new sign-in even where the existing one works.
       if (modes.has("session_auth_required")) return send({ id: request.id, error: { code: -32000, message: "Authentication required" } });

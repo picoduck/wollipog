@@ -822,6 +822,12 @@ export class AntigravitySetupSupervisor {
       // What the copy in use achieves now (the last report may be stale, or name a version a
       // recovery just replaced). The new version must do at least as well.
       const baseline = await this.runCheck("never");
+      // A check that timed out proves nothing about the copy in use: it may still work once the
+      // service answers. Judging the new version against it could replace a working copy, so the
+      // update stops here, before anything is downloaded or activated.
+      if (baseline.status === "verification_failed" && baseline.failure === "timed_out") {
+        throw new AntigravityInstallError("timed_out", "The copy in use couldn't be checked in time, so the update didn't start.");
+      }
       const before = accessRank(baseline.status);
       const release = await resolveAntigravityRelease(platformKey, {
         fetch, signal, timeoutMs: this.options.installerTimeoutMs ?? INSTALLER_TIMEOUT_MS, onStage: setStage,

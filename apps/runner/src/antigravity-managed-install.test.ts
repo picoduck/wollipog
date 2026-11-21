@@ -611,3 +611,24 @@ test("a runner that starts stopping during verification never confirms the new v
   assert.equal(readlinkSync(join(managedRoot, "current")), working);
   assert.equal(existsSync(join(managedRoot, "pending-activation.json")), false);
 });
+
+test("an update stops before it starts when the copy in use can't be checked in time", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  const { setup, managedRoot, published } = supervisor(server, { sessionTimeoutMs: 1_000 });
+  assert.equal((await install(setup)).status, "ready");
+  const working = readlinkSync(join(managedRoot, "current"));
+
+  // The candidate asks for a new sign-in; the working copy's own check is interrupted once.
+  const { archiveUrl } = server.publish({ platform: PLATFORM, version: "1.6.0", archive: release("1.6.0", "session_auth_required") });
+  writeFileSync(join(state, "hang-next-session"), "");
+  const stopped = await install(setup);
+  assert.equal(stopped.managedInstall?.operation?.failure, "timed_out");
+  assert.equal(readlinkSync(join(managedRoot, "current")), working);
+  assert.ok(!server.requests.includes(archiveUrl), "nothing was downloaded");
+  assert.equal(readdirSync(join(managedRoot, "generations")).length, 1);
+  const checked = await setup.check("never");
+  assert.equal(checked.status, "ready");
+  assert.equal(checked.executable?.version, "1.5.14");
+  assertAllValid(published);
+});

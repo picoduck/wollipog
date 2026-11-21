@@ -132,7 +132,7 @@ export function antigravityInstallFailureSentence(failure: AntigravityInstallFai
     case "download_failed":
       return "The download from Google didn't finish. Check the machine's network connection, then try again.";
     case "timed_out":
-      return "The download or the new version's checks took too long. Try again.";
+      return "A download or a check took too long, so nothing was changed. Try again.";
     case "checksum_mismatch":
       return "The downloaded file didn't match the checksum Google published, so Wollipog discarded it.";
     case "archive_invalid":
