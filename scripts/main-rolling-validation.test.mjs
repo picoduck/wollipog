@@ -280,14 +280,14 @@ function forge() {
 
 test("candidate request persists before dispatch, concurrent/cross-purpose duplicates share one claim", async () => {
   const { data, api } = forge();
-  await assert.rejects(requestCandidate(repository, B, { api }), /candidate-scheduler-state-requires-operator-reconciliation/);
+  await assert.rejects(requestCandidate(repository, B, { api }), /state requires operator/);
   await writeState(api, repository, await readState(api, repository), emptyState(repository));
   const receipts = await Promise.all(["release", "repair"].map((purpose) => requestCandidate(repository, B, { api, purpose, now: () => at() })));
   assert.equal(receipts[0].claimId, receipts[1].claimId);
   assert.equal(data.dispatches.length, 0);
   assert.equal((await readState(api, repository)).value.candidates.requests.length, 1);
   data.deniedAncestry = true;
-  await assert.rejects(requestCandidate(repository, C, { api }), /candidate-is-outside-main-ancestry/);
+  await assert.rejects(requestCandidate(repository, C, { api }), /outside main/);
 });
 
 test("candidate dispatch/admission survives wakes, then new main takes priority without cancelling it", async () => {

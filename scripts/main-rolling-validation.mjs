@@ -39,7 +39,7 @@ const date = (s) => typeof s === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:
 const STATUSES = new Set(["initializing", "validating", "stalled-active-run", "current-target-completed", "dispatch-unknown-operator-required",
   "dispatch-outcome-unknown", "recovery-limit-operator-required", "predecessor-evidence-operator-required", "claimed"]);
 class RollingFailure extends Error {
-  constructor(failureClass) { super(failureClass); this.failureClass = failureClass; }
+  constructor(failureClass, message = failureClass) { super(message); this.failureClass = failureClass; }
 }
 class InvalidState extends Error {}
 class StateConflict extends Error {}
@@ -87,7 +87,7 @@ export function workerIdentity(run, repository) {
 /** Never certify from the dispatcher head, controller result, state ref, or uploaded artifacts. */
 export function validationRecord(repository, run, jobs, blobs) {
   const identity = workerIdentity(run, repository);
-  if (!identity) throw new RollingFailure("invalid-rolling-worker-identity");
+  if (!identity) throw new RollingFailure("invalid-rolling-worker-identity", "Invalid rolling worker identity");
   const named = (name) => jobs.filter((j) => j.name === name);
   const unique = (name) => named(name).length === 1 ? named(name)[0] : null;
   const checkedOut = CHECKOUT_JOBS.every((name) => unique(name)?.steps?.some((step) =>
@@ -119,7 +119,7 @@ export async function readState(api, repository) {
   try {
     const ref = await api(`${root}/git/ref/heads/ci/main-rolling-state`);
     oid = ref?.object?.sha;
-    if (!SHA.test(oid)) throw new RollingFailure("invalid-state-ref");
+    if (!SHA.test(oid)) throw new RollingFailure("invalid-state-ref", "Invalid state ref");
     const commit = await api(`${root}/git/commits/${oid}`);
     const tree = await api(`${root}/git/trees/${commit.tree.sha}`);
     const entry = tree.tree?.find((e) => e.path === "state.json" && e.type === "blob");
@@ -158,7 +158,7 @@ export async function readState(api, repository) {
 export async function writeState(api, repository, previous, value) {
   const root = `/repos/${repository}`;
   value = { ...value, sequence: previous.value.sequence + 1 };
-  if (!validState(value, repository)) throw new RollingFailure("refusing-invalid-rolling-state");
+  if (!validState(value, repository)) throw new RollingFailure("refusing-invalid-rolling-state", "Refusing invalid rolling state");
   const compact = previous.recovered || value.sequence % COMPACT_EVERY === 0;
   const tree = await api(`${root}/git/trees`, { method: "POST", body: { tree: [
     { path: "state.json", mode: "100644", type: "blob", content: JSON.stringify(value) + "\n" },
@@ -181,16 +181,16 @@ async function listRuns(api, repository, query, complete = true) {
   const runs = [];
   for (let page = 1; page <= 10; page++) {
     const payload = await api(`/repos/${repository}/actions/workflows/main-rolling-validation.yml/runs?branch=main&event=workflow_dispatch&per_page=100&page=${page}${query}`);
-    if (!Array.isArray(payload?.workflow_runs) || !Number.isSafeInteger(payload.total_count)) throw new RollingFailure("unreadable-worker-listing");
+    if (!Array.isArray(payload?.workflow_runs) || !Number.isSafeInteger(payload.total_count)) throw new RollingFailure("unreadable-worker-listing", "Unreadable worker listing");
     runs.push(...payload.workflow_runs);
     if (!complete || runs.length >= payload.total_count) return runs;
   }
-  throw new RollingFailure("worker-listing-truncated-operator-reconciliation-required");
+  throw new RollingFailure("worker-listing-truncated-operator-reconciliation-required", "Worker listing truncated; operator reconciliation required");
 }
 
 async function readRun(api, repository, id) {
   const run = await api(`/repos/${repository}/actions/runs/${id}`);
-  if (!workerIdentity(run, repository)) throw new RollingFailure("unexpected-worker-run");
+  if (!workerIdentity(run, repository)) throw new RollingFailure("unexpected-worker-run", "Unexpected worker run");
   return run;
 }
 
@@ -204,19 +204,19 @@ async function readRecords(api, repository, run, cache = new Map()) {
   const blobs = {};
   for (const [key, path] of Object.entries(paths)) {
     const file = await immutable(`${root}/contents/${path}?ref=${run.head_sha}`);
-    if (!SHA.test(file?.sha)) throw new RollingFailure("workflow-revision-unavailable");
+    if (!SHA.test(file?.sha)) throw new RollingFailure("workflow-revision-unavailable", "Workflow revision unavailable");
     blobs[key] = file.sha;
   }
-  if (run.run_attempt > 10) throw new RollingFailure("worker-attempts-truncated-operator-required");
+  if (run.run_attempt > 10) throw new RollingFailure("worker-attempts-truncated-operator-required", "Worker attempts truncated; operator required");
   const records = [];
   const target = await immutable(`${root}/commits/${workerIdentity(run, repository).targetSha}`);
   const targetCommitAt = target?.commit?.committer?.date;
   for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
     const snapshot = await api(`${root}/actions/runs/${run.id}/attempts/${attempt}`);
     if (snapshot.id !== run.id || snapshot.run_attempt !== attempt || snapshot.head_sha !== run.head_sha ||
-        workerIdentity(snapshot, repository)?.targetSha !== workerIdentity(run, repository)?.targetSha) throw new RollingFailure("changed-worker-attempt");
+        workerIdentity(snapshot, repository)?.targetSha !== workerIdentity(run, repository)?.targetSha) throw new RollingFailure("changed-worker-attempt", "Changed worker attempt");
     const { jobs, truncated } = await listJobs(api, repository, run.id, attempt);
-    if (truncated) throw new RollingFailure("worker-jobs-truncated");
+    if (truncated) throw new RollingFailure("worker-jobs-truncated", "Worker jobs truncated");
     const record = validationRecord(repository, snapshot, jobs, blobs);
     records.push({ ...record,
       targetCommitAt: date(targetCommitAt) ? targetCommitAt : null,
@@ -230,7 +230,7 @@ async function readRecords(api, repository, run, cache = new Map()) {
 /** All active runs are read independently of the bounded completed-history window. */
 export async function observe(api, repository, state, { targetSha, report = false, mainSha } = {}) {
   mainSha ??= (await api(`/repos/${repository}/git/ref/heads/main`))?.object?.sha;
-  if (!SHA.test(mainSha)) throw new RollingFailure("main-ancestry-unavailable");
+  if (!SHA.test(mainSha)) throw new RollingFailure("main-ancestry-unavailable", "Main ancestry unavailable");
   targetSha ??= mainSha;
   const active = [];
   for (const status of ACTIVE) active.push(...await listRuns(api, repository, `&status=${status}`));
@@ -280,7 +280,7 @@ export async function observe(api, repository, state, { targetSha, report = fals
     let admissionVerified = false;
     if (run.status === "in_progress") {
       const { jobs, truncated } = await listJobs(api, repository, run.id, run.run_attempt);
-      if (truncated) throw new RollingFailure("active-worker-jobs-truncated");
+      if (truncated) throw new RollingFailure("active-worker-jobs-truncated", "Active worker jobs truncated");
       // A copied successful job from a prior attempt is not current execution.
       const executing = jobs.some((job) => REQUIRED.includes(job.name) && (job.status === "in_progress" ||
         run.run_attempt === 1 && job.status === "completed" && job.steps?.some((step) =>
@@ -385,7 +385,7 @@ export async function reconcile(repository, { api, now = () => new Date().toISOS
   for (let retry = 0; retry < 3; retry++) {
     const previous = await readState(api, repository);
     const main = await api(`/repos/${repository}/git/ref/heads/main`);
-    if (!SHA.test(main?.object?.sha)) throw new RollingFailure("invalid-main-head");
+    if (!SHA.test(main?.object?.sha)) throw new RollingFailure("invalid-main-head", "Invalid main head");
     // Candidate history is optional overhead. Missing/large old candidate evidence must not
     // prevent the main scheduler from queuing its next snapshot.
     let observation = await observe(api, repository, { ...previous.value, candidates: undefined }, { mainSha: main.object.sha });
@@ -448,12 +448,12 @@ export async function reconcile(repository, { api, now = () => new Date().toISOS
 
 export async function admit(repository, event, runId, attempt, { api, now = () => new Date().toISOString() } = {}) {
   const targetSha = event?.inputs?.target_sha, claimId = event?.inputs?.claim_id;
-  if (event?.ref !== "refs/heads/main" || !SHA.test(targetSha) || !UUID.test(claimId)) throw new RollingFailure("invalid-worker-dispatch");
+  if (event?.ref !== "refs/heads/main" || !SHA.test(targetSha) || !UUID.test(claimId)) throw new RollingFailure("invalid-worker-dispatch", "Invalid worker dispatch");
   const run = await readRun(api, repository, runId);
   const identity = workerIdentity(run, repository);
-  if (identity.targetSha !== targetSha || identity.claimId !== claimId || run.run_attempt !== attempt) throw new RollingFailure("worker-identity-mismatch");
+  if (identity.targetSha !== targetSha || identity.claimId !== claimId || run.run_attempt !== attempt) throw new RollingFailure("worker-identity-mismatch", "Worker identity mismatch");
   const comparison = await api(`/repos/${repository}/compare/${targetSha}...main`);
-  if (comparison?.merge_base_commit?.sha !== targetSha) throw new RollingFailure("target-is-outside-main-ancestry");
+  if (comparison?.merge_base_commit?.sha !== targetSha) throw new RollingFailure("target-is-outside-main-ancestry", "Target is outside main ancestry");
   for (let retry = 0; retry < 3; retry++) {
     const previous = await readState(api, repository);
     if (previous.recovered) return false;
@@ -504,11 +504,11 @@ export async function admit(repository, event, runId, attempt, { api, now = () =
 
 /** Immutable suite identity shared by requests and authoritative worker evidence. */
 export async function candidateSuiteVersion(api, repository, sourceSha) {
-  if (!SHA.test(sourceSha)) throw new RollingFailure("invalid-workflow-source");
+  if (!SHA.test(sourceSha)) throw new RollingFailure("invalid-workflow-source", "Invalid workflow source");
   const blobs = {};
   for (const [key, path] of Object.entries({ worker: WORKER, ci: ".github/workflows/ci.yml", windows: ".github/workflows/settings-rows-win32.yml" })) {
     const file = await api(`/repos/${repository}/contents/${path}?ref=${sourceSha}`);
-    if (!SHA.test(file?.sha)) throw new RollingFailure("candidate-suite-unavailable");
+    if (!SHA.test(file?.sha)) throw new RollingFailure("candidate-suite-unavailable", "Candidate suite unavailable");
     blobs[key] = file.sha;
   }
   return createHash("sha256").update(JSON.stringify(blobs)).digest("hex");
@@ -516,13 +516,13 @@ export async function candidateSuiteVersion(api, repository, sourceSha) {
 
 /** Record intent only; the bounded reconciler is the sole worker dispatcher. */
 export async function requestCandidate(repository, targetSha, { purpose = "release", api, now = () => new Date().toISOString() } = {}) {
-  if (!REPOSITORY.test(repository) || !SHA.test(targetSha)) throw new RollingFailure("invalid-candidate-request");
+  if (!REPOSITORY.test(repository) || !SHA.test(targetSha)) throw new RollingFailure("invalid-candidate-request", "Invalid candidate request");
   for (let retry = 0; retry < 3; retry++) {
     const previous = await readState(api, repository);
-    if (previous.recovered) throw new RollingFailure("candidate-scheduler-state-requires-operator-reconciliation");
+    if (previous.recovered) throw new RollingFailure("candidate-scheduler-state-requires-operator-reconciliation", "Candidate scheduler state requires operator reconciliation");
     const mainSha = (await api(`/repos/${repository}/git/ref/heads/main`))?.object?.sha;
     if (!SHA.test(mainSha) || (await api(`/repos/${repository}/compare/${targetSha}...${mainSha}`))?.merge_base_commit?.sha !== targetSha)
-      throw new RollingFailure("candidate-is-outside-main-ancestry");
+      throw new RollingFailure("candidate-is-outside-main-ancestry", "Candidate is outside main ancestry");
     const suiteVersion = await candidateSuiteVersion(api, repository, mainSha);
     const queued = queueCandidate(previous.value.candidates, { targetSha, suiteVersion, purpose, requestedAt: now(), claimId: randomUUID() });
     try {
@@ -536,12 +536,12 @@ export async function main(argv, { env = process.env, log = console.log, error =
   waitForWorker = awaitWorkerTerminal } = {}) {
   try {
     const repository = env.GITHUB_REPOSITORY;
-    if (!REPOSITORY.test(repository ?? "") || !env.GITHUB_TOKEN || env.GITHUB_REF !== "refs/heads/main") throw new RollingFailure("invalid-controller-environment");
+    if (!REPOSITORY.test(repository ?? "") || !env.GITHUB_TOKEN || env.GITHUB_REF !== "refs/heads/main") throw new RollingFailure("invalid-controller-environment", "Invalid controller environment");
     api ??= githubApi(env.GITHUB_TOKEN);
     const mode = argv[0] ?? "reconcile";
     if (mode === "request") {
       const event = JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8"));
-      if (event.ref !== "refs/heads/main") throw new RollingFailure("invalid-candidate-request-ref");
+      if (event.ref !== "refs/heads/main") throw new RollingFailure("invalid-candidate-request-ref", "Invalid candidate request ref");
       const receipt = await requestCandidate(repository, event.inputs?.candidate_sha,
         { api, purpose: event.inputs?.purpose ?? "release" });
       log(JSON.stringify({ event: "main_validation_candidate_request", ...receipt }));
@@ -564,10 +564,10 @@ export async function main(argv, { env = process.env, log = console.log, error =
     } else if (mode === "admit") {
       const allowed = await admit(repository, JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8")),
         Number(env.GITHUB_RUN_ID), Number(env.GITHUB_RUN_ATTEMPT), { api });
-      if (!env.GITHUB_OUTPUT) throw new RollingFailure("worker-output-unavailable");
+      if (!env.GITHUB_OUTPUT) throw new RollingFailure("worker-output-unavailable", "Worker output unavailable");
       appendFileSync(env.GITHUB_OUTPUT, `admitted=${allowed}\nreconcile=${allowed}\n`);
       log(JSON.stringify({ event: "main_rolling_admission", runId: Number(env.GITHUB_RUN_ID), admitted: allowed }));
-    } else throw new RollingFailure("unsupported-rolling-mode");
+    } else throw new RollingFailure("unsupported-rolling-mode", "Unsupported rolling mode");
     return 0;
   } catch (cause) {
     // Never expose response bodies, event content, network exception messages or credentials.
