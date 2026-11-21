@@ -527,6 +527,13 @@ export class AntigravitySetupSupervisor {
     return { command: executable.path, context: this.credentialContext(executable.source === "managed") };
   }
 
+  /** Settles once no install or update is running (#4779). An update moves `current` before it
+   * verifies the new copy, so a session launch waits for that verification (or its rollback)
+   * before it reads `launchTarget()`. */
+  async installSettled(): Promise<void> {
+    while (this.installing) await this.installing.catch(() => {});
+  }
+
   /** Check the runtime and its sign-in. Concurrent calls share one check. While a sign-in or an
    * install runs, its own verification decides, so the current setup is returned unchanged. */
   check(latest: AntigravityLatestRefresh = "never"): Promise<AntigravitySetupView> {

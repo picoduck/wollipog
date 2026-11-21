@@ -187,6 +187,7 @@ import {
   ANTIGRAVITY_AGENT_ID,
   antigravityAgentDefinition,
   antigravitySessionLaunch,
+  antigravitySignOutSuperseded,
   withAntigravityAgent,
   withoutAntigravityAgent,
 } from "./antigravity-session.js";
@@ -888,6 +889,7 @@ function updateAgentAuthStatus(agentId: string, update: AcpAuthRuntime): void {
   // A session found the shared Antigravity sign-in gone: check the setup again, so New Session
   // and Connections say sign-in is needed rather than offering a session that cannot start.
   if (agentId === ANTIGRAVITY_AGENT_ID && update.status === "unauthenticated" && !configuredAgentIds.has(agentId)) {
+    antigravitySignedOutAt = Date.now();
     void antigravitySetup.check();
   }
   const prior = acpAuthStatus.get(agentId) ?? {};
@@ -1013,14 +1015,16 @@ function antigravityLaunchContext(): ReturnType<AntigravitySetupSupervisor["cred
 /** Antigravity's New Session row from the last settled setup. A check in progress keeps the row
  * it replaces, so New Session does not flicker while a person checks again. */
 let antigravityAgentRow: AgentDefinition | null = null;
+/** When a session last reported the shared Antigravity sign-in gone. */
+let antigravitySignedOutAt: number | undefined;
 const configuredAgentIds = new Set(config.agents.map((agent) => agent.id));
 function publishAntigravityAgent(setup: AntigravitySetupView): void {
   // An operator's configured agent owns the id, its row and its auth status; the setup touches none.
   if (setup.status === "checking" || configuredAgentIds.has(ANTIGRAVITY_AGENT_ID)) return;
   const row = antigravityAgentDefinition(setup, antigravityLaunchContext(), config.executionIsolation);
-  // A confirmed sign-in replaces a session's earlier report that it was signed out.
+  // A sign-in confirmed by a check that finished after a session's sign-out report replaces it.
   const runtime = acpAuthStatus.get(ANTIGRAVITY_AGENT_ID);
-  const staleSignOut = setup.status === "ready" && runtime?.status !== undefined;
+  const staleSignOut = runtime?.status !== undefined && antigravitySignOutSuperseded(setup, antigravitySignedOutAt);
   if (staleSignOut) {
     if (runtime?.capabilities) acpAuthStatus.set(ANTIGRAVITY_AGENT_ID, { capabilities: runtime.capabilities });
     else acpAuthStatus.delete(ANTIGRAVITY_AGENT_ID);
@@ -1036,9 +1040,12 @@ function publishAntigravityAgent(setup: AntigravitySetupView): void {
 /** An Antigravity session launch (after the shared preparation): the setup's current executable,
  * `agy acp`, and the setup's credential context, whose ambient credentials are dropped both from
  * the inherited environment and from anything the preparation layered on. */
-function prepareAntigravityLaunch(meta: SessionMeta): Pick<SessionLaunchPreparation, "scrubInheritedEnv" | "acpCompatibility"> | undefined {
+async function prepareAntigravityLaunch(meta: SessionMeta): Promise<Pick<SessionLaunchPreparation, "scrubInheritedEnv" | "acpCompatibility"> | undefined> {
   if (meta.agentId !== ANTIGRAVITY_AGENT_ID || configuredAgentIds.has(ANTIGRAVITY_AGENT_ID) ||
       meta.driver !== "acp" || meta.context.kind !== "native") return undefined;
+  // An update moves the managed `current/agy` before it verifies the new copy: wait for that
+  // verification (or its rollback), so a launch never runs an unverified release.
+  await antigravitySetup.installSettled();
   // The setup's launch target: the checked executable (the managed copy's `current/agy`, or the
   // PATH copy) and the credential context that copy runs with.
   const target = antigravitySetup.launchTarget();
@@ -1420,7 +1427,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
       ...(codexLaunchArgs ? { codexLaunchArgs } : {}),
       sessionCommandCatalogProvenance: JSON.stringify(meta.sessionSlashCommandProvenance ?? null),
       ...(codexPrompts.outcome !== "not_applicable" ? { codexPrompts: launchPrompts } : {}),
-      ...prepareAntigravityLaunch(meta),
+      ...(await prepareAntigravityLaunch(meta)),
     };
   },
   createPromptImageFetcher({

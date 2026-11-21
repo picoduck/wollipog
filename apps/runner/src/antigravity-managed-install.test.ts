@@ -691,3 +691,20 @@ test("an update stops before it starts when the copy in use can't be checked in 
   assert.equal(checked.executable?.version, "1.5.14");
   assertAllValid(published);
 });
+
+test("a session launch waits for a running install to verify before reading its target (#4779)", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  const { setup, managedRoot } = supervisor(server);
+  await setup.check("never");
+  await setup.installSettled(); // Nothing running: settles at once.
+  setup.startInstall();
+  assert.equal(setup.current().managedInstall?.operation?.status, "running");
+  await setup.installSettled();
+  const view = setup.current();
+  assert.equal(view.managedInstall?.operation?.status, "succeeded", "the install, its verification included, finished first");
+  assert.equal(view.status, "ready");
+  const target = setup.launchTarget();
+  assert.equal(target?.command, join(managedRoot, "current", "agy"));
+  assert.equal(target?.context.env.AGY_CLI_DISABLE_AUTO_UPDATE, "true", "the managed copy launches with its updater off");
+});

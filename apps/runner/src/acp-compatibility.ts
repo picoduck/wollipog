@@ -30,6 +30,9 @@ export interface AcpCompatibility {
    * approved worktree setup environment, say): the agent's credential context drops them from the
    * inherited environment, and this keeps them out of the one the launch supplies. */
   withheldEnvironment?: { names: readonly string[]; prefixes: readonly string[] };
+  /** Values the agent's credential context requires, applied after every other layer, so a worktree
+   * setup environment cannot override them (the managed copy's `AGY_CLI_DISABLE_AUTO_UPDATE`). */
+  pinnedEnvironment?: Readonly<Record<string, string>>;
   /** Bounds for the handshake and for opening or resuming the session: a process that never
    * answers fails the launch with the profile's error instead of leaving it starting. */
   deadlines?: { handshakeMs: number; sessionMs: number };
@@ -69,9 +72,12 @@ export function acpRequestTimedOut(error: unknown): boolean {
 /** The explicit launch environment without the variables the profile withholds. */
 export function compatibleAcpEnvironment(env: Record<string, string>, compatibility?: AcpCompatibility): Record<string, string> {
   const withheld = compatibility?.withheldEnvironment;
-  if (!withheld) return env;
-  return Object.fromEntries(Object.entries(env).filter(([name]) =>
-    !withheld.names.includes(name) && !withheld.prefixes.some((prefix) => name.startsWith(prefix))));
+  const filtered = withheld
+    ? Object.fromEntries(Object.entries(env).filter(([name]) =>
+      !withheld.names.includes(name) && !withheld.prefixes.some((prefix) => name.startsWith(prefix))))
+    : env;
+  // The credential context's own values win over every layer (the managed copy's updater switch).
+  return compatibility?.pinnedEnvironment ? { ...filtered, ...compatibility.pinnedEnvironment } : filtered;
 }
 
 const AGENT_NAME = { antigravity: "Google Antigravity" } as const;

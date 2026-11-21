@@ -7,12 +7,13 @@ import { fileURLToPath } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 import type { AcpRuntimeCapabilities, AgentCapabilities, AgentDefinition, AntigravitySetupView, SessionConfig, SessionEventPayload } from "@wollipog/protocol";
 import { negotiateAcpInitialize } from "./acp-contract.js";
-import { acpCompatibilityFailure, compatibleAcpNegotiation, redactAccountIdentifiers } from "./acp-compatibility.js";
+import { acpCompatibilityFailure, compatibleAcpEnvironment, compatibleAcpNegotiation, redactAccountIdentifiers } from "./acp-compatibility.js";
 import {
   ANTIGRAVITY_AGENT_ID,
   ANTIGRAVITY_UNAVAILABLE,
   antigravityAgentDefinition,
   antigravitySessionLaunch,
+  antigravitySignOutSuperseded,
   withAntigravityAgent,
   withoutAntigravityAgent,
 } from "./antigravity-session.js";
@@ -190,7 +191,16 @@ test("a launch uses the setup's executable and exact credential context, and res
   assert.equal(antigravitySessionLaunch(setup({ status: "missing_runtime", executable: undefined }), context, PROVIDER).command, undefined);
   // The managed copy (#4780) launches with its self-updater off, from its own credential context.
   const managed = antigravityCredentialContext({ HOME: "/home/fixture" }, { managed: true });
-  assert.equal(antigravitySessionLaunch(setup({}), managed, PROVIDER).env.AGY_CLI_DISABLE_AUTO_UPDATE, "true");
+  const managedLaunch = antigravitySessionLaunch(setup({}), managed, PROVIDER);
+  assert.equal(managedLaunch.env.AGY_CLI_DISABLE_AUTO_UPDATE, "true");
+  // A worktree setup layer added after preparation cannot turn the managed copy's updater back on.
+  assert.deepEqual(compatibleAcpEnvironment({ AGY_CLI_DISABLE_AUTO_UPDATE: "false", FIXTURE_SETUP_VAR: "kept" },
+    managedLaunch.acpCompatibility), { AGY_CLI_DISABLE_AUTO_UPDATE: "true", FIXTURE_SETUP_VAR: "kept" });
+  // A session's sign-out stands until a check that finished after it confirms the sign-in.
+  assert.equal(antigravitySignOutSuperseded({ status: "ready", checkedAt: 100 }, 200), false, "a republished earlier view");
+  assert.equal(antigravitySignOutSuperseded({ status: "ready", checkedAt: 300 }, 200), true);
+  assert.equal(antigravitySignOutSuperseded({ status: "sign_in_required", checkedAt: 300 }, 200), false);
+  assert.equal(antigravitySignOutSuperseded({ status: "ready", checkedAt: 100 }, undefined), true);
   assert.equal(antigravitySessionLaunch(setup({}), context, PROVIDER).env.AGY_CLI_DISABLE_AUTO_UPDATE, undefined);
 });
 

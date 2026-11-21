@@ -95,6 +95,13 @@ export function withAntigravityAgent(
   return row ? [...others, row] : others;
 }
 
+/** Whether a setup confirms the sign-in after a session reported it gone. Only a ready check that
+ * finished after the report does: a republished earlier view (install or update progress, say)
+ * leaves the session's newer sign-out in place. */
+export function antigravitySignOutSuperseded(setup: Pick<AntigravitySetupView, "status" | "checkedAt">, signedOutAt: number | undefined): boolean {
+  return setup.status === "ready" && (signedOutAt === undefined || setup.checkedAt > signedOutAt);
+}
+
 /** The agents external-session discovery and adoption may probe: never the setup-derived
  * Antigravity row. Those paths spawn adapters without its credential context or compatibility
  * profile, and listing (and the load that adoption needs) is withheld for Antigravity anyway. */
@@ -131,6 +138,7 @@ export function antigravitySessionLaunch(
     scrubInheritedEnv: [...context.scrubInheritedEnv],
     acpCompatibility: { profile: "antigravity", resumable: antigravityResumable(isolation),
       withheldEnvironment: { names: [...ANTIGRAVITY_AMBIENT_CREDENTIAL_ENV], prefixes: [...ANTIGRAVITY_AMBIENT_CREDENTIAL_PREFIXES] },
+      ...(Object.keys(context.env).length ? { pinnedEnvironment: { ...context.env } } : {}),
       deadlines: { ...ANTIGRAVITY_LAUNCH_DEADLINES } },
   };
 }
