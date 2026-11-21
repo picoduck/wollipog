@@ -166,6 +166,12 @@ export function acpSessionPresentation(
   const permissionModes = modes?.availableModes.map((mode) => mode.id)
     ?? modeOption?.options.map((entry) => entry.value)
     ?? [];
+  // The agent's own (already bounded) names for its modes: an ACP mode id means what the agent
+  // says, not what a native harness means by the same id (#4779).
+  const agentPermissionModes = modes?.availableModes.map((mode) => ({ ...mode }))
+    ?? modeOption?.options.map((entry) => ({ id: entry.value, name: entry.name,
+      ...(entry.description ? { description: entry.description } : {}) }))
+    ?? [];
   const elicitation = Object.fromEntries(
     permissionModes.map((mode) => [mode, ["acp-permission" as const]]),
   );
@@ -176,7 +182,7 @@ export function acpSessionPresentation(
       slashCommands,
       supportsImages,
       supportsApprovals: true,
-      ...(permissionModes.length ? { permissionModes, elicitation } : {}),
+      ...(permissionModes.length ? { permissionModes, elicitation, agentPermissionModes } : {}),
     },
     config: {
       ...(model ? { model: model.currentValue } : {}),

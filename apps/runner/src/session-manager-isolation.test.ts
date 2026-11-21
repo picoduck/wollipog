@@ -189,6 +189,72 @@ test("a Linux managed worktree launch selects bwrap from provider mode and fails
   }
 });
 
+test("an ACP launch whose profile accepts read-only state runs in a Linux managed worktree from provider mode, without resume (#4779)", async () => {
+  if (process.platform !== "linux") return;
+  const root = mkdtempSync(join(tmpdir(), "wollipog-acp-managed-launch-"));
+  const home = mkdtempSync(join(tmpdir(), "wollipog-acp-managed-home-"));
+  let manager: SessionManager | undefined;
+  try {
+    const { repoPath, worktreePath } = hostWorktree(root, "s1");
+    const store = new SessionStore(join(root, "sessions"));
+    const acpMeta = (sessionId: string): SessionMeta => ({
+      ...meta(), sessionId, agentId: "google-antigravity", driver: "acp", command: "agy", args: ["acp"],
+      repoPath, worktreePath, worktreeBranch: "agent/s1", env: { HOME: home },
+      worktrees: [{ id: "legacy", path: worktreePath, branch: "agent/s1", source: "legacy" }],
+    });
+    store.create(acpMeta("s1"));
+    store.create({ ...acpMeta("s2"), agentId: "other-acp" });
+    let preservedProviderHome: boolean | undefined;
+    let options: DriverOptions | undefined;
+    const factory = (_driver: unknown, driverOptions: DriverOptions) => {
+      options = driverOptions;
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => "provider-1",
+        prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
+        setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-1",
+      };
+    };
+    manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, join(root, "state"), 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "provider", network: "inherit" }, async (policy, context, _deps, state) => {
+        preservedProviderHome = state?.preserveProviderHome === true;
+        return resolveExecutionIsolation(policy, context, {
+          platform: "linux", uid: () => 1000, nativeEnvironment: () => ({ HOME: home }),
+          resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
+        }, state);
+      },
+      async () => {}, async () => {}, async () => {}, undefined, [],
+      (prepared: SessionMeta) => prepared.agentId === "google-antigravity"
+        ? { acpCompatibility: { profile: "antigravity" as const, resumable: true } }
+        : undefined,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    internals.verifySelectedWorktreeBeforeLaunch = async () => true;
+
+    // Another ACP agent keeps the existing refusal: its provider state cannot be preserved.
+    assert.equal(await internals.acquireAdmission("s2"), true);
+    assert.equal(await internals.launch(store.readMeta("s2")), false);
+    assert.equal(preservedProviderHome, true);
+    assert.equal(options, undefined);
+
+    assert.equal(await internals.acquireAdmission("s1"), true);
+    assert.equal(await internals.launch(store.readMeta("s1")), true);
+    assert.equal(preservedProviderHome, false, "no provider home is preserved for it");
+    const isolation = options?.isolation;
+    assert.equal(isolation?.backend, "bwrap", "the managed worktree's forced bwrap still applies");
+    assert.equal(isolation?.backend === "bwrap" && isolation.writableBinds?.some((bind) =>
+      bind.target === home || bind.target.startsWith(`${home}/`)), false, "its HOME stays read-only");
+    assert.deepEqual(options?.acpCompatibility, { profile: "antigravity", resumable: false },
+      "resume follows the effective sandbox, not the configured provider mode");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("strict Orchestrator scratch does not make its selected managed worktree writable", async () => {
   if (process.platform !== "linux") return;
   const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-selected-worktree-"));

@@ -21,9 +21,11 @@ import { Markdown } from "./Markdown.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import {
-  AUTOMATIC_TURNS_HELD_SENTENCE, BACKGROUND_RESULTS_HELD_SENTENCE, describeTurnError, isAutomaticTurnsHeld,
-  isBackgroundResultsHeld,
+  AUTOMATIC_TURNS_HELD_SENTENCE, BACKGROUND_RESULTS_HELD_SENTENCE, agentLaunchFailure, describeTurnError, isAutomaticTurnsHeld,
+  isBackgroundResultsHeld, type AgentLaunchFailure,
 } from "../turn-error.js";
+import { viewPath } from "../navigation.js";
+import { useOptionalNavigate } from "../store.js";
 import {
   MeasuredVirtualList,
   type VirtualRevealOutcome,
@@ -2571,6 +2573,10 @@ function TimelineRowContent({
         <Notice tone="warning" title="Worktree Base Fallback"><p>{item.message}</p></Notice>
       );
       if (item.nonFatal) return <TurnProblemNotice message={item.message} />;
+      {
+        const launchFailure = agentLaunchFailure(item.message);
+        if (launchFailure) return <AgentLaunchFailureNotice failure={launchFailure} />;
+      }
       return isAutomaticTurnsHeld(item.message)
         ? <AutomaticTurnsHeldNotice message={item.message} />
         : isBackgroundResultsHeld(item.message)
@@ -3157,6 +3163,41 @@ function TurnFailedNotice({ message, prompt }: { message: string; prompt?: UserM
       {prompt !== undefined && retry?.error?.promptId === prompt.id && (
         <p className="notice-meta" role="alert">Couldn't retry the turn: {retry.error.message}</p>
       )}
+    </Notice>
+  );
+}
+
+/** An agent that could not start, needs sign-in, or could not resume on its machine (#4779). These are
+ * setup problems, not failed turns: each has its own heading and fix, and none offers Retry Turn. The
+ * runner's sentence stays behind Show Details without its generic launch prefix. */
+function AgentLaunchFailureNotice({ failure }: { failure: AgentLaunchFailure }) {
+  const navigate = useOptionalNavigate();
+  const connections = { name: "runners", section: "machines" } as const;
+  const openConnections = (
+    <a
+      className="btn sm"
+      href={viewPath(connections)}
+      onClick={(event) => {
+        if (!navigate || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        navigate(connections);
+      }}
+    >Open Connections</a>
+  );
+  const { agent } = failure;
+  const copy = failure.kind === "start"
+    ? { title: `${agent} Couldn't Start`, sentence: `Wollipog couldn't start ${agent} on this machine. Check that it's installed and set up in Connections.` }
+    : failure.kind === "sign_in"
+    ? { title: "Sign-In Required", sentence: `${agent} isn't signed in on this machine. Sign in from Connections, then try again.` }
+    : { title: "Conversation Can't Resume", sentence: `${agent} couldn't resume this conversation, so its history here is read-only. Start a new session to continue.` };
+  return (
+    <Notice
+      tone={failure.kind === "resume" ? "warning" : "danger"}
+      title={copy.title}
+      actions={failure.kind === "resume" ? undefined : openConnections}
+      details={<div className="code-well"><pre>{failure.text}</pre></div>}
+    >
+      <p>{copy.sentence}</p>
     </Notice>
   );
 }
