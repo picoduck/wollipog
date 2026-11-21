@@ -6910,15 +6910,14 @@ body.shell-dock-dragging * {
 }
 /* The queued messages share the card's edge and the editing strip's full-width position. */
 .composer-queue {
-  --queue-row-control: var(--control-h-sm);
   min-width: 0;
-  margin-inline: calc(-1 * var(--space-3));
+  margin: 0 calc(-1 * var(--space-3));
   border-bottom: 1px solid var(--border);
 }
 .composer-queue:first-child {
   margin-top: calc(-1 * var(--space-2) - var(--space-0-5));
-  border-start-start-radius: inherit;
-  border-start-end-radius: inherit;
+  border-top-left-radius: inherit;
+  border-top-right-radius: inherit;
 }
 /* The tray starts as this one line (#2788): the §5.5 disclosure across the tray's full width, with
    the Held badge and the most severe row status after the count. It stays one line on a phone; the
@@ -6965,7 +6964,7 @@ body.shell-dock-dragging * {
 }
 .composer-queue:not(.is-single) .queue-rows {
   /* Keep the transcript in view when a long queue is expanded. */
-  max-block-size: min(30dvh, calc(4 * (var(--control-h) + 2 * var(--space-1) + 1px)));
+  max-height: min(30dvh, calc(4 * (var(--control-h) + 2 * var(--space-1) + 1px)));
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -7001,7 +7000,7 @@ body.shell-dock-dragging * {
 }
 .composer-queue:not(.is-single) .queue-text {
   /* Preserve the inset of a line centred beside the controls when the text wraps. */
-  padding-block: max(0px, calc((var(--queue-row-control) - 1lh) / 2));
+  padding-block: max(0px, calc((var(--control-h-sm) - 1lh) / 2));
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -7026,7 +7025,9 @@ body.shell-dock-dragging * {
 }
 /* Phones (#2178): each row is its text and one 44px actions button. A status that differs moves under
    the text, so the words keep the line. */
-.composer-queue.is-phone { --queue-row-control: 44px; }
+.composer-queue.is-phone:not(.is-single) .queue-text {
+  padding-block: max(0px, calc((44px - 1lh) / 2));
+}
 .composer-queue.is-phone .queue-status {
   order: 1;
 }
@@ -7043,7 +7044,7 @@ body.shell-dock-dragging * {
 .composer-queue.is-phone.is-single .queue-row { padding-block: 0; }
 .queue-held { flex: none; }
 @media (pointer: coarse) {
-  .composer-queue.is-phone .queue-steer::after { inset-inline: 0; }
+  .composer-queue.is-phone .queue-steer::after { left: 0; right: 0; }
 }
 /* The composer's mode strip (#2194): editing a queued message is a state of the card, so it is the
    card's first row, full bleed across its 10px/12px padding, 40px tall at every width. Its actions
