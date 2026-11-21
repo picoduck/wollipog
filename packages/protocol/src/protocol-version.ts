@@ -1552,6 +1552,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 403: Set up Google Antigravity from Connections: runtime check, remote sign-in and access verification (Refs #4780).
   403,
   // v404 slot
+  // 404: Install and update a managed Google Antigravity CLI from Connections, verified against Google's release manifest (Refs #4780).
+  404,
   // v405 slot
   // v406 slot
   // v407 slot

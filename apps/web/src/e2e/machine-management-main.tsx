@@ -176,9 +176,14 @@ if (signInFixture && runner.providerAccounts) {
 }
 // Google Antigravity setup (#4780), with `?antigravity=`: `missing`, `unsupported`, `update-runner`,
 // `checking`, `signin-required`, `signin-pending`, `signin-waiting`, `verifying`, `signin-failed`,
-// `signin-expired`, `verification-failed` or `ready`. Every state but `unsupported` is a Linux
-// runner. Without it this Windows runner reports `unsupported`. `?longName` gives the machine a long
-// name and the executable a long path; `?manyAgents` adds a dozen more agent rows. No real codes.
+// `signin-expired`, `verification-failed` or `ready`, and the v404 managed install states:
+// `install-available`, `installing`, `install-failed`, `updating`, `update-failed`, `update-available`,
+// `ready-managed`, `ready-path` (a PATH copy, offering a managed copy) and `install-failed-path`
+// (a managed install that failed beside a PATH copy). Every state but `unsupported` is a Linux
+// runner. Without it this Windows runner reports `unsupported`. `?longName` gives the machine a
+// long name and the executable a long path; `?manyAgents` adds a dozen more agent rows;
+// `?neutralHost` replaces the fixture's personal host name and workspace path, as every
+// `?antigravity=` state does. No real codes, tokens or account names.
 const antigravityFixture = new URLSearchParams(window.location.search).get("antigravity");
 if (runner) {
   const longName = new URLSearchParams(window.location.search).has("longName");
@@ -187,19 +192,61 @@ if (runner) {
     // A 300+ character path with a 200-character unbroken segment: the longest variable detail.
     path: longName
       ? `/home/design-workstation-operator-with-a-very-long-account-name/.local/share/google-antigravity/${"releases".repeat(25)}/stable/bin/agy`
-      : "/home/fixture/.local/bin/agy",
+      : "/home/operator/.local/bin/agy",
     version: "1.4.2",
   };
   const base = { version: 1 as const, checkedAt, credentialStore: "shared_os_keyring" as const };
+  // v404 managed install fixtures: release provenance of the shape the runner verifies.
+  const managedPath = longName
+    ? `/srv/wollipog/runner-data-for-the-design-workstation/${"generations".repeat(20)}/antigravity-managed/current/agy`
+    : "/home/operator/.local/share/wollipog/antigravity-managed/current/agy";
+  const managedRelease = (version: string) => ({
+    version, activatedAt: checkedAt - 86_400_000, installerSha256: "0".repeat(64),
+    manifestUrl: "https://antigravity-cli-auto-updater-fixture.us-central1.run.app/manifests/linux_amd64.json",
+    archiveUrl: `https://storage.googleapis.com/antigravity-public/antigravity-cli/${version}-fixture/linux-x64/cli_linux_x64.tar.gz`,
+    archiveSha512: "0".repeat(128),
+  });
+  const models = [{ id: "fixture-pro", name: "Gemini 3 Pro (Fixture)" }, { id: "fixture-flash", name: "Gemini 3 Flash (Fixture)" }];
+  const operation = (kind: "install" | "update", status: "running" | "failed", extra: Record<string, unknown> = {}) => ({
+    operationId: "agy_install_fixture-design-workstation", kind, status, startedAt: checkedAt - 30_000,
+    ...(status === "running" ? { stage: "downloading" as const } : { finishedAt: checkedAt }), ...extra,
+  });
+  const managedReady = (managedInstall: Record<string, unknown>) => ({
+    ...base, status: "ready" as const, models, executable: { path: managedPath, version: "1.5.14", source: "managed" as const },
+    managedInstall: { available: true, active: managedRelease("1.5.14"), pathExecutable: executable.path, ...managedInstall },
+  });
+  const managedFixtures: Record<string, NonNullable<typeof runner.antigravitySetup>> = {
+    "install-available": { ...base, status: "missing_runtime", managedInstall: { available: true } },
+    installing: { ...base, status: "missing_runtime", managedInstall: { available: true,
+      operation: operation("install", "running", { targetVersion: "1.5.14" }) } },
+    "install-failed": { ...base, status: "missing_runtime", managedInstall: { available: true,
+      operation: operation("install", "failed", { failure: "checksum_mismatch", targetVersion: "1.5.14" }) } },
+    updating: managedReady({ latest: { version: "1.6.0", checkedAt },
+      operation: operation("update", "running", { stage: "validating", targetVersion: "1.6.0" }) }),
+    "update-failed": managedReady({ latest: { version: "1.6.0", checkedAt }, previousVersion: "1.5.10",
+      operation: operation("update", "failed", { failure: "validation_failed", targetVersion: "1.6.0" }) }),
+    "update-available": managedReady({ latest: { version: "1.6.0", checkedAt }, previousVersion: "1.5.10" }),
+    "ready-managed": managedReady({ latest: { version: "1.5.14", checkedAt } }),
+    "ready-path": { ...base, status: "ready", models, executable: { ...executable, source: "path" },
+      managedInstall: { available: true, pathExecutable: executable.path, latest: { version: "1.5.14", checkedAt } } },
+    "install-failed-path": { ...base, status: "ready", models, executable: { ...executable, source: "path" },
+      managedInstall: { available: true, pathExecutable: executable.path,
+        operation: operation("install", "failed", { failure: "download_failed", targetVersion: "1.5.14" }) } },
+  };
   const signIn = (status: "awaiting_code" | "waiting_for_provider" | "verifying" | "failed" | "timed_out") => ({
     operationId: "agy_login_fixture-design-workstation", status, startedAt: checkedAt,
     ...(status === "awaiting_code" ? { verificationUrl: "https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture&state=fixture" } : {}),
     ...(status === "failed" ? { failure: "not_completed" as const } : {}),
   });
   if (antigravityFixture && antigravityFixture !== "unsupported") runner.os = "linux";
+  // Setup evidence shows no personal names: a neutral host name for the setup fixtures.
+  if (antigravityFixture || new URLSearchParams(window.location.search).has("neutralHost")) {
+    runner.hostname = "design-workstation";
+    runner.workspaces = runner.workspaces.map((workspace) => ({ ...workspace, path: workspace.path.replace(/misko/giu, "operator") }));
+  }
   if (antigravityFixture === "update-runner") runner.protocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.antigravitySetup - 1;
-  runner.antigravitySetup =
-    antigravityFixture === "missing" ? { ...base, status: "missing_runtime" }
+  runner.antigravitySetup = antigravityFixture && managedFixtures[antigravityFixture] ? managedFixtures[antigravityFixture]
+    : antigravityFixture === "missing" ? { ...base, status: "missing_runtime" }
       : antigravityFixture === "checking" ? { ...base, status: "checking" }
         : antigravityFixture === "signin-required" ? { ...base, status: "sign_in_required", executable }
           : antigravityFixture === "signin-pending" ? { ...base, status: "sign_in_required", executable, signIn: signIn("awaiting_code") }
@@ -911,6 +958,17 @@ const client = {
   // Google Antigravity setup (#4780): Check Again keeps the fixture's state; Sign In opens the
   // pending step; the fixture code completes it; Cancel ends it.
   checkAntigravitySetup: async () => ({ setup: runner?.antigravitySetup }),
+  // Install (v404) starts the fixture's install, which stays at its first stage.
+  installAntigravity: async () => {
+    if (!runner?.antigravitySetup) throw new Error("runner not found");
+    const managed = runner.antigravitySetup.managedInstall;
+    runner.antigravitySetup = { ...runner.antigravitySetup, managedInstall: { ...managed, available: true, operation: {
+      operationId: "agy_install_fixture-design-workstation", kind: managed?.active ? "update" : "install", status: "running",
+      stage: "fetching_installer", startedAt: Date.now(),
+    } } };
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { setup: runner.antigravitySetup };
+  },
   startAntigravitySignIn: async () => {
     if (!runner?.antigravitySetup) throw new Error("runner not found");
     runner.antigravitySetup = { ...runner.antigravitySetup, signIn: {

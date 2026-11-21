@@ -6,12 +6,13 @@ import { test, type TestContext } from "node:test";
 import { runInNewContext } from "node:vm";
 import { transformSync } from "esbuild";
 import {
-  PROTOCOL_VERSION, parseMessage, runnerSupportsProtocol, reviewRetirementPeerRefusal,
+  PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, parseMessage, runnerSupportsProtocol, reviewRetirementPeerRefusal,
   type PendingSkillReportRequest, type RegisteredLocationSwitchLookupMessage, type RegisteredMessage, type SkillsStateMessage,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "../../control-plane/src/db.js";
 import { Hub, type Socket } from "../../control-plane/src/hub.js";
 import { providerProfileGrantsForRunner } from "../../control-plane/src/provider-profile-route.js";
+import { antigravitySetupForControlPlane } from "./antigravity-setup.js";
 import { SkillStateReporter } from "./skill-state-reporter.js";
 import type { ReconcileSkillsResult } from "./skills.js";
 
@@ -85,7 +86,7 @@ function fixture(t: TestContext) {
     WebSocket: InertSocket, validateControlPlaneUrl: (url: string) => url, allowInsecureTransport: false,
     agentsForControlPlane: () => [], providerAccountsForControlPlane: () => [], registrationSessionSnapshots: () => [],
     providerProfileGrants: { reportedProfileIds: () => [] },
-    PROTOCOL_VERSION, parseMessage, runnerSupportsProtocol, reviewRetirementPeerRefusal,
+    PROTOCOL_VERSION, parseMessage, runnerSupportsProtocol, reviewRetirementPeerRefusal, antigravitySetupForControlPlane,
     randomUUID, setTimeout, clearTimeout,
     projectMessageForCurrentProtocol: (message: SkillsStateMessage) => message,
     stagedRunnerCredential: { promote() {} }, backoff: 99, INITIAL_BACKOFF_MS: 1,
@@ -163,6 +164,59 @@ test("a Google Antigravity setup that changes before the registered reply is pub
   const published = f.upFrames.slice(before).filter((frame) => frame.type === "antigravity_setup_updated");
   assert.deepEqual(published.map((frame) => frame.setup?.status), ["ready"],
     "the newer setup goes up before recovery can throw");
+});
+
+for (const [peer, expectManaged] of [[RUNNER_CAPABILITY_MIN_PROTOCOL.antigravityManagedInstall, true],
+  [RUNNER_CAPABILITY_MIN_PROTOCOL.antigravitySetup, false]] as const) test(`the registration republish ${expectManaged ? "sends" : "leaves out"} managed install fields for a v${peer} control plane`, async t => {
+  const managed = {
+    version: 1, status: "ready", checkedAt: 1, credentialStore: "shared_os_keyring",
+    executable: { path: "/fixture/antigravity-managed/current/agy", version: "1.5.14", source: "managed" },
+    models: [{ id: "m", name: "Model" }],
+    managedInstall: { available: true, active: { version: "1.5.14" } },
+  };
+  {
+    const f = fixture(t);
+    f.scope.antigravitySetup = { current: () => managed };
+    const before = f.upFrames.length;
+    const b = f.start(false);
+    b.socket.emit("message", Buffer.from(JSON.stringify({ ...b.response, protocolVersion: peer })));
+    const published = f.upFrames.slice(before).filter((frame) => frame.type === "antigravity_setup_updated")
+      .map((frame) => frame.setup as unknown as Record<string, unknown>);
+    assert.equal(published.length, 1, `one republish to a v${peer} peer`);
+    assert.equal("managedInstall" in published[0]!, expectManaged, `managed install fields to a v${peer} peer`);
+    assert.equal("source" in (published[0]!.executable as Record<string, unknown>), expectManaged);
+  }
+});
+
+test("the register frame's Antigravity setup always has the v403 shape, whatever the peer", () => {
+  // The production wiring of the supervisor and the register metadata, with a fake supervisor that
+  // reports a managed install.
+  const managed = {
+    version: 1, status: "ready", checkedAt: 1, credentialStore: "shared_os_keyring",
+    executable: { path: "/fixture/antigravity-managed/current/agy", version: "1.5.14", source: "managed" },
+    models: [{ id: "m", name: "Model" }],
+    managedInstall: { available: true },
+  };
+  let options: { onUpdate: (setup: typeof managed) => void } | undefined;
+  const scope: Record<string, unknown> = {
+    AntigravitySetupSupervisor: class {
+      constructor(given: typeof options) { options = given; }
+      current() { return managed; }
+    },
+    antigravitySetupForControlPlane, runnerSupportsProtocol,
+    config: { dataDir: "/fixture", runnerId: "fixture" }, log: () => {}, metadata: {} as Record<string, unknown>,
+    registered: false, controlPlaneProtocolVersion: undefined, sendUp: () => {},
+  };
+  install(slice(runnerSource, "const antigravitySetup = new AntigravitySetupSupervisor({", "/** On `registered`: the register frame"), scope);
+  const metadata = scope.metadata as { antigravitySetup?: Record<string, unknown> };
+  const assertLegacy = (label: string) => {
+    const setup = metadata.antigravitySetup!;
+    assert.equal("managedInstall" in setup, false, `${label}: no managed install fields`);
+    assert.equal("source" in (setup.executable as Record<string, unknown>), false, `${label}: no executable source`);
+  };
+  assertLegacy("initial register metadata");
+  options!.onUpdate(managed);
+  assertLegacy("register metadata after an update");
 });
 
 test("registered Location lookup keeps timeouts and socket loss distinct from a correlated refusal", async t => {

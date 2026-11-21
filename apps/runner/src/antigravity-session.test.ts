@@ -188,6 +188,10 @@ test("a launch uses the setup's executable and exact credential context, and res
   assert.equal(antigravitySessionLaunch(setup({}), context, BWRAP).acpCompatibility.resumable, false);
   assert.deepEqual(antigravitySessionLaunch(setup({}), context, { mode: "seatbelt" }).acpCompatibility.resumable, false);
   assert.equal(antigravitySessionLaunch(setup({ status: "missing_runtime", executable: undefined }), context, PROVIDER).command, undefined);
+  // The managed copy (#4780) launches with its self-updater off, from its own credential context.
+  const managed = antigravityCredentialContext({ HOME: "/home/fixture" }, { managed: true });
+  assert.equal(antigravitySessionLaunch(setup({}), managed, PROVIDER).env.AGY_CLI_DISABLE_AUTO_UPDATE, "true");
+  assert.equal(antigravitySessionLaunch(setup({}), context, PROVIDER).env.AGY_CLI_DISABLE_AUTO_UPDATE, undefined);
 });
 
 test("real agy 1.5.14 initialize: the profile withholds sign-in, sign-out, load and listing, and resume outside provider isolation", async () => {

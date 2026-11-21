@@ -331,6 +331,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerLogin: 171,
   /** v403 (Refs #4780): Google Antigravity runtime and sign-in setup from Connections. */
   antigravitySetup: 403,
+  /** v404 (Refs #4780): a managed Google Antigravity install and update from Connections. */
+  antigravityManagedInstall: 404,
   providerAccountRemoval: 188,
   accountScopedAgentSkills: 172,
   piHarness: 155,
