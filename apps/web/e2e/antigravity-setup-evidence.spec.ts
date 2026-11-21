@@ -190,6 +190,17 @@ for (const viewport of VIEWPORTS) test.describe(`${viewport.width}x${viewport.he
     await capture(page, `connections-machine-${size}`, "article.machine-detail", true);
   });
 
+  // The Linux machine's Agents section with the Google Antigravity row: before, the v403 row with a
+  // PATH copy; after, the PATH copy, a managed install, and a failed update kept at Ready.
+  for (const state of prefix === "before" ? ["ready"] : ["ready-path", "ready-managed", "update-failed"]) {
+    test(`Connections Linux machine view, ${state}, ${size}`, async ({ page }) => {
+      await openMachine(page, `antigravity=${state}`, viewport);
+      await page.locator('ul[aria-label="Agent Setup"]').scrollIntoViewIfNeeded();
+      measurements[`connections-linux-${state}-${size}-row`] = await measure(page, 'ul[aria-label="Agent Setup"]');
+      await capture(page, `connections-linux-${state}-${size}`, "article.machine-detail", true);
+    });
+  }
+
   if (prefix === "before") return;
 
   test(`Connections with many agents and a long machine name, ${size}`, async ({ page }) => {

@@ -35,6 +35,10 @@ export function AntigravitySetupRow({ runner, online, machineName }: { runner: R
   const opener = useRef<HTMLElement | null>(null);
   const presentation = antigravitySetupPresentation(runner, online);
   const setup = presentation.setup;
+  const failed = presentation.install?.failed;
+  const attention = failed && !presentation.install?.running
+    ? failed.operation.kind === "update" ? "update_failed" as const : "install_failed" as const
+    : null;
   return (
     <>
       <ul className="machine-agent-list" aria-label="Agent Setup">
@@ -50,6 +54,9 @@ export function AntigravitySetupRow({ runner, online, machineName }: { runner: R
               </span>
               <span className="row-sub machine-agent-meta">
                 <span>Setup Only</span>
+                {/* A failed install or update stays visible on the row, at every width, beside a
+                    status that can still be Ready (the kept or PATH copy works). */}
+                {attention && <StatusBadge meta={statusMeta("antigravityInstall", attention)} inline />}
                 {setup && setup.status !== "checking" && <span className="machine-agent-meta-extra">Checked {relativeTime(setup.checkedAt)}</span>}
                 {setup?.executable?.version && <span className="machine-agent-meta-extra">v{setup.executable.version}</span>}
                 {setup?.executable?.source === "managed" && <span className="machine-agent-meta-extra">Managed</span>}

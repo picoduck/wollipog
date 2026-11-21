@@ -451,6 +451,11 @@ const VOCABULARY = {
     verification_failed: danger("Check Failed"),
     ready: success("Ready"),
   },
+  /** A failed managed Google Antigravity install or update (#4780), beside the setup's own status. */
+  antigravityInstall: {
+    install_failed: danger("Install Failed"),
+    update_failed: danger("Update Failed"),
+  },
 } as const satisfies Record<string, Record<string, Entry>>;
 
 export type StatusDomain = keyof typeof VOCABULARY;

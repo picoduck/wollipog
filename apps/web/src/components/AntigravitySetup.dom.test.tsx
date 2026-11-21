@@ -404,6 +404,28 @@ test("a first install stopped by a timed-out check doesn't claim the found copy 
   } finally { await view.unmount(); }
 });
 
+test("the row keeps Ready but shows a failed install or update beside it, and nothing otherwise", async () => {
+  const cases: Array<[AntigravitySetupView, string, string | null]> = [
+    [managedReady({ operation: failedOperation("update", "validation_failed", "1.6.0") }), "Ready", "Update Failed"],
+    [setup({ status: "ready", models: [{ id: "a", name: "Fixture Pro" }], executable: { ...executable, source: "path" },
+      managedInstall: { available: true, operation: failedOperation("install", "checksum_mismatch", "1.5.14") } }), "Ready", "Install Failed"],
+    [setup({ status: "missing_runtime", executable: undefined,
+      managedInstall: { available: true, operation: failedOperation("install", "checksum_mismatch", "1.5.14") } }), "Not Installed", "Install Failed"],
+    [managedReady({}), "Ready", null],
+    [managedReady({ operation: { operationId: "agy_install_1", kind: "update", status: "running", stage: "downloading", startedAt: NOW } }), "Updating", null],
+  ];
+  for (const [report, status, attention] of cases) {
+    const view = await mount(runner(report));
+    try {
+      const setupRow = row(view.body)!;
+      assert.equal(setupRow.querySelector(".machine-agent-status")?.textContent, status);
+      const badges = [...setupRow.querySelectorAll(".row-sub .status")].map((badge) => badge.textContent);
+      assert.deepEqual(badges, attention ? [attention] : [], JSON.stringify(report.managedInstall?.operation));
+      if (attention) assert.ok(setupRow.querySelector(".row-sub .status")!.classList.contains("t-danger"));
+    } finally { await view.unmount(); }
+  }
+});
+
 test("an update whose rollback failed claims no kept version", async () => {
   const view = await mount(runner(managedReady({ active: managedRelease("1.6.0"), latest: { version: "1.6.0", checkedAt: NOW },
     operation: failedOperation("update", "rollback_failed", "1.6.0") })));
