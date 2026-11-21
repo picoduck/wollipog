@@ -9049,6 +9049,55 @@ textarea {
 /* Absolutely positioned screen-reader text otherwise keeps its static inline position. When the
    timestamp lands exactly at the reader edge, the 1px hidden box extends scrollWidth by 1px. */
 .timeline .sr-only { inset-inline-start: 0; }
+.tl-wollipog-prompt {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--border);
+  color: var(--text);
+  font: var(--type-body);
+}
+.tl-prompt-icon {
+  display: flex;
+  align-items: center;
+  min-height: var(--control-h-sm);
+}
+.tl-prompt-content { flex: 1; min-width: 0; }
+.tl-prompt-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-height: var(--control-h-sm);
+  overflow-wrap: anywhere;
+}
+.tl-prompt-heading > span { min-width: 0; }
+.chip.tl-prompt-target {
+  height: auto;
+  min-height: var(--control-h-sm);
+  max-width: 100%;
+  gap: var(--space-2);
+  white-space: normal;
+  text-align: start;
+  overflow-wrap: anywhere;
+  overflow: clip;
+}
+.tl-prompt-target > span:first-child { min-width: 0; }
+.tl-prompt-target > .status { flex: none; }
+.tl-prompt-fact { color: var(--text-dim); font: var(--type-small); }
+.tl-prompt-message {
+  flex-direction: column;
+  align-items: stretch;
+  padding: var(--space-2);
+  overflow-wrap: anywhere;
+}
+.tl-prompt-message > pre { margin: var(--space-1) 0 0; white-space: pre-wrap; }
+@media (pointer: coarse) {
+  button.chip.tl-prompt-target,
+  .tl-prompt-details > summary { min-height: var(--control-h); }
+}
 .tl-row {
   display: flex;
 }

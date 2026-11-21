@@ -24,6 +24,7 @@ import type { AssistantThread, AssistantThreadDefaults, CreateAssistantThreadReq
 import type { AssistantOwnerConfirmation, AssistantThreadAccountChoices, ChangeAssistantThreadAccountRequest, ChangeAssistantThreadHarnessRequest, OrchestratorCampaignBudgetDefault } from "@wollipog/protocol";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { assistantDecisionHistoryFixture } from "./assistant-decision-fixture.js";
+import { confirmationResultFixture, longConfirmationTarget } from "./wollipog-prompt-fixture.js";
 import { ThemeProvider } from "../components/ThemeProvider.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
 import { viewFromPath, viewPath, type ViewNavigation } from "../navigation.js";
@@ -50,6 +51,7 @@ const scenario = params.get("threads") ?? "some";
 const attentionCount = Number(params.get("attention") ?? 0);
 const limitsScenario = params.get("limits");
 const campaignScenario = params.has("campaign");
+const resultScenario = params.get("confirmation-result");
 const delegationScenario = params.get("delegation");
 const showDelegation = delegationScenario === "stress" || delegationScenario === "ci-old" || delegationScenario === "release-old";
 const evidenceScenario = params.get("evidence");
@@ -170,10 +172,11 @@ const sessions = new Map<string, SessionView>([
   } : { status: "idle" })],
   ["sess-release", session("sess-release", "Ship the Release Notes", { status: "running", agentId: "codex", agentName: "Codex", driver: "codex-app-server" })],
   ["sess-cleanup", session("sess-cleanup", "Weekly Cleanup", { status: "idle", updatedAt: NOW - 26 * 60 * minute })],
-  ["sess-flaky", session("sess-flaky", "Fix the Flaky Upload Test", { status: "running", updatedAt: NOW - minute })],
+  ["sess-flaky", session("sess-flaky", resultScenario === "stress" ? longConfirmationTarget : "Fix the Flaky Upload Test", { status: "running", updatedAt: NOW - minute })],
   ["sess-deps", session("sess-deps", "Bump the Vite Group", {
-    status: "input_required",
-    pendingApproval: depsApproval("occ-deps-1"),
+    ...(resultScenario === "approved"
+      ? { status: "stopped", archived: true }
+      : { status: "input_required", pendingApproval: depsApproval("occ-deps-1") }),
   })],
 ]);
 
@@ -473,6 +476,8 @@ const events: Record<string, SessionEvent[]> = {
       costUsd: 0.21, durationMs: 118_000, model: "claude-opus-5-5",
     } as SessionEvent["payload"]),
     event("sess-triage", NOW - 28 * minute, { kind: "conversation_checkpoint", turn: 1 } as SessionEvent["payload"]),
+    ...(resultScenario ? confirmationResultFixture(resultScenario).map((payload, index) =>
+      event("sess-triage", NOW - 15 * minute + index * minute, payload)) : []),
     ...(evidenceScenario === "refused" || evidenceScenario === "refused-stress" ? [
       event("sess-triage", NOW - 2 * minute, { kind: "user_message", text: "Approve the UI evidence for the release settings.", images: [] }),
       event("sess-triage", NOW - minute, { kind: "tool_call", toolCallId: "evidence-approval", title: "Resolve UI Evidence",
@@ -481,6 +486,10 @@ const events: Record<string, SessionEvent[]> = {
         text: `The evidence decision is still pending. I need to inspect ${missingEvidenceIds.length} screenshots before I can approve it.`, final: true }),
     ] : []),
   ],
+  ...(resultScenario === "background" ? {
+    "sess-flaky": confirmationResultFixture("background").map((payload, index) =>
+      event("sess-flaky", NOW - 15 * minute + index * minute, payload)),
+  } : {}),
 };
 
 class FixtureSocket implements UiSocket {
@@ -517,7 +526,7 @@ function snapshot(): UiSnapshotMessage {
     runners: [structuredClone(runner)],
     boxes: [],
     // The launched sessions arrive as summaries; the backing sessions in full.
-    sessions: [...sessions.values()].map((entry) => launched(entry.id) ? summary(entry) : structuredClone(entry)),
+    sessions: [...sessions.values()].filter((entry) => !entry.archived).map((entry) => launched(entry.id) ? summary(entry) : structuredClone(entry)),
   } as UiSnapshotMessage;
 }
 
