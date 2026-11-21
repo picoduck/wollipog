@@ -441,6 +441,8 @@ const VOCABULARY = {
   /** Google Antigravity setup on a machine (#4780), by `antigravitySetupPresentation()`. */
   antigravitySetup: {
     checking: info("Checking", { pulse: true }),
+    installing: info("Installing", { pulse: true }),
+    updating: info("Updating", { pulse: true }),
     missing_runtime: neutral("Not Installed", { hollow: true }),
     unsupported: neutral("Not Available"),
     update_runner: warning("Update Runner"),

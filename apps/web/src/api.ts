@@ -1472,6 +1472,11 @@ export function createApiClient(transport: ApiTransport) {
     req<{ setup?: AntigravitySetupView }>(
       `/api/runners/${encodeURIComponent(runnerId)}/antigravity-setup/check`, { method: "POST" }),
 
+  /** Install Google's latest release as the machine's managed copy, or update it (v404). */
+  installAntigravity: (runnerId: string) =>
+    req<{ setup?: AntigravitySetupView }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/antigravity-setup/install`, { method: "POST" }),
+
   startAntigravitySignIn: (runnerId: string) =>
     req<{ setup?: AntigravitySetupView }>(
       `/api/runners/${encodeURIComponent(runnerId)}/antigravity-setup/sign-in`, { method: "POST" }),

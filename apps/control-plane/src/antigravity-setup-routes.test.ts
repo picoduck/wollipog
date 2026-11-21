@@ -13,6 +13,7 @@ import type { Hub } from "./hub.js";
 import type { HumanPrincipal } from "./identity.js";
 
 const SUPPORTED = RUNNER_CAPABILITY_MIN_PROTOCOL.antigravitySetup;
+const INSTALL = RUNNER_CAPABILITY_MIN_PROTOCOL.antigravityManagedInstall;
 
 const owner: HumanPrincipal = {
   kind: "human", actorId: "usr_local_owner", userId: "usr_local_owner", userName: "Local owner",
@@ -149,6 +150,38 @@ test("manage access revoked while the runner answers withholds the reply and its
       assert.ok(!response.body.includes("accounts.google.com"), change);
     } finally {
       await changed.app.close();
+    }
+  }
+});
+
+test("install relays an explicit install to a v404 runner and refuses older runners and non-managers", async () => {
+  const install = (app: ReturnType<typeof Fastify>) => app.inject({ method: "POST", url: "/api/runners/runner-1/antigravity-setup/install" });
+  const installing: AntigravitySetupView = { version: 1, status: "missing_runtime", checkedAt: 1_000, credentialStore: "shared_os_keyring",
+    managedInstall: { available: true, operation: { operationId: "agy_install_1", kind: "install", status: "running", stage: "fetching_installer", startedAt: 1_000 } } };
+  const { app, sent, stored } = harness({ protocolVersion: INSTALL, reply: (msg) => ({ type: "antigravity_setup_result", requestId: msg.requestId, ok: true, setup: installing }) });
+  try {
+    const response = await install(app);
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json(), { setup: installing });
+    assert.deepEqual(sent.map((msg) => [msg.action, msg.operationId, msg.code]), [["install", undefined, undefined]]);
+    assert.deepEqual(stored, [installing]);
+  } finally {
+    await app.close();
+  }
+  for (const [options, status] of [
+    [{ protocolVersion: INSTALL, canManage: false }, 403],
+    [{ protocolVersion: INSTALL, online: false }, 409],
+    // A v403 runner sets up Antigravity but can't install it.
+    [{ protocolVersion: SUPPORTED }, 409],
+  ] as const) {
+    const refused = harness(options);
+    try {
+      const response = await install(refused.app);
+      assert.equal(response.statusCode, status, JSON.stringify(options));
+      if (options.protocolVersion === SUPPORTED) assert.match((response.json() as { error: string }).error, /newer runner for Google Antigravity managed install/);
+      assert.equal(refused.sent.length, 0);
+    } finally {
+      await refused.app.close();
     }
   }
 });

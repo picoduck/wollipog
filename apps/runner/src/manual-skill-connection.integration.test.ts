@@ -12,6 +12,7 @@ import {
 import { ControlPlaneDb } from "../../control-plane/src/db.js";
 import { Hub, type Socket } from "../../control-plane/src/hub.js";
 import { providerProfileGrantsForRunner } from "../../control-plane/src/provider-profile-route.js";
+import { antigravitySetupForControlPlane } from "./antigravity-setup.js";
 import { SkillStateReporter } from "./skill-state-reporter.js";
 import type { ReconcileSkillsResult } from "./skills.js";
 
@@ -85,7 +86,7 @@ function fixture(t: TestContext) {
     WebSocket: InertSocket, validateControlPlaneUrl: (url: string) => url, allowInsecureTransport: false,
     agentsForControlPlane: () => [], providerAccountsForControlPlane: () => [], registrationSessionSnapshots: () => [],
     providerProfileGrants: { reportedProfileIds: () => [] },
-    PROTOCOL_VERSION, parseMessage, runnerSupportsProtocol, reviewRetirementPeerRefusal,
+    PROTOCOL_VERSION, parseMessage, runnerSupportsProtocol, reviewRetirementPeerRefusal, antigravitySetupForControlPlane,
     randomUUID, setTimeout, clearTimeout,
     projectMessageForCurrentProtocol: (message: SkillsStateMessage) => message,
     stagedRunnerCredential: { promote() {} }, backoff: 99, INITIAL_BACKOFF_MS: 1,

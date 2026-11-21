@@ -98,7 +98,7 @@ test("only people who may manage the machine see the setup row, and it says it i
   } finally { await shown.unmount(); }
 });
 
-test("a missing runtime shows Google's install command and never offers to install it", async () => {
+test("a missing runtime without managed install support shows Google's install command and never offers to install it", async () => {
   let checks = 0;
   const view = await mount(runner(setup({ status: "missing_runtime", executable: undefined })),
     { checkAntigravitySetup: async () => { checks += 1; return {}; } });
@@ -278,4 +278,158 @@ test("an offline machine keeps its last report but disables every action", async
     assert.equal(buttonNamed(opened, "Sign In with Google")?.disabled, true);
     assert.equal(buttonNamed(opened, "Check Again")?.disabled, true);
   } finally { await view.unmount(); }
+});
+
+// Managed install (protocol v404).
+const managedPath = "/srv/wollipog/antigravity-managed/current/agy";
+const managedRelease = (version: string) => ({
+  version, activatedAt: NOW, installerSha256: "0".repeat(64),
+  manifestUrl: "https://fixture-updater.us-central1.run.app/manifests/linux_amd64.json",
+  archiveUrl: `https://storage.googleapis.com/antigravity-public/${version}/cli.tar.gz`,
+  archiveSha512: "0".repeat(128),
+});
+const managedReady = (managedInstall: Partial<NonNullable<AntigravitySetupView["managedInstall"]>>) => setup({
+  status: "ready", models: [{ id: "a", name: "Fixture Pro" }],
+  executable: { path: managedPath, version: "1.5.14", source: "managed" },
+  managedInstall: { available: true, active: managedRelease("1.5.14"), pathExecutable: executable.path, ...managedInstall },
+});
+const failedOperation = (kind: "install" | "update", failure: "checksum_mismatch" | "validation_failed", targetVersion: string) => ({
+  operationId: "agy_install_1", kind, status: "failed" as const, startedAt: NOW, finishedAt: NOW, failure, targetVersion,
+});
+
+test("a missing runtime offers the managed install beside Google's command, and Install starts it", async () => {
+  let installs = 0;
+  const view = await mount(runner(setup({ status: "missing_runtime", executable: undefined, managedInstall: { available: true } })),
+    { installAntigravity: async () => { installs += 1; return {}; } });
+  try {
+    const opened = await openSetup(view.body);
+    const text = opened.textContent ?? "";
+    assert.match(text, /Wollipog can install Google.s latest release in its own folder/u);
+    assert.doesNotMatch(text, /doesn.t install it for you/u);
+    assert.match(text, /curl -fsSL https:\/\/antigravity\.google\/cli\/install\.sh \| bash/u);
+    await act(async () => buttonNamed(opened, "Install Google Antigravity")!.click());
+    assert.equal(installs, 1);
+  } finally { await view.unmount(); }
+
+  // A v403 runner, or a platform without a Google release, keeps the guidance only.
+  for (const [report, overrides] of [
+    [setup({ status: "missing_runtime", executable: undefined, managedInstall: { available: true } }),
+      { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.antigravityManagedInstall - 1 }],
+    [setup({ status: "missing_runtime", executable: undefined, managedInstall: { available: false } }), {}],
+  ] as const) {
+    const guidance = await mount(runner(report, overrides));
+    try {
+      const opened = await openSetup(guidance.body);
+      assertNoDomNode(buttonNamed(opened, "Install Google Antigravity"), "an install button");
+      assert.match(opened.textContent ?? "", /doesn.t install it for you/u);
+    } finally { await guidance.unmount(); }
+  }
+});
+
+test("a running install or update shows its stage and offers no second install", async () => {
+  const installing = await mount(runner(setup({ status: "missing_runtime", executable: undefined, managedInstall: { available: true,
+    operation: { operationId: "agy_install_1", kind: "install", status: "running", stage: "downloading", startedAt: NOW, targetVersion: "1.5.14" } } })));
+  try {
+    assert.equal(row(installing.body)!.querySelector(".status")?.textContent, "Installing");
+    const opened = await openSetup(installing.body);
+    assert.match(opened.textContent ?? "", /Installing Google Antigravity/u);
+    assert.match(opened.textContent ?? "", /Downloading Google.s release/u);
+    assert.match(opened.textContent ?? "", /Version v1\.5\.14/u);
+    assertNoDomNode(buttonNamed(opened, "Install Google Antigravity"), "a second install");
+  } finally { await installing.unmount(); }
+  const updating = await mount(runner(managedReady({ latest: { version: "1.6.0", checkedAt: NOW },
+    operation: { operationId: "agy_install_1", kind: "update", status: "running", stage: "validating", startedAt: NOW, targetVersion: "1.6.0" } })));
+  try {
+    assert.equal(row(updating.body)!.querySelector(".status")?.textContent, "Updating");
+    const opened = await openSetup(updating.body);
+    assert.match(opened.textContent ?? "", /v1\.5\.14 stays active until the new version passes its checks/u);
+    assertNoDomNode(buttonNamed(opened, "Update to v1.6.0"), "an update button while updating");
+  } finally { await updating.unmount(); }
+});
+
+test("a failed install says nothing was installed and offers Try Again with the terminal fallback", async () => {
+  let installs = 0;
+  const view = await mount(runner(setup({ status: "missing_runtime", executable: undefined,
+    managedInstall: { available: true, operation: failedOperation("install", "checksum_mismatch", "1.5.14") } })),
+  { installAntigravity: async () => { installs += 1; return {}; } });
+  try {
+    const opened = await openSetup(view.body);
+    const notice = opened.querySelector('[role="alert"]')!;
+    assert.match(notice.textContent ?? "", /Install Failed/u);
+    assert.match(notice.textContent ?? "", /didn.t match the checksum Google published.*Nothing was installed/u);
+    assert.match(notice.textContent ?? "", /install\.sh/u);
+    await act(async () => buttonNamed(opened, "Try Again")!.click());
+    assert.equal(installs, 1);
+  } finally { await view.unmount(); }
+});
+
+test("a failed update shows the last working version kept, with the managed copy and its fallback", async () => {
+  const view = await mount(runner(managedReady({ latest: { version: "1.6.0", checkedAt: NOW },
+    operation: failedOperation("update", "validation_failed", "1.6.0") })));
+  try {
+    assert.match(row(view.body)!.querySelector(".row-sub")?.textContent ?? "", /v1\.5\.14.*Managed/u);
+    const opened = await openSetup(view.body);
+    const text = opened.textContent ?? "";
+    assert.match(text, /Signed In/u);
+    assert.match(text, /Update Failed/u);
+    assert.match(text, /Wollipog kept v1\.5\.14, the last working version, instead of v1\.6\.0/u);
+    assert.ok(buttonNamed(opened, "Try Again"));
+    // The failed notice replaces the update offer for the same release.
+    assertNoDomNode(buttonNamed(opened, "Update to v1.6.0"), "a second update offer");
+    assert.match(text, /Installed and updated by Wollipog from Connections/u);
+    assert.match(text, /self-updater is off/u);
+    assert.match(text, new RegExp(`used if the managed copy stops working: ${executable.path}`, "u"));
+  } finally { await view.unmount(); }
+});
+
+test("an update is offered only when Google's release is newer than the managed copy", async () => {
+  let installs = 0;
+  const newer = await mount(runner(managedReady({ latest: { version: "1.6.0", checkedAt: NOW } })),
+    { installAntigravity: async () => { installs += 1; return {}; } });
+  try {
+    const opened = await openSetup(newer.body);
+    assert.match(opened.textContent ?? "", /Google released v1\.6\.0\. This machine.s managed copy is v1\.5\.14/u);
+    await act(async () => buttonNamed(opened, "Update to v1.6.0")!.click());
+    assert.equal(installs, 1);
+  } finally { await newer.unmount(); }
+  const current = await mount(runner(managedReady({ latest: { version: "1.5.14", checkedAt: NOW } })));
+  try {
+    const opened = await openSetup(current.body);
+    assert.doesNotMatch(opened.textContent ?? "", /Update Available/u);
+    assertNoDomNode(buttonNamed(opened, "Install Managed Copy"), "a managed install offer beside a managed copy");
+  } finally { await current.unmount(); }
+});
+
+test("a PATH copy keeps working and a managed copy can be installed beside it, but not during a sign-in", async () => {
+  const pathCopy = { ...executable, source: "path" as const };
+  const ready = await mount(runner(setup({ status: "ready", models: [{ id: "a", name: "Fixture Pro" }], executable: pathCopy,
+    managedInstall: { available: true, pathExecutable: executable.path } })));
+  try {
+    const opened = await openSetup(ready.body);
+    assert.match(opened.textContent ?? "", /SourceThe runner user.s PATH\./u);
+    assert.equal(buttonNamed(opened, "Install Managed Copy")?.disabled, false);
+  } finally { await ready.unmount(); }
+  const fallback = await mount(runner(setup({ status: "ready", models: [{ id: "a", name: "Fixture Pro" }], executable: pathCopy,
+    managedInstall: { available: true, active: managedRelease("1.5.14"), activeCheckFailed: true, pathExecutable: executable.path } })));
+  try {
+    const opened = await openSetup(fallback.body);
+    assert.match(opened.textContent ?? "", /managed copy didn.t pass its version check, so this copy is in use/u);
+  } finally { await fallback.unmount(); }
+  // A managed install that failed beside the PATH copy says so, and the PATH copy keeps working.
+  const failedBeside = await mount(runner(setup({ status: "ready", models: [{ id: "a", name: "Fixture Pro" }], executable: pathCopy,
+    managedInstall: { available: true, pathExecutable: executable.path, operation: failedOperation("install", "checksum_mismatch", "1.5.14") } })));
+  try {
+    const opened = await openSetup(failedBeside.body);
+    const alert = opened.querySelector('[role="alert"]');
+    assert.match(alert?.textContent ?? "", /Install Failed.*didn.t match the checksum.*keeps working/u);
+    assert.ok(buttonNamed(alert!, "Try Again"));
+    assertNoDomNode(buttonNamed(opened, "Install Managed Copy"), "a second install offer beside Try Again");
+  } finally { await failedBeside.unmount(); }
+  const signingIn = await mount(runner(setup({ executable: pathCopy, managedInstall: { available: true },
+    signIn: { operationId: "agy_login_1", status: "waiting_for_provider", startedAt: NOW } })));
+  try {
+    const opened = await openSetup(signingIn.body);
+    // The sign-in step replaces the status notice; no install is offered while it runs.
+    assertNoDomNode(buttonNamed(opened, "Install Managed Copy"), "an install during a sign-in");
+  } finally { await signingIn.unmount(); }
 });

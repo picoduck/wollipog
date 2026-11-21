@@ -3,9 +3,12 @@ import { ANTIGRAVITY_SETUP_GUIDANCE, type AntigravitySetupView, type RunnerView 
 import { useApi } from "../api-context.js";
 import {
   antigravityCheckFailureSentence,
+  antigravityInstallFailureSentence,
+  antigravityInstallStageSentence,
   antigravityTerminalSetup,
   antigravitySetupPresentation,
   antigravitySignInEnding,
+  antigravitySignInRunning,
   type AntigravitySetupPresentation,
 } from "../antigravity-setup.js";
 import { relativeTime } from "../format.js";
@@ -23,7 +26,7 @@ import { BusyButton } from "./ui/BusyButton.js";
 
 const NAME = "Google Antigravity";
 
-type Running = "check" | "start" | "submit" | "cancel" | null;
+type Running = "check" | "start" | "submit" | "cancel" | "install" | null;
 
 /** Google Antigravity's row in a machine's Agents section (#4780). It is setup only: Antigravity is
  * not offered in New Session yet, so the row says so instead of listing it as an agent. */
@@ -49,6 +52,7 @@ export function AntigravitySetupRow({ runner, online, machineName }: { runner: R
                 <span>Setup Only</span>
                 {setup && setup.status !== "checking" && <span className="machine-agent-meta-extra">Checked {relativeTime(setup.checkedAt)}</span>}
                 {setup?.executable?.version && <span className="machine-agent-meta-extra">v{setup.executable.version}</span>}
+                {setup?.executable?.source === "managed" && <span className="machine-agent-meta-extra">Managed</span>}
               </span>
             </span>
           </button>
@@ -100,11 +104,43 @@ export function AntigravitySetupDialog({ runner, presentation, machineName, retu
       {label}
     </BusyButton>
   );
+  // Install and Update (v404): an explicit person's action. Unavailable while a sign-in runs.
+  const install = presentation.install;
+  const signInBusy = antigravitySignInRunning(setup) || setup?.signIn?.status === "verifying";
+  const installBlocked = blocked ?? (signInBusy ? "Finish or cancel the Google sign-in first." : null);
+  const installButton = (label: string, primary = false) => install && !install.running ? (
+    <BusyButton className={primary ? "btn sm primary" : "btn sm"} busy={running === "install"} progress="Starting…"
+      disabled={installBlocked !== null || running !== null} title={installBlocked ?? undefined}
+      onClick={() => void act("install", () => api.installAntigravity(runner.runnerId))}>
+      {label}
+    </BusyButton>
+  ) : null;
+  const failedUpdate = install?.failed?.keptVersion ? install.failed : undefined;
+  // A first managed install that failed beside a working PATH copy: the PATH copy stays in use.
+  // Without a runtime, the status notice itself reports the failure.
+  const failedBeside = install?.failed && !failedUpdate && setup?.executable && phase !== "installing" ? install.failed : undefined;
 
   return (
     <Modal title={NAME} description={`On ${machineName}`} onClose={onClose} returnFocusRef={returnFocusRef}
       footer={<button type="button" className="btn" onClick={onClose}>Done</button>}>
-      <AntigravityNotice runner={runner} presentation={presentation} checkAgain={checkAgain} signIn={signIn} />
+      <AntigravityNotice runner={runner} presentation={presentation} checkAgain={checkAgain} signIn={signIn} installButton={installButton} />
+      {failedUpdate && phase !== "updating" && (
+        <Notice tone="danger" title="Update Failed" role="alert" actions={installButton("Try Again")}>
+          <p>{antigravityInstallFailureSentence(failedUpdate.operation.failure)}</p>
+          <p>Wollipog kept v{failedUpdate.keptVersion}, the last working version{failedUpdate.operation.targetVersion
+            ? `, instead of v${failedUpdate.operation.targetVersion}` : ""}.</p>
+        </Notice>
+      )}
+      {failedBeside && (
+        <Notice tone="danger" title="Install Failed" role="alert" actions={installButton("Try Again")}>
+          <p>{antigravityInstallFailureSentence(failedBeside.operation.failure)} Nothing was installed, and the copy Wollipog found keeps working.</p>
+        </Notice>
+      )}
+      {install?.updateTo && !failedUpdate && (
+        <Notice tone="info" title="Update Available" role="status" actions={installButton(`Update to v${install.updateTo}`)}>
+          <p>Google released v{install.updateTo}. This machine&apos;s managed copy is v{install.activeVersion}, which stays active until the new version passes its checks.</p>
+        </Notice>
+      )}
       {phase === "signing_in" && setup?.signIn && (
         <AntigravitySignIn key={setup.signIn.operationId} runnerId={runner.runnerId} setup={setup}
           blocked={blocked} running={running} act={act} />
@@ -123,6 +159,27 @@ export function AntigravitySetupDialog({ runner, presentation, machineName, retu
           </div>
         )}
         {setup?.executable && <div><dt>Version</dt><dd>{setup.executable.version ? `v${setup.executable.version}` : "Unknown"}</dd></div>}
+        {setup?.executable?.source && (
+          <div>
+            <dt>Source</dt>
+            <dd>
+              {setup.executable.source === "managed"
+                ? "Installed and updated by Wollipog from Connections. Google's background self-updater is off for this copy."
+                : setup.managedInstall?.activeCheckFailed
+                  ? "The runner user's PATH. Wollipog's managed copy didn't pass its version check, so this copy is in use."
+                  : "The runner user's PATH."}
+            </dd>
+          </div>
+        )}
+        {setup?.executable?.source === "managed" && setup.managedInstall?.pathExecutable && (
+          <div>
+            <dt>Fallback</dt>
+            <dd>
+              The copy on the runner user&apos;s PATH, used if the managed copy stops working:{" "}
+              <span className="connection-fact-mono">{setup.managedInstall.pathExecutable}</span>
+            </dd>
+          </div>
+        )}
         {setup?.status === "ready" && setup.models && (
           <div><dt>Models</dt><dd>{setup.models.map((model) => model.name).join(", ")}</dd></div>
         )}
@@ -137,13 +194,17 @@ export function AntigravitySetupDialog({ runner, presentation, machineName, retu
   );
 }
 
-function AntigravityNotice({ runner, presentation, checkAgain, signIn }: {
+function AntigravityNotice({ runner, presentation, checkAgain, signIn, installButton }: {
   runner: RunnerView;
   presentation: AntigravitySetupPresentation;
   checkAgain: React.ReactNode;
   signIn: (label: string) => React.ReactNode;
+  installButton: (label: string, primary?: boolean) => React.ReactNode;
 }) {
-  const { phase, setup, blocked } = presentation;
+  const { phase, setup, blocked, install } = presentation;
+  // A copy found on PATH works as it is; a managed copy can still be installed beside it.
+  const managedOffer = install && !install.activeVersion && !install.failed && setup?.executable?.source === "path"
+    ? installButton("Install Managed Copy") : null;
   const terminal = antigravityTerminalSetup(runner.os);
   const shellName = terminal.shell === "PowerShell" ? "PowerShell" : "the terminal";
   const guides = (
@@ -181,28 +242,60 @@ function AntigravityNotice({ runner, presentation, checkAgain, signIn }: {
           {terminalSetup}
         </Notice>
       );
-    case "missing_runtime":
+    case "installing":
+    case "updating": {
+      const operation = install?.running;
       return (
+        <Notice tone="info" title={phase === "updating" ? "Updating Google Antigravity" : "Installing Google Antigravity"} role="status">
+          <p className="signin-waiting"><Spinner decorative />{antigravityInstallStageSentence(operation?.stage)}</p>
+          <p>
+            {operation?.targetVersion ? `Version v${operation.targetVersion}. ` : ""}
+            {phase === "updating" && install?.activeVersion
+              ? `v${install.activeVersion} stays active until the new version passes its checks.`
+              : "Wollipog checks Google's release against its published checksum and tests it before using it."}
+          </p>
+        </Notice>
+      );
+    }
+    case "missing_runtime":
+      if (!install) {
+        return (
+          <Notice tone="neutral" title="Not Installed" role="status"
+            actions={<>{checkAgain}<GuideLink href={ANTIGRAVITY_SETUP_GUIDANCE.installDocsUrl}>Install Guide</GuideLink></>}>
+            <p>Antigravity isn&apos;t installed for this machine&apos;s runner user. Run Google&apos;s install command in the machine&apos;s terminal as that user, then check again. Wollipog doesn&apos;t install it for you.</p>
+            <CodeWell value={terminal.installCommand} name="Google Antigravity Install Command" />
+          </Notice>
+        );
+      }
+      return install.failed ? (
+        <Notice tone="danger" title="Install Failed" role="alert"
+          actions={<>{installButton("Try Again", true)}{checkAgain}<GuideLink href={ANTIGRAVITY_SETUP_GUIDANCE.installDocsUrl}>Install Guide</GuideLink></>}>
+          <p>{antigravityInstallFailureSentence(install.failed.operation.failure)} Nothing was installed.</p>
+          <p>You can also run Google&apos;s install command in the machine&apos;s terminal as the runner&apos;s user, then check again.</p>
+          <CodeWell value={terminal.installCommand} name="Google Antigravity Install Command" />
+        </Notice>
+      ) : (
         <Notice tone="neutral" title="Not Installed" role="status"
-          actions={<>{checkAgain}<GuideLink href={ANTIGRAVITY_SETUP_GUIDANCE.installDocsUrl}>Install Guide</GuideLink></>}>
-          <p>Antigravity isn&apos;t installed for this machine&apos;s runner user. Run Google&apos;s install command in the machine&apos;s terminal as that user, then check again. Wollipog doesn&apos;t install it for you.</p>
+          actions={<>{installButton("Install Google Antigravity", true)}{checkAgain}<GuideLink href={ANTIGRAVITY_SETUP_GUIDANCE.installDocsUrl}>Install Guide</GuideLink></>}>
+          <p>Antigravity isn&apos;t installed for this machine&apos;s runner user. Wollipog can install Google&apos;s latest release in its own folder on the machine, without changing the user&apos;s shell or PATH.</p>
+          <p>Or run Google&apos;s install command in the machine&apos;s terminal as that user, then check again.</p>
           <CodeWell value={terminal.installCommand} name="Google Antigravity Install Command" />
         </Notice>
       );
     case "sign_in_required":
       return ending ? (
         <Notice tone={ending.tone} title={ending.title} role={ending.tone === "danger" ? "alert" : "status"}
-          actions={<>{signIn("Try Again")}{checkAgain}</>}>
+          actions={<>{signIn("Try Again")}{checkAgain}{managedOffer}</>}>
           <p>{ending.sentence}</p>
         </Notice>
       ) : (
-        <Notice tone="warning" title="Sign-In Required" role="status" actions={<>{signIn("Sign In with Google")}{checkAgain}</>}>
+        <Notice tone="warning" title="Sign-In Required" role="status" actions={<>{signIn("Sign In with Google")}{checkAgain}{managedOffer}</>}>
           <p>Antigravity is installed, but this machine has no Google sign-in for it, or the sign-in has expired. Sign in from this device: Wollipog runs Google&apos;s sign-in on the machine.</p>
         </Notice>
       );
     case "verification_failed":
       return (
-        <Notice tone="danger" title="Check Failed" role="alert" actions={<>{checkAgain}{signIn("Sign In Again")}</>}>
+        <Notice tone="danger" title="Check Failed" role="alert" actions={<>{checkAgain}{signIn("Sign In Again")}{managedOffer}</>}>
           <p>{setup ? antigravityCheckFailureSentence(setup) : null}</p>
           {/* The runner reports fixed sentences, never the CLI's own output, so the executable it
               checked is the one variable detail. A long path wraps at any character. */}
@@ -214,7 +307,7 @@ function AntigravityNotice({ runner, presentation, checkAgain, signIn }: {
       );
     case "ready":
       return (
-        <Notice tone="success" title="Signed In" role="status" actions={checkAgain}>
+        <Notice tone="success" title="Signed In" role="status" actions={<>{checkAgain}{managedOffer}</>}>
           <p>This machine&apos;s Google sign-in opened an Antigravity session and listed the account&apos;s models.</p>
         </Notice>
       );

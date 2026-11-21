@@ -1433,23 +1433,74 @@ Protocol v100 provisions native host sessions with the session-scoped Wollipog C
 Code, the equivalent general stdio MCP server. See [Agent Control CLI and MCP](./agent-control.md)
 for the credential lifecycle, route/audit boundary, commands, and compatibility contract.
 
-### 4.2 Google Antigravity setup (protocol v403)
+### 4.2 Google Antigravity setup (protocol v403, managed install v404)
 
 Protocol v403 (Refs #4780) lets a person who can manage a Machine set up Google's `agy` CLI from
 **Connections**, ahead of Antigravity sessions (#4779). It is setup only. The runner advertises no
 Antigravity agent, so Antigravity is not offered in New Session, and nothing here launches a turn.
 
 - **Runtime.** The runner resolves `agy` for its own user (PATH, `~/.local/bin` and the other
-  discovery locations) and runs `agy --version`. Wollipog never installs or updates it. A missing
-  runtime shows Google's documented install command for a person to run in the machine's terminal.
-  Managed install and update, with the last working version preserved, wait for a verifiable release
-  artifact: Google publishes only a `curl | bash` installer, with no checksums or update contract.
+  discovery locations) and runs `agy --version`. A missing runtime shows Google's documented install
+  command for a person to run in the machine's terminal, and, from protocol v404, an Install action.
+- **Resolution (v404).** A working managed copy (below) is preferred. The operator-installed copy on
+  PATH is used when there is no managed copy, or when the managed copy fails its version check, and
+  Wollipog never changes it. The setup names the executable in use (`executable.source`: `managed`
+  or `path`), the PATH copy kept as the fallback (`managedInstall.pathExecutable`), and
+  `managedInstall.activeCheckFailed` when the fallback is in use because the managed copy failed.
+  The managed launch path is `<dataDir>/antigravity-managed/current/agy`, so an update changes what
+  the next launch runs without disturbing one already running.
+- **Managed install and update (v404).** Only on a person's explicit Install or Update
+  (`POST /api/runners/:id/antigravity-setup/install`, Machine manage permission, human principals
+  only; the Assistant capability audit marks it `human_authority`), on Linux and macOS. Google
+  publishes the CLI through `https://antigravity.google/cli/install.sh`, which reads a per-platform
+  manifest and downloads a gzipped tar. Wollipog follows that chain itself and never runs the script
+  (nor `agy install`, which edits shell profiles):
+  1. Fetch the script from `antigravity.google` as text, with no redirect off that origin, and
+     record its SHA-256. It must assign `DOWNLOAD_BASE_URL` exactly once, to a bare `https://` origin
+     whose host ends in `.run.app`, read `$DOWNLOAD_BASE_URL/manifests/$platform.json`, and extract
+     the `antigravity` member. Anything else fails as `installer_not_recognized`.
+  2. Fetch `<base>/manifests/<platform>.json`. The platform is the script's own name for it:
+     `linux_amd64`, `linux_arm64`, `linux_amd64_musl`, `linux_arm64_musl`, `darwin_amd64` or
+     `darwin_arm64`. musl is detected as the script does, from its two loader paths, else from the C
+     library the runner's own Node process reports instead of running `ldd`. Other platforms keep the
+     guidance only (`managedInstall.available: false`). The manifest is
+     `{"version": "1.5.14", "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/<version>-<build>/<platform-dir>/cli_<os>_<arch>.tar.gz", "sha512": "<128 hex>"}`.
+     Its `url` must be HTTPS on `storage.googleapis.com` and end in `.tar.gz`.
+  3. Download the archive into `<dataDir>/antigravity-managed/staging/<id>/` (512 MiB cap, 20-minute
+     limit, same-origin redirects only), hashing it as it streams, and refuse it unless its SHA-512
+     equals the manifest's.
+  4. Extract only the single regular `antigravity` member as `agy`, mode 0755 (1 GiB cap). Links,
+     devices, absolute or `..` paths, a duplicate or missing member, or a truncated archive refuse the
+     whole archive (`archive_invalid`).
+  5. Validate the staged binary with HOME, the XDG folders and TMPDIR inside a private scratch
+     folder, so a release not yet trusted never touches the runner user's files or sign-in:
+     `agy --version` must print a version, `agy acp --help` must succeed, and `agy acp` must complete
+     an ACP `initialize` handshake.
+  6. Activate: rename the staging folder to `generations/<id>/` with a `release.json` provenance
+     record, point `previous` at the old generation, and swap the `current` symlink by renaming a new
+     link over it. Exactly one previous generation is kept, and older ones are removed.
+
+  Any failure removes the staging folder, leaves `current` untouched and reports a distinct
+  `managedInstall.operation.failure` (`platform_not_supported`, `installer_not_recognized`,
+  `redirect_refused`, `download_failed`, `timed_out`, `checksum_mismatch`, `archive_invalid`,
+  `validation_failed` or `activation_failed`). The card then shows the version still active. The
+  provenance (installer SHA-256, manifest URL, version, archive URL and SHA-512) is recorded in the
+  setup (`managedInstall.active`), in the generation's `release.json` and in the runner log.
+  Operations are kept in memory, so a finished install's outcome lasts until the runner restarts.
+  `managedInstall.latest` is Google's newest version. It is read on a person's Check Again, and at
+  runner start only when a managed copy exists, never on a timer. The card offers an update only when
+  that version is newer than the active managed one. A runner sends the v404 fields only to a v404
+  control plane; an older one receives the v403 shape.
 - **Credential context.** `antigravityCredentialContext()` (`apps/runner/src/antigravity-setup.ts`)
   is the single launch environment for the version check, sign-in and access check, and it is
   exported for #4779's session launch. It keeps the runner user's HOME and drops ambient
   credentials that could change the account or billing: `GEMINI_API_KEY`, `GOOGLE_API_KEY`,
   `GOOGLE_GEMINI_BASE_URL`, `AGY_ADC_AUTH`, `GOOGLE_APPLICATION_CREDENTIALS`,
-  `GOOGLE_GENAI_USE_VERTEXAI` and every `GOOGLE_CLOUD_*` variable. Antigravity stores its sign-in in
+  `GOOGLE_GENAI_USE_VERTEXAI` and every `GOOGLE_CLOUD_*` variable. The managed copy always runs with
+  `AGY_CLI_DISABLE_AUTO_UPDATE=true`, Google's switch for the CLI's background self-updater, because
+  Wollipog owns its updates and its kept previous generation. A copy on PATH keeps its own behavior.
+  `AntigravitySetupSupervisor.launchTarget()` returns the resolved executable with its context.
+  Antigravity stores its sign-in in
   the OS keyring, which every process of that user shares. The setup therefore reports
   `credentialStore: "shared_os_keyring"`, and the card calls it a shared sign-in. No per-account
   isolation is claimed.
@@ -1473,11 +1524,23 @@ Antigravity agent, so Antigravity is not offered in New Session, and nothing her
   Assistant has no route to them. A runner reconnect clears the stored setup until the runner
   republishes it.
 
-These outputs are undocumented: the link format, the exit codes and the session errors. They are
-verified only against the credential-free fixture `apps/runner/src/fixtures/antigravity/fake-agy.mjs`,
-not against a real signed-in runner. Every unrecognized outcome therefore fails closed to
+These outputs are undocumented: the link format, the exit codes and the session errors. The tests use
+the credential-free fixtures in `apps/runner/src/fixtures/antigravity/` (`fake-agy.mjs`, and
+`fake-release.ts` for the installer, manifest and archive). Every unrecognized outcome fails closed to
 `sign_in_required` or `verification_failed`. Setup from Connections supports Linux and macOS runners;
 others report `unsupported` and show the terminal commands.
+
+Real-runner verification (2026-11-21, `linux_amd64`, `agy` 1.5.14):
+
+- The access check against an operator-installed, signed-in `agy` on PATH reported `ready`.
+  `--version` parsed as `1.5.14`, and the session advertised nine models, which parsed as expected.
+- The managed install chain ran into a throwaway data folder. It read the live script (7,643 bytes),
+  the manifest above and the 101 MB archive, whose SHA-512 matched. It extracted the single
+  273 MB `antigravity` member, and validation passed (`1.5.14`; `acp --help` and `initialize`
+  succeeded with the scratch HOME, where the CLI created only `.gemini/antigravity-cli`).
+- Google's documentation lists `--skip-path` and `--skip-aliases` installer flags, but the live
+  script accepts only `--dir` and `--help`, which is one reason Wollipog never runs it.
+- The remote `agy acp --login` sign-in remains verified only against the fixture.
 
 ---
 

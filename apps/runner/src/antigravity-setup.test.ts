@@ -132,7 +132,7 @@ test("a working runtime without a sign-in reports sign_in_required", async () =>
   assert.equal(setup.current().status, "checking");
   const view = await setup.check();
   assert.equal(view.status, "sign_in_required");
-  assert.deepEqual(view.executable, { path: agy, version: "1.4.2" });
+  assert.deepEqual(view.executable, { path: agy, version: "1.4.2", source: "path" });
   assert.equal(view.models, undefined);
   assert.equal(published[0]?.status, "checking");
   assertAllValid(published);
@@ -251,7 +251,7 @@ test("an existing sign-in is reused, including agents that report session model 
   const { setup } = supervisor();
   const view = await setup.check();
   assert.equal(view.status, "ready");
-  assert.deepEqual(view.executable, { path: agy });
+  assert.deepEqual(view.executable, { path: agy, source: "path" });
   assert.deepEqual(view.models?.map((model) => model.id), ["fixture-pro", "fixture-flash"]);
 });
 
