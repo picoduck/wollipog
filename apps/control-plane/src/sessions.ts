@@ -17999,7 +17999,7 @@ export class SessionsService {
     }
     const { grant, revision } = threadDecisionDelegation(thread);
     if (!grant?.categories.includes("ui_evidence_review") || grant.expiresAt !== null && Date.now() >= grant.expiresAt) {
-      return fail("The thread needs a current UI Evidence Approval grant. The owner can change it in Decision Delegation.", 403);
+      return fail("The thread needs a current grant for Approve UI Evidence. The owner can change it in Decision Delegation.", 403);
     }
     const owner = this.db.operatingHumanPrincipal(thread.owner_user_id, thread.organization_id);
     const controller = this.db.getSession(decision.controllingSessionId);
@@ -18033,7 +18033,7 @@ export class SessionsService {
     const availability = assistantEvidenceReviewAvailability(this.db, session);
     if (!availability.available) return fail(availability.reason, 409);
     if (grant.evidenceDisclosureDigest !== availability.disclosureDigest) {
-      return fail("The thread’s provider, model or account changed. The owner needs to renew its UI Evidence Approval grant.", 409);
+      return fail("The thread’s provider, model or account changed. The owner needs to renew its grant for Approve UI Evidence.", 409);
     }
     const control = controller.orchestratorPolicy?.control;
     const boundary = control?.mode === "full_control" ? control.boundary : undefined;
