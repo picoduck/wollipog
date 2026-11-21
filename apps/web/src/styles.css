@@ -13757,18 +13757,54 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   font: var(--type-small);
 }
 .inbox-row-sender > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The phone card's first line: the sender and, trailing, the flags. */
-.inbox-row-sender-line > .inbox-row-flags { margin-left: auto; }
-/* The phone card's status line: the time is trailing, and the branch between gives way. */
-/* So does one with a pull request attention badge (#604), rather than clip its reason or the branch. */
-.stacked .inbox-row-status-line:has(.status + .status),
-.stacked .inbox-row-status-line:has(.inbox-row-pr .status) { height: auto; min-height: var(--space-5); flex-wrap: wrap; }
-.inbox-row-shell.stacked .inbox-row-status-line > .inbox-row-time { margin-left: auto; }
-/* Dense phone cards grow a status line rather than clipping either lifecycle or secondary label. */
-.inbox-row-shell.stacked .inbox-row-status-line > .row-status { flex: 0 1 auto; min-width: 0; max-width: 100%; flex-wrap: wrap; }
+/* The phone card's first line (#4791): the sender, then the time and the flags trailing it at the
+   card's right edge, above ⋯. The sender gives up width; the time and the flags never do. */
+.inbox-row-sender-line > .inbox-row-trail { gap: var(--space-1); }
+/* The phone card's status line (#4791) is one line across the whole card and never wraps, so every
+   card stays three lines. The branch gives way long before the status does, as the sender does on
+   the desktop status line; past that, `fitStatusLine()` drops the branch (keeping a pull request
+   that needs the person, #604), then the strip, then folds the secondary badge into its count, and
+   last ends that pull request in an ellipsis. The lifecycle badge always stays. */
 .inbox-row-shell.stacked .row-status > .status { flex: none; padding-inline: var(--space-1); }
-/* The branch gives way long before the status does, as the sender does on the desktop status line. */
 .inbox-row-shell.stacked .inbox-row-status-line > .inbox-row-git { flex-shrink: 100000; }
+/* Once its branch has gone, the group holds only a pull request that needs the person, which no longer
+   shrinks: the line overflows instead, so the later steps run. */
+.inbox-row-shell.stacked .inbox-row-status-line[data-fit~="branch"] > .inbox-row-git { flex: none; }
+/* A dropped branch and strip leave the eye only: the card's accessible name still says them, as
+   `.sr-only` text does. The folded secondary badge is named by its count instead. */
+.inbox-row-status-line[data-fit~="branch"] > .inbox-row-git:not(:has(.inbox-row-pr .status)),
+.inbox-row-status-line[data-fit~="branch"] > .inbox-row-git > :is(.inbox-row-branch, .inbox-row-base),
+.inbox-row-status-line[data-fit~="strip"] > .inbox-row-activity {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.inbox-row-status-line[data-fit~="badge"] .row-status > .status + .status,
+.inbox-row-status-line[data-fit~="badge"] .row-status-more { display: none; }
+.row-status-collapsed { display: none; }
+.inbox-row-status-line[data-fit~="badge"] .row-status-collapsed { display: inline; }
+/* Last, a pull request that needs the person ends in an ellipsis rather than being cut off; its
+   whole label stays in the card's name and its tooltip. */
+.inbox-row-shell.stacked .inbox-row-status-line[data-fit~="pr"] > .inbox-row-git { flex: 0 1 auto; }
+.inbox-row-status-line[data-fit~="pr"] .inbox-row-pr { flex: 0 1 auto; min-width: calc(var(--icon-sm) + var(--space-1) + 3em); overflow: hidden; }
+.inbox-row-status-line[data-fit~="pr"] .inbox-row-pr > .status {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.inbox-row-status-line[data-fit~="pr"] .inbox-row-pr > .status::before {
+  display: inline-block;
+  margin-right: var(--space-1);
+  vertical-align: 1px;
+}
 /* Meta (§11.3): plain text, each item after its 14px icon, 12px apart. */
 .inbox-row-git {
   display: flex;
@@ -13823,7 +13859,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 /* The one status (#2209, §11.1): the badge and a neutral "+N". */
 .row-status { display: inline-flex; flex: none; align-items: center; gap: var(--space-1); }
-.row-status-more {
+.row-status-more,
+.row-status-collapsed {
   color: var(--text-dim);
   font: var(--type-micro);
   font-variant-numeric: tabular-nums;
@@ -13891,7 +13928,10 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .inbox-row-action:not(.inbox-row-more) { display: none; }
   .icon-btn.inbox-row-more { width: var(--control-h); height: var(--control-h); }
   .inbox-row-shell .inbox-row { padding-right: var(--control-h); }
-  .inbox-row-shell.stacked .inbox-row { padding-right: calc(var(--control-h) + var(--space-2)); }
+  /* A phone card keeps the column for ⋯ on its title line only (#4791): the time and the flags above
+     ⋯ and the status line below it run to the card's own padding. */
+  .inbox-row-shell.stacked .inbox-row { padding-right: var(--inbox-row-pad-x); }
+  .inbox-row-shell.stacked .inbox-row-copy { padding-right: calc(var(--control-h) + var(--space-2) - var(--inbox-row-pad-x)); }
 }
 /* A wide list's rows (#2218, docs/design-system.md §6.3 "Rows use the width"). At 880px and wider the
    two lines keep their height. The status line's trailing cluster becomes fixed columns, the same on
