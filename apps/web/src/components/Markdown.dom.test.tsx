@@ -627,9 +627,13 @@ const streamingCases = [
   ["dangling marker", "A marker", " **", " follows**.", "p", "A marker"],
   ["open fence", "Run this:\n\n```ts\n", "const total = 2 * 3;", "\n```", "pre code", "const total = 2 * 3;\n"],
   ["unfinished label", "Compare [tracker", " history", "](https://example.test/history)", ".md-streaming-link", "tracker history"],
+  ["formatted unfinished label", "Compare [tracker **", "history", "**](https://example.test/history)", ".md-streaming-link > strong", "history"],
+  ["link waiting for its URL", "Compare [tracker history", "]", "(https://example.test/history)", ".md-streaming-link", "tracker history"],
+  ["open code containing a bracket", "Use `[", "tracker", "]`.", ":not(pre) > code", "[tracker"],
   ["unfinished destination", "Compare [tracker **history**]", "(https://example", ".test/history)", ".md-streaming-link > strong", "history"],
   ["partial table", "| Check |", " Status |", "\n| --- | --- |\n| Lint | Passed |", "p", "| Check | Status |"],
   ["list, identifier and multiplication", "* A list item\n* ", "snake_case at 2 * 3", " stays literal.", "li:last-child", "snake_case at 2 * 3"],
+  ["filename glob", "Match ", "*.ts files", " only.", "p", "Match *.ts files"],
   ["escaped marker", "This is \\*", "literal", " text.", "p", "This is *literal"],
 ] as const;
 

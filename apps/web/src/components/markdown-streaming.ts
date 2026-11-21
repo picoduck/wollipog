@@ -39,69 +39,84 @@ export function streamMarkdownTail(
   const children = tail?.children;
   if (end === undefined || !children || /\n[ \t]*\n/.test(source.slice(end))) return tree;
 
-  const lastText = source.slice(0, end).trimEnd().length;
-  let linkStart = -1;
-  for (const child of children) {
+  const ranges = children.flatMap((child) => {
     const start = child.position?.start.offset;
     const stop = child.position?.end.offset;
-    if (child.type !== "text" || start === undefined || stop === undefined) continue;
+    return child.type === "text" && start !== undefined && stop !== undefined ? [[start, stop] as const] : [];
+  });
+  let linkStart = -1;
+  for (const [start, stop] of ranges) {
     for (const match of source.slice(start, stop).matchAll(/\[/g)) {
       const offset = start + match.index;
       if (source[offset - 1] !== "!" && !escaped(source, offset)) linkStart = offset;
     }
   }
-  const link = linkStart < 0 ? undefined : unfinishedLinkSuffix(source.slice(linkStart, end));
+  const labelLength = linkStart < 0 ? undefined : unfinishedLinkLabelLength(source.slice(linkStart, end));
+  if (labelLength !== undefined) {
+    const prefix = previewMarkers(source, ranges, 0, linkStart, false);
+    // A bracket inside an open code span is code, even if it looks like a link label.
+    if (!prefix.openCode) {
+      const labelStart = linkStart + 1;
+      const label = previewMarkers(source, ranges, labelStart, labelStart + labelLength);
+      const preview = parse(source.slice(0, linkStart) + "[" + label.text + "]()" + prefix.closers + source.slice(end), file);
+      markProvisionalLink(preview, linkStart);
+      return preview;
+    }
+  }
+  const { text } = previewMarkers(source, ranges, 0, end);
+  return text === source.slice(0, end) ? tree : parse(text + source.slice(end), file);
+}
+
+function previewMarkers(
+  source: string,
+  ranges: ReadonlyArray<readonly [number, number]>,
+  start: number,
+  end: number,
+  hideDangling = true,
+) {
+  const original = source.slice(start, end);
+  const lastText = start + original.trimEnd().length;
   const markers: string[] = [];
   let danglingAt = end;
-  let unfinishedLink = link;
-  for (const child of children) {
-    const start = child.position?.start.offset;
-    const stop = child.position?.end.offset;
-    if (child.type !== "text" || start === undefined || stop === undefined) continue;
-    const text = source.slice(start, stop);
-
-    for (const match of text.matchAll(INLINE_MARKER)) {
-      const offset = start + match.index;
-      if (unfinishedLink && offset >= linkStart) break;
+  for (const [textStart, textEnd] of ranges) {
+    const from = Math.max(start, textStart);
+    const to = Math.min(end, textEnd);
+    if (from >= to) continue;
+    for (const match of source.slice(from, to).matchAll(INLINE_MARKER)) {
+      const offset = from + match.index;
       const marker = match[0];
       if (escaped(source, offset)) continue;
       const after = offset + marker.length;
       const before = source[offset - 1];
       const isCode = marker[0] === "`";
-      // Conserve intraword punctuation and spaced operators. Backtick spans can start within
-      // a word and may have a space before their content.
+      // Keep intraword punctuation, spaced operators and filename globs literal. Backtick
+      // spans can start within a word and may have a space before their content.
       if (!isCode && (marker.length > 3 || before && WORD.test(before))) continue;
-      if (after >= lastText) {
+      if (marker === "*" && source[after] === "." && WORD.test(source[after + 1] ?? "")) continue;
+      if (hideDangling && after >= lastText) {
         danglingAt = offset;
         break;
       }
-      if (!isCode && (/\s/u.test(source[after]!) || marker === "~")) continue;
-
+      if (!isCode && (/\s/u.test(source[after] ?? "") || marker === "~")) continue;
       markers.push(marker);
-      if (isCode) {
-        unfinishedLink = undefined;
-        break;
-      }
+      if (isCode) break;
     }
-    if (markers.at(-1)?.[0] === "`" || (unfinishedLink && stop >= linkStart)) break;
+    if (markers.at(-1)?.[0] === "`") break;
   }
-
-  // Put provisional closers against the text, so whitespace at a chunk boundary doesn't turn
-  // them into new openers. Preserve the whitespace before a provisional link's label.
-  const base = unfinishedLink ? source.slice(0, linkStart) : source.slice(0, danglingAt).trimEnd();
-  const suffix = (unfinishedLink ?? "") + markers.reverse().join("");
-  if (!suffix && danglingAt === end) return tree;
-  const preview = parse(base + suffix + source.slice(end), file);
-  if (unfinishedLink) markProvisionalLink(preview, linkStart);
-  return preview;
+  const openCode = markers.at(-1)?.[0] === "`";
+  const closers = markers.reverse().join("");
+  // Place the closers against the text so a whitespace-only chunk can't turn them into openers.
+  const text = closers || danglingAt < end ? source.slice(start, danglingAt).trimEnd() + closers : original;
+  return { text, closers, openCode };
 }
 
-/** Build a link with an inert destination. A closed label alone can still be bracketed prose. */
-function unfinishedLinkSuffix(value: string): string | undefined {
+/** Locate the unfinished label, including the chunk boundary between its closing bracket and URL. */
+function unfinishedLinkLabelLength(value: string): number | undefined {
   const match = /^\[((?:\\.|[^\[\]\\\n])+)(.*)$/.exec(value);
   if (!match || !match[1]!.trim() || match[1]!.startsWith("^")) return;
-  const [, label, rest] = match;
-  if (!rest) return `[${label}]()`;
+  const label = match[1]!;
+  const rest = match[2]!;
+  if (!rest || rest === "]") return label.length;
   if (!rest.startsWith("](")) return;
   let depth = 0;
   for (let index = 2; index < rest.length; index++) {
@@ -112,7 +127,7 @@ function unfinishedLinkSuffix(value: string): string | undefined {
       depth--;
     }
   }
-  return `[${label}]()`;
+  return label.length;
 }
 
 function markProvisionalLink(node: MarkdownNode, start: number): void {
