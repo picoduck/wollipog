@@ -178,6 +178,14 @@ test.describe("on a touch screen", () => {
     // Each small control borrows 4px a side for its 44px target, so neighbours sit 8px apart.
     expect(Math.min(...layout.gaps)).toBeGreaterThanOrEqual(8);
     expect(layout.overflow).toBe(false);
+    // At the top of the panel the scrollport must not clip the hit areas' borrowed top: a tap 3px
+    // above each control's drawn edge is still that control's.
+    await expect(page.locator(".campaign-status")).toHaveJSProperty("scrollTop", 0);
+    const aboveTop = await index.evaluate(element => [...element.querySelectorAll<HTMLElement>("button")].map(button => {
+      const rect = button.getBoundingClientRect();
+      return document.elementFromPoint(rect.left + rect.width / 2, rect.top - 3)?.closest("button") === button;
+    }));
+    expect(aboveTop).toEqual(aboveTop.map(() => true));
     // A tap just inside Collapse All's right edge, and in its borrowed margin, is Collapse All's.
     const collapse = await index.getByRole("button", { name: "Collapse All", exact: true }).boundingBox();
     for (const dx of [-1, 3]) {

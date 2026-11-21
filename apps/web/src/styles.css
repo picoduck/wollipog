@@ -5737,8 +5737,10 @@ body.shell-dock-dragging * {
    An inline-size container gives it no intrinsic width; its menu is portalled, so the layout
    containment that comes with it does not move the menu.
    Every control here is a small one, 36px on touch with a borrowed 44px hit area (§2.8): they sit
-   8px apart so no hit area takes a neighbour's taps, and 2px of padding keeps the row (36 + 2 + 2
-   + its 1px rule) inside 44px on touch. */
+   8px apart so no hit area takes a neighbour's taps. On touch the row is 36 + 4 + 2 + its 1px rule
+   = 43px: the 4px above is the hit area's borrowed top, which the panel's scrollport would clip
+   at the top of the panel, and the 1px it borrows below the rule lies over the content, where it
+   still takes the tap. */
 .campaign-section-index {
   position: sticky;
   top: 0;
@@ -5751,6 +5753,9 @@ body.shell-dock-dragging * {
   background: var(--bg);
   border-bottom: 1px solid var(--border);
   container-type: inline-size;
+}
+@media (pointer: coarse) {
+  .campaign-section-index { padding: var(--space-1) 0 var(--space-0-5); }
 }
 .campaign-section-trigger.btn {
   flex: 0 1 auto;
