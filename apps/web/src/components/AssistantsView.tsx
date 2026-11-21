@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useApi } from "../api-context.js";
 import {
   applyAssistantThreadEvents,
@@ -21,12 +21,12 @@ import { AssistantConfirmationCard } from "./AssistantConfirmationCard.js";
 import { ASSISTANT_DEFAULTS_VIEW, AssistantSettingsLink } from "./AssistantSettingsLink.js";
 import { AssistantThreadLimitsDialog } from "./AssistantThreadLimitsDialog.js";
 import { AssistantDecisionDelegationDialog } from "./AssistantDecisionDelegationDialog.js";
-import { AssistantWaitingWork, LaunchedSessionsToggle } from "./AssistantWorkCards.js";
-import { launchedWorkIds, type LaunchedWork } from "../assistant-launched-work.js";
+import { AssistantWaitingWork, useLaunchedWorkGroups } from "./AssistantWorkCards.js";
+import type { LaunchedWork } from "../assistant-launched-work.js";
 import { ChangeAssistantThreadAccountDialog } from "./ChangeAssistantThreadAccountDialog.js";
 import { ChangeAssistantThreadHarnessDialog } from "./ChangeAssistantThreadHarnessDialog.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { AssistantsIcon, BotIcon, PlusIcon } from "./Icons.js";
+import { AssistantsIcon, PlusIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
 import { NewAssistantThreadDialog, THREADS_UNAVAILABLE_MESSAGE } from "./NewAssistantThreadDialog.js";
 import { Notice } from "./Notice.js";
@@ -43,8 +43,6 @@ import type { RightPanelState } from "./right-panel-state.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { SidePanelToggle } from "./SessionPanelToggles.js";
 
-/** The one assistant today; the section lists it first and names its threads under it. */
-const WOLLIPOG_ASSISTANT = "Wollipog Assistant";
 const ASSISTANTS = destination("assistants");
 /** How often the list is read while a thread is working, as a net under the thread events. */
 const WORKING_POLL_MS = 15_000;
@@ -71,7 +69,7 @@ function newThreadBlock(list: ListState): { title: string; message: string } | u
 }
 
 /**
- * The Assistants section (#4664): the Wollipog Assistant first, its threads newest activity first
+ * The Assistants section (#4664): threads listed newest activity first
  * with New Thread, and the open thread beside them. On a phone the list and the thread are two
  * routes. Every thread comes from the Thread API; a control plane without it (404) shows the empty
  * section and New Thread explains, never a failure.
@@ -313,7 +311,6 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   const launchedWork = useMemo<LaunchedWork | undefined>(() => launchedSessionIds
     ? { sessionIds: launchedSessionIds, ...(launchedCampaignIds ? { campaignIds: launchedCampaignIds } : {}) }
     : undefined, [launchedSessionIds, launchedCampaignIds]);
-  const launchedPanelOpen = panel.open && panel.tab === "Work";
   const showSessionTool = (mode: RightPanelMode) => {
     if (!selected) return;
     rightPanel.show(mode);
@@ -327,11 +324,14 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
           title={selected ? assistantThreadTitle(selected) : "Thread"}
           backLabel={backLabel("assistants")}
           onBack={toList}
-          status={selected ? <StatusBadge meta={statusMeta("assistantThread", selected.status)} /> : undefined}
+          status={selected ? threadBarStatus(selected) : undefined}
           menu={selected ? threadMenu(selected) : []}
           menuLabel="Thread Actions"
           searchInMenu={Boolean(selected)}
-          controls={canTogglePanel ? <SidePanelToggle small open={panel.open} onToggle={panel.toggle} /> : undefined}
+          controls={canTogglePanel && launchedWork
+            ? <AssistantSidePanelToggle work={launchedWork} open={panel.open} onToggle={panel.toggle} />
+            : undefined}
+          renderTitle={selected ? (title) => <ThreadBarTitle title={title} phone /> : undefined}
         />
       ) : (
         // New Thread belongs to the assistant's Threads list, so the page header offers no second one.
@@ -358,9 +358,8 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
             <div className="assistant-thread-pane-state">
               {/* The detail pane's placeholder beside a list that offers New Thread itself (§21.4), not
                   an empty screen: its action is the list's, one step to the left. */}
-              <State compact icon={<AssistantsIcon />} title={WOLLIPOG_ASSISTANT} headingLevel={2}>
-                Ask the assistant to start sessions, check on work and handle approvals. Choose a thread, or start one
-                with New Thread.
+              <State compact icon={<AssistantsIcon />} title="Choose a Thread" headingLevel={2}>
+                Ask the assistant to start sessions, check on work and handle approvals. Use New Thread to start a conversation.
               </State>
             </div>
           ) : list.kind === "loading" || (!selected && !missing && list.kind === "ready") ? (
@@ -413,8 +412,6 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
                   thread={selected}
                   work={launchedWork!}
                   menu={threadMenu(selected)}
-                  launchedPanelOpen={launchedPanelOpen}
-                  onToggleLaunched={panel.toggleWork}
                   sidePanelOpen={panel.open}
                   onToggleSidePanel={panel.toggle}
                 />
@@ -422,9 +419,6 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
               columnLead={<ThreadWaitingLead
                 thread={selected}
                 work={launchedWork!}
-                compact={isMobile}
-                launchedPanelOpen={launchedPanelOpen}
-                onToggleLaunched={panel.toggleWork}
                 onConfirmationAnswered={refresh}
               />}
             />
@@ -501,7 +495,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   );
 }
 
-/** The list pane: the Wollipog Assistant, then its threads. */
+/** The list pane's threads and New Thread action. */
 function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
   list: ListState;
   selectedId: string | null;
@@ -513,13 +507,9 @@ function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
   // Re-renders each row's "5m ago" as time passes.
   useTimelineClock(threads.length > 0);
   return (
-    <section className="assistant-group" aria-labelledby="assistant-wollipog-title">
-      <div className="assistant-group-head">
-        <span className="assistant-group-icon" aria-hidden="true"><BotIcon size={16} /></span>
-        <h2 id="assistant-wollipog-title" className="assistant-group-title">{WOLLIPOG_ASSISTANT}</h2>
-      </div>
+    <section className="assistant-group" aria-labelledby="assistant-threads-title">
       <div className="assistant-threads-head">
-        <h3 className="group-label">Threads{threads.length > 0 && <span className="count">{threads.length}</span>}</h3>
+        <h2 id="assistant-threads-title" className="group-label">Threads{threads.length > 0 && <span className="count">{threads.length}</span>}</h2>
         {/* With no threads the empty state offers New Thread itself, so the head steps aside (§12.1). */}
         {!(list.kind !== "loading" && list.kind !== "failed" && threads.length === 0) && (
           <button type="button" className="btn sm ghost" onClick={onNewThread}><PlusIcon />New Thread</button>
@@ -584,42 +574,87 @@ function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
   );
 }
 
-/**
- * The open thread's bar, in the session bar's place and on its geometry (#4776): the title and status,
- * then the Launched Sessions toggle with its live counts, Thread Actions (⋯, Thread Settings among
- * them) and, after a divider, the Side Panel toggle, as the session bar ends with its panel toggles.
- * The side panel opens under it, so it spans the page beside the conversation column.
- */
-function ThreadBar({ thread, work, menu, launchedPanelOpen, onToggleLaunched, sidePanelOpen, onToggleSidePanel }: {
+/** The desktop thread bar spans the conversation and the side panel that opens beneath it. */
+function ThreadBar({ thread, work, menu, sidePanelOpen, onToggleSidePanel }: {
   thread: AssistantThread;
   work: LaunchedWork;
   menu: PageMenuAction[];
-  launchedPanelOpen: boolean;
-  onToggleLaunched: () => void;
   sidePanelOpen: boolean;
   onToggleSidePanel: () => void;
 }) {
   return (
-    <header className="detail-bar session-bar assistant-thread-bar">
-      <h2 className="detail-bar-title session-bar-title" title={assistantThreadTitle(thread)}>{assistantThreadTitle(thread)}</h2>
-      <StatusBadge meta={statusMeta("assistantThread", thread.status)} />
-      <div className="topbar-actions">
-        <LaunchedSessionsToggle work={work} open={launchedPanelOpen} onToggle={onToggleLaunched} />
+    <header className="detail-bar assistant-thread-bar">
+      <div className="detail-bar-heading">
+        <ThreadBarTitle title={assistantThreadTitle(thread)} />
+        {threadBarStatus(thread)}
+      </div>
+      <div className="detail-bar-actions">
         <ActionsMenu label="Thread Actions" items={menu} />
         <span className="detail-actions-divider" aria-hidden="true" />
-        <SidePanelToggle small={false} open={sidePanelOpen} onToggle={onToggleSidePanel} />
+        <AssistantSidePanelToggle work={work} open={sidePanelOpen} onToggle={onToggleSidePanel} />
       </div>
     </header>
   );
 }
 
+/** Use the same thread lifecycle on both bars. "Done" is the thread's at-rest state. */
+function threadBarStatus(thread: AssistantThread) {
+  return thread.status === "done" ? null : <StatusBadge meta={statusMeta("assistantThread", thread.status)} />;
+}
+
+function AssistantSidePanelToggle({ work, open, onToggle }: {
+  work: LaunchedWork;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const { groups } = useLaunchedWorkGroups(work);
+  return <SidePanelToggle small={false} open={open} onToggle={onToggle} waitingSessions={groups.needsYou.length} />;
+}
+
+/** The full title is available on mouse hover and by pressing the title with a finger or keyboard. */
+function ThreadBarTitle({ title, phone = false }: { title: string; phone?: boolean }) {
+  const Heading = phone ? "h1" : "h2";
+  const tooltipId = useId();
+  const [open, setOpen] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  const wrapper = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const dismiss = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && (open || wrapper.current?.matches(":hover"))) {
+        setOpen(false);
+        setDismissed(true);
+      }
+    };
+    document.addEventListener("keydown", dismiss);
+    return () => document.removeEventListener("keydown", dismiss);
+  }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    // A tap need not focus the title button, so leaving the tooltip cannot depend on blur.
+    const handleOutsidePress = (event: PointerEvent) => {
+      if (!wrapper.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", handleOutsidePress, true);
+    return () => document.removeEventListener("pointerdown", handleOutsidePress, true);
+  }, [open]);
+  return (
+    <div className="assistant-bar-title" ref={wrapper} data-open={open || undefined} data-dismissed={dismissed || undefined}
+      onPointerLeave={() => setDismissed(false)}>
+      <Heading id={phone ? "page-title" : undefined} tabIndex={phone ? -1 : undefined}>
+        <button type="button" className="detail-bar-title" aria-expanded={open} aria-controls={tooltipId}
+          onBlur={() => setOpen(false)} onClick={() => { setDismissed(open); setOpen(!open); }}>
+          {title}
+        </button>
+      </Heading>
+      <span id={tooltipId} className="assistant-bar-title-tooltip" role="tooltip">{title}</span>
+    </div>
+  );
+}
+
 /** Waiting cards remain here until the thread's request dock takes over in #4809. */
-function ThreadWaitingLead({ thread, work, compact, launchedPanelOpen, onToggleLaunched, onConfirmationAnswered }: {
+function ThreadWaitingLead({ thread, work, onConfirmationAnswered }: {
   thread: AssistantThread;
   work: LaunchedWork;
-  compact: boolean;
-  launchedPanelOpen: boolean;
-  onToggleLaunched: () => void;
   onConfirmationAnswered?: () => void;
 }) {
   // Destructive commands this thread's assistant is waiting on the owner for (#4665), drawn ahead
@@ -630,12 +665,8 @@ function ThreadWaitingLead({ thread, work, compact, launchedPanelOpen, onToggleL
   const launchRefusal = thread.launchLimitRefusal ?? (launches?.limit != null && launches.used >= launches.limit && thread.status !== "archived"
     ? "This thread has reached its session launch limit." : null);
   const settingsView = { name: "assistants", threadId: thread.id, limits: true } as const;
-  const showToggle = compact && launchedWorkIds(work).length > 0;
   return (
     <div className="assistant-thread-head">
-      {showToggle && <div className="assistant-thread-toggle-row">
-        <LaunchedSessionsToggle work={work} open={launchedPanelOpen} onToggle={onToggleLaunched} />
-      </div>}
       {launchRefusal ? <Notice tone="warning" role="status" title="Thread Limit Reached" actions={<>
         <AssistantSettingsLink view={settingsView}>Thread Settings</AssistantSettingsLink>
         <AssistantSettingsLink view={ASSISTANT_DEFAULTS_VIEW}>Assistant Defaults</AssistantSettingsLink>

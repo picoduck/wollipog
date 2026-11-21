@@ -7655,12 +7655,8 @@ body.shell-dock-dragging * {
     overflow: visible;
   }
   .assistant-work-confirmations > .request-card { width: auto; }
-  /* Tall enough to show a whole request and the start of what follows. The Launched Sessions
-     toggle's row above it (#4776) comes out of the same allowance, so the transcript keeps its room. */
+  /* Tall enough to show a whole request and the start of what follows. */
   .assistant-work:has(> .assistant-work-confirmations) { max-height: 60vh; }
-  .assistant-thread-toggle-row ~ .assistant-work:has(> .assistant-work-confirmations) {
-    max-height: calc(60vh - var(--control-h-sm) - var(--space-2));
-  }
   .assistant-work:has(> .assistant-work-confirmations) > .assistant-work-cards {
     max-height: none;
     overflow-y: visible;
@@ -12961,20 +12957,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 /* The empty state's column starts where the Threads label and the rows' titles do. */
 .assistant-group > .state { padding-inline: var(--space-3); }
-.assistant-group-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-}
-.assistant-group-icon {
-  display: inline-flex;
-  color: var(--text-dim);
-}
-.assistant-group-title {
-  margin: 0;
-  font: var(--type-body-strong);
-}
 .assistant-threads-head {
   display: flex;
   align-items: center;
@@ -12986,9 +12968,60 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: 0;
   list-style: none;
 }
-/* The thread's bar (#4776), on the session bar's geometry (`.detail-bar.session-bar`): the title
-   gives way first, and the status badge and the actions never shrink. */
-.assistant-thread-bar > .status { flex: none; }
+/* The thread title is the only part of the detail bar that shrinks. The tooltip belongs outside the
+   clipping box so it can show the whole title and wrap on a phone. */
+.assistant-thread-bar { padding-inline: var(--space-3); }
+.detail-bar-heading > .assistant-bar-title {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.assistant-bar-title > :is(h1, h2) { margin: 0; }
+.assistant-bar-title .detail-bar-title {
+  display: block;
+  width: 100%;
+  height: var(--control-h);
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: start;
+  cursor: pointer;
+}
+.assistant-bar-title-tooltip {
+  position: absolute;
+  z-index: var(--z-popover);
+  inset-block-start: 100%;
+  inset-inline-start: 0;
+  width: max-content;
+  max-width: min(280px, calc(100vw - 2 * var(--page-gutter) - var(--control-h) - var(--space-2)));
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  background: var(--bg-elev-3);
+  box-shadow: var(--elev-2);
+  color: var(--text);
+  font: var(--type-small);
+  overflow-wrap: anywhere;
+  visibility: hidden;
+}
+.assistant-bar-title[data-open] > .assistant-bar-title-tooltip { visibility: visible; }
+@media (hover: hover) {
+  .assistant-bar-title:hover:not([data-dismissed]) > .assistant-bar-title-tooltip {
+    visibility: visible;
+    transition: visibility 0s var(--delay-tooltip);
+  }
+}
+[data-assistant-panel-toggle] { position: relative; }
+.assistant-side-panel-dot {
+  position: absolute;
+  inset-block-start: calc(50% - 11px);
+  inset-inline-end: calc(50% - 11px);
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--warning);
+  box-shadow: 0 0 0 2px var(--bg);
+}
 /* Waiting requests stay in the conversation column beside Work. */
 .assistant-thread-head {
   display: grid;
@@ -13082,15 +13115,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
-}
-/* The header's Launched Sessions toggle (#4776): its counts read whole, never squeezed by the title. */
-.assistant-launched-toggle {
-  flex: none;
-  font-variant-numeric: tabular-nums;
-}
-.assistant-thread-toggle-row {
-  display: flex;
-  min-width: 0;
 }
 /* Thread tabs share the session panel's frame. */
 .assistant-thread-panel .rpanel-head > .tabs {

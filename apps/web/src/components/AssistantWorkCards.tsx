@@ -3,7 +3,6 @@ import { prioritizedPendingRequests, type PendingApproval, type SessionView } fr
 import { useApi } from "../api-context.js";
 import {
   groupLaunchedWork,
-  launchedSessionsToggleLabel,
   launchedWorkGroup,
   launchedWorkIds,
   type LaunchedWork,
@@ -137,7 +136,7 @@ function cardFocusTarget(list: HTMLElement | null, sessionId: string | null): HT
  * answered never moves between surfaces, whether the panel is open or not.
  *
  * A card leaves once its session stops waiting, Approve Once's own card included. When focus was in
- * one that left, it moves to the header's Launched Sessions toggle, where that session now is,
+ * one that left, it moves to the bar's Side Panel toggle, where that session now is,
  * rather than dropping to the page; a card that stays, waiting on another request, keeps it.
  */
 export function AssistantWaitingWork({ work, confirmations }: {
@@ -148,8 +147,7 @@ export function AssistantWaitingWork({ work, confirmations }: {
   const waiting = groups.needsYou;
   const campaigns = useMemo(() => new Set(work.campaignIds ?? []), [work.campaignIds]);
   const focus = useFocusRecovery<HTMLElement>(waiting.join("\n"), (sessionId, list) => cardFocusTarget(list, sessionId)
-    // The thread's one Launched Sessions toggle: in its bar on desktop, under its facts on a phone.
-    ?? document.querySelector<HTMLElement>(".assistant-launched-toggle"));
+    ?? document.querySelector<HTMLElement>("[data-assistant-panel-toggle]"));
   if (waiting.length === 0 && !confirmations) return null;
   return (
     <section ref={focus.ref} className="assistant-work" aria-label="Waiting for You" onFocus={focus.onFocus} onBlur={focus.onBlur}>
@@ -160,33 +158,6 @@ export function AssistantWaitingWork({ work, confirmations }: {
         </ul>
       )}
     </section>
-  );
-}
-
-/**
- * The thread header's Launched Sessions toggle (#4776): the live counts, "3 Sessions · 1 Needs You",
- * opening and closing the panel. Hidden until the thread has launched something.
- */
-export function LaunchedSessionsToggle({ work, open, onToggle }: {
-  work: LaunchedWork;
-  open: boolean;
-  onToggle: () => void;
-}) {
-  const { ids, groups } = useLaunchedWorkGroups(work);
-  if (ids.length === 0) return null;
-  const needsYou = groups.needsYou.length;
-  return (
-    <button
-      type="button"
-      className="btn sm assistant-launched-toggle"
-      data-needs-you={needsYou > 0 ? "" : undefined}
-      aria-expanded={open}
-      aria-controls={open ? "right-panel" : undefined}
-      title={open ? "Hide Launched Sessions" : "Show Launched Sessions"}
-      onClick={onToggle}
-    >
-      {launchedSessionsToggleLabel({ total: ids.length, needsYou })}
-    </button>
   );
 }
 
