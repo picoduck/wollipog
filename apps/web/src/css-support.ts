@@ -281,7 +281,8 @@ export const CSS_SURFACE = {
   functions: [
   "attr", "calc", "color-mix", "conic-gradient", "counter",
   "cubic-bezier", "env", "format", "inset", "linear-gradient", "max", "min", "minmax", "rect",
-  "repeat", "rgb", "rgba", "rotate", "scale", "scaley", "translatex", "translatey", "url", "var",
+  // CSS Images 3 repeating gradients predate every supported engine.
+  "repeat", "repeating-linear-gradient", "rgb", "rgba", "rotate", "scale", "scaley", "translatex", "translatey", "url", "var",
   ],
 } as const;
 
