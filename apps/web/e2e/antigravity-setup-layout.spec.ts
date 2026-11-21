@@ -27,5 +27,38 @@ for (const viewport of VIEWPORTS) {
       await expectFullyInViewport(done, "Done");
       await expectFullyInViewport(dialog.getByRole("button", { name: "Check Again" }).first(), "Check Again");
     });
+
+    test("the pending sign-in keeps its code field full width with Submit Code below it", async ({ page }) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.goto("/machine-management-e2e.html?machine=native-t14s&antigravity=signin-pending&longName");
+      await page.locator('ul[aria-label="Agent Setup"] button.row').click();
+      const dialog = page.getByRole("dialog", { name: "Google Antigravity" });
+      const field = dialog.getByLabel("Paste the Code Google Shows");
+      const submit = dialog.getByRole("button", { name: "Submit Code" });
+      await expect(field).toBeVisible();
+      const [fieldBox, submitBox] = [await field.boundingBox(), await submit.boundingBox()];
+      expect(fieldBox && submitBox).toBeTruthy();
+      expect(submitBox!.y, "Submit Code sits below the field").toBeGreaterThanOrEqual(fieldBox!.y + fieldBox!.height);
+      expect(Math.abs(submitBox!.width - fieldBox!.width), "the field and Submit Code share the column's width").toBeLessThanOrEqual(1);
+      await expectNoHorizontalOverflow(dialog, "The setup dialog");
+      await expectPageNoHorizontalOverflow(page);
+      await expectFullyInViewport(dialog.getByRole("button", { name: "Cancel" }), "Cancel");
+    });
+
+    test("a failed check wraps a long executable path inside its notice and keeps its actions reachable", async ({ page }) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.goto("/machine-management-e2e.html?machine=native-t14s&antigravity=verification-failed&longName");
+      await page.locator('ul[aria-label="Agent Setup"] button.row').click();
+      const dialog = page.getByRole("dialog", { name: "Google Antigravity" });
+      const notice = dialog.locator(".notice", { hasText: "Check Failed" });
+      await expect(notice).toContainText("Checked executable: /home/design-workstation-operator");
+      await expectNoHorizontalOverflow(notice, "The Check Failed notice");
+      await expectNoHorizontalOverflow(dialog, "The setup dialog");
+      await expectPageNoHorizontalOverflow(page);
+      await expectFullyInViewport(notice.getByRole("button", { name: "Check Again" }), "Check Again");
+      const done = dialog.getByRole("button", { name: "Done" });
+      await done.scrollIntoViewIfNeeded();
+      await expectFullyInViewport(done, "Done");
+    });
   });
 }

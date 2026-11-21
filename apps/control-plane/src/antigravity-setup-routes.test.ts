@@ -47,10 +47,17 @@ test("a runner's setup is validated, version-gated, cleared on reconnect, and sh
     assert.throws(() => db.updateRunnerAntigravitySetup("runner-1", { ...signInRequired, output: "token" }, 620), /invalid/);
     assert.deepEqual(db.getRunner("runner-1")?.antigravitySetup, signInRequired, "a refused report changes nothing");
 
-    // A reconnect forgets the previous connection's setup (and any sign-in link it held) until the
-    // runner republishes its current one.
+    // A reconnect replaces the previous connection's setup (and any sign-in link it held) with the
+    // register frame's own, stored with the registration itself.
     db.registerRunner(meta(), 700, SUPPORTED);
     assert.equal(db.getRunner("runner-1")?.antigravitySetup, undefined);
+    const ready: AntigravitySetupView = { ...signInRequired, status: "ready", models: [{ id: "m", name: "Model" }] };
+    db.registerRunner({ ...meta(), antigravitySetup: ready }, 800, SUPPORTED);
+    assert.deepEqual(db.getRunner("runner-1")?.antigravitySetup, ready);
+    db.registerRunner({ ...meta(), antigravitySetup: { ...ready, models: [] } }, 900, SUPPORTED);
+    assert.equal(db.getRunner("runner-1")?.antigravitySetup, undefined, "an invalid frame setup is not reported, never kept stale");
+    db.registerRunner({ ...meta(), antigravitySetup: ready }, 1_000, SUPPORTED - 1);
+    assert.equal(db.getRunner("runner-1")?.antigravitySetup, undefined, "an older runner's frame is ignored");
   } finally {
     db.close();
   }

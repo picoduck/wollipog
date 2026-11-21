@@ -979,11 +979,15 @@ function defaultCodexImportSource(): ProviderCredentialImportSourceHome | undefi
 const antigravitySetup = new AntigravitySetupSupervisor({
   dataDir: config.dataDir,
   onUpdate: (setup) => {
+    // The register frame carries the latest setup, so registration stores it atomically: nothing
+    // later in the registration handler (session recovery, say) can leave it unpublished.
+    metadata.antigravitySetup = setup;
     if (registered && runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySetup")) {
       sendUp({ type: "antigravity_setup_updated", runnerId: config.runnerId, setup });
     }
   },
 });
+metadata.antigravitySetup = antigravitySetup.current();
 const providerCredentialImportSupported = providerCredentialImportHostSupported();
 const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSupervisor({
   dataDir: config.dataDir,
@@ -2521,7 +2525,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       skillStateReporter.resumeRequests(runnerSupportsProtocol(controlPlaneProtocolVersion, "skillRequestResumption")
         ? msg.pendingSkillRequests : undefined);
       harnessInstallationChoices = synchronizedHarnessChoices(controlPlaneProtocolVersion, msg.harnessInstallationChoices);
-      // Google Antigravity setup frames are connection-local (#4780): republish the current setup.
+      // Google Antigravity setup (#4780): the register frame carried the setup as it was then;
+      // republish it in case it changed before this reply (its frames are connection-local).
       if (runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySetup")) {
         sendUp({ type: "antigravity_setup_updated", runnerId: config.runnerId, setup: antigravitySetup.current() });
       }

@@ -8795,6 +8795,12 @@ export class ControlPlaneDb {
       const providerLogins = runnerSupportsProtocol(protocolVersion, "providerLogin")
         ? JSON.stringify(safeProviderLogins(meta.providerLogins ?? []))
         : null;
+      // v403 (#4780): the register frame's setup replaces the previous connection's. Anything a
+      // supported runner sends that does not validate is stored as not yet reported.
+      const antigravitySetup = runnerSupportsProtocol(protocolVersion, "antigravitySetup") &&
+          validAntigravitySetupView(meta.antigravitySetup)
+        ? JSON.stringify(meta.antigravitySetup)
+        : null;
       let containerTargets: string | null = null;
       if (runnerSupportsProtocol(protocolVersion, "containerExecutionTargets")) {
         const advertised = meta.executionTargets ?? [];
@@ -8817,16 +8823,16 @@ export class ControlPlaneDb {
         this.stmt(
             `UPDATE runners SET hostname=?, os=?, version=?, protocol_version=?, status='online',
                 connected_at=?, last_seen=?, updated_at=?, agents_refreshed_at=NULL,
-                editors=COALESCE(?, editors), runtime=?, container_targets=?, provider_accounts=?, provider_logins=?, antigravity_setup=NULL, capacity_status=NULL WHERE runner_id=?`,
+                editors=COALESCE(?, editors), runtime=?, container_targets=?, provider_accounts=?, provider_logins=?, antigravity_setup=?, capacity_status=NULL WHERE runner_id=?`,
           )
-          .run(meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, editors, runtime, containerTargets, providerAccounts, providerLogins, meta.runnerId);
+          .run(meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, editors, runtime, containerTargets, providerAccounts, providerLogins, antigravitySetup, meta.runnerId);
       } else {
         this.stmt(
             `INSERT INTO runners
-               (runner_id, hostname, os, version, protocol_version, status, connected_at, last_seen, created_at, updated_at, editors, runtime, container_targets, provider_accounts, provider_logins)
-             VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               (runner_id, hostname, os, version, protocol_version, status, connected_at, last_seen, created_at, updated_at, editors, runtime, container_targets, provider_accounts, provider_logins, antigravity_setup)
+             VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .run(meta.runnerId, meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, now, editors, runtime, containerTargets, providerAccounts, providerLogins);
+          .run(meta.runnerId, meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, now, editors, runtime, containerTargets, providerAccounts, providerLogins, antigravitySetup);
       }
       // A runner that cannot prove provider retirement now serves its sessions' live generations,
       // so their slots stay held whatever it, or a later runner, attests for them (#3788).
