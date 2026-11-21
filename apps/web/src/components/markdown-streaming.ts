@@ -93,7 +93,7 @@ function previewMarkers(
       // spans can start within a word and may have a space before their content.
       if (!isCode && (marker.length > 3 || before && WORD.test(before))) continue;
       if (marker === "*" && source[after] === "." && WORD.test(source[after + 1] ?? "")) continue;
-      if (marker === "**" && before === "/" && source[after] === "/") continue;
+      if (marker === "**" && source[after] === "/") continue;
       if (hideDangling && after >= lastText) {
         danglingAt = offset;
         break;
