@@ -148,7 +148,9 @@ export const ANTIGRAVITY_INSTALL_STAGES: readonly AntigravityInstallStage[] = [
  * - `archive_invalid`: the archive is unsafe (links, devices, absolute or `..` paths) or lacks a
  *   single regular `antigravity` file.
  * - `validation_failed`: the staged CLI failed `--version`, `acp --help` or the ACP handshake.
- * - `activation_failed`: the runner could not stage or activate the files. */
+ * - `activation_failed`: the runner could not stage or activate the files, or it stopped first.
+ * - `access_check_failed`: the new version was activated, but it failed the access check the version
+ *   before it passed, so the runner restored that version. */
 export type AntigravityInstallFailure =
   | "platform_not_supported"
   | "installer_not_recognized"
@@ -158,11 +160,12 @@ export type AntigravityInstallFailure =
   | "checksum_mismatch"
   | "archive_invalid"
   | "validation_failed"
-  | "activation_failed";
+  | "activation_failed"
+  | "access_check_failed";
 
 export const ANTIGRAVITY_INSTALL_FAILURES: readonly AntigravityInstallFailure[] = [
   "platform_not_supported", "installer_not_recognized", "redirect_refused", "download_failed", "timed_out",
-  "checksum_mismatch", "archive_invalid", "validation_failed", "activation_failed",
+  "checksum_mismatch", "archive_invalid", "validation_failed", "activation_failed", "access_check_failed",
 ];
 
 /** The provenance of one managed release: what was fetched and verified before activation. */
@@ -307,12 +310,14 @@ function hex(value: unknown, length: number): value is string {
   return typeof value === "string" && value.length === length && /^[0-9a-f]+$/u.test(value);
 }
 
-/** An HTTPS URL without credentials or a port whose host is `host`, or ends in `.suffix` labels. */
+/** An HTTPS URL whose host is `host`, or ends in `.suffix` labels, without credentials, a port, a
+ * query or a fragment. Google's release addresses carry none, and a query could carry a signed
+ * download token into the setup report and the runner log. */
 export function antigravityReleaseUrlAllowed(value: unknown, host: { exact?: string; suffix?: string }): value is string {
-  if (typeof value !== "string" || value.length > 2_048 || CONTROL.test(value)) return false;
+  if (typeof value !== "string" || value.length > 2_048 || CONTROL.test(value) || /[?#]/u.test(value)) return false;
   try {
     const url = new URL(value);
-    if (url.protocol !== "https:" || url.username || url.password || url.port) return false;
+    if (url.protocol !== "https:" || url.username || url.password || url.port || url.search || url.hash) return false;
     if (host.exact !== undefined) return url.hostname === host.exact;
     return host.suffix !== undefined && url.hostname.length > host.suffix.length && url.hostname.endsWith(host.suffix) &&
       /^[a-z0-9-]+(?:\.[a-z0-9-]+)*$/u.test(url.hostname);

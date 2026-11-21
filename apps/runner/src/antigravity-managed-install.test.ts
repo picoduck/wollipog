@@ -83,7 +83,8 @@ async function install(setup: AntigravitySetupSupervisor): Promise<AntigravitySe
   return until(setup, (view) => view.managedInstall?.operation?.operationId === operationId && settled(view));
 }
 
-function environments(): Array<{ label: string; copy: string; home: string | null; autoUpdateDisabled: string | null; present: string[] }> {
+function environments(): Array<{ label: string; copy: string; home: string | null; autoUpdateDisabled: string | null;
+  runtimeDir: string | null; sessionBus: string | null; present: string[] }> {
   const file = join(state, "environments.jsonl");
   return existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : [];
 }
@@ -325,4 +326,108 @@ test("a control plane before v404 receives the setup without the managed install
   // The v403 shape: only the keys an older validator accepts.
   assert.deepEqual(Object.keys(legacy).sort(), ["checkedAt", "credentialStore", "executable", "models", "status", "version"]);
   assert.deepEqual(Object.keys(legacy.executable!).sort(), ["path", "version"]);
+});
+
+test("a runner that starts stopping during activation keeps the version it had", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  let stopAt: string | undefined;
+  let target: AntigravitySetupSupervisor | undefined;
+  const { setup, managedRoot } = supervisor(server, {
+    onUpdate: (view) => { if (stopAt && view.managedInstall?.operation?.stage === stopAt) { stopAt = undefined; target?.shutdown(); } },
+  });
+  target = setup;
+  await install(setup);
+  const working = readlinkSync(join(managedRoot, "current"));
+
+  server.publish({ platform: PLATFORM, version: "1.6.0", archive: release("1.6.0") });
+  stopAt = "activating";
+  setup.startInstall();
+  const stopped = await until(setup, (view) => view.managedInstall?.operation?.status === "failed");
+  assert.equal(stopped.managedInstall?.operation?.failure, "activation_failed");
+  assert.equal(readlinkSync(join(managedRoot, "current")), working);
+  assert.equal(stopped.managedInstall?.active?.version, "1.5.14");
+  assert.equal(readdirSync(join(managedRoot, "generations")).length, 1, "the unactivated generation is removed");
+});
+
+test("an update that fails the access check its predecessor passed is rolled back", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  const { setup, published, managedRoot } = supervisor(server);
+  assert.equal((await install(setup)).status, "ready");
+  const working = readlinkSync(join(managedRoot, "current"));
+
+  // 1.6.0 starts and initializes, but can't open a session with the runner's sign-in.
+  server.publish({ platform: PLATFORM, version: "1.6.0", archive: release("1.6.0", "session_error") });
+  const rolledBack = await install(setup);
+  assert.equal(rolledBack.managedInstall?.operation?.status, "failed");
+  assert.equal(rolledBack.managedInstall?.operation?.failure, "access_check_failed");
+  assert.equal(readlinkSync(join(managedRoot, "current")), working);
+  assert.equal(rolledBack.status, "ready");
+  assert.equal(rolledBack.executable?.version, "1.5.14");
+  assert.equal(rolledBack.managedInstall?.active?.version, "1.5.14");
+  assert.equal(readdirSync(join(managedRoot, "generations")).length, 1, "the rejected generation is removed");
+  assertAllValid(published);
+
+  // A first managed copy beside a ready PATH copy is held to the same standard: on failure the
+  // managed copy is removed and the PATH copy is used again.
+  const beside = supervisor(server, { resolveExecutable: async () => pathAgy });
+  assert.equal((await beside.setup.check("never")).status, "ready");
+  const removed = await install(beside.setup);
+  assert.equal(removed.managedInstall?.operation?.failure, "access_check_failed");
+  assert.equal(removed.status, "ready");
+  assert.equal(removed.executable?.source, "path");
+  assert.equal(existsSync(join(beside.managedRoot, "current")), false);
+
+  // Without a sign-in, a first install that only needs one succeeds: nothing worked before it.
+  rmSync(join(state, "signed-in"));
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  const unsigned = supervisor(server);
+  assert.equal((await unsigned.setup.check("never")).status, "missing_runtime");
+  const installed = await install(unsigned.setup);
+  assert.equal(installed.managedInstall?.operation?.status, "succeeded");
+  assert.equal(installed.status, "sign_in_required");
+  assert.equal(installed.executable?.source, "managed");
+});
+
+test("a staged release is validated without the runner user's runtime folder or session bus", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  const saved = { runtime: process.env.XDG_RUNTIME_DIR, bus: process.env.DBUS_SESSION_BUS_ADDRESS };
+  process.env.XDG_RUNTIME_DIR = "/run/user/fixture";
+  process.env.DBUS_SESSION_BUS_ADDRESS = "unix:path=/run/user/fixture/bus";
+  try {
+    const { setup, managedRoot } = supervisor(server);
+    await install(setup);
+    const runs = environments().filter((entry) => entry.copy === "managed-1.5.14");
+    const validation = runs.filter((entry) => entry.home?.startsWith(join(managedRoot, "staging")));
+    assert.equal(validation.length, 3);
+    for (const entry of validation) {
+      assert.equal(entry.runtimeDir, entry.home, "the runtime folder is the private scratch folder");
+      assert.equal(entry.sessionBus, null);
+    }
+    // Once active, the managed copy runs in the runner user's own session, as the PATH copy would.
+    const active = runs.filter((entry) => !validation.includes(entry));
+    assert.ok(active.length > 0 && active.every((entry) => entry.sessionBus === "unix:path=/run/user/fixture/bus"));
+  } finally {
+    for (const [name, value] of [["XDG_RUNTIME_DIR", saved.runtime], ["DBUS_SESSION_BUS_ADDRESS", saved.bus]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test("a PATH entry leading into the managed folder doesn't hide a separate copy later on PATH", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  const aliased = supervisor(server, {
+    resolveExecutables: async () => [join(aliased.managedRoot, "current", "agy"), pathAgy],
+  });
+  await install(aliased.setup);
+  assert.equal(aliased.setup.current().managedInstall?.pathExecutable, pathAgy);
+  writeFileSync(join(aliased.managedRoot, "current", "agy"), "#!/bin/sh\nexit 3\n");
+  const fallback = await aliased.setup.check("never");
+  assert.equal(fallback.executable?.source, "path");
+  assert.equal(fallback.executable?.path, pathAgy);
+  assert.equal(fallback.managedInstall?.activeCheckFailed, true);
 });

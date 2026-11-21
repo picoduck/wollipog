@@ -133,7 +133,7 @@ export function AntigravitySetupDialog({ runner, presentation, machineName, retu
       )}
       {failedBeside && (
         <Notice tone="danger" title="Install Failed" role="alert" actions={installButton("Try Again")}>
-          <p>{antigravityInstallFailureSentence(failedBeside.operation.failure)} Nothing was installed, and the copy Wollipog found keeps working.</p>
+          <p>{antigravityInstallFailureSentence(failedBeside.operation.failure)} The copy Wollipog found keeps working.</p>
         </Notice>
       )}
       {install?.updateTo && !failedUpdate && (

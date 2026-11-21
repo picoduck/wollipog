@@ -293,7 +293,7 @@ const managedReady = (managedInstall: Partial<NonNullable<AntigravitySetupView["
   executable: { path: managedPath, version: "1.5.14", source: "managed" },
   managedInstall: { available: true, active: managedRelease("1.5.14"), pathExecutable: executable.path, ...managedInstall },
 });
-const failedOperation = (kind: "install" | "update", failure: "checksum_mismatch" | "validation_failed", targetVersion: string) => ({
+const failedOperation = (kind: "install" | "update", failure: "checksum_mismatch" | "validation_failed" | "access_check_failed", targetVersion: string) => ({
   operationId: "agy_install_1", kind, status: "failed" as const, startedAt: NOW, finishedAt: NOW, failure, targetVersion,
 });
 
@@ -379,6 +379,16 @@ test("a failed update shows the last working version kept, with the managed copy
     assert.match(text, /Installed and updated by Wollipog from Connections/u);
     assert.match(text, /self-updater is off/u);
     assert.match(text, new RegExp(`used if the managed copy stops working: ${executable.path}`, "u"));
+  } finally { await view.unmount(); }
+});
+
+test("an update rolled back after a failed access check says Wollipog went back to the working copy", async () => {
+  const view = await mount(runner(managedReady({ latest: { version: "1.6.0", checkedAt: NOW },
+    operation: failedOperation("update", "access_check_failed", "1.6.0") })));
+  try {
+    const opened = await openSetup(view.body);
+    assert.match(opened.textContent ?? "", /couldn.t open a session with this machine.s sign-in.*went back to that copy/u);
+    assert.match(opened.textContent ?? "", /Wollipog kept v1\.5\.14, the last working version, instead of v1\.6\.0/u);
   } finally { await view.unmount(); }
 });
 

@@ -71,5 +71,33 @@ for (const viewport of VIEWPORTS) {
       await done.scrollIntoViewIfNeeded();
       await expectFullyInViewport(done, "Done");
     });
+
+    // Managed install (v404): the longest variable details are the two executable paths beside a
+    // second notice, and the primary install action under Google's command.
+    for (const [state, noticeTitle, action] of [
+      ["update-failed", "Update Failed", "Try Again"],
+      ["update-available", "Update Available", "Update to v1.6.0"],
+      ["install-available", "Not Installed", "Install Google Antigravity"],
+      ["install-failed", "Install Failed", "Try Again"],
+    ] as const) {
+      test(`the ${state} state keeps its paths inside the dialog and ${action} reachable`, async ({ page }) => {
+        await page.setViewportSize({ width: viewport.width, height: viewport.height });
+        await page.goto(`/machine-management-e2e.html?machine=native-t14s&antigravity=${state}&longName&manyAgents`);
+        await page.locator('ul[aria-label="Agent Setup"] button.row').click();
+        const dialog = page.getByRole("dialog", { name: "Google Antigravity" });
+        const notice = dialog.locator(".notice", { hasText: noticeTitle });
+        await expect(notice).toBeVisible();
+        await dialogMotionSettled(page);
+        await expectNoHorizontalOverflow(notice, `The ${noticeTitle} notice`);
+        await expectNoHorizontalOverflow(dialog, "The setup dialog");
+        await expectPageNoHorizontalOverflow(page);
+        const button = notice.getByRole("button", { name: action });
+        await button.scrollIntoViewIfNeeded();
+        await expectFullyInViewport(button, action);
+        const done = dialog.getByRole("button", { name: "Done" });
+        await done.scrollIntoViewIfNeeded();
+        await expectFullyInViewport(done, "Done");
+      });
+    }
   });
 }

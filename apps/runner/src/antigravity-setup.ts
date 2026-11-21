@@ -38,6 +38,7 @@ import {
   ANTIGRAVITY_EXECUTABLE_NAME,
   AntigravityInstallError,
   AntigravityManagedStore,
+  type AntigravityActivation,
   antigravityReleasePlatform,
   detectAntigravityMusl,
   downloadAntigravityArchive,
@@ -48,7 +49,7 @@ import {
 import { acpInitializeRequest, negotiateAcpInitialize } from "./acp-contract.js";
 import { isAgentAuthRequiredError } from "./acp.js";
 import { normalizeAcpConfigOptions, optionForCategory } from "./acp-session-state.js";
-import { resolveNative } from "./discovery/resolve.js";
+import { resolveNativeCandidates } from "./discovery/resolve.js";
 import { JsonRpcPeer } from "./jsonrpc.js";
 import { killTreeAndWait, spawnAgent, type AgentProcess } from "./spawn.js";
 
@@ -95,16 +96,36 @@ export function antigravityCredentialContext(
   };
 }
 
+/** Session services a staged release must not reach while it is validated: the user's runtime
+ * folder, session bus (and with it the desktop keyring), agent sockets and display. */
+export const ANTIGRAVITY_VALIDATION_SCRUBBED_ENV = [
+  "XDG_RUNTIME_DIR",
+  "DBUS_SESSION_BUS_ADDRESS",
+  "SSH_AUTH_SOCK",
+  "GPG_AGENT_INFO",
+  "GNOME_KEYRING_CONTROL",
+  "GNOME_KEYRING_PID",
+  "KRB5CCNAME",
+  "DISPLAY",
+  "WAYLAND_DISPLAY",
+  "XAUTHORITY",
+] as const;
+
 /** The context a staged release is validated in, before it is activated: the managed context with
- * HOME, the XDG folders and TMPDIR inside the install's private scratch folder, so a release that
- * is not yet trusted never reads or writes the runner user's own files or sign-in. */
+ * HOME, the XDG folders (the runtime folder included) and TMPDIR inside the install's private
+ * scratch folder, and without the session bus, agent sockets or display. A release that is not yet
+ * trusted therefore doesn't use the runner user's files, keyring or sign-in in the ordinary course.
+ * It still runs as that user with no operating-system sandbox; the archive's SHA-512 from Google's
+ * manifest is what establishes that it is Google's build. */
 export function antigravityValidationContext(scratch: string, inherited: NodeJS.ProcessEnv = process.env): AntigravityCredentialContext {
   const managed = antigravityCredentialContext(inherited, { managed: true });
   return {
     ...managed,
+    scrubInheritedEnv: [...new Set([...managed.scrubInheritedEnv, ...ANTIGRAVITY_VALIDATION_SCRUBBED_ENV])],
     env: {
       ...managed.env,
       HOME: scratch,
+      XDG_RUNTIME_DIR: scratch,
       XDG_CONFIG_HOME: join(scratch, "config"),
       XDG_CACHE_HOME: join(scratch, "cache"),
       XDG_DATA_HOME: join(scratch, "data"),
@@ -400,6 +421,10 @@ export interface AntigravitySetupSupervisorOptions {
   /** Whether this Linux machine's C library is musl. Defaults to the installer's own detection. */
   musl?: () => boolean;
   inheritedEnv?: NodeJS.ProcessEnv;
+  /** The `agy` executables found for the runner's user, best first. The first one outside the
+   * managed folder is the PATH copy. */
+  resolveExecutables?: () => Promise<string[]>;
+  /** Single-result form of `resolveExecutables`, for tests. */
   resolveExecutable?: () => Promise<string | null>;
   spawn?: typeof spawnAgent;
   kill?: typeof killTreeAndWait;
@@ -521,11 +546,9 @@ export class AntigravitySetupSupervisor {
     this.managed.operation = operation;
     const abort = new AbortController();
     this.installAbort = abort;
-    this.installing = this.runInstall(operation, platformKey, abort.signal).then(async (activated) => {
-      this.installing = null;
-      this.installAbort = null;
-      if (activated && !this.stopped) await this.check("never");
-    });
+    // The install runs its own check after activation, and restores the version before it when
+    // that check is worse. It ends its own busy state before it publishes the outcome.
+    this.installing = this.runInstall(operation, platformKey, abort.signal).then(() => undefined);
     this.publish();
     return this.current();
   }
@@ -668,6 +691,15 @@ export class AntigravitySetupSupervisor {
     }
   }
 
+  private async resolvePathCandidates(): Promise<string[]> {
+    if (this.options.resolveExecutables) return this.options.resolveExecutables();
+    if (this.options.resolveExecutable) {
+      const path = await this.options.resolveExecutable();
+      return path ? [path] : [];
+    }
+    return (await resolveNativeCandidates("agy")).map((candidate) => candidate.path);
+  }
+
   private async refreshLatest(mode: AntigravityLatestRefresh, hasManaged: boolean): Promise<void> {
     const platformKey = this.releasePlatform();
     if (!platformKey || mode === "never" || (mode === "if_managed" && !hasManaged)) return;
@@ -694,8 +726,8 @@ export class AntigravitySetupSupervisor {
     }
     const managed = this.releasePlatform() ? this.readManaged() : null;
     const latestRead = this.refreshLatest(latest, !!managed);
-    let pathCopy = await (this.options.resolveExecutable ?? defaultResolveExecutable)().catch(() => null);
-    if (pathCopy && this.insideManagedStore(pathCopy)) pathCopy = null;
+    const pathCopy = (await this.resolvePathCandidates().catch(() => [] as string[]))
+      .find((candidate) => !this.insideManagedStore(candidate)) ?? null;
     this.managed.pathExecutable = pathCopy ?? undefined;
     this.managed.activeCheckFailed = undefined;
     const version = (path: string, isManaged: boolean) => checkAntigravityVersion({ command: path, args: [], cwd: this.options.dataDir,
@@ -743,6 +775,8 @@ export class AntigravitySetupSupervisor {
    * Any failure removes the staging folder and leaves the active version as it was. */
   private async runInstall(operation: AntigravityInstallOperationView, platformKey: string, signal: AbortSignal): Promise<boolean> {
     const fetch = this.options.fetch ?? defaultFetch;
+    // What the copy in use achieved before the install. The new version must do at least as well.
+    const before = accessRank(this.view.status);
     const setStage = (stage: AntigravityInstallStage) => this.updateOperation(operation.operationId, { stage });
     try {
       const release = await resolveAntigravityRelease(platformKey, {
@@ -779,6 +813,7 @@ export class AntigravitySetupSupervisor {
       if (this.stopped) throw new AntigravityInstallError("activation_failed", "The runner stopped before activation.");
       setStage("activating");
       await rm(staging.scratch, { recursive: true, force: true });
+      if (this.stopped) throw new AntigravityInstallError("activation_failed", "The runner stopped before activation.");
       const record: AntigravityManagedRelease = {
         version: release.version,
         activatedAt: this.now(),
@@ -787,28 +822,52 @@ export class AntigravitySetupSupervisor {
         archiveUrl: release.archiveUrl,
         archiveSha512: release.archiveSha512,
       };
+      let activation: AntigravityActivation;
       try {
-        await this.store.activate(staging, record);
-      } catch {
-        throw new AntigravityInstallError("activation_failed", "The runner couldn't activate the new release.");
+        // Asked before each pointer changes: a runner that began stopping activates nothing.
+        activation = await this.store.activate(staging, record, () => !this.stopped);
+      } catch (error) {
+        throw error instanceof AntigravityInstallError ? error
+          : new AntigravityInstallError("activation_failed", "The runner couldn't activate the new release.");
       }
+      this.readManaged();
+      // The activated version runs the ordinary check with the runner user's sign-in. If it does
+      // worse than the version before it (or the runner is stopping), that version is restored.
+      const verified = this.stopped ? undefined : await this.runCheck("never");
+      if (!verified || accessRank(verified.status) < before) {
+        await this.store.rollback(activation).catch(() => {});
+        this.readManaged();
+        if (!this.stopped) await this.runCheck("never");
+        throw new AntigravityInstallError(verified ? "access_check_failed" : "activation_failed",
+          "The new release didn't pass the access check its predecessor passed, so it was rolled back.");
+      }
+      await this.store.confirm().catch(() => {});
       this.readManaged();
       this.managed.latest = { version: release.version, checkedAt: this.now() };
       // Provenance for the runner's log and the generation's release.json: what was verified.
       this.options.log?.(`Google Antigravity ${operation.kind}: activated managed v${release.version} ` +
         `(reports ${validated.version}; installer sha256 ${release.installerSha256}; manifest ${release.manifestUrl}; ` +
         `archive ${release.archiveUrl}; sha512 ${release.archiveSha512})`);
-      this.finishOperation(operation.operationId, "succeeded");
       await this.store.discardStaging();
+      this.endInstall();
+      this.finishOperation(operation.operationId, "succeeded");
       return true;
     } catch (error) {
       const failure: AntigravityInstallFailure = error instanceof AntigravityInstallError ? error.failure : "activation_failed";
       await this.store.discardStaging();
       this.readManaged();
       this.options.log?.(`Google Antigravity ${operation.kind} failed (${failure}); the active version is unchanged.`);
+      this.endInstall();
       this.finishOperation(operation.operationId, "failed", failure);
       return false;
     }
+  }
+
+  /** The install is over: a check, sign-in or install that starts once its outcome is published
+   * runs normally. */
+  private endInstall(): void {
+    this.installing = null;
+    this.installAbort = null;
   }
 
   private updateOperation(operationId: string, patch: Partial<AntigravityInstallOperationView>): void {
@@ -925,6 +984,9 @@ export function antigravitySignInActive(view: AntigravitySetupView): boolean {
 
 const defaultFetch: AntigravityFetch = (input, init) => fetch(input, init);
 
-async function defaultResolveExecutable(): Promise<string | null> {
-  return (await resolveNative("agy"))?.path ?? null;
+/** How far a check got: confirmed access, a working runtime that needs a sign-in, or neither. */
+function accessRank(status: AntigravitySetupView["status"]): number {
+  return status === "ready" ? 2 : status === "sign_in_required" ? 1 : 0;
 }
+
+

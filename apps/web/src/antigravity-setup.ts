@@ -138,6 +138,8 @@ export function antigravityInstallFailureSentence(failure: AntigravityInstallFai
       return "Google's release archive wasn't in the expected form, so Wollipog discarded it.";
     case "validation_failed":
       return "The new version didn't pass Wollipog's checks: its version, its ACP help and an ACP handshake.";
+    case "access_check_failed":
+      return "The new version couldn't open a session with this machine's sign-in, which the copy before it could, so Wollipog went back to that copy.";
     case "activation_failed":
     default:
       return "Wollipog couldn't write the new version to the runner's data folder.";

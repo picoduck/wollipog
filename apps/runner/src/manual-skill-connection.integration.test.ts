@@ -6,7 +6,7 @@ import { test, type TestContext } from "node:test";
 import { runInNewContext } from "node:vm";
 import { transformSync } from "esbuild";
 import {
-  PROTOCOL_VERSION, parseMessage, runnerSupportsProtocol, reviewRetirementPeerRefusal,
+  PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, parseMessage, runnerSupportsProtocol, reviewRetirementPeerRefusal,
   type PendingSkillReportRequest, type RegisteredLocationSwitchLookupMessage, type RegisteredMessage, type SkillsStateMessage,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "../../control-plane/src/db.js";
@@ -164,6 +164,28 @@ test("a Google Antigravity setup that changes before the registered reply is pub
   const published = f.upFrames.slice(before).filter((frame) => frame.type === "antigravity_setup_updated");
   assert.deepEqual(published.map((frame) => frame.setup?.status), ["ready"],
     "the newer setup goes up before recovery can throw");
+});
+
+for (const [peer, expectManaged] of [[RUNNER_CAPABILITY_MIN_PROTOCOL.antigravityManagedInstall, true],
+  [RUNNER_CAPABILITY_MIN_PROTOCOL.antigravitySetup, false]] as const) test(`the registration republish ${expectManaged ? "sends" : "leaves out"} managed install fields for a v${peer} control plane`, async t => {
+  const managed = {
+    version: 1, status: "ready", checkedAt: 1, credentialStore: "shared_os_keyring",
+    executable: { path: "/fixture/antigravity-managed/current/agy", version: "1.5.14", source: "managed" },
+    models: [{ id: "m", name: "Model" }],
+    managedInstall: { available: true, active: { version: "1.5.14" } },
+  };
+  {
+    const f = fixture(t);
+    f.scope.antigravitySetup = { current: () => managed };
+    const before = f.upFrames.length;
+    const b = f.start(false);
+    b.socket.emit("message", Buffer.from(JSON.stringify({ ...b.response, protocolVersion: peer })));
+    const published = f.upFrames.slice(before).filter((frame) => frame.type === "antigravity_setup_updated")
+      .map((frame) => frame.setup as unknown as Record<string, unknown>);
+    assert.equal(published.length, 1, `one republish to a v${peer} peer`);
+    assert.equal("managedInstall" in published[0]!, expectManaged, `managed install fields to a v${peer} peer`);
+    assert.equal("source" in (published[0]!.executable as Record<string, unknown>), expectManaged);
+  }
 });
 
 test("registered Location lookup keeps timeouts and socket loss distinct from a correlated refusal", async t => {

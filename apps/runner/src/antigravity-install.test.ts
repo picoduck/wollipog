@@ -73,6 +73,7 @@ test("the installer script is read for its manifest service, and any other layou
     fakeInstallerScript({ base: "https://fixture-updater.run.app/prefix" }),
     fakeInstallerScript({ base: "https://fixture-updater.run.app:8443" }),
     fakeInstallerScript({ base: "https://user:secret@fixture-updater.run.app" }),
+    fakeInstallerScript({ base: "https://fixture-updater.run.app?token=fixture" }),
     fakeInstallerScript({ extraBase: "https://other.run.app" }),
     fakeInstallerScript({ manifestLine: 'MANIFEST_URL="$DOWNLOAD_BASE_URL/v2/$platform.json"' }),
     fakeInstallerScript({ extractLine: 'tar -xzf "$staging_payload" -C "$STAGING_DIR" agy' }),
@@ -94,6 +95,9 @@ test("the manifest must name an HTTPS tar.gz on storage.googleapis.com with a SH
     JSON.stringify({ version: "1.5.14", url: url.replace("storage.googleapis.com", "storage.googleapis.com.example.com"), sha512: sha }),
     JSON.stringify({ version: "1.5.14", url: url.replace("storage.googleapis.com", "example.com"), sha512: sha }),
     JSON.stringify({ version: "1.5.14", url: url.replace(".tar.gz", ".zip"), sha512: sha }),
+    // A signed query could carry a download token into the setup report and the runner log.
+    JSON.stringify({ version: "1.5.14", url: `${url}?X-Goog-Signature=fixture-signature`, sha512: sha }),
+    JSON.stringify({ version: "1.5.14", url: `${url}#fragment`, sha512: sha }),
     JSON.stringify({ version: "1.5.14", url, sha512: sha.slice(2) }),
     JSON.stringify({ version: "1.5.14", url, sha512: `${sha.slice(2)}zz` }),
   ];
@@ -206,6 +210,8 @@ test("unsafe, partial or ambiguous archives are refused whole", async () => {
     ["duplicate member", fakeTarGz([binary, { name: "./antigravity", content: "other" }])],
     ["truncated member", fakeTarGz([{ ...binary, declaredSize: 4_096 }], { end: false })],
     ["no end marker", fakeTarGz([binary], { end: false })],
+    ["one end block", fakeTarGz([binary], { endBlocks: 1 })],
+    ["data after the end", fakeTarGz([binary], { trailing: Buffer.from("trailing payload") })],
     ["not gzip", Buffer.from("plain bytes")],
     ["not tar", gzipSync(Buffer.alloc(1_024, 7))],
   ];
@@ -213,6 +219,8 @@ test("unsafe, partial or ambiguous archives are refused whole", async () => {
     assert.equal((await extract(archive)).error, "archive_invalid", name);
   }
   assert.equal((await extract(fakeTarGz([{ name: "antigravity", content: "x".repeat(2_000) }]), { maxBinaryBytes: 1_000 })).error, "archive_invalid");
+  // Record padding (zeros past the two end blocks) is fine.
+  assert.equal((await extract(fakeTarGz([binary], { trailing: Buffer.alloc(9_216, 0) }))).error, undefined);
 });
 
 function release(version: string): AntigravityManagedRelease {
@@ -232,21 +240,42 @@ async function stage(store: AntigravityManagedStore, now: number, content: strin
   return staging;
 }
 
-test("activation swaps current atomically and keeps exactly one previous generation", async () => {
+test("activation swaps current atomically, keeps exactly one previous generation and can be undone", async () => {
   const store = new AntigravityManagedStore(fresh("store"));
   assert.equal(store.read("current"), null);
 
-  const first = await store.activate(await stage(store, 1, "one"), release("1.0.0"));
+  const first = (await store.activate(await stage(store, 1, "one"), release("1.0.0"))).generation;
+  await store.confirm();
   assert.equal(readlinkSync(join(store.root, "current")), `generations/${first.id}`);
   assert.equal(readFileSync(store.executablePath(), "utf8"), "one");
   assert.equal(store.read("previous"), null);
 
-  const second = await store.activate(await stage(store, 2, "two"), release("1.1.0"));
+  const second = (await store.activate(await stage(store, 2, "two"), release("1.1.0"))).generation;
+  await store.confirm();
   assert.equal(readFileSync(store.executablePath(), "utf8"), "two");
   assert.equal(store.read("current")?.release.version, "1.1.0");
   assert.equal(store.read("previous")?.id, first.id);
 
-  const third = await store.activate(await stage(store, 3, "three"), release("1.2.0"));
+  // An activation that is rolled back restores both pointers and removes only its own generation.
+  const rejected = await store.activate(await stage(store, 3, "rejected"), release("1.1.5"));
+  assert.equal(readFileSync(store.executablePath(), "utf8"), "rejected");
+  assert.ok(existsSync(first.directory), "nothing is removed before the new version is confirmed");
+  await store.rollback(rejected);
+  assert.equal(store.read("current")?.id, second.id);
+  assert.equal(store.read("previous")?.id, first.id);
+  assert.equal(existsSync(rejected.generation.directory), false);
+
+  // A runner that starts stopping before the pointers change activates nothing.
+  for (const allowed of [0, 1, 2]) {
+    let asked = 0;
+    await assert.rejects(store.activate(await stage(store, 4 + allowed, "stopped"), release("1.1.9"), () => asked++ < allowed),
+      (error: unknown) => error instanceof AntigravityInstallError && error.failure === "activation_failed");
+    assert.equal(store.read("current")?.id, second.id, `stopped after ${allowed} pointer checks`);
+    assert.equal(store.read("previous")?.id, first.id);
+  }
+
+  const third = (await store.activate(await stage(store, 7, "three"), release("1.2.0"))).generation;
+  await store.confirm();
   assert.equal(store.read("current")?.id, third.id);
   assert.equal(store.read("previous")?.id, second.id);
   assert.equal(existsSync(first.directory), false, "a generation older than previous is removed");
@@ -259,6 +288,13 @@ test("activation swaps current atomically and keeps exactly one previous generat
   await store.discardStaging();
   assert.equal(existsSync(join(store.root, "staging")), false);
   assert.equal(store.read("current")?.id, third.id, "discarding staging never touches the active generation");
+
+  // Undoing a first activation removes current, so the PATH copy is used again.
+  const firstStore = new AntigravityManagedStore(fresh("first"));
+  const only = await firstStore.activate(await stage(firstStore, 1, "one"), release("1.0.0"));
+  await firstStore.rollback(only);
+  assert.equal(firstStore.read("current"), null);
+  assert.equal(existsSync(join(firstStore.root, "current")), false);
 
   // A damaged generation is not reported as installed.
   writeFileSync(join(third.directory, "release.json"), JSON.stringify({ ...release("1.2.0"), archiveUrl: "https://example.com/x.tar.gz" }));

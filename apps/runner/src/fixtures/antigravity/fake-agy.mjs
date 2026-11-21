@@ -25,6 +25,7 @@ function recordEnvironment(label) {
   appendFileSync(join(state, "environments.jsonl"), `${JSON.stringify({
     label, copy: process.env.FAKE_AGY_LABEL ?? "path", present, home: process.env.HOME ?? null,
     autoUpdateDisabled: process.env.AGY_CLI_DISABLE_AUTO_UPDATE ?? null,
+    runtimeDir: process.env.XDG_RUNTIME_DIR ?? null, sessionBus: process.env.DBUS_SESSION_BUS_ADDRESS ?? null,
   })}\n`);
 }
 

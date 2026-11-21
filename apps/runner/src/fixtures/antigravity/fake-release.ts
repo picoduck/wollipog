@@ -72,8 +72,9 @@ function tarHeader(entry: FakeTarEntry, size: number): Buffer {
   return block;
 }
 
-/** A tar archive of `entries`, gzipped. `end: false` leaves out the end-of-archive blocks. */
-export function fakeTarGz(entries: FakeTarEntry[], options: { end?: boolean; truncateTo?: number } = {}): Buffer {
+/** A tar archive of `entries`, gzipped. `end: false` leaves out the end-of-archive blocks,
+ * `endBlocks` writes another number of them (2 by default), and `trailing` appends bytes after. */
+export function fakeTarGz(entries: FakeTarEntry[], options: { end?: boolean; endBlocks?: number; trailing?: Buffer; truncateTo?: number } = {}): Buffer {
   const parts: Buffer[] = [];
   for (const entry of entries) {
     const content = Buffer.from(entry.content ?? "");
@@ -82,7 +83,8 @@ export function fakeTarGz(entries: FakeTarEntry[], options: { end?: boolean; tru
     const padding = (512 - (content.length % 512)) % 512;
     parts.push(Buffer.alloc(padding, 0));
   }
-  if (options.end !== false) parts.push(Buffer.alloc(1024, 0));
+  if (options.end !== false) parts.push(Buffer.alloc(512 * (options.endBlocks ?? 2), 0));
+  if (options.trailing) parts.push(options.trailing);
   let tar = Buffer.concat(parts);
   if (options.truncateTo !== undefined) tar = tar.subarray(0, options.truncateTo);
   return gzipSync(tar);

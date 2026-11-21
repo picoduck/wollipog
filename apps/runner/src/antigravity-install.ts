@@ -380,6 +380,13 @@ export async function extractAntigravityBinary(
   let buffer: Buffer = Buffer.alloc(0);
   let expanded = 0;
   let ended = false;
+  // Zero bytes after the first end-of-archive block. A tar ends with two zero blocks, and record
+  // padding may add more zeros; anything else after the first block refuses the archive.
+  let trailing = 0;
+  const trailer = (bytes: Buffer) => {
+    if (bytes.some((byte) => byte !== 0)) throw invalid("Google's release archive has data after its end.");
+    trailing += bytes.length;
+  };
   let found = false;
   let pendingPath: string | undefined;
   // The member being read: its remaining bytes, its padding, and where they go.
@@ -442,7 +449,7 @@ export async function extractAntigravityBinary(
       for await (const chunk of gunzip) {
         expanded += (chunk as Buffer).length;
         if (expanded > maxExpanded) throw invalid("Google's release archive expands beyond what Wollipog accepts.");
-        if (ended) continue;
+        if (ended) { trailer(chunk as Buffer); continue; }
         buffer = buffer.length ? Buffer.concat([buffer, chunk as Buffer]) : chunk as Buffer;
         for (;;) {
           const current = state.entry;
@@ -466,7 +473,12 @@ export async function extractAntigravityBinary(
           if (buffer.length < 512) break;
           const block = buffer.subarray(0, 512);
           buffer = buffer.subarray(512);
-          if (block.every((byte) => byte === 0)) { ended = true; break; }
+          if (block.every((byte) => byte === 0)) {
+            ended = true;
+            trailer(buffer);
+            buffer = Buffer.alloc(0);
+            break;
+          }
           await startMember(Buffer.from(block));
         }
       }
@@ -474,7 +486,7 @@ export async function extractAntigravityBinary(
       if (error instanceof AntigravityInstallError) throw error;
       throw invalid("Google's release archive couldn't be decompressed.");
     }
-    if (!ended || state.entry || pendingPath !== undefined) throw invalid("Google's release archive is incomplete.");
+    if (!ended || trailing < 512 || state.entry || pendingPath !== undefined) throw invalid("Google's release archive is incomplete.");
     if (!found || !out || !outFailed) throw invalid("Google's release archive has no antigravity binary.");
     const target = out;
     await Promise.race([closed(target, "The Antigravity binary couldn't be written."), outFailed]);
@@ -499,6 +511,13 @@ export interface AntigravityGeneration {
   id: string;
   directory: string;
   release: AntigravityManagedRelease;
+}
+
+/** An activated generation and the pointer targets it replaced, kept until the new version proves
+ * itself: `confirm` keeps it, and `rollback` restores the pointers exactly. */
+export interface AntigravityActivation {
+  generation: AntigravityGeneration;
+  replaced: { current?: string; previous?: string };
 }
 
 /** The runner's managed copies under `<dataDir>/antigravity-managed`:
@@ -547,24 +566,58 @@ export class AntigravityManagedStore {
     return { id, directory, scratch };
   }
 
-  /** Make a validated staging folder the current generation. The old current becomes `previous`;
-   * older generations are removed. Each pointer is swapped by renaming a new symlink over it. */
-  async activate(staging: { id: string; directory: string }, release: AntigravityManagedRelease): Promise<AntigravityGeneration> {
+  /** Make a validated staging folder the current generation, and the old current `previous`. Each
+   * pointer is swapped by renaming a new symlink over it. `proceed` is asked before each pointer
+   * changes (the runner may be stopping): a refusal undoes what changed and activates nothing.
+   * Nothing is removed until `confirm`. */
+  async activate(
+    staging: { id: string; directory: string },
+    release: AntigravityManagedRelease,
+    proceed: () => boolean = () => true,
+  ): Promise<AntigravityActivation> {
+    const stopped = () => new AntigravityInstallError("activation_failed", "The runner stopped before activation.");
     await writeFile(join(staging.directory, RELEASE_RECORD), `${JSON.stringify(release, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     const generations = join(this.root, "generations");
     await mkdir(generations, { recursive: true, mode: 0o700 });
+    if (!proceed()) throw stopped();
     const directory = join(generations, staging.id);
     await rename(staging.directory, directory);
-    let old: string | undefined;
-    try { old = readlinkSync(join(this.root, "current")); } catch { old = undefined; }
-    if (old) await this.swap("previous", old);
-    await this.swap("current", `generations/${staging.id}`);
+    const replaced = { ...this.target("current"), ...this.target("previous") };
+    const activation: AntigravityActivation = { generation: { id: staging.id, directory, release }, replaced };
+    try {
+      if (!proceed()) throw stopped();
+      if (replaced.current) await this.swap("previous", replaced.current);
+      if (!proceed()) throw stopped();
+      await this.swap("current", `generations/${staging.id}`);
+    } catch (error) {
+      await this.rollback(activation).catch(() => {});
+      throw error;
+    }
+    return activation;
+  }
+
+  /** Keep an activation: remove generations neither pointer names, so one previous remains. */
+  async confirm(): Promise<void> {
     await this.prune();
-    return { id: staging.id, directory, release };
+  }
+
+  /** Undo an activation: restore both pointers to what they named before, then remove the new
+   * generation. With nothing before it, `current` is removed, so the PATH copy is used again. */
+  async rollback(activation: AntigravityActivation): Promise<void> {
+    for (const pointer of ["current", "previous"] as const) {
+      const target = activation.replaced[pointer];
+      if (target) await this.swap(pointer, target);
+      else await rm(join(this.root, pointer), { force: true });
+    }
+    await this.prune();
   }
 
   async discardStaging(): Promise<void> {
     await rm(join(this.root, "staging"), { recursive: true, force: true }).catch(() => {});
+  }
+
+  private target(pointer: "current" | "previous"): { current?: string; previous?: string } {
+    try { return { [pointer]: readlinkSync(join(this.root, pointer)) }; } catch { return {}; }
   }
 
   private async swap(pointer: "current" | "previous", target: string): Promise<void> {

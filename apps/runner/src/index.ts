@@ -981,14 +981,16 @@ const antigravitySetup = new AntigravitySetupSupervisor({
   log,
   onUpdate: (setup) => {
     // The register frame carries the latest setup, so registration stores it atomically: nothing
-    // later in the registration handler (session recovery, say) can leave it unpublished.
-    metadata.antigravitySetup = setup;
+    // later in the registration handler (session recovery, say) can leave it unpublished. The peer's
+    // version is unknown when it is sent, so it carries the v403 shape every peer accepts; the
+    // registration republish then sends the managed install fields to a v404 peer.
+    metadata.antigravitySetup = antigravitySetupForControlPlane(setup, false);
     if (registered && runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySetup")) {
       sendUp({ type: "antigravity_setup_updated", runnerId: config.runnerId, setup: antigravitySetupForPeer(setup) });
     }
   },
 });
-metadata.antigravitySetup = antigravitySetup.current();
+metadata.antigravitySetup = antigravitySetupForControlPlane(antigravitySetup.current(), false);
 /** On `registered`: the register frame carried the setup as it was then, and its frames are
  * connection-local, so the current setup goes up once more in case it changed before the reply. */
 function publishAntigravitySetupOnRegistration(): void {

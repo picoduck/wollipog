@@ -1445,7 +1445,8 @@ Antigravity agent, so Antigravity is not offered in New Session, and nothing her
 - **Resolution (v404).** A working managed copy (below) is preferred. The operator-installed copy on
   PATH is used when there is no managed copy, or when the managed copy fails its version check, and
   Wollipog never changes it. The setup names the executable in use (`executable.source`: `managed`
-  or `path`), the PATH copy kept as the fallback (`managedInstall.pathExecutable`), and
+  or `path`), the PATH copy kept as the fallback (`managedInstall.pathExecutable`: the first `agy`
+  on PATH that isn't a link into the managed folder), and
   `managedInstall.activeCheckFailed` when the fallback is in use because the managed copy failed.
   The managed launch path is `<dataDir>/antigravity-managed/current/agy`, so an update changes what
   the next launch runs without disturbing one already running.
@@ -1465,32 +1466,42 @@ Antigravity agent, so Antigravity is not offered in New Session, and nothing her
      library the runner's own Node process reports instead of running `ldd`. Other platforms keep the
      guidance only (`managedInstall.available: false`). The manifest is
      `{"version": "1.5.14", "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/<version>-<build>/<platform-dir>/cli_<os>_<arch>.tar.gz", "sha512": "<128 hex>"}`.
-     Its `url` must be HTTPS on `storage.googleapis.com` and end in `.tar.gz`.
+     Its `url` must be HTTPS on `storage.googleapis.com`, end in `.tar.gz` and have no query or
+     fragment, so a signed download token can never reach the setup report or the runner log.
   3. Download the archive into `<dataDir>/antigravity-managed/staging/<id>/` (512 MiB cap, 20-minute
      limit, same-origin redirects only), hashing it as it streams, and refuse it unless its SHA-512
      equals the manifest's.
   4. Extract only the single regular `antigravity` member as `agy`, mode 0755 (1 GiB cap). Links,
-     devices, absolute or `..` paths, a duplicate or missing member, or a truncated archive refuse the
-     whole archive (`archive_invalid`).
-  5. Validate the staged binary with HOME, the XDG folders and TMPDIR inside a private scratch
-     folder, so a release not yet trusted never touches the runner user's files or sign-in:
-     `agy --version` must print a version, `agy acp --help` must succeed, and `agy acp` must complete
-     an ACP `initialize` handshake.
+     devices, absolute or `..` paths, a duplicate or missing member, a truncated archive, a missing
+     second end-of-archive block or data after it refuse the whole archive (`archive_invalid`).
+  5. Validate the staged binary with HOME, the XDG folders (the runtime folder included) and TMPDIR
+     inside a private scratch folder, and without the session bus, agent sockets or display, so a
+     release not yet trusted doesn't use the runner user's files, keyring or sign-in in the ordinary
+     course: `agy --version` must print a version, `agy acp --help` must succeed, and `agy acp` must
+     complete an ACP `initialize` handshake. It still runs as the runner's user without an
+     operating-system sandbox. The manifest's SHA-512 is what establishes it is Google's build.
   6. Activate: rename the staging folder to `generations/<id>/` with a `release.json` provenance
      record, point `previous` at the old generation, and swap the `current` symlink by renaming a new
-     link over it. Exactly one previous generation is kept, and older ones are removed.
+     link over it. A runner that begins stopping before a pointer changes activates nothing.
+  7. Verify: run the ordinary check, with the runner user's sign-in, against the activated version.
+     If it does worse than the copy in use before the install (`ready` over `sign_in_required` over
+     anything else), restore both pointers, so the previous managed version (or, for a first
+     install, the PATH copy) is used again, and report `access_check_failed`. Only then are
+     generations other than `current` and `previous` removed, keeping exactly one previous.
 
   Any failure removes the staging folder, leaves `current` untouched and reports a distinct
   `managedInstall.operation.failure` (`platform_not_supported`, `installer_not_recognized`,
   `redirect_refused`, `download_failed`, `timed_out`, `checksum_mismatch`, `archive_invalid`,
-  `validation_failed` or `activation_failed`). The card then shows the version still active. The
+  `validation_failed`, `activation_failed` or `access_check_failed`). The card then shows the version still active. The
   provenance (installer SHA-256, manifest URL, version, archive URL and SHA-512) is recorded in the
   setup (`managedInstall.active`), in the generation's `release.json` and in the runner log.
   Operations are kept in memory, so a finished install's outcome lasts until the runner restarts.
   `managedInstall.latest` is Google's newest version. It is read on a person's Check Again, and at
   runner start only when a managed copy exists, never on a timer. The card offers an update only when
   that version is newer than the active managed one. A runner sends the v404 fields only to a v404
-  control plane; an older one receives the v403 shape.
+  control plane; an older one receives the v403 shape. The register frame always carries the v403
+  shape, because the peer's version isn't known yet, and the registration republish adds the v404
+  fields for a v404 peer.
 - **Credential context.** `antigravityCredentialContext()` (`apps/runner/src/antigravity-setup.ts`)
   is the single launch environment for the version check, sign-in and access check, and it is
   exported for #4779's session launch. It keeps the runner user's HOME and drops ambient
