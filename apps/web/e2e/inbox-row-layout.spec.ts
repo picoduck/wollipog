@@ -420,50 +420,141 @@ test.describe("with a row in every status", () => {
     }
   }
 
-  // Cross-model review of #2209: the densest phone status line (Authentication Required, the strip and
-  // a weekday return time) clipped its time at 320px. The badge is what gives way; the strip and the
-  // time stay whole inside the line.
-  for (const width of [320, 390] as const) {
-    test(`a phone card's status line keeps its strip and time whole at ${width}px`, async ({ page }) => {
-      await page.setViewportSize({ width, height: 844 });
-      await page.goto(ROWS);
-      await expect(page.locator(".inbox-row")).toHaveCount(15);
-      // In the widest face CI renders, so a line that only just fits on one machine cannot clip on another.
-      await pinWidestFace(page, page.locator(".inbox-row"));
-      const lines = await page.locator(".inbox-row-status-line").evaluateAll((nodes) => nodes.map((line) => {
-        const box = line.getBoundingClientRect();
-        const inside = (selector: string) => {
-          const item = line.querySelector<HTMLElement>(selector);
-          if (!item) return null;
-          const itemBox = item.getBoundingClientRect();
-          return itemBox.left >= box.left - 0.5 && itemBox.right <= box.right + 0.5 && itemBox.width > 0;
-        };
-        // The badge ITSELF, not its wrapper: a wrapper can shrink while the badge paints past it.
-        const badge = line.querySelector<HTMLElement>(".row-status .status");
-        const strip = line.querySelector<HTMLElement>(".inbox-row-activity");
-        const next = strip ?? line.querySelector<HTMLElement>(".inbox-row-time")!;
-        return {
-          title: line.closest(".inbox-row")!.querySelector(".inbox-row-title")!.textContent,
-          time: inside(".inbox-row-time"),
-          strip: inside(".inbox-row-activity"),
-          badge: badge ? inside(".row-status .status")
-            && (badge.getBoundingClientRect().right <= next.getBoundingClientRect().left + 0.5
-              || badge.getBoundingClientRect().bottom <= next.getBoundingClientRect().top + 0.5) : null,
-          badgeWhole: badge ? badge.scrollWidth <= badge.clientWidth + 0.5 : null,
-        };
-      }));
-      const dense = lines.find((line) => line.title?.startsWith("Snoozed and Blocked"))!;
-      expect(dense).toMatchObject({ time: true, strip: true, badge: true });
-      for (const line of lines) {
-        expect(line.time, `${line.title}: the time stays whole`).toBe(true);
-        if (line.strip !== null) expect(line.strip, `${line.title}: the strip stays whole`).toBe(true);
-        if (line.badge !== null) expect(line.badge, `${line.title}: the badge stays inside the line`).toBe(true);
-        // The branch gives way before the status does; only the densest card clips its badge.
-        if (line.badgeWhole !== null && !line.title?.startsWith("Snoozed and Blocked")) {
-          expect(line.badgeWhole, `${line.title}: the badge is whole`).toBe(true);
+  /*
+   * #4791: a phone card is three lines whatever it carries. Its status line is one line that gives way
+   * (the branch, then the strip, then the secondary badge folds into "+N") instead of wrapping onto a
+   * fourth; the time and the flags trail line one, whole, inside the card. Every row in every status,
+   * a thread family and the dense cards that used to wrap, top-level and indented, in the widest face
+   * CI renders, under a mouse and under touch, where ⋯ keeps a column on the title line only.
+   */
+  for (const width of [320, 390, 412] as const) {
+    for (const touch of [false, true]) {
+      test(`every phone card stays three lines with its time on line one at ${width}px${touch ? " on touch" : ""}`, async ({ browser }) => {
+        // Tall enough that the virtualizer mounts every card.
+        const context = await browser.newContext({ viewport: { width, height: 2600 }, hasTouch: touch });
+        const page = await context.newPage();
+        try {
+          await page.goto(`${ROWS}?dense=1&family=1`);
+          await expect(page.locator(".inbox-row")).toHaveCount(23);
+          await pinWidestFace(page, page.locator(".inbox-row"));
+          // A face pinned after the first layout changes no box, so nudge the width to re-fit every line.
+          // Each step needs its own frame: a ResizeObserver compares sizes once per frame, so a nudge
+          // there and back within one frame reports nothing.
+          const nextFrames = () => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+          await page.setViewportSize({ width: width - 1, height: 2600 });
+          await nextFrames();
+          await page.setViewportSize({ width, height: 2600 });
+          await expect.poll(() => page.locator(".inbox-row-shell.stacked").count()).toBe(23);
+          await nextFrames();
+          const cards = await page.locator(".inbox-row").evaluateAll((rows, touch) => rows.map((row) => {
+            const rowBox = row.getBoundingClientRect();
+            const style = getComputedStyle(row);
+            const contentRight = rowBox.right - parseFloat(style.borderRightWidth) - parseFloat(style.paddingRight);
+            const lineOne = row.querySelector<HTMLElement>(".inbox-row-sender-line")!;
+            const line = row.querySelector<HTMLElement>(".inbox-row-status-line")!;
+            const lineBox = line.getBoundingClientRect();
+            // Drawn on the line: not `display: none`, and neither it nor any ancestor up to the line left
+            // in the name only (`.sr-only`-style, which a clipped ancestor hides its whole subtree with).
+            const shown = (element: Element | null): element is HTMLElement => {
+              if (element === null || (element as HTMLElement).getClientRects().length === 0) return false;
+              for (let node: Element | null = element; node && node !== line; node = node.parentElement) {
+                const style = getComputedStyle(node);
+                if (style.position === "absolute" || style.clipPath !== "none") return false;
+              }
+              return true;
+            };
+            const whole = (element: HTMLElement, box: DOMRect) => {
+              const r = element.getBoundingClientRect();
+              return r.width > 0 && r.left >= box.left - 0.5 && r.right <= box.right + 0.5
+                && element.scrollWidth <= element.clientWidth + 0.5;
+            };
+            const time = row.querySelector<HTMLElement>(".inbox-row-time")!;
+            const statuses = [...line.querySelectorAll<HTMLElement>(".row-status > .status")].filter(shown);
+            const strip = line.querySelector(".inbox-row-activity");
+            const more = row.closest(".inbox-row-primary-cell")!.querySelector<HTMLElement>(".inbox-row-more")!;
+            // The title line's content box: its padding is the column it keeps free for ⋯.
+            const copy = row.querySelector<HTMLElement>(".inbox-row-copy")!;
+            const title = { right: copy.getBoundingClientRect().right - parseFloat(getComputedStyle(copy).paddingRight) };
+            return {
+              title: row.querySelector(".inbox-row-title")!.textContent,
+              height: Math.round(rowBox.height),
+              lineHeight: lineBox.height,
+              lineOverflow: line.scrollWidth - line.clientWidth,
+              fit: line.dataset.fit ?? "",
+              statuses: statuses.length,
+              lifecycleWhole: statuses[0] ? whole(statuses[0], lineBox) : false,
+              stripShown: shown(strip),
+              stripWhole: shown(strip) ? whole(strip, lineBox) : null,
+              folded: shown(line.querySelector(".row-status-collapsed")),
+              branch: line.querySelector(".inbox-row-branch-name")?.textContent ?? null,
+              branchShown: shown(line.querySelector(".inbox-row-branch")),
+              // A pull request that needs the person (#604): always drawn, inside the line, its whole
+              // label still in the DOM (and so the name) even when it ends in an ellipsis.
+              prAttention: (() => {
+                const pr = line.querySelector<HTMLElement>(".inbox-row-pr > .status");
+                if (!pr) return null;
+                const r = pr.getBoundingClientRect();
+                // Inside the line AND inside the Git group, which clips what overflows it.
+                const group = pr.closest(".inbox-row-git")!.getBoundingClientRect();
+                const within = (box: DOMRect) => r.left >= box.left - 0.5 && r.right <= box.right + 0.5;
+                return { shown: shown(pr), inside: r.width > 0 && within(lineBox) && within(group), text: pr.textContent };
+              })(),
+              timeOnLineOne: time.closest(".inbox-row-sender-line") === lineOne,
+              timeWhole: whole(time, rowBox) && time.getBoundingClientRect().right <= contentRight + 0.5,
+              timeHeight: time.getBoundingClientRect().height,
+              dotOnLineOne: row.querySelector(".inbox-unread-dot")
+                ? row.querySelector(".inbox-unread-dot")!.closest(".inbox-row-sender-line") === lineOne : null,
+              // On touch ⋯ is always drawn, and the title line keeps clear of it; the lines above and
+              // below it run to the card's own padding.
+              titleClearOfMore: touch ? title.right <= more.getBoundingClientRect().left + 0.5 : true,
+              lineToEdge: Math.abs(lineBox.right - contentRight) <= 0.5,
+            };
+          }), touch);
+          expect(cards).toHaveLength(23);
+          expect(new Set(cards.map((card) => card.height)).size, `one height: ${cards.map((c) => `${c.title} ${c.height}`).join(", ")}`)
+            .toBe(1);
+          for (const card of cards) {
+            expect(card.lineHeight, `${card.title}: the status line is one line`).toBeLessThanOrEqual(20.5);
+            expect(card.lineOverflow, `${card.title}: nothing is cut off the status line`).toBeLessThanOrEqual(0.5);
+            expect(card.lifecycleWhole, `${card.title}: the lifecycle badge stays whole`).toBe(true);
+            if (card.stripWhole !== null) expect(card.stripWhole, `${card.title}: a shown strip is whole`).toBe(true);
+            expect(card.timeOnLineOne, `${card.title}: the time trails line one`).toBe(true);
+            expect(card.timeWhole, `${card.title}: the time is whole inside the card`).toBe(true);
+            expect(card.timeHeight, `${card.title}: the time is one line`).toBeLessThanOrEqual(20);
+            if (card.dotOnLineOne !== null) expect(card.dotOnLineOne, `${card.title}: the unread dot is on line one`).toBe(true);
+            expect(card.titleClearOfMore, `${card.title}: the title stops before ⋯`).toBe(true);
+            expect(card.lineToEdge, `${card.title}: the status line runs the card's width`).toBe(true);
+          }
+          // The dense cards keep two statuses where there is room, and fold the second, never the first.
+          for (const title of ["Dense: Number-Line", "Dense Child: PR #94"]) {
+            const dense = cards.find((card) => card.title?.startsWith(title))!;
+            expect(dense.statuses + (dense.folded ? 1 : 0), `${title}: both statuses are accounted for`).toBe(2);
+            if (dense.folded) expect(dense.fit).toContain("badge");
+          }
+          if (width >= 390) {
+            const top = cards.find((card) => card.title?.startsWith("Dense: Number-Line"))!;
+            expect(top, "a 390px phone keeps both badges and the strip on a top-level dense card")
+              .toMatchObject({ statuses: 2, folded: false, stripShown: true });
+          }
+          // The depth-2 grandchild's merge-queue warning outlives every drop, whole or ellipsized.
+          const dequeued = cards.find((card) => card.title?.startsWith("Dequeued Grandchild"))!;
+          expect(dequeued.prAttention, "the dequeued warning stays on the line").toEqual({
+            shown: true, inside: true, text: "Dequeued: Check Failed" });
+          expect(dequeued.fit, "its branch gave way first").toContain("branch");
+          // A dropped branch leaves the eye, not the card's accessible name (cross-model review).
+          const dropped = cards.filter((card) => card.branch !== null && !card.branchShown);
+          expect(dropped.length, "the fixture drops at least one branch").toBeGreaterThan(0);
+          for (const card of dropped) {
+            const button = page.locator(".inbox-row", { has: page.locator(".inbox-row-title", { hasText: card.title! }) });
+            await expect(button, `${card.title}: still named with its branch`)
+              .toHaveAccessibleName(new RegExp(`Branch: ${card.branch!.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}`));
+          }
+          expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        } finally {
+          await context.close();
         }
-      }
-    });
+      });
+    }
   }
 
   // Silence does not add a danger badge or rail over the selected row's accent bar (#4167).
