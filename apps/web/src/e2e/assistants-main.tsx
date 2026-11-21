@@ -57,6 +57,7 @@ const streamingReply = params.has("streaming-reply");
 const scenario = params.get("threads") ?? "some";
 const attentionCount = Number(params.get("attention") ?? 0);
 const limitsScenario = params.get("limits");
+const overBudgetBar = params.get("thread-bar") === "over-budget";
 const panelScenario = params.get("thread-panel");
 const campaignScenario = params.has("campaign");
 const resultScenario = params.get("confirmation-result");
@@ -452,12 +453,17 @@ if (params.get("launched") === "many") {
 if (limitsScenario) {
   for (const item of threads) {
     item.usage = {
-      costUsd: { used: item.id === "thr_triage" ? 8.13 : 0, limit: 25 },
+      costUsd: { used: item.id === "thr_triage" ? (overBudgetBar ? 80 : 8.13) : 0, limit: 25 },
       launchedSessions: { used: item.launchedSessionIds.length, limit: limitsScenario === "stress" ? null : 10 },
     };
     if (item.status !== "archived" && limitsScenario !== "old") item.limitsEditable = true;
     if (item.id === "thr_triage" && limitsScenario === "budget") {
       item.launchLimitRefusal = "This Wollipog Assistant thread has spent or committed its whole $25 budget, so it cannot launch another session.";
+      if (overBudgetBar) {
+        item.status = "done";
+        item.launchedSessionIds = ["sess-flaky"];
+        item.usage.launchedSessions.used = item.launchedSessionIds.length;
+      }
     }
     const backing = sessions.get(item.sessionId);
     if (backing && limitsScenario !== "old") {
@@ -948,6 +954,13 @@ Object.assign(window, {
   },
   /** The running launched session finishes, as its stream would report it. */
   assistantsAdvance: () => upsert({ ...sessions.get("sess-flaky")!, status: "completed", updatedAt: Date.now() }),
+  /** Another launched session reaches an approval without a thread API update. */
+  assistantsWaitOnLaunch: () => upsert({
+    ...sessions.get("sess-flaky")!,
+    status: "input_required",
+    pendingApproval: depsApproval("occ-flaky-1"),
+    updatedAt: Date.now(),
+  }),
   /** Mid-turn, the assistant launches another session: the thread's status stays as it was, and
    * the control plane republishes the thread with its new launch. */
   assistantsLaunch: () => {

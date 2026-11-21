@@ -10,7 +10,7 @@ const EVIDENCE = process.env.ASSISTANT_LIMITS_EVIDENCE_DIR;
 
 async function openDetails(page: Page) {
   const panel = page.locator("#right-panel");
-  if (!(await panel.isVisible())) await page.getByRole("button", { name: "Side Panel", exact: true }).click();
+  if (!(await panel.isVisible())) await page.getByRole("button", { name: /Side Panel/ }).click();
   await panel.getByRole("tab", { name: "Details", exact: true }).click();
   return panel.getByRole("tabpanel", { name: "Details", exact: true });
 }

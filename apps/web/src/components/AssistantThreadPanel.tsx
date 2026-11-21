@@ -55,7 +55,7 @@ export function AssistantThreadPanel({ state, thread, work, model, effort, onSet
     if (!state.open && wasOpen.current && active === document.body) {
       const target = returnFocus.current;
       if (target?.isConnected && target !== document.body && target.getClientRects().length > 0) target.focus();
-      else document.querySelector<HTMLElement>('.assistant-thread-bar [aria-label="Side Panel"], .page > .detail-bar [aria-label="Side Panel"]')?.focus();
+      else document.querySelector<HTMLElement>("[data-assistant-panel-toggle]")?.focus();
     }
     wasOpen.current = state.open;
   }, [asideRef, state.open, covering]);

@@ -74,22 +74,32 @@ export function SessionPanelToggles({
 
 /**
  * The Side Panel toggle, the session bar's last panel toggle and an Assistant thread's bar's (#4776):
- * one name in both states, `aria-pressed` for the state, and the chord in its tooltip on a fine
- * pointer.
+ * `aria-pressed` for the state and the chord in its tooltip on a fine pointer. Thread toggles
+ * also name waiting launches and mark their button for focus recovery.
  */
-export function SidePanelToggle({ small, open, onToggle }: { small: boolean; open: boolean; onToggle: () => void }) {
+export function SidePanelToggle({ small, open, onToggle, waitingSessions }: {
+  small: boolean;
+  open: boolean;
+  onToggle: () => void;
+  waitingSessions?: number;
+}) {
   const coarsePointer = useIsCoarsePointer();
+  const waiting = waitingSessions ?? 0;
+  const waitingLabel = `${open ? "Hide" : "Show"} Side Panel, ${waiting} ${waiting === 1 ? "Session Needs" : "Sessions Need"} You`;
+  const label = waiting > 0 ? waitingLabel : "Side Panel";
   return (
     <button
       type="button"
       className={small ? "icon-btn sm" : "icon-btn"}
       onClick={onToggle}
-      title={coarsePointer ? "Side Panel" : `Side Panel (${shortcutDisplay("toggle-side-panel")})`}
-      aria-label="Side Panel"
+      title={coarsePointer ? label : `${label} (${shortcutDisplay("toggle-side-panel")})`}
+      aria-label={waiting > 0 ? waitingLabel : "Side Panel"}
+      data-assistant-panel-toggle={waitingSessions !== undefined ? "" : undefined}
       aria-keyshortcuts={shortcutAriaKeys("toggle-side-panel")}
       aria-pressed={open}
     >
       <PanelRightIcon size={16} />
+      {waiting > 0 && <span className="assistant-side-panel-dot" aria-hidden="true" />}
     </button>
   );
 }
