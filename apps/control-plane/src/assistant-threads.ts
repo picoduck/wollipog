@@ -3,6 +3,7 @@ import {
   ASSISTANT_THREAD_CREDENTIAL_TTL_MS,
   ASSISTANT_THREAD_HARNESSES,
   ASSISTANT_DECISION_CATEGORIES,
+  ASSISTANT_DECISION_DEFAULT_DURATIONS,
   PROVIDER_ACCOUNT_SKIP_TEXT,
   resolveAgentHarnessRow,
   isProviderAccountRef,
@@ -12,6 +13,7 @@ import {
   type AgentDriverKind,
   type AssistantOwnerConfirmation,
   type AssistantDecisionCategory,
+  type AssistantDecisionDefault,
   type AssistantDecisionDelegation,
   type AssistantDecisionGrant,
   type AssistantEvidenceReviewAvailability,
@@ -244,6 +246,42 @@ export class AssistantThreads {
     return limits;
   }
 
+  patchLimitDefaults(owner: HumanPrincipal, body: unknown): AssistantThreadLimits {
+    const input = body as Partial<AssistantThreadLimits> | null;
+    if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).length !== 1 ||
+        (!Object.hasOwn(input, "costUsd") && !Object.hasOwn(input, "launchedSessions"))) {
+      throw new AssistantThreadRefusal("Specify either costUsd or launchedSessions to update.", 400);
+    }
+    const existing = this.store.defaultLimits(owner);
+    const limits = threadLimits({ ...existing, ...input }, Object.hasOwn(input, "costUsd") ? undefined : existing.costUsd);
+    this.store.setDefaultLimits(owner, limits);
+    return limits;
+  }
+
+  setDecisionDefault(owner: HumanPrincipal, body: unknown): AssistantDecisionDefault | null {
+    if (owner.role !== "owner") throw new AssistantThreadRefusal("Only the owner can change their default delegation.", 403);
+    const input = body as { grant?: Partial<AssistantDecisionDefault> | null } | null;
+    if (input?.grant === null) {
+      this.store.setDefaultDecision(owner, null);
+      return null;
+    }
+    const expiresAfterMs = input?.grant?.expiresAfterMs;
+    if (expiresAfterMs === undefined ||
+        !Object.values<number | null>(ASSISTANT_DECISION_DEFAULT_DURATIONS).includes(expiresAfterMs)) {
+      throw new AssistantThreadRefusal("Choose a supported expiry duration.", 400);
+    }
+    const { grant } = decisionDelegation({ revision: 0, grant: { ...input?.grant, expiresAt: null } }, this.now());
+    if (!grant || grant.categories.includes("ui_evidence_review")) {
+      throw new AssistantThreadRefusal("Approving UI evidence requires accepting the provider disclosure for an individual thread.", 400);
+    }
+    const defaultGrant: AssistantDecisionDefault = {
+      categories: grant.categories, selectionMode: grant.selectionMode,
+      projects: grant.projects, campaigns: grant.campaigns, expiresAfterMs,
+    };
+    this.store.setDefaultDecision(owner, defaultGrant);
+    return defaultGrant;
+  }
+
   setLimits(owner: HumanPrincipal, id: string, body: unknown): AssistantThread {
     const row = this.owned(owner, id);
     const session = row.session_id ? this.deps.getSession(row.session_id) : null;
@@ -316,6 +354,25 @@ export class AssistantThreads {
     return this.defaults(owner);
   }
 
+  patchLaunchDefaults(owner: HumanPrincipal, body: unknown): AssistantThreadDefaultsResponse {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new AssistantThreadRefusal("Specify either a harness or an account to update.", 400);
+    }
+    const current = this.store.defaultLaunch(owner);
+    const keys = Object.keys(body);
+    if (keys.length === 1 && "harness" in body) {
+      if (body.harness === current.harness) return this.defaults(owner);
+      return this.setLaunchDefaults(owner, { harness: body.harness, providerAccount: null });
+    }
+    if (keys.length === 2 && "providerAccount" in body && "expectedHarness" in body) {
+      if (harnessOf(body.expectedHarness) !== current.harness) {
+        throw new AssistantThreadRefusal("The default harness changed. Reopen Assistant Settings to choose its account.", 409);
+      }
+      return this.setLaunchDefaults(owner, { harness: current.harness, providerAccount: body.providerAccount });
+    }
+    throw new AssistantThreadRefusal("Specify either a harness or an account to update.", 400);
+  }
+
   defaults(owner: HumanPrincipal): AssistantThreadDefaultsResponse {
     const launchDefaults = this.store.defaultLaunch(owner);
     const online = this.deps.listRunners(owner).filter((runner) => this.deps.isRunnerOnline(runner.runnerId));
@@ -323,6 +380,7 @@ export class AssistantThreads {
     return {
       harness: launchDefaults.harness,
       launchDefaults,
+      decisionDefault: this.store.defaultDecision(owner),
       harnesses: ASSISTANT_THREAD_HARNESSES.map((id) => {
         const label = HARNESS_LABELS[id];
         const usable = capable.filter((candidate) => candidate.workspaces.length > 0 && harnessAgent(candidate, id));
@@ -414,6 +472,7 @@ export class AssistantThreads {
 
     const now = this.now();
     const limits = this.store.defaultLimits(owner);
+    const decisionDefault = this.store.defaultDecision(owner);
     const threadId = this.store.reserve(owner, harness, title, now, limits);
     // The thread's own Assistant connection. It authenticates nothing until the session's runner
     // proxy binds a credential it minted and keeps in memory.
@@ -444,7 +503,12 @@ export class AssistantThreads {
       const { ok: _ok, status, error, data: _data, ...details } = created;
       throw new AssistantThreadRefusal(error ?? "The thread's session could not be started.", status >= 400 ? status : 409, details);
     }
-    this.store.activate(threadId, created.data.id, this.now());
+    let grant: AssistantDecisionGrant | null = null;
+    if (decisionDefault) {
+      const { expiresAfterMs, ...scope } = decisionDefault;
+      grant = { ...scope, expiresAt: expiresAfterMs === null ? null : now + expiresAfterMs };
+    }
+    this.store.activate(threadId, created.data.id, this.now(), grant);
     return this.publish(this.store.get(threadId)!);
   }
 

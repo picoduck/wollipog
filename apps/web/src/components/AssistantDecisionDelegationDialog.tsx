@@ -1,9 +1,11 @@
 import { useId, useState, type ReactNode } from "react";
 import {
   ASSISTANT_DECISION_CATEGORIES,
+  ASSISTANT_DECISION_DEFAULT_DURATIONS,
   ASSISTANT_EVIDENCE_RETENTION_DISCLOSURE,
   sessionRole,
   type AssistantDecisionCategory,
+  type AssistantDecisionDefault,
   type AssistantDecisionDelegation,
   type AssistantDecisionGrant,
   type AssistantEvidenceReviewAvailability,
@@ -12,9 +14,12 @@ import { useStoreSelector } from "../store.js";
 import {
   ASSISTANT_DECISION_GROUPS,
   DELEGATION_EXPIRY_OPTIONS,
+  DEFAULT_DELEGATION_EXPIRY_OPTIONS,
+  defaultDelegationExpiry,
   delegationExpiryAt,
   formatAssistantDelegationSummary,
   formatDelegationExpiryHelp,
+  isDefaultDelegationExpiry,
   type DelegationExpiry,
 } from "../assistant-decision-delegation.js";
 import { useTimelineClock } from "../timeline-clock.js";
@@ -117,36 +122,50 @@ function CategoryGroup({ label, categories, selected, unavailable, disclosure, o
   </fieldset>;
 }
 
-export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, onSave, onClose, draft = false }: {
-  delegation: AssistantDecisionDelegation;
-  evidenceReview?: AssistantEvidenceReviewAvailability;
-  onSave: (value: AssistantDecisionDelegation) => Promise<void>;
-  onClose: () => void;
-  draft?: boolean;
-}) {
+type DelegationEditorProps = { onClose: () => void } & (
+  | {
+    delegation: AssistantDecisionDelegation;
+    draft?: boolean;
+    evidenceReview?: AssistantEvidenceReviewAvailability;
+    onSave: (value: AssistantDecisionDelegation) => Promise<void>;
+  }
+  | {
+    defaultGrant: AssistantDecisionDefault | null;
+    onSaveDefault: (grant: AssistantDecisionDefault | null) => Promise<void>;
+  }
+);
+
+export function AssistantDecisionDelegationDialog(props: DelegationEditorProps) {
+  const { onClose } = props;
+  const isDefault = "defaultGrant" in props;
+  const draft = !isDefault && props.draft === true;
+  const threadGrant = isDefault ? null : props.delegation.grant;
+  const grant = isDefault ? props.defaultGrant : threadGrant;
+  const evidenceReview = isDefault ? undefined : props.evidenceReview;
   const form = useId();
   const expiryHelp = useId();
   const { confirm } = useFeedback();
   const projects = useStoreSelector((state) => state.projects);
   const sessions = useStoreSelector((state) => state.sessions);
-  const grant = delegation.grant;
-  const now = useTimelineClock(grant?.expiresAt != null);
+  const now = useTimelineClock(threadGrant?.expiresAt != null);
   const [mode, setMode] = useState<Mode>(grant ? grant.selectionMode ?? "choose" : "ask");
   const [categories, setCategories] = useState(grant?.categories ?? []);
   // An existing Delegate All grant is an explicit snapshot. Only selecting the mode again
   // enumerates today's categories, so editing a scope or expiry after an upgrade cannot add one.
   const [refreshAll, setRefreshAll] = useState(false);
-  const [acceptedDigest, setAcceptedDigest] = useState(grant?.evidenceDisclosureDigest);
+  const [acceptedDigest, setAcceptedDigest] = useState(threadGrant?.evidenceDisclosureDigest);
   const [projectScope, setProjectScope] = useState<Scope>(grant?.projects ?? "all");
   const [campaignScope, setCampaignScope] = useState<Scope>(grant?.campaigns ?? "all");
-  const [preset, setPreset] = useState<DelegationExpiry>(grant ? grant.expiresAt === null ? "never" : "custom" : "week");
-  const [customTime, setCustomTime] = useState(localDateTime(grant?.expiresAt));
+  const [preset, setPreset] = useState<DelegationExpiry>("defaultGrant" in props && props.defaultGrant
+    ? defaultDelegationExpiry(props.defaultGrant.expiresAfterMs)?.value ?? "week"
+    : threadGrant ? threadGrant.expiresAt === null ? "never" : "custom" : "week");
+  const [customTime, setCustomTime] = useState(localDateTime(threadGrant?.expiresAt));
   const [expiryStart, setExpiryStart] = useState(Date.now);
   const [busy, setBusy] = useState(false);
   const ciRerunSupported = useStoreSelector((state) => state.assistantCiRerunDecisionsSupported);
   const releaseSupported = useStoreSelector((state) => state.assistantReleaseDecisionsSupported);
   const [error, setError] = useState<string | null>(null);
-  const expired = grant?.expiresAt != null && grant.expiresAt <= now;
+  const expired = threadGrant?.expiresAt != null && threadGrant.expiresAt <= now;
   const digest = evidenceReview?.available ? evidenceReview.disclosureDigest : undefined;
   const disclosed = digest !== undefined && acceptedDigest === digest;
   const disclosure = evidenceReview?.available
@@ -159,7 +178,9 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
     unavailable.release_publish = "Update the control plane to grant release publication decisions.";
   }
   if (!evidenceReview?.available) {
-    unavailable.ui_evidence_review = evidenceReview?.reason ?? "This control plane does not support approving UI evidence.";
+    unavailable.ui_evidence_review = isDefault
+      ? "Approving UI evidence requires accepting the provider disclosure in each thread."
+      : evidenceReview?.reason ?? "This control plane does not support approving UI evidence.";
   }
   const allCategories = Object.keys(ASSISTANT_DECISION_CATEGORIES) as AssistantDecisionCategory[];
   const allCandidates = refreshAll ? allCategories : categories;
@@ -176,10 +197,11 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
       // Accepting the disclosure here explicitly adds this category to an existing all grant.
       if (checked && mode === "all") setCategories((current) => [...new Set([...current, "ui_evidence_review" as const])]);
     }} />;
-  const expiresAt = preset === "custom" && grant?.expiresAt != null && customTime === localDateTime(grant.expiresAt)
-    ? grant.expiresAt : delegationExpiryAt(preset, customTime, expiryStart);
+  const expiresAt = preset === "custom" && threadGrant?.expiresAt != null && customTime === localDateTime(threadGrant.expiresAt)
+    ? threadGrant.expiresAt : delegationExpiryAt(preset, customTime, expiryStart);
 
   const revoke = async () => {
+    if ("defaultGrant" in props) return;
     const revoked = await confirm({
       title: "Revoke Delegation",
       message: "This thread will lose permission to resolve decisions on your behalf.",
@@ -187,7 +209,7 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
       tone: "danger",
       progress: "Revoking delegation…",
       cancelWhileRunning: false,
-      onConfirm: () => onSave({ revision: delegation.revision, grant: null }),
+      onConfirm: () => props.onSave({ revision: props.delegation.revision, grant: null }),
     });
     if (revoked) onClose();
   };
@@ -199,16 +221,22 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
       if (evidenceSelected && !digest) return setError("Clear Approve UI Evidence to save while it is unavailable.");
       if (evidenceSelected && !disclosed) return setError("Accept the provider disclosure to grant Approve UI Evidence.");
       if (!projectScope.length || !campaignScope.length) return setError("Select at least one item in each selected scope, or choose All.");
-      if (expiresAt !== null && (!Number.isFinite(expiresAt) || expiresAt <= Date.now())) return setError("Choose a future expiration time.");
+      if (!isDefault && expiresAt !== null && (!Number.isFinite(expiresAt) || expiresAt <= Date.now())) return setError("Choose a future expiration time.");
     }
     setError(null);
     setBusy(true);
     try {
-      await onSave({ revision: delegation.revision,
-        grant: mode === "ask" ? null : {
-          categories: selected, selectionMode: mode, projects: projectScope, campaigns: campaignScope, expiresAt,
-          ...(evidenceSelected && disclosed ? { evidenceDisclosureDigest: digest } : {}),
-        } });
+      const scope: Omit<AssistantDecisionDefault, "expiresAfterMs"> | null = mode === "ask" ? null : {
+        categories: selected, selectionMode: mode, projects: projectScope, campaigns: campaignScope,
+      };
+      if ("defaultGrant" in props) {
+        if (!isDefaultDelegationExpiry(preset)) throw new Error("Choose a supported expiry duration.");
+        await props.onSaveDefault(scope ? { ...scope, expiresAfterMs: ASSISTANT_DECISION_DEFAULT_DURATIONS[preset] } : null);
+      } else {
+        await props.onSave({ revision: props.delegation.revision, grant: scope ? {
+          ...scope, expiresAt, ...(evidenceSelected && disclosed ? { evidenceDisclosureDigest: digest } : {}),
+        } : null });
+      }
       onClose();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not update decision delegation.");
@@ -218,11 +246,13 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
 
   const categoryNotes = allCategories.filter((category) => !selected.includes(category) || unavailable[category]);
 
-  return <Modal title="Decision Delegation" size="lg" className="delegation-dialog" phoneSheet="full"
-    description="Choose which decisions this Assistant thread may resolve on your behalf. Its decisions are attributed to the thread."
+  return <Modal title={isDefault ? "Decision Delegation for New Threads" : "Decision Delegation"} size="lg"
+    className="delegation-dialog" phoneSheet="full"
+    description={isDefault ? "New threads start with these permissions. Existing threads keep their own grants."
+      : "Choose which decisions this Assistant thread may resolve on your behalf. Its decisions are attributed to the thread."}
     onClose={busy ? () => {} : onClose}
     footer={<>
-      {grant && !draft && <button className="btn ghost danger delegation-revoke" type="button" disabled={busy}
+      {threadGrant && !draft && <button className="btn ghost danger delegation-revoke" type="button" disabled={busy}
         onClick={() => void revoke()}>Revoke Delegation</button>}
       <button className="btn" type="button" disabled={busy} onClick={onClose}>Cancel</button>
       <BusyButton className="btn primary" form={form} type="submit" busy={busy}
@@ -230,9 +260,9 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
     </>}>
     <form id={form} onSubmit={(event) => { event.preventDefault(); void save(); }}>
       <fieldset className="assistant-fields form" disabled={busy}>
-        {grant && <Notice compact role="status" tone={expired ? "neutral" : "success"}
+        {threadGrant && <Notice compact role="status" tone={expired ? "neutral" : "success"}
           title={expired ? "Expired Delegation" : "Active Delegation"}>
-          {formatAssistantDelegationSummary(grant, now)}
+          {formatAssistantDelegationSummary(threadGrant, now)}
         </Notice>}
         <SegmentedControl label="Delegation Mode" options={modes} value={mode} onChange={(next) => {
           setMode(next);
@@ -276,13 +306,14 @@ export function AssistantDecisionDelegationDialog({ delegation, evidenceReview, 
         {mode !== "ask" && <>
           <fieldset className="assistant-fields form">
             <legend>Expiry</legend>
-            <SegmentedControl label="Expiry Preset" options={DELEGATION_EXPIRY_OPTIONS} value={preset} describedBy={expiryHelp}
+            <SegmentedControl label="Expiry Preset" options={isDefault ? DEFAULT_DELEGATION_EXPIRY_OPTIONS : DELEGATION_EXPIRY_OPTIONS} value={preset} describedBy={expiryHelp}
               className="delegation-presets" onChange={(next) => { setPreset(next); setExpiryStart(Date.now()); }} />
             {preset === "custom" && <label className="field">
               <span>Ends At</span>
               <input type="datetime-local" aria-describedby={expiryHelp} value={customTime} onChange={(event) => setCustomTime(event.target.value)} />
             </label>}
-            <p className="muted" id={expiryHelp}>{formatDelegationExpiryHelp(preset, expiresAt)}</p>
+            <p className="muted" id={expiryHelp}>{isDefault && preset !== "never" ? "The expiry starts when each thread is created."
+              : formatDelegationExpiryHelp(preset, expiresAt)}</p>
           </fieldset>
           <div className="delegation-scopes">
             <SelectionScope name="Projects" value={projectScope} onChange={setProjectScope}

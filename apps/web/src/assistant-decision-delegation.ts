@@ -1,4 +1,4 @@
-import type { AssistantDecisionCategory, AssistantDecisionGrant } from "@wollipog/protocol";
+import { ASSISTANT_DECISION_DEFAULT_DURATIONS, type AssistantDecisionCategory, type AssistantDecisionDefault, type AssistantDecisionGrant } from "@wollipog/protocol";
 
 export const ASSISTANT_DECISION_GROUPS = [
   { label: "Pull Requests", categories: ["pr_merge", "review_round_extension"] },
@@ -57,4 +57,26 @@ export function formatDelegationExpiryHelp(preset: DelegationExpiry, expiresAt: 
     return `Delegation ends at midnight at the end of ${end} (local time).`;
   }
   return `Delegation ends on ${localTime.format(expiresAt)} (local time).`;
+}
+
+type DefaultExpiry = keyof typeof ASSISTANT_DECISION_DEFAULT_DURATIONS;
+
+export function isDefaultDelegationExpiry(preset: DelegationExpiry): preset is DefaultExpiry {
+  return Object.hasOwn(ASSISTANT_DECISION_DEFAULT_DURATIONS, preset);
+}
+
+type ExpiryOption = typeof DELEGATION_EXPIRY_OPTIONS[number];
+export const DEFAULT_DELEGATION_EXPIRY_OPTIONS = DELEGATION_EXPIRY_OPTIONS.filter(
+  (option): option is Extract<ExpiryOption, { value: DefaultExpiry }> => isDefaultDelegationExpiry(option.value),
+);
+
+export function defaultDelegationExpiry(duration: AssistantDecisionDefault["expiresAfterMs"]) {
+  return DEFAULT_DELEGATION_EXPIRY_OPTIONS.find((option) => ASSISTANT_DECISION_DEFAULT_DURATIONS[option.value] === duration);
+}
+
+export function formatAssistantDefaultDelegation(grant: AssistantDecisionDefault | null): string {
+  if (!grant) return "Ask Me";
+  const mode = grant.selectionMode === "all" ? "Delegate All" : "Choose";
+  const expiry = defaultDelegationExpiry(grant.expiresAfterMs);
+  return expiry ? `${mode} · ${expiry.label}` : mode;
 }

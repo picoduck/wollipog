@@ -2,7 +2,7 @@
 import type { AssistantConnection } from "@wollipog/protocol";
 export type { AssistantGrant, AssistantConnection } from "@wollipog/protocol";
 export interface AssistantConnectionsView {
-  connections: AssistantConnection[];
+  connections: (AssistantConnection & { lastUsedAt?: number | null })[];
   installation: {id: string; name: string; canRename: boolean};
   operations: {name: string; description: string}[];
   projects: {id: string; name: string}[];

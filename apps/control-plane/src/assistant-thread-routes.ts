@@ -34,10 +34,14 @@ export function registerAssistantThreadRoutes(app: FastifyInstance, deps: {
     ({ threads: deps.threads.list(owner, (req.query as { includeArchived?: unknown }).includeArchived === "true") })));
   app.get("/api/assistant-threads/defaults", handle((owner) => deps.threads.defaults(owner)));
   app.put("/api/assistant-threads/defaults/launch", handle((owner, req) => deps.threads.setLaunchDefaults(owner, req.body)));
+  app.patch("/api/assistant-threads/defaults/launch", handle((owner, req) => deps.threads.patchLaunchDefaults(owner, req.body)));
+  app.put("/api/assistant-threads/defaults/delegation", handle((owner, req) =>
+    ({ grant: deps.threads.setDecisionDefault(owner, req.body) })));
   // Separate write routes ensure older control planes refuse these inputs instead of silently
   // treating an update as a rename or applying the historic fixed limits.
   app.get("/api/assistant-threads/defaults/limits", handle((owner) => deps.threads.limitDefaults(owner)));
   app.put("/api/assistant-threads/defaults/limits", handle((owner, req) => deps.threads.setLimitDefaults(owner, req.body)));
+  app.patch("/api/assistant-threads/defaults/limits", handle((owner, req) => deps.threads.patchLimitDefaults(owner, req.body)));
   app.post("/api/assistant-threads", handle(async (owner, req) => ({ thread: deps.threads.create(owner, req.body) })));
   app.get("/api/assistant-threads/:threadId", handle((owner, req) => ({ thread: deps.threads.get(owner, threadId(req)) })));
   app.patch("/api/assistant-threads/:threadId", handle((owner, req) => ({ thread: deps.threads.rename(owner, threadId(req), req.body) })));
