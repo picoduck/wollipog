@@ -20,7 +20,7 @@ const TURN_ERROR_SHAPES: ReadonlyArray<{ pattern: RegExp; sentence: string }> = 
     sentence: "The provider's usage limit was reached. Wait for it to reset, then retry.",
   },
   {
-    pattern: /\b(?:not (?:logged|signed) in|log ?in again|sign ?in again|please (?:log|sign) ?in|unauthori[sz]ed|unauthenticated|authentication (?:failed|required|error)|401|invalid (?:api[ _-]?key|x-api-key|credentials)|(?:oauth |access )?token (?:has )?expired)\b/i,
+    pattern: /\b(?:not (?:logged|signed) in|log ?in again|sign ?in again|needs sign-in|please (?:log|sign) ?in|unauthori[sz]ed|unauthenticated|authentication (?:failed|required|error)|401|invalid (?:api[ _-]?key|x-api-key|credentials)|(?:oauth |access )?token (?:has )?expired)\b/i,
     sentence: "The provider account needs you to sign in again.",
   },
   {
@@ -82,8 +82,11 @@ const AGENT_LAUNCH_FAILURES: ReadonlyArray<{ kind: AgentLaunchFailure["kind"]; p
   { kind: "resume", pattern: /^(Google Antigravity) could not resume this conversation, so its history here is read-only\. Start a new session to continue\.$/u },
 ];
 
+/** Only a launch failure qualifies: the runner's `agent init failed: ` prefix says the session never
+ * started. The same sign-in sentence on a rejected prompt is a failed turn, which keeps Retry Turn. */
 export function agentLaunchFailure(message: string): AgentLaunchFailure | null {
-  const text = withoutPromptFailedPrefix(message).replace(LAUNCH_FAILURE_PREFIX, "");
+  if (!LAUNCH_FAILURE_PREFIX.test(message)) return null;
+  const text = message.replace(LAUNCH_FAILURE_PREFIX, "");
   for (const { kind, pattern } of AGENT_LAUNCH_FAILURES) {
     const agent = pattern.exec(text)?.[1];
     if (agent) return { kind, agent, text };

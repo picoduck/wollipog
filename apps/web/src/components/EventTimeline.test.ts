@@ -238,6 +238,10 @@ test("an agent's setup failures read as their own problems, not as failed turns 
   for (const html of [start, signIn, resume]) {
     assert.doesNotMatch(html, /Turn Failed|Retry Turn|agent init failed/);
   }
+  // A prompt rejected for sign-in mid-session stays a failed turn, so Retry Turn remains after signing in.
+  const midTurn = render("prompt failed: Google Antigravity needs sign-in on this machine. Sign in from Connections, then try again.");
+  assert.match(midTurn, /Turn Failed/);
+  assert.match(midTurn, /The provider account needs you to sign in again\./);
   // A real turn error keeps the failed-turn notice.
   assert.match(render("Google Antigravity could not complete this turn: Quota exhausted for [account]; try again later"), /Turn Failed/);
 });

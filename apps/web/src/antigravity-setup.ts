@@ -67,6 +67,10 @@ export function antigravitySessions(runner: Pick<RunnerView, "agents" | "antigra
   // The agent the runner derives from this setup; an operator-configured agent that happens to use
   // the id is not it, and says nothing about the setup's sessions.
   const agent = runner.agents.find((candidate) => candidate.id === ANTIGRAVITY_AGENT_ID && candidate.source !== "config");
+  // The runner never replaces a configured agent with the id, so the setup offers no sessions there.
+  if (!agent && runner.agents.some((candidate) => candidate.id === ANTIGRAVITY_AGENT_ID && candidate.source === "config")) {
+    return { label: "Setup Only", sentence: `A configured agent on ${machineName} already uses the Google Antigravity agent id, so this setup doesn't add Antigravity to New Session.` };
+  }
   if (agent?.available === true) {
     return { label: "Available in New Session", sentence: "Available in New Session." };
   }

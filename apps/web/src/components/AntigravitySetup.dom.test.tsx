@@ -129,7 +129,8 @@ test("a ready setup says whether its runner offers Antigravity in New Session, a
       assert.ok(agentRows.includes("Operator Wrapper"));
       assert.match(row(configured.body)!.querySelector(".row-sub")?.textContent ?? "", /^Setup Only/u);
       const opened = (await openSetup(configured.body)).textContent ?? "";
-      assert.doesNotMatch(opened, /Available in New Session\.|network access/u);
+      assert.doesNotMatch(opened, /Available in New Session\.|network access|Update Wollipog/u);
+      assert.match(opened, /A configured agent on Studio Mac already uses the Google Antigravity agent id/u);
     } finally { await configured.unmount(); }
   }
 

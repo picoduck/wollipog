@@ -157,7 +157,7 @@ import {
   useOffscreenReceipts,
   useRecoveryAnnouncement,
 } from "./TranscriptTailControl.js";
-import { agentOwnsPermissionModes, ApprovalsControl, ComposerButton, ModelEffortControl, useModelSettingsAvailable } from "./ComposerControls.js";
+import { agentOwnsPermissionModes, nativePlanModeActive, ApprovalsControl, ComposerButton, ModelEffortControl, useModelSettingsAvailable } from "./ComposerControls.js";
 import { reportRenderProbe, SESSION_DETAIL_PROBE, SESSION_VIEW_PROBE, TRANSCRIPT_PROBE } from "./render-probe.js";
 import {
   ComposerIdlePreview,
@@ -6147,7 +6147,7 @@ function SessionDetailLoaded({
     [api, configRefusal, session.assistantThreadBudget, sessionId],
   );
 
-  const planActive = session.permissionMode === "plan";
+  const planActive = nativePlanModeActive(session, agentCaps);
   const togglePlan = (on = !planActive) => {
     if (!planSupported) return; // never set an unsupported "plan" mode (would map to a writable sandbox)
     applyConfig({ permissionMode: on ? "plan" : "" });

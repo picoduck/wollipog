@@ -182,6 +182,15 @@ export function sessionPermissionModeControls(
   };
 }
 
+/** Whether the session is in Wollipog's read-only Plan Mode, which shows the Plan pill and its
+ * promise. An agent-owned `plan` (#4779) is one of the agent's modes, shown by Permission Mode. */
+export function nativePlanModeActive(
+  session: Pick<SessionView, "driver" | "permissionMode">,
+  capabilities: Pick<AgentCapabilities, "agentPermissionModes"> | undefined,
+): boolean {
+  return session.permissionMode === "plan" && !agentOwnsPermissionModes(session.driver, capabilities);
+}
+
 /** Whether an ACP session's agent named its own modes, so every mode is the agent's (#4779). */
 export function agentOwnsPermissionModes(
   driver: AgentDriverKind | undefined,

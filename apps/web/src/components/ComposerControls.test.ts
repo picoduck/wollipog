@@ -4,6 +4,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   agentOwnsPermissionModes,
+  nativePlanModeActive,
   approvalControlLabel,
   approvalDeliveryUnverified,
   ApprovalsMenuChoices,
@@ -294,6 +295,11 @@ test("an ACP agent's modes use its own names and meanings, never a native harnes
   assert.equal(controls.showDefaultPermissionMode, false);
   assert.equal(agentOwnsPermissionModes("acp", capabilities), true);
   assert.equal(agentOwnsPermissionModes("claude-code", capabilities), false);
+  // Selecting the agent's Plan shows no read-only Plan pill; Claude's native plan still does.
+  assert.equal(nativePlanModeActive({ driver: "acp", permissionMode: "plan" }, capabilities), false);
+  assert.equal(approvalControlLabel("acp", "plan", "available", capabilities), "Plan");
+  assert.equal(nativePlanModeActive({ driver: "claude-code", permissionMode: "plan" }, undefined), true);
+  assert.equal(nativePlanModeActive({ driver: "acp", permissionMode: "plan" }, undefined), true, "an older runner keeps today's behavior");
   assert.equal(sessionPermissionModeControls({ driver: "acp", permissionMode: "" }, { ...capabilities, agentPermissionModes: undefined })
     .permModes.includes("plan"), false, "without the agent's names, plan keeps its existing handling");
   const html = renderToStaticMarkup(React.createElement(ApprovalsMenuChoices, {
