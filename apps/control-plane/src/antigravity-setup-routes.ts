@@ -16,7 +16,8 @@ import type { HumanPrincipal } from "./identity.js";
  * Only a person who can manage the Machine may check the runtime or run Google's sign-in: the
  * sign-in link and authorization code are bearer-like, so agent principals and the Assistant have
  * no route here. The authorization code passes through to the runner once and is never logged or
- * stored. Wollipog never installs Antigravity; the card shows Google's install command instead. */
+ * stored. Install (v404) is an explicit human action under the same Machine manage permission: the
+ * runner installs or updates its managed copy from Google's verified release, never on its own. */
 export function registerAntigravitySetupRoutes(
   app: FastifyInstance,
   db: ControlPlaneDb,
@@ -39,6 +40,9 @@ export function registerAntigravitySetupRoutes(
     if (!hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
     if (!runnerSupportsProtocol(runner.protocolVersion, "antigravitySetup")) {
       return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "antigravitySetup", "Google Antigravity setup"));
+    }
+    if (action === "install" && !runnerSupportsProtocol(runner.protocolVersion, "antigravityManagedInstall")) {
+      return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "antigravityManagedInstall", "Google Antigravity managed install"));
     }
     const requestId = `antigravity_setup_${randomUUID()}`;
     let result;
@@ -73,6 +77,10 @@ export function registerAntigravitySetupRoutes(
   app.post("/api/runners/:id/antigravity-setup/check", (req, reply) => command(req, reply, "check"));
 
   app.post("/api/runners/:id/antigravity-setup/sign-in", (req, reply) => command(req, reply, "start_sign_in"));
+
+  // Install Google's latest release as the runner's managed copy, or update it (v404). The reply
+  // confirms the install started; its progress and outcome arrive as setup updates.
+  app.post("/api/runners/:id/antigravity-setup/install", (req, reply) => command(req, reply, "install"));
 
   app.post("/api/runners/:id/antigravity-setup/sign-in/:operationId/code", (req, reply) => {
     const { operationId } = req.params as { operationId: string };

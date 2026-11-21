@@ -441,6 +441,8 @@ const VOCABULARY = {
   /** Google Antigravity setup on a machine (#4780), by `antigravitySetupPresentation()`. */
   antigravitySetup: {
     checking: info("Checking", { pulse: true }),
+    installing: info("Installing", { pulse: true }),
+    updating: info("Updating", { pulse: true }),
     missing_runtime: neutral("Not Installed", { hollow: true }),
     unsupported: neutral("Not Available"),
     update_runner: warning("Update Runner"),
@@ -448,6 +450,11 @@ const VOCABULARY = {
     signing_in: info("Signing In", { pulse: true }),
     verification_failed: danger("Check Failed"),
     ready: success("Ready"),
+  },
+  /** A failed managed Google Antigravity install or update (#4780), beside the setup's own status. */
+  antigravityInstall: {
+    install_failed: danger("Install Failed"),
+    update_failed: danger("Update Failed"),
   },
 } as const satisfies Record<string, Record<string, Entry>>;
 

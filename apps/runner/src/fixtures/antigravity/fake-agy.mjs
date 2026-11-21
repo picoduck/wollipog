@@ -5,7 +5,10 @@
 //
 // FAKE_AGY_STATE: directory holding the fake sign-in marker and any probe output.
 // FAKE_AGY_MODE: comma-separated behaviors (see below). Defaults to a working CLI.
-import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+// FAKE_AGY_VERSION: the version `--version` prints. A fake managed release (fake-release.ts) sets
+// it, and its own FAKE_AGY_MODE, in the wrapper script inside its archive.
+// FAKE_AGY_LABEL: names the copy (for example a managed release) in environments.jsonl.
+import { appendFileSync, existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -19,13 +22,37 @@ const AMBIENT = ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL", "
 function recordEnvironment(label) {
   if (!state) return;
   const present = AMBIENT.filter((name) => process.env[name] !== undefined);
-  appendFileSync(join(state, "environments.jsonl"), `${JSON.stringify({ label, present, home: process.env.HOME ?? null })}\n`);
+  appendFileSync(join(state, "environments.jsonl"), `${JSON.stringify({
+    label, copy: process.env.FAKE_AGY_LABEL ?? "path", present, home: process.env.HOME ?? null,
+    autoUpdateDisabled: process.env.AGY_CLI_DISABLE_AUTO_UPDATE ?? null,
+    runtimeDir: process.env.XDG_RUNTIME_DIR ?? null, sessionBus: process.env.DBUS_SESSION_BUS_ADDRESS ?? null,
+  })}\n`);
 }
 
 if (args[0] === "--version") {
   recordEnvironment("version");
-  if (modes.has("version_fail")) process.exit(3);
-  process.stdout.write(modes.has("version_garbled") ? "antigravity cli\n" : "agy 1.4.2 (fixture)\n");
+  // A one-time stall: the next version check, from any copy, never answers.
+  const hangVersionOnce = state ? join(state, "hang-next-version") : undefined;
+  if (hangVersionOnce && existsSync(hangVersionOnce)) {
+    unlinkSync(hangVersionOnce);
+    setInterval(() => {}, 1_000);
+    await new Promise(() => {});
+  } else {
+    if (modes.has("version_fail")) process.exit(3);
+    // A release that works only in the install's staging scratch HOME, not the runner user's own.
+    if (modes.has("version_fail_outside_staging") && !(process.env.HOME ?? "").includes("/antigravity-managed/staging/")) process.exit(3);
+    process.stdout.write(modes.has("version_garbled") ? "antigravity cli\n" : `agy ${process.env.FAKE_AGY_VERSION ?? "1.4.2"} (fixture)\n`);
+    process.exit(0);
+  }
+}
+
+if (args[0] === "acp" && args[1] === "--help") {
+  recordEnvironment("acp_help");
+  if (modes.has("acp_help_fail")) {
+    process.stderr.write("unknown command\n");
+    process.exit(2);
+  }
+  process.stdout.write("Usage: agy acp [--login]\n");
   process.exit(0);
 }
 
@@ -90,7 +117,12 @@ if (args[0] === "acp" && args[1] === "--login") {
     }
     if (request.method === "session/new") {
       if (modes.has("session_hang")) return;
+      // A one-time service interruption: the next session request, from any copy, goes unanswered.
+      const hangOnce = state ? join(state, "hang-next-session") : undefined;
+      if (hangOnce && existsSync(hangOnce)) { unlinkSync(hangOnce); return; }
       if (modes.has("session_error")) return send({ id: request.id, error: { code: -32603, message: "internal error" } });
+      // A release that asks for a new sign-in even where the existing one works.
+      if (modes.has("session_auth_required")) return send({ id: request.id, error: { code: -32000, message: "Authentication required" } });
       if (!signedInMarker || !existsSync(signedInMarker)) {
         return send({ id: request.id, error: { code: -32000, message: "Authentication required" } });
       }

@@ -5,13 +5,19 @@ import { expect, test, type Page } from "@playwright/test";
 /** Reviewable captures of Google Antigravity setup in Connections (#4780) at 1440x900 and 390x844,
  * with layout measurements: target sizes and gaps, text and control contrast, and horizontal
  * overflow. Runs only with WOLLIPOG_EVIDENCE_DIR set; WOLLIPOG_EVIDENCE_PREFIX names the set
- * ("before", "after"). Behaviour is asserted in AntigravitySetup.dom.test.tsx. */
+ * ("before", "after"); WOLLIPOG_EVIDENCE_STATES limits the setup states captured. Behaviour is
+ * asserted in AntigravitySetup.dom.test.tsx. */
 const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
 const prefix = process.env.WOLLIPOG_EVIDENCE_PREFIX ?? "after";
 const VIEWPORTS = [{ width: 1440, height: 900 }, { width: 390, height: 844 }] as const;
 /** The machine harness's `?antigravity=` fixtures (machine-management-main.tsx). */
 const STATES = ["missing", "unsupported", "update-runner", "signin-required", "signin-pending", "signin-failed",
-  "verification-failed", "ready"] as const;
+  "verification-failed", "ready",
+  // Managed install (protocol v404).
+  "install-available", "installing", "install-failed", "updating", "update-failed", "update-available", "ready-managed",
+  "ready-path", "install-failed-path"] as const;
+/** `?states=a,b` limits a run to those states (re-filing only changed captures). */
+const ONLY = process.env.WOLLIPOG_EVIDENCE_STATES?.split(",").filter(Boolean);
 const measurements: Record<string, unknown> = {};
 
 test.skip(!evidenceDir, "set WOLLIPOG_EVIDENCE_DIR to capture evidence");
@@ -168,7 +174,8 @@ async function capture(page: Page, name: string, scope: string, fullPage = false
 
 async function openMachine(page: Page, query: string, viewport: { width: number; height: number }): Promise<void> {
   await page.setViewportSize(viewport);
-  await page.goto(`/machine-management-e2e.html?machine=native-t14s${query ? `&${query}` : ""}`);
+  // `neutralHost`: no personal names in evidence.
+  await page.goto(`/machine-management-e2e.html?machine=native-t14s&neutralHost${query ? `&${query}` : ""}`);
   await expect(page.locator("article.machine-detail")).toBeVisible();
 }
 
@@ -183,6 +190,17 @@ for (const viewport of VIEWPORTS) test.describe(`${viewport.width}x${viewport.he
     await capture(page, `connections-machine-${size}`, "article.machine-detail", true);
   });
 
+  // The Linux machine's Agents section with the Google Antigravity row: before, the v403 row with a
+  // PATH copy; after, the PATH copy, a managed install, and a failed update kept at Ready.
+  for (const state of prefix === "before" ? ["ready"] : ["ready-path", "ready-managed", "update-failed"]) {
+    test(`Connections Linux machine view, ${state}, ${size}`, async ({ page }) => {
+      await openMachine(page, `antigravity=${state}`, viewport);
+      await page.locator('ul[aria-label="Agent Setup"]').scrollIntoViewIfNeeded();
+      measurements[`connections-linux-${state}-${size}-row`] = await measure(page, 'ul[aria-label="Agent Setup"]');
+      await capture(page, `connections-linux-${state}-${size}`, "article.machine-detail", true);
+    });
+  }
+
   if (prefix === "before") return;
 
   test(`Connections with many agents and a long machine name, ${size}`, async ({ page }) => {
@@ -192,7 +210,7 @@ for (const viewport of VIEWPORTS) test.describe(`${viewport.width}x${viewport.he
     await capture(page, `connections-antigravity-stress-${size}`, "article.machine-detail", true);
   });
 
-  for (const state of STATES) {
+  for (const state of STATES.filter((candidate) => !ONLY || ONLY.includes(candidate))) {
     test(`Google Antigravity setup, ${state}, ${size}`, async ({ page }) => {
       await openMachine(page, `antigravity=${state}`, viewport);
       await page.locator('ul[aria-label="Agent Setup"] button.row').click();
@@ -207,5 +225,21 @@ for (const viewport of VIEWPORTS) test.describe(`${viewport.width}x${viewport.he
     await page.locator('ul[aria-label="Agent Setup"] button.row').click();
     await expect(page.getByRole("dialog", { name: "Google Antigravity" })).toBeVisible();
     await capture(page, `connections-antigravity-long-diagnostic-${size}`, '[role="dialog"]');
+  });
+
+  // A failed update with the longest variable details: the machine name, the managed and PATH
+  // executable paths, and the failure text beside the kept version.
+  test(`Google Antigravity setup, failed update with long paths, ${size}`, async ({ page }) => {
+    await openMachine(page, "antigravity=update-failed&longName", viewport);
+    await page.locator('ul[aria-label="Agent Setup"] button.row').click();
+    await expect(page.getByRole("dialog", { name: "Google Antigravity" })).toBeVisible();
+    await capture(page, `connections-antigravity-update-failed-long-${size}`, '[role="dialog"]');
+  });
+
+  test(`Connections with many agents, a long machine name and a managed install, ${size}`, async ({ page }) => {
+    await openMachine(page, "antigravity=update-available&manyAgents&longName", viewport);
+    await page.locator('ul[aria-label="Agent Setup"]').scrollIntoViewIfNeeded();
+    measurements[`connections-antigravity-stress-managed-${size}-row`] = await measure(page, 'ul[aria-label="Agent Setup"]');
+    await capture(page, `connections-antigravity-stress-managed-${size}`, "article.machine-detail", true);
   });
 });
