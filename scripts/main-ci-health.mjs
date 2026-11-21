@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { workerIdentity } from "./main-rolling-identity.mjs";
 import { isSupersededWorkerAttempt } from "./main-rolling-outcomes.mjs";
 
 const SHA = /^[a-f0-9]{40}$/;
@@ -23,7 +24,6 @@ export const WORKER_HANDOFF_WAIT_MS = 180_000;
 export async function awaitWorkerTerminal(repository, { runId, attempt }, { api,
   clock = () => performance.now(), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
   if (!REPOSITORY.test(repository) || !positive(runId) || !positive(attempt) || attempt > 10) fail("invalid-worker-handoff");
-  const { workerIdentity } = await import("./main-rolling-validation.mjs");
   const started = clock(), deadline = started + WORKER_HANDOFF_WAIT_MS;
   let polls = 0, targetSha = null;
   while (polls < 6 && clock() + REQUEST_MS <= deadline) {
@@ -288,7 +288,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
   now = () => new Date().toISOString() } = {}) {
   const observedAt = now(), health = unknownHealth(repository, observedAt, "no-full-evidence");
   try {
-    const { workerIdentity, REQUIRED, UNIT_SHARDS } = await import("./main-rolling-validation.mjs");
+    const { REQUIRED, UNIT_SHARDS } = await import("./main-rolling-validation.mjs");
     const root = `/repos/${repository}`;
     const mainSha = (await api(`${root}/git/ref/heads/main`))?.object?.sha;
     if (!SHA.test(mainSha)) fail("main-unavailable");
