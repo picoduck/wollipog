@@ -19,6 +19,7 @@
  * - Session listing is not offered: adopting a conversation started outside Wollipog would need
  *   `session/load`. */
 
+import type { InitializeRequest } from "@agentclientprotocol/sdk";
 import type { AcpNegotiation } from "./acp-contract.js";
 
 export interface AcpCompatibility {
@@ -32,6 +33,21 @@ export interface AcpCompatibility {
   /** Bounds for the handshake and for opening or resuming the session: a process that never
    * answers fails the launch with the profile's error instead of leaving it starting. */
   deadlines?: { handshakeMs: number; sessionMs: number };
+}
+
+/** Whether the client's `fs/write_text_file` service is offered. A profiled agent never gets it: the
+ * runner performs those writes itself, outside the agent's sandbox, where a managed worktree's
+ * read-only registration files are not read-only. agy 1.5.14 writes files with its own tools,
+ * inside its sandbox, so it does not need the service. */
+export function acpClientFileWritesOffered(compatibility?: AcpCompatibility): boolean {
+  return !compatibility;
+}
+
+/** The initialize request a profiled agent receives: the shared one, without the write service. */
+export function compatibleAcpInitializeRequest(request: InitializeRequest, compatibility?: AcpCompatibility): InitializeRequest {
+  if (acpClientFileWritesOffered(compatibility)) return request;
+  const fs = request.clientCapabilities?.fs;
+  return { ...request, clientCapabilities: { ...request.clientCapabilities, fs: { ...fs, writeTextFile: false } } };
 }
 
 /** JSON-RPC options bounding one launch request, for a profile that sets deadlines. */

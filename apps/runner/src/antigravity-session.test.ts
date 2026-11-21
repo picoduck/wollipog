@@ -81,7 +81,7 @@ function launchDriver(
   isolation: { mode: "provider" | "bwrap" },
   cwd: string,
   resumeId?: string,
-  overrides: { layeredEnv?: Record<string, string>; deadlines?: { handshakeMs: number; sessionMs: number } } = {},
+  overrides: { layeredEnv?: Record<string, string>; deadlines?: { handshakeMs: number; sessionMs: number }; config?: SessionConfig } = {},
 ): { driver: AcpDriver; seen: Observed } {
   const context = antigravityCredentialContext();
   const launch = antigravitySessionLaunch(view, context, isolation);
@@ -94,7 +94,7 @@ function launchDriver(
     scrubInheritedEnv: launch.scrubInheritedEnv,
     acpCompatibility: { ...launch.acpCompatibility, ...(overrides.deadlines ? { deadlines: overrides.deadlines } : {}) },
     cwd,
-    config: {},
+    config: overrides.config ?? {},
     context: { kind: "native" },
     ...(resumeId ? { resumeId } : {}),
   };
@@ -411,6 +411,38 @@ test("a launch that never answers fails with its Antigravity error instead of ha
   await assert.rejects(unresumed.driver.newSession(cwd), /could not resume this conversation/u);
   assert.deepEqual(antigravitySessionLaunch(setup({}), antigravityCredentialContext({}), PROVIDER).acpCompatibility.deadlines,
     { handshakeMs: 20_000, sessionMs: 60_000 });
+});
+
+test("an unanswered initial settings update settles the launch on the agent's own values instead of hanging", async () => {
+  signIn();
+  process.env.FAKE_AGY_MODE = "config_hang";
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined, {
+    deadlines: { handshakeMs: 2_000, sessionMs: 300 }, config: { model: "fixture-flash" },
+  });
+  await driver.initialize();
+  const started = Date.now();
+  // The shared restore keeps the agent-reported values when an update fails; the deadline makes an
+  // unanswered one fail.
+  assert.ok(await driver.newSession(cwd));
+  assert.ok(Date.now() - started < 5_000, "bounded by the session deadline");
+  assert.equal(seen.state.at(-1)?.config.model, "fixture-pro", "the agent's live model, not the unconfirmed request");
+});
+
+test("agy is never offered, and never given, client-side file writes outside its sandbox", async () => {
+  signIn();
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const gitLink = join(cwd, ".git");
+  writeFileSync(gitLink, "gitdir: /repo/.git/worktrees/s1\n");
+  const { driver } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd);
+  await driver.initialize();
+  await driver.newSession(cwd);
+  const initialize = calls().find((call) => call.method === "initialize") as { clientCapabilities?: { fs?: { writeTextFile?: boolean } } };
+  assert.equal(initialize.clientCapabilities?.fs?.writeTextFile, false);
+  assert.equal(await driver.prompt("Make a client write."), "end_turn");
+  const response = calls().find((call) => call.method === "fs/write_text_file response") as { error?: string | null };
+  assert.ok(response?.error, "the write request is refused");
+  assert.equal(readFileSync(gitLink, "utf8"), "gitdir: /repo/.git/worktrees/s1\n", "the registration file is untouched");
 });
 
 test("external session discovery and adoption never probe the setup-derived Antigravity agent", () => {

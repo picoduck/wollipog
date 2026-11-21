@@ -66,8 +66,10 @@ import {
 import { AcpFilesystemService, AcpTerminalService } from "./acp-client-services.js";
 import {
   acpCompatibilityFailure,
+  acpClientFileWritesOffered,
   acpLaunchRequestOptions,
   acpRequestTimedOut,
+  compatibleAcpInitializeRequest,
   acpStderrMirrored,
   compatibleAcpEnvironment,
   compatibleAcpNegotiation,
@@ -262,7 +264,7 @@ export class AcpClient {
 
   async initialize(): Promise<void> {
     try {
-      const res = await this.peer.request("initialize", acpInitializeRequest() as unknown as Record<string, unknown>,
+      const res = await this.peer.request("initialize", compatibleAcpInitializeRequest(acpInitializeRequest(), this.compatibility) as unknown as Record<string, unknown>,
         acpLaunchRequestOptions(this.compatibility, "handshake"));
       this.negotiation = compatibleAcpNegotiation(negotiateAcpInitialize(res), this.compatibility);
     } catch (error) {
@@ -498,7 +500,7 @@ export class AcpClient {
     this.modeBarrier = modeId;
     const request: SetSessionModeRequest = { sessionId: this.sessionId, modeId };
     try {
-      await this.peer.request("session/set_mode", request);
+      await this.peer.request("session/set_mode", request, acpLaunchRequestOptions(this.compatibility, "session"));
       this.modes = { ...this.modes, currentModeId: modeId };
       if (this.modeBarrier === modeId) this.modeBarrier = null;
       this.emitSessionState();
@@ -525,7 +527,8 @@ export class AcpClient {
       value,
     };
     try {
-      const response = await this.peer.request("session/set_config_option", request) as SetSessionConfigOptionResponse;
+      const response = await this.peer.request("session/set_config_option", request,
+        acpLaunchRequestOptions(this.compatibility, "session")) as SetSessionConfigOptionResponse;
       const next = normalizeAcpConfigOptions(response.configOptions);
       if (optionForCategory(next, category)?.currentValue !== value) {
         throw new Error("unconfirmed ACP session configuration");
@@ -947,6 +950,9 @@ export class AcpClient {
   private async handleWrite(params: WriteTextFileRequest): Promise<WriteTextFileResponse> {
     this.assertActiveSession(params.sessionId);
     this.assertOrchestratorClientServiceRefused("filesystem writes");
+    // The runner writes outside the agent's sandbox; a profile that withholds the service (it was
+    // never advertised to that agent) refuses any write the agent asks for anyway.
+    if (!acpClientFileWritesOffered(this.compatibility)) throw new Error("ACP filesystem writes are not offered to this agent");
     await this.filesystem.write(params.path, params.content);
     this.ev.onEvent({ kind: "file_edit", path: params.path });
     return {};

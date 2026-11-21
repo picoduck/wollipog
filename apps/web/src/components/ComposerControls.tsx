@@ -158,8 +158,11 @@ export function sessionPermissionModeControls(
   if (session.permissionMode === "orchestrator") {
     return { permModes: ["orchestrator"], permVal: "orchestrator", showDefaultPermissionMode: true };
   }
+  // An ACP agent that names its own modes (#4779) owns them all, `plan` included: its plan mode is
+  // what the agent says, not Wollipog's read-only Plan Mode, and the menu needs no separate Default.
+  const agentOwned = agentOwnsPermissionModes(session.driver, capabilities);
   const advertised = (capabilities?.permissionModes ?? [])
-    .filter((mode) => mode !== "plan" && mode !== "orchestrator");
+    .filter((mode) => (agentOwned || mode !== "plan") && mode !== "orchestrator");
   const piWithoutHostBridge = session.driver === "pi" && session.executionTarget !== undefined &&
     session.executionTarget.adapter !== "host";
   let permModes = piWithoutHostBridge ? ["bypassPermissions"] : advertised;
@@ -175,8 +178,16 @@ export function sessionPermissionModeControls(
     permVal: piWithoutHostBridge
       ? configuredMode || "bypassPermissions"
       : unavailablePiMode ? configuredMode : displayedMode,
-    showDefaultPermissionMode: !piWithoutHostBridge,
+    showDefaultPermissionMode: !piWithoutHostBridge && !agentOwned,
   };
+}
+
+/** Whether an ACP session's agent named its own modes, so every mode is the agent's (#4779). */
+export function agentOwnsPermissionModes(
+  driver: AgentDriverKind | undefined,
+  capabilities: Pick<AgentCapabilities, "agentPermissionModes"> | undefined,
+): boolean {
+  return driver === "acp" && (capabilities?.agentPermissionModes?.length ?? 0) > 0;
 }
 
 /** Shared menu shell for the composer-bar dropdowns (bottom-anchored, click-away backdrop). */
@@ -923,9 +934,13 @@ export function advertisedPermissionMode(
 ): { label: string; description: string } | undefined {
   if (driver !== "acp" || !mode) return undefined;
   const entry = capabilities?.agentPermissionModes?.find((candidate) => candidate.id === mode);
-  return entry
-    ? { label: titleCaseLabel(entry.name), description: entry.description ?? "Wollipog doesn't know what this mode permits." }
-    : undefined;
+  if (!entry) return undefined;
+  // The agent's words, said as its own: Wollipog can't verify what an agent-owned mode permits (agy
+  // 1.5.14 edited a file without asking in its Default), only that it shows what the agent asks.
+  const claim = entry.description
+    ? `The agent describes this mode as “${entry.description.replace(/[.\s]+$/u, "")}.”`
+    : "Wollipog doesn't know what this mode permits.";
+  return { label: titleCaseLabel(entry.name), description: `${claim} You're asked only about actions the agent sends for approval.` };
 }
 
 export function approvalControlLabel(

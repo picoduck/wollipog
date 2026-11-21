@@ -221,6 +221,27 @@ test("historical transcript error rows are not assertive live regions", () => {
   assert.doesNotMatch(html, /Worktree verification failed/, "the raw message waits behind Show Details");
 });
 
+test("an agent's setup failures read as their own problems, not as failed turns (#4779)", () => {
+  const render = (message: string) => renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: [{ kind: "error", id: 1, message }],
+  }));
+  const start = render("agent init failed: Google Antigravity could not be started on this machine. Check its setup in Connections.");
+  assert.match(start, /Google Antigravity Couldn&#x27;t Start/);
+  assert.match(start, /Check that it&#x27;s installed and set up in Connections\./);
+  assert.match(start, /href="\/connections\/machines"[^>]*>Open Connections</);
+  const signIn = render("agent init failed: Google Antigravity needs sign-in on this machine. Sign in from Connections, then try again.");
+  assert.match(signIn, /Sign-In Required/);
+  assert.match(signIn, /Open Connections/);
+  const resume = render("agent init failed: Google Antigravity could not resume this conversation, so its history here is read-only. Start a new session to continue.");
+  assert.match(resume, /Conversation Can&#x27;t Resume/);
+  assert.doesNotMatch(resume, /Open Connections/);
+  for (const html of [start, signIn, resume]) {
+    assert.doesNotMatch(html, /Turn Failed|Retry Turn|agent init failed/);
+  }
+  // A real turn error keeps the failed-turn notice.
+  assert.match(render("Google Antigravity could not complete this turn: Quota exhausted for [account]; try again later"), /Turn Failed/);
+});
+
 test("a canonical accepted steer keeps one quiet Steered the Current Turn fact under its bubble", () => {
   const html = renderToStaticMarkup(React.createElement(EventTimeline, {
     items: [

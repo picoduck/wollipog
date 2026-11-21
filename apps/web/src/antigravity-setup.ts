@@ -64,7 +64,9 @@ export function antigravitySetupPresentation(
 /** Whether people can start Google Antigravity sessions on this machine (#4779), from the agent the
  * runner advertises beside its setup. A ready setup without that agent is an older runner. */
 export function antigravitySessions(runner: Pick<RunnerView, "agents" | "antigravitySetup">, machineName: string): { label: string; sentence: string } {
-  const agent = runner.agents.find((candidate) => candidate.id === ANTIGRAVITY_AGENT_ID);
+  // The agent the runner derives from this setup; an operator-configured agent that happens to use
+  // the id is not it, and says nothing about the setup's sessions.
+  const agent = runner.agents.find((candidate) => candidate.id === ANTIGRAVITY_AGENT_ID && candidate.source !== "config");
   if (agent?.available === true) {
     return { label: "Available in New Session", sentence: "Available in New Session." };
   }

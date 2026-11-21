@@ -3,6 +3,7 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  agentOwnsPermissionModes,
   approvalControlLabel,
   approvalDeliveryUnverified,
   ApprovalsMenuChoices,
@@ -287,13 +288,24 @@ test("an ACP agent's modes use its own names and meanings, never a native harnes
       { id: "plan", name: "Plan" },
     ],
   };
+  // The agent owns every mode: plan stays in the menu, and there is no second, generic Default.
+  const controls = sessionPermissionModeControls({ driver: "acp", permissionMode: "auto" }, capabilities);
+  assert.deepEqual(controls.permModes, ["default", "accept-edits", "auto", "plan"]);
+  assert.equal(controls.showDefaultPermissionMode, false);
+  assert.equal(agentOwnsPermissionModes("acp", capabilities), true);
+  assert.equal(agentOwnsPermissionModes("claude-code", capabilities), false);
+  assert.equal(sessionPermissionModeControls({ driver: "acp", permissionMode: "" }, { ...capabilities, agentPermissionModes: undefined })
+    .permModes.includes("plan"), false, "without the agent's names, plan keeps its existing handling");
   const html = renderToStaticMarkup(React.createElement(ApprovalsMenuChoices, {
-    capabilities, driver: "acp", permModes: capabilities.permissionModes, permVal: "auto", apply: () => {}, close: () => {},
+    capabilities, driver: "acp", permModes: controls.permModes, permVal: "auto", apply: () => {}, close: () => {},
+    showDefault: controls.showDefaultPermissionMode,
   }));
-  assert.match(html, /aria-checked="true"[^>]*>[\s\S]*?>Auto<[\s\S]*?Approve edits and safe commands; ask before irreversible actions\./);
-  assert.match(html, />Accept Edits<[\s\S]*?Approve file edits in the workspace without asking\./, "Title Case label from the agent's name");
+  assert.equal((html.match(/>Default</g) ?? []).length, 1, "one Default: the agent's");
+  assert.match(html, /aria-checked="true"[^>]*>[\s\S]*?>Auto<[\s\S]*?The agent describes this mode as “Approve edits and safe commands; ask before irreversible actions\.”/);
+  assert.match(html, />Accept Edits<[\s\S]*?The agent describes this mode as “Approve file edits in the workspace without asking\.”/, "Title Case label from the agent's name");
+  assert.match(html, />Default<[\s\S]*?You&#x27;re asked only about actions the agent sends for approval\./, "Wollipog promises no more than the agent asks");
   assert.match(html, />Plan<[\s\S]*?Wollipog doesn&#x27;t know what this mode permits\./);
-  assert.doesNotMatch(html, /AI-Reviewed|classifier|Ask Every Time|Plan Only|accept-edits</u);
+  assert.doesNotMatch(html, /AI-Reviewed|classifier|Ask Every Time|Plan Only|accept-edits<|Uses the agent/u);
   assert.equal(approvalControlLabel("acp", "accept-edits", "available", capabilities), "Accept Edits");
   // Without advertised names (an older runner), the existing labels stay.
   assert.equal(approvalControlLabel("acp", "plan", "available"), "Plan Only (Read-Only)");

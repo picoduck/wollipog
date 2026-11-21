@@ -1518,10 +1518,21 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   on this machine. Check its setup in Connections". A rejected turn fails with "could not complete
   this turn: …" and the provider's message with email-shaped text replaced by `[account]` (bounded,
   with an ellipsis when cut). The handshake has a 20-second deadline and opening or resuming the
-  session a 60-second one, so a process that never answers fails the launch with the same errors.
+  session, and each settings update, a 60-second one, so a process that never answers fails the
+  launch with the same errors (an unanswered initial settings update keeps the agent's own values,
+  as the shared restore already does for a refused one). The transcript shows the start, sign-in
+  and resume failures as their own notices ("Google Antigravity Couldn't Start", "Sign-In
+  Required" with Open Connections, "Conversation Can't Resume"), never as a failed turn.
+- **Client file writes.** The profile does not offer the client's `fs/write_text_file` service and
+  refuses the request if agy sends it anyway: the runner would perform that write outside agy's
+  sandbox, where a managed worktree's runner-owned registration files are not read-only. agy
+  1.5.14 writes files with its own tools inside its sandbox, with the service offered or not.
 - **Modes.** For every ACP agent, the session capabilities now carry the agent's own bounded mode
-  names and descriptions (`agentPermissionModes`), and the composer shows those for an ACP session
-  instead of a native harness's meaning for the same id (Claude's classifier `auto`, say).
+  names and descriptions (`agentPermissionModes`). For an ACP session that has them, the composer
+  lists every advertised mode (agy's `plan` included) under the agent's names, without a separate
+  generic Default, and quotes each description as the agent's own, adding that the person is
+  asked only about actions the agent sends for approval. Wollipog's read-only Plan Mode is not
+  offered for such a session, because an agent's `plan` mode makes no such promise.
 - **Stop.** For every ACP agent, `cancel()` now answers each pending `session/request_permission`
   with `cancelled`, as ACP requires, so a stopped turn's approval never stays open in the agent. The
   card itself settles with the turn, as for the native drivers.
@@ -1552,7 +1563,8 @@ answered `cancelled` and the command never ran; no stderr reached the transcript
 `session/resume` failed with -32603, shown as the resume error. Raw probes of the same CLI also showed
 the initialize capabilities captured in `apps/runner/src/fixtures/acp/antigravity-1.5.14.initialize.json`,
 "Authentication required" (-32000) from `session/new` when agy cannot find its sign-in, the silent
-empty `session/load`, and an unrequested file edit in `default` mode.
+empty `session/load`, and an unrequested file edit in `default` mode, made with agy's own
+`write_file` tool both when the client offered `fs/write_text_file` and when it did not.
 
 Assumed, not verified against real agy: resume with a writable state directory under `provider`
 isolation (the profile offers it, and only the credential-free fixture exercises it); macOS; the

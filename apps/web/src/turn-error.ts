@@ -64,6 +64,33 @@ export function isBackgroundResultsHeld(message: string): boolean {
   return BACKGROUND_RESULTS_HELD.test(withoutPromptFailedPrefix(message));
 }
 
+/** A session that could not start or continue for a reason of the agent's setup on its machine, not a
+ * failed turn (#4779). Matched on the runner's own wording for Google Antigravity
+ * (apps/runner/src/acp-compatibility.ts), after the runner's generic launch prefix. The agent's name
+ * is part of the pattern, so provider text cannot choose what the notice names. */
+export interface AgentLaunchFailure {
+  kind: "start" | "sign_in" | "resume";
+  agent: string;
+  /** The runner's sentence without its launch prefix, for Show Details. */
+  text: string;
+}
+
+const LAUNCH_FAILURE_PREFIX = /^agent init failed: /u;
+const AGENT_LAUNCH_FAILURES: ReadonlyArray<{ kind: AgentLaunchFailure["kind"]; pattern: RegExp }> = [
+  { kind: "start", pattern: /^(Google Antigravity) could not be started on this machine\. Check its setup in Connections\.$/u },
+  { kind: "sign_in", pattern: /^(Google Antigravity) needs sign-in on this machine\. Sign in from Connections, then try again\.$/u },
+  { kind: "resume", pattern: /^(Google Antigravity) could not resume this conversation, so its history here is read-only\. Start a new session to continue\.$/u },
+];
+
+export function agentLaunchFailure(message: string): AgentLaunchFailure | null {
+  const text = withoutPromptFailedPrefix(message).replace(LAUNCH_FAILURE_PREFIX, "");
+  for (const { kind, pattern } of AGENT_LAUNCH_FAILURES) {
+    const agent = pattern.exec(text)?.[1];
+    if (agent) return { kind, agent, text };
+  }
+  return null;
+}
+
 /** A failed turn's error in plain words (docs/design-system.md §13.2): what happened and, where
  * one exists, what to do. The raw provider message stays behind Show Details. */
 export function describeTurnError(message: string): string {

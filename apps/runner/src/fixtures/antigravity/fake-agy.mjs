@@ -145,10 +145,18 @@ if (args[0] === "acp" && args[1] === "--login") {
       options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }] } });
   };
   const sessionCwds = new Map();
+  /** Answers awaited for requests the fixture sent the client, by request id. */
+  const clientRequests = new Map();
   lines.on("line", (line) => {
     const request = JSON.parse(line);
-    // The client's answer to a permission request.
+    // The client's answer to a permission (or other client) request.
     if (request.method === undefined && request.id !== undefined) {
+      const answered = clientRequests.get(String(request.id));
+      if (answered) {
+        clientRequests.delete(String(request.id));
+        answered(request);
+        return;
+      }
       if (turn?.permission && String(request.id) === turn.permission.id) {
         record({ method: "permission_response", outcome: request.result?.outcome ?? null });
         turn.permission.settle(request.result?.outcome);
@@ -163,7 +171,8 @@ if (args[0] === "acp" && args[1] === "--login") {
       return;
     }
     if (request.id === undefined) return;
-    record({ method: request.method, ...(request.method === "initialize" ? { clientInfo: request.params?.clientInfo ?? null } : {}),
+    record({ method: request.method, ...(request.method === "initialize" ? { clientInfo: request.params?.clientInfo ?? null,
+      clientCapabilities: request.params?.clientCapabilities ?? null } : {}),
       ...(request.params?.sessionId ? { sessionId: request.params.sessionId } : {}) });
     if (request.method === "initialize") {
       // Valid JSON that is not a JSON-RPC message.
@@ -202,6 +211,7 @@ if (args[0] === "acp" && args[1] === "--login") {
       sessionCwds.set(sessionId, request.params?.cwd);
       return send({ id: request.id, result: { sessionId, ...sessionState() } });
     }
+    if ((request.method === "session/set_config_option" || request.method === "session/set_mode") && modes.has("config_hang")) return;
     if (request.method === "session/set_config_option") {
       const { configId, value } = request.params ?? {};
       if (configId in config) config[configId] = value;
@@ -223,6 +233,18 @@ if (args[0] === "acp" && args[1] === "--login") {
       update(sessionId, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Reading the request." } });
       if (/run (a |the )?command/iu.test(text)) return runCommand(sessionId, sessionCwds.get(sessionId) ?? process.cwd());
       if (/wait/iu.test(text)) return; // Ends only on session/cancel.
+      if (/client write/iu.test(text)) {
+        // Ask the client to write a file, as an ACP agent may even when the service was not offered.
+        const writeId = `write-${++permissionCounter}`;
+        turn.permission = { id: writeId, settle: () => {} };
+        clientRequests.set(writeId, (message) => {
+          record({ method: "fs/write_text_file response", error: message.error ? message.error.message ?? "error" : null });
+          turn.permission = null;
+          endTurn("end_turn");
+        });
+        return send({ id: writeId, method: "fs/write_text_file", params: { sessionId,
+          path: join(sessionCwds.get(sessionId) ?? process.cwd(), ".git"), content: "gitdir: /tmp/elsewhere\n" } });
+      }
       update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Fixture " } });
       update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "reply." } });
       update(sessionId, { sessionUpdate: "usage_update", used: 8_764, size: 1_048_576 });
