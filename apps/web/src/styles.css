@@ -10128,15 +10128,15 @@ textarea {
 }
 .md-streaming-caret {
   display: inline-block;
-  inline-size: 2px;
-  block-size: 0.9em;
+  width: 2px;
+  height: 0.9em;
   margin-inline-start: var(--space-0-5);
   vertical-align: -0.1em;
   background: currentColor;
 }
 @media (prefers-reduced-motion: no-preference) {
   .md-streaming-caret {
-    animation: md-streaming-caret-blink 1s steps(1) infinite;
+    animation: md-streaming-caret-blink 1s step-end infinite;
   }
 }
 @keyframes md-streaming-caret-blink {

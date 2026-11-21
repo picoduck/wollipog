@@ -651,8 +651,8 @@ for (const [name, prefix, partial, completion, formatted, visible] of streamingC
       await render(streamed, false);
       assert.equal(container.querySelector(formatted)?.textContent, visible);
       assert.equal(container.querySelectorAll(".md-streaming-caret[aria-hidden=true]").length, 1);
-      assert.equal(container.querySelector(".md a"), null, "partial destinations are inert");
-      assert.equal(container.querySelector("table"), null, "a header alone is still prose");
+      assertNoDomNode(container.querySelector(".md a"), "partial destinations are inert");
+      assertNoDomNode(container.querySelector("table"), "a header alone is still prose");
       if (name.startsWith("bold")) assert.doesNotMatch(container.textContent ?? "", /\*/);
       if (name === "partial table") {
         await render(streamed + completion, false);
