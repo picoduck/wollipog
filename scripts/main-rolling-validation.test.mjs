@@ -278,6 +278,137 @@ function forge() {
   return { data, api };
 }
 
+// Each snapshot is one traversal, with an explicit page sequence. Other endpoints
+// still use the stateful forge so tests exercise real admission/reconciliation.
+function queuedListings(api, snapshots) {
+  const pages = [], waits = [];
+  let attempt = -1;
+  return { pages, waits, sleep: async ms => { waits.push(ms); }, api: async (path, options) => {
+    const url = new URL(path, "https://api.github.com");
+    if (url.pathname.endsWith("/runs") && url.searchParams.get("status") === "queued") {
+      const page = Number(url.searchParams.get("page"));
+      if (page === 1) attempt++;
+      pages.push(page);
+      const snapshot = snapshots[Math.min(attempt, snapshots.length - 1)];
+      return snapshot[page - 1] ?? { workflow_runs: [], total_count: snapshot[0].total_count };
+    }
+    return api(path, options);
+  } };
+}
+
+test("admission retries an empty page with a transiently inflated total from page one", async () => {
+  const { data, api } = forge(); data.nativeQueue = true;
+  await reconcile(repository, { api, now: () => at(), log: () => {} });
+  const worker = data.runs.at(-1);
+  const listing = queuedListings(api, [
+    [{ workflow_runs: [], total_count: 1 }],
+    [{ workflow_runs: [], total_count: 0 }],
+  ]);
+  assert.equal(await admit(repository, eventFor(worker), worker.id, 1, { api: listing.api, sleep: listing.sleep }), true);
+  assert.deepEqual(listing.pages, [1, 1]);
+  assert.deepEqual(listing.waits, [5000]);
+  const state = (await readState(api, repository)).value;
+  assert.equal(state.active.runId, worker.id); assert.equal(state.pending, null);
+  assert.equal(data.dispatches.length, 1);
+});
+
+test("page shifts cannot count duplicate run IDs as a complete census", async () => {
+  const { api } = forge();
+  const first = run({ id: 20, status: "queued", conclusion: null });
+  const second = run({ id: 21, status: "queued", conclusion: null });
+  const listing = queuedListings(api, [
+    [{ workflow_runs: [first], total_count: 2 }, { workflow_runs: [first], total_count: 2 }],
+    [{ workflow_runs: [first, second, first], total_count: 2 }],
+  ]);
+  const result = await observe(listing.api, repository, emptyState(repository), { sleep: listing.sleep });
+  assert.deepEqual(listing.pages, [1, 2, 3, 1]);
+  assert.deepEqual(result.active.map(r => r.id), [20, 21]);
+});
+
+test("persistent short census fails closed without losing pending intent; next terminal wake recovers", async () => {
+  const { data, api } = forge(); data.nativeQueue = true;
+  await reconcile(repository, { api, now: () => at(), log: () => {} });
+  const worker = data.runs.at(-1);
+  const before = await readState(api, repository);
+  const listing = queuedListings(api, [[{ workflow_runs: [], total_count: 1 }]]);
+  await assert.rejects(admit(repository, eventFor(worker), worker.id, 1, { api: listing.api, sleep: listing.sleep }),
+    { failureClass: "worker-listing-truncated-operator-reconciliation-required" });
+  assert.deepEqual(listing.pages, [1, 1, 1, 1, 1]);
+  assert.deepEqual(listing.waits, [5000, 10000, 20000, 30000]);
+  assert.deepEqual(await readState(api, repository), before);
+  assert.equal(data.dispatches.length, 1);
+  worker.status = "completed"; worker.conclusion = "failure"; data.jobs.set(`${worker.id}/1`, []);
+  const transient = queuedListings(api, [
+    [{ workflow_runs: [], total_count: 1 }], [{ workflow_runs: [], total_count: 0 }],
+  ]);
+  const env = { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test", GITHUB_REF: "refs/heads/main",
+    MAIN_ROLLING_WORKER_RUN_ID: String(worker.id), MAIN_ROLLING_WORKER_ATTEMPT: "1" };
+  assert.equal(await main(["reconcile"], { env, api: transient.api, sleep: transient.sleep,
+    waitForWorker: async () => ({ status: "completed" }), log: () => {}, error: () => {} }), 0);
+  assert.deepEqual(transient.pages, [1, 1]);
+  assert.equal(data.dispatches.length, 2);
+  assert.equal(data.dispatches.at(-1).inputs.target_sha, A);
+});
+
+test("listing transport and malformed payload failures are never retried", async () => {
+  for (const failure of [new Error("private response body"), { workflow_runs: null, total_count: 1 }]) {
+    const { data, api } = forge();
+    let reads = 0;
+    await assert.rejects(reconcile(repository, { api: async (path, options) => {
+      if (path.includes("status=queued")) {
+        reads++;
+        if (failure instanceof Error) throw failure;
+        return failure;
+      }
+      return api(path, options);
+    }, log: () => {} }));
+    assert.equal(reads, 1); assert.equal(data.mutations.length, 0); assert.equal(data.dispatches.length, 0);
+  }
+});
+
+test("listing retries discard prior census and retain the ten-page bound", async () => {
+  const { api } = forge();
+  const first = run({ id: 20, status: "queued", conclusion: null });
+  const second = run({ id: 21, status: "queued", conclusion: null });
+  const changed = queuedListings(api, [
+    [{ workflow_runs: [first], total_count: 2 }],
+    [{ workflow_runs: [second], total_count: 1 }],
+  ]);
+  assert.deepEqual((await observe(changed.api, repository, emptyState(repository), { sleep: changed.sleep })).active.map(r => r.id), [21]);
+  const capped = queuedListings(api, [Array.from({ length: 10 }, () => ({ workflow_runs: [first], total_count: 1001 }))]);
+  await assert.rejects(observe(capped.api, repository, emptyState(repository), { sleep: capped.sleep }),
+    { failureClass: "worker-listing-truncated-operator-reconciliation-required" });
+  assert.deepEqual(capped.pages, Array.from({ length: 5 }, () => Array.from({ length: 10 }, (_, i) => i + 1)).flat());
+});
+
+test("a short census lasting forty seconds recovers within the bounded retry window", async () => {
+  const { data, api } = forge();
+  let elapsed = 0;
+  const waits = [];
+  const transient = async (path, options) => {
+    if (path.includes("status=pending") && elapsed < 40_000) return { workflow_runs: [], total_count: 1 };
+    return api(path, options);
+  };
+  await reconcile(repository, { api: transient, now: () => at(), log: () => {},
+    sleep: async ms => { waits.push(ms); elapsed += ms; } });
+  assert.deepEqual(waits, [5000, 10000, 20000, 30000]);
+  assert.equal(elapsed, 65_000); assert.equal(data.dispatches.length, 1);
+});
+
+test("CAS retries share the invocation's sixty-five-second listing delay allowance", async () => {
+  const { data, api } = forge();
+  let listings = 0;
+  const waits = [];
+  await assert.rejects(reconcile(repository, { api: async (path, options) => {
+    if (path.includes("status=queued")) return { workflow_runs: [], total_count: ++listings % 5 === 0 ? 0 : 1 };
+    if (path === "/graphql") return { errors: [{ message: "CAS refused" }] };
+    return api(path, options);
+  }, log: () => {}, sleep: async ms => { waits.push(ms); } }),
+  { failureClass: "worker-listing-truncated-operator-reconciliation-required" });
+  assert.deepEqual(waits, [5000, 10000, 20000, 30000]);
+  assert.equal(data.oid, null); assert.equal(data.dispatches.length, 0);
+});
+
 test("candidate request persists before dispatch, concurrent/cross-purpose duplicates share one claim", async () => {
   const { data, api } = forge();
   await assert.rejects(requestCandidate(repository, B, { api }), /state requires operator/);
