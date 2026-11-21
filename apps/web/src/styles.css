@@ -7688,24 +7688,7 @@ body.shell-dock-dragging * {
 .assistant-dock-details { justify-self: start; }
 .assistant-dock-facts { display: grid; gap: var(--space-1); min-width: 0; }
 .assistant-dock-facts .facts { margin: 0; }
-.assistant-dock-choices {
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-.assistant-dock-choices label {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: var(--control-h-sm);
-  font: var(--type-body);
-}
-.assistant-dock-choices small {
-  display: block;
-  color: var(--text-dim);
-  font: var(--type-small);
-}
+.assistant-dock-choices { min-width: 0; }
 .assistant-dock-failure {
   margin: 0;
   scroll-margin-bottom: var(--space-1);
@@ -7720,7 +7703,7 @@ body.shell-dock-dragging * {
 }
 .assistant-dock-resolve { margin-left: auto; }
 @media (max-width: 760px) {
-  .assistant-dock-slot:not(:has([data-show-all])) { max-height: 72cqh; }
+  .assistant-dock-slot:not(:has([data-show-all])) { max-height: 74cqh; }
   .assistant-dock-head { padding-inline: var(--space-2); }
   .assistant-dock-card-head,
   .assistant-dock-card-body,
@@ -7738,8 +7721,7 @@ body.shell-dock-dragging * {
 }
 @media (pointer: coarse) {
   .assistant-dock .icon-btn.sm { min-width: 44px; min-height: 44px; }
-  .assistant-dock .btn.sm,
-  .assistant-dock-choices label { min-height: 44px; }
+  .assistant-dock .btn.sm { min-height: 44px; }
   .assistant-dock :is(.btn.sm, .icon-btn.sm)::after { content: none; }
 }
 .assistant-campaign-review {

@@ -25,6 +25,7 @@ import { useClipEdges } from "./requests/clip-edges.js";
 import { requestKindMeta } from "./requests/request-meta.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
+import { ChoiceRows } from "./ui/ChoiceControls.js";
 import { useToastChrome } from "./useToastChrome.js";
 
 type Request =
@@ -346,16 +347,13 @@ function WaitingCard({ item, now, busy, begin, finish, onConfirmationAnswered, o
         <p className="assistant-confirmation-summary">{summary}</p>
         <TargetChip id={session?.id ?? target?.id ?? ""} label={session ? "Launched Session" : target?.label ?? ""} />
         {options && command && <div className="code-well"><pre>{command}</pre></div>}
-        {question && <fieldset className="assistant-dock-choices" aria-disabled={busy ? true : undefined}>
-          <legend>{question.question === title ? <span className="sr-only">Answer Options</span> : question.question}</legend>
-          {question.options.map(option => (
-            <label key={option.label}>
-              <input type="radio" name={headingId} checked={choice === option.label} aria-disabled={busy ? true : undefined}
-                onChange={() => { if (!busy) setChoice(option.label); }} />
-              <span>{option.label}{option.description && <small>{option.description}</small>}</span>
-            </label>
-          ))}
-        </fieldset>}
+        {question && <div className="assistant-dock-choices">
+          {question.question !== title && <p className="assistant-confirmation-summary">{question.question}</p>}
+          <ChoiceRows label={question.question} value={choice ?? null} onChange={setChoice}
+            options={question.options.map(option => ({
+              value: option.label, title: option.label, description: option.description, disabled: busy !== null,
+            }))} />
+        </div>}
         {refusal && <p className="request-card-reasons">{refusal}</p>}
         {failure && <p className="assistant-dock-failure" role="alert">{responseCopy[failure.action].failure}</p>}
         {detailCount > 0 && <>
