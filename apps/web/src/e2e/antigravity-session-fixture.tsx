@@ -31,6 +31,7 @@ import { SessionDetail } from "../components/SessionDetail.js";
  *   `session_many_models` stress shape).
  * - `modes`, `attach-menu`: the `pickers` session, for the open Permission Mode menu (which names
  *   agy's four modes as agy does, `agentPermissionModes`) and the Attach and Settings menu.
+ * - `modes-stress`: that session with ten fixture modes (not agy's) for the Permission Mode menu.
  * - `streaming`: a running turn with a command's long output and a reply still streaming.
  * - `approval`: the turn waits on agy's permission request for `touch notes.txt`.
  * - `denied`: that request was denied, the tool call failed and the agent said so.
@@ -43,7 +44,7 @@ import { SessionDetail } from "../components/SessionDetail.js";
  * agy's account is the runner's redaction placeholder `[account]`.
  */
 const params = new URLSearchParams(window.location.search);
-type AntigravityState = "pickers" | "pickers-stress40" | "modes" | "attach-menu" | "resume-failed" | "streaming" | "approval" | "denied" | "stopped" | "install-failed" | "signin-failed" | "turn-failed";
+type AntigravityState = "pickers" | "pickers-stress40" | "modes" | "modes-stress" | "attach-menu" | "resume-failed" | "streaming" | "approval" | "denied" | "stopped" | "install-failed" | "signin-failed" | "turn-failed";
 const state = (params.get("agState") ?? "pickers") as AntigravityState;
 
 const SESSION_ID = "antigravity-session-e2e";
@@ -63,9 +64,32 @@ const manyModels = state === "pickers-stress40";
 const models = manyModels ? STRESS_MODELS : REAL_MODELS;
 const currentModel = models[0]![0];
 
+/** agy's own names and meanings for its four modes, as the runner forwards them. */
+const AGY_MODES = [
+  { id: "default", name: "Default", description: "Ask before edits and commands, per your permission settings." },
+  { id: "accept-edits", name: "Accept edits", description: "Approve file edits in the workspace without asking." },
+  { id: "auto", name: "Auto", description: "Approve edits and safe commands; ask before irreversible actions." },
+  { id: "plan", name: "Plan", description: "Plan carefully before executing a task." },
+];
+/** `modes-stress` (fixture only, not agy's): ten long-named modes, every odd one with a description
+ * of 200+ characters (and the tenth), the seventh with none, and the fifth checked. */
+const NUMBER_WORDS = ["One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten"];
+const STRESS_MODES = NUMBER_WORDS.map((word, index) => ({
+  id: `mode-${index + 1}`,
+  name: `Fixture Mode ${word} With a Long Name for Layout`,
+  ...(index === 6 ? {} : {
+    description: index % 2 === 0 || index === 9
+      ? `Fixture mode ${index + 1} approves file edits inside the workspace and read-only commands without asking, asks before any command that writes outside the workspace, reaches the network, or changes git history, and refuses anything it cannot undo`
+      : `Fixture mode ${index + 1} asks before every edit and command`,
+  }),
+}));
+const modesStress = state === "modes-stress";
+const agentModes = modesStress ? STRESS_MODES : AGY_MODES;
+const currentMode = modesStress ? "mode-5" : "default";
+
 /** What acpSessionPresentation (apps/runner/src/acp-session-state.ts) makes of agy's session: its
  * `model` and `thought_level` options and its four modes, each approving through ACP permission. */
-const permissionModes = ["default", "accept-edits", "auto", "plan"];
+const permissionModes = agentModes.map((mode) => mode.id);
 const capabilities: AgentCapabilities = {
   models: models.map(([id, displayName]) => ({ id, displayName, ...(id === currentModel ? { default: true } : {}) })),
   effortLevels: ["low", "medium", "high", "xhigh"],
@@ -73,13 +97,7 @@ const capabilities: AgentCapabilities = {
   supportsImages: true,
   supportsApprovals: true,
   permissionModes,
-  // agy's own names and meanings for its modes, as the runner forwards them.
-  agentPermissionModes: [
-    { id: "default", name: "Default", description: "Ask before edits and commands, per your permission settings." },
-    { id: "accept-edits", name: "Accept edits", description: "Approve file edits in the workspace without asking." },
-    { id: "auto", name: "Auto", description: "Approve edits and safe commands; ask before irreversible actions." },
-    { id: "plan", name: "Plan", description: "Plan carefully before executing a task." },
-  ],
+  agentPermissionModes: agentModes,
   elicitation: Object.fromEntries(permissionModes.map((mode) => [mode, ["acp-permission" as const]])),
 };
 
@@ -145,6 +163,7 @@ switch (state) {
   case "pickers":
   case "pickers-stress40":
   case "modes":
+  case "modes-stress":
   case "attach-menu":
   case "resume-failed":
     prompt("Summarize what this project does in two sentences.");
@@ -207,7 +226,7 @@ const events: SessionEvent[] = payloads.map((payload, index) => ({
 }));
 
 const statusByState: Record<AntigravityState, SessionStatus> = {
-  pickers: "idle", "pickers-stress40": "idle", modes: "idle", "attach-menu": "idle", "resume-failed": "failed", streaming: "running", approval: "input_required", denied: "idle", stopped: "idle",
+  pickers: "idle", "pickers-stress40": "idle", modes: "idle", "modes-stress": "idle", "attach-menu": "idle", "resume-failed": "failed", streaming: "running", approval: "input_required", denied: "idle", stopped: "idle",
   "install-failed": "failed", "signin-failed": "failed", "turn-failed": "idle",
 };
 
@@ -235,7 +254,7 @@ const session = {
   driver: "acp",
   model: currentModel,
   effort: "high",
-  permissionMode: "default",
+  permissionMode: currentMode,
   agentCapabilities: { ...capabilities, restartResumesConversation: false },
   ...(state === "streaming" || state === "approval" ? { activeTurnId: "turn-1" } : {}),
   tokensIn: 0,

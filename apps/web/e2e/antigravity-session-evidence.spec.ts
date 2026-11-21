@@ -442,4 +442,36 @@ for (const viewport of VIEWPORTS) test.describe(`${viewport.width}x${viewport.he
       await capture(page, id, size, "body");
     });
   }
+
+  // Fixture only (not agy's modes): ten long-named modes, five with 200+ character descriptions, one
+  // with none, the fifth checked. The menu must fit or scroll, never sideways, and reach every row.
+  test(`Google Antigravity session, modes-stress, ${size}`, async ({ page }) => {
+    await openSession(page, "modes-stress", viewport);
+    await openComposerBar(page, viewport);
+    await page.getByRole("button", { name: /^Permission Mode/ }).click();
+    const menu = page.getByRole("menu", { name: "Permission Mode" });
+    await expect(menu).toBeVisible();
+    const rows = menu.locator('[role^="menuitem"], [role="radio"]');
+    await expect(rows).toHaveCount(10);
+    await expect(rows.nth(4)).toHaveAttribute("aria-checked", "true");
+    await expect(rows.nth(6)).toContainText("Wollipog doesn't know what this mode permits.");
+    await expectNoHorizontalOverflow(menu, "The open Permission Mode menu");
+    // Whether the menu (or the sheet around it) scrolls: a scrolling box in it, or holding it, that is taller than it shows.
+    const scrolls = await menu.evaluate((root) => {
+      const candidates = [...root.querySelectorAll("*"), root];
+      for (let node = root.parentElement; node && node !== document.body; node = node.parentElement) candidates.push(node);
+      return candidates.some((element) => ["auto", "scroll"].includes(getComputedStyle(element).overflowY) &&
+        element.scrollHeight > element.clientHeight + 1);
+    });
+    measurements[`antigravity-session-modes-stress-${size}-scrolls`] = scrolls;
+    // As it first appears.
+    await capture(page, "modes-stress", size, "body");
+    const last = rows.last();
+    // Title Case keeps the short preposition "with" lowercase.
+    await expect(last).toContainText("Fixture Mode Ten with a Long Name for Layout");
+    await last.scrollIntoViewIfNeeded();
+    await expect(last, "the last mode is reachable").toBeInViewport({ ratio: 1 });
+    await expectNoHorizontalOverflow(menu, "The scrolled Permission Mode menu");
+    if (scrolls) await capture(page, "modes-stress-scrolled", size, "body");
+  });
 });
