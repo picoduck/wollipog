@@ -616,3 +616,51 @@ test("a completed signed media URL retries after its streamed unsigned prefix fa
     await cleanup(container, root);
   }
 });
+
+const streamingCases = [
+  ["bold", "Verified that **", "Tracker Reconciliation", "** is ready.", "strong", "Tracker Reconciliation"],
+  ["bold with half a closer", "Verified that **Tracker", " Reconciliation*", "*", "strong", "Tracker Reconciliation"],
+  ["asterisk italics", "Notes on *", "this change", "*.", "em", "this change"],
+  ["underscore italics", "Notes on _", "this change", "_.", "em", "this change"],
+  ["strikethrough", "Mark ~~", "the old plan", "~~.", "del", "the old plan"],
+  ["inline code", "Call `", "reconcile(*)", "` here.", ":not(pre) > code", "reconcile(*)"],
+  ["dangling marker", "A marker", " **", " follows**.", "p", "A marker"],
+  ["open fence", "Run this:\n\n```ts\n", "const total = 2 * 3;", "\n```", "pre code", "const total = 2 * 3;\n"],
+  ["unfinished label", "Compare [tracker", " history", "](https://example.test/history)", ".md-streaming-link", "tracker history"],
+  ["unfinished destination", "Compare [tracker **history**]", "(https://example", ".test/history)", ".md-streaming-link > strong", "history"],
+  ["partial table", "| Check |", " Status |", "\n| --- | --- |\n| Lint | Passed |", "p", "| Check | Status |"],
+  ["list, identifier and multiplication", "* A list item\n* ", "snake_case at 2 * 3", " stays literal.", "li:last-child", "snake_case at 2 * 3"],
+  ["escaped marker", "This is \\*", "literal", " text.", "p", "This is *literal"],
+] as const;
+
+for (const [name, prefix, partial, completion, formatted, visible] of streamingCases) {
+  test(`streaming Markdown previews ${name} and restores canonical output on settlement`, async () => {
+    const { container, root } = await renderMarkdown(prefix, false, false);
+    const render = (text: string, settled: boolean) => act(async () => {
+      root.render(<Markdown highlightEligible={false} settled={settled} streaming={!settled}>{text}</Markdown>);
+    });
+    const streamed = prefix + partial;
+    try {
+      await render(prefix, false);
+      await render(streamed, false);
+      assert.equal(container.querySelector(formatted)?.textContent, visible);
+      assert.equal(container.querySelectorAll(".md-streaming-caret[aria-hidden=true]").length, 1);
+      assert.equal(container.querySelector(".md a"), null, "partial destinations are inert");
+      assert.equal(container.querySelector("table"), null, "a header alone is still prose");
+      if (name.startsWith("bold")) assert.doesNotMatch(container.textContent ?? "", /\*/);
+      if (name === "partial table") {
+        await render(streamed + completion, false);
+        assert.equal(container.querySelector("thead th")?.textContent, "Check");
+        assert.ok(container.querySelector("tbody td:last-child .md-streaming-caret"));
+      }
+      // A turn can also settle without ever receiving its closing syntax.
+      for (const text of [streamed, streamed + completion]) {
+        await render(text, true);
+        const canonical = await renderMarkdown(text);
+        try {
+          assert.equal(container.innerHTML, canonical.container.innerHTML);
+        } finally { await cleanup(canonical.container, canonical.root); }
+      }
+    } finally { await cleanup(container, root); }
+  });
+}

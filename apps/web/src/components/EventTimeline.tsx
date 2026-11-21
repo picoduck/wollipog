@@ -2522,7 +2522,7 @@ function TimelineRowContent({
         <div className="tl-agent-msg">
           <MessageTimestamp timestamp={item.createdAt} />
           <ReplyArtifactScope text={item.text} settled={mediaSettled} previews={replyArtifacts}>
-            <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled}>{item.text}</Markdown>
+            <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled} streaming={!mediaSettled}>{item.text}</Markdown>
           </ReplyArtifactScope>
           {(standaloneCopy || insertable) && item.text && (
             <div className="tl-message-actions tl-reply-actions" role="group" aria-label="Message Actions">
