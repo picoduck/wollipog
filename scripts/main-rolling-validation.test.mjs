@@ -1012,6 +1012,20 @@ test("exhausted admission CAS conflicts recover through terminal reconciliation 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("handoff failures retain only allow-listed failure classes and never reconcile", async () => {
+  for (const reason of ["invalid-worker-handoff", "worker-handoff-identity-changed", "worker-handoff-status-unknown", "private body"]) {
+    const errors = [];
+    const rc = await main(["reconcile"], { env: { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test",
+      GITHUB_REF: "refs/heads/main", MAIN_ROLLING_WORKER_RUN_ID: "10", MAIN_ROLLING_WORKER_ATTEMPT: "1" },
+      api: async () => assert.fail("no state reads after failed handoff"),
+      waitForWorker: async () => { const error = new Error("private message"); error.reason = reason; throw error; },
+      error: line => errors.push(JSON.parse(line)) });
+    assert.equal(rc, 1);
+    assert.equal(errors[0].failureClass, reason === "private body" ? "unexpected-error" : reason);
+    assert.doesNotMatch(JSON.stringify(errors), /private/);
+  }
+});
+
 test("completion reconciliation waits for the exact terminal attempt before any state reads", async () => {
   const { data, api } = forge();
   const env = { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test", GITHUB_REF: "refs/heads/main",

@@ -55,6 +55,11 @@ dispatch and `main_rolling_handoff`, then a complete full rolling verdict for th
 (or a coalesced descendant). Verify health independently certifies that target and closes #4785
 only when its ordinary descendant/full-suite rules permit. Do not dispatch artificial traffic
 or treat a green controller or admission-only run as that observation.
+When an admission error next occurs naturally, also verify GitHub propagates the failed admit
+job's `reconcile=true` output: **Wake Rolling Controller** must run and log
+`main_rolling_wake` with delivery `dispatched`, followed by the controller's terminal handoff.
+Local tests prove the output is written and the workflow references it; only GitHub can prove
+that failed-job output propagation and actual dispatch delivery.
 No fixed provider-event or cron delivery bound is promised. Push and in-progress wakes are omitted. Skipped workflow-run
 jobs consume no observer API calls. It checks out trusted default-branch code without persisted credentials and runs
 `scripts/main-ci-health.mjs`; it never executes the triggering run's code or artifacts. The

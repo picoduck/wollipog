@@ -44,6 +44,7 @@ class RollingFailure extends Error {
 class InvalidState extends Error {}
 class StateConflict extends Error {}
 class UnsafePredecessor extends Error {}
+const HANDOFF_FAILURES = new Set(["invalid-worker-handoff", "worker-handoff-identity-changed", "worker-handoff-status-unknown"]);
 
 export function emptyState(repository) {
   return { version: 2, repository, sequence: 0, active: null, pending: null, lastVerdict: null, records: [], status: "initializing" };
@@ -576,6 +577,7 @@ export async function main(argv, { env = process.env, log = console.log, error =
     const failureClass = cause instanceof RollingFailure ? cause.failureClass
       : cause instanceof StateConflict ? "state-conflict"
       : cause instanceof UnsafePredecessor ? "unsafe-predecessor"
+      : HANDOFF_FAILURES.has(cause?.reason) ? cause.reason
       : cause instanceof TypeError ? "type-error"
       : cause instanceof SyntaxError ? "invalid-json"
       : cause?.name === "TimeoutError" ? "request-timeout"
