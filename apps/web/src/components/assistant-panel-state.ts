@@ -46,7 +46,6 @@ export function useAssistantPanelState() {
     close,
     show,
     toggle,
-    toggleWork: () => setPreference((current) => ({ open: !(current.open && current.tab === "Work"), tab: "Work" })),
   };
 }
 

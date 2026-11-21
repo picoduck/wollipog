@@ -53,12 +53,3 @@ export function groupLaunchedWork(
   for (const entry of entries) groups[groupOf(entry.id, entry.index)].push(entry.id);
   return groups;
 }
-
-/**
- * The thread header's toggle (#4776): "3 Sessions · 1 Needs You". The count of sessions waiting on
- * the owner is named only while there is one.
- */
-export function launchedSessionsToggleLabel(counts: { total: number; needsYou: number }): string {
-  const sessions = `${counts.total} ${counts.total === 1 ? "Session" : "Sessions"}`;
-  return counts.needsYou > 0 ? `${sessions} · ${counts.needsYou} Needs You` : sessions;
-}

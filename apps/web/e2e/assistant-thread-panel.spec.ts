@@ -7,7 +7,7 @@ const LONG_ACCOUNT = "DesignResearchAndEngineeringSubscriptionForLongRunningProj
 const PANEL_PREFERENCE = "wollipog.assistant-panel";
 const CHORD = "Control+Backslash";
 const panel = (page: Page) => page.locator("#right-panel");
-const toggle = (page: Page) => page.getByRole("button", { name: "Side Panel", exact: true });
+const toggle = (page: Page) => page.getByRole("button", { name: /Side Panel/ });
 const tab = (page: Page, name: string) => panel(page).getByRole("tab", { name: new RegExp("^" + name) });
 const body = (page: Page, name: string) => panel(page).getByRole("tabpanel", { name: new RegExp("^" + name) });
 

@@ -9,7 +9,7 @@ const thread = viewPath({ name: "assistants", threadId: "thr_triage" });
 
 async function openDecisions(page: Page) {
   const panel = page.locator("#right-panel");
-  if (!(await panel.isVisible())) await page.getByRole("button", { name: "Side Panel", exact: true }).click();
+  if (!(await panel.isVisible())) await page.getByRole("button", { name: /Side Panel/ }).click();
   await panel.getByRole("tab", { name: /^Decisions/ }).click();
   return panel.getByRole("tabpanel", { name: /^Decisions/ });
 }
