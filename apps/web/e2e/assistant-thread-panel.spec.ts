@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizontalOverflow } from "./layout-invariants.js";
+import { expectTextContrast, expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizontalOverflow } from "./layout-invariants.js";
 
 const THREAD_PATH = "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA";
 const LONG_ACCOUNT = "DesignResearchAndEngineeringSubscriptionForLongRunningProjectsAcrossTheEntireNorthAmericanWorkspace";
@@ -60,34 +60,6 @@ async function expectTouchTargets(container: Locator) {
       expect(width > 0.5 && height > 0.5, first.name + " overlaps " + second.name).toBe(false);
     }
   }
-}
-
-async function expectTextContrast(root: Locator) {
-  const weakest = await root.evaluate((element) => {
-    const rgb = (value: string) => value.match(/[\d.]+/g)?.map(Number) ?? [];
-    const luminance = (color: number[]) => color.slice(0, 3).map((channel) => {
-      const value = channel / 255;
-      return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
-    }).reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index]!, 0);
-    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-    let weakest = { ratio: Infinity, text: "" };
-    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      const parent = node.parentElement;
-      if (!parent || !node.textContent?.trim() || !parent.getClientRects().length || parent.closest(":disabled")) continue;
-      const foreground = rgb(getComputedStyle(parent).color);
-      let background: number[] = [];
-      for (let layer: Element | null = parent; layer; layer = layer.parentElement) {
-        background = rgb(getComputedStyle(layer).backgroundColor);
-        if (background.length === 3 || background[3] === 1) break;
-      }
-      if (background.length < 3 || foreground.length < 3) continue;
-      const [a, b] = [luminance(foreground), luminance(background)].sort((left, right) => right - left);
-      const ratio = (a! + 0.05) / (b! + 0.05);
-      if (ratio < weakest.ratio) weakest = { ratio, text: node.textContent.trim() };
-    }
-    return weakest;
-  });
-  expect(weakest.ratio, weakest.text + " contrast against its background").toBeGreaterThanOrEqual(4.5);
 }
 
 async function checkPanel(page: Page, phone: boolean) {

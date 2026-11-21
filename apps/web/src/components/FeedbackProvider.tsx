@@ -532,7 +532,8 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
 
 /**
  * Publishes --toast-clear: the height docked at the bottom of the view that toasts must sit above —
- * the phone tab bar, a session's composer, a sheet's footer (docs/design-system.md §13.1). Docked
+ * the phone tab bar, a session's composer, an Assistant request dock, or a sheet's footer
+ * (docs/design-system.md §13.1). Docked
  * chrome stacks (a phone session's composer sits on its tab bar), so the measurement walks up from
  * the bottom of the app through every visible candidate whose bottom edge touches the stack so far.
  * A candidate taller than half the app is skipped: the desktop rail spans the full height and sits
@@ -552,7 +553,8 @@ function useToastClearance(active: boolean) {
       const app = document.getElementById("root") ?? document.body;
       const bottom = app.getBoundingClientRect().bottom;
       // The dock signals layout changes but does not contribute its box to toast clearance.
-      const chrome = toastChromeElements(document).filter((element) => element.matches(".app-rail, .composer, .modal-foot"));
+      const chrome = toastChromeElements(document).filter((element) =>
+        element.matches(".app-rail, .composer, .modal-foot, .assistant-dock-slot"));
       const boxes = chrome
         .map((element) => element.getBoundingClientRect())
         .filter((box) => box.width > 0 && box.height > 0 && box.height <= bottom / 2)
@@ -563,9 +565,12 @@ function useToastClearance(active: boolean) {
         stackTop = Math.min(stackTop, box.top);
       }
       const column = document.querySelector(".toast-region")?.getBoundingClientRect();
-      for (const foot of chrome.filter((element) => element.classList.contains("modal-foot"))) {
-        const box = foot.getBoundingClientRect();
-        if (box.width === 0 || box.height === 0 || box.top < bottom / 2) continue;
+      // The Assistant dock can have a notice between it and the composer. Clear it even when
+      // there is a gap, so a success toast cannot cover the next request's controls.
+      for (const element of chrome.filter((element) => element.matches(".modal-foot, .assistant-dock-slot"))) {
+        const box = element.getBoundingClientRect();
+        if (box.width === 0 || box.height === 0 || element.closest("[inert]")) continue;
+        if (element.classList.contains("modal-foot") && box.top < bottom / 2) continue;
         if (column && (box.right <= column.left || box.left >= column.right)) continue;
         stackTop = Math.min(stackTop, box.top);
       }

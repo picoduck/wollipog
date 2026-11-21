@@ -7577,8 +7577,7 @@ body.shell-dock-dragging * {
   margin-left: var(--space-1);
 }
 .assistant-approvals-more { align-self: flex-end; }
-/* An Assistant thread's owner confirmations (#4665): request cards among a thread's work cards. An
-   argument's whole value wraps rather than hides. */
+/* Assistant confirmations in the Waiting for You dock and the Inbox. */
 .assistant-confirmation-summary {
   margin: 0;
   font: var(--type-body);
@@ -7588,30 +7587,160 @@ body.shell-dock-dragging * {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
-/* A thread's pending requests, in their own list ahead of its work cards (AssistantWorkCards). Each
-   keeps a readable width and its whole height. On desktop the list scrolls sideways when several are
-   waiting, and where the requests and the work cards' own floor (`.assistant-work-cards`) do not both
-   fit, the row wraps and the work cards take a full line below. Neither is ever squeezed to nothing.
-   On a phone (below) they stack above the work cards, and the whole area scrolls within a bound. */
-.assistant-work-confirmations {
+/* The dock uses the same column gutters and height budget as the session request slot. */
+.assistant-dock-slot {
   display: flex;
-  flex: 0 1 auto;
-  gap: var(--space-2);
-  min-width: min(440px, 100%);
-  max-width: 100%;
+  flex: none;
+  min-height: 0;
+  max-height: 40cqh;
+  padding: var(--space-1) max(var(--space-3), calc((100% - var(--chat-max)) / 2));
+}
+.assistant-dock-slot:has([data-show-all]) { max-height: 60cqh; }
+.assistant-dock {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev);
+}
+.assistant-dock-head,
+.assistant-dock-pager {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.assistant-dock-head {
+  justify-content: space-between;
+  flex: none;
+  min-height: var(--bar-h);
+  padding-inline: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+.assistant-dock-head h3 {
   margin: 0;
-  padding: 0 0 var(--space-1);
-  overflow-x: auto;
+  font: var(--type-body-strong);
+}
+.assistant-dock-pager {
+  flex: none;
+  font: var(--type-small);
+}
+.assistant-dock-pager > span { white-space: nowrap; }
+.assistant-dock-list {
+  min-height: 0;
+  padding: 0;
+  margin: 0;
   list-style: none;
+  overflow: auto;
+  overscroll-behavior: contain;
 }
-.assistant-work-confirmations > .request-card {
-  flex: none;
-  width: 440px;
-  max-width: 100%;
+.assistant-dock-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
-.assistant-work-confirmations > .request-card > .request-card-body {
+.assistant-dock-list:not([data-show-all]) { display: flex; }
+.assistant-dock-list[data-show-all][data-clip-start] { box-shadow: inset 0 1px var(--border); }
+.assistant-dock-list:not([data-show-all]) > .assistant-dock-card { width: 100%; }
+.assistant-dock-card-head,
+.assistant-dock-card-body {
+  display: grid;
+  gap: var(--space-1);
+  padding-inline: var(--space-3);
+  min-width: 0;
+}
+.assistant-dock-card-head {
   flex: none;
-  overflow: visible;
+  padding-block: var(--space-2) var(--space-1);
+}
+.assistant-dock-list:not([data-show-all]) .assistant-dock-card-body {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.assistant-dock-card-body[data-clip-start] { box-shadow: inset 0 1px var(--border); }
+.assistant-dock-card-body[data-clip-end] + .assistant-dock-actions { box-shadow: 0 -1px var(--border); }
+.assistant-dock-card + .assistant-dock-card { border-top: 1px solid var(--border); }
+.assistant-dock-card .request-card-title {
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.assistant-dock-card .code-well { min-width: 0; }
+.assistant-dock-card .code-well pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.assistant-dock-target,
+.assistant-dock-actions,
+.assistant-dock-resolve {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.assistant-dock-target > .chip {
+  display: block;
+  overflow: hidden;
+  align-content: center;
+  text-overflow: ellipsis;
+}
+.assistant-dock-target > .status { flex: none; }
+.assistant-dock-details { justify-self: start; }
+.assistant-dock-facts { display: grid; gap: var(--space-1); min-width: 0; }
+.assistant-dock-facts .facts { margin: 0; }
+.assistant-dock-choices {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.assistant-dock-choices label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h-sm);
+  font: var(--type-body);
+}
+.assistant-dock-choices small {
+  display: block;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.assistant-dock-failure {
+  margin: 0;
+  color: var(--danger-text);
+  font: var(--type-body);
+}
+.assistant-dock-actions {
+  justify-content: space-between;
+  flex: none;
+  background: var(--bg-elev);
+  padding: var(--space-2) var(--space-3);
+}
+.assistant-dock-resolve { margin-left: auto; }
+@media (max-width: 760px) {
+  .assistant-dock-slot { max-height: 50cqh; }
+  .assistant-dock-head { padding-inline: var(--space-2); }
+  .assistant-dock-card-head,
+  .assistant-dock-card-body,
+  .assistant-dock-actions { padding-inline: var(--space-2); }
+  .assistant-dock-actions { flex-wrap: wrap; }
+  .assistant-dock-resolve:has(> [data-dock-action="approve"]) {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+  .assistant-dock-resolve:has(> [data-dock-action="approve"]) > .btn { max-width: none; }
+}
+@container chat-reading (max-height: 479px) {
+  .assistant-dock-slot { max-height: 60cqh; }
+}
+@media (pointer: coarse) {
+  .assistant-dock .icon-btn.sm { min-width: 44px; min-height: 44px; }
+  .assistant-dock .btn.sm,
+  .assistant-dock-choices label { min-height: 44px; }
+  .assistant-dock :is(.btn.sm, .icon-btn.sm)::after { content: none; }
 }
 .assistant-campaign-review {
   display: grid;
@@ -7636,31 +7765,6 @@ body.shell-dock-dragging * {
   margin: 0;
   padding: 0;
   list-style: none;
-}
-/* With requests waiting, the requests and work cards scroll together within a bound at every width,
-   wrapped or not, so the transcript and composer always keep their room. A phone (below) allows
-   more, enough for a whole request. */
-.assistant-work:has(> .assistant-work-confirmations) {
-  max-height: 40vh;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-@media (max-width: 760px) {
-  .assistant-work-confirmations {
-    flex: none;
-    flex-direction: column;
-    min-width: 0;
-    max-width: none;
-    padding: 0;
-    overflow: visible;
-  }
-  .assistant-work-confirmations > .request-card { width: auto; }
-  /* Tall enough to show a whole request and the start of what follows. */
-  .assistant-work:has(> .assistant-work-confirmations) { max-height: 60vh; }
-  .assistant-work:has(> .assistant-work-confirmations) > .assistant-work-cards {
-    max-height: none;
-    overflow-y: visible;
-  }
 }
 /* The card in a side panel's detail (#2206): flush on the panel, with no wash or frame, a title-sized
    heading, and its footer stuck to the panel's lower edge above a hairline. The detail scrolls as one
@@ -13022,7 +13126,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   background: var(--warning);
   box-shadow: 0 0 0 2px var(--bg);
 }
-/* Waiting requests stay in the conversation column beside Work. */
+/* The thread's launch limit notice stays in the conversation column beside Work. */
 .assistant-thread-head {
   display: grid;
   flex: none;
@@ -13033,42 +13137,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .assistant-thread-account-picker .choice-row-title { overflow-wrap: anywhere; }
 .assistant-thread-account-picker .choice-row-body { gap: var(--space-1); }
 .assistant-thread-head:empty { display: none; }
-/* AssistantWorkCards.tsx: in the thread header, what waits on the owner as one scrolling row of
-   cards; each card opens its session, and a waiting approval rides on its card. Every other launched
-   session is in the side panel's Launched Sessions tool (#4776). */
-/* Pending requests (#4665) and the work cards share one row when both fit, the work cards keeping at
-   least a card's width; otherwise the row wraps and the work cards take the next line. */
-.assistant-work {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  min-width: 0;
-}
-.assistant-work-cards {
-  display: flex;
-  flex: 1 1 280px;
-  gap: var(--space-2);
-  min-width: min(280px, 100%);
-  margin: 0;
-  padding: 0 0 var(--space-1);
-  overflow-x: auto;
-  list-style: none;
-}
-/* Cards share the row's width up to a readable measure, so a title takes the room beside it rather
-   than truncating at the minimum; past the row's width they scroll. */
-.assistant-work-card {
-  display: grid;
-  flex: 1 1 280px;
-  align-content: start;
-  min-width: min(280px, 80%);
-  max-width: 480px;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-elev);
-}
-.assistant-work-card[data-needs-you] { border-color: var(--border-strong); }
 .assistant-work-open {
   display: grid;
   gap: var(--space-1);
@@ -13102,19 +13170,10 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.assistant-work-request {
-  display: grid;
-  gap: var(--space-2);
-}
 .assistant-work-request-title {
   margin: 0;
   font: var(--type-small);
   overflow-wrap: anywhere;
-}
-.assistant-work-request-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
 }
 /* Thread tabs share the session panel's frame. */
 .assistant-thread-panel .rpanel-head > .tabs {
@@ -13204,27 +13263,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .assistant-thread-head { padding: var(--space-2) var(--page-gutter); }
   .assistant-thread-pane-state { padding: var(--space-4) var(--page-gutter) var(--space-12); }
   .master-detail.assistants-md:not([data-detail-open]) > .assistant-thread-pane { display: none; }
-  /* A phone stacks the cards at the column's width, so a waiting approval and all three of its
-     buttons show without a sideways scroll nobody would know to try. Many cards scroll in place
-     rather than pushing the transcript off the screen. */
-  /* Pending requests stack above the cards at their whole height; only the cards' column scrolls. */
-  .assistant-work {
-    flex-direction: column;
-    flex-wrap: nowrap;
-  }
-  .assistant-work-cards {
-    flex: none;
-    flex-direction: column;
-    max-height: 40vh;
-    padding: 0;
-    overflow-x: visible;
-    overflow-y: auto;
-  }
-  .assistant-work-card {
-    flex: none;
-    min-width: 0;
-    max-width: none;
-  }
   .master-detail.assistants-md[data-detail-open] > .master-detail-list { display: none; }
 }
 /* Project management --------------------------------------------------- */

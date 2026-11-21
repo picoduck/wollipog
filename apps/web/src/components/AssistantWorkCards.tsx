@@ -1,6 +1,5 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type ReactNode } from "react";
-import { prioritizedPendingRequests, type PendingApproval, type SessionView } from "@wollipog/protocol";
-import { useApi } from "../api-context.js";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent } from "react";
+import { prioritizedPendingRequests, type PendingApproval } from "@wollipog/protocol";
 import {
   groupLaunchedWork,
   launchedWorkGroup,
@@ -11,18 +10,14 @@ import {
 } from "../assistant-launched-work.js";
 import { formatUsd } from "../guardrail-values.js";
 import { relativeTime } from "../format.js";
-import { approvalOptionForIntent } from "../inbox.js";
-import { sessionCommandRefusal } from "../session-command-permissions.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { sessionStatusSignal } from "../status-meta.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
-import { useFeedback } from "./FeedbackProvider.js";
 import { AssistantsIcon, ChevronRightIcon, SearchIcon } from "./Icons.js";
 import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { campaignFact } from "../session-tools.js";
-import { BusyButton } from "./ui/BusyButton.js";
 
 const GROUP_CODES: Record<LaunchedWorkGroup, string> = { needsYou: "n", active: "a", finished: "f" };
 const GROUP_OF_CODE: Record<string, LaunchedWorkGroup> = { n: "needsYou", a: "active", f: "finished" };
@@ -54,12 +49,9 @@ export function useLaunchedWorkGroups(work: LaunchedWork): { ids: string[]; grou
 }
 
 /**
- * Keeps keyboard focus when the control holding it leaves a list of cards (#4776). A card is drawn
- * again elsewhere when its session changes group, a header card leaves once its session stops
- * waiting, and a card's own request actions leave when that request is answered while another keeps
- * the card waiting. Either
- * way the focused element is removed. If focus was last inside the list and the page now has none,
- * `recover` gets the session whose card last held focus and the list, and returns where focus goes.
+ * Keeps keyboard focus when a session changes group or its Review button goes away (#4776).
+ * If focus was last inside the list and the page now has none, `recover` gets the session
+ * whose row last held focus and the list, and returns where focus goes.
  * The check runs after each change named by `changeKey`, which can remove the list itself, and after
  * any removal inside the list, which a card's own render makes. A removed element takes focus
  * without a blur naming where it went, so only a blur to somewhere else clears the record.
@@ -84,8 +76,8 @@ function useFocusRecovery<T extends HTMLElement>(
     recoverRef.current(lastSession.current, ref.current)?.focus();
   }).current;
   useLayoutEffect(check, [changeKey, check]);
-  // The list element comes and goes (the header's region renders only while something waits), so the
-  // observer follows whichever element the ref holds after each render.
+  // Review can disappear while the row stays in the same group. Observe the list as well as
+  // checking the groups after each render.
   const observed = useRef<{ element: T; observer: MutationObserver } | null>(null);
   useLayoutEffect(() => {
     const element = ref.current;
@@ -118,57 +110,14 @@ function useFocusRecovery<T extends HTMLElement>(
   };
 }
 
-/** Where focus lands on a session's card in `list`: its request's last action (Open Session) while
- * it still shows one, else the card itself. */
+/** The session link is the row's surviving focus target. */
 function cardFocusTarget(list: HTMLElement | null, sessionId: string | null): HTMLElement | null {
   if (!list || !sessionId) return null;
   const card = list.querySelector<HTMLElement>(`[data-session-id="${CSS.escape(sessionId)}"]`);
-  return card?.querySelector<HTMLElement>(".assistant-work-request-actions > button:last-child")
-    ?? card?.querySelector<HTMLElement>(".assistant-work-open") ?? null;
+  return card?.querySelector<HTMLElement>(".assistant-work-open") ?? null;
 }
 
-/**
- * What a thread is waiting on its owner for, in the thread header where a closed panel never hides it
- * (#4665, #4776): the owner confirmations bound to the thread itself first, ahead of the work they
- * would unblock, then each launched session waiting on an approval or a question, as its work card
- * with the approval inline. This is the one place a launched session's request is answered from the
- * thread: the Work tab links to the same requests, so a card being
- * answered never moves between surfaces, whether the panel is open or not.
- *
- * A card leaves once its session stops waiting, Approve Once's own card included. When focus was in
- * one that left, it moves to the bar's Side Panel toggle, where that session now is,
- * rather than dropping to the page; a card that stays, waiting on another request, keeps it.
- */
-export function AssistantWaitingWork({ work, confirmations }: {
-  work: LaunchedWork;
-  confirmations?: ReactNode;
-}) {
-  const { groups } = useLaunchedWorkGroups(work);
-  const waiting = groups.needsYou;
-  const campaigns = useMemo(() => new Set(work.campaignIds ?? []), [work.campaignIds]);
-  const focus = useFocusRecovery<HTMLElement>(waiting.join("\n"), (sessionId, list) => cardFocusTarget(list, sessionId)
-    ?? document.querySelector<HTMLElement>("[data-assistant-panel-toggle]"));
-  if (waiting.length === 0 && !confirmations) return null;
-  return (
-    <section ref={focus.ref} className="assistant-work" aria-label="Waiting for You" onFocus={focus.onFocus} onBlur={focus.onBlur}>
-      {confirmations && <ul className="assistant-work-confirmations" aria-label="Approvals Needed">{confirmations}</ul>}
-      {waiting.length > 0 && (
-        <ul className="assistant-work-cards" aria-label="Sessions Waiting for You">
-          {waiting.map((sessionId) => <AssistantWorkCard key={sessionId} sessionId={sessionId} campaign={campaigns.has(sessionId)} />)}
-        </ul>
-      )}
-    </section>
-  );
-}
-
-/** Stable request identity for Review. The thread's request surface owns the focus target. */
-export function focusAssistantWorkRequest(sessionId: string, request: PendingApproval) {
-  const requestKey = request.occurrenceId ?? request.requestId;
-  const selector = `[data-session-id="${CSS.escape(sessionId)}"] [data-assistant-work-request="${CSS.escape(requestKey)}"]`;
-  document.querySelector<HTMLElement>(selector)?.focus();
-}
-
-export function AssistantWorkPanel({ work, beforeReview }: { work: LaunchedWork; beforeReview: () => void }) {
+export function AssistantWorkPanel({ work, onReview }: { work: LaunchedWork; onReview: (sessionId: string, request: PendingApproval) => void }) {
   const { ids, groups } = useLaunchedWorkGroups(work);
   const [query, setQuery] = useState("");
   const [finishedOpen, setFinishedOpen] = useState<boolean | null>(null);
@@ -200,7 +149,7 @@ export function AssistantWorkPanel({ work, beforeReview }: { work: LaunchedWork;
   const rows = (list: readonly string[]) => (
     <ul className="launched-sessions-rows">
       {list.map((sessionId) => <AssistantWorkRow key={sessionId} sessionId={sessionId}
-        campaign={work.campaignIds?.includes(sessionId)} beforeReview={beforeReview} />)}
+        campaign={work.campaignIds?.includes(sessionId)} onReview={onReview} />)}
     </ul>
   );
   return (
@@ -239,10 +188,10 @@ export function AssistantWorkPanel({ work, beforeReview }: { work: LaunchedWork;
   );
 }
 
-function AssistantWorkRow({ sessionId, campaign, beforeReview }: {
+function AssistantWorkRow({ sessionId, campaign, onReview }: {
   sessionId: string;
   campaign?: boolean;
-  beforeReview: () => void;
+  onReview: (sessionId: string, request: PendingApproval) => void;
 }) {
   const session = useStoreSelector((state) => state.sessions.get(sessionId));
   const runnerOnline = useStoreSelector((state) => state.runners.get(session?.runnerId ?? "")?.status === "online");
@@ -267,136 +216,8 @@ function AssistantWorkRow({ sessionId, campaign, beforeReview }: {
       </button>
       {request && <div className="assistant-work-review">
         <p className="assistant-work-request-title" title={request.title}>{request.title}</p>
-        <button type="button" className="btn" onClick={() => {
-          beforeReview();
-          focusAssistantWorkRequest(sessionId, request);
-        }}>Review</button>
+        <button type="button" className="btn" onClick={() => onReview(sessionId, request)}>Review</button>
       </div>}
     </li>
-  );
-}
-
-/**
- * A launched session waiting on its owner. Its inline card opens the session and offers the
- * request's once-only options when available.
- */
-function AssistantWorkCard({ sessionId, campaign }: {
-  sessionId: string;
-  campaign?: boolean;
-}) {
-  const session = useStoreSelector((state) => state.sessions.get(sessionId));
-  const runnerOnline = useStoreSelector((state) => {
-    const runnerId = session?.runnerId;
-    return runnerId ? state.runners.get(runnerId)?.status === "online" : true;
-  });
-  const { navigate } = useStoreActions();
-  const open = (requestId?: string) => {
-    navigate(requestId && session
-      ? { name: "session", id: sessionId, attention: { eventEpoch: session.eventEpoch ?? 0, requestId } }
-      : { name: "session", id: sessionId });
-  };
-  if (!session) {
-    // Launched, but not in this dashboard's snapshot yet: it can still be opened by id.
-    return (
-      <li className="assistant-work-card" data-session-id={sessionId}>
-        <button type="button" className="assistant-work-open" onClick={() => open()}>
-          <span className="assistant-work-title">{campaign ? "Launched Campaign" : "Launched Session"}</span>
-          <span className="assistant-work-meta">Not loaded yet</span>
-        </button>
-      </li>
-    );
-  }
-  const signal = sessionStatusSignal(session, { runnerOnline });
-  const title = sessionDisplayTitle(session.title) || "Untitled Session";
-  const request = session.archived ? undefined : prioritizedPendingRequests(session.pendingApproval)[0];
-  return (
-    <li className="assistant-work-card" data-session-id={sessionId} data-needs-you={request ? "" : undefined}>
-      <button type="button" className="assistant-work-open" onClick={() => open()} title={title}>
-        <span className="assistant-work-line">
-          <span className="assistant-work-title">{title}</span>
-          {campaign && <StatusBadge label="Campaign" noDot />}
-          <StatusBadge meta={signal.meta} />
-        </span>
-        <span className="assistant-work-meta">
-          {session.agentName ? `${session.agentName} · ` : ""}{relativeTime(session.updatedAt)}
-        </span>
-      </button>
-      {request && (
-        // Keyed by occurrence: a new request reusing the provider's id starts with nothing carried over.
-        <WorkCardRequest key={request.occurrenceId ?? request.requestId} session={session} requestId={request.requestId}
-          onOpen={() => open(request.requestId)} />
-      )}
-    </li>
-  );
-}
-
-/** A launched session's waiting request, inline on its card: Approve Once / Deny / Open Session. */
-function WorkCardRequest({ session, requestId, onOpen }: { session: SessionView; requestId: string; onOpen: () => void }) {
-  const api = useApi();
-  const { loadSession, beginSessionDetailLoad } = useStoreActions();
-  const { showToast } = useFeedback();
-  const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
-  const listed = prioritizedPendingRequests(session.pendingApproval).find((candidate) => candidate.requestId === requestId);
-  // The live list carries summary sessions, whose requests arrive without their options. The card
-  // reads the session's detail once per request and keeps that request's options, so a later
-  // summary upsert of the same request cannot take Approve Once and Deny away again.
-  const [hydrated, setHydrated] = useState<PendingApproval | null>(null);
-  const needsDetail = listed !== undefined && listed.options.length === 0 && listed.kind !== "question" &&
-    hydrated?.requestId !== requestId;
-  useEffect(() => {
-    if (!needsDetail) return;
-    const load = beginSessionDetailLoad(session.id);
-    let current = true;
-    void api.session(session.id).then(({ session: detail }) => {
-      const match = prioritizedPendingRequests(detail.pendingApproval).find((candidate) => candidate.requestId === requestId);
-      if (current && match) setHydrated(match);
-      load.apply(detail);
-    }, () => { /* The card still offers Open Session, where the request can be answered. */ })
-      .finally(() => load.cancel());
-    return () => { current = false; };
-  }, [api, beginSessionDetailLoad, needsDetail, requestId, session.id]);
-  const request = listed && listed.options.length === 0 && hydrated?.requestId === requestId ? hydrated : listed;
-  if (!request) return null;
-  // Only a request with exactly one once-only option per intent is decided from the card; anything
-  // richer (a question, a choice of scopes) is answered in the session, where its context is.
-  const approve = approvalOptionForIntent(request, "approve");
-  const deny = approvalOptionForIntent(request, "deny");
-  const refusal = sessionCommandRefusal(session, "respond");
-  const decide = async (intent: "approve" | "deny") => {
-    const option = intent === "approve" ? approve : deny;
-    if (!option || busy) return;
-    setBusy(intent);
-    try {
-      loadSession(await api.approve(session.id, { requestId: request.requestId, optionId: option.optionId }));
-    } catch (cause) {
-      showToast(intent === "approve" ? "Couldn't approve the request." : "Couldn't deny the request.", {
-        tone: "error",
-        detail: cause instanceof Error ? cause.message : String(cause),
-      });
-    } finally {
-      setBusy(null);
-    }
-  };
-  return (
-    <div className="assistant-work-request" data-assistant-work-request={request.occurrenceId ?? request.requestId} tabIndex={-1}>
-      <p className="assistant-work-request-title">{request.title}</p>
-      <div className="assistant-work-request-actions">
-        {approve && deny && (
-          <>
-            <BusyButton className="btn sm primary" busy={busy === "approve"} progress="Approving…"
-              disabled={busy !== null || refusal !== null} title={refusal ?? undefined}
-              onClick={() => void decide("approve")}>
-              Approve Once
-            </BusyButton>
-            <BusyButton className="btn sm" busy={busy === "deny"} progress="Denying…"
-              disabled={busy !== null || refusal !== null} title={refusal ?? undefined}
-              onClick={() => void decide("deny")}>
-              Deny
-            </BusyButton>
-          </>
-        )}
-        <button type="button" className="btn sm ghost" onClick={onOpen}>Open Session</button>
-      </div>
-    </div>
   );
 }

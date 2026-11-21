@@ -150,7 +150,25 @@ function session(id: string, title: string, overrides: Partial<SessionView> = {}
 
 /** The Vite bump's install approval. `?deps=question` adds a nonblocking question beside it, which the
  * card shows once the approval is answered (#4776). */
+const dockScenario = params.get("dock");
+const dockCount = Number(params.get("dockCount") ?? 1);
+
 function depsApproval(occurrenceId: string): PendingApproval {
+  if (dockScenario === "question") {
+    return {
+      requestId: "req-lockfile", occurrenceId, kind: "question", title: "Choose a Lockfile", options: [],
+      expiresAt: NOW + 14 * minute, async: true,
+      questions: [{ id: "lockfile", question: "Which lockfile should I keep?",
+        options: [{ label: "Workspace Lockfile" }, { label: "Package Lockfile" }] }],
+    };
+  }
+  if (dockScenario === "rich") {
+    return { requestId: "req-1", occurrenceId, kind: "authentication", title: "Select a Sign-In Method", options: [] };
+  }
+  const stress = dockScenario === "tool";
+  const command = stress
+    ? "pnpm install --frozen-lockfile --filter release-engineering-integration-test-fixtures --filter cross-platform-packaging-verification"
+    : "pnpm install --frozen-lockfile";
   return {
     requestId: "req-1",
     occurrenceId,
@@ -160,9 +178,16 @@ function depsApproval(occurrenceId: string): PendingApproval {
       { optionId: "reject", name: "Deny", kind: "reject_once" },
     ],
     kind: "permission",
+    context: { input: command },
+    ...(stress ? { expiresAt: NOW + 14 * minute, additionalRequests: Array.from({ length: dockCount - 1 }, (_, index) => ({
+      requestId: `req-dock-${index}`, occurrenceId: `occ-dock-${index}`, kind: "permission",
+      title: `Verify Release Engineering Package ${index + 2}`, context: { input: command }, expiresAt: NOW + 14 * minute,
+      options: [{ optionId: "allow", name: "Allow Once", kind: "allow_once" }, { optionId: "reject", name: "Deny", kind: "reject_once" }],
+    })) } : {}),
     ...(params.get("deps") === "question" ? { additionalRequests: [{
       requestId: "req-lockfile", occurrenceId: "occ-lockfile", kind: "question", async: true,
       title: "Which lockfile should I keep?", options: [],
+      questions: [{ id: "scope", question: "Which lockfile should I keep?", options: [{ label: "Workspace Lockfile" }] }],
     } as PendingApproval] } : {}),
   } as PendingApproval;
 }
@@ -179,10 +204,11 @@ const sessions = new Map<string, SessionView>([
   } : { status: streamingReply ? "running" : "idle" })],
   ["sess-release", session("sess-release", "Ship the Release Notes", { status: "running", agentId: "codex", agentName: "Codex", driver: "codex-app-server" })],
   ["sess-cleanup", session("sess-cleanup", "Weekly Cleanup", { status: "idle", updatedAt: NOW - 26 * 60 * minute })],
-  ["sess-flaky", session("sess-flaky", resultScenario === "stress" ? longConfirmationTarget : "Fix the Flaky Upload Test", { status: "running", updatedAt: NOW - minute })],
-  ["sess-deps", session("sess-deps", "Bump the Vite Group", {
+  ["sess-flaky", session("sess-flaky", resultScenario === "stress" || dockScenario ? longConfirmationTarget : "Fix the Flaky Upload Test", { status: "running", updatedAt: NOW - minute })],
+  ["sess-deps", session("sess-deps", dockScenario ? longConfirmationTarget : "Bump the Vite Group", {
     ...(resultScenario === "approved"
       ? { status: "stopped", archived: true }
+      : dockScenario === "owner" || dockScenario === "campaign" ? { status: "running" }
       : { status: "input_required", pendingApproval: depsApproval("occ-deps-1") }),
   })],
 ]);
@@ -850,13 +876,18 @@ const client = {
     return { confirmation, thread };
   },
   denyAssistantConfirmation: async (threadId: string, confirmationId: string) => settleConfirmation(threadId, confirmationId, "deny"),
-  answerQuestion: async (sessionId: string) => {
-    const next = { ...sessions.get(sessionId)!, status: "running" as const, pendingApproval: null, updatedAt: Date.now() };
+  answerQuestion: async (sessionId: string, body: { requestId: string; occurrenceId?: string; answers: Record<string, string> }) => {
+    document.body.dataset.questionAnswer = JSON.stringify([sessionId, body]);
+    const current = sessions.get(sessionId)!;
+    const remaining = removePendingRequest(current.pendingApproval, body.requestId);
+    const next = { ...current, status: remaining ? current.status : "running" as const, pendingApproval: remaining, updatedAt: Date.now() };
     upsert(next);
-    const changed = threads.find((candidate) => candidate.sessionId === sessionId)!;
-    const answered = { ...changed, status: "working" as const };
-    threads = threads.map((candidate) => candidate === changed ? answered : candidate);
-    publish(answered);
+    const changed = threads.find((candidate) => candidate.sessionId === sessionId);
+    if (changed) {
+      const answered = { ...changed, status: "working" as const };
+      threads = threads.map((candidate) => candidate === changed ? answered : candidate);
+      publish(answered);
+    }
     return structuredClone(next);
   },
   archiveAssistantThread: async (threadId: string) => {
@@ -867,6 +898,11 @@ const client = {
   },
   session: async (id: string) => ({ session: structuredClone(sessions.get(id)!) }),
   approve: async (id: string, body: { requestId: string; optionId: string | null }) => {
+    if (params.has("dockFailure") && !document.body.dataset.dockAttempted) {
+      document.body.dataset.dockAttempted = "true";
+      await new Promise<void>(resolve => { Object.assign(window, { assistantsReleaseApproval: resolve }); });
+      throw new Error("The runner did not acknowledge this approval.");
+    }
     const current = sessions.get(id)!;
     // Only the answered request leaves; another one waiting beside it stays.
     const remaining = removePendingRequest(current.pendingApproval, body.requestId);
