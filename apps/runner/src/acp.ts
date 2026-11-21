@@ -64,6 +64,18 @@ import {
   type SafeAcpModeState,
 } from "./acp-session-state.js";
 import { AcpFilesystemService, AcpTerminalService } from "./acp-client-services.js";
+import {
+  acpCompatibilityFailure,
+  acpClientFileWritesOffered,
+  acpLaunchRequestOptions,
+  acpRequestTimedOut,
+  compatibleAcpInitializeRequest,
+  acpStderrMirrored,
+  compatibleAcpEnvironment,
+  compatibleAcpNegotiation,
+  resolveAcpLaunch,
+  type AcpCompatibility,
+} from "./acp-compatibility.js";
 import { materializeAcpMcpServers } from "./acp-session-context.js";
 import {
   assertClaudeAgentAcpOrchestratorIdentity,
@@ -151,30 +163,48 @@ export class AcpClient {
       /** Discovery probes negotiate only the ACP initialize response and must not expose client
        * filesystem, terminal, permission, or session-update services to the launched adapter. */
       initializeOnly?: boolean;
+      /** Inherited variables the agent process must not see (an agent's credential context). */
+      scrubInheritedEnv?: string[];
+      /** Narrow handling for one agent (see `acp-compatibility.ts`). */
+      compatibility?: AcpCompatibility;
     },
     private readonly ev: AcpEvents,
     deps: Partial<AcpClientDeps> = {},
   ) {
     this.artifactGuidance = opts.artifactGuidance;
+    // Resolved at the spawn below, with no await between: what the launch runs is decided now, not
+    // when it was prepared. A refusal throws before anything is spawned.
+    const launch = resolveAcpLaunch(opts.command, opts.compatibility);
+    this.compatibility = launch.compatibility;
+    // The resolved executable is held until the agent answers the handshake (it has then opened
+    // it), so a launcher that opens it after this spawn (bwrap, the cgroup helper) still finds it.
+    this.releaseLaunch = launch.release;
     this.orchestrator = opts.orchestrator === true;
     // `||`, not `??`: the role can only ever widen the assertion. An explicit `false` alongside the
     // coupled preset must not be able to switch the pinned-identity check off.
     this.orchestratorRole = opts.orchestratorRole === true || this.orchestrator;
     this.commands = this.orchestrator ? [] : normalizeAcpCommands(opts.initialCommands);
     this.sessionContext = opts.sessionContext;
-    this.mcpEnvironment = { ...process.env, ...opts.env };
+    const env = compatibleAcpEnvironment(opts.env, launch.compatibility);
+    this.mcpEnvironment = { ...process.env, ...env };
     const context = opts.context ?? { kind: "native" as const };
     this.filesystem = new AcpFilesystemService(opts.cwd, context);
     this.terminals = new AcpTerminalService(this.filesystem, context, opts.isolation, { cgroup: opts.reviewWriterCgroup });
     this.kill = deps.kill ?? killTree;
-    this.child = (deps.spawn ?? spawnAgent)(opts);
+    try {
+      this.child = (deps.spawn ?? spawnAgent)({ ...opts, command: launch.command, env });
+    } catch (error) {
+      this.finishLaunch();
+      throw error;
+    }
+    this.child.once("close", () => this.finishLaunch());
     this.peer = new JsonRpcPeer(this.child.stdin, this.child.stdout, (err) =>
       this.ev.onStderr(`transport: ${err.message}`),
     );
 
     this.child.stderr.setEncoding("utf8");
     this.child.stderr.on("data", (t: string) => {
-      if (this.disposed) return;
+      if (this.disposed || !acpStderrMirrored(this.compatibility)) return;
       const text = String(t).trim();
       if (text) this.ev.onStderr(text);
     });
@@ -204,6 +234,8 @@ export class AcpClient {
   }
 
   private readonly sessionContext: AcpSessionContextConfig | undefined;
+  private readonly compatibility: AcpCompatibility | undefined;
+  private releaseLaunch: (() => void) | undefined;
   private readonly mcpEnvironment: NodeJS.ProcessEnv;
   private readonly orchestrator: boolean;
   private readonly orchestratorRole: boolean;
@@ -245,13 +277,40 @@ export class AcpClient {
   /* ----------------------------- Lifecycle ------------------------------- */
 
   async initialize(): Promise<void> {
-    const res = await this.peer.request("initialize", acpInitializeRequest());
-    this.negotiation = negotiateAcpInitialize(res);
+    try {
+      const res = await this.peer.request("initialize", compatibleAcpInitializeRequest(acpInitializeRequest(), this.compatibility) as unknown as Record<string, unknown>,
+        acpLaunchRequestOptions(this.compatibility, "handshake"));
+      this.negotiation = compatibleAcpNegotiation(negotiateAcpInitialize(res), this.compatibility);
+    } catch (error) {
+      // A profiled agent that cannot complete the handshake is an installation problem.
+      throw this.compatibilityError("start") ?? error;
+    } finally {
+      this.finishLaunch();
+    }
     // Keyed on the role, not the preset: only the exact audited adapter release may ever carry
     // Orchestrator authority, whichever launch shape asked for it.
     if (this.orchestratorRole) assertClaudeAgentAcpOrchestratorIdentity(this.negotiation.agentInfo);
     this.supportsImages = this.negotiation.stable.promptImage;
     this.ev.onAcpCapabilities?.(runtimeCapabilities(this.negotiation));
+  }
+
+  /** The launch no longer needs its resolved executable kept (answered, failed or gone). */
+  private finishLaunch(): void {
+    const release = this.releaseLaunch;
+    this.releaseLaunch = undefined;
+    release?.();
+  }
+
+  private compatibilityError(stage: "start" | "resume" | "turn", detail?: string): Error | undefined {
+    const message = acpCompatibilityFailure(this.compatibility, stage, detail);
+    return message ? new Error(message) : undefined;
+  }
+
+  /** A profiled agent signs in from the machine's setup, never from a session: report the
+   * session's agent as signed out and say where to sign in. */
+  private signInRequired(): Error {
+    this.ev.onAuthStatus?.("unauthenticated");
+    return new Error(acpCompatibilityFailure(this.compatibility, "sign_in"));
   }
 
   negotiatedCapabilities(): AcpNegotiation | null {
@@ -271,7 +330,8 @@ export class AcpClient {
       this.establishingSession = true;
       this.pendingSessionStateUpdates = [];
       try {
-        const res = (await this.peer.request("session/new", this.sessionRequest(cwd))) as NewSessionResponse;
+        const res = (await this.peer.request("session/new", this.sessionRequest(cwd),
+          acpLaunchRequestOptions(this.compatibility, "session"))) as NewSessionResponse;
         this.sessionId = res.sessionId;
         this.establishingSession = false;
         this.acceptSessionState(res.modes, res.configOptions);
@@ -281,6 +341,9 @@ export class AcpClient {
       } catch (error) {
         this.establishingSession = false;
         this.pendingSessionStateUpdates = [];
+        if (this.compatibility && !this.transportClosed && isAgentAuthRequiredError(error)) throw this.signInRequired();
+        // A profiled agent that never opens the session is a start failure, not a hang.
+        if (this.compatibility && acpRequestTimedOut(error)) throw this.compatibilityError("start")!;
         if (this.transportClosed || !isAgentAuthRequiredError(error) || !this.negotiation?.authMethods.length) throw error;
         await this.authenticate();
       }
@@ -298,7 +361,8 @@ export class AcpClient {
     try {
       if (this.negotiation?.stable.sessionResume) {
         const request: ResumeSessionRequest = { sessionId, ...this.sessionRequest(cwd) };
-        const response = await this.peer.request("session/resume", request) as ResumeSessionResponse;
+        const response = await this.peer.request("session/resume", request,
+          acpLaunchRequestOptions(this.compatibility, "session")) as ResumeSessionResponse;
         this.acceptSessionState(response.modes, response.configOptions);
       } else if (this.negotiation?.stable.loadSession) {
         const request: LoadSessionRequest = { sessionId, ...this.sessionRequest(cwd) };
@@ -320,6 +384,9 @@ export class AcpClient {
       this.sessionId = null;
       this.replaySuppressedStateUpdates = [];
       if (error instanceof Error && error.message.startsWith("ACP agent does not advertise")) throw error;
+      if (this.compatibility) {
+        throw isAgentAuthRequiredError(error) && !this.transportClosed ? this.signInRequired() : this.compatibilityError("resume");
+      }
       throw new Error(this.negotiation?.stable.sessionResume ? "ACP session resume failed" : "ACP session load failed");
     }
     this.reportAuthenticated();
@@ -456,7 +523,7 @@ export class AcpClient {
     this.modeBarrier = modeId;
     const request: SetSessionModeRequest = { sessionId: this.sessionId, modeId };
     try {
-      await this.peer.request("session/set_mode", request);
+      await this.peer.request("session/set_mode", request, acpLaunchRequestOptions(this.compatibility, "session"));
       this.modes = { ...this.modes, currentModeId: modeId };
       if (this.modeBarrier === modeId) this.modeBarrier = null;
       this.emitSessionState();
@@ -483,7 +550,8 @@ export class AcpClient {
       value,
     };
     try {
-      const response = await this.peer.request("session/set_config_option", request) as SetSessionConfigOptionResponse;
+      const response = await this.peer.request("session/set_config_option", request,
+        acpLaunchRequestOptions(this.compatibility, "session")) as SetSessionConfigOptionResponse;
       const next = normalizeAcpConfigOptions(response.configOptions);
       if (optionForCategory(next, category)?.currentValue !== value) {
         throw new Error("unconfirmed ACP session configuration");
@@ -588,10 +656,17 @@ export class AcpClient {
     if (content.length === 0) content.push({ type: "text", text: "" });
     this.streamedAgentResponse = false;
     try {
-      const res = (await this.peer.request("session/prompt", {
-        sessionId: this.sessionId,
-        prompt: content,
-      })) as PromptResponse;
+      let res: PromptResponse;
+      try {
+        res = (await this.peer.request("session/prompt", {
+          sessionId: this.sessionId,
+          prompt: content,
+        })) as PromptResponse;
+      } catch (error) {
+        if (!this.compatibility || this.transportClosed) throw error;
+        throw isAgentAuthRequiredError(error) ? this.signInRequired()
+          : this.compatibilityError("turn", errorMessage(error)) ?? error;
+      }
       const stopReason = res.stopReason as StopReason;
       // ACP publishes response text only as chunks. Mirror the native streaming drivers' durable,
       // content-free completion fence so transcript consumers can settle the last text item.
@@ -616,6 +691,15 @@ export class AcpClient {
 
   cancel(): void {
     if (this.sessionId) this.peer.notify("session/cancel", { sessionId: this.sessionId });
+    // ACP: after session/cancel the client answers every pending permission request as
+    // `cancelled`, so the agent never waits on an approval for a stopped turn. Like the native
+    // drivers, nothing is emitted here: settling the turn settles its approval card. A sign-in
+    // choice is not part of a turn and stays pending.
+    for (const [requestId, resolve] of [...this.permPending]) {
+      if (!requestId.startsWith("perm_")) continue;
+      this.permPending.delete(requestId);
+      resolve(null);
+    }
   }
 
   resolvePermission(requestId: string, optionId: string | null): boolean {
@@ -629,6 +713,7 @@ export class AcpClient {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.finishLaunch();
     this.transportClosed = true;
     this.terminals.dispose();
     this.settlePendingPermissions();
@@ -889,6 +974,9 @@ export class AcpClient {
   private async handleWrite(params: WriteTextFileRequest): Promise<WriteTextFileResponse> {
     this.assertActiveSession(params.sessionId);
     this.assertOrchestratorClientServiceRefused("filesystem writes");
+    // The runner writes outside the agent's sandbox; a profile that withholds the service (it was
+    // never advertised to that agent) refuses any write the agent asks for anyway.
+    if (!acpClientFileWritesOffered(this.compatibility)) throw new Error("ACP filesystem writes are not offered to this agent");
     await this.filesystem.write(params.path, params.content);
     this.ev.onEvent({ kind: "file_edit", path: params.path });
     return {};
@@ -952,6 +1040,12 @@ export function isAgentAuthRequiredError(value: unknown): value is RpcError {
     (value as RpcError).code === -32000 &&
     (value as RpcError).transportFailure !== true
   );
+}
+
+/** The message of a thrown Error or JSON-RPC error object. */
+function errorMessage(error: unknown): string | undefined {
+  const message = error && typeof error === "object" ? (error as { message?: unknown }).message : undefined;
+  return typeof message === "string" ? message : undefined;
 }
 
 function runtimeCapabilities(negotiation: AcpNegotiation): AcpRuntimeCapabilities {
