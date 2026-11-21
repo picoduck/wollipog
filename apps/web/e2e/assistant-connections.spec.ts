@@ -96,8 +96,24 @@ async function checkLegibility(page: Page) {
 
 async function targetSize(target: Locator, minimum: number) {
   const box = await target.boundingBox();
-  expect(box?.width).toBeGreaterThanOrEqual(minimum);
-  expect(box?.height).toBeGreaterThanOrEqual(minimum);
+  expect(box).not.toBeNull();
+  const hit = await target.evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    const extension = getComputedStyle(element, "::after");
+    if (extension.content === "none" || extension.position !== "absolute") {
+      return { width: bounds.width, height: bounds.height };
+    }
+    // Shared coarse-pointer targets extend from the padding edge of the painted box.
+    const outside = (inset: string, border: string) =>
+      Math.max(0, -(Number.parseFloat(inset) + Number.parseFloat(border))) || 0;
+    return {
+      width: bounds.width + outside(extension.left, style.borderLeftWidth) + outside(extension.right, style.borderRightWidth),
+      height: bounds.height + outside(extension.top, style.borderTopWidth) + outside(extension.bottom, style.borderBottomWidth),
+    };
+  });
+  expect(hit.width).toBeGreaterThanOrEqual(minimum);
+  expect(hit.height).toBeGreaterThanOrEqual(minimum);
   return box!;
 }
 

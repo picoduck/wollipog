@@ -19540,15 +19540,7 @@ a.tab { text-decoration: none; }
   .assistant-installation-row .setting-row-control {
     justify-content: flex-start;
   }
-  .assistant-connections-page :is(.detail-bar .btn, .detail-bar .icon-btn, .settings-group-action > .btn, .setting-row-control > .btn, .setting-row-control > .icon-btn, .assistant-editor-save > .btn, .choice-row, .seg > button),
-  .assistant-credential-visibility {
-    min-width: 44px;
-    min-height: 44px;
-  }
-  .assistant-connections-content .seg {
-    height: auto;
-    gap: var(--space-2);
-  }
+  .assistant-connections-content .seg { gap: var(--space-2); }
   .assistant-connections-content .choice-list { gap: var(--space-2); }
   .assistant-connection-row + .assistant-connection-row { margin-top: var(--space-2); }
   .assistant-activity-table :is(tbody, td) { display: block; }
