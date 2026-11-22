@@ -231,7 +231,8 @@ test("the owner edits future defaults from Settings and an existing thread from 
 
   await page.getByRole("link", { name: "Assistants", exact: true }).click();
   await page.getByRole("button", { name: "New Thread", exact: true }).first().click();
-  await page.getByRole("dialog", { name: "New Thread" }).getByRole("button", { name: "Start Thread" }).click();
+  await page.getByRole("textbox", { name: "First Message" }).fill("Check the current budget.");
+  await page.getByRole("button", { name: "Start Thread" }).click();
   await expect(await openDetails(page)).toContainText("$0.00 of $40.00 spent");
   await closeDetails(page);
   await page.getByText("Triage Open Issues", { exact: true }).click();
@@ -284,9 +285,10 @@ test("a new thread uses the saved harness, provider account and both unlimited d
   await expect(defaults.getByText("Existing Threads", { exact: true })).toHaveCount(0);
   await page.getByRole("link", { name: "Assistants", exact: true }).click();
   await page.getByRole("button", { name: "New Thread" }).first().click();
-  const newThread = page.getByRole("dialog", { name: "New Thread" });
-  await expect(newThread.getByRole("radio", { name: /^Codex$/, exact: true })).toBeChecked();
-  await expect(newThread.getByRole("radio", { name: "Codex Studio", exact: true })).toBeChecked();
+  const newThread = page.getByRole("form", { name: "What should the assistant work on?" });
+  await expect(newThread.getByRole("button", { name: "Harness Codex", exact: true })).toBeVisible();
+  await expect(newThread.getByRole("button", { name: "Account Codex Studio", exact: true })).toBeVisible();
+  await newThread.getByRole("textbox", { name: "First Message" }).fill("Check the launch limit.");
   await newThread.getByRole("button", { name: "Start Thread" }).click();
   await expect(await openDetails(page)).toContainText("No Budget");
   await expect(await openDetails(page)).toContainText("No Launch Limit");

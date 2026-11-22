@@ -57,6 +57,7 @@ export interface AssistantProxyDeps {
   configDir?: string;
   /** Sends `assistant_credential` with the hash; the answer arrives through `acknowledge`. */
   register(sessionId: string, tokenHash: string): void;
+  credentialRejected?(sessionId: string, rejected: boolean): void;
   fetch?: typeof globalThis.fetch;
   now?: () => number;
   ackTimeoutMs?: number;
@@ -113,6 +114,7 @@ export class AssistantProxies {
     if (accepted && typeof expiresAt === "number") credential.expiresAt = expiresAt;
     else credential.refusal = error ?? "the control plane refused the thread credential";
     credential.settle();
+    this.deps.credentialRejected?.(sessionId, credential.refusal !== null);
   }
 
   /** Unanswered registrations, re-sent after a reconnect. Hashes only. */
@@ -131,6 +133,7 @@ export class AssistantProxies {
       state.credential = null;
     }
     this.states.delete(sessionId);
+    this.deps.credentialRejected?.(sessionId, false);
     await this.relays.close(sessionId);
     // The key in it is dead with the proxy; the file goes too.
     if (this.deps.configDir) {
@@ -194,6 +197,10 @@ export class AssistantProxies {
       credential.refusal = "expired";
       credential = await this.ready(sessionId, state, signal);
       response = await send(credential, body);
+    }
+    if ((response.status === 401 || response.ok) &&
+        this.states.get(sessionId) === state && state.credential === credential) {
+      this.deps.credentialRejected?.(sessionId, response.status === 401);
     }
     const responseBody = await response.text();
     if (!inspect || !response.ok || !responseBody) return { status: response.status, body: responseBody };

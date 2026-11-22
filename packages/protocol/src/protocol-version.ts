@@ -1562,10 +1562,12 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   406,
   // v407 slot
   // v408 slot
-  // 408: Anchor Assistant transcript receipts to provider tool results (Refs #4814).
-  408,
   // v409 slot
+  // 409: Optional Assistant thread health and correlated transcript error notices (Refs #4813).
+  409,
   // v410 slot
+  // 410: Anchor Assistant transcript receipts to provider tool results (Refs #4814).
+  410,
   // v411 slot
   // v412 slot
   // v413 slot

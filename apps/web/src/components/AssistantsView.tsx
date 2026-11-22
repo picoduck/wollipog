@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useApi } from "../api-context.js";
 import type { ApiClient } from "../api.js";
+import { assistantThreadProblems } from "../assistant-thread-health.js";
 import { threadSpendingCopy, threadSpendingStates } from "../assistant-thread-spending.js";
 import {
   applyAssistantThreadEvents,
@@ -17,7 +18,7 @@ import { effortLabel, relativeTime, resolvedModelLabel } from "../format.js";
 import { backLabel, destination } from "../navigation.js";
 import { statusMeta } from "../status-meta.js";
 import { sessionDisplayTitle } from "../session-title.js";
-import { useStoreActions, useStoreSelector } from "../store.js";
+import { useStoreActions, useStoreSelector, useStoreValueSource } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { AssistantTranscriptContext } from "./AssistantTranscriptReceipts.js";
 import { AssistantWaitingDock, type AssistantWaitingDockHandle } from "./AssistantWaitingDock.js";
@@ -29,11 +30,11 @@ import type { LaunchedWork } from "../assistant-launched-work.js";
 import { ConfirmationFailure, useFeedback } from "./FeedbackProvider.js";
 import { AssistantsIcon, PlusIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
-import { NewAssistantThreadDialog, THREADS_UNAVAILABLE_MESSAGE } from "./NewAssistantThreadDialog.js";
+import { NewAssistantThreadComposer, THREADS_UNAVAILABLE_MESSAGE, type NewAssistantThreadResult } from "./NewAssistantThreadComposer.js";
 import { Notice } from "./Notice.js";
 import { ActionsMenu, DetailBar, PageHeader, type ActionsMenuChoice, type PageMenuAction } from "./PageHeader.js";
 import { SessionDetail } from "./SessionDetail.js";
-import { SESSION_NOTICE_RANK, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
+import { compareSessionNotices, SESSION_NOTICE_RANK, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
 import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -79,25 +80,31 @@ function newThreadBlock(list: ListState): { title: string; message: string } | u
  * routes. Every thread comes from the Thread API; a control plane without it (404) shows the empty
  * section and New Thread explains, never a failure.
  */
-export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
+export function AssistantsView({ threadId, limits, delegation, newThread, rightPanel }: {
   threadId?: string;
   limits?: true | "spending";
   delegation?: true;
+  newThread?: true;
   /** Opens a session tool if the conversation offers a link to one. */
   rightPanel: RightPanelState;
 }) {
   const api = useApi();
   const { navigate, dispatch, getSession, loadSession } = useStoreActions();
+  const currentView = useStoreValueSource((state) => state.view);
   const { confirm, showToast } = useFeedback();
   const isMobile = useIsMobile();
   const conn = useStoreSelector((state) => state.conn);
+  const runners = useStoreSelector((state) => state.runners);
+  const [accountSettingsFor, setAccountSettingsFor] = useState<string | null>(null);
   const panel = useAssistantPanelState();
   const waitingDock = useRef<AssistantWaitingDockHandle>(null);
   const [list, setList] = useState<ListState>({ kind: "loading" });
   /** An open thread the list leaves out (archived), read on its own. */
   const [extra, setExtra] = useState<AssistantThread | null>(null);
   const [missing, setMissing] = useState(false);
-  const [creating, setCreating] = useState(false);
+  const [unsentFirstMessage, setUnsentFirstMessage] = useState<
+    (NonNullable<NewAssistantThreadResult["firstMessageFailure"]> & { sessionId: string; dismissed?: true }) | null
+  >(null);
   const [renaming, setRenaming] = useState<AssistantThread | null>(null);
   const [archiving, setArchiving] = useState(false);
   const [budgetDismissal, setBudgetDismissal] = useState(() => ({
@@ -164,14 +171,25 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   // A reconnect may have missed changes.
   useEffect(() => { if (conn === "online") refresh(); }, [conn, refresh]);
 
+  const titleForDisplay = (thread: AssistantThread) => thread.sessionId === unsentFirstMessage?.sessionId &&
+    assistantThreadTitle(thread) === "New Thread" ? { ...thread, title: "Untitled Thread" } : thread;
   const threads = list.kind === "ready" ? list.threads : [];
   const listed = threadId === undefined ? undefined : threads.find((thread) => thread.id === threadId);
-  const selected = listed ?? (extra?.id === threadId ? extra : undefined);
+  const selectedThread = listed ?? (extra?.id === threadId ? extra : undefined);
+  const selected = selectedThread && titleForDisplay(selectedThread);
+  const problemsFor = (thread: AssistantThread) => assistantThreadProblems(thread, conn,
+    thread.runnerId ? runners.get(thread.runnerId) : undefined);
+  const badgeFor = (thread: AssistantThread, hideDone = false) => threadStatusBadge(thread, problemsFor(thread)[0], hideDone);
   const model = useStoreSelector((state) => {
     const backing = selected ? state.sessions.get(selected.sessionId) : undefined;
     return backing?.resolvedModel ?? backing?.model;
   });
   const effort = useStoreSelector((state) => selected ? state.sessions.get(selected.sessionId)?.effort : undefined);
+  const firstMessageDelivered = useStoreSelector((state) => unsentFirstMessage !== null &&
+    (state.sessions.get(unsentFirstMessage.sessionId)?.messageCount ?? 0) > 0);
+  useEffect(() => {
+    if (firstMessageDelivered) setUnsentFirstMessage(null);
+  }, [firstMessageDelivered]);
   const canTogglePanel = useStoreSelector((state) => Boolean(selected && state.sessions.has(selected.sessionId)));
   const togglePanel = panel.toggle;
   useEffect(() => {
@@ -189,7 +207,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   }, [canTogglePanel, togglePanel]);
   // The window title names the open thread.
   useReportEntityTitle(
-    threadId === undefined ? { name: "assistants" } : { name: "assistants", threadId, limits, delegation },
+    threadId === undefined ? { name: "assistants", newThread } : { name: "assistants", threadId, limits, delegation },
     selected ? assistantThreadTitle(selected) : null,
   );
 
@@ -291,6 +309,16 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   const openThreadSettings = (id: string, section: true | "spending" = true) =>
     navigate({ name: "assistants", threadId: id, limits: section });
   const toList = () => navigate({ name: "assistants" });
+  const cancelNewThread = () => navigate({ name: "assistants" }, { replace: true });
+  const startThread = () => navigate({ name: "assistants", newThread: true });
+  const finishNewThread = ({ thread, firstMessageFailure }: NewAssistantThreadResult) => {
+    replace(thread);
+    if (firstMessageFailure) setUnsentFirstMessage({ sessionId: thread.sessionId, ...firstMessageFailure });
+    const view = currentView.read();
+    if (view.name === "assistants" && view.newThread) {
+      navigate({ name: "assistants", threadId: thread.id }, { replace: true });
+    }
+  };
 
   const archive = async (thread: AssistantThread, reopen: () => void) => {
     const accepted = await confirm({
@@ -338,7 +366,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
     ];
   };
 
-  const phoneDetail = isMobile && threadId !== undefined;
+  const phoneDetail = isMobile && (threadId !== undefined || newThread);
   // The open thread's launched work, for the header toggle and the Work tab. Kept
   // the same object while the thread's lists are, so their live counts don't recompute each render.
   const launchedSessionIds = selected?.launchedSessionIds;
@@ -404,19 +432,37 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
     rightPanel.show(mode);
     navigate({ name: "session", id: selected.sessionId });
   };
+  const creationBlock = newThreadBlock(list);
+  const firstMessageNoticeTitle = unsentFirstMessage?.deliveryUnconfirmed
+    ? "First Message Delivery Unconfirmed" : "First Message Wasn't Sent";
+  const firstMessageNotice: SessionNoticeEntry | null =
+    unsentFirstMessage && !unsentFirstMessage.dismissed && !firstMessageDelivered &&
+      selected?.sessionId === unsentFirstMessage.sessionId ? {
+      key: "assistant-first-message-unsent",
+      severity: "warning",
+      rank: SESSION_NOTICE_RANK.composerError,
+      title: firstMessageNoticeTitle,
+      render: ({ trailing }) => (
+        <Notice tone="warning" role="status" title={firstMessageNoticeTitle} trailing={trailing}
+          onDismiss={() => setUnsentFirstMessage((current) => current && { ...current, dismissed: true })}>
+          Your draft is kept. {unsentFirstMessage.reason}
+          {unsentFirstMessage.deliveryUnconfirmed && " Check the transcript before sending again."}
+        </Notice>
+      ),
+    } : null;
 
   return (
     <section className="page full fill">
       {phoneDetail ? (
         <DetailBar
-          title={selected ? assistantThreadTitle(selected) : "Thread"}
+          title={newThread ? "New Thread" : selected ? assistantThreadTitle(selected) : "Thread"}
           backLabel={backLabel("assistants")}
-          onBack={toList}
-          status={selected ? threadBarStatus(selected) : undefined}
+          onBack={newThread ? cancelNewThread : toList}
+          status={selected ? badgeFor(selected, true) : undefined}
           menu={selected ? threadMenu(selected) : []}
           menuLabel="Thread Actions"
           menuSheetTitle={selected ? assistantThreadTitle(selected) : undefined}
-          hideSearch={Boolean(selected)}
+          hideSearch={Boolean(selected || newThread)}
           controls={canTogglePanel && launchedWork
             ? <AssistantSidePanelToggle work={launchedWork} open={panel.open} onToggle={panel.toggle} />
             : undefined}
@@ -426,20 +472,26 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
         // New Thread belongs to the assistant's Threads list, so the page header offers no second one.
         <PageHeader title={ASSISTANTS.name} description={ASSISTANTS.description} />
       )}
-      <div className="master-detail assistants-md" data-detail-open={threadId !== undefined ? "" : undefined}>
+      <div className="master-detail assistants-md" data-detail-open={threadId !== undefined || newThread ? "" : undefined}>
         <aside className="master-detail-list" aria-label={ASSISTANTS.name} data-focus-zone="list" tabIndex={-1}>
           <div className="master-detail-list-body clip-focus">
             <ThreadList
-              list={list}
+              list={unsentFirstMessage && list.kind === "ready" ? { ...list, threads: threads.map(titleForDisplay) } : list}
               selectedId={threadId ?? null}
+              unsentSessionId={unsentFirstMessage?.sessionId}
               onOpen={openThread}
-              onNewThread={() => setCreating(true)}
+              onNewThread={startThread}
               onRetry={() => void load()}
+              badgeFor={badgeFor}
             />
           </div>
         </aside>
         <div className="assistant-thread-pane" data-focus-zone="main" tabIndex={-1}>
-          {threadId === undefined && (list.kind === "unavailable" || list.kind === "ownerOnly") ? (
+          {newThread ? creationBlock ? (
+            <div className="assistant-thread-pane-state"><State compact icon={<AssistantsIcon />}
+              title={creationBlock.title} headingLevel={2}>{creationBlock.message}</State></div>
+          ) : <NewAssistantThreadComposer onCancel={isMobile ? undefined : cancelNewThread} onCreated={finishNewThread} />
+          : threadId === undefined && (list.kind === "unavailable" || list.kind === "ownerOnly") ? (
             // The list already says why there are no threads here; an invitation to choose one would
             // contradict it, so the pane stays empty.
             null
@@ -507,6 +559,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
                   thread={selected}
                   work={launchedWork!}
                   menu={threadMenu(selected)}
+                  status={badgeFor(selected, true)}
                   sidePanelOpen={panel.open}
                   onToggleSidePanel={panel.toggle}
                 />
@@ -518,23 +571,17 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
                 onConfirmationAnswered={replace}
                 focusComposer={focusComposer}
               />}
-              assistantSpendingNotices={spendingNotices}
+              assistantSpendingNotices={firstMessageNotice ? [firstMessageNotice, ...spendingNotices] : spendingNotices}
+              assistantThreadHealth={selected.health ? {
+                thread: selected,
+                problems: problemsFor(selected),
+                onSwitchAccount: () => setAccountSettingsFor(selected.id),
+              } : undefined}
             />
             </AssistantTranscriptContext.Provider>
           )}
         </div>
       </div>
-      {creating && (
-        <NewAssistantThreadDialog
-          blocked={newThreadBlock(list)}
-          onClose={() => setCreating(false)}
-          onCreated={(thread) => {
-            setCreating(false);
-            replace(thread);
-            openThread(thread.id);
-          }}
-        />
-      )}
       {renaming && (
         <RenameThreadDialog
           thread={renaming}
@@ -546,14 +593,18 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
           }}
         />
       )}
-      {limits && selected && (
+      {selected && (limits || accountSettingsFor === selected.id) && (
         <AssistantThreadLimitsDialog
           key={selected.id}
           thread={selected}
           startAtSpending={limits === "spending"}
+          startAtAccount={accountSettingsFor === selected.id}
           model={model ? resolvedModelLabel(model) : undefined}
           effort={effort ? effortLabel(effort) : undefined}
-          onClose={() => navigate({ name: "assistants", threadId: selected.id }, { replace: true })}
+          onClose={() => {
+            setAccountSettingsFor(null);
+            if (limits) navigate({ name: "assistants", threadId: selected.id }, { replace: true });
+          }}
           onChanged={replace}
         />
       )}
@@ -572,12 +623,14 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
 }
 
 /** The list pane's threads and New Thread action. */
-function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
+function ThreadList({ list, selectedId, unsentSessionId, onOpen, onNewThread, onRetry, badgeFor }: {
   list: ListState;
   selectedId: string | null;
+  unsentSessionId?: string;
   onOpen: (threadId: string) => void;
   onNewThread: () => void;
   onRetry: () => void;
+  badgeFor: (thread: AssistantThread, hideDone?: boolean) => React.ReactNode;
 }) {
   const threads = list.kind === "ready" ? list.threads : [];
   // Re-renders each row's "5m ago" as time passes.
@@ -587,7 +640,7 @@ function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
       <div className="assistant-threads-head">
         <h2 id="assistant-threads-title" className="group-label">Threads{threads.length > 0 && <span className="count">{threads.length}</span>}</h2>
         {/* With no threads the empty state offers New Thread itself, so the head steps aside (§12.1). */}
-        {!(list.kind !== "loading" && list.kind !== "failed" && threads.length === 0) && (
+        {threads.length > 0 && (
           <button type="button" className="btn sm ghost" onClick={onNewThread}><PlusIcon />New Thread</button>
         )}
       </div>
@@ -611,12 +664,12 @@ function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
       ) : list.kind === "ownerOnly" ? (
         // Not an empty list but a person who can't have one: no New Thread to offer.
         <State compact icon={<AssistantsIcon />} title="Threads Are for Owners">{list.message}</State>
+      ) : list.kind === "unavailable" ? (
+        <State compact icon={<AssistantsIcon />} title="Threads Aren't Available Yet">{THREADS_UNAVAILABLE_MESSAGE}</State>
       ) : threads.length === 0 ? (
         <State compact icon={<AssistantsIcon />} title="No Threads Yet"
           actions={<button type="button" className="btn" onClick={onNewThread}>New Thread</button>}>
-          {list.kind === "unavailable"
-            ? "Assistant threads aren't available on this control plane yet."
-            : "Start a thread to ask the assistant for help."}
+          Start a thread to ask the assistant for help.
         </State>
       ) : (
         <ul className="assistant-thread-list">
@@ -634,7 +687,7 @@ function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
                   <span className="row-body">
                     <span className="row-line">
                       <span className="row-title" title={assistantThreadTitle(thread)}>{assistantThreadTitle(thread)}</span>
-                      {threadStatusBadge(thread)}
+                      {badgeFor(thread, thread.sessionId === unsentSessionId)}
                     </span>
                     <span className="row-sub">
                       {assistantThreadHarnessLabel(thread.harness)} · {relativeTime(thread.lastActivityAt)}
@@ -651,10 +704,11 @@ function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
 }
 
 /** The desktop thread bar spans the conversation and the side panel that opens beneath it. */
-function ThreadBar({ thread, work, menu, sidePanelOpen, onToggleSidePanel }: {
+function ThreadBar({ thread, work, menu, status, sidePanelOpen, onToggleSidePanel }: {
   thread: AssistantThread;
   work: LaunchedWork;
   menu: PageMenuAction[];
+  status: React.ReactNode;
   sidePanelOpen: boolean;
   onToggleSidePanel: () => void;
 }) {
@@ -662,7 +716,7 @@ function ThreadBar({ thread, work, menu, sidePanelOpen, onToggleSidePanel }: {
     <header className="detail-bar assistant-thread-bar">
       <div className="detail-bar-heading">
         <ThreadBarTitle title={assistantThreadTitle(thread)} />
-        {threadBarStatus(thread)}
+        {status}
       </div>
       <div className="detail-bar-actions">
         <ActionsMenu label="Thread Actions" items={menu} />
@@ -673,13 +727,16 @@ function ThreadBar({ thread, work, menu, sidePanelOpen, onToggleSidePanel }: {
   );
 }
 
-/** Spending supersedes lifecycle on the row and both bars. The bars omit the at-rest badge. */
-function threadBarStatus(thread: AssistantThread) {
-  return threadStatusBadge(thread, true);
-}
-
-function threadStatusBadge(thread: AssistantThread, hideDone = false) {
+/** The row and both bars use the same order as the notice slot. */
+function threadStatusBadge(
+  thread: AssistantThread, problem: ReturnType<typeof assistantThreadProblems>[number] | undefined, hideDone: boolean,
+) {
   const spending = threadSpendingStates(thread)[0];
+  if (problem && (!spending || compareSessionNotices(problem, {
+    key: spending.kind,
+    rank: SESSION_NOTICE_RANK.assistantBudget,
+    severity: spending.kind === "over_budget" ? "danger" : "warning",
+  }) < 0)) return <StatusBadge meta={problem.badge} />;
   if (spending) return <StatusBadge meta={statusMeta("assistantThreadSpending", spending.kind)} />;
   return hideDone && thread.status === "done" ? null : <StatusBadge meta={statusMeta("assistantThread", thread.status)} />;
 }

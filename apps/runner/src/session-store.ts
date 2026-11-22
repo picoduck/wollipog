@@ -189,6 +189,7 @@ export interface SessionMeta {
   automaticProviderAccountCooldowns?: Record<string, number>;
   automaticProviderAccountLastSwitchAt?: number;
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
+  assistantThreadTurn?: import("@wollipog/protocol").AssistantThreadHealth["turn"];
   /** (#4138) An approved Location switch, verified on this runner, that moves the live session at
    * its next turn boundary. Durable so a runner restart neither loses nor half-applies it. */
   pendingLocationSwitch?: PendingLocationSwitch;

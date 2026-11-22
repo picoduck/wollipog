@@ -363,6 +363,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   assistantThreadProviderAccount: 388,
   assistantEvidenceReview: 397,
   assistantThreadHarnessChange: 402,
+  assistantThreadHealth: 409,
   assistantCampaignLaunch: 391,
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
@@ -6567,7 +6568,7 @@ export type SessionEventPayload =
       exitCode?: number;
       /** v393: content-safe evidence from the provider's structured permission-denial result. */
       providerForgeRefusal?: import("./forge-decision-action.js").ProviderForgeRefusal;
-      /** Opaque key echoed from the authenticated Assistant MCP result (v408). */
+      /** Opaque key echoed from the authenticated Assistant MCP result (v410). */
       assistantReceiptKey?: string;
       /** Control-plane-authored, after checking the key against this backing session. */
       assistantReceipt?: import("./assistant-threads.js").AssistantTranscriptReceipt;
@@ -6601,6 +6602,8 @@ export type SessionEventPayload =
       nonFatal?: true;
       /** A non-fatal warning from automatic worktree creation, before the first turn. */
       source?: "worktree_base_fallback";
+      /** Correlates a promoted notice with this authorized transcript entry. */
+      assistantThreadErrorId?: string;
     }
   | {
       kind: "policy_transport";
@@ -8599,6 +8602,7 @@ export interface SessionView {
    * policy change or usage-limit switch leaves it describing the launch. Names no account. */
   providerAccountSelection?: import("./provider-account-selection.js").ProviderAccountSelectionRecord;
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
+  assistantThreadHealth?: import("./assistant-threads.js").AssistantThreadHealth;
   /** (#4138) An approved Location switch waiting for the provider's turn to end, or one that failed
    * and left the session in its previous Location. */
   locationSwitch?: import("./location-switch.js").LocationSwitchStateView;
@@ -8828,6 +8832,7 @@ export interface SessionSnapshot {
   providerAccountAutomaticallySelected?: boolean;
   /** Three-valued: undefined is an older peer; null explicitly clears an earlier failure. */
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView | null;
+  assistantThreadHealth?: import("./assistant-threads.js").AssistantThreadHealth;
   /** (#4138) Three-valued like the account switch failure: null clears an earlier state. */
   locationSwitch?: import("./location-switch.js").LocationSwitchStateView | null;
   /** Protocol v233 (#3240). Three-valued: undefined is an older peer; null clears an earlier

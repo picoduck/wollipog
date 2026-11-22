@@ -39,11 +39,12 @@ function legacyLaunchLimit(threadId: string): number | null {
   return DEFAULT_ASSISTANT_THREAD_LIMITS.launchedSessions;
 }
 
-export function AssistantThreadLimitsDialog({ thread, model, effort, startAtSpending, onClose, onChanged }: {
+export function AssistantThreadLimitsDialog({ thread, model, effort, startAtSpending, startAtAccount, onClose, onChanged }: {
   thread: AssistantThread;
   model?: string;
   effort?: string;
   startAtSpending?: boolean;
+  startAtAccount?: boolean;
   onClose: () => void;
   onChanged: (thread: AssistantThread) => void;
 }) {
@@ -61,7 +62,7 @@ export function AssistantThreadLimitsDialog({ thread, model, effort, startAtSpen
   const [paused, setPaused] = useState(thread.launchPaused || launchLimit === 0);
   const [costEdited, setCostEdited] = useState(false);
   const [launchesEdited, setLaunchesEdited] = useState(false);
-  const [editor, setEditor] = useState<Editor | null>(null);
+  const [editor, setEditor] = useState<Editor | null>(startAtAccount ? "account" : null);
   const [conversation, setConversation] = useState<ConversationEdit | null>(null);
   const [delegation, setDelegation] = useState<AssistantDecisionDelegation>();
   const [saving, setSaving] = useState(false);
