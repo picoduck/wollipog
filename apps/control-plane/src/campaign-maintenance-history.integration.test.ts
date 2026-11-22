@@ -129,6 +129,8 @@ test("local health requests stay responsive while periodic maintenance sweeps re
     let sweeping = true;
     // The control plane's 5-second maintenance timers, back to back: each sweep yields only between runs.
     const sweeps = (async () => {
+      // Yield first, so the first health request is already timed when the first sweep starts.
+      await new Promise((resolve) => setImmediate(resolve));
       let runs = 0;
       const started = Date.now();
       while (runs < 5 || Date.now() - started < 1_000) {
