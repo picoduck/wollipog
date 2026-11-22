@@ -8,6 +8,11 @@ recovers it.
 ## Settings
 
 - `journal_mode=WAL`.
+- `main.cache_size=-32768` sets a 32 MiB page-cache target per file-backed connection,
+  including attached readers, the WAL checkpointer, and the offline vacuum command. SQLite
+  allocates pages on demand, so small databases use less memory. The target covers the frequently
+  read tables reported in #4859 while limiting the cache footprint on small hosts. In-memory
+  databases keep SQLite's default setting. See [SQLite's cache size documentation](https://sqlite.org/pragma.html#pragma_cache_size).
 - `busy_timeout=250` (`CONTROL_PLANE_DB_BUSY_TIMEOUT_MS`). Exactly one control plane owns a
   database file, and in WAL mode readers and SQLite-aware backups (`VACUUM INTO`, the online backup
   API) never block its writes. Only another writer, such as test seeding or a manual edit, can

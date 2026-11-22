@@ -71,6 +71,7 @@ import { ACCRUED_USAGE_SQL, claudeTurnRunningTotal } from "./claude-running-tota
 import { lookupRate, priceUsage, resolveCostSource, sameRequestInputTier, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
 import { WalCheckpointer, type WalCheckpointerOptions } from "./wal-checkpointer.js";
+import { FILE_BACKED_PAGE_CACHE_PRAGMA } from "./sqlite-page-cache.js";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
 import { uptime } from "node:os";
@@ -6924,6 +6925,7 @@ export class ControlPlaneDb {
     }
     const journalMode = (db.prepare("PRAGMA journal_mode = WAL;").get() as { journal_mode: string })
       .journal_mode;
+    if (location !== ":memory:") db.exec(FILE_BACKED_PAGE_CACHE_PRAGMA);
     // FULL flushes the WAL at every commit, so control-plane decisions are durable once
     // acknowledged. Only runner-replayable event ingest relaxes it; see replayableCommit.
     db.exec("PRAGMA synchronous = FULL;");
@@ -8696,6 +8698,7 @@ export class ControlPlaneDb {
         throw uninitialized;
       }
       // The same per-connection behavior open sets, so attached writes act exactly as the server's.
+      db.exec(FILE_BACKED_PAGE_CACHE_PRAGMA);
       db.exec("PRAGMA secure_delete = ON;");
       db.exec("PRAGMA foreign_keys = ON;");
       db.exec("PRAGMA recursive_triggers = ON;");

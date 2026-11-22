@@ -2,6 +2,7 @@ import { realpathSync, statfsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { FILE_BACKED_PAGE_CACHE_PRAGMA } from "./sqlite-page-cache.js";
 
 /** SQLite can need two extra copies (temporary DB plus WAL/journal), plus operator headroom. */
 export function incrementalVacuumConversionRequiredBytes(databaseBytes: bigint): bigint {
@@ -29,6 +30,7 @@ export function convertIncrementalVacuum(location: string, options: {
   let previousTemp: string | undefined;
   let tempChanged = false;
   try {
+    db.exec(FILE_BACKED_PAGE_CACHE_PRAGMA);
     db.exec("PRAGMA busy_timeout=0; PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;");
     // EXCLUSIVE retains the lock across the commit and the subsequent VACUUM. In WAL mode
     // even an idle connected owner prevents acquisition. The acknowledgement is still required:
