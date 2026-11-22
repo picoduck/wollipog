@@ -27,6 +27,7 @@ for (const theme of ["light", "dark"] as const) {
     test(`${key} keeps campaign approvals, settings and launched work reachable`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await open(page, theme, threadPath, 7);
+      await page.getByRole("button", { name: "Show All", exact: true }).click();
       await expect(cards(page)).toHaveCount(7);
       const first = cards(page).first();
       await expect(first.getByRole("button", { name: "Approve Once", exact: true })).toHaveCount(0);

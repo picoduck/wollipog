@@ -173,20 +173,19 @@ for (const theme of ["dark", "light"] as const) {
 
     test("an open thread shows its transcript, composer and the waiting approval", async ({ page }) => {
       await open(page, theme, "", "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA");
-      const head = page.locator(".assistant-thread-head");
       // The bar spans the thread pane above the waiting requests.
       const bar = page.locator(".assistant-thread-bar");
       await expect(bar.getByRole("heading", { level: 2, name: "Triage Open Issues" })).toBeVisible();
-      await expect(head).not.toContainText("Full access.");
+      await expect(bar).not.toContainText("Full access.");
       // The backing session's transcript and composer.
       await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
       await expect(page.locator(".composer")).toBeVisible();
       // The panel toggle signals waiting sessions. The only card in the conversation is the
       // waiting approval, while the running session is in Work.
       await expect(bar.getByRole("button", { name: /Side Panel/ })).toHaveAccessibleName("Show Side Panel, 1 Session Needs You");
-      const cards = page.getByRole("region", { name: "Waiting for You" }).locator(".assistant-work-card");
+      const cards = page.getByRole("region", { name: "Waiting for You" }).locator(".assistant-dock-card");
       await expect(cards).toHaveCount(1);
-      await expect(head).not.toContainText("Fix the Flaky Upload Test");
+      await expect(cards.first()).not.toContainText("Fix the Flaky Upload Test");
       const waiting = cards.filter({ hasText: "Bump the Vite Group" });
       await expect(waiting).toContainText("Run pnpm install --frozen-lockfile");
       await expect(waiting.getByRole("button", { name: "Approve Once" })).toBeVisible();
@@ -207,7 +206,7 @@ for (const theme of ["dark", "light"] as const) {
       await expect(toggle).toHaveAccessibleName("Show Side Panel, 1 Session Needs You");
       // The launched sessions arrive as summaries, without their requests' options: the card reads
       // the detail and still offers the inline approval.
-      const cards = page.getByRole("region", { name: "Waiting for You" }).locator(".assistant-work-card");
+      const cards = page.getByRole("region", { name: "Waiting for You" }).locator(".assistant-dock-card");
       await expect(cards.filter({ hasText: "Bump the Vite Group" }).getByRole("button", { name: "Approve Once" })).toBeVisible();
 
       // Mid-turn the assistant launches more work while its own status stays put. The control plane
@@ -247,9 +246,9 @@ for (const theme of ["dark", "light"] as const) {
       await capture(page, `assistants-backing-session-page-${theme}-desktop`);
     });
 
-    test("work cards share the row's width, so a title is not cut while there is room", async ({ page }) => {
+    test("Work panel titles fit when there is room", async ({ page }) => {
       await open(page, theme, "", "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA");
-      await expect(page.getByRole("region", { name: "Waiting for You" }).locator(".assistant-work-title")).toHaveCount(1);
+      await expect(page.getByRole("region", { name: "Waiting for You" }).locator(".assistant-dock-target .chip")).toHaveCount(1);
       await page.getByRole("button", { name: /Side Panel/ }).click();
       const titles = page.locator("#right-panel .launched-sessions .assistant-work-title");
       await expect(titles).toHaveCount(2);
@@ -385,17 +384,17 @@ for (const theme of ["dark", "light"] as const) {
       await threadRow(page, "Triage Open Issues").click();
       await expect(page.getByRole("button", { name: "Back to Assistants" })).toBeVisible();
       await expect(threadsList(page)).toBeHidden();
-      await expect(page.locator(".assistant-thread-head")).not.toContainText("Full access.");
+      await expect(page.locator(".page > .detail-bar")).not.toContainText("Full access.");
       await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
       await expect(page.getByRole("region", { name: "Waiting for You" }).getByRole("button", { name: "Approve Once" })).toBeVisible();
       // The waiting approval is whole on the screen: its title, its command and all three buttons sit
       // inside the phone's width, with no sideways scroll to find them.
-      const approval = page.locator(".assistant-work-card", { hasText: "Bump the Vite Group" });
+      const approval = page.locator(".assistant-dock-card", { hasText: "Bump the Vite Group" });
       const width = page.viewportSize()!.width;
       for (const part of [
         approval,
-        approval.locator(".assistant-work-title"),
-        approval.locator(".assistant-work-request-title"),
+        approval.locator(".assistant-dock-target .chip"),
+        approval.locator(".request-card-title"),
         approval.getByRole("button", { name: "Approve Once" }),
         approval.getByRole("button", { name: "Deny" }),
         approval.getByRole("button", { name: "Open Session" }),
@@ -404,7 +403,7 @@ for (const theme of ["dark", "light"] as const) {
         expect(box.x, "starts on the screen").toBeGreaterThanOrEqual(0);
         expect(box.x + box.width, "ends on the screen").toBeLessThanOrEqual(width);
       }
-      expect(await approval.locator(".assistant-work-title").evaluate((element) => element.scrollWidth <= element.clientWidth),
+      expect(await approval.locator(".assistant-dock-target .chip").evaluate((element) => element.scrollWidth <= element.clientWidth),
         "the card's title is not cut").toBe(true);
       // Nothing overflows the phone's width.
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);

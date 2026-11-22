@@ -138,6 +138,7 @@ const NavigationRailPanel = lazy(() => import("./components/SettingsView.js").th
 const BehaviorPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.BehaviorPanel })));
 const AssistantThreadDefaultsPanel = lazy(() => import("./components/AssistantThreadDefaultsPanel.js").then((module) => ({ default: module.AssistantThreadDefaultsPanel })));
 const AssistantConnectionsGroup = lazy(() => import("./components/AssistantConnectionsGroup.js").then((module) => ({ default: module.AssistantConnectionsGroup })));
+const AssistantConnectionsPages = lazy(() => import("./components/AssistantConnectionsPages.js").then((module) => ({ default: module.AssistantConnectionsPages })));
 const AssistantDelegationPanel = lazy(() => import("./components/AssistantDelegationPanel.js").then((module) => ({ default: module.AssistantDelegationPanel })));
 const AgentDefaultsPanel = lazy(() => import("./components/AgentDefaultsPanel.js").then((module) => ({ default: module.AgentDefaultsPanel })));
 const NetworkPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NetworkPanel })));
@@ -909,7 +910,9 @@ export function Shell() {
             />
           )}
           {view.name === "archived" && <ArchivedSessionsView key={view.browseVisit?.activationId} restoreBrowse={view.browseVisit?.restore} initialSearch={view.archiveSearch} />}
-          {view.name === "settings" && (
+          {view.name === "settings" && (view.assistantConnections ? (
+            <AssistantConnectionsPages route={view.assistantConnections} onNavigate={navigate} />
+          ) : (
             <SettingsView
               section={view.section}
               onNavigate={navigate}
@@ -958,7 +961,7 @@ export function Shell() {
                 assistant: <>
                   <AssistantThreadDefaultsPanel />
                   <AssistantDelegationPanel />
-                  <AssistantConnectionsGroup />
+                  <AssistantConnectionsGroup onNavigate={navigate} />
                 </>,
                 reviews: <ReviewSettingsPanel />,
                 network: <NetworkPanel tailnet={tailnet} onNavigate={navigate} />,
@@ -966,7 +969,7 @@ export function Shell() {
                 about: <AboutPanel update={desktopUpdate} />,
               }}
             />
-          )}
+          ))}
           {view.name === "projects" && (
             <ProjectsView
               selectedProjectId={view.id}

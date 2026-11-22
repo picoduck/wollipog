@@ -133,7 +133,7 @@ for (const theme of ["light", "dark"] as const) {
         await expect(panel.getByRole("region", { name: "Needs You", exact: true })).toContainText("Bump the Vite Group");
         await panel.getByRole("button", { name: "Close Panel" }).click();
 
-        const waiting = page.getByRole("list", { name: "Sessions Waiting for You" });
+        const waiting = page.getByRole("list", { name: "Pending Requests" });
         await waiting.getByRole("button", { name: "Approve Once" }).click();
         await expect(toggle).toHaveAccessibleName("Side Panel");
         await expect(dot).toHaveCount(0);

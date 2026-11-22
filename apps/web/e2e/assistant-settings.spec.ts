@@ -128,7 +128,7 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
         await capture(grants, "many-delegations", "The page is scrolled to Active Delegations. Remove for the long thread name is fully visible, and the group contains 10 actions.");
 
         const connections = page.getByRole("region", { name: "Assistant Connections", exact: true });
-        await expect(connections.locator(".setting-row-static")).toHaveCount(3);
+        await expect(connections.locator(".assistant-connection-row")).toHaveCount(3);
         const all = connections.getByRole("button", { name: "All Connections 9" });
         await connections.scrollIntoViewIfNeeded();
         await expectFullyInViewport(all, "All Connections");
@@ -136,14 +136,17 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
         await capture(connections, "long-connection-names", "The page is scrolled to Assistant Connections. The preview contains three rows, All Connections 9 and New Connection.");
       });
 
-      test("the connection preview shows availability, access and last use and opens existing connection controls", async ({ page }) => {
+      test("the connection preview shows availability, access and last use and opens the Settings pages", async ({ page }) => {
         await open(page);
         const connections = page.getByRole("region", { name: "Assistant Connections", exact: true });
-        await expect(connections.locator(".setting-row-static")).toHaveCount(3);
-        await expect(connections).toContainText("Active · Configured Access");
-        await expect(connections).toContainText("Revoked · Full Access");
+        const previews = connections.locator(".assistant-connection-row");
+        await expect(previews).toHaveCount(3);
+        const configured = previews.filter({ hasText: "Configured Access" });
+        await expect(configured).toContainText("Active");
+        const revoked = previews.filter({ hasText: "Revoked" });
+        await expect(revoked).toContainText("Full Access");
         await expect(connections.locator("time")).toHaveAttribute("datetime", "2025-11-19T18:00:00.000Z");
-        await expect(connections.getByText("Never used")).toHaveCount(2);
+        await expect(previews.filter({ hasText: "Never Used" })).toHaveCount(2);
         const all = connections.getByRole("button", { name: "All Connections 3" });
         const create = connections.getByRole("button", { name: "New Connection", exact: true });
         await connections.scrollIntoViewIfNeeded();
@@ -151,11 +154,12 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
         await expectFullyInViewport(all, "All Connections");
         await capture(connections, "connections", "The page is scrolled to Assistant Connections. Three rows show active or revoked status, full or configured access, and recorded or no use. All Connections shows 3.");
         await all.click();
-        const dialog = page.getByRole("dialog", { name: "Assistant Connections" });
-        await expect(dialog.getByRole("region", { name: "Your Connections" })).toBeVisible();
-        await dialog.getByRole("button", { name: "Done", exact: true }).click();
+        await expect(page.getByRole("heading", { name: "Assistant Connections", exact: true })).toBeVisible();
+        await expect(page.getByRole("region", { name: "Connections", exact: true }).getByRole("button")).toHaveCount(3);
+        await page.goBack();
         await create.click();
-        await expect(dialog.getByRole("textbox", { name: "Connection Name" })).toBeVisible();
+        await expect(page.getByRole("heading", { name: "New Connection", exact: true })).toBeVisible();
+        await expect(page.getByRole("textbox", { name: "Connection Name" })).toBeVisible();
       });
 
       test("a control plane without the feature still shows the four earlier defaults", async ({ page }) => {

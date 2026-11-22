@@ -19,5 +19,5 @@ export function useSidePanelLayout(open: boolean, phone: boolean, preferredWidth
   const ceiling = rightPanelDragCeiling(columnsWidth);
   const effectiveWidth = clampRightPanelWidth(preferredWidth, ceiling);
   const overlaysAtWidth = !phone && columnsWidth !== null && rightPanelOverlays(columnsWidth, effectiveWidth);
-  return { asideRef, ceiling, effectiveWidth, overlaysAtWidth };
+  return { asideRef, ceiling, columnsWidth, effectiveWidth, overlaysAtWidth };
 }

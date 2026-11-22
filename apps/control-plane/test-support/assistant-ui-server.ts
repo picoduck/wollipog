@@ -16,6 +16,19 @@ export async function assistantUiServer() {
   const requestHuman = (req: {headers: {authorization?: string}}) => req.headers.authorization === `Bearer ${ownerCredential}` ? owner : null;
   registerAuthGate(app, {authenticate: req => requestHuman(req) ? {id: "synthetic-owner", name: "Owner", principal: owner} : null, isAllowedOrigin: () => false});
   const operations = createAssistantOperations(db);
+  const inventory = [
+    ["connection_list", "List connection metadata and current grants."],
+    ["connection_activity", "Read a connection's recent activity. Use connection_list to find the connection."],
+    ["project_list", "List projects the owner can access."],
+  ] as const;
+  for (const [name, description] of inventory) {
+    operations.register({
+      name, description, inputSchema: { type: "object" }, metadata: true,
+      resolveTarget: () => ({ kind: "control_plane", id: db.instanceId() }),
+      ownerCanAccess: () => true,
+      execute: () => ({}),
+    });
+  }
   registerAssistantRoutes(app, {db, operations, requestHuman});
   const project = db.createProject({name: "Assistant Sandbox", scope: {organizationId: owner.organizationId, owner: {kind: "user", userId: owner.userId}}});
   const origin = await app.listen({host: "127.0.0.1", port: 0});

@@ -162,7 +162,7 @@ for (const profile of [mouse, phone]) {
 
       test("Approve Once shows the aligned confirmation toast in the Assistant thread", async ({ page }) => {
         await page.goto(`/assistants-e2e.html?theme=${theme}&confirm=1&path=%2Fassistants%2F~dABoAHIAXwB0AHIAaQBhAGcAZQA`);
-        const approve = page.getByRole("list", { name: "Approvals Needed" }).getByRole("button", { name: "Approve Once" });
+        const approve = page.getByRole("list", { name: "Pending Requests" }).getByRole("button", { name: "Approve Once" });
         if (profile.hasTouch) await approve.tap();
         else await approve.click();
         const toast = page.locator(".toast").filter({ hasText: "Stop Session ran once." });

@@ -19,12 +19,11 @@ import { statusMeta } from "../status-meta.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
-import { pendingAssistantConfirmations } from "../assistant-confirmations.js";
-import { AssistantConfirmationCard } from "./AssistantConfirmationCard.js";
+import { AssistantWaitingDock, type AssistantWaitingDockHandle } from "./AssistantWaitingDock.js";
 import { AssistantSpendingNotice } from "./AssistantSpendingNotice.js";
 import { AssistantThreadLimitsDialog } from "./AssistantThreadLimitsDialog.js";
 import { AssistantDecisionDelegationDialog } from "./AssistantDecisionDelegationDialog.js";
-import { AssistantWaitingWork, useLaunchedWorkGroups } from "./AssistantWorkCards.js";
+import { useLaunchedWorkGroups } from "./AssistantWorkCards.js";
 import type { LaunchedWork } from "../assistant-launched-work.js";
 import { ConfirmationFailure, useFeedback } from "./FeedbackProvider.js";
 import { AssistantsIcon, PlusIcon } from "./Icons.js";
@@ -92,6 +91,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   const isMobile = useIsMobile();
   const conn = useStoreSelector((state) => state.conn);
   const panel = useAssistantPanelState();
+  const waitingDock = useRef<AssistantWaitingDockHandle>(null);
   const [list, setList] = useState<ListState>({ kind: "loading" });
   /** An open thread the list leaves out (archived), read on its own. */
   const [extra, setExtra] = useState<AssistantThread | null>(null);
@@ -493,6 +493,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
                 onSettings={() => openThreadSettings(selected.id)}
                 onDelegation={() => navigate({ name: "assistants", threadId: selected.id, delegation: true })}
                 onOverlayChange={onOverlayChange}
+                onReview={(sessionId, request) => waitingDock.current?.focusAssistantWorkRequest(sessionId, request)}
               />}
               // A phone's detail bar is the thread's bar, so SessionDetail draws none of its own.
               header={isMobile ? null : (
@@ -504,10 +505,12 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
                   onToggleSidePanel={panel.toggle}
                 />
               )}
-              columnLead={<ThreadWaitingLead
+              assistantRequestDock={(focusComposer) => <AssistantWaitingDock
+                ref={waitingDock}
                 thread={selected}
                 work={launchedWork!}
-                onConfirmationAnswered={refresh}
+                onConfirmationAnswered={replace}
+                focusComposer={focusComposer}
               />}
               assistantSpendingNotices={spendingNotices}
             />
@@ -719,27 +722,6 @@ function ThreadBarTitle({ title, phone = false }: { title: string; phone?: boole
         </button>
       </Heading>
       <span id={tooltipId} className="assistant-bar-title-tooltip" role="tooltip">{title}</span>
-    </div>
-  );
-}
-
-/** Waiting cards remain here until the thread's request dock takes over in #4809. */
-function ThreadWaitingLead({ thread, work, onConfirmationAnswered }: {
-  thread: AssistantThread;
-  work: LaunchedWork;
-  onConfirmationAnswered?: () => void;
-}) {
-  // Destructive commands this thread's assistant is waiting on the owner for (#4665), drawn ahead
-  // of the work they would unblock.
-  const pending = pendingAssistantConfirmations([thread]);
-  return (
-    <div className="assistant-thread-head">
-      <AssistantWaitingWork
-        work={work}
-        confirmations={pending.length > 0 ? pending.map(({ confirmation }) => (
-          <AssistantConfirmationCard key={confirmation.id} confirmation={confirmation} onAnswered={onConfirmationAnswered} />
-        )) : undefined}
-      />
     </div>
   );
 }
