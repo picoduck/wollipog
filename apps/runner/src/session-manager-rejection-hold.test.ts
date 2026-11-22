@@ -508,8 +508,8 @@ test("Assistant notices correlate rejected and failed turns with their own trans
   try {
     await h.manager.start(h.spec);
     h.store.patchMeta(h.spec.sessionId, { assistant: { threadId: "thr_health" } });
-    const health = () => h.sent.findLast((message) => message.type === "session_runtime_updated" &&
-      message.snapshot.id === h.spec.sessionId && message.snapshot.assistantThreadHealth !== undefined);
+    const health = () => h.sent.filter((message) => message.type === "session_runtime_updated" &&
+      message.snapshot.id === h.spec.sessionId && message.snapshot.assistantThreadHealth !== undefined).at(-1);
     await engageHold(h);
     const held = health();
     assert.ok(held?.type === "session_runtime_updated");
