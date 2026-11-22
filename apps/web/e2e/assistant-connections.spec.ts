@@ -228,19 +228,11 @@ for (const width of [1440, 390]) {
           await expect(allowedOperations.locator(".choice-row-title")).toHaveText([
             "Assistant Discover", "Connection List", "Connection Activity", "Project List",
           ]);
-          await expect(allowedOperations.locator(".choice-row-desc code").first()).toBeVisible();
-          const descriptions = await allowedOperations.locator(".choice-row-desc").evaluateAll(elements => elements.map(element => {
-            const description = element.cloneNode(true) as HTMLElement;
-            description.querySelector("code")?.remove();
-            return description.textContent;
-          }));
-          expect(descriptions.join(" ")).not.toMatch(/assistant_discover|connection_list|connection_activity|project_list/);
+          await expect(allowedOperations).not.toContainText(/assistant_discover|connection_list|connection_activity|project_list/);
           await targetSize(allowedOperations.locator(".choice-row").first(), minimum);
           await capture(page, theme, "detail-configured", allowedOperations.locator(".choice-row").first());
 
-          const discoverRow = allowedOperations.locator(".choice-row").filter({ has: page.getByText("assistant_discover", { exact: true }) });
-          await expect(discoverRow.locator(".choice-row-title")).toHaveText("Assistant Discover");
-          await expect(discoverRow.locator("code")).toHaveText("assistant_discover");
+          const discoverRow = allowedOperations.locator(".choice-row").filter({ has: page.getByText("Assistant Discover", { exact: true }) });
           await discoverRow.getByRole("checkbox").check();
           await page.getByRole("button", { name: /^Projects:/ }).click();
           await page.getByRole("option", { name: "Selected Projects", exact: true }).click();
@@ -269,16 +261,17 @@ for (const width of [1440, 390]) {
           await expect(activity.locator("tbody tr")).toHaveCount(26);
           const longTarget = activity.getByRole("cell", { name: "Assistant Connection · " + fixtures[0]!.connection.name, exact: true }).first();
           await expect(longTarget).toBeVisible();
-          await expect(activity.locator("code").getByText("assistant_discover", { exact: true }).first()).toBeVisible();
+          await expect(activity.getByRole("cell", { name: "Assistant Discover", exact: true }).first()).toBeVisible();
+          await expect(activity).not.toContainText("assistant_discover");
           await expect(activity.getByText("Succeeded", { exact: true }).first()).toBeVisible();
           await expect(activity.getByText("Refused", { exact: true }).first()).toBeVisible();
           await expectNoHorizontalOverflow(activityScroll);
           expect(await activityScroll.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
           if (width === 390) {
-            expect(await activity.locator("tbody code").evaluateAll(identifiers => identifiers.every(identifier => {
+            expect(await activity.getByRole("cell", { name: "Assistant Discover", exact: true }).evaluateAll(labels => labels.every(label => {
               const range = document.createRange();
-              range.selectNodeContents(identifier);
-              return range.getClientRects().length === 1 && identifier.scrollWidth <= identifier.clientWidth;
+              range.selectNodeContents(label);
+              return range.getClientRects().length === 1 && label.scrollWidth <= label.clientWidth;
             }))).toBe(true);
             const stressTarget = activity.getByRole("cell", { name: "Project · " + stressProject.name, exact: true }).first();
             expect(await stressTarget.locator(".assistant-activity-target").evaluate(element => {

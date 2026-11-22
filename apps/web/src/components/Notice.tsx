@@ -33,6 +33,8 @@ export interface NoticeProps {
   /** Everything longer than the body's one or two sentences. It stays behind a Show Details toggle
    * at the end of the action row and is not in the DOM until the person opens it (§13.2). */
   details?: ReactNode;
+  /** Put the quiet details disclosure before the resolving action. */
+  detailsFirst?: boolean;
   /** Controls in the title row, before the dismiss button: the session notice slot's "+N More".
    * In a titled notice these and the dismiss button sit in the title row only, so the body and the
    * actions use the notice's full width. */
@@ -73,6 +75,7 @@ export function Notice({
   children,
   actions,
   details,
+  detailsFirst = false,
   trailing,
   onDismiss,
   dismissLabel = "Dismiss",
@@ -95,6 +98,13 @@ export function Notice({
   const [detailsOpen, setDetailsOpen] = useState(false);
   const detailsId = `notice-details-${useId().replace(/:/g, "")}`;
   const hasDetails = details != null && details !== false;
+  const detailsToggle = hasDetails && (
+    <button type="button" className="btn sm ghost notice-details-toggle"
+      aria-expanded={detailsOpen} aria-controls={detailsOpen ? detailsId : undefined}
+      onClick={() => setDetailsOpen(open => !open)}>
+      {detailsOpen ? "Hide Details" : "Show Details"}
+    </button>
+  );
   const dismiss = onDismiss && (
     <button type="button" className="icon-btn sm notice-dismiss" aria-label={dismissLabel} title={dismissLabel}
       disabled={dismissDisabled} onClick={onDismiss}>
@@ -140,18 +150,9 @@ export function Notice({
         {children != null && children !== false && <div className="notice-body">{children}</div>}
         {(actions || hasDetails) && (
           <div className="notice-actions">
+            {detailsFirst && detailsToggle}
             {actions}
-            {hasDetails && (
-              <button
-                type="button"
-                className="btn sm ghost notice-details-toggle"
-                aria-expanded={detailsOpen}
-                aria-controls={detailsOpen ? detailsId : undefined}
-                onClick={() => setDetailsOpen((open) => !open)}
-              >
-                {detailsOpen ? "Hide Details" : "Show Details"}
-              </button>
-            )}
+            {!detailsFirst && detailsToggle}
           </div>
         )}
         {hasDetails && detailsOpen && <div className="notice-details-body" id={detailsId}>{details}</div>}

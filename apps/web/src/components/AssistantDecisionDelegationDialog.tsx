@@ -254,7 +254,7 @@ export function AssistantDecisionDelegationDialog(props: DelegationEditorProps) 
     footer={<>
       {threadGrant && !draft && <button className="btn ghost danger delegation-revoke" type="button" disabled={busy}
         onClick={() => void revoke()}>Revoke Delegation</button>}
-      <button className="btn" type="button" disabled={busy} onClick={onClose}>Cancel</button>
+      <button className="btn ghost" type="button" disabled={busy} onClick={onClose}>Cancel</button>
       <BusyButton className="btn primary" form={form} type="submit" busy={busy}
         progress="Saving delegation…">{draft ? "Use Delegation Settings" : "Save Delegation"}</BusyButton>
     </>}>

@@ -175,11 +175,11 @@ export function AssistantThreadLimitsDialog({ thread, model, effort, startAtSpen
       className="assistant-thread-settings"
       initialFocusRef={startAtSpending ? spendingRef : undefined}
       headerActions={phone ? <>
-        <button type="button" className="btn assistant-thread-settings-cancel" onClick={onClose} disabled={saving}>Cancel</button>
+        <button type="button" className="btn ghost assistant-thread-settings-cancel" onClick={onClose} disabled={saving}>Cancel</button>
         {saveButton}
       </> : undefined}
       footer={phone ? undefined : <>
-        <button type="button" className="btn" onClick={onClose} disabled={saving}>Cancel</button>
+        <button type="button" className="btn ghost" onClick={onClose} disabled={saving}>Cancel</button>
         {saveButton}
       </>}>
       <form id={form} className="form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
@@ -260,7 +260,7 @@ export function AssistantThreadLimitsDialog({ thread, model, effort, startAtSpen
     {editor === "confirm" && conversation && <Modal title="Confirm Conversation Change"
       onClose={saving ? () => {} : closeEditor}
       footer={<>
-        <button type="button" className="btn" disabled={saving} onClick={closeEditor}>Keep Editing</button>
+        <button type="button" className="btn ghost" disabled={saving} onClick={closeEditor}>Keep Editing</button>
         <BusyButton className="btn primary" busy={saving} progress="Saving changes…"
           icon={<ArrowLeftRightIcon size={14} aria-hidden="true" />} onClick={() => void save(true)}>
           Confirm and Save

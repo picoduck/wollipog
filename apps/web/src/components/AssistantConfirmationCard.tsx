@@ -10,6 +10,7 @@ import { assistantThreadTitle } from "../assistant-threads.js";
 import { formatClock } from "../format.js";
 import { useStoreActions } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
+import { CopyButton } from "./common.js";
 import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -65,7 +66,7 @@ function ConfirmationActions({ busy, answer, approveDisabled = false }: {
 }) {
   return (
     <>
-      <BusyButton className="btn sm" busy={busy === "deny"} progress="Denying the request…" aria-disabled={busy !== null || undefined}
+      <BusyButton className="btn sm ghost danger" busy={busy === "deny"} progress="Denying the request…" aria-disabled={busy !== null || undefined}
         onClick={event => void answer("deny", event.currentTarget)}>
         Deny
       </BusyButton>
@@ -116,8 +117,8 @@ function CampaignBudgetEditor({ confirmation, onSaved, onCancel }: {
       </label>
       {error && <p role="alert">{error}</p>}
       <div className="request-card-foot">
-        <button type="button" className="btn sm" onClick={onCancel} disabled={saving}>Cancel</button>
-        <BusyButton className="btn sm primary" busy={saving} progress="Updating…" disabled={saving || !validOrchestratorCampaignBudgetDefault(budget)}
+        <button type="button" className="btn sm ghost" onClick={onCancel} disabled={saving}>Cancel</button>
+        <BusyButton className="btn sm primary" busy={saving} progress="Updating…" disabled={!validOrchestratorCampaignBudgetDefault(budget)}
           onClick={() => void save()}>Update Preview</BusyButton>
       </div>
     </div>
@@ -155,7 +156,9 @@ export function CampaignReviewDialog({ confirmation, onClose, onAnswered }: {
             {failure.message}
           </Notice>}
           <dl className="facts" aria-label="Campaign Details">
-            <div><dt>Location</dt><dd>{shown.target.label} ({shown.target.id})</dd></div>
+            <div><dt>Location</dt><dd>{shown.target.label}{" "}
+              <CopyButton text={shown.target.id} className="icon-btn sm" iconOnly ariaLabel="Copy Location ID" />
+            </dd></div>
             {shown.impact.map(({ label, value }) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
           </dl>
           {shown.arguments.map(({ label, value }) => (
@@ -213,7 +216,7 @@ export function AssistantConfirmationsNotice({ waiting }: { waiting: readonly As
               <span className="assistant-approvals-meta">
                 <span className="request-card-kind">{thread.confirmations.length} {thread.confirmations.length === 1 ? "Approval" : "Approvals"}</span>
                 <span className="assistant-approvals-expiry">Expires {formatClock(thread.expiresAt)}</span>
-                <button type="button" className="btn sm primary" aria-describedby={titleId}
+                <button type="button" className="btn sm ghost" aria-describedby={titleId}
                   onClick={() => thread.confirmations.some(confirmation => confirmation.campaign)
                     ? setReviewThreadId(thread.threadId)
                     : navigate({ name: "assistants", threadId: thread.threadId })}>
@@ -231,7 +234,7 @@ export function AssistantConfirmationsNotice({ waiting }: { waiting: readonly As
       )}
       {reviewThread && campaigns.length > 0 && (
         <Modal title="Campaign Approvals" onClose={() => setReviewThreadId(null)}
-          footer={<button type="button" className="btn" onClick={() => {
+          footer={<button type="button" className="btn ghost" onClick={() => {
             setReviewThreadId(null);
             navigate({ name: "assistants", threadId: reviewThread.threadId });
           }}>Open Thread</button>}>

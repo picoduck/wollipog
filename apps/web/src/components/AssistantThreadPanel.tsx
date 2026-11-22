@@ -144,7 +144,7 @@ function DelegationSummary({ thread, onDelegation }: { thread: AssistantThread; 
       {expiresAt != null && expiresAt <= now ? "Expired" : "Active"}
       {expiresAt == null ? " · No Expiration" : " · " + (expiresAt <= now ? "Expired " : "Expires ") + formatCalendarTime(expiresAt, now)}
     </p>}
-    {thread.status !== "archived" && thread.decisionDelegation && <button type="button" className="btn sm" onClick={onDelegation}>
+    {thread.status !== "archived" && thread.decisionDelegation && <button type="button" className="btn sm ghost" onClick={onDelegation}>
       {grant ? "Manage…" : "Delegate…"}
     </button>}
   </div>;
@@ -173,7 +173,7 @@ function ThreadDetails({ thread, model, effort, onSettings }: {
         unlimited="No Launch Limit" paused={thread.launchPaused} />
     </>}
     {!!thread.earlierConversations?.length && <AssistantThreadHistory entries={thread.earlierConversations} />}
-    <button type="button" className="btn" onClick={onSettings}>Thread Settings…</button>
+    <button type="button" className="btn ghost" onClick={onSettings}>Thread Settings…</button>
   </div>;
 }
 

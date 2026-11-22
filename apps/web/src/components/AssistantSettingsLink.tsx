@@ -13,10 +13,10 @@ type Props = {
 };
 
 export function AssistantSettingsLink(props: Props) {
-  return useHasStore() ? <StoreLink {...props} /> : <a className={props.className ?? "btn sm"} href={viewPath(props.view)}>{props.children}</a>;
+  return useHasStore() ? <StoreLink {...props} /> : <a className={props.className ?? "btn sm ghost"} href={viewPath(props.view)}>{props.children}</a>;
 }
 
-function StoreLink({ view, children, className = "btn sm" }: Props) {
+function StoreLink({ view, children, className = "btn sm ghost" }: Props) {
   const { navigate } = useStoreActions();
   const { desktopMultiInstance, activeProfile } = useInstances();
   return <a className={className} href={desktopMultiInstance ? instanceViewPath(activeProfile.id, view) : viewPath(view)} onClick={(event) => {

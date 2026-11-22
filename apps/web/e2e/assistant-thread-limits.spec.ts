@@ -424,6 +424,7 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await expect(thread.getByRole("link", { name: "Settings › Assistant" })).toHaveAttribute("href", SETTINGS);
       await open(page, "/sessions/~cwBlAHMAcwAtAHQAcgBpAGEAZwBlAA/guardrails", theme, "budget");
       const guardrails = page.getByRole("dialog", { name: "Guardrails", exact: true });
+      await expect(guardrails.getByRole("link", { name: "Assistant Defaults" })).toHaveClass(/\bghost\b/u);
       const budget = guardrails.getByRole("textbox", { name: "Assistant Thread Cost Budget" });
       await expect(budget).toHaveValue("25"); // The fixture's derived runtime cap is $15.
       await budget.fill("20");

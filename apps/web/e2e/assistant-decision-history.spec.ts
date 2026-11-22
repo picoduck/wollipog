@@ -204,6 +204,7 @@ for (const theme of ["light", "dark"] as const) {
         await check(page, decisions);
         await page.getByRole("tab", { name: /^Decisions/ }).evaluate((tab: HTMLElement) => tab.blur());
         await capture(page, "decisions", theme, "error");
+        await page.evaluate(() => Reflect.get(window, "allowDecisionHistoryRetry")());
         await retry.click();
         await expect(rows(decisions)).toHaveCount(5);
         await expect(alert).toHaveCount(0);

@@ -45,7 +45,7 @@ export function AssistantThreadProblemNotice({ problem, thread, machine, trailin
       break;
     case "sign_in_needed":
       body = "Sign in to " + account + " to continue this thread.";
-      actions = <>{signIn}{switchAccount}</>;
+      actions = <>{switchAccount}{signIn}</>;
       break;
     case "machine_offline":
       title = machine + " Is Offline";

@@ -4705,7 +4705,7 @@ function SessionDetailLoaded({
   }, [api, busy, composerRestartOffered, loadSession, restartPending, restartRefusal, runnerOnline, session.id]);
   // The launch refusal notice's Restart Session (#3240): the same restart as the header's, for the
   // failed or stopped session the refusal left.
-  const restartFromRefusal = useCallback(async (waitForProviderHome = false) => {
+  const restartFromRefusal = useCallback(async (waitForProviderHome = false, onFailure?: () => void) => {
     if (!runnerOnline || busy || restartPending || restartRefusal !== null || session.archived ||
         turnRetryInFlightRef.current) return;
     const generation = viewGenerationRef.current;
@@ -4716,7 +4716,10 @@ function SessionDetailLoaded({
     try {
       loadSession(await api.restart(session.id, waitForProviderHome ? { waitForProviderHome } : undefined));
     } catch (cause) {
-      if (viewGenerationRef.current === generation) showActionError("restart", cause);
+      if (viewGenerationRef.current === generation) {
+        if (onFailure) onFailure();
+        else showActionError("restart", cause);
+      }
     } finally {
       if (viewGenerationRef.current === generation) {
         setRestartPending(false);
@@ -5096,6 +5099,7 @@ function SessionDetailLoaded({
     ? prioritizedRequests.find((request) => request.kind === "authentication") : undefined;
   const [assistantSignInOpen, setAssistantSignInOpen] = useState(false);
   const [assistantSignInError, setAssistantSignInError] = useState<string>();
+  const [assistantRestartError, setAssistantRestartError] = useState<string>();
   const [assistantSignInPending, setAssistantSignInPending] = useState(false);
   const assistantSignInFlight = useRef(false);
   const openThreadMachine = () => navigate({ name: "runners", section: "machines", machineId: session.runnerId });
@@ -5139,16 +5143,21 @@ function SessionDetailLoaded({
             trailing={trailing} details={problem.key === "automatic_turns_held"
               ? assistantTurnItems.hold?.message : assistantTurnItems.error?.message}
             switchAccount={<button type="button" className={problem.key === "usage_limit" ? "btn sm primary" : "btn sm ghost"}
-              disabled={!runnerOnline || busy || thread.accountChangeSupported !== true}
+              disabled={!runnerOnline || busy || assistantSignInPending || thread.accountChangeSupported !== true}
               onClick={onSwitchAccount}>Switch Account…</button>}
             signIn={<BusyButton className="btn sm primary" busy={assistantSignInPending} progress="Starting sign-in…"
               disabled={!runnerOnline || runner?.canManage === false || (!authenticationRequest && !session.providerAccountId)}
-              onClick={() => void signInToThread()}>Sign In…</BusyButton>}
+              onClick={event => { event.currentTarget.focus({ preventScroll: true }); void signInToThread(); }}>Sign In…</BusyButton>}
             restart={<BusyButton className="btn sm primary" busy={restartPending} progress="Restarting the thread…"
-              disabled={!runnerOnline || busy || restartRefusal !== null || headerRestartPending}
-              onClick={() => void restartFromRefusal()}>Restart Thread</BusyButton>}
+              disabled={!runnerOnline || (busy && !restartPending) || restartRefusal !== null || headerRestartPending}
+              onClick={event => {
+                event.currentTarget.focus({ preventScroll: true });
+                setAssistantRestartError(undefined);
+                void restartFromRefusal(false, () => setAssistantRestartError("Couldn't restart the thread. Try again."));
+              }}>Restart Thread</BusyButton>}
             openMachine={<button type="button" className="btn sm ghost" onClick={openThreadMachine}>Open Machine</button>}
-            actionError={problem.key === "sign_in_needed" ? assistantSignInError : undefined} />
+            actionError={problem.key === "sign_in_needed" ? assistantSignInError
+              : problem.key === "tools_unavailable" ? assistantRestartError : undefined} />
         ),
       });
     }

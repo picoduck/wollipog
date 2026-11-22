@@ -224,7 +224,7 @@ export function NewAssistantThreadComposer({ onCancel, onCreated, onCreationPend
           {failure && <Notice tone="danger" role="alert" title="Couldn't Start the Thread">{failure}</Notice>}
           <div className="new-assistant-thread-suggestions" aria-label="Starter Prompts" role="group">
             {suggestions.map(({ label, prompt }) => (
-              <button key={label} type="button" className="btn" disabled={busy} onClick={() => {
+              <button key={label} type="button" className="btn ghost" disabled={busy} onClick={() => {
                 setMessage(prompt);
                 messageField.current?.focus();
               }}>{label}</button>
@@ -233,7 +233,7 @@ export function NewAssistantThreadComposer({ onCancel, onCreated, onCreationPend
         </>}
       </div>
       <div className="new-assistant-thread-actions" onMouseDown={holdFieldFocus}>
-        {onCancel && <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button>}
+        {onCancel && <button type="button" className="btn ghost" disabled={busy} onClick={onCancel}>Cancel</button>}
         {defaults && <BusyButton type="submit" className="btn primary" busy={busy}
           progress="Starting the thread…" disabled={!canStart}>Start Thread</BusyButton>}
       </div>
@@ -254,7 +254,7 @@ function ThreadOption({ label, value, disabled, className, fitWithinViewport, ch
   const contentRef = useRef<HTMLDivElement>(null);
   const close = () => popover.close(true);
   return <>
-    <button type="button" className="btn new-assistant-option" ref={popover.triggerRef} disabled={disabled}
+    <button type="button" className="btn ghost new-assistant-option" ref={popover.triggerRef} disabled={disabled}
       aria-haspopup="dialog" aria-expanded={open && !disabled} aria-controls={open && !disabled ? popover.panelId : undefined}
       onClick={popover.toggle} onKeyDown={popover.onTriggerKeyDown}>
       <span>{label} <strong>{value}</strong></span><ChevronDownIcon size={14} />

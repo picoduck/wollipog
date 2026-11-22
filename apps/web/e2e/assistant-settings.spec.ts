@@ -116,6 +116,7 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
         await expired.click();
         await expect(grants.getByText("Release Follow-Up", { exact: true })).toHaveCount(0);
         await expect(grants.getByText("No Delegation Grants")).toBeVisible();
+        await expect(grants.getByRole("heading", { name: "Active Delegations" })).toBeFocused();
       });
 
       test("many grants and long connection names fit the Settings page", async ({ page }) => {

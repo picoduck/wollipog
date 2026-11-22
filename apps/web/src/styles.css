@@ -7677,7 +7677,7 @@ body.shell-dock-dragging * {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.assistant-dock-card .code-well { min-width: 0; }
+.assistant-dock-card .code-well { border: 0; }
 .assistant-dock-card .code-well pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .assistant-dock-target,
 .assistant-dock-actions,
@@ -7695,6 +7695,9 @@ body.shell-dock-dragging * {
 }
 .assistant-dock-target > .status { flex: none; }
 .assistant-dock-details { justify-self: start; }
+:is(.assistant-dock, .assistant-thread-panel, .detail-bar:has(.assistant-bar-title)) :is(.chip, .count, .status) {
+  font-size: var(--text-sm);
+}
 .assistant-dock-facts { display: grid; gap: var(--space-1); min-width: 0; }
 .assistant-dock-facts .facts { margin: 0; }
 .assistant-dock-choices { min-width: 0; }
@@ -12566,10 +12569,11 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .assistant-decision-meta {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 0 var(--space-2);
   width: 100%;
+  min-height: var(--space-6);
 }
 .assistant-decision-meta strong { font: var(--type-body-strong); }
 .assistant-decision-meta time {
@@ -12615,6 +12619,15 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 .delegation-dialog :is(.delegation-category, .form) > p { margin: 0; }
 .delegation-dialog .modal-foot > .delegation-revoke { margin-right: auto; }
+@media (min-width: 761px) {
+  .delegation-dialog .modal-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .delegation-dialog .modal-heading { display: contents; }
+  .delegation-dialog .modal-desc { grid-area: 2 / 1 / auto / -1; }
+  .delegation-dialog .modal-close { grid-area: 1 / 2; }
+}
 .delegation-groups,
 .delegation-scopes {
   display: grid;
@@ -13282,6 +13295,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: var(--space-2);
   resize: vertical;
   font: var(--type-body);
+  border: 0;
 }
 .new-assistant-thread-chips,
 .new-assistant-thread-suggestions,
@@ -13298,6 +13312,10 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding-inline: var(--page-gutter);
 }
 .new-assistant-option {
+  display: inline-grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-content: center;
+  align-items: start;
   height: auto;
   min-height: var(--control-h);
   min-width: 0;
@@ -13306,7 +13324,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   text-align: start;
 }
 .new-assistant-option > span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
-.new-assistant-option > svg { flex: none; }
+.new-assistant-option > svg { margin-block-start: calc((1lh - var(--icon-sm)) / 2); }
 .new-assistant-option-panel .menu-head {
   z-index: var(--z-sticky);
   justify-content: space-between;
@@ -13417,6 +13435,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .assistant-threads-foot .count { font-size: var(--text-sm); }
 @media (max-width: 760px) {
   .assistant-threads-foot { padding-inline: var(--page-gutter); }
+  .detail-bar-heading:has(> .assistant-bar-title) { gap: var(--space-1); }
 }
 /* The thread title is the only part of the detail bar that shrinks. The tooltip belongs outside the
    clipping box so it can show the whole title and wrap on a phone. */
@@ -13475,6 +13494,13 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .assistant-thread-account-picker .choice-row-title { overflow-wrap: anywhere; }
 .assistant-thread-account-picker .choice-row-body { gap: var(--space-1); }
 .assistant-thread-settings .modal-head { gap: var(--space-2); }
+.assistant-thread-settings .setting-row-trailing:has(.setting-row-control > .btn) {
+  align-items: start;
+  align-content: center;
+}
+.assistant-thread-settings .setting-row-trailing:has(.setting-row-control > .btn) .setting-row-text {
+  padding-block-start: calc((var(--control-h) - var(--space-5)) / 2);
+}
 .assistant-thread-spending-row { display: block; }
 .choice-chips,
 .assistant-launch-stepper {
@@ -13593,8 +13619,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 .assistant-spending-total { font: var(--type-small); font-variant-numeric: tabular-nums; }
 @media (pointer: coarse) {
-  .assistant-thread-notice-slot .btn.sm { --control-h-sm: var(--control-h); }
-  .assistant-thread-notice-slot .btn.sm::after { content: none; }
+  .assistant-thread-notice-slot { --control-h-sm: var(--control-h); }
+  .assistant-thread-notice-slot :is(.btn.sm, .icon-btn.sm)::after { content: none; }
   .menu.assistant-thread-notice-slot > .menu-item + .menu-item { margin-top: var(--space-2); }
 }
 @media (max-width: 760px) {
@@ -20216,6 +20242,13 @@ a.tab { text-decoration: none; }
   flex-direction: row;
   gap: var(--space-2);
 }
+.assistant-connection-row {
+  align-items: start;
+  align-content: center;
+}
+.assistant-connection-row .setting-row-control {
+  padding-block-start: calc((var(--space-5) - var(--icon)) / 2);
+}
 .assistant-connection-row .setting-row-title {
   display: -webkit-box;
   overflow: hidden;
@@ -20251,13 +20284,6 @@ a.tab { text-decoration: none; }
   overflow-wrap: anywhere;
 }
 .assistant-activity-table tbody tr { border-top: 1px solid var(--border); }
-.assistant-activity-table code {
-  display: block;
-  width: fit-content;
-  max-width: 100%;
-  color: var(--text-dim);
-  font-size: inherit;
-}
 .assistant-credential-visibility { align-self: flex-start; }
 .assistant-credential-revealed {
   font-family: var(--font-mono);
@@ -20285,7 +20311,6 @@ a.tab { text-decoration: none; }
   }
   .assistant-activity-table td { padding: 0; }
   .assistant-activity-table td:nth-child(-n+2) { grid-column: 1 / -1; }
-  .assistant-activity-table code { white-space: nowrap; }
   .assistant-activity-target {
     display: -webkit-box;
     overflow: hidden;

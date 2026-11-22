@@ -6,6 +6,7 @@ import { FieldError } from "../FieldError.js";
 import { CheckIcon, ChevronRightIcon } from "../Icons.js";
 import { Notice } from "../Notice.js";
 import { affixSuffixRef } from "./affix-suffix.js";
+import { BusyButton } from "./BusyButton.js";
 import { SegmentedControl, Select, type SelectOption } from "./ChoiceControls.js";
 
 /**
@@ -685,6 +686,7 @@ export function ActionRow({
   disabled,
   hasPopup,
   buttonRef,
+  pending,
 }: {
   title: string;
   description?: ReactNode;
@@ -700,9 +702,21 @@ export function ActionRow({
   disabled?: boolean;
   hasPopup?: "dialog";
   buttonRef?: Ref<HTMLButtonElement>;
+  pending?: { busy: boolean; progress: string };
 }) {
   const id = useId();
   const buttonId = actionId ?? `${id}-action`;
+  const buttonProps = {
+    ref: buttonRef,
+    id: buttonId,
+    type: "button" as const,
+    className: "btn",
+    disabled,
+    "aria-haspopup": hasPopup,
+    "aria-labelledby": `${buttonId} ${id}-title`,
+    "aria-describedby": description ? `${id}-desc` : undefined,
+    onClick: onAction,
+  };
   return (
     <div className={rowClass("setting-row setting-row-trailing", { disabled })}>
       <RowText
@@ -714,20 +728,9 @@ export function ActionRow({
         descriptionId={description ? `${id}-desc` : undefined}
       />
       <span className="setting-row-control">
-        <button
-          ref={buttonRef}
-          id={buttonId}
-          type="button"
-          className="btn"
-          disabled={disabled}
-          aria-haspopup={hasPopup}
-          aria-labelledby={`${buttonId} ${id}-title`}
-          aria-describedby={description ? `${id}-desc` : undefined}
-          onClick={onAction}
-        >
-          {actionIcon}
-          {actionLabel}
-        </button>
+        {pending
+          ? <BusyButton {...buttonProps} {...pending} icon={actionIcon}>{actionLabel}</BusyButton>
+          : <button {...buttonProps}>{actionIcon}{actionLabel}</button>}
       </span>
     </div>
   );

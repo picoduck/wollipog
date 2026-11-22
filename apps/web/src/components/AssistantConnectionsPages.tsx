@@ -89,23 +89,31 @@ function ConnectionPage({ route, onNavigate }: { route: AssistantConnectionsRout
   const changeCredential = (action: "rotate" | "revoke", choice?: ActionsMenuChoice) => void runWrite(async () => {
     if (!connection) return;
     const title = action === "rotate" ? "Rotate Credential" : "Revoke Connection";
+    let result: { connection: AssistantConnection; token?: string } | undefined;
     const approved = await confirm({
       title, confirmLabel: title, tone: "danger",
       message: action === "rotate"
         ? `The old credential for “${connection.name}” stops working immediately. Update the assistant with the new credential shown once after rotation.`
         : `Permanently disable “${connection.name}”. Already completed actions are retained. Create a new connection to restore access.`,
       back: choice && { label: "Back to More Actions", run: choice.reopen },
+      progress: action === "rotate" ? "Rotating the credential…" : "Revoking the connection…",
+      cancelWhileRunning: false,
+      onConfirm: async () => {
+        try {
+          result = action === "rotate"
+            ? await api.rotateAssistantConnection(connection.id)
+            : await api.revokeAssistantConnection(connection.id);
+        } catch (cause) {
+          const message = cause instanceof Error ? cause.message : "Couldn't reach Wollipog.";
+          throw new Error(message + " If a change may have been delivered, check the connection before trying again.");
+        }
+      },
     });
-    if (!approved || !mounted.current) return;
-    if (action === "rotate") {
-      const result = await api.rotateAssistantConnection(connection.id);
-      if (!mounted.current) return;
-      update(result.connection);
+    if (!approved || !result || !mounted.current) return;
+    update(result.connection);
+    if (result.token !== undefined) {
       setCredential({ token: result.token });
     } else {
-      const result = await api.revokeAssistantConnection(connection.id);
-      if (!mounted.current) return;
-      update(result.connection);
       setNotice("Connection revoked.");
     }
   });
@@ -153,7 +161,7 @@ function ConnectionPage({ route, onNavigate }: { route: AssistantConnectionsRout
                 <code className="setting-row-desc">{data.installation.id}</code>
               </div>
               <div className="setting-row-control">
-                <CopyButton text={data.installation.id} className="btn" ariaLabel="Copy Installation ID" />
+                <CopyButton text={data.installation.id} className="btn ghost" ariaLabel="Copy Installation ID" />
                 {data.installation.canRename && (
                   <button className="btn" type="button" aria-haspopup="dialog" onClick={() => setRenaming(true)}>Rename…</button>
                 )}

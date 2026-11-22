@@ -333,25 +333,30 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   };
 
   const archive = async (thread: AssistantThread, reopen: () => void) => {
+    let archived: AssistantThread | undefined;
     const accepted = await confirm({
       title: "Archive Thread",
       message: `“${assistantThreadTitle(thread)}” moves to Archived Threads, where you can still read it.`,
       confirmLabel: "Archive Thread",
       tone: "danger",
       back: { label: "Back to Thread Actions", run: reopen },
+      progress: "Archiving the thread…",
+      cancelWhileRunning: false,
+      onConfirm: async () => {
+        setArchiving(true);
+        try {
+          archived = (await api.archiveAssistantThread(thread.id)).thread;
+        } catch (cause) {
+          throw new ConfirmationFailure("Couldn't archive the thread.", cause instanceof Error ? cause.message : String(cause));
+        } finally {
+          setArchiving(false);
+        }
+      },
     });
-    if (!accepted) return;
-    setArchiving(true);
-    try {
-      const { thread: archived } = await api.archiveAssistantThread(thread.id);
-      replace(archived);
-      showToast("Thread archived.", { tone: "success" });
-      if (threadId === thread.id) navigate({ name: "assistants" }, { replace: true });
-    } catch (cause) {
-      showToast("Couldn't archive the thread.", { tone: "error", detail: cause instanceof Error ? cause.message : String(cause) });
-    } finally {
-      setArchiving(false);
-    }
+    if (!accepted || !archived) return;
+    replace(archived);
+    showToast("Thread archived.", { tone: "success" });
+    if (threadId === thread.id) navigate({ name: "assistants" }, { replace: true });
   };
 
   const threadMenu = (thread: AssistantThread): PageMenuAction[] => {
@@ -938,7 +943,7 @@ function RenameThreadDialog({ thread, onClose, onRenamed }: {
       onClose={busy ? () => {} : onClose}
       footer={(
         <>
-          <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
+          <button type="button" className="btn ghost" disabled={busy} onClick={onClose}>Cancel</button>
           <BusyButton className="btn primary" busy={busy} progress="Renaming…" disabled={!trimmed || trimmed === thread.title}
             onClick={() => void save()}>
             Rename

@@ -69,6 +69,8 @@ const campaignScenario = params.has("campaign");
 const resultScenario = params.get("confirmation-result");
 const receiptScenario = params.get("transcript-receipts");
 const delegationScenario = params.get("delegation");
+let decisionHistoryCanRetry = false;
+Object.defineProperty(window, "allowDecisionHistoryRetry", { value: () => { decisionHistoryCanRetry = true; } });
 const showDelegation = delegationScenario === "stress" || delegationScenario === "ci-old" || delegationScenario === "release-old";
 const longScopes = params.has("long-scopes");
 const evidenceScenario = params.get("evidence");
@@ -381,7 +383,9 @@ function confirmation(index: number): AssistantOwnerConfirmation {
     ["sess-deps", "Bump the Vite Group", "bump-vite"], ["sess-release", "Ship the Release Notes", "release-notes"]][index % 3]!;
   return {
     id: `aoc_${index}_${sessionId}`, threadId: "thr_triage", operation: stop ? "session_stop" : "session_archive",
-    title: stop ? "Stop Session" : "Archive Session",
+    title: params.has("long-confirmation-title")
+      ? "Archive the Release Engineering Workspace After the Last Cross-Platform Verification"
+      : stop ? "Stop Session" : "Archive Session",
     summary: stop ? "Stops the session and cancels its queued prompts and background jobs. Its transcript and worktree are kept, but it takes no further messages until it is restarted."
       : "Stops the session if it is running, then archives it and its side chat. Its transcript is kept, and it can be unarchived later.",
     target: { kind: "session", id: sessionId!, label: label! },
@@ -947,11 +951,10 @@ const client = {
     return { thread: structuredClone(current) };
   },
   assistantDecisionHistory: async (filter: { threadId?: string; before?: string; outcome?: AssistantDecisionOutcome }) => {
-    const firstRequest = !document.body.dataset.assistantDecisionHistoryRequested;
     document.body.dataset.assistantDecisionHistoryRequested = "true";
     const scenario = params.get("decision-history");
     if (scenario === "loading") await new Promise<void>((resolve) => Reflect.set(window, "releaseDecisionHistory", resolve));
-    if (scenario === "error" && firstRequest) throw new ApiError("Fixture failed to load decision history.", 503);
+    if (scenario === "error" && !decisionHistoryCanRetry) throw new ApiError("Fixture failed to load decision history.", 503);
     if (scenario === "empty" || panelScenario === "not-delegated") return { entries: [], total: 0 };
     const history = assistantDecisionHistoryFixture("campaign_0", {
       ...filter, release: params.has("release-history"), stress: scenario === "stress", legacy: scenario === "legacy",

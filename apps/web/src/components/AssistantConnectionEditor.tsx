@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import type { AssistantConnection, AssistantConnectionsView, AssistantGrant } from "../assistant-connections.js";
 import { assistantOperationTitle } from "../assistant-connections.js";
+import { BusyButton } from "./ui/BusyButton.js";
 import { ChoiceRows } from "./ui/ChoiceControls.js";
 import { SegmentedRow, SelectRow, SettingsGroup, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
 
@@ -29,7 +30,8 @@ export function AssistantConnectionEditor({
   const [operations, setOperations] = useState<AssistantGrant["operations"]>(connection?.grant.operations ?? "all");
   const [projects, setProjects] = useState<AssistantGrant["projects"]>(connection?.grant.projects ?? "all");
   const [confirmation, setConfirmation] = useState(connection?.grant.destructiveConfirmation ?? "none");
-  const disabled = busy || connection?.revoked === true;
+  const unavailable = connection?.revoked === true;
+  const disabled = busy || unavailable;
   const operationDescriptions = new Map(view.operations.map(operation => [operation.name, operation.description]));
   const projectNames = new Map(view.projects.map(project => [project.id, project.name]));
   const operationIds = [...new Set([...operationDescriptions.keys(), ...(operations === "all" ? [] : operations)])];
@@ -64,14 +66,15 @@ export function AssistantConnectionEditor({
         <SettingsGroup title="Allowed Projects" intro="Only selected projects are allowed. Resources without a project are excluded.">
           {projectIds.length ? <ChoiceRows label="Allowed Projects" multiple value={projects}
             onChange={id => setProjects(toggle(projects, id))}
-            options={projectIds.map(id => ({ value: id, title: projectNames.get(id) ?? id, disabled }))} />
+            options={projectIds.map(id => ({ value: id, title: projectNames.get(id) ?? "Unavailable Project", disabled }))} />
             : <StaticRow title="No Projects Available" />}
         </SettingsGroup>
       )}
       <div className="assistant-editor-save">
-        <button type="submit" className="btn primary" disabled={disabled || !name.trim()}>
+        <BusyButton type="submit" className="btn primary" busy={busy} disabled={unavailable || !name.trim()}
+          progress={connection ? "Saving the connection…" : "Creating the connection…"}>
           {connection ? "Save Connection" : "Create Connection"}
-        </button>
+        </BusyButton>
       </div>
       {operations !== "all" && (
         <SettingsGroup title="Allowed Operations">
@@ -80,7 +83,7 @@ export function AssistantConnectionEditor({
             options={operationIds.map(id => ({
               value: id,
               title: assistantOperationTitle(id),
-              description: <><code>{id}</code> · {operationDescription(id)}</>,
+              description: operationDescription(id),
               disabled,
             }))} /> : <StaticRow title="No Operations Available" />}
         </SettingsGroup>

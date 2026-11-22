@@ -10,6 +10,7 @@ import { useApi } from "../api-context.js";
 import { assistantConfirmationOutcome, pendingAssistantConfirmations } from "../assistant-confirmations.js";
 import type { LaunchedWork } from "../assistant-launched-work.js";
 import { assistantInlineQuestion, assistantToolOptions, assistantWorkRequestKey } from "../assistant-waiting-requests.js";
+import { titleCaseLabel } from "../format.js";
 import { ChevronLeftIcon, ChevronRightIcon } from "./Icons.js";
 import { claimQuestionResponseOperation } from "../question-response.js";
 import { sessionCommandRefusal } from "../session-command-permissions.js";
@@ -25,6 +26,7 @@ import { useClipEdges } from "./requests/clip-edges.js";
 import { requestKindMeta } from "./requests/request-meta.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
+import { CopyButton } from "./common.js";
 import { ChoiceRows } from "./ui/ChoiceControls.js";
 import { useToastChrome } from "./useToastChrome.js";
 
@@ -319,7 +321,7 @@ function WaitingCard({ item, now, busy, begin, finish, onConfirmationAnswered, o
     }
   };
   const button = (action: Response, disabled = false) => (
-    <BusyButton className={action === "deny" ? "btn sm" : "btn sm primary"} data-dock-action={action}
+    <BusyButton className={action === "deny" ? "btn sm ghost danger" : "btn sm primary"} data-dock-action={action}
       busy={busy?.key === item.key && busy.action === action} progress={responseCopy[action].progress}
       aria-disabled={busy !== null || refusal !== null || disabled || undefined}
       onClick={event => { if (!disabled) void respond(action, event); }}>
@@ -367,7 +369,13 @@ function WaitingCard({ item, now, busy, begin, finish, onConfirmationAnswered, o
               {confirmation.impact.map(({ label, value }, index) => <div key={index}><dt>{label}</dt><dd>{value}</dd></div>)}
             </dl>}
             {!!confirmation?.arguments.length && <dl className="facts assistant-confirmation-arguments" aria-label="Arguments">
-              {confirmation.arguments.map(({ label, value }) => <div key={label}><dt><code>{label}</code></dt><dd><code>{value}</code></dd></div>)}
+              {confirmation.arguments.map(({ label, value }) => <div key={label}>
+                <dt>{titleCaseLabel(label.replace(/([a-z\d])([A-Z])/gu, "$1 $2").replaceAll("_", " ")).replace(/\bId(s?)\b/gu, "ID$1")}</dt>
+                <dd>
+                  <code>{value}</code>
+                  {/ids?$/iu.test(label) && <CopyButton text={value} className="icon-btn sm" iconOnly ariaLabel="Copy Argument Value" />}
+                </dd>
+              </div>)}
             </dl>}
             {failure && <div className="code-well"><pre>{failure.detail}</pre></div>}
           </div>}

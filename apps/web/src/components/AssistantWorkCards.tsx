@@ -216,7 +216,7 @@ function AssistantWorkRow({ sessionId, campaign, onReview }: {
       </button>
       {request && <div className="assistant-work-review">
         <p className="assistant-work-request-title" title={request.title}>{request.title}</p>
-        {onReview && <button type="button" className="btn" onClick={() => onReview(sessionId, request)}>Review</button>}
+        {onReview && <button type="button" className="btn ghost" onClick={() => onReview(sessionId, request)}>Review</button>}
       </div>}
     </li>
   );
