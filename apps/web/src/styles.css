@@ -13623,7 +13623,12 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   gap: var(--space-4);
 }
 .assistant-panel-details > :not(button) { width: 100%; }
-.assistant-panel-details > .btn { padding-inline-start: 0; }
+.assistant-panel-details > .link {
+  min-height: var(--control-h);
+  font: var(--type-body-strong);
+  cursor: pointer;
+  text-decoration: underline;
+}
 .assistant-panel-meter {
   display: grid;
   grid-template-columns: 1fr auto;

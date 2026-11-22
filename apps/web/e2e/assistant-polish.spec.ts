@@ -366,7 +366,12 @@ for (const theme of ["light", "dark"] as const) {
         const picker = page.getByRole("dialog", { name: "Account", exact: true });
         await expect(picker.getByRole("radio")).toHaveCount(8);
         await picker.locator("summary").click();
-        await expect(picker.locator('details li[aria-disabled="true"]')).toHaveCount(4);
+        const unavailable = picker.getByRole("list");
+        await expect(unavailable.getByRole("listitem")).toHaveCount(4);
+        await expect(unavailable.locator("li > span")).toHaveText([
+          /needs sign-in/u, /can't run/u, /would spend API credits/u, /at a usage limit/u,
+        ]);
+        await expect(unavailable.locator("button, a[href], input, [tabindex]")).toHaveCount(0);
         await check(picker, "new-thread", theme, "eleven-accounts");
       });
 
