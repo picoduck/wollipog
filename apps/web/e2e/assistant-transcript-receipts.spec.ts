@@ -6,6 +6,7 @@ import { expectAssistantControlLayout } from "./assistant-control-layout.js";
 import { expectPageNoHorizontalOverflow } from "./layout-invariants.js";
 
 const evidenceDir = process.env.WOLLIPOG_TRANSCRIPT_RECEIPTS_EVIDENCE_DIR;
+const evidenceStates = process.env.WOLLIPOG_TRANSCRIPT_RECEIPTS_EVIDENCE_STATES?.split(",");
 const threadPath = "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA";
 const sessionPath = (id: string) => "/sessions/~" + Buffer.from(id, "utf16le").toString("base64url");
 
@@ -41,7 +42,7 @@ for (const theme of ["light", "dark"] as const) {
           const badgeSizes = await row.locator(".assistant-transcript-launch > .status").evaluateAll((nodes) =>
             nodes.map((node) => Number.parseFloat(getComputedStyle(node).fontSize)));
           for (const size of badgeSizes) expect(size).toBeGreaterThanOrEqual(12);
-          if (evidenceDir) {
+          if (evidenceDir && (!evidenceStates || evidenceStates.includes(`${width}:${state}`))) {
             mkdirSync(evidenceDir, { recursive: true });
             await page.screenshot({ path: join(evidenceDir, `assistant-receipts-${width}x${height}-${theme}-${state}.png`) });
           }
@@ -72,6 +73,17 @@ for (const theme of ["light", "dark"] as const) {
         const work = page.getByRole("tabpanel", { name: /^Work/ });
         await expect(page.getByRole("tab", { name: "Work 10", exact: true })).toHaveAttribute("aria-selected", "true");
         await expect(work.getByRole("button", { name: /Verification Session 9/ })).toBeVisible();
+        if (width === 390) {
+          const tabs = await page.getByRole("tablist", { name: "Thread Panel" }).getByRole("tab").evaluateAll((nodes) =>
+            nodes.map((node) => {
+              const { left, right, width, height } = node.getBoundingClientRect();
+              return { label: node.textContent?.trim(), left, right, width, height };
+            }));
+          expect(tabs).toHaveLength(3);
+          expect(tabs.every((tab) => tab.width > 0 && tab.height > 0)).toBe(true);
+          console.log(`Existing phone Work tabs (${theme}), CSS px: ${tabs.map(({ label, width, height }) =>
+            `${label} ${width}×${height}`).join(", ")}. Gaps: ${tabs.slice(1).map(({ left }, index) => left - tabs[index]!.right).join(", ")}.`);
+        }
         await capture("work-tab", page.locator(".assistant-thread-panel"), "", width !== 390);
         await page.getByRole("button", { name: "Close Panel", exact: true }).click();
 
@@ -83,8 +95,11 @@ for (const theme of ["light", "dark"] as const) {
         const positioned = await eventRow.evaluate((row) => {
           const before = [...document.querySelectorAll(".tl-agent-msg")].find((item) => item.textContent?.includes("I’ll review the release"));
           const after = [...document.querySelectorAll(".tl-agent-msg")].find((item) => item.textContent?.includes("The release approval is recorded."));
+          const time = (item: Element | undefined) =>
+            Date.parse(item?.querySelector("time")?.getAttribute("datetime") ?? "");
           return Boolean(before && after && (before.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING) &&
-            (row.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING));
+            (row.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+            time(before) < time(row) && time(row) < time(after));
         });
         expect(positioned).toBe(true);
         await capture("delegated-decision", eventRow, "summary");
@@ -104,6 +119,15 @@ for (const theme of ["light", "dark"] as const) {
         await dock.getByRole("button", { name: "Deny", exact: true }).click();
         await expect(waiting).toHaveCount(0);
         await expect(requestMessage.getByText("Request Closed: Stop Session")).toBeVisible();
+        if (width === 390) {
+          const toast = page.locator(".toast-region").filter({ hasText: "Stop Session was denied. Nothing ran." });
+          const transcript = page.getByRole("region", { name: "Session Activity" });
+          await expect(toast).toBeVisible();
+          await expect.poll(async () => {
+            const [reader, notice] = await Promise.all([transcript.boundingBox(), toast.boundingBox()]);
+            return reader && notice ? Math.ceil(reader.y + reader.height - notice.y) : Infinity;
+          }).toBeLessThanOrEqual(1);
+        }
         await capture("request-answered", requestMessage, "");
 
         await open(page, theme, "stress");

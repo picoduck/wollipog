@@ -622,8 +622,9 @@ const events: Record<string, SessionEvent[]> = {
   } : {}),
 };
 if (receiptScenario) {
-  events["sess-triage"] = assistantReceiptFixture(receiptScenario, receiptSessionIds, confirmation(0).id, NOW - minute)
-    .map((payload, index) => event("sess-triage", NOW - 2 * minute + index * 1_000, payload));
+  const startsAt = NOW - 2 * minute;
+  events["sess-triage"] = assistantReceiptFixture(receiptScenario, receiptSessionIds, confirmation(0).id, startsAt + 3_000)
+    .map((payload, index) => event("sess-triage", startsAt + index * 1_000, payload));
 }
 if (streamingReply) {
   seq = 0;

@@ -495,6 +495,8 @@
   /* The height docked at the bottom of the view (tab bar, composer, sheet footer) that toasts sit
      above (§13.1). FeedbackProvider measures it onto the root element while a toast is showing. */
   --toast-clear: 0px;
+  /* FeedbackProvider measures the visible toast stack for the phone Assistant transcript. */
+  --toast-stack-height: 0px;
   --tone: var(--text-faint);
   --tone-text: var(--text-dim-on-tint);
 
@@ -12489,6 +12491,11 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     bottom: calc(max(var(--toast-clear), env(safe-area-inset-bottom, 0px)) + var(--keyboard-inset, 0px) + var(--space-2));
     width: auto;
     max-height: calc(100dvh - max(var(--toast-clear), env(safe-area-inset-bottom, 0px)) - var(--keyboard-inset, 0px) - var(--space-4));
+  }
+  /* The Assistant dock can leave only a short transcript above it. Reserve a band for the
+     notification so it clears both the dock controls and the transcript's last visible row. */
+  body:has(.toast-region:not(.under-menu)) .detail-main[data-assistant-transcript] {
+    margin-block-end: calc(var(--toast-stack-height) + var(--space-2) + var(--keyboard-inset, 0px));
   }
 
   /* On a phone the stack and an open menu sheet compete for the same screen, and there is no free edge
