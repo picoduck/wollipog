@@ -184,11 +184,31 @@ for (const theme of ["light", "dark"] as const) {
       const card = cards(page).first();
       await actionOrder(card, ["Open Session", "Deny", "Approve Once"]);
       const body = card.locator(".assistant-dock-card-body");
-      const { height, commandLineHeight } = await body.evaluate(element => ({
-        height: element.clientHeight,
-        commandLineHeight: parseFloat(getComputedStyle(element.querySelector("pre")!).lineHeight),
-      }));
-      expect(height, "Room to read a line of the command when scrolled").toBeGreaterThanOrEqual(commandLineHeight);
+      // The narrow chat can show one line at a time. Check that every rendered text line
+      // fits somewhere within the body's scroll range.
+      const lines = await body.locator(".assistant-confirmation-summary, .assistant-dock-target .chip, .code-well pre")
+        .evaluateAll(elements => elements.map(element => {
+          const scroller = element.closest(".assistant-dock-card-body")!;
+          const top = scroller.getBoundingClientRect().top;
+          const range = document.createRange();
+          range.selectNodeContents(element);
+          return [...range.getClientRects()].map(rect => {
+            const first = Math.max(0, Math.ceil(rect.bottom - top - scroller.clientHeight));
+            const last = Math.min(scroller.scrollHeight - scroller.clientHeight, Math.floor(rect.top - top));
+            return first <= last;
+          });
+        }));
+      expect(lines).toHaveLength(3);
+      for (const readable of lines) {
+        expect(readable.length).toBeGreaterThan(0);
+        expect(readable).not.toContain(false);
+      }
+      const cue = card.locator(".assistant-dock-scroll-cue");
+      await expectFullyInViewport(cue, "Scroll cue beside a docked panel");
+      await body.hover();
+      await page.mouse.wheel(0, 400);
+      await expect(cue).toBeHidden();
+      await actionOrder(card, ["Open Session", "Deny", "Approve Once"]);
     });
   });
 

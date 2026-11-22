@@ -7782,6 +7782,9 @@ body.shell-dock-dragging * {
       flex: 1;
       min-width: 0;
     }
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock:not(:has(.assistant-dock-pager)) .assistant-dock-card-head {
+      padding-block-end: 0;
+    }
   }
 }
 @media (pointer: coarse) {
