@@ -111,6 +111,8 @@ export interface RecordedAssistantDecisionResolution extends AssistantDecisionRe
   resolvedAt: number;
 }
 
+export type AssistantDecisionOutcome = RecordedAssistantDecisionResolution["outcome"];
+
 export interface AssistantDecisionHistoryEntry {
   occurrenceId: string;
   sessionId: string;
@@ -122,8 +124,10 @@ export interface AssistantDecisionHistoryEntry {
 }
 
 export interface AssistantDecisionHistoryPage {
-  /** Total for the whole filter, on the first page of a thread history. */
+  /** Total for the thread, on the first page. */
   total?: number;
+  /** Totals across all outcomes in the thread or campaign, on the first page. */
+  outcomeCounts?: Record<AssistantDecisionOutcome, number>;
   entries: AssistantDecisionHistoryEntry[];
   nextBefore?: string;
 }

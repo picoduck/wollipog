@@ -100,8 +100,8 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     await page.setViewportSize({ width, height });
     await openAssistantFixture(page, thread);
     const history = await openDecisions(page);
-    await expect(history).toContainText("under your delegation.");
-    await expect(history).toContainText("Triage Open Issues");
+    await expect(history.getByRole("img", { name: "Approved", exact: true }).first()).toBeVisible();
+    await expect(history.getByRole("link", { name: "Triage Open Issues", exact: true })).toHaveCount(0);
     await expect(history.getByRole("listitem")).toHaveCount(5);
     await expectCiRerunHistory(history);
     await expectNoHorizontalOverflow(history, "Thread Decision History");
@@ -204,29 +204,29 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     });
   }
 
-  test(`release decisions show the approving thread in Inbox and Campaign Status on ${layout}`, async ({ page }) => {
+  test(`release decisions show their target in the thread and link back from Campaign Status on ${layout}`, async ({ page }) => {
     await page.setViewportSize({ width, height });
-    const expectReleaseEntry = async (scope: Locator) => {
+    const expectReleaseEntry = async (scope: Locator, campaign: boolean) => {
       const entry = scope.getByRole("listitem").filter({ hasText: "Publish Releases" });
       await expect(entry).toContainText("engineering/release-validation · v0.38.0");
-      await expect(entry).toContainText("Approved by Assistant thread");
-      const attribution = entry.getByRole("button", { name: "Triage Open Issues", exact: true });
+      await expect(entry.getByRole("img", { name: "Approved", exact: true })).toBeVisible();
+      const attribution = entry.getByRole("link", { name: "Triage Open Issues", exact: true });
       await entry.evaluate((element) => element.scrollIntoView({ block: "center" }));
-      await expectFullyInViewport(attribution, "Release Publication Thread Attribution");
-      await expect(scope.getByRole("listitem").filter({ hasText: "Tag Releases" })).toContainText("Approved by Assistant thread");
+      if (campaign) await expectFullyInViewport(attribution, "Release Publication Thread Attribution");
+      else await expect(attribution).toHaveCount(0);
+      await expect(scope.getByRole("listitem").filter({ hasText: "Tag Releases" })
+        .getByRole("img", { name: "Approved", exact: true })).toBeVisible();
       await expect(scope).not.toContainText("release_publish:");
       await expectNoHorizontalOverflow(scope);
     };
-    await page.goto("/assistants-e2e.html?delegation=stress&release-history&path=%2F");
-    await page.getByRole("button", { name: "More Actions", exact: true }).first().click();
-    await page.getByRole("menuitem", { name: "Delegated Decisions", exact: true }).click();
-    await expectReleaseEntry(page.getByRole("dialog", { name: "Delegated Decisions" }));
-    await capture(page, "release-inbox-history");
+    await page.goto(`/assistants-e2e.html?delegation=stress&release-history&path=${encodeURIComponent(thread)}`);
+    await expectReleaseEntry(await openDecisions(page), false);
+    await capture(page, "release-thread-history");
 
     await page.goto("/campaign-status-e2e.html?scenario=campaign&delegation=stress&release-history");
     await page.getByRole("navigation", { name: "Campaign Sections" }).getByRole("button", { name: /^Go to Section/ }).click();
     await page.getByRole("menu", { name: "Go to Section" }).getByRole("menuitem", { name: /^Delegated Decisions/ }).click();
-    await expectReleaseEntry(page.locator('[data-campaign-section="Delegated Decisions"]'));
+    await expectReleaseEntry(page.locator('[data-campaign-section="Delegated Decisions"]'), true);
     await capture(page, "release-campaign-history");
   });
 
@@ -282,25 +282,8 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
     }
   });
 
-  test(`Inbox and Campaign Status show bounded delegated decisions on ${layout}`, async ({ page }) => {
+  test(`Campaign Status shows bounded delegated decisions on ${layout}`, async ({ page }) => {
     await page.setViewportSize({ width, height });
-    await openAssistantFixture(page, "/");
-    await page.getByRole("button", { name: "More Actions", exact: true }).first().click();
-    await page.getByRole("menuitem", { name: "Delegated Decisions", exact: true }).click();
-    const history = page.getByRole("dialog", { name: "Delegated Decisions" });
-    await expect(history).toContainText("The required checks passed and the review covered the current head.");
-    await expect(history.getByRole("button", { name: "Triage Open Issues" }).first()).toBeVisible();
-    await expectNoHorizontalOverflow(history, "Inbox Decision History");
-    await expectFullyInViewport(history.getByRole("button", { name: "Close", exact: true }).last(), "Close");
-    await expectCiRerunHistory(history);
-    await capture(page, "inbox-history");
-    await history.getByRole("button", { name: "Older Decisions" }).click();
-    await expect(history.getByRole("listitem")).toHaveCount(5);
-    await expect(history).toContainText("picoduck/wollipog#120");
-    await history.getByRole("button", { name: "Newer Decisions" }).click();
-    await expect(history.getByRole("listitem")).toHaveCount(5);
-    await expect(history).toContainText("picoduck/wollipog#126");
-
     await page.goto("/campaign-status-e2e.html?scenario=campaign&delegation=stress");
     await page.getByRole("navigation", { name: "Campaign Sections" }).getByRole("button", { name: /^Go to Section/ }).click();
     await page.getByRole("menu", { name: "Go to Section" }).getByRole("menuitem", { name: /^Delegated Decisions/ }).click();

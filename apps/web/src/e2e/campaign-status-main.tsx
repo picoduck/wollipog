@@ -111,7 +111,8 @@ if (largeCampaign) {
   params.set("recovery", "failed_checks"); params.set("owners", "after");
 }
 const scenario = params.get("scenario") ?? "campaign";
-if (params.get("theme") === "light") document.documentElement.dataset.theme = "light";
+const theme = params.get("theme");
+if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
 
 const NOW = params.has("closureRecovery") || params.has("epicTracking") ? Date.parse("2026-01-01T12:00:00Z") : Date.now();
 let pauseFixture: import("@wollipog/protocol").CampaignPauseView | undefined = params.has("pause") ? {
@@ -1261,8 +1262,10 @@ if (params.get("typed") === "1") {
 
 const client = {
   ...api,
-  assistantDecisionHistory: async (filter: { campaignId: string; before?: string }) =>
-    assistantDecisionHistoryFixture(filter.campaignId, filter.before, params.has("release-history")),
+  assistantDecisionHistory: async (filter: Parameters<typeof assistantDecisionHistoryFixture>[1] & { campaignId: string }) =>
+    assistantDecisionHistoryFixture(filter.campaignId, {
+      ...filter, release: params.has("release-history"), stress: params.get("decision-history") === "stress",
+    }),
   ...(params.get("screen") === "ask" ? { session: async (id: string) => ({
     session: { ...sessionsFor(revision).find((candidate) => candidate.id === id)!, pendingApproval: classificationRequest },
   }) } : {}),

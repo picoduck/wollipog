@@ -14,6 +14,7 @@ import type {
   AssistantDecisionDefault,
   AssistantDecisionDelegation,
   AssistantDecisionHistoryPage,
+  AssistantDecisionOutcome,
   AssistantThread,
   AssistantThreadAccess,
   AssistantThreadAccountChoices,
@@ -79,7 +80,7 @@ export function assistantThreadRoutes(req: JsonRequest) {
       req<AssistantThreadResponse>(`${threadPath(threadId)}/limits`, { method: "PUT", body: JSON.stringify(limits) }),
     setAssistantThreadDelegation: (threadId: string, delegation: AssistantDecisionDelegation) =>
       req<AssistantThreadResponse>(`${threadPath(threadId)}/delegation`, { method: "PUT", body: JSON.stringify(delegation) }),
-    assistantDecisionHistory: (filter: { campaignId?: string; threadId?: string; before?: string } = {}, signal?: AbortSignal) =>
+    assistantDecisionHistory: (filter: { campaignId?: string; threadId?: string; before?: string; outcome?: AssistantDecisionOutcome } = {}, signal?: AbortSignal) =>
       req<AssistantDecisionHistoryPage>(`/api/assistant-decision-history?${new URLSearchParams(filter)}`, { signal }),
     /** An unsupported runner or harness is refused with 409 and the server's guidance. */
     createAssistantThread: (body: CreateAssistantThreadRequest) =>
