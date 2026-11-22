@@ -289,6 +289,7 @@ export function DetailBar({
   menuLabel,
   menuSheetTitle,
   hideSearch = false,
+  searchInMenu = false,
   controls,
   renderTitle,
 }: {
@@ -308,6 +309,8 @@ export function DetailBar({
   menuSheetTitle?: string;
   /** Omit global Search on a detail bar that needs the space for entity controls. */
   hideSearch?: boolean;
+  /** Fold global Search into ⋯ on phones. */
+  searchInMenu?: boolean;
   /** Phone app bar controls that stay visible before ⋯. */
   controls?: ReactNode;
   /** A title that can reveal its full text on touch. Keep the page title ID for route focus. */
@@ -315,8 +318,10 @@ export function DetailBar({
 }) {
   const compact = useIsCompact();
   const phone = useIsMobile();
-  const onSearch = useContext(AppBarSearchContext);
-  const showSearch = onSearch && !hideSearch;
+  const appBarSearch = useContext(AppBarSearchContext);
+  const onSearch = hideSearch ? undefined : appBarSearch;
+  const menuSearch = phone && searchInMenu ? onSearch : undefined;
+  const actions = menuSearch ? [{ label: "Search", icon: <SearchIcon />, onClick: menuSearch }, ...menu] : menu;
   const headingRef = useRef<HTMLDivElement>(null);
   const hasStatus = Boolean(status);
   // Whether the badge is a dot is measured against the full badge, every time, so the answer never
@@ -382,12 +387,12 @@ export function DetailBar({
         {renderTitle ? renderTitle(title) : <h1 id="page-title" className="detail-bar-title" tabIndex={-1} title={title}>{title}</h1>}
         {status && <span className="detail-bar-status">{status}</span>}
       </div>
-      {(showSearch || primary || secondary || menu.length > 0 || controls) && (
+      {(onSearch || primary || secondary || actions.length > 0 || controls) && (
         <div className="detail-bar-actions">
-          {showSearch && <AppBarSearch onSearch={onSearch} />}
+          {onSearch && !menuSearch && <AppBarSearch onSearch={onSearch} />}
           {secondary && action(secondary, "btn")}
           {controls}
-          {menu.length > 0 && <ActionsMenu label={menuLabel} sheetTitle={menuSheetTitle} items={menu} />}
+          {actions.length > 0 && <ActionsMenu label={menuLabel} sheetTitle={menuSheetTitle} items={actions} />}
           {primary && action(primary, "btn primary")}
         </div>
       )}
