@@ -82,10 +82,11 @@ async function expectButtonStandard(surface: Locator) {
 
 function nestedBorderViolations(surface: Locator) {
   return surface.evaluate(root => {
-    const regions = ".assistant-dock, .assistant-dock-card, .notice, .request-card";
+    const boundary = root.closest(".modal, .popover") ?? root;
     const isBorderedContainer = (node: Element) => {
       // A control outline and a one-sided divider do not create a nested box.
-      if (node.matches("button, input, select, textarea, a, summary, label:has(input), [role=button]") ||
+      if (node.matches("button, input, select, textarea, a, summary, [role=button], .seg, .meter, .ui-switch, " +
+          "label:has(input):not(.delegation-group-toggle)") ||
           !node.getClientRects().length) return false;
       const style = getComputedStyle(node);
       return style.visibility === "visible" && ["top", "right", "bottom", "left"].every(side =>
@@ -93,10 +94,9 @@ function nestedBorderViolations(surface: Locator) {
         style.getPropertyValue("border-" + side + "-color") !== "rgba(0, 0, 0, 0)");
     };
     const name = (node: Element) => node.getAttribute("class") || node.tagName;
-    return [...root.querySelectorAll("*")].flatMap(node => {
-      if (!node.closest(regions) || !isBorderedContainer(node)) return [];
-      for (let parent = node.parentElement; parent; parent = parent.parentElement) {
-        if (!parent.closest(regions)) break;
+    return [...boundary.querySelectorAll("*")].flatMap(node => {
+      if (!isBorderedContainer(node)) return [];
+      for (let parent = node.parentElement; parent && boundary.contains(parent); parent = parent.parentElement) {
         if (isBorderedContainer(parent)) return [name(node) + " inside " + name(parent)];
       }
       return [];
@@ -180,11 +180,13 @@ async function check(surface: Locator, id: string, theme: string, state: string)
   expect(text, id + " operation names").not.toMatch(/\b[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)+\b/u);
   expect(text, id + " internal IDs").not.toMatch(/\b(?:(?:s|thr|occ|asst|loc|usr|org|aoc|wd|cwi)_[\w-]+|sess-[\w-]+)\b/u);
   expect(text, id + " protocol prefixes").not.toMatch(/\b(?:acct:|mcp__|wollipog-assistant:|workflow_decision:)/iu);
-  if (process.env.ASSISTANT_POLISH_EVIDENCE_DIR) {
+  const evidenceDir = process.env.ASSISTANT_POLISH_EVIDENCE_DIR;
+  const evidenceStates = process.env.ASSISTANT_POLISH_EVIDENCE_STATES?.split(",");
+  if (evidenceDir && (!evidenceStates || evidenceStates.includes(id + "/" + state))) {
     const { width, height } = page.viewportSize()!;
     await page.mouse.move(0, 0);
     await page.screenshot({
-      path: join(process.env.ASSISTANT_POLISH_EVIDENCE_DIR, [id, width + "x" + height, theme, state].join("-") + ".png"),
+      path: join(evidenceDir, [id, width + "x" + height, theme, state].join("-") + ".png"),
       animations: "disabled",
     });
   }
@@ -267,6 +269,11 @@ for (const theme of ["light", "dark"] as const) {
         await review.click();
         const request = page.getByRole("dialog", { name: "Start Campaign", exact: true });
         await expect(request.getByRole("button", { name: "Approve Once" })).toBeVisible();
+        await expect(request.locator(".modal-foot").getByRole("button")).toHaveText(["Deny", "Approve Once"]);
+        const effortFacts = request.getByLabel("Campaign Details").locator("div").filter({
+          has: page.getByText(/^(Orchestrator|Child) Effort$/u),
+        });
+        await expect(effortFacts.locator("dd")).toHaveText(["High", "High"]);
         await check(request, "waiting-dock", theme, "campaign-approval");
       });
 
@@ -283,6 +290,19 @@ for (const theme of ["light", "dark"] as const) {
           const panel = await openPanel(page, tab);
           await expectAligned(panel.locator(".rpanel-head"), '[aria-selected="true"]', ".rpanel-head > button");
           if (tab === "Work") await expect(panel.getByRole("tab", { name: "Work 42" })).toBeVisible();
+          if (tab === "Details") {
+            const history = panel.getByRole("region", { name: "Earlier Conversations" });
+            await expect(history.getByRole("button", { name: /^Open Earlier Conversation/u })).toHaveClass(/\bghost\b/u);
+            await expectAligned(history.locator(".assistant-history-row"), "p", "button");
+            const edges = await panel.locator(".assistant-panel-details").evaluate(details => {
+              const facts = details.querySelector("dt")!.getBoundingClientRect().left;
+              const heading = details.querySelector(".assistant-history h3")!.getBoundingClientRect().left;
+              const label = document.createRange();
+              label.selectNodeContents(details.querySelector(":scope > button")!);
+              return [Math.abs(heading - facts), Math.abs(label.getBoundingClientRect().left - facts)];
+            });
+            expect(Math.max(...edges), "History and Thread Settings align with the facts").toBeLessThanOrEqual(1);
+          }
           await check(panel, "side-panel-" + tab.toLowerCase(), theme, tab === "Work" ? "42-sessions" : "long-thread");
         });
       }
@@ -321,6 +341,8 @@ for (const theme of ["light", "dark"] as const) {
         await open(page, theme, "/settings/assistant", "limits=stress&accounts=stress&delegation=settings");
         const defaults = page.getByRole("region", { name: "Thread Defaults" });
         await expectAligned(defaults.locator(".setting-row"), ".setting-row-title", ".setting-row-control > button");
+        const grants = page.getByRole("region", { name: "Active Delegations" });
+        await expectAligned(grants.locator(".setting-row-trailing"), ".setting-row-title", ".setting-row-control > button");
         await check(page.locator(".settings-panel"), "assistant-settings", theme, "defaults-and-delegations");
       });
 
@@ -344,7 +366,7 @@ for (const theme of ["light", "dark"] as const) {
         const picker = page.getByRole("dialog", { name: "Account", exact: true });
         await expect(picker.getByRole("radio")).toHaveCount(8);
         await picker.locator("summary").click();
-        await expect(picker.locator("details li")).toHaveCount(4);
+        await expect(picker.locator('details li[aria-disabled="true"]')).toHaveCount(4);
         await check(picker, "new-thread", theme, "eleven-accounts");
       });
 

@@ -316,7 +316,7 @@ function ThreadAccountOption({ choices, value, disabled, onChange }: {
         }
       }}>
         <summary className="btn">Unavailable <span className="count">{unavailable.length}</span></summary>
-        <ul>{unavailable.map((account) => <li key={account.ref}>
+        <ul>{unavailable.map((account) => <li key={account.ref} aria-disabled="true">
           <strong>{account.title}</strong><span>{account.reason}</span>
         </li>)}</ul>
       </details>}

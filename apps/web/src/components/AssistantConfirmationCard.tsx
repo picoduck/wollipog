@@ -7,7 +7,7 @@ import {
   type AssistantThreadConfirmations,
 } from "../assistant-confirmations.js";
 import { assistantThreadTitle } from "../assistant-threads.js";
-import { formatClock } from "../format.js";
+import { effortLabel, formatClock } from "../format.js";
 import { useStoreActions } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { CopyButton } from "./common.js";
@@ -159,7 +159,9 @@ export function CampaignReviewDialog({ confirmation, onClose, onAnswered }: {
             <div><dt>Location</dt><dd>{shown.target.label}{" "}
               <CopyButton text={shown.target.id} className="icon-btn sm" iconOnly ariaLabel="Copy Location ID" />
             </dd></div>
-            {shown.impact.map(({ label, value }) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
+            {shown.impact.map(({ label, value }) => <div key={label}><dt>{label}</dt><dd>
+              {label === "Orchestrator Effort" || label === "Child Effort" ? effortLabel(value) : value}
+            </dd></div>)}
           </dl>
           {shown.arguments.map(({ label, value }) => (
             <section className="assistant-campaign-message" key={label} aria-label={label}>

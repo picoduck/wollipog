@@ -12654,16 +12654,12 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .delegation-dialog .delegation-group {
   display: grid;
   gap: var(--space-2);
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
 }
 .checkbox.delegation-group-toggle {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   padding-inline: var(--space-2);
-  border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   background: var(--bg-elev-2);
   font: var(--type-body-strong);
@@ -13381,8 +13377,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   display: grid;
   gap: var(--space-1);
   padding: var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xs);
   color: var(--text-dim);
   font: var(--type-small);
 }
@@ -13519,6 +13513,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .assistant-thread-account-picker .choice-row-title { overflow-wrap: anywhere; }
 .assistant-thread-account-picker .choice-row-body { gap: var(--space-1); }
 .assistant-thread-settings .modal-head { gap: var(--space-2); }
+.assistant-thread-settings .settings-group-surface { border: 0; }
 .assistant-thread-settings .setting-row-trailing:has(.setting-row-control > .btn) {
   align-items: start;
   align-content: center;
@@ -13628,6 +13623,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   gap: var(--space-4);
 }
 .assistant-panel-details > :not(button) { width: 100%; }
+.assistant-panel-details > .btn { padding-inline-start: 0; }
 .assistant-panel-meter {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -13800,11 +13796,17 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 @media (pointer: coarse) {
   .assistant-spending-notice.compact .notice-content { row-gap: var(--space-2); }
 }
+.assistant-history > .group-label { padding-inline: 0; }
 .assistant-history-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-2);
+}
+.assistant-history-row > p {
+  margin: 0;
+  padding-block-start: calc((var(--control-h-sm) - var(--space-5)) / 2);
+  font: var(--type-body);
 }
 .assistant-history-row > .btn { flex: none; }
 .assistant-delegation-summary {
@@ -18944,13 +18946,19 @@ button.setting-row { cursor: pointer; }
 .setting-row-value-part { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
 .setting-row-link-word { color: var(--text-dim); font: var(--type-small); white-space: nowrap; }
 .setting-row-chevron { display: inline-flex; color: var(--text-dim); }
-/* Centre a default's edit button on the title's first line even if that title wraps. */
-.assistant-thread-defaults .setting-row {
+/* Centre the trailing button on the title's first line even if that title wraps. */
+:is(.assistant-thread-defaults, .assistant-active-delegations) .setting-row-trailing {
   align-items: start;
   align-content: center;
 }
-.assistant-thread-defaults .setting-row-text {
+:is(.assistant-thread-defaults, .assistant-active-delegations) .setting-row-trailing .setting-row-text {
   padding-block-start: calc((var(--control-h) - var(--space-5)) / 2);
+}
+.assistant-active-delegations .setting-row-trailing { grid-template-columns: minmax(0, 1fr) auto; }
+.assistant-active-delegations .setting-row-title-line {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-0-5);
 }
 /* The button shows the current value. Keep long account labels inside the control column. */
 .assistant-thread-defaults .setting-row-control > .btn {
@@ -20367,6 +20375,11 @@ a.tab { text-decoration: none; }
 .assistant-installation-row .setting-row-control {
   flex-direction: row;
   gap: var(--space-2);
+}
+.assistant-installation-row .setting-row-desc {
+  padding: 0;
+  border: 0;
+  background: none;
 }
 .assistant-connection-row {
   align-items: start;

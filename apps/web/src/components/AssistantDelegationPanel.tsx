@@ -86,7 +86,7 @@ function DelegationGroup() {
       setRemoving(null);
     }
   };
-  return <SettingsGroup title="Active Delegations" scope="Your Account" headingRef={heading}
+  return <SettingsGroup className="assistant-active-delegations" title="Active Delegations" scope="Your Account" headingRef={heading}
     notice={removeError && <Notice role="alert" tone="danger">{removeError}</Notice>}
     failure={grants.kind === "failed" ? {
       message: "Couldn't load delegation grants.", detail: grants.message,
