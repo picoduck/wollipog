@@ -695,7 +695,12 @@ test("reviews under a campaign remain outside its membership, counts, requests a
     assert.equal(h.db.isSessionDescendant("campaign", id), false);
     assert.equal(h.db.sessionResultOrchestrator(id), null);
     assert.equal(h.db.campaignBudgets.root(id), null);
+    for (const sessionId of ["s1", id]) {
+      h.db.setPendingApproval(sessionId, { requestId: "question", kind: "question", title: "Question", options: [] });
+    }
     assert.deepEqual(h.db.listSessionDescendantRequestCandidates("campaign").map(s => s.id), ["s1"]);
+    h.db.setPendingApproval("s1", null);
+    h.db.setPendingApproval(id, null);
     const plan = h.svc.recordCampaignPlan("campaign", { items: [{ key: "implementation" }], planComplete: true });
     assert.ok(plan.ok, plan.error ?? "campaign plan refused");
     const workItemId = plan.data!.items[0]!.workItemId;

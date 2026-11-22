@@ -8956,7 +8956,7 @@ export class SessionsService {
   private campaignPeerContracts(controller: SessionView, requesterId: string): { controller?: unknown; requester?: unknown } | undefined {
     const control = controller.orchestratorPolicy?.control;
     if (control?.mode !== "full_control" || !control.boundary.evidenceAuthority) return undefined;
-    const requester = this.db.getSession(requesterId);
+    const requester = this.db.getSession(requesterId, { includeCampaignProjection: false });
     return { controller: this.pacedVideoInstallationContract(controller.runnerId, controller.agentId),
       requester: requester ? this.pacedVideoInstallationContract(requester.runnerId, requester.agentId) : undefined };
   }
@@ -10744,7 +10744,8 @@ export class SessionsService {
   private genericCampaignAuthority(controller: SessionView, requester: Pick<SessionView, "id" | "driver" | "runnerId"> & Partial<Pick<SessionView, "workspaceId">>, request: PendingApproval): CampaignAuthorityEvaluation {
     const repositoryRoot = controller.orchestratorPolicy?.control?.mode === "full_control" && request.context?.operation
       ? this.db.sessionRepositoryRoot(requester.id) : undefined;
-    const workspaceId = requester.workspaceId ?? (controller.orchestratorPolicy?.control?.mode === "full_control" ? this.db.getSession(requester.id)?.workspaceId : undefined);
+    const workspaceId = requester.workspaceId ?? (controller.orchestratorPolicy?.control?.mode === "full_control"
+      ? this.db.getSession(requester.id, { includeCampaignProjection: false })?.workspaceId : undefined);
     return evaluateCampaignAuthority(controller, this.campaignPlaced(controller, { ...requester, workspaceId, repositoryRoot: repositoryRoot ?? undefined }), this.db.getRunner(requester.runnerId)?.protocolVersion, this.db.campaignPolicyRequest(requester.id, controller.orchestratorPolicy?.control, request), controller.parentControlPolicy,
       controller.orchestratorPolicy?.control?.mode === "full_control" ? this.db.getRunner(controller.runnerId)?.protocolVersion : undefined,
       this.campaignPeerContracts(controller, requester.id));
@@ -11266,9 +11267,10 @@ export class SessionsService {
    * resolve protected requests by treating itself as a descendant. */
   private workflowDecisionRelationship(controllerId: string, requesterId: string): boolean {
     if (this.db.isSessionDescendant(controllerId, requesterId)) return true;
-    const controller = this.db.getSession(controllerId);
+    if (controllerId !== requesterId) return false;
+    const controller = this.db.getSession(controllerId, { includeCampaignProjection: false });
     const root = this.orchestratorCampaignController(controller);
-    return controllerId === requesterId && controller?.orchestratorPolicy?.control?.mode === "full_control" &&
+    return controller?.orchestratorPolicy?.control?.mode === "full_control" &&
       campaignBoundaryCurrent(controller) && root !== "refused" && root?.id === controllerId;
   }
 
@@ -15816,7 +15818,7 @@ export class SessionsService {
   /** Snapshot once for a check that may inspect many owner-kept occurrences. */
   private personalRuleLookup(rootId: string, category: WorkflowDecisionCategory):
     (rule: import("@wollipog/protocol").WorkflowDecisionOwnerRule) => string | undefined {
-    const root = this.db.getSession(rootId);
+    const root = this.db.getSession(rootId, { includeCampaignProjection: false });
     const control = root?.orchestratorPolicy?.control;
     if (control?.mode !== "full_control" || !control.boundary.operations.includes(category)) return () => undefined;
     const current = this.db.personalRuleDelegations(rootId).filter((d) => {
@@ -17767,7 +17769,7 @@ export class SessionsService {
         controller.orchestratorPolicy?.control?.mode !== "full_control") return direct;
     // Full Control never routes evidence to the Human (#2940). The Orchestrator keeps a decision it
     // cannot fully inspect only while the current boundary gives it UI Evidence Approval.
-    const requester = this.db.getSession(childSessionId);
+    const requester = this.db.getSession(childSessionId, { includeCampaignProjection: false });
     const owner = requester ? evaluateCampaignAuthority(controller, this.campaignPlaced(controller, requester),
       this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
       this.campaignPeerContracts(controller, requester.id)).owner : "human";
@@ -17782,7 +17784,7 @@ export class SessionsService {
     childSessionId: string,
     snapshot: WorkflowDecisionResourceSnapshot,
   ): WorkflowDecisionAuthority {
-    const requester = this.db.getSession(childSessionId);
+    const requester = this.db.getSession(childSessionId, { includeCampaignProjection: false });
     return requester ? evaluateCampaignAuthority(controller, this.campaignPlaced(controller, requester),
       this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
       this.campaignPeerContracts(controller, requester.id), this.reviewExtensionCap(requester.id, snapshot)).owner : "human";
@@ -17812,7 +17814,7 @@ export class SessionsService {
       this.db.uiEvidenceReviewClient(controller, authority),
     );
     if (client.effectiveOwner === "human") return client;
-    if (snapshot.videoReview && ![controller, this.db.getSession(childSessionId)].every((owner) =>
+    if (snapshot.videoReview && ![controller, this.db.getSession(childSessionId, { includeCampaignProjection: false })].every((owner) =>
       owner && runnerSupportsProtocol(this.db.getRunner(owner.runnerId)?.protocolVersion,
         "orchestratorVideoFrameReview"))) {
       return { effectiveOwner: "human", fallback: { code: "runner_unsupported",
@@ -17822,7 +17824,7 @@ export class SessionsService {
       return { effectiveOwner: "human", fallback: { code: "artifact_mismatch",
         reason: "The derived video frames no longer match their complete source manifest." } };
     }
-    const child = this.db.getSession(childSessionId);
+    const child = this.db.getSession(childSessionId, { includeCampaignProjection: false });
     if (!snapshot.videoReview && child && this.productionVideoReviewAvailable(controller, child, snapshot)) {
       const images = snapshot.evidence.filter((item) => item.mediaType?.startsWith("image/"));
       return images.length ? evaluateUiEvidenceItems(controller.driver, childSessionId, images,
@@ -17954,7 +17956,7 @@ export class SessionsService {
     if (!ownerKept && decision.authority === "human" && ["campaign_issue_scope", "issue_closure", "campaign_follow_up_admission"].includes(decision.category)) {
       return this.evaluateWorkflowDecisionAuthority(controller, policy, decision.sessionId, decision.resourceSnapshot).effectiveOwner === "human";
     }
-    const requester = this.db.getSession(decision.sessionId);
+    const requester = this.db.getSession(decision.sessionId, { includeCampaignProjection: false });
     if (!options.recordingCompletedMerge && decision.status === "approved" && requester && decision.resourceSnapshot.category === "pr_merge" &&
         this.mergeReviewEvidenceRefusal(requester, decision.resourceSnapshot)) return false;
     if (decision.authorityEvaluation?.boundaryRevision !== undefined && (!requester ||
@@ -18780,7 +18782,7 @@ export class SessionsService {
   private workflowDecisionApproval(decision: WorkflowDecisionView): PendingApproval {
     const snapshot = decision.resourceSnapshot;
     const requester = decision.sessionId === decision.controllingSessionId && decision.authority === "human"
-      ? this.db.getSession(decision.sessionId) : null;
+      ? this.db.getSession(decision.sessionId, { includeCampaignProjection: false }) : null;
     const categoryTitle: Record<WorkflowDecisionCategory, string> = {
       implementation_question: "Implementation Decision Required",
       pr_merge: "PR Merge Approval Required",
@@ -18853,7 +18855,7 @@ export class SessionsService {
           (decision.ownerRule || decision.ownerHandoff || decision.authorityEvaluation?.reason === "owner_kept") &&
           !this.db.ownerOccurrenceWasReturned(decision.occurrenceId) &&
           this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot) &&
-          this.db.getSession(decision.controllingSessionId)?.orchestratorPolicy?.control?.mode === "full_control"
+          this.db.sessionOrchestratorPolicy(decision.controllingSessionId)?.control?.mode === "full_control"
           ? { returnableOwnerResource: true as const } : {}) },
     };
   }
@@ -19957,7 +19959,7 @@ export class SessionsService {
             (!unbound && (decision.policyRevision !== typedPolicy.revision ||
               !this.workflowDecisionAuthorityCurrent(parent, typedPolicy, decision))) ||
             !this.workflowDecisionRelationship(parentSessionId, decision.sessionId) || !canAccess(decision.sessionId)) return [];
-        const session = this.db.getSession(decision.sessionId);
+        const session = this.db.getSession(decision.sessionId, { includeCampaignProjection: false });
         if (!session || isTerminal(session.status) || !runnerSupportsProtocol(
           this.db.getRunner(session.runnerId)?.protocolVersion,
           "typedWorkflowDecisionDelegation",
