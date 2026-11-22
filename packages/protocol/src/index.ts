@@ -91,6 +91,7 @@ export {
   campaignLaunchDisclosure, validCampaignLaunchDisclosure,
 } from "./campaign-control-launch.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
+export const SESSION_UPSERT_BACKGROUND_REUSE_UI_PROTOCOL = 411;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
 export const MAX_SKILL_REPORT_REQUESTS = 64;
 export { boundedIssueNumbers, campaignIssueForgeUrl, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot, validIssueAdmission, validIssueLineage,
@@ -12853,6 +12854,9 @@ export interface UiBoxRemovedMessage {
 export interface UiSessionUpsertMessage {
   type: "session_upsert";
   session: SessionView;
+  /** Reuse backgroundJobs, backgroundJobsTruncated and backgroundDeliveries from the last
+   * inventory-bearing upsert for this session on this socket. Snapshots and HTTP reads are independent. */
+  reuseBackgroundInventory?: true;
 }
 
 /** v383 (#4663): an Assistant thread changed. Delivered only to the thread's owner. */

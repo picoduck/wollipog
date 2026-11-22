@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
 /**
@@ -11,7 +12,7 @@ import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
  */
 
 import { MAX_SKILL_REPORT_REQUESTS, SKILL_REPORT_REQUEST_LIFETIME_MS, runnerSupportsProtocol, PROJECT_MEMORY_MIN_PROTOCOL, SESSION_SUMMARY_UI_PROTOCOL, isTerminal, isTerminalDurableDeliveryState,
-  MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW, UI_SUBSCRIPTION_RATE_WINDOW_MS } from "@wollipog/protocol";
+  MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW, SESSION_UPSERT_BACKGROUND_REUSE_UI_PROTOCOL, UI_SUBSCRIPTION_RATE_WINDOW_MS } from "@wollipog/protocol";
 import type {
   ControlPlaneToRunner,
   ControlPlaneToUi,
@@ -72,6 +73,7 @@ import type {
   SessionReminderWakeReason,
   SessionView,
   UiSnapshotMessage,
+  UiSessionUpsertMessage,
   SubscriptionUsageRefreshResultMessage,
   SteerSessionResultMessage,
   AssistantThread,
@@ -274,6 +276,37 @@ interface OutboundFrame {
   data: string;
   bytes: number;
   coalesceKey?: string;
+  sessionUpsert?: SessionUpsertIdentity;
+  removedSessionId?: string;
+}
+
+interface SessionUpsertIdentity {
+  id: string;
+  digest: string;
+  inventoryDigest?: string;
+}
+
+const MAX_SENT_SESSION_UPSERTS = 1024;
+
+function frameDigest(data: string): string {
+  return createHash("sha256").update(data).digest("base64url");
+}
+
+function prepareSessionUpsert(message: UiSessionUpsertMessage, reuseInventory: boolean) {
+  const { id } = message.session;
+  let full: string | undefined;
+  const fullData = () => full ??= JSON.stringify(message);
+  if (!reuseInventory) {
+    return { identity: { id, digest: frameDigest(fullData()) }, fullData };
+  }
+  const { backgroundJobs, backgroundJobsTruncated, backgroundDeliveries, ...session } = message.session;
+  const inventory = JSON.stringify({ backgroundJobs, backgroundJobsTruncated, backgroundDeliveries });
+  if (inventory === "{}") {
+    return { identity: { id, digest: frameDigest(fullData()) }, fullData };
+  }
+  const inventoryDigest = frameDigest(inventory);
+  const compactData = JSON.stringify({ ...message, session, reuseBackgroundInventory: true } satisfies UiSessionUpsertMessage);
+  return { identity: { id, inventoryDigest, digest: frameDigest(inventoryDigest + compactData) }, fullData, compactData };
 }
 
 /** Per-UI-client metadata: which paired device (if any) authenticated the socket, and how to
@@ -308,6 +341,8 @@ interface UiClientInfo {
   /** The command-permission verdict and hold advice last sent for each session (#1843, #1875), so
    * a scope change can resend only the sessions whose verdict or advice it changed. */
   sentCommandPermissions?: Map<string, string>;
+  /** Only dispatched frames are inventory bases. A queued frame can still be coalesced away. */
+  sentSessionUpserts?: Map<string, SessionUpsertIdentity>;
   backgroundObservationWindowStartedAt?: number;
   backgroundObservationsInWindow?: number;
   /** This client's session access decisions, valid only at the database access revision they were
@@ -1033,6 +1068,7 @@ export class Hub {
     info.subscribedSessionIds?.clear();
     info.observedBackgroundDeliveryKeys?.clear();
     info.hiddenIndefiniteReminderSessionIds?.clear();
+    info.sentSessionUpserts?.clear();
   }
 
   /** Replace the high-volume live stream selection. Undefined means a pre-subscription dashboard
@@ -1362,7 +1398,13 @@ export class Hub {
     const now = Date.now();
     this.pruneSessionUpsertPacing(now);
     const pacing = this.sessionUpsertPacing.get(view.id);
-    if (pacing?.sent.transition === keys.transition && pacing.sent.streaming !== keys.streaming) {
+    if (pacing?.sent.transition === keys.transition) {
+      if (pacing.sent.streaming === keys.streaming) {
+        // The shared view is unchanged, but a viewer's permissions or attention may have moved.
+        // Compare the projected frames without resetting the streaming clock or its trailing send.
+        this.broadcastSessionUpsert(view);
+        return;
+      }
       if (pacing.timer) return;
       // Clamped, so a wall clock stepped backwards cannot hold a paced update past one interval.
       const wait = Math.min(pacing.sentAt + SESSION_STREAMING_UPSERT_INTERVAL_MS - now, SESSION_STREAMING_UPSERT_INTERVAL_MS);
@@ -1386,7 +1428,12 @@ export class Hub {
         return;
       }
       const view = this.withQueue(session);
-      this.sendSessionUpsert(view, sessionPacingKeys(view), Date.now());
+      const keys = sessionPacingKeys(view);
+      if (pacing.sent.transition === keys.transition && pacing.sent.streaming === keys.streaming) {
+        this.broadcastSessionUpsert(view);
+      } else {
+        this.sendSessionUpsert(view, keys, Date.now());
+      }
     } catch {
       // A timer has no caller to report to, and a throw here would end the process; the database
       // is closing at shutdown. Forgetting the entry sends the next change of this session at once.
@@ -1398,6 +1445,10 @@ export class Hub {
     // The newest view supersedes any pending flush, and re-insertion keeps send order for pruning.
     this.forgetSessionUpsertPacing(view.id);
     this.sessionUpsertPacing.set(view.id, { sent: keys, sentAt: now });
+    this.broadcastSessionUpsert(view);
+  }
+
+  private broadcastSessionUpsert(view: SessionView): void {
     this.broadcast({ type: "session_upsert", session: view });
     if (view.role === "assistant") {
       try { this.assistantSessionListener?.(view); } catch { /* A thread republish never blocks the session's own. */ }
@@ -1754,20 +1805,32 @@ export class Hub {
     msg: ControlPlaneToUi,
     predicate?: (principal: AuthPrincipal | undefined, info: UiClientInfo) => boolean,
   ): void {
-    // Serialize ONCE per broadcast — stringifying per client made fan-out cost
-    // O(clients × payload) on the streamed-delta hot path.
     if (this.uiClients.size === 0) return;
-    const data = JSON.stringify(msg);
-    // Reuse a projected session only for the same principal and verdict: campaign request
-    // visibility and personal attention can differ even when command permissions match.
-    const sessionDataByPermissions = new Map<string, string>();
+    let data: string | undefined;
+    const preparedUpserts = new Map<string, ReturnType<typeof prepareSessionUpsert>>();
     for (const [client, info] of this.uiClients) {
       if (!this.isSubscribed(info, msg)) continue;
       if (!(predicate ? predicate(info.principal, info) : this.canReceive(info.principal, msg, info))) continue;
       const projectedMessages = this.compatibilityProjection(info, msg);
       for (const compatible of projectedMessages) {
         const projected = projectCampaignStatusForUi(projectBackgroundRetryExhaustionForUi(compatible, info.uiProtocolVersion), info.uiProtocolVersion);
-        let clientData = projected === msg ? data : JSON.stringify(projected);
+        if (projected.type === "session_upsert") {
+          const session = withSessionCommandPermissions(this.db, info.principal, projected.session);
+          const permissions = permissionsKey(session);
+          const reuseInventory = (info.uiProtocolVersion ?? 0) >= SESSION_UPSERT_BACKGROUND_REUSE_UI_PROTOCOL;
+          // Share serialization only for the same principal and verdict, since permissions,
+          // campaign visibility and personal attention can differ.
+          const key = JSON.stringify([info.principal, permissions, session.attention, reuseInventory]);
+          const shared = projected === msg ? preparedUpserts.get(key) : undefined;
+          const prepared = shared ?? prepareSessionUpsert({ ...projected, session }, reuseInventory);
+          if (projected === msg && !shared) preparedUpserts.set(key, prepared);
+          if (info.principal !== undefined) (info.sentCommandPermissions ??= new Map()).set(session.id, permissions);
+          info.visibleSessionIds?.add(session.id);
+          info.snapshotVisibilityChanges?.sessions.set(session.id, true);
+          this.sendSessionUpsertFrame(client, info, prepared);
+          continue;
+        }
+        let clientData = projected === msg ? (data ??= JSON.stringify(msg)) : JSON.stringify(projected);
         if (projected.type === "runner_upsert" && info.principal !== undefined) {
           const runner = this.db.listRunnersForPrincipal(info.principal)
             .find((item) => item.runnerId === projected.runner.runnerId);
@@ -1779,18 +1842,8 @@ export class Hub {
           if (!project) continue;
           clientData = JSON.stringify({ type: "project_upsert", project } satisfies ControlPlaneToUi);
         }
-        if (projected.type === "session_upsert" && info.principal !== undefined) {
-          const session = withSessionCommandPermissions(this.db, info.principal, projected.session);
-          const key = JSON.stringify(info.principal) + permissionsKey(session) + JSON.stringify(session.attention);
-          const shared = projected === msg ? sessionDataByPermissions.get(key) : undefined;
-          clientData = shared ?? JSON.stringify({ ...projected, session } satisfies ControlPlaneToUi);
-          if (projected === msg && shared === undefined) sessionDataByPermissions.set(key, clientData);
-          (info.sentCommandPermissions ??= new Map()).set(session.id, permissionsKey(session));
-        }
-        if (projected.type === "session_removed") info.sentCommandPermissions?.delete(projected.sessionId);
-        if (projected.type === "session_upsert") {
-          info.visibleSessionIds?.add(projected.session.id);
-          info.snapshotVisibilityChanges?.sessions.set(projected.session.id,true);
+        if (projected.type === "session_removed") {
+          info.sentCommandPermissions?.delete(projected.sessionId);
         }
         if (projected.type === "runner_upsert") {
           info.visibleRunnerIds?.add(projected.runner.runnerId);
@@ -1800,7 +1853,8 @@ export class Hub {
           info.visibleProjectIds?.add(projected.project.id);
           info.snapshotVisibilityChanges?.projects.set(projected.project.id,true);
         }
-        this.sendRaw(client, clientData, this.coalesceKey(projected));
+        this.sendRaw(client, clientData, this.coalesceKey(projected), undefined,
+          projected.type === "session_removed" ? projected.sessionId : undefined);
       }
     }
   }
@@ -1859,16 +1913,33 @@ export class Hub {
   }
 
   private safeSend(client: Socket, msg: ControlPlaneToUi): void {
-    const uiProtocolVersion = this.uiClients.get(client)?.uiProtocolVersion;
+    const info = this.uiClients.get(client);
+    if (!info) return;
+    const { uiProtocolVersion } = info;
     const projected = projectCampaignStatusForUi(projectBackgroundRetryExhaustionForUi(msg, uiProtocolVersion), uiProtocolVersion);
+    if (projected.type === "session_upsert") {
+      this.sendSessionUpsertFrame(client, info, prepareSessionUpsert(projected,
+        (uiProtocolVersion ?? 0) >= SESSION_UPSERT_BACKGROUND_REUSE_UI_PROTOCOL));
+      return;
+    }
     this.sendRaw(client, JSON.stringify(projected), this.coalesceKey(projected));
+  }
+
+  private sendSessionUpsertFrame(client: Socket, info: UiClientInfo, prepared: ReturnType<typeof prepareSessionUpsert>): void {
+    const { identity, compactData, fullData } = prepared;
+    const key = `session:${identity.id}`;
+    const removing = info.outbound?.some((frame) => frame.removedSessionId === identity.id);
+    const sent = removing ? undefined : info.sentSessionUpserts?.get(identity.id);
+    const queued = info.outbound?.find((frame) => frame.coalesceKey === key)?.sessionUpsert;
+    if (!removing && (queued ?? sent)?.digest === identity.digest) return;
+    const data = compactData && sent?.inventoryDigest === identity.inventoryDigest ? compactData : fullData();
+    this.sendRaw(client, data, key, identity);
   }
 
   private coalesceKey(msg: ControlPlaneToUi): string | undefined {
     switch (msg.type) {
       case "runner_upsert": return `runner:${msg.runner.runnerId}`;
       case "box_upsert": return `box:${msg.box.boxId}`;
-      case "session_upsert": return `session:${msg.session.id}`;
       case "session_reminder_upsert": return `reminder:${msg.reminder.sessionId}`;
       case "session_reminder_removed": return `reminder:${msg.sessionId}`;
       case "worktree_setup_notice_dismissed": return `worktree-setup-notice:${msg.projectId}`;
@@ -1887,10 +1958,11 @@ export class Hub {
     }
   }
 
-  private sendRaw(client: Socket, data: string, coalesceKey?: string): void {
+  private sendRaw(client: Socket, data: string, coalesceKey?: string, sessionUpsert?: SessionUpsertIdentity,
+    removedSessionId?: string): void {
     const info = this.uiClients.get(client);
     if (!info) return;
-    const frame: OutboundFrame = { data, bytes: Buffer.byteLength(data, "utf8"), ...(coalesceKey ? { coalesceKey } : {}) };
+    const frame: OutboundFrame = { data, bytes: Buffer.byteLength(data, "utf8"), coalesceKey, sessionUpsert, removedSessionId };
     const outbound = info.outbound ??= [];
     const queuedBytes = info.queuedBytes ?? 0;
     const replaceIndex = coalesceKey === undefined
@@ -1925,7 +1997,7 @@ export class Hub {
         info.snapshotAccessRevision = revision;
       }
     }
-    const frame = initial === undefined ? info.outbound?.shift() : { data: initial, bytes: Buffer.byteLength(initial) };
+    const frame: OutboundFrame | undefined = initial === undefined ? info.outbound?.shift() : { data: initial, bytes: Buffer.byteLength(initial) };
     if (!frame) return;
     if (initial !== undefined) {
       info.initialFrameIndex = (info.initialFrameIndex ?? 0)+1;
@@ -1937,6 +2009,14 @@ export class Hub {
     if ((client.bufferedAmount ?? 0)+frame.bytes > MAX_UI_BUFFERED_BYTES) {
       this.evictUiClient(client,info,1013,"client is too slow; reconnect for fresh state");
       return;
+    }
+    if (frame.removedSessionId) info.sentSessionUpserts?.delete(frame.removedSessionId);
+    if (frame.sessionUpsert) {
+      const upserts = info.sentSessionUpserts ??= new Map();
+      const { id } = frame.sessionUpsert;
+      upserts.delete(id);
+      upserts.set(id, frame.sessionUpsert);
+      if (upserts.size > MAX_SENT_SESSION_UPSERTS) upserts.delete(upserts.keys().next().value!);
     }
     info.sending = true;
     const complete = (error?: Error) => {

@@ -1569,6 +1569,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 410: Anchor Assistant transcript receipts to provider tool results (Refs #4814).
   410,
   // v411 slot
+  // 411: UI session upserts can reuse the background inventory already sent on the same socket (Refs #4860).
+  411,
   // v412 slot
   // v413 slot
   // v414 slot
