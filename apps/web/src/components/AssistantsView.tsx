@@ -101,6 +101,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   const waitingDock = useRef<AssistantWaitingDockHandle>(null);
   const [list, setList] = useState<ListState>({ kind: "loading" });
   const [showArchive, setShowArchive] = useState(false);
+  const [emptyCreationPending, setEmptyCreationPending] = useState(false);
   /** A deep link that the list doesn't carry, read on its own. */
   const [extra, setExtra] = useState<AssistantThread | null>(null);
   const [missing, setMissing] = useState(false);
@@ -320,11 +321,11 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   const cancelNewThread = () => navigate({ name: "assistants" }, { replace: true });
   const startThread = () => navigate({ name: "assistants", newThread: true });
   const finishNewThread = ({ thread, firstMessageFailure }: NewAssistantThreadResult, fromEmptyInbox: boolean) => {
-    setShowArchive(false);
     replace(thread);
     if (firstMessageFailure) setUnsentFirstMessage({ sessionId: thread.sessionId, ...firstMessageFailure });
     const view = currentView.read();
-    if (view.name === "assistants" && (view.newThread || (fromEmptyInbox && view.threadId === undefined))) {
+    if (view.name === "assistants" && (fromEmptyInbox ? !view.newThread && view.threadId === undefined : view.newThread)) {
+      setShowArchive(false);
       navigate({ name: "assistants", threadId: thread.id }, { replace: true });
     }
   };
@@ -376,7 +377,8 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   };
 
   const emptyInbox = list.kind === "ready" && threads.length === 0;
-  const showEmptyComposer = emptyInbox && !showArchive && threadId === undefined && !newThread;
+  // Creation is published to the list before the first message finishes sending.
+  const showEmptyComposer = (emptyInbox || emptyCreationPending) && !showArchive && threadId === undefined && !newThread;
   const phoneDetail = isMobile && (threadId !== undefined || newThread);
   // The open thread's launched work, for the header toggle and the Work tab. Kept
   // the same object while the thread's lists are, so their live counts don't recompute each render.
@@ -488,6 +490,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
           <ThreadList
             list={unsentFirstMessage && list.kind === "ready" ? { ...list, threads: threads.map(titleForDisplay) } : list}
             showArchive={showArchive}
+            composingFirstThread={showEmptyComposer}
             onShowArchive={setShowArchive}
             selectedId={threadId ?? null}
             onOpen={openThread}
@@ -500,7 +503,9 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
           {newThread || showEmptyComposer ? creationBlock ? (
             <div className="assistant-thread-pane-state"><State compact icon={<AssistantsIcon />}
               title={creationBlock.title} headingLevel={2}>{creationBlock.message}</State></div>
-          ) : <NewAssistantThreadComposer onCancel={newThread && !isMobile ? cancelNewThread : undefined}
+          ) : <NewAssistantThreadComposer key={newThread ? "explicit" : "empty"}
+            onCancel={newThread && !isMobile ? cancelNewThread : undefined}
+            onCreationPendingChange={showEmptyComposer ? setEmptyCreationPending : undefined}
             onCreated={(result) => finishNewThread(result, showEmptyComposer)} />
           : threadId === undefined && (list.kind === "unavailable" || list.kind === "ownerOnly") ? (
             // The list already says why there are no threads here; an invitation to choose one would
@@ -629,9 +634,10 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
 }
 
 /** The list pane's threads and New Thread action. */
-function ThreadList({ list, showArchive, onShowArchive, selectedId, onOpen, onNewThread, onRetry, badgeFor }: {
+function ThreadList({ list, showArchive, composingFirstThread, onShowArchive, selectedId, onOpen, onNewThread, onRetry, badgeFor }: {
   list: ListState;
   showArchive: boolean;
+  composingFirstThread: boolean;
   onShowArchive: (show: boolean) => void;
   selectedId: string | null;
   onOpen: (threadId: string) => void;
@@ -721,7 +727,7 @@ function ThreadList({ list, showArchive, onShowArchive, selectedId, onOpen, onNe
               }
             }}><SearchIcon /></button>
         )}
-        {!showArchive && (threads.length > 0 || list.kind === "loading" || list.kind === "failed") && (
+        {!showArchive && !composingFirstThread && (threads.length > 0 || list.kind === "loading" || list.kind === "failed") && (
           <button type="button" className="btn primary" onClick={onNewThread}><PlusIcon />New Thread</button>
         )}
       </div>
@@ -794,7 +800,7 @@ function ThreadList({ list, showArchive, onShowArchive, selectedId, onOpen, onNe
           </>
         )}
       </section>
-      {list.kind === "ready" && threads.length > 0 && !showArchive && (
+      {list.kind === "ready" && threads.length > 0 && !showArchive && !composingFirstThread && (
         <div className="assistant-threads-foot">
           <ListFoot>
             <button ref={archiveButton} type="button" className="row" onClick={() => openArchive(true)}>

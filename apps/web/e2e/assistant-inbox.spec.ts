@@ -107,7 +107,7 @@ for (const theme of ["light", "dark"] as const) {
       test.use({ viewport, hasTouch: phone, isMobile: phone, colorScheme: theme });
 
       test("mounts the first-thread composer and three starter prompts in an empty inbox", async ({ page }) => {
-        await open(page, theme, "threads=empty&limits=enabled");
+        await open(page, theme, "threads=empty&limits=enabled&new-thread=hold-first-message");
         const pane = page.locator(".assistant-thread-pane");
         const composer = pane.getByRole("form", { name: "What should the assistant work on?" });
         const start = composer.getByRole("button", { name: "Start Thread" });
@@ -124,6 +124,11 @@ for (const theme of ["light", "dark"] as const) {
         await suggestions.getByText("Plan a Task").click();
         await expect(start).toBeEnabled();
         await start.click();
+        await expect(page.locator("body")).toHaveAttribute("data-first-message-held", "true");
+        // The creation event has reached the list while the first prompt is still in flight.
+        await expect(page.locator(".master-detail-list [data-thread-id]")).toHaveCount(1);
+        await expect(composer).toBeVisible();
+        await page.evaluate(() => Reflect.get(window, "assistantsReleaseFirstMessage")());
         await expect(pane.locator(".composer")).toBeVisible();
         await expect(composer).toHaveCount(0);
       });

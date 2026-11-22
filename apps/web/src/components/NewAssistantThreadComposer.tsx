@@ -61,9 +61,10 @@ const suggestions = [
 ];
 
 /** Mount in an explicit New Thread pane or in the empty Assistants detail pane. */
-export function NewAssistantThreadComposer({ onCancel, onCreated }: {
+export function NewAssistantThreadComposer({ onCancel, onCreated, onCreationPendingChange }: {
   onCancel?: () => void;
   onCreated: (result: NewAssistantThreadResult) => void;
+  onCreationPendingChange?: (pending: boolean) => void;
 }) {
   const api = useApi();
   const scope = useInstanceScope();
@@ -116,6 +117,7 @@ export function NewAssistantThreadComposer({ onCancel, onCreated }: {
   const start = async () => {
     if (!defaults || !harness || !account || !message.trim() || submitting.current) return;
     submitting.current = true;
+    onCreationPendingChange?.(true);
     setBusy(true);
     setFailure(null);
     let thread: AssistantThread;
@@ -132,6 +134,7 @@ export function NewAssistantThreadComposer({ onCancel, onCreated }: {
       else setFailure(errorMessage(cause));
       submitting.current = false;
       setBusy(false);
+      onCreationPendingChange?.(false);
       return;
     }
 
@@ -155,6 +158,7 @@ export function NewAssistantThreadComposer({ onCancel, onCreated }: {
     }
     // Once create succeeded, retries belong in the backing conversation.
     onCreated({ thread, firstMessageFailure });
+    onCreationPendingChange?.(false);
   };
 
   return (

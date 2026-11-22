@@ -82,6 +82,7 @@ const NOW = Date.now();
 const minute = 60_000;
 const accountScenario = params.get("accounts");
 const newThreadScenario = params.get("new-thread");
+let releaseFirstMessage: (() => void) | undefined;
 const fixtureAccountRef = (index: number) => `acct:${index.toString(16).padStart(16, "0")}`;
 const fixtureAccounts: AssistantThreadAccountChoices["accounts"] = [
   { accountRef: fixtureAccountRef(1), label: "Studio Subscription" },
@@ -1094,6 +1095,12 @@ const client = {
   },
   prompt: async (id: string, message: string) => {
     if (id.startsWith("sess-new-")) {
+      if (newThreadScenario === "hold-first-message") {
+        await new Promise<void>((resolve) => {
+          releaseFirstMessage = resolve;
+          document.body.dataset.firstMessageHeld = "true";
+        });
+      }
       if (newThreadScenario === "first-message-failure" && !document.body.dataset.refusedFirstMessage) {
         document.body.dataset.refusedFirstMessage = "true";
         throw new ApiError("The Machine did not accept the message.", 409);
@@ -1245,6 +1252,10 @@ Object.assign(window, {
     publish(threads.find((candidate) => candidate.id === threadId)!);
   },
   assistantsHoldNextList: () => { holdNextList = true; },
+  assistantsReleaseFirstMessage: () => {
+    releaseFirstMessage?.();
+    releaseFirstMessage = undefined;
+  },
   assistantsSlowLists: (ms: number) => { slowListMs = ms; },
   assistantsReleaseList: () => {
     initialListGate = undefined;
