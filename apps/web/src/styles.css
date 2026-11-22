@@ -7720,6 +7720,13 @@ body.shell-dock-dragging * {
 .assistant-dock-resolve { margin-left: auto; }
 @media (max-width: 760px) {
   .assistant-dock-slot:not(:has([data-show-all])) { max-height: 74cqh; }
+  @container chat-reading (min-height: 480px) {
+    /* A single request with expanded facts can use more of a tall reading column while
+       leaving at least a fifth for the transcript. Short reading columns keep their lower cap. */
+    .assistant-dock-slot:not(:has([data-show-all], .assistant-dock-pager)):has(.assistant-dock-facts) {
+      max-height: 78cqh;
+    }
+  }
   .assistant-dock-head { padding-inline: var(--space-2); }
   .assistant-dock-card-head,
   .assistant-dock-card-body,
@@ -18833,7 +18840,15 @@ button.setting-row { cursor: pointer; }
 .setting-row-value-part { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
 .setting-row-link-word { color: var(--text-dim); font: var(--type-small); white-space: nowrap; }
 .setting-row-chevron { display: inline-flex; color: var(--text-dim); }
-/* A default's current value is its edit button. Keep long account labels inside the control column. */
+/* Centre a default's edit button on the title's first line even if that title wraps. */
+.assistant-thread-defaults .setting-row {
+  align-items: start;
+  align-content: center;
+}
+.assistant-thread-defaults .setting-row-text {
+  padding-block-start: calc((var(--control-h) - var(--space-5)) / 2);
+}
+/* The button shows the current value. Keep long account labels inside the control column. */
 .assistant-thread-defaults .setting-row-control > .btn {
   display: block;
   min-width: var(--control-h);

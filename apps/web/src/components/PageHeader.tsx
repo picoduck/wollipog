@@ -324,6 +324,7 @@ export function DetailBar({
   const actions = menuSearch ? [{ label: "Search", icon: <SearchIcon />, onClick: menuSearch }, ...menu] : menu;
   const headingRef = useRef<HTMLDivElement>(null);
   const hasStatus = Boolean(status);
+  const phoneTitleIsInteractive = phone && Boolean(renderTitle);
   // Whether the badge is a dot is measured against the full badge, every time, so the answer never
   // depends on the previous one. The attribute is written straight to the DOM inside one layout
   // pass: React does not own it, and nothing paints between taking it off and putting it back.
@@ -337,9 +338,15 @@ export function DetailBar({
     const measure = () => {
       badge.removeAttribute("data-dot");
       badge.removeAttribute("title");
-      if (!compact) return;
-      const truncated = titleElement.scrollWidth > titleElement.clientWidth;
-      if (!truncated || titleElement.clientWidth >= DETAIL_TITLE_READABLE_PX) return;
+      if (phoneTitleIsInteractive) {
+        // The Assistant title opens its tooltip, so it needs at least a square target.
+        const { width, height } = titleElement.getBoundingClientRect();
+        if (width >= height) return;
+      } else {
+        if (!compact) return;
+        const truncated = titleElement.scrollWidth > titleElement.clientWidth;
+        if (!truncated || titleElement.clientWidth >= DETAIL_TITLE_READABLE_PX) return;
+      }
       badge.setAttribute("data-dot", "");
       badge.title = badge.textContent ?? "";
     };
@@ -361,7 +368,7 @@ export function DetailBar({
       resized?.disconnect();
       relabelled?.disconnect();
     };
-  }, [compact, title, hasStatus]);
+  }, [compact, title, hasStatus, phoneTitleIsInteractive]);
   const action = (item: DetailBarAction, kind: "btn" | "btn primary") => {
     const iconOnly = (compact || (phone && Boolean(item.iconOnPhone))) && Boolean(item.icon);
     return (
