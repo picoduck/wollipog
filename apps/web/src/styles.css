@@ -13201,7 +13201,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .new-assistant-option > span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .new-assistant-option > svg { flex: none; }
 .new-assistant-option-panel .menu-head {
-  z-index: 1;
+  z-index: var(--z-sticky);
   justify-content: space-between;
 }
 .new-assistant-option-content {
