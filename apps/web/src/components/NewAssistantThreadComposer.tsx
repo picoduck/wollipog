@@ -54,7 +54,7 @@ export type NewAssistantThreadResult = {
 };
 
 const suggestions = [
-  { label: "Check on Running Work", prompt: "Check on my running work and tell me what needs attention." },
+  { label: "Check On Running Work", prompt: "Check on my running work and tell me what needs attention." },
   { label: "Review Open Decisions", prompt: "Show me the open decisions that need my input." },
   { label: "Plan a Task", prompt: "Help me plan a task and decide how to break it into sessions." },
 ];

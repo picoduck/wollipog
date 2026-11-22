@@ -13250,11 +13250,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   }
   .new-assistant-thread-actions:empty { display: none; }
   .new-assistant-thread-actions > .btn { max-width: none; width: 100%; }
-  .new-assistant-thread .btn,
-  .new-assistant-option-panel :is(.btn, .icon-btn, .choice-row, input:not([type="radio"])) {
-    min-width: 44px;
-    min-height: 44px;
-  }
 }
 .assistant-thread-pane-state {
   min-height: 0;
@@ -20268,6 +20263,7 @@ a.tab { text-decoration: none; }
     --switch-h: 24px;
     --switch-thumb: 18px;
   }
+  .new-assistant-option-panel .choice-row { min-height: var(--control-h); }
   /* Comfortable density on touch: the same 4px more per row tier, above the touch floor. */
   :root[data-density="comfortable"] {
     --row-h: 52px;

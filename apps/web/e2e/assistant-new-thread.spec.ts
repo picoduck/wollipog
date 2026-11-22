@@ -100,7 +100,7 @@ for (const theme of ["light", "dark"] as const) {
         const starterPrompts = form(page).getByRole("group", { name: "Starter Prompts" });
         await expect(starterPrompts.getByRole("button")).toHaveCount(3);
         for (const [label, prompt] of [
-          ["Check on Running Work", "Check on my running work and tell me what needs attention."],
+          ["Check On Running Work", "Check on my running work and tell me what needs attention."],
           ["Review Open Decisions", "Show me the open decisions that need my input."],
           ["Plan a Task", "Help me plan a task and decide how to break it into sessions."],
         ]) {
