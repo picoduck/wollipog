@@ -20,6 +20,7 @@ import { statusMeta } from "../status-meta.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { useStoreActions, useStoreSelector, useStoreValueSource } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
+import { AssistantTranscriptContext } from "./AssistantTranscriptReceipts.js";
 import { AssistantWaitingDock, type AssistantWaitingDockHandle } from "./AssistantWaitingDock.js";
 import { AssistantSpendingNotice } from "./AssistantSpendingNotice.js";
 import { AssistantThreadLimitsDialog } from "./AssistantThreadLimitsDialog.js";
@@ -532,6 +533,11 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
               </State>
             </div>
           ) : (
+            <AssistantTranscriptContext.Provider value={{
+              thread: selected,
+              onShowWork: () => panel.show("Work"),
+              onFocusConfirmation: (id) => waitingDock.current?.focusConfirmation(id),
+            }}>
             <SessionDetail
               key={selected.sessionId}
               sessionId={selected.sessionId}
@@ -591,6 +597,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
                 onSwitchAccount: () => setAccountSettingsFor(selected.id),
               } : undefined}
             />
+            </AssistantTranscriptContext.Provider>
           )}
         </div>
       </div>

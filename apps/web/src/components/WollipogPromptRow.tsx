@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, type ReactNode } from "react";
 import type { SessionView } from "@wollipog/protocol";
 import type { ApiClient } from "../api.js";
 import { useApi } from "../api-context.js";
@@ -44,24 +44,28 @@ function lookupTargetSession(api: ApiClient, id: string): Promise<SessionView> {
   return lookup;
 }
 
-function ConfirmationTargetChip({ target }: { target: ConfirmationOrigin["target"] }) {
+export function useTimelineTargetSession(sessionId: string | undefined) {
   const api = useApi();
   const navigate = useOptionalNavigate();
-  const liveSession = useOptionalStoreSelector((state) =>
-    target.kind === "session" ? state.sessions.get(target.id) : undefined);
+  const liveSession = useOptionalStoreSelector((state) => sessionId ? state.sessions.get(sessionId) : undefined);
   const [lookedUpSession, setLookedUpSession] = useState<SessionView>();
   useEffect(() => {
-    if (target.kind !== "session" || liveSession || !navigate) return;
-    // The default live snapshot omits archived sessions, including the result of Archive Session.
+    if (!sessionId || liveSession || !navigate) return;
+    // The default live snapshot omits archived sessions.
     let current = true;
-    void lookupTargetSession(api, target.id).then((session) => {
+    void lookupTargetSession(api, sessionId).then((session) => {
       if (current) setLookedUpSession(session);
     }).catch(() => {
       if (current) setLookedUpSession(undefined);
     });
     return () => { current = false; };
-  }, [api, liveSession, navigate, target.kind, target.id]);
-  const session = liveSession ?? (lookedUpSession?.id === target.id ? lookedUpSession : undefined);
+  }, [api, liveSession, navigate, sessionId]);
+  return liveSession ?? (lookedUpSession?.id === sessionId ? lookedUpSession : undefined);
+}
+
+function ConfirmationTargetChip({ target }: { target: ConfirmationOrigin["target"] }) {
+  const navigate = useOptionalNavigate();
+  const session = useTimelineTargetSession(target.kind === "session" ? target.id : undefined);
   const runner = useOptionalStoreSelector((state) =>
     target.kind === "runner" ? state.runners.get(target.id) : undefined);
   const project = useOptionalStoreSelector((state) =>
@@ -88,22 +92,51 @@ export function WollipogPromptRow({ origin, text, createdAt, open, onToggle }: {
   const confirmation = origin.kind === "owner_confirmation" ? origin : null;
   const outcome = confirmation ? outcomes[confirmation.outcome] : null;
   const at = confirmation?.resolvedAt ?? createdAt;
-  const time = formatRecordedTimestamp(at);
   const fact = confirmation?.outcome === "approved"
     ? "Wollipog ran it once · Receipt: " + (confirmation.receiptStatus ? receipts[confirmation.receiptStatus] : "Unknown")
     : confirmation ? "Nothing ran" : undefined;
+  return <WollipogEventRow
+    origin={origin.kind}
+    confirmationOutcome={confirmation?.outcome}
+    icon={outcome?.icon}
+    tone={outcome?.tone}
+    heading={origin.kind === "owner_confirmation"
+      ? <span>{outcomes[origin.outcome].lead} <strong>{origin.title}</strong></span>
+      : <strong>{noticeTitles[origin.kind]}</strong>}
+    target={confirmation && <ConfirmationTargetChip target={confirmation.target} />}
+    fact={fact}
+    at={at}
+    open={open}
+    onToggle={onToggle}
+    details={<>
+      <strong>{origin.kind === "legacy_confirmation" ? "Recorded Message" : "Message Wollipog Sent to the Assistant"}</strong>
+      <pre>{text}</pre>
+    </>}
+  />;
+}
+
+export function WollipogEventRow({ origin, confirmationOutcome, icon, tone = "t-info", heading, target,
+  fact, at, open, onToggle, details }: {
+  origin: string;
+  confirmationOutcome?: ConfirmationOrigin["outcome"];
+  icon?: ReactNode;
+  tone?: string;
+  heading: ReactNode;
+  target?: ReactNode;
+  fact?: string;
+  at?: number;
+  open: boolean;
+  onToggle?: () => void;
+  details: ReactNode;
+}) {
+  const time = formatRecordedTimestamp(at);
   return (
-    <div className="tl-wollipog-prompt" data-prompt-origin={origin.kind} data-confirmation-outcome={confirmation?.outcome}>
+    <div className="tl-wollipog-prompt" data-prompt-origin={origin} data-confirmation-outcome={confirmationOutcome}>
       <div className="tl-prompt-icon" aria-hidden="true">
-        <span className={"tl-decision-icon " + (outcome?.tone ?? "t-info")}>{outcome?.icon ?? <InfoIcon size={16} />}</span>
+        <span className={"tl-decision-icon " + tone}>{icon ?? <InfoIcon size={16} />}</span>
       </div>
       <div className="tl-prompt-content">
-        <div className="tl-prompt-heading">
-          {origin.kind === "owner_confirmation"
-            ? <span>{outcomes[origin.outcome].lead} <strong>{origin.title}</strong></span>
-            : <strong>{noticeTitles[origin.kind]}</strong>}
-          {confirmation && <ConfirmationTargetChip target={confirmation.target} />}
-        </div>
+        <div className="tl-prompt-heading">{heading}{target}</div>
         {(fact || time) && <div className="tl-prompt-fact">
           {fact}{fact && time && " · "}
           {time && <time dateTime={time.dateTime} title={time.title}>{formatClock(at)}</time>}
@@ -118,8 +151,7 @@ export function WollipogPromptRow({ origin, text, createdAt, open, onToggle }: {
             Details
           </summary>
           <div className="code-well tl-prompt-message">
-            <strong>{origin.kind === "legacy_confirmation" ? "Recorded Message" : "Message Wollipog Sent to the Assistant"}</strong>
-            <pre>{text}</pre>
+            {details}
           </div>
         </details>
       </div>

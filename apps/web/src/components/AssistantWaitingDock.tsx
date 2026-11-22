@@ -44,6 +44,7 @@ const responseCopy = {
 
 export interface AssistantWaitingDockHandle {
   focusAssistantWorkRequest: (sessionId: string, request: PendingApproval) => void;
+  focusConfirmation: (confirmationId: string) => void;
 }
 
 export function AssistantWaitingDock({ thread, work, onConfirmationAnswered, focusComposer, ref }: {
@@ -93,14 +94,14 @@ export function AssistantWaitingDock({ thread, work, onConfirmationAnswered, foc
   const actionFor = (key: string, action: string) => cardFor(key)
     ?.querySelector<HTMLButtonElement>(`[data-dock-action="${CSS.escape(action)}"]:not([aria-disabled="true"])`);
 
+  const focusRequest = (key: string) => {
+    if (operation.current || !requests.some(item => item.key === key)) return;
+    setSelected(key);
+    setReviewTarget(key);
+  };
   useImperativeHandle(ref, () => ({
-    focusAssistantWorkRequest(sessionId, request) {
-      if (operation.current) return;
-      const key = assistantWorkRequestKey(sessionId, request);
-      if (!requests.some(item => item.key === key)) return;
-      setSelected(key);
-      setReviewTarget(key);
-    },
+    focusAssistantWorkRequest: (sessionId, request) => focusRequest(assistantWorkRequestKey(sessionId, request)),
+    focusConfirmation: focusRequest,
   }));
 
   useLayoutEffect(() => {

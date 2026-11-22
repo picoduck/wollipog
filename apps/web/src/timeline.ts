@@ -16,6 +16,7 @@ import type {
   SessionCommandExecutionMode,
   SessionEvent,
   ArtifactView,
+  AssistantTranscriptReceipt,
   QuestionAnswerSummaryEntry,
   StructuredRequestResolutionReason,
 } from "@wollipog/protocol";
@@ -66,6 +67,7 @@ export function mergeTurnUsage(current: TurnUsage | undefined, addition: TurnUsa
 }
 
 export type TimelineItem =
+  | { kind: "assistant_receipt"; id: number; toolCallId: string; receipt: AssistantTranscriptReceipt }
   | { kind: "wollipog_prompt"; id: number; text: string; promptOrigin: TimelinePromptOrigin; createdAt: number }
   | { kind: "artifact_attached"; id: number; artifact: ArtifactView; createdAt: number }
   | {
@@ -1135,7 +1137,7 @@ export class TimelineBuilder {
           else delete updated.completedAt;
           this.items[idx] = updated;
           this.markDirty(idx);
-        } else {
+        } else if (!p.assistantReceipt) {
           this.breakText();
           const i =
             this.items.push({
@@ -1156,6 +1158,12 @@ export class TimelineBuilder {
           this.pendingSubagentRollups.delete(p.toolCallId);
           this.toolIndex.set(p.toolCallId, i);
           this.markDirty(i);
+        }
+        if (p.assistantReceipt) {
+          this.breakText();
+          this.markDirty(this.items.push({
+            kind: "assistant_receipt", id: ev.seq, toolCallId: p.toolCallId, receipt: p.assistantReceipt,
+          }) - 1);
         }
         break;
       }

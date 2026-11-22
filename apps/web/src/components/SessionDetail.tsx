@@ -7523,6 +7523,7 @@ function SessionDetailLoaded({
           <div className="chat-reading" ref={chatReadingRef}>
           <div
             className="detail-main"
+            data-assistant-transcript={assistantRequestDock ? true : undefined}
             data-active-pane={activePane}
             onFocusCapture={() => setActivePane("reader")}
             onPointerDownCapture={(event) => {
