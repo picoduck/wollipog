@@ -11,10 +11,12 @@ import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { fakeScreenRuntime } from "./credential-screen-test-fixture.js";
 
 /** The retained shape from #4851: 38 dependent work items, 36 descendants of which 18 failed and
- * were superseded by verified successors, and thousands of recorded attempt status transitions. */
+ * were superseded by verified successors, and a long recorded attempt status history. The field's
+ * largest campaign had 3,781 transitions; this fixture records more so that rebuilding timelines
+ * exceeds the 5-second health timeout even on a fast machine, while the fixed check never reads them. */
 const ITEMS = 38;
 const SUPERSEDED = 18;
-const STATUS_TRANSITIONS = 3_800;
+const STATUS_TRANSITIONS = 20_000;
 
 function retainedCampaign() {
   const db = ControlPlaneDb.open(":memory:");
@@ -124,16 +126,17 @@ test("local health requests stay responsive while periodic maintenance sweeps re
     response.end('{"ok":true}');
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  let sweeping = true;
+  let sweeps: Promise<number> = Promise.resolve(0);
   try {
     const { port } = server.address() as AddressInfo;
-    let sweeping = true;
     // The control plane's 5-second maintenance timers, back to back: each sweep yields only between runs.
-    const sweeps = (async () => {
+    sweeps = (async () => {
       // Yield first, so the first health request is already timed when the first sweep starts.
       await new Promise((resolve) => setImmediate(resolve));
       let runs = 0;
       const started = Date.now();
-      while (runs < 5 || Date.now() - started < 1_000) {
+      while (sweeping && (runs < 5 || Date.now() - started < 1_000)) {
         h.svc.retryDuePrompts(Date.now());
         h.db.campaignProjection("root");
         runs += 1;
@@ -145,6 +148,7 @@ test("local health requests stay responsive while periodic maintenance sweeps re
     const latencies: number[] = [];
     while (sweeping) {
       const sent = performance.now();
+      // The field's local health check gave up after 5 seconds.
       const response = await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(5_000) });
       assert.equal(response.status, 200);
       await response.text();
@@ -152,11 +156,14 @@ test("local health requests stay responsive while periodic maintenance sweeps re
     }
     assert.ok(await sweeps >= 5);
     assert.ok(latencies.length > 0, "a health request was served during the sweeps");
-    // Before #4851 one sweep of this history held the event loop for seconds. Generous enough for a slow
-    // CI machine, far below the 5-second health timeout that failed in the field.
+    // Before #4851 a sweep of this history held the event loop past the 5-second health timeout; after it
+    // the slowest response took about 0.6 s locally and about three times that on a loaded CI runner.
     const worst = Math.max(...latencies);
-    assert.ok(worst < 1_500, `slowest health response during maintenance took ${Math.round(worst)} ms`);
+    assert.ok(worst < 4_000, `slowest health response during maintenance took ${Math.round(worst)} ms`);
   } finally {
+    // A failed probe must not leave a sweep running against the closed database.
+    sweeping = false;
+    await sweeps.catch(() => 0);
     await new Promise<void>((resolve) => server.close(() => resolve()));
     h.db.close();
   }
