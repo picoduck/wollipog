@@ -26,6 +26,7 @@ import { useTimelineClock } from "../timeline-clock.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
+import { useIsMobile } from "./useIsMobile.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { Checkbox, SegmentedControl } from "./ui/ChoiceControls.js";
 
@@ -138,11 +139,14 @@ type DelegationEditorProps = { onClose: () => void } & (
 export function AssistantDecisionDelegationDialog(props: DelegationEditorProps) {
   const { onClose } = props;
   const isDefault = "defaultGrant" in props;
+  const phone = useIsMobile();
+  const saveInHeader = phone && !isDefault;
   const draft = !isDefault && props.draft === true;
   const threadGrant = isDefault ? null : props.delegation.grant;
   const grant = isDefault ? props.defaultGrant : threadGrant;
   const evidenceReview = isDefault ? undefined : props.evidenceReview;
   const form = useId();
+  const descriptionId = useId();
   const expiryHelp = useId();
   const { confirm } = useFeedback();
   const projects = useStoreSelector((state) => state.projects);
@@ -245,25 +249,32 @@ export function AssistantDecisionDelegationDialog(props: DelegationEditorProps) 
   };
 
   const categoryNotes = allCategories.filter((category) => !selected.includes(category) || unavailable[category]);
+  const description = isDefault ? "New threads start with these permissions. Existing threads keep their own grants."
+    : "Choose which decisions this Assistant thread may resolve on your behalf. Its decisions are attributed to the thread.";
+  const saveButton = <BusyButton className="btn primary" form={form} type="submit" busy={busy}
+    progress="Saving delegation…">{draft ? "Use Delegation Settings" : "Save Delegation"}</BusyButton>;
+  const revokeButton = threadGrant && !draft && <button className="btn ghost danger delegation-revoke" type="button" disabled={busy}
+    onClick={() => void revoke()}>Revoke Delegation</button>;
 
   return <Modal title={isDefault ? "Decision Delegation for New Threads" : "Decision Delegation"} size="lg"
     className="delegation-dialog" phoneSheet="full"
-    description={isDefault ? "New threads start with these permissions. Existing threads keep their own grants."
-      : "Choose which decisions this Assistant thread may resolve on your behalf. Its decisions are attributed to the thread."}
+    description={saveInHeader ? undefined : description}
+    describedBy={saveInHeader ? descriptionId : undefined}
+    headerActions={saveInHeader ? saveButton : undefined}
     onClose={busy ? () => {} : onClose}
-    footer={<>
-      {threadGrant && !draft && <button className="btn ghost danger delegation-revoke" type="button" disabled={busy}
-        onClick={() => void revoke()}>Revoke Delegation</button>}
+    footer={saveInHeader ? undefined : <>
+      {revokeButton}
       <button className="btn ghost" type="button" disabled={busy} onClick={onClose}>Cancel</button>
-      <BusyButton className="btn primary" form={form} type="submit" busy={busy}
-        progress="Saving delegation…">{draft ? "Use Delegation Settings" : "Save Delegation"}</BusyButton>
+      {saveButton}
     </>}>
     <form id={form} onSubmit={(event) => { event.preventDefault(); void save(); }}>
       <fieldset className="assistant-fields form" disabled={busy}>
+        {saveInHeader && <p id={descriptionId} className="muted">{description}</p>}
         {threadGrant && <Notice compact role="status" tone={expired ? "neutral" : "success"}
           title={expired ? "Expired Delegation" : "Active Delegation"}>
           {formatAssistantDelegationSummary(threadGrant, now)}
         </Notice>}
+        {saveInHeader && revokeButton}
         <SegmentedControl label="Delegation Mode" options={modes} value={mode} onChange={(next) => {
           setMode(next);
           setError(null);
