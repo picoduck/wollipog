@@ -25,6 +25,7 @@ import { Skeleton } from "./common.js";
 import { useDismissiblePopover } from "./interactions.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { ChoiceRows } from "./ui/ChoiceControls.js";
+import { useIsMobile } from "./useIsMobile.js";
 
 export const THREADS_UNAVAILABLE_MESSAGE =
   "Assistant threads aren't available on this control plane yet. Update Wollipog to start one.";
@@ -224,11 +225,12 @@ export function NewAssistantThreadComposer({ onCancel, onCreated }: {
   );
 }
 
-function ThreadOption({ label, value, disabled, className, children }: {
+function ThreadOption({ label, value, disabled, className, fitWithinViewport, children }: {
   label: string;
   value: string;
   disabled: boolean;
   className?: string;
+  fitWithinViewport?: boolean;
   children: (close: () => void) => ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -245,6 +247,10 @@ function ThreadOption({ label, value, disabled, className, children }: {
       anchor={{ trigger: popover.triggerRef }} boundary=".new-assistant-thread" kind="popover" role="dialog"
       label={label} className={className ? "new-assistant-option-panel " + className : "new-assistant-option-panel"}
       id={popover.panelId} tabIndex={-1}
+      fitWithinViewport={fitWithinViewport}
+      onScroll={fitWithinViewport
+        ? (event) => event.currentTarget.toggleAttribute("data-scrolled", event.currentTarget.scrollTop > 0)
+        : undefined}
       onDismiss={close} onKeyDown={popover.onPanelKeyDown}
       head={<div className="menu-head persistent">
         <span className="menu-head-title">{label}</span>
@@ -261,6 +267,7 @@ function ThreadAccountOption({ choices, value, disabled, onChange }: {
   disabled: boolean;
   onChange: (value: string) => void;
 }) {
+  const phone = useIsMobile();
   const accounts = choices?.accounts ?? [];
   const labels = accounts.map(({ label }) => label);
   const [revealed, toggle] = useAccountIdentifierReveal(JSON.stringify(accounts.map(({ accountRef, label }) => [accountRef, label])));
@@ -272,20 +279,26 @@ function ThreadAccountOption({ choices, value, disabled, onChange }: {
   const unavailable = accounts.flatMap((account, index) => account.reason ? [{
     ref: account.accountRef, title: titles[index]!,
     reason: "This account " + PROVIDER_ACCOUNT_SKIP_TEXT[account.reason] +
-      (account.retryAt === undefined ? "" : account.reason === "cooldown"
-        ? ". Try again after " + formatCalendarTime(account.retryAt)
-        : " until " + formatCalendarTime(account.retryAt)) + ".",
+      (account.retryAt === undefined ? "" : account.reason === "usage_exhausted"
+        ? " until " + formatCalendarTime(account.retryAt)
+        : ". Try again after " + formatCalendarTime(account.retryAt)) + ".",
   }] : []);
   const usePolicy = !choices || canUseMachineAccountPolicy(choices);
   const options = usePolicy ? [{ value: MACHINE_ACCOUNT_POLICY, title: policyTitle }, ...eligible] : eligible;
   return <ThreadOption label="Account" value={value === MACHINE_ACCOUNT_POLICY ? policyTitle : titles[selectedIndex] ?? "Choose"}
-    disabled={disabled} className="new-assistant-account-panel">
+    disabled={disabled} className="new-assistant-account-panel" fitWithinViewport>
     {() => <>
       {labels.some(isPersonalIdentifier) && <AccountIdentifierRevealButton label="Emails" revealed={revealed}
         onToggle={toggle} withText />}
       {options.length > 0 && <ChoiceRows label="Eligible Accounts" value={value} onChange={onChange} options={options} />}
       {(choices?.unavailable || choices?.policyRefusal) && <p>{choices.unavailable ?? choices.policyRefusal}</p>}
-      {unavailable.length > 0 && <details className="new-assistant-unavailable">
+      {unavailable.length > 0 && <details className="new-assistant-unavailable" onToggle={(event) => {
+        const group = event.currentTarget;
+        const panel = group.closest(".new-assistant-account-panel");
+        if (phone && group.open && panel && panel.scrollHeight > panel.clientHeight) {
+          group.querySelector("summary")?.scrollIntoView({ block: "start" });
+        }
+      }}>
         <summary className="btn">Unavailable <span className="count">{unavailable.length}</span></summary>
         <ul>{unavailable.map((account) => <li key={account.ref}>
           <strong>{account.title}</strong><span>{account.reason}</span>

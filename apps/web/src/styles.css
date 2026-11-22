@@ -13219,6 +13219,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   margin-block-start: 0;
   border-bottom: 1px solid var(--border);
 }
+.new-assistant-account-panel[data-scrolled] > .menu-head { box-shadow: var(--elev-2); }
 @media (min-width: 761px) {
   .new-assistant-account-panel .choice-rows { gap: var(--space-1); }
   .new-assistant-account-panel .choice-row { min-height: 32px; padding-block: var(--space-1); }
@@ -13237,6 +13238,10 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 .new-assistant-unavailable strong { color: var(--text); }
 @media (max-width: 760px) {
+  .popover.new-assistant-account-panel:has(.new-assistant-unavailable[open]) {
+    max-height: calc(100dvh - var(--keyboard-inset, 0px));
+    scroll-padding-block-start: var(--bar-h);
+  }
   .new-assistant-thread-body { flex: 1; padding-block-start: var(--space-4); }
   .new-assistant-thread-actions {
     padding-block: var(--space-2);

@@ -471,6 +471,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
             <ThreadList
               list={unsentFirstMessage && list.kind === "ready" ? { ...list, threads: threads.map(titleForDisplay) } : list}
               selectedId={threadId ?? null}
+              unsentSessionId={unsentFirstMessage?.sessionId}
               onOpen={openThread}
               onNewThread={startThread}
               onRetry={() => void load()}
@@ -598,9 +599,10 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
 }
 
 /** The list pane's threads and New Thread action. */
-function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
+function ThreadList({ list, selectedId, unsentSessionId, onOpen, onNewThread, onRetry }: {
   list: ListState;
   selectedId: string | null;
+  unsentSessionId?: string;
   onOpen: (threadId: string) => void;
   onNewThread: () => void;
   onRetry: () => void;
@@ -660,7 +662,7 @@ function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
                   <span className="row-body">
                     <span className="row-line">
                       <span className="row-title" title={assistantThreadTitle(thread)}>{assistantThreadTitle(thread)}</span>
-                      {threadStatusBadge(thread)}
+                      {threadStatusBadge(thread, thread.sessionId === unsentSessionId)}
                     </span>
                     <span className="row-sub">
                       {assistantThreadHarnessLabel(thread.harness)} · {relativeTime(thread.lastActivityAt)}

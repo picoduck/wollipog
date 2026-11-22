@@ -145,7 +145,8 @@ for (const theme of ["light", "dark"] as const) {
         await unavailable.locator("summary").click();
         await expect(unavailable).toHaveJSProperty("open", true);
         await expect(unavailable.locator("li")).toHaveCount(4);
-        await account.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+        await expect.poll(() => account.evaluate((panel) => panel.scrollHeight - panel.clientHeight)).toBeLessThanOrEqual(1);
+        await expectFullyInViewport(eligible.getByText("Machine Policy · Studio Subscription"), "First eligible choice");
         for (const reason of [
           "This account needs sign-in.",
           "This account can't run in this agent's environment.",
@@ -155,9 +156,9 @@ for (const theme of ["light", "dark"] as const) {
         await expect(unavailable.getByText(/usage limit until .+\./)).toBeVisible();
         expect(await account.evaluate((panel) => {
           const heading = panel.querySelector(".menu-head")!;
-          const clip = panel.getBoundingClientRect();
           const head = heading.getBoundingClientRect();
-          return Math.abs(head.top - clip.top) <= 2 &&
+          const firstChoice = panel.querySelector(".choice-row")!.getBoundingClientRect();
+          return firstChoice.top >= head.bottom &&
             heading.contains(document.elementFromPoint(head.left + 32, head.top + 4));
         })).toBe(true);
         await expectNoHorizontalOverflow(account, "Expanded account choices");
@@ -223,6 +224,7 @@ for (const theme of ["light", "dark"] as const) {
         const notice = pane(page).getByText("First Message Wasn't Sent", { exact: true });
         const title = phone ? page.locator("#page-title") : pane(page).locator(".assistant-thread-bar h2");
         await expect(title).toHaveText("Untitled Thread");
+        if (!phone) await expect(list(page).locator("[aria-current]")).not.toContainText("Done");
         await expect(notice).toBeVisible();
         await expect(pane(page)).toContainText("The Machine did not accept the message.");
         const draft = pane(page).locator(".composer textarea");
