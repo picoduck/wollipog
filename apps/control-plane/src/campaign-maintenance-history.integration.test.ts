@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
   type RunnerMetadata } from "@wollipog/protocol";
-import { ControlPlaneDb } from "./db.js";
+import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
@@ -80,8 +80,83 @@ function retainedCampaign() {
   }
   db.raw().exec("COMMIT");
   db.updateSessionStatus("root", "idle", Date.now());
-  return { db, svc, failed, items };
+  return { db, svc, hub, failed, items };
 }
+
+test("prompt retry maintenance avoids full session reads across retained campaigns (#4857)", async (t) => {
+  const { db, svc, hub } = retainedCampaign();
+  try {
+    const identity = db.localIdentityContext();
+    const scope = { organizationId: identity.organizationId, owner: { kind: "user" as const, userId: identity.userId } };
+    const now = Date.now();
+    const refused: string[] = [];
+    for (let campaign = 0; campaign < 7; campaign++) {
+      const root = `campaign-${campaign}`;
+      const policy = db.sessionOrchestratorPolicy("root")!;
+      policy.control = undefined; // Enable a fresh boundary for this campaign through the service.
+      policy.behavior.completion = "stop_and_archive";
+      const session = { runnerId: "r", workspaceId: "w", agentId: "agent", useWorktree: false,
+        driver: "codex-app-server" as const, config: { model: "gpt-6.1-sol" }, now, scope };
+      db.createSession({ ...session, id: root, title: root, role: "orchestrator", orchestratorPolicy: policy,
+        parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } });
+      db.updateSessionStatus(root, "running", now);
+      const enabled = svc.setCampaignControl(root, { mode: "full_control", objective: "Implement #4851",
+        operations: ["implementation_question", "question", "tool_approval"], delegatablePolicyIds: [] }, 1,
+      { ...identity, kind: "human", actorId: identity.userId });
+      assert.ok(enabled.ok, enabled.error ?? "admission failed");
+      for (let index = 0; index < 14; index++) {
+        const id = `${root}-child-${index}`;
+        db.createSession({ ...session, id, title: id, parentSessionId: root });
+        if (index >= (campaign < 5 ? 4 : 3)) {
+          db.updateSessionStatus(id, "idle", now);
+          if (index % 2) db.setSessionArchived(id, true, now);
+          continue;
+        }
+        const path = `/worktrees/${id}`;
+        db.setWorktreePath(id, path);
+        db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?")
+          .run(JSON.stringify([{ id, path, branch: "fix/fixture", source: "created" }]), id);
+        db.updateSessionStatus(id, "stopped", now, RUNNER_REPORTED_STOP);
+        const seq = db.appendEvent(id, { kind: "agent_message", text: "Done.", final: true }, now).seq;
+        db.verifyCampaignChildReport(root, id, seq, now);
+        db.setSessionArchived(id, true, now);
+        db.recordCampaignWorktreeCleanup(id, path, id, "refused", "the worktree has uncommitted changes", now);
+        refused.push(id);
+      }
+      db.updateSessionStatus(root, "idle", now);
+    }
+    assert.equal(refused.length, 26);
+    assert.deepEqual(db.archivedChildrenWithRefusedWorktrees(""), refused);
+    const reconciled: string[] = [];
+    hub.requestFromRunner = async (_runner, requestId, message) => {
+      assert.equal(message.type, "session_worktree");
+      assert.equal(message.operation, "reconcile_removal");
+      reconciled.push(message.sessionId);
+      return { type: "session_worktree_result", requestId, sessionId: message.sessionId,
+        operation: "reconcile_removal", ok: false, error: "The worktree is still present." };
+    };
+    const childIds = new Set(db.listOrchestratorCampaignSessionIds().flatMap(id => db.campaignDescendantIds(id)));
+    let calls: Array<{ id: string; full: boolean }> = [];
+    const getSession = db.getSession.bind(db);
+    db.getSession = (id, options) => {
+      calls.push({ id, full: options?.includeCampaignProjection !== false });
+      return getSession(id, options);
+    };
+    const samples = [];
+    for (const elapsed of [0, 5_000, 10_000, 15_000, 20_000, 25_000, 30_000]) {
+      calls = [];
+      const started = performance.now();
+      svc.retryDuePrompts(now + elapsed);
+      samples.push({ elapsed, ms: Math.round((performance.now() - started) * 10) / 10, calls: calls.length,
+        full: calls.filter(call => call.full).length, children: calls.filter(call => childIds.has(call.id)).length });
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+    t.diagnostic(JSON.stringify(samples));
+    assert.deepEqual(reconciled, [...refused, ...refused], "both worktree sweeps reconcile the same refused generations");
+    for (const id of refused) assert.equal(db.campaignWorktreeCleanup(id)[0]?.status, "refused");
+    assert.ok(samples.every(sample => sample.full === 0 && sample.children === 0), JSON.stringify(samples));
+  } finally { db.close(); }
+});
 
 test("supersession checks read no timing history and keep their verdicts (#4851)", () => {
   const h = retainedCampaign();

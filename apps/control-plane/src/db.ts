@@ -22672,6 +22672,44 @@ export class ControlPlaneDb {
     `).all(campaignSessionId) as unknown as Array<{ id: string }>).map((row) => row.id);
   }
 
+  /** The recovery sweep needs lifecycle and request facts, without rebuilding session views.
+   * Read steering receipts even for archived children when an uncertain one may survive. */
+  campaignRecoveryDescendants(campaignId: string): Array<Pick<SessionView,
+    "id" | "runnerId" | "workspaceId" | "driver" | "status" | "archived" | "eventEpoch" |
+    "pendingApproval" | "holds" | "steeringAttempts" | "backgroundWorkState"> & { stopStatus?: ArchiveStatus }> {
+    const rows = this.stmt(`
+      SELECT s.id, s.runner_id, s.workspace_id, s.driver, s.status, s.archived, s.event_epoch,
+        s.pending_approval, s.worktree_recovery, s.queue_hold, s.background_work_state,
+        CASE WHEN stop.session_id IS NULL THEN NULL
+          WHEN stop.failed_at IS NULL THEN 'stop_pending' ELSE 'stop_failed' END AS stop_status,
+        EXISTS (SELECT 1 FROM session_steering_attempts attempt
+          WHERE attempt.session_id=s.id AND attempt.disposition='uncertain'
+            AND attempt.receipt_dismissed_at IS NULL) AS uncertain_steering
+      FROM sessions s LEFT JOIN session_stop_intents stop ON stop.session_id=s.id
+      WHERE s.id IN (SELECT value FROM json_each(?)) ORDER BY s.id
+    `).all(JSON.stringify(this.campaignDescendantIds(campaignId))) as unknown as Array<Pick<SessionRow,
+      "id" | "runner_id" | "workspace_id" | "driver" | "status" | "archived" | "event_epoch" |
+      "pending_approval" | "worktree_recovery" | "queue_hold" | "background_work_state"> & {
+        stop_status: ArchiveStatus | null; uncertain_steering: number;
+      }>;
+    return rows.map(row => {
+      const status = row.status as SessionStatus;
+      const archived = row.archived === 1;
+      const observingRequests = !archived && row.stop_status === null;
+      return {
+        id: row.id, runnerId: row.runner_id, workspaceId: row.workspace_id,
+        driver: (row.driver as AgentDriverKind) ?? "acp", status, archived, eventEpoch: row.event_epoch ?? 0,
+        stopStatus: row.stop_status ?? undefined,
+        backgroundWorkState: parseBackgroundWorkState(row.background_work_state),
+        pendingApproval: observingRequests ? parseJson<PendingApproval>(row.pending_approval) : null,
+        holds: observingRequests
+          ? this.sessionHoldsFor(row.id, row.worktree_recovery, isTerminal(status) ? null : row.queue_hold)
+          : undefined,
+        steeringAttempts: row.uncertain_steering ? this.listSteeringAttempts(row.id) : undefined,
+      };
+    });
+  }
+
   hasCompletedAgentReportAt(sessionId: string, eventSeq: number): boolean {
     if (!Number.isSafeInteger(eventSeq) || eventSeq < 1) return false;
     return Boolean(this.stmt(
@@ -22918,14 +22956,20 @@ export class ControlPlaneDb {
   }
 
   /** The root campaign whose verification of this child is current. Verifications are keyed by the
-   * resolved root (#1462); a row under any other id is one the projection never counts. */
-  campaignForVerifiedChild(childSessionId: string): string | null {
+   * resolved root (#1462); a row under any other id is one the projection never counts. A synchronous
+   * sweep can reuse resolved root policies, but each child's report must still be verified. */
+  campaignForVerifiedChild(childSessionId: string, rootPolicies?: Map<string, OrchestratorCampaignPolicy | null>): string | null {
     const row = this.stmt(
       `SELECT campaign_session_id AS id FROM orchestrator_campaign_child_reports
        WHERE child_session_id=? ORDER BY verified_at DESC LIMIT 1`,
     ).get(childSessionId) as { id: string } | undefined;
-    return row && this.resolvedCampaignSessionId(row.id) === row.id &&
-      this.campaignChildReportVerified(row.id, childSessionId) ? row.id : null;
+    if (!row) return null;
+    if (rootPolicies && !rootPolicies.has(row.id)) {
+      const root = this.resolvedCampaignSession(row.id);
+      rootPolicies.set(row.id, root?.id === row.id ? orchestratorCampaignPolicyFromJson(root.orchestrator_policy) : null);
+    }
+    const isRoot = rootPolicies ? Boolean(rootPolicies.get(row.id)) : this.resolvedCampaignSessionId(row.id) === row.id;
+    return isRoot && this.campaignChildReportVerified(row.id, childSessionId) ? row.id : null;
   }
 
   campaignReportRecoverySessionIds(campaignSessionId: string): string[] {
@@ -23703,6 +23747,22 @@ export class ControlPlaneDb {
        ORDER BY s.id LIMIT 64`,
     ).all(after, ...(runnerId ? [runnerId] : [])) as Array<{ id: string }>;
     return rows.map(row => row.id);
+  }
+
+  /** Only the inventory and archive gate are needed before worktree retirement. */
+  campaignWorktreeRetirementState(sessionId: string): Pick<SessionView, "runnerId" | "archived" | "worktrees"> & {
+    archivePending: boolean;
+  } | null {
+    const row = this.stmt(`
+      SELECT s.runner_id, s.archived, s.worktrees, stop.archive_after_stop
+      FROM sessions s LEFT JOIN session_stop_intents stop ON stop.session_id=s.id WHERE s.id=?
+    `).get(sessionId) as {
+      runner_id: string; archived: number; worktrees: string | null; archive_after_stop: number | null;
+    } | undefined;
+    if (!row) return null;
+    const worktrees = parseJson<SessionWorktreeView[]>(row.worktrees);
+    return { runnerId: row.runner_id, archived: row.archived === 1, archivePending: row.archive_after_stop === 1,
+      worktrees: Array.isArray(worktrees) ? worktrees : undefined };
   }
 
   campaignWorktreeCleanup(sessionId: string): NonNullable<OrchestratorCampaignProjection["cleanupWorktrees"]> {
