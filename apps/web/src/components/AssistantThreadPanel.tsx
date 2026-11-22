@@ -122,7 +122,7 @@ export function AssistantThreadPanel({ state, thread, work, model, effort, onSet
             ? <AssistantThreadDecisionHistory threadId={thread.id} onCount={setDecisionCount} />
             : <p className="muted">This control plane does not support delegated decision history.</p>}
         </>}
-        {tab === "Work" && <AssistantWorkPanel work={work} onReview={(sessionId, request) => {
+        {tab === "Work" && <AssistantWorkPanel work={work} onReview={thread.status === "archived" ? undefined : (sessionId, request) => {
           if (covering) flushSync(state.close);
           onReview(sessionId, request);
         }} />}

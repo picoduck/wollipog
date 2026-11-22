@@ -10,6 +10,7 @@ import { LOCAL_OWNER_USER_ID, PERSONAL_ORGANIZATION_ID } from "./identity.js";
 
 const PREFIX = "idx_session_events_tool_call";
 const WIDER = "idx_session_events_tool_call_id";
+const ASSISTANT_REPLY = "idx_session_events_assistant_reply";
 const LEGACY_PREFIX_SQL = `CREATE INDEX ${PREFIX}
   ON session_events(session_id, json_extract(payload,'$.toolCallId')) WHERE kind='tool_call'`;
 const DISTINCT_SQL = `SELECT COUNT(DISTINCT json_extract(payload,'$.toolCallId')) AS n
@@ -68,7 +69,7 @@ function writeLegacy(location: string, includeWider: boolean, sessionCount = 2):
     }
     const definitions = indexDefinitions(template.raw());
     for (const [name, sql] of Object.entries(definitions)) {
-      if (name !== WIDER || includeWider) legacy.exec(sql);
+      if (name !== ASSISTANT_REPLY && (name !== WIDER || includeWider)) legacy.exec(sql);
     }
     legacy.exec(LEGACY_PREFIX_SQL);
     const insert = legacy.prepare(`INSERT INTO session_events(session_id,seq,runner_seq,ts,kind,payload)
@@ -94,9 +95,10 @@ for (const includeWider of [false, true]) {
       const expected = writeLegacy(location, includeWider);
       const db = ControlPlaneDb.open(location);
       try {
-        assert.deepEqual(indexDefinitions(db.raw()), expected, "only the legacy prefix is retired");
-        assert.equal(Object.keys(expected).length, 8);
+        assert.deepEqual(indexDefinitions(db.raw()), expected, "the current indexes replace the legacy set");
+        assert.equal(Object.keys(expected).length, 9);
         assert.ok(expected.idx_session_events_user_message, "prompt recall keeps its user-only index");
+        assert.ok(expected[ASSISTANT_REPLY], "Assistant previews get their index on upgrade");
         assert.equal(db.countToolCalls("s0"), 4);
         assertCounts(db);
         assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM session_events").get()!.n, 9);

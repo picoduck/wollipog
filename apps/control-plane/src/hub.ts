@@ -1691,7 +1691,13 @@ export class Hub {
         (principal === undefined || this.db.canAccessProject(principal, msg.projectId));
     }
     // A thread is its owner's conversation; even another owner of the organization never sees it.
-    if (msg.type === "assistant_thread_upsert") return this.reminderPrincipalMatches(msg.userId, principal);
+    if (msg.type === "assistant_thread_upsert") {
+      if (!this.reminderPrincipalMatches(msg.userId, principal)) return false;
+      const thread = this.db.assistantThreads.get(msg.thread.id);
+      return thread !== null && thread.owner_user_id === msg.userId && (principal === undefined
+        ? thread.organization_id === PERSONAL_ORGANIZATION_ID
+        : principal.kind === "human" && principal.role === "owner" && principal.organizationId === thread.organization_id);
+    }
     if (principal === undefined) return true;
     switch (msg.type) {
       case "runner_upsert":

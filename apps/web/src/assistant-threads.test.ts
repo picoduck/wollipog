@@ -104,16 +104,18 @@ test("only an organization owner has threads, in the control plane's own words",
   assert.equal(ASSISTANT_THREAD_TITLE_MAX, 120, "the control plane's title limit");
 });
 
-test("thread events apply in order: a change replaces its row, a new thread joins, an archive leaves", () => {
+test("thread events apply in order and retain archives for the archive list", () => {
   const list = [thread({ id: "thr_a", lastActivityAt: 10 }), thread({ id: "thr_b", lastActivityAt: 20 })];
   const events = [
     { seq: 1, thread: thread({ id: "thr_a", title: "Already Applied", lastActivityAt: 15 }) },
     { seq: 2, thread: thread({ id: "thr_a", title: "Renamed", lastActivityAt: 30 }) },
     { seq: 3, thread: thread({ id: "thr_c", lastActivityAt: 25 }) },
-    { seq: 4, thread: thread({ id: "thr_b", status: "archived", archivedAt: 40 }) },
+    { seq: 4, thread: thread({ id: "thr_b", status: "archived", archivedAt: 40, lastActivityAt: 40 }) },
   ];
   const next = applyAssistantThreadEvents(list, events, 1);
-  assert.deepEqual(next.map((item) => [item.id, item.title]), [["thr_a", "Renamed"], ["thr_c", "Triage Open Issues"]]);
+  assert.deepEqual(next.map((item) => [item.id, item.title, item.status]), [
+    ["thr_b", "Triage Open Issues", "archived"], ["thr_a", "Renamed", "working"], ["thr_c", "Triage Open Issues", "working"],
+  ]);
   // Nothing newer than the read: the read stands as it was.
   assert.deepEqual(applyAssistantThreadEvents(list, events, 4).map((item) => item.id), ["thr_b", "thr_a"]);
 });

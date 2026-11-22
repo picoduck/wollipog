@@ -653,6 +653,8 @@ export type SessionDetailProps = {
   assistantPanel?: (onOverlayChange: (overlay: boolean) => void) => ReactNode;
   /** A host-owned request dock between the reader and the composer notice slot. */
   assistantRequestDock?: (focusComposer: () => void) => ReactNode;
+  /** The thread's archive takes effect even while its backing session is still stopping. */
+  archivedAssistantThread?: boolean;
   /** Usage warnings from the Assistant thread that owns this conversation. */
   assistantSpendingNotices?: readonly SessionNoticeEntry[];
   assistantThreadHealth?: {
@@ -1194,6 +1196,7 @@ function SessionDetailLoaded({
   header,
   assistantPanel,
   assistantRequestDock,
+  archivedAssistantThread = false,
   assistantSpendingNotices = [],
   assistantThreadHealth,
   providerCommandAttachmentPolicy = "send",
@@ -3794,7 +3797,8 @@ function SessionDetailLoaded({
   // An archived session is also stopped; its notice is in the slot, so the slot's order decides.
   const promptUnavailableReason = composerUnavailableReason({
     refusal: promptRefusal,
-    archivedReason: archivedOrder ? sessionNoticeReason : undefined,
+    archivedReason: archivedAssistantThread ? "This thread is archived and read-only."
+      : archivedOrder ? sessionNoticeReason : undefined,
     status: session.status,
     runnerOnline,
     machineName: runnerDisp.name,
@@ -7350,6 +7354,7 @@ function SessionDetailLoaded({
       )}    </>
   ) : null;
 
+  const canActOnTranscript = mode === "expanded" && !historyPreview.active && !archivedAssistantThread;
   return (
     <div className={`session-detail ${mode}`} data-session-surface-id={session.id}>
       {/* Reports each render of this view itself, never one of the transcript alone (#2763). */}
@@ -7666,7 +7671,7 @@ function SessionDetailLoaded({
                 // or is cached while disconnected is its notice alone, never the notice above "Start
                 // the Conversation" or "Starting {Agent}".
                 transcript.notice !== "error" && transcript.notice !== "stale" && <TranscriptEmptyState
-                  kind={transcriptEmptyKind(session)}
+                  kind={transcriptEmptyKind(archivedAssistantThread ? { ...session, archived: true } : session)}
                   agent={sessionAgentLabel(session.agentName, session.driver, session.agentId)}
                   project={currentProjectName ?? undefined}
                   machine={runnerDisp.name || undefined}
@@ -7708,19 +7713,19 @@ function SessionDetailLoaded({
                         onAnchorLost={followTail.onAnchorLost}
                         // Keep checkpoint actions discoverable when the runner or worktree cannot
                         // currently satisfy them; activation still uses the existing API contract.
-                        onRewind={mode === "expanded" && !historyPreview.active ? onRewind : undefined}
+                        onRewind={canActOnTranscript ? onRewind : undefined}
                         rewindUnavailableReason={rewindUnavailableReason}
-                        onFork={mode === "expanded" && !historyPreview.active ? onFork : undefined}
-                        handoff={mode === "expanded" && !historyPreview.active ? handoffControls : undefined}
-                        turnRetry={mode === "expanded" && !historyPreview.active ? turnRetry : undefined}
-                        onEditAndResend={mode === "expanded" && !historyPreview.active ? openResendAction : undefined}
+                        onFork={canActOnTranscript ? onFork : undefined}
+                        handoff={canActOnTranscript ? handoffControls : undefined}
+                        turnRetry={canActOnTranscript ? turnRetry : undefined}
+                        onEditAndResend={canActOnTranscript ? openResendAction : undefined}
                         editAndResendUnavailableReason={promptUnavailableReason ?? undefined}
-                        onEditInFork={mode === "expanded" && !historyPreview.active ? openForkEditAction : undefined}
+                        onEditInFork={canActOnTranscript ? openForkEditAction : undefined}
                         editInForkAvailabilityByItem={mode === "expanded" ? editInForkAvailabilityByItem : undefined}
                         forkAvailabilityByTurn={mode === "expanded" ? forkAvailabilityByTurn : undefined}
                         revealRequest={timelineRevealRequest}
                         onRevealHandled={handleTimelineReveal}
-                        questionContext={historyPreview.active ? undefined : timelineQuestionContext}
+                        questionContext={historyPreview.active || archivedAssistantThread ? undefined : timelineQuestionContext}
                         subagentStatus={timelineSubagentStatus}
                       />
                     </Profiler>
@@ -7730,7 +7735,7 @@ function SessionDetailLoaded({
               {/* One place for every transcript state, so a pending prompt or receipt never remounts
                   (and drops the focus it holds) when history arrives; while history loads or fails, a
                   failed message and the recovery receipts still keep their actions (#2171, #2500). */}
-              <PendingPromptBubbles
+              {!archivedAssistantThread && <PendingPromptBubbles
                 prompts={session.pendingPrompts ?? []}
                 deliveredCommandIds={deliveredPromptCommandIds}
                 liveQueueIds={liveQueueIds}
@@ -7742,7 +7747,7 @@ function SessionDetailLoaded({
                 onCancelLive={(commandId) => void cancelLivePendingPrompt(commandId)}
                 onDismiss={(commandId) => void resolvePendingPrompt(commandId, "dismiss")}
                 onRetry={(commandId) => void resolvePendingPrompt(commandId, "retry")}
-              />
+              />}
               {showOptimistic && pending && (
                 <div className="tl-row user">
                   <div className="tl-bubble">
@@ -7795,7 +7800,7 @@ function SessionDetailLoaded({
           </div>
           {assistantRequestDock?.(focusComposerOrTitle)}
           {/* In Assistant threads requests stay above the composer's notice slot. */}
-          {mode === "expanded" && requestDockLead && (
+          {mode === "expanded" && requestDockLead && !archivedAssistantThread && (
             <SessionNoticeSlot
               sessionId={session.id}
               entries={noticesBelowDock ? [] : sessionNotices}
@@ -7810,7 +7815,12 @@ function SessionDetailLoaded({
               (#2843). A phone's terminal sheet takes the composer's place, so it hides it too (#2866).
               It stays mounted: the draft returns with it, and Answer Mode keeps a secret answer only
               in its own state. */}
-          {mode === "expanded" && (
+          {archivedAssistantThread && (
+            <Notice tone="info" title="Thread Archived" className="assistant-thread-archive-notice">
+              This thread is read-only.
+            </Notice>
+          )}
+          {mode === "expanded" && !archivedAssistantThread && (
             <div
               className="composer"
               hidden={composerHiddenOnPhone}

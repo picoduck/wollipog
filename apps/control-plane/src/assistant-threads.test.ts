@@ -865,3 +865,51 @@ test("thread health is additive on owner reads and upserts, and can clear withou
     assert.deepEqual((await h.call("GET", path + "/" + thread.id)).body.thread.health, {});
   } finally { await h.close(); }
 });
+
+test("thread previews summarize attention, spending and the latest reply for the exact owner", async () => {
+  const h = await harness();
+  try {
+    const path = "/api/assistant-threads";
+    const thread = (await h.call("POST", path, {})).body.thread as AssistantThread;
+    const { sessionId } = thread;
+    assert.equal(thread.preview, undefined);
+    const otherOrganization = new Dashboard();
+    const otherPrincipal = { ...h.owner, organizationId: "org_other" };
+    assert.ok(h.hub.addUiClient(otherOrganization, { deviceId: "other-org-device", principal: otherPrincipal, close() {} }));
+    const latest = async () => (await h.call("GET", path)).body.threads[0]?.preview;
+    const now = Date.now();
+    const reply = h.db.appendEvent(sessionId, {
+      kind: "agent_message", final: true, text: "I checked the rollout. The upload test\n now passes.",
+    }, now);
+    h.db.updateSessionStatus(sessionId, "idle", now);
+    h.hub.sessionEvent(reply);
+    h.db.appendEvent(sessionId, { kind: "agent_message", text: "A partial reply." }, now + 1);
+    h.db.appendEvent(sessionId, {
+      kind: "agent_message", final: true, parentToolUseId: "child-tool", text: "A child worker reply.",
+    }, now + 2);
+    h.db.appendEvent(sessionId, { kind: "user_message", text: "Do not include a prompt." }, now + 3);
+    assert.equal(await latest(), "The upload test now passes.");
+    assert.equal((await h.call("GET", path + "/" + thread.id)).body.thread.preview, "The upload test now passes.");
+    assert.equal(h.dashboard.threads().at(-1)?.preview, "The upload test now passes.");
+    assert.deepEqual(h.stranger.threads(), []);
+    assert.deepEqual(otherOrganization.threads(), []);
+    for (const other of [otherPrincipal, { ...h.owner, userId: "usr_other_owner" }]) {
+      h.as(other);
+      assert.equal((await h.call("GET", path + "/" + thread.id)).status, 404);
+      assert.deepEqual((await h.call("GET", path + "?includeArchived=true")).body.threads, []);
+    }
+    h.as(h.owner);
+    h.db.raw().prepare("UPDATE sessions SET cost_usd=? WHERE id=?").run(79.93, sessionId);
+    assert.equal(await latest(), "Spent $79.93 of its $25.00 budget.");
+    h.db.setPendingApproval(sessionId, {
+      requestId: "first", title: "Approve the upload test", options: [],
+      additionalRequests: [{ requestId: "second", title: "Review the logs", options: [] }],
+    });
+    assert.equal(await latest(), "Waiting for you: Approve the upload test, and 1 more");
+    h.db.setPendingApproval(sessionId, null);
+    h.db.updateSessionStatus(sessionId, "input_required", now + 4);
+    assert.equal(await latest(), "Waiting for you…");
+    const archived = await h.call("POST", path + "/" + thread.id + "/archive");
+    assert.equal(archived.body.thread.preview, "The upload test now passes.");
+  } finally { await h.close(); }
+});

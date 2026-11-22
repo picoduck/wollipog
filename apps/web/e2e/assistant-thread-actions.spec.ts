@@ -95,7 +95,7 @@ for (const theme of ["light", "dark"] as const) {
         const archive = menu.getByRole("menuitem", { name: "Archive Thread…", exact: true });
         await archive.click();
         const confirm = page.getByRole("dialog", { name: "Archive Thread", exact: true });
-        await expect(confirm).toContainText(`“${title}” leaves the thread list. Its session and transcript are kept.`);
+        await expect(confirm).toContainText(`“${title}” moves to Archived Threads, where you can still read it.`);
         const cancel = confirm.getByRole("button", { name: "Cancel", exact: true });
         const confirmArchive = confirm.getByRole("button", { name: "Archive Thread", exact: true });
         await expect(cancel).toBeFocused();

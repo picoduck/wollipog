@@ -1874,6 +1874,9 @@ CREATE TABLE IF NOT EXISTS session_events (
 CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_session_events_user_message ON session_events(session_id, seq)
   WHERE kind='user_message';
+CREATE INDEX IF NOT EXISTS idx_session_events_assistant_reply ON session_events(session_id, seq)
+  WHERE kind='agent_message' AND json_extract(payload, '$.final') = 1
+    AND json_extract(payload, '$.parentToolUseId') IS NULL;
 CREATE INDEX IF NOT EXISTS idx_session_events_turn_start ON session_events(session_id, seq)
   WHERE kind='user_message' AND COALESCE(json_extract(payload, '$.deliveryIntent'), '')!='steer'
     AND json_type(payload, '$.commandInvocation') IS NULL;
@@ -18115,6 +18118,15 @@ export class ControlPlaneDb {
        FROM session_events WHERE session_id=? AND kind='user_message' ORDER BY seq LIMIT 1`,
     ).get(sessionId) as { text: string | null } | undefined;
     return typeof row?.text === "string" && row.text.length <= 65_536 ? row.text : null;
+  }
+
+  /** Read only the end of the latest complete top-level reply, where its last sentence lives. */
+  latestAssistantReplyTail(sessionId: string): string | undefined {
+    const row = this.stmt(`SELECT substr(json_extract(payload, '$.text'), -8192) AS text
+      FROM session_events WHERE session_id=? AND kind='agent_message'
+        AND json_extract(payload, '$.final') = 1 AND json_extract(payload, '$.parentToolUseId') IS NULL
+      ORDER BY seq DESC LIMIT 1`).get(sessionId) as { text: string | null } | undefined;
+    return row?.text ?? undefined;
   }
 
   /** Bound closure approvals to the most recent delivered, durable queued, immediately sent, or

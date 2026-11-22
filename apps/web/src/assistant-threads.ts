@@ -137,7 +137,7 @@ export interface NumberedAssistantThread {
 
 /**
  * The list with every event after `afterSeq` applied, in order: a changed thread replaces its row,
- * a new one joins, and an archived one leaves. Applying the events newer than a read's start to
+ * a new one joins, and an archived one can move to the Archive. Applying the events newer than a read's start to
  * what the read returned keeps a change that landed while the read was in flight.
  */
 export function applyAssistantThreadEvents(
@@ -149,7 +149,7 @@ export function applyAssistantThreadEvents(
   for (const { seq, thread } of events) {
     if (seq <= afterSeq) continue;
     next = next.filter((candidate) => candidate.id !== thread.id);
-    if (thread.status !== "archived") next.push(thread);
+    next.push(thread);
   }
   return sortAssistantThreads(next);
 }
