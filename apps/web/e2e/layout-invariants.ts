@@ -87,36 +87,45 @@ export async function expectTouchTargets(container: Locator) {
   }
 }
 
-/** Composite translucent backgrounds from the ancestors outward before measuring text contrast. */
+/** Compare the weakest visible text against its computed background. */
 export async function expectTextContrast(root: Locator) {
-  const weakest = await root.evaluate((element) => {
-    const context = document.createElement("canvas").getContext("2d")!;
-    const fill = (color: string) => {
-      context.fillStyle = color;
+  const contrast = () => root.evaluate((element) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const context = canvas.getContext("2d", { willReadFrequently: true })!;
+    const rgb = (value: string) => {
+      context.clearRect(0, 0, 1, 1);
+      context.fillStyle = value;
       context.fillRect(0, 0, 1, 1);
+      return [...context.getImageData(0, 0, 1, 1).data];
     };
-    const luminance = () => Array.from(context.getImageData(0, 0, 1, 1).data.slice(0, 3))
-      .map((channel) => channel / 255)
-      .map((value) => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4)
-      .reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index]!, 0);
+    const luminance = (color: number[]) => color.slice(0, 3).map((channel) => {
+      const value = channel / 255;
+      return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    }).reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index]!, 0);
     const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
     let weakest = { ratio: Infinity, text: "" };
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       const parent = node.parentElement;
-      if (!parent || !node.textContent?.trim() || !parent.getClientRects().length || parent.closest(".sr-only, :disabled")) continue;
-      const layers: string[] = [];
+      if (!parent || !node.textContent?.trim() || !parent.getClientRects().length || parent.closest(':disabled, [aria-disabled="true"], .sr-only')) continue;
+      const layers: number[][] = [];
       for (let layer: Element | null = parent; layer; layer = layer.parentElement) {
-        layers.push(getComputedStyle(layer).backgroundColor);
+        const color = rgb(getComputedStyle(layer).backgroundColor);
+        if (color[3]) layers.push(color);
+        if (color[3] === 255) break;
       }
-      fill("white");
-      layers.reverse().forEach(fill);
-      const background = luminance();
-      fill(getComputedStyle(parent).color);
-      const text = luminance();
-      const ratio = (Math.max(background, text) + 0.05) / (Math.min(background, text) + 0.05);
+      const over = (bottom: number[], top: number[]) => {
+        const alpha = top[3]! / 255;
+        return [0, 1, 2].map(index => top[index]! * alpha + bottom[index]! * (1 - alpha));
+      };
+      const background = layers.reduceRight(over, [255, 255, 255]);
+      const foreground = over(background, rgb(getComputedStyle(parent).color));
+      const [a, b] = [luminance(foreground), luminance(background)].sort((left, right) => right - left);
+      const ratio = (a! + 0.05) / (b! + 0.05);
       if (ratio < weakest.ratio) weakest = { ratio, text: node.textContent.trim() };
     }
     return weakest;
   });
-  expect(weakest.ratio, weakest.text + " contrast against its computed background").toBeGreaterThanOrEqual(4.5);
+  // A selection can enable a button whose foreground and background are still transitioning.
+  await expect.poll(async () => (await contrast()).ratio).toBeGreaterThanOrEqual(4.5);
 }

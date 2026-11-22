@@ -83,7 +83,7 @@ test("the Inbox sums up a thread's requests in one line, and Review opens the th
   await expect(approvals(page).getByRole("button", { name: "Approve Once" })).toHaveCount(0);
   await row.getByRole("button", { name: "Review", exact: true }).click();
   await expect(page).toHaveURL(/path=%2Fassistants%2F(~|%7E)/);
-  const request = page.getByRole("list", { name: "Approvals Needed" }).getByRole("listitem", { name: "Archive Session" });
+  const request = page.getByRole("list", { name: "Pending Requests" }).getByRole("listitem", { name: "Archive Session" });
   await expect(request).toBeVisible();
   await expect(request.locator("dl[aria-label='Arguments']")).toContainText("session-0");
   await request.getByRole("button", { name: "Approve Once", exact: true }).click();
@@ -115,7 +115,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     // Review opens the thread it names.
     await threadRow(page, RELEASE).getByRole("button", { name: "Review", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`path=${encodeURIComponent("/assistants/")}`));
-    await expect(page.getByRole("list", { name: "Approvals Needed" }).getByRole("listitem")).toHaveCount(2);
+    await page.getByRole("button", { name: "Show All", exact: true }).click();
+    await expect(page.getByRole("list", { name: "Pending Requests" }).getByRole("listitem")).toHaveCount(2);
     if (viewport.width > 760) await expect(page.locator(".assistant-thread-bar").getByRole("heading", { level: 2 })).toHaveText(RELEASE);
     else await expect(page.locator(".detail-bar-title")).toHaveText(RELEASE);
   });

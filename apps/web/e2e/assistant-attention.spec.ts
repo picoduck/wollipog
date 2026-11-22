@@ -11,7 +11,7 @@ const rail = (page: Page) => page.getByRole("navigation", { name: "Primary Navig
 const assistants = (page: Page) => rail(page).getByRole("link", { name: "Assistants", exact: true });
 const badge = (destination: Locator) => destination.locator(".count-badge");
 const thread = (page: Page, id: string) => page.locator(`[data-thread-id="${id}"]`);
-const approvals = (page: Page) => page.getByRole("list", { name: "Approvals Needed" });
+const approvals = (page: Page) => page.getByRole("list", { name: "Pending Requests" });
 
 test.use({ timezoneId: "UTC" });
 
@@ -59,7 +59,7 @@ test("the badge counts each waiting thread once and clears as confirmations and 
   const inboxBefore = await sessions.getAttribute("data-rail-note");
   await thread(page, "thr_triage").click();
   await approvals(page).getByRole("button", { name: "Approve Once", exact: true }).first().click();
-  await expect(approvals(page).getByRole("listitem")).toHaveCount(1);
+  await expect(approvals(page).getByRole("listitem")).toHaveAccessibleName("Archive Session");
   await expectCount(destination, 2);
   await approvals(page).getByRole("button", { name: "Deny", exact: true }).click();
   await expectCount(destination, 1);

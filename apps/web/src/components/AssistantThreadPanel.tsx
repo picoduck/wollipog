@@ -1,6 +1,6 @@
 import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { flushSync } from "react-dom";
-import { ASSISTANT_DECISION_CATEGORIES, type AssistantThread } from "@wollipog/protocol";
+import { ASSISTANT_DECISION_CATEGORIES, type AssistantThread, type PendingApproval } from "@wollipog/protocol";
 import { assistantThreadAccessSentence, assistantThreadHarnessLabel } from "../assistant-threads.js";
 import { launchedWorkIds, type LaunchedWork } from "../assistant-launched-work.js";
 import { formatCalendarTime } from "../format.js";
@@ -19,7 +19,7 @@ import { TabList } from "./Tabs.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { useSidePanelLayout } from "./useSidePanelLayout.js";
 
-export function AssistantThreadPanel({ state, thread, work, model, effort, onSettings, onDelegation, onOverlayChange }: {
+export function AssistantThreadPanel({ state, thread, work, model, effort, onSettings, onDelegation, onOverlayChange, onReview }: {
   state: AssistantPanelState;
   thread: AssistantThread;
   work: LaunchedWork;
@@ -27,11 +27,12 @@ export function AssistantThreadPanel({ state, thread, work, model, effort, onSet
   effort?: string;
   onSettings: () => void;
   onDelegation: () => void;
+  onReview: (sessionId: string, request: PendingApproval) => void;
   onOverlayChange: (overlay: boolean) => void;
 }) {
   const id = useId();
   const phone = useIsMobile();
-  const { asideRef, effectiveWidth, overlaysAtWidth } = useSidePanelLayout(state.open, phone, RIGHT_PANEL_DEFAULT_WIDTH);
+  const { asideRef, columnsWidth, effectiveWidth, overlaysAtWidth } = useSidePanelLayout(state.open, phone, RIGHT_PANEL_DEFAULT_WIDTH);
   const expanded = state.open && state.expanded && !phone;
   const overlay = state.open && !expanded && overlaysAtWidth;
   const covering = overlay || expanded || phone;
@@ -39,13 +40,21 @@ export function AssistantThreadPanel({ state, thread, work, model, effort, onSet
   const wasOpen = useRef(false);
   const [decisionCount, setDecisionCount] = useState<string | null>(null);
   const decisionHistorySupported = useStoreSelector((store) => store.assistantDecisionHistorySupported);
-  useLayoutEffect(() => {
-    onOverlayChange(overlay);
-    return () => onOverlayChange(false);
-  }, [overlay, onOverlayChange]);
+  const wasDocked = useRef(false);
 
   useLayoutEffect(() => {
     const active = document.activeElement;
+    const coversConversation = state.open && (overlay || phone);
+    const columns = asideRef.current?.parentElement;
+    // Close before the overlay makes the focused conversation inert.
+    if (coversConversation && wasDocked.current && columns?.querySelector(".detail-chat")?.contains(active)) {
+      state.close();
+      return;
+    }
+    onOverlayChange(coversConversation);
+    // The first open can render before layout is measured. That provisional render must not
+    // turn an intentional keyboard open into a resize-driven close.
+    wasDocked.current = state.open && !covering && columnsWidth === columns?.getBoundingClientRect().width;
     if (state.open && !wasOpen.current) {
       returnFocus.current = active instanceof HTMLElement ? active : null;
     }
@@ -58,7 +67,7 @@ export function AssistantThreadPanel({ state, thread, work, model, effort, onSet
       else document.querySelector<HTMLElement>("[data-assistant-panel-toggle]")?.focus();
     }
     wasOpen.current = state.open;
-  }, [asideRef, state.open, covering]);
+  }, [asideRef, columnsWidth, state.open, state.close, covering, overlay, phone, onOverlayChange]);
 
   if (!state.open) return null;
   const labels = { Work: launchedWorkIds(work).length, Decisions: decisionHistorySupported ? decisionCount : null, Details: null };
@@ -113,8 +122,9 @@ export function AssistantThreadPanel({ state, thread, work, model, effort, onSet
             ? <AssistantThreadDecisionHistory threadId={thread.id} onCount={setDecisionCount} />
             : <p className="muted">This control plane does not support delegated decision history.</p>}
         </>}
-        {tab === "Work" && <AssistantWorkPanel work={work} beforeReview={() => {
+        {tab === "Work" && <AssistantWorkPanel work={work} onReview={(sessionId, request) => {
           if (covering) flushSync(state.close);
+          onReview(sessionId, request);
         }} />}
         {tab === "Details" && <ThreadDetails thread={thread} model={model} effort={effort} onSettings={onSettings} />}
       </div>)}

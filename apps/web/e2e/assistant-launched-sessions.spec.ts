@@ -31,7 +31,7 @@ const toggle = (page: Page) => page.getByRole("button", { name: /Side Panel/ });
 const panel = (page: Page) => page.locator("#right-panel");
 const launched = (page: Page) => panel(page).locator(".launched-sessions");
 const group = (page: Page, name: string) => launched(page).getByRole("region", { name });
-const waitingInHeader = (page: Page) => page.locator(".assistant-thread-head").getByRole("list", { name: "Sessions Waiting for You" });
+const waitingDock = (page: Page) => page.locator(".assistant-dock").getByRole("list", { name: "Pending Requests" });
 const advance = (page: Page) => page.evaluate(() => (window as unknown as { assistantsAdvance: () => void }).assistantsAdvance());
 
 for (const theme of ["dark", "light"] as const) {
@@ -43,22 +43,21 @@ for (const theme of ["dark", "light"] as const) {
       await expect(toggle(page)).toHaveAccessibleName("Show Side Panel, 1 Session Needs You");
       await expect(toggle(page)).toHaveAttribute("aria-pressed", "false");
       await expect(panel(page)).toHaveCount(0);
-      // Only the waiting session is in the header; the running one is in the closed panel.
-      const waiting = waitingInHeader(page).locator(".assistant-work-card");
+      // Only the waiting session is in the dock; the running one is in the closed panel.
+      const waiting = waitingDock(page).locator(".assistant-dock-card");
       await expect(waiting).toHaveCount(1);
       await expect(waiting).toContainText("Bump the Vite Group");
-      await expect(page.locator(".assistant-thread-head")).not.toContainText("Fix the Flaky Upload Test");
+      await expect(waitingDock(page)).not.toContainText("Fix the Flaky Upload Test");
       await expectFullyInViewport(page.locator(".composer"), "Thread composer");
       await capture(page, `assistant-launched-closed-${theme}-desktop`);
 
-      // The approval is answered from the header with the panel still closed.
+      // The approval is answered from the dock with the panel still closed.
       await waiting.getByRole("button", { name: "Approve Once" }).click();
       await expect(page.locator("body")).toHaveAttribute("data-approved", "sess-deps:req-1:allow");
       await expect(toggle(page)).toHaveAccessibleName("Side Panel");
-      await expect(waitingInHeader(page)).toHaveCount(0);
+      await expect(waitingDock(page)).toHaveCount(0);
       await expect(panel(page)).toHaveCount(0);
-      // Its card left the header with focus in it; focus moves to the toggle, where the session now is.
-      await expect(toggle(page)).toBeFocused();
+      await expect(page.locator(".composer textarea")).toBeFocused();
     });
 
     test("Work lists waiting work first and its counts follow the work live", async ({ page }) => {
@@ -71,17 +70,17 @@ for (const theme of ["dark", "light"] as const) {
       await expect(needsYou).toContainText("Run pnpm install --frozen-lockfile");
       await expect(group(page, "Running").locator(".assistant-work-row")).toHaveText([/Fix the Flaky Upload Test/]);
       await expect(group(page, "Finished")).toHaveCount(0);
-      // The approval is answered from the header, which stays beside the open panel; the panel's card
+      // The approval is answered from the dock, which stays beside the open panel; the panel row
       // names it and opens its session, so the approval is offered once.
-      await expect(waitingInHeader(page).getByRole("button", { name: "Approve Once" })).toBeVisible();
+      await expect(waitingDock(page).getByRole("button", { name: "Approve Once" })).toBeVisible();
       await expect(page.getByRole("button", { name: "Approve Once" })).toHaveCount(1);
       await expect(needsYou.getByRole("button", { name: "Approve Once" })).toHaveCount(0);
       await expectFullyInViewport(page.locator(".composer"), "Thread composer");
       await expectPageNoHorizontalOverflow(page);
       await capture(page, `assistant-launched-open-${theme}-desktop`);
 
-      // Approving from the header moves the session to Running in the open panel.
-      await waitingInHeader(page).getByRole("button", { name: "Approve Once" }).click();
+      // Approving from the dock moves the session to Running in the open panel.
+      await waitingDock(page).getByRole("button", { name: "Approve Once" }).click();
       await expect(group(page, "Needs You")).toHaveCount(0);
       await expect(group(page, "Running").locator('[data-session-id="sess-deps"]')).toHaveCount(1);
 
@@ -131,7 +130,7 @@ for (const theme of ["dark", "light"] as const) {
       const panelBox = (await panel(page).boundingBox())!;
       expect(Math.abs(panelBox.y - (barBox!.y + barBox!.height))).toBeLessThanOrEqual(1);
       expect(Math.abs(panelBox.y + panelBox.height - page.viewportSize()!.height)).toBeLessThanOrEqual(1);
-      const waiting = (await page.locator(".assistant-thread-head").boundingBox())!;
+      const waiting = (await page.locator(".assistant-dock").boundingBox())!;
       expect(waiting.x + waiting.width).toBeLessThanOrEqual(panelBox.x + 1);
       await sidePanel.click();
       await expect(panel(page)).toHaveCount(0);
@@ -170,12 +169,12 @@ for (const theme of ["dark", "light"] as const) {
 
     test("answering one of two requests keeps focus on the card that still waits", async ({ page }) => {
       await open(page, theme, "deps=question");
-      await waitingInHeader(page).getByRole("button", { name: "Approve Once" }).focus();
+      await waitingDock(page).getByRole("button", { name: "Approve Once" }).focus();
       await page.keyboard.press("Enter");
       await expect(page.locator("body")).toHaveAttribute("data-approved", "sess-deps:req-1:allow");
-      const card = waitingInHeader(page).locator('[data-session-id="sess-deps"]');
+      const card = waitingDock(page).locator(".assistant-dock-card");
       await expect(card).toContainText("Which lockfile should I keep?");
-      await expect(card.getByRole("button", { name: "Open Session" })).toBeFocused();
+      await expect(page.getByRole("heading", { name: "Waiting for You 1" })).toBeFocused();
     });
 
     test("the panel's open state is remembered on this device across a reload", async ({ page }) => {
@@ -196,9 +195,8 @@ for (const theme of ["dark", "light"] as const) {
     test("with 42 launched sessions the conversation keeps its height and the panel scrolls on its own", async ({ page }) => {
       await open(page, theme, "launched=many");
       await expect(toggle(page)).toHaveAccessibleName("Show Side Panel, 1 Session Needs You");
-      const head = page.locator(".assistant-thread-head");
-      const closedHead = (await head.boundingBox())!.height;
-      expect(closedHead, "the header holds no list of 42 cards").toBeLessThan(260);
+      const head = page.locator(".assistant-dock");
+      await expect(head.locator(".assistant-dock-card")).toHaveCount(1);
       await expectFullyInViewport(page.locator(".composer"), "Thread composer");
       await capture(page, `assistant-launched-many-closed-${theme}-desktop`);
 
@@ -208,8 +206,8 @@ for (const theme of ["dark", "light"] as const) {
       const finished = group(page, "Finished");
       await finished.getByRole("button", { name: /Finished/ }).click();
       await expect(finished.locator(".assistant-work-row")).toHaveCount(32);
-      // Opening the panel leaves the header as it was.
-      expect(Math.abs((await head.boundingBox())!.height - closedHead)).toBeLessThanOrEqual(1);
+      // The panel only changes the column width.
+      await expect(head.locator(".assistant-dock-card")).toHaveCount(1);
       const body = panel(page).getByRole("tabpanel", { name: /^Work/ });
       const scroll = await body.evaluate((element) => ({ overflow: element.scrollHeight - element.clientHeight }));
       expect(scroll.overflow, "the panel body scrolls its own list").toBeGreaterThan(0);
@@ -233,7 +231,7 @@ for (const theme of ["dark", "light"] as const) {
       await open(page, theme);
       await expect(toggle(page)).toHaveAccessibleName("Show Side Panel, 1 Session Needs You");
       await expect(panel(page)).toHaveCount(0);
-      const waiting = waitingInHeader(page).locator(".assistant-work-card");
+      const waiting = waitingDock(page).locator(".assistant-dock-card");
       await expect(waiting.getByRole("button", { name: "Approve Once" })).toBeVisible();
       await expectPageNoHorizontalOverflow(page);
       await capture(page, `assistant-launched-closed-${theme}-mobile`);
@@ -254,7 +252,7 @@ for (const theme of ["dark", "light"] as const) {
 
       await panel(page).getByRole("button", { name: "Close Panel" }).click();
       await expect(panel(page)).toHaveCount(0);
-      await expect(waitingInHeader(page).getByRole("button", { name: "Approve Once" })).toBeVisible();
+      await expect(waitingDock(page).getByRole("button", { name: "Approve Once" })).toBeVisible();
 
       const sidePanel = page.locator(".detail-bar").getByRole("button", { name: "Side Panel" });
       await sidePanel.click();
@@ -290,14 +288,14 @@ for (const theme of ["dark", "light"] as const) {
 
     test("behind an overlaying panel the column's waiting approval is out of the tab order until it closes", async ({ page }) => {
       await open(page, theme);
-      const approve = waitingInHeader(page).getByRole("button", { name: "Approve Once" });
+      const approve = waitingDock(page).getByRole("button", { name: "Approve Once", includeHidden: true });
       await toggle(page).click();
       await expect(panel(page)).toHaveAttribute("data-presentation", "overlay");
-      await expect(page.locator(".detail-column-lead")).toHaveAttribute("inert", "");
+      await expect(page.locator(".detail-body")).toHaveAttribute("inert", "");
       await approve.focus();
       await expect(approve).not.toBeFocused();
       await panel(page).getByRole("button", { name: "Close Panel" }).click();
-      await expect(page.locator(".detail-column-lead")).not.toHaveAttribute("inert", "");
+      await expect(page.locator(".detail-body")).not.toHaveAttribute("inert", "");
       await approve.focus();
       await expect(approve).toBeFocused();
     });
@@ -308,8 +306,8 @@ for (const theme of ["dark", "light"] as const) {
       await expect(panel(page)).toHaveAttribute("data-presentation", "overlay");
       await group(page, "Needs You").getByRole("button", { name: "Review", exact: true }).click();
       await expect(panel(page)).toHaveCount(0);
-      await expect(waitingInHeader(page).locator('[data-assistant-work-request="occ-deps-1"]')).toBeFocused();
-      await expect(waitingInHeader(page).getByRole("button", { name: "Approve Once" })).toBeVisible();
+      await expect(waitingDock(page).locator('[data-assistant-work-request="occ-deps-1"]')).toBeFocused();
+      await expect(waitingDock(page).getByRole("button", { name: "Approve Once" })).toBeVisible();
     });
   });
 }

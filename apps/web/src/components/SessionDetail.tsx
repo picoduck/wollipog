@@ -646,10 +646,8 @@ export type SessionDetailProps = {
   header?: ReactNode;
   /** The Assistant thread's panel, rendered in the same row as the conversation. */
   assistantPanel?: (onOverlayChange: (overlay: boolean) => void) => ReactNode;
-  /** Heads the expanded chat column, under the bar and beside the side panel (#4776): an assistant
-   * thread's waiting work, so the panel spans the page under the bar as it does
-   * beside a session's. */
-  columnLead?: ReactNode;
+  /** A host-owned request dock between the reader and the composer notice slot. */
+  assistantRequestDock?: (focusComposer: () => void) => ReactNode;
   /** Usage warnings from the Assistant thread that owns this conversation. */
   assistantSpendingNotices?: readonly SessionNoticeEntry[];
   /** Transport-owned policy seam. Native passthrough commands default to the existing send path. */
@@ -1175,7 +1173,7 @@ function SessionDetailLoaded({
   topbarControls,
   header,
   assistantPanel,
-  columnLead,
+  assistantRequestDock,
   assistantSpendingNotices = [],
   providerCommandAttachmentPolicy = "send",
   onPreviewNavigationReady,
@@ -3614,9 +3612,8 @@ function SessionDetailLoaded({
   // A phone's side panel sheet hides the composer (#2843), and so does a phone's terminal sheet, which
   // takes the composer's place (#2866). A draft that changed while it was hidden had no width to
   // measure, so revealing it grows it again.
-  const phonePanelOpen = isMobile && rightPanel.open;
-  // Whether the side panel overlays the conversation; only a column lead reads it (#4776).
   const [panelOverlay, setPanelOverlay] = useState(false);
+  const phonePanelOpen = isMobile && (assistantPanel ? panelOverlay : rightPanel.open);
   const composerHiddenOnPhone = phonePanelOpen || phoneTerminalOpen;
   const toastComposerRef = useToastChrome<HTMLDivElement>();
   useLayoutEffect(() => {
@@ -7378,11 +7375,6 @@ function SessionDetailLoaded({
               onFocusLost={() => scrollRef.current?.focus({ preventScroll: true })}
             />
           )}
-          {/* Behind an overlaying panel's scrim the lead is out of reach of the pointer, so it is out
-              of the tab order too: its approvals are answered once the panel closes (#4776). */}
-          {mode === "expanded" && columnLead !== undefined && (
-            <div className="detail-column-lead" inert={panelOverlay || undefined}>{columnLead}</div>
-          )}
           {/* Campaign notices, not session notices (§13.2; #2036): they describe the campaign, not
               whether this session can take its next turn, so they head the chat column directly
               under the session bar, in this order, on its edges (#2157), rather than in the notice
@@ -7698,6 +7690,7 @@ function SessionDetailLoaded({
             {/* The one polite live region for recovery, whatever the control is showing. */}
             <span className="sr-only" role="status" data-transcript-recovery-status>{recoveryAnnouncement}</span>
           </div>
+          {assistantRequestDock?.(focusComposerOrTitle)}
           {/* Requests usually lead the slot. A thread with spending notices keeps the request
               dock visible above the composer's notice slot. */}
           {mode === "expanded" && requestDockLead && (

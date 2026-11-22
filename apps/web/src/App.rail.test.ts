@@ -170,8 +170,8 @@ test("the transcript's lower edge has one floating tail control, and context and
   // to the composer column, and context, cost and the Reply hint moved into the composer.
   // #2179: the reading column then ends with the request dock, the notice slot's lead, directly
   // above the composer.
-  assert.match(detail, /<div className="detail-reader">[\s\S]*<TranscriptTailControl[\s\S]*role="status" data-transcript-recovery-status>\{recoveryAnnouncement\}<\/span>\s*<\/div>\s*\{\/\*[\s\S]*?\*\/\}\s*\{mode === "expanded" && requestDockLead && \(\s*<SessionNoticeSlot[\s\S]*?lead=\{requestDockLead\}[\s\S]*?\/>\s*\)\}\s*<\/div>\s*\{\/\*[\s\S]*?\*\/\}\s*\{mode === "expanded" && \(\s*<div\s+className="composer"\s+hidden=\{composerHiddenOnPhone\}/,
-    "the anchor and the one recovery live region end the reader, and the request dock alone sits between it and the composer");
+  assert.match(detail, /<div className="detail-reader">[\s\S]*<TranscriptTailControl[\s\S]*role="status" data-transcript-recovery-status>\{recoveryAnnouncement\}<\/span>\s*<\/div>\s*\{assistantRequestDock\?\.\(focusComposerOrTitle\)\}\s*\{\/\*[\s\S]*?\*\/\}\s*\{mode === "expanded" && requestDockLead && \(\s*<SessionNoticeSlot[\s\S]*?lead=\{requestDockLead\}[\s\S]*?\/>\s*\)\}\s*<\/div>\s*\{\/\*[\s\S]*?\*\/\}\s*\{mode === "expanded" && \(\s*<div\s+className="composer"\s+hidden=\{composerHiddenOnPhone\}/,
+    "the anchor and recovery live region end the reader, followed by the request surfaces and composer");
   // #2210: a preview has no composer, so its dock heads the chat column instead.
   assert.match(detail, /<div className="detail-chat" ref=\{detailChatRef\}>\s*\{\/\*[\s\S]*?\*\/\}\s*\{mode === "preview" && requestDockLead && \(\s*<SessionNoticeSlot/,
     "the preview's request dock is the first thing in its chat column");
