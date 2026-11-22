@@ -495,7 +495,14 @@ export async function extractAntigravityBinary(
     await Promise.race([closed(target, "The Antigravity binary couldn't be written."), outFailed]);
     await chmod(destination, 0o755);
   } catch (error) {
-    out?.destroy();
+    if (out && !out.closed) {
+      // destroy() can return before a pending open creates the file. Remove it only after close.
+      const target = out;
+      await new Promise<void>((resolve) => {
+        target.once("close", resolve);
+        target.destroy();
+      });
+    }
     await rm(destination, { force: true }).catch(() => {});
     throw error;
   } finally {
