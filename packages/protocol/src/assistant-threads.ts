@@ -207,7 +207,13 @@ export interface CreateAssistantThreadRequest {
 export interface UpdateAssistantThreadRequest { title: string }
 
 export interface AssistantThreadAccountChoices {
-  accounts: { accountRef: string; label: string; reason?: ProviderAccountSkipReason }[];
+  accounts: {
+    accountRef: string;
+    label: string;
+    reason?: ProviderAccountSkipReason;
+    /** When the current usage limit is expected to reset, if known. */
+    retryAt?: number;
+  }[];
   /** The Machine's policy will resolve again when a thread starts without a chosen account. */
   policyAccountRef?: string;
   policyRefusal?: string;

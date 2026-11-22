@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   PROTOCOL_VERSION,
   ASSISTANT_DECISION_CATEGORIES,
+  titleFromPrompt,
   type AssistantDecisionCategory,
   removePendingRequest,
   type AgentHarnessDefaultsView,
@@ -77,6 +78,7 @@ const missingEvidenceIds = evidenceScenario === "refused-stress"
 const NOW = Date.now();
 const minute = 60_000;
 const accountScenario = params.get("accounts");
+const newThreadScenario = params.get("new-thread");
 const fixtureAccountRef = (index: number) => `acct:${index.toString(16).padStart(16, "0")}`;
 const fixtureAccounts: AssistantThreadAccountChoices["accounts"] = [
   { accountRef: fixtureAccountRef(1), label: "Studio Subscription" },
@@ -84,7 +86,7 @@ const fixtureAccounts: AssistantThreadAccountChoices["accounts"] = [
   { accountRef: fixtureAccountRef(3), label: "Field Subscription", reason: "signed_out" },
   { accountRef: fixtureAccountRef(4), label: "Remote Subscription", reason: "context_incompatible" },
   { accountRef: fixtureAccountRef(5), label: "Metered Account", reason: "api_billing" },
-  { accountRef: fixtureAccountRef(6), label: "Review Subscription", reason: "usage_exhausted" },
+  { accountRef: fixtureAccountRef(6), label: "Review Subscription", reason: "usage_exhausted", retryAt: NOW + 120 * minute },
   { accountRef: fixtureAccountRef(7), label: "QA Subscription" },
   { accountRef: fixtureAccountRef(8), label: "Weekend Subscription" },
   { accountRef: fixtureAccountRef(9), label: "Release Subscription" },
@@ -93,7 +95,11 @@ const triageAccount = fixtureAccounts[accountScenario === "stress" ? 1 : 6]!;
 const accountSelections = new Map([["thr_triage", triageAccount.accountRef]]);
 
 function fixtureAccountChoices(harness: string, currentAccountRef?: string): AssistantThreadAccountChoices {
-  const accounts = accountScenario === "stress" ? fixtureAccounts
+  const accounts = accountScenario === "composer-stress" ? [
+    ...fixtureAccounts,
+    { accountRef: fixtureAccountRef(11), label: "Planning Subscription" },
+    { accountRef: fixtureAccountRef(12), label: "Operations Subscription" },
+  ] : accountScenario === "stress" ? fixtureAccounts
     : accountScenario === "choices" ? [fixtureAccounts[0]!, ...fixtureAccounts.slice(2, 6)]
     : [fixtureAccounts[0]!, fixtureAccounts[6]!, fixtureAccounts[2]!];
   return harness === "codex"
@@ -848,6 +854,10 @@ const client = {
   createAssistantThread: async (body: CreateAssistantThreadRequest) => {
     const refusal = refused();
     if (refusal) return refusal;
+    if (newThreadScenario === "create-failure") {
+      throw new ApiError("The selected Machine went offline.", 409);
+    }
+    document.body.dataset.threadCreateCount = String(Number(document.body.dataset.threadCreateCount ?? 0) + 1);
     const id = `thr_new_${threads.length + 1}`;
     const sessionId = `sess-new-${threads.length + 1}`;
     const harness = body.harness ?? defaults.harness;
@@ -988,6 +998,22 @@ const client = {
     return { session: detail };
   },
   prompt: async (id: string, message: string) => {
+    if (id.startsWith("sess-new-")) {
+      if (newThreadScenario === "first-message-failure" && !document.body.dataset.refusedFirstMessage) {
+        document.body.dataset.refusedFirstMessage = "true";
+        throw new ApiError("The Machine did not accept the message.", 409);
+      }
+      const thread = threads.find((candidate) => candidate.sessionId === id)!;
+      const now = Date.now();
+      const next = { ...sessions.get(id)!, title: thread.title || titleFromPrompt(message), messageCount: 1, updatedAt: now };
+      thread.title = next.title;
+      thread.lastActivityAt = now;
+      const delivered = event(id, now, { kind: "user_message", text: message, images: [] });
+      (events[id] ??= []).push(delivered);
+      upsert(next);
+      publish(thread);
+      socket?.push({ type: "session_event", event: delivered });
+    }
     document.body.dataset.assistantPrompt = id + ":" + message;
     return structuredClone(sessions.get(id)!);
   },

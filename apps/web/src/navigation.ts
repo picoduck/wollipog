@@ -23,7 +23,7 @@ export type View =
   | { name: "automations"; editor?: AutomationEditorRoute; tab?: AutomationsTab }
   | { name: "automation"; id: string }
   /** The Assistants section (#4664): the Wollipog Assistant's threads, and one open thread. */
-  | { name: "assistants"; threadId?: string; limits?: true | "spending"; delegation?: true }
+  | { name: "assistants"; threadId?: string; limits?: true | "spending"; delegation?: true; newThread?: true }
   | { name: "skills"; id?: string; pane?: SkillsPane }
   | { name: "usage"; tab?: UsageTab }
   /** Archive visit intents are memory-only; viewPath deliberately serializes neither field. */
@@ -293,6 +293,7 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
       return destination(view.name).name;
     case "assistants":
       // An open thread is titled by the thread; the list by its destination.
+      if (view.newThread) return "New Thread";
       return view.threadId !== undefined
         ? entityTitle || ENTITY_FALLBACK_TITLES.thread
         : destination(view.name).name;
@@ -543,7 +544,7 @@ export function viewPath(view: View): string {
       : view.editor?.kind === "edit" ? `/automations/~${encodeResourceId(view.editor.automationId)}/edit`
         : view.tab === "outbound" ? "/automations/outbound" : "/automations";
     case "automation": return `/automations/~${encodeResourceId(view.id)}`;
-    case "assistants": return view.threadId !== undefined
+    case "assistants": return view.newThread ? "/assistants/new" : view.threadId !== undefined
       ? `/assistants/~${encodeResourceId(view.threadId)}${view.delegation ? "/delegation" : view.limits === "spending" ? "/settings/spending" : view.limits ? "/settings" : ""}` : "/assistants";
     case "skills": return view.id ? `/skills/~${encodeResourceId(view.id)}` : view.pane ? `/skills/${view.pane}` : "/skills";
     case "usage": return view.tab === "api" ? "/usage/api" : "/usage";
@@ -630,6 +631,7 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     return id === null ? null : { name: "automation", id };
   }
   if (path === "/assistants") return { name: "assistants" };
+  if (path === "/assistants/new") return { name: "assistants", newThread: true };
   const threadMatch = /^\/assistants\/~([^/]+)(?:\/(settings(?:\/spending)?|delegation))?$/.exec(path);
   if (threadMatch) {
     const threadId = decodeResourceId(threadMatch[1]!);

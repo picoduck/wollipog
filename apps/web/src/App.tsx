@@ -789,7 +789,8 @@ export function Shell() {
   const dialogTitle = dialog?.kind === "session" ? "New Session"
     : palette !== null ? "Search" : "Keyboard Shortcuts";
   const shell = (
-    <RemoteAccessProvider><div className={`app${rightPanel.dragging ? " panel-dragging" : ""}`}>
+    <RemoteAccessProvider><div className={`app${rightPanel.dragging ? " panel-dragging" : ""}`}
+      data-assistant-composing={view.name === "assistants" && view.newThread ? "" : undefined}>
       <Rail
         view={view}
         blockedCount={blockedSessions}
@@ -898,7 +899,8 @@ export function Shell() {
               </State>
             </div>
           )}
-          {view.name === "assistants" && <AssistantsView threadId={view.threadId} limits={view.limits} delegation={view.delegation} rightPanel={rightPanel} />}
+          {view.name === "assistants" && <AssistantsView threadId={view.threadId} limits={view.limits}
+            delegation={view.delegation} newThread={view.newThread} rightPanel={rightPanel} />}
           {view.name === "automations" && (view.editor ? <AutomationEditor key={viewPath(view)} route={view.editor} /> : <AutomationsView />)}
           {view.name === "automation" && <AutomationDetail key={view.id} automationId={view.id} />}
           {view.name === "skills" && <SkillsView route={view} />}

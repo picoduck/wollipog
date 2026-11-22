@@ -69,7 +69,7 @@ for (const theme of ["dark", "light"] as const) {
       test.use({ viewport: phone ? { width: 390, height: 844 } : { width: 1440, height: 900 },
         hasTouch: phone, isMobile: phone, colorScheme: theme });
 
-      test("chooses an eligible account at creation and changes an existing thread's account", async ({ page }) => {
+      test("changes an existing thread's account", async ({ page }) => {
         await page.clock.setFixedTime(new Date("2026-11-19T16:00:00Z"));
         const prefix = `assistant-account-${theme}-${device}`;
         const path = "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA";
@@ -78,36 +78,6 @@ for (const theme of ["dark", "light"] as const) {
           await page.getByRole("menuitem", { name: "Thread Settings…" }).click();
           await page.getByRole("button", { name: "Change… Account" }).click();
         };
-        await open(page, theme, "accounts=default");
-        await threadsList(page).getByRole("button", { name: "New Thread" }).click();
-        const create = page.getByRole("dialog", { name: "New Thread" });
-        const start = create.getByRole("button", { name: "Start Thread" });
-        const createOptions = create.getByRole("radiogroup", { name: "Account" });
-        await expect(createOptions.getByRole("radio", { name: "Machine Policy · Studio Subscription" })).toBeChecked();
-        await expectFullyInViewport(start, "Start Thread");
-        await capture(page, `${prefix}-create-default`);
-
-        await open(page, theme, "accounts=choices");
-        await threadsList(page).getByRole("button", { name: "New Thread" }).click();
-        for (const [name, reason] of [
-          ["Field Subscription", "needs sign-in"], ["Remote Subscription", "can't run in this agent's environment"],
-          ["Metered Account", "would spend API credits"], ["Review Subscription", "is at a usage limit"],
-        ]) {
-          const option = createOptions.getByRole("radio", { name });
-          await expect(option).toHaveAttribute("aria-disabled", "true");
-          await expect(option).toHaveAccessibleDescription(`This account ${reason}.`);
-        }
-        await expectNoHorizontalOverflow(create, "New Thread with account reasons");
-        await expectFullyInViewport(start, "Start Thread");
-        await capture(page, `${prefix}-create-choices`);
-
-        await open(page, theme, "accounts=stress");
-        await threadsList(page).getByRole("button", { name: "New Thread" }).click();
-        await createOptions.getByRole("radio", { name: /DesignResearchAndEngineering/ }).check();
-        await captureAccountList(page, create, start, `${prefix}-create-stress`, 10);
-        await start.click();
-        await expect(page.locator("body")).toHaveAttribute("data-created-account", "acct:0000000000000002");
-
         await open(page, theme, "accounts=default&limits=enabled", path);
         await openChange();
         const change = page.getByRole("dialog", { name: "Change Account" });
@@ -326,15 +296,13 @@ for (const theme of ["dark", "light"] as const) {
     test("New Thread preselects the default harness, and rename and archive act on the thread", async ({ page }) => {
       await open(page, theme);
       await page.getByRole("button", { name: "New Thread" }).first().click();
-      const dialog = page.getByRole("dialog", { name: "New Thread" });
-      await expect(dialog.getByRole("radio", { name: /Claude Code/ })).toBeChecked();
-      await capture(page, `assistants-new-thread-${theme}-desktop`);
-      await dialog.getByRole("radio", { name: /Codex/ }).check();
-      // The control plane takes titles of up to 120 characters; the field stops there.
-      await expect(dialog.getByRole("textbox", { name: "Title (Optional)" })).toHaveAttribute("maxlength", "120");
-      await dialog.getByRole("textbox", { name: "Title (Optional)" }).fill("Plan the Next Release");
-      await dialog.getByRole("button", { name: "Start Thread" }).click();
-      await expect(dialog).toHaveCount(0);
+      const form = page.getByRole("form", { name: "What should the assistant work on?" });
+      await form.getByRole("button", { name: /^Harness Claude Code/ }).click();
+      await page.getByRole("radio", { name: "Codex", exact: true }).check();
+      await page.getByRole("button", { name: "Close Harness" }).click();
+      await form.getByRole("textbox", { name: "First Message" }).fill("Plan the Next Release");
+      await form.getByRole("button", { name: "Start Thread" }).click();
+      await expect(form).toHaveCount(0);
       await expect(page.locator(".assistant-thread-bar").getByRole("heading", { level: 2, name: "Plan the Next Release" })).toBeVisible();
       await expect(threadRow(page, "Plan the Next Release")).toHaveAttribute("aria-current", "true");
       await expect(threadRow(page, "Plan the Next Release").locator(".row-sub")).toContainText("Codex");
@@ -353,23 +321,16 @@ for (const theme of ["dark", "light"] as const) {
       await expect(threadsList(page).locator("[data-thread-id]")).toHaveCount(3);
     });
 
-    test("a control plane without threads shows the empty section, and New Thread explains", async ({ page }) => {
+    test("a control plane without threads explains why and offers no thread creation", async ({ page }) => {
       await open(page, theme, "threads=unavailable");
-      await expect(threadsList(page).getByText("No Threads Yet", { exact: true })).toBeVisible();
+      await expect(threadsList(page).getByText("Threads Aren't Available Yet", { exact: true })).toBeVisible();
       await expect(threadsList(page)).toContainText("Assistant threads aren't available on this control plane yet.");
       await expect(page.getByRole("alert")).toHaveCount(0);
       await expectEmptyStateAligned(page);
       // The pane beside the list offers no thread to choose: the list already says why.
       await expect(page.locator(".assistant-thread-pane")).toBeEmpty();
       await capture(page, `assistants-unavailable-${theme}-desktop`);
-      await page.getByRole("button", { name: "New Thread" }).first().click();
-      const dialog = page.getByRole("dialog", { name: "New Thread" });
-      await expect(dialog.getByText("Threads Aren't Available Yet", { exact: true })).toBeVisible();
-      await expect(dialog).toContainText("aren't available on this control plane yet");
-      await expect(dialog.getByRole("button", { name: "Start Thread" })).toHaveCount(0);
-      await capture(page, `assistants-unavailable-new-thread-${theme}-desktop`);
-      await dialog.getByRole("button", { name: "Close" }).click();
-      await expect(dialog).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "New Thread" })).toHaveCount(0);
     });
   });
 

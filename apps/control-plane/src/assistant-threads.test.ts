@@ -589,6 +589,27 @@ test("creation previews the Machine's policy, validates an explicit reference, a
   } finally { await h.close(); }
 });
 
+test("thread defaults report the reset time for an account at its usage limit", async () => {
+  const h = await harness({ accounts });
+  try {
+    const now = Date.now();
+    const resetsAt = now + 60_000;
+    h.db.upsertSubscriptionUsageSnapshot({
+      runnerId: "r", agentId: "claude", sourceId: "work", provider: "claude",
+      providerAccountId: "work", fetchedAt: now, state: "available",
+      buckets: [{ id: "five-hour", label: "Five Hour", usedPercent: 100, resetsAt }],
+    });
+    const result = await h.call("GET", "/api/assistant-threads/defaults");
+    assert.equal(result.status, 200, result.raw);
+    const account = result.body.harnesses[0].accountSelection.accounts.find(
+      (candidate: { accountRef: string }) => candidate.accountRef === accountRef("work"),
+    );
+    assert.deepEqual(account, {
+      accountRef: accountRef("work"), label: "Work Subscription", reason: "usage_exhausted", retryAt: resetsAt,
+    });
+  } finally { await h.close(); }
+});
+
 test("thread account changes are owner-only, wait for idle, and address only the existing backing session", async () => {
   const h = await harness({ accounts });
   try {
