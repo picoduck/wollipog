@@ -24,9 +24,9 @@ async function capture(page: Page, theme: string, view: string, state: string) {
   await page.screenshot({ path: join("playwright-report", "4818", id + ".png"), animations: "disabled" });
 }
 
-async function open(page: Page, theme: string) {
+async function open(page: Page, theme: string, extra = "") {
   await page.clock.setFixedTime(Date.UTC(2026, 10, 20, 17));
-  await page.goto("/assistants-e2e.html?theme=" + theme + "&" + fixture + "&path=" + encodeURIComponent(path));
+  await page.goto("/assistants-e2e.html?theme=" + theme + "&" + fixture + extra + "&path=" + encodeURIComponent(path));
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   const dock = page.getByRole("list", { name: "Pending Requests" });
   await expect(page.locator(".assistant-dock-pager")).toContainText("1 of 3");
@@ -97,10 +97,22 @@ for (const theme of ["light", "dark"] as const) {
           await requestBody.evaluate((element) => { element.scrollTop = element.scrollHeight; });
           await expect(dock.locator(".assistant-dock-scroll-cue")).toBeHidden();
           await expectFullyInViewport(approve);
+        } else {
+          await expect(page.locator(".assistant-spending-notice .notice-trailing")).toBeHidden();
         }
       });
 
       if (!phone) return;
+
+      test("a compact notice still explains why launched sessions cannot be stopped", async ({ page }) => {
+        await open(page, theme, "&no-running-launches");
+        const notice = page.locator(".assistant-spending-notice");
+        await expect(notice.getByRole("button", { name: "Show Details" })).toHaveAttribute("aria-expanded", "false");
+        const stop = notice.getByRole("button", { name: "Stop Launched Sessions…" });
+        await expect(stop).toBeDisabled();
+        await expect(stop).toHaveAccessibleDescription("There are no running sessions to stop.");
+        await expectFullyInViewport(notice.getByText("There are no running sessions to stop."));
+      });
 
       test("thread sheets keep their controls, heading and Save in reach", async ({ page }) => {
         await open(page, theme);

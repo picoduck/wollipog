@@ -13628,7 +13628,10 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 .session-notice-slot .assistant-spending-notice .notice-actions { flex-wrap: wrap; }
 .session-notice-slot .assistant-spending-notice .notice-actions > .btn:first-child { flex: none; }
-.assistant-spending-notice .assistant-budget-details { display: none; }
+.assistant-spending-notice .assistant-budget-details,
+.assistant-spending-notice .notice-trailing:has(> .assistant-budget-details:first-child:last-child) {
+  display: none;
+}
 @media (min-width: 380px) and (max-width: 760px) and (pointer: coarse) {
   /* Start with the budget warning and its actions. Expand the prose and meter on demand
      so a paged request and the first turn can share the screen. */
@@ -13636,18 +13639,20 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     padding: var(--space-2);
     column-gap: var(--space-2);
   }
-  .detail-chat:has(.assistant-dock-pager) .assistant-budget-details { display: inline-flex; }
+  .detail-chat:has(.assistant-dock-pager) .assistant-spending-notice .assistant-budget-details { display: inline-flex; }
   .detail-chat:has(.assistant-dock-pager) .assistant-spending-notice .notice-head:has(.assistant-budget-details) {
     align-items: center;
     min-height: var(--control-h);
   }
-  .detail-chat:has(.assistant-dock-pager) .assistant-spending-notice .notice-trailing:has(.assistant-budget-details) {
+  .detail-chat:has(.assistant-dock-pager) .assistant-spending-notice .notice-trailing:has(> .assistant-budget-details) {
+    display: flex;
     margin: 0;
   }
   .detail-chat:has(.assistant-dock-pager) .assistant-spending-notice:has(.assistant-budget-details) .notice-icon {
     height: var(--control-h);
   }
-  .detail-chat:has(.assistant-dock-pager) .assistant-spending-notice:has(.assistant-budget-details[aria-expanded="false"]) .notice-body {
+  .detail-chat:has(.assistant-dock-pager) .assistant-spending-notice:has(.assistant-budget-details[aria-expanded="false"])
+    :is(.notice-body:not(:has(> .notice-meta)), .notice-body > :not(.notice-meta)) {
     display: none;
   }
   .detail-chat:has(.assistant-dock-pager) .assistant-spending-notice .notice-actions {

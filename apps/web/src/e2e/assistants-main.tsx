@@ -570,7 +570,9 @@ if (spendingScenario) {
     launchedSessions: { used: current.launchedSessionIds.length, limit: isLaunchLimit ? 10 : 60 },
   };
   for (const [index, id] of current.launchedSessionIds.entries()) {
-    sessions.get(id)!.title = "Session " + (index + 1) + " · " + longTitle(index + 1);
+    const launched = sessions.get(id)!;
+    launched.title = "Session " + (index + 1) + " · " + longTitle(index + 1);
+    if (params.has("no-running-launches") && launched.status === "running") launched.status = "completed";
   }
   const second = threads.find((candidate) => candidate.id === "thr_release");
   if (second) {
