@@ -374,9 +374,10 @@ for (const theme of ["dark", "light"] as const) {
       await expect(threadsList(page).locator("[data-thread-id]")).toHaveCount(3);
     });
 
-    test("a phone without threads shows the empty section", async ({ page }) => {
+    test("a phone without thread support explains why and offers no thread creation", async ({ page }) => {
       await open(page, theme, "threads=unavailable");
-      await expect(threadsList(page).getByText("No Threads Yet", { exact: true })).toBeVisible();
+      await expect(threadsList(page).getByText("Threads Aren't Available Yet", { exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "New Thread" })).toHaveCount(0);
       await expectEmptyStateAligned(page);
       await capture(page, `assistants-unavailable-${theme}-mobile`);
     });
