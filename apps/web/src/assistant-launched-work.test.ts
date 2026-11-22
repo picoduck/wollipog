@@ -3,7 +3,6 @@ import test from "node:test";
 import type { PendingApproval, SessionView } from "@wollipog/protocol";
 import {
   groupLaunchedWork,
-  launchedSessionsToggleLabel,
   launchedWorkGroup,
   launchedWorkIds,
 } from "./assistant-launched-work.js";
@@ -63,10 +62,4 @@ test("launch time orders sessions and campaigns together; an unloaded launch lea
   const ids = ["s-old", "s-new", "c-mid", "s-unloaded"];
   const at: Record<string, number | undefined> = { "s-old": 100, "s-new": 300, "c-mid": 200, "s-unloaded": undefined };
   assert.deepEqual(groupLaunchedWork(ids, () => "active", (id) => at[id]).active, ["s-unloaded", "s-new", "c-mid", "s-old"]);
-});
-
-test("the header toggle names the sessions, and those needing you only while there are some (#4776)", () => {
-  assert.equal(launchedSessionsToggleLabel({ total: 1, needsYou: 0 }), "1 Session");
-  assert.equal(launchedSessionsToggleLabel({ total: 3, needsYou: 0 }), "3 Sessions");
-  assert.equal(launchedSessionsToggleLabel({ total: 3, needsYou: 1 }), "3 Sessions · 1 Needs You");
 });

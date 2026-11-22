@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { AntigravityManagedStore } from "./antigravity-install.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,10 @@ import {
   type AntigravitySetupSupervisorOptions,
 } from "./antigravity-setup.js";
 import { FakeReleaseServer, fakeAgyWrapper, fakeInstallerScript, fakeTarGz } from "./fixtures/antigravity/fake-release.js";
+import { resolveAcpLaunch } from "./acp-compatibility.js";
+import { ANTIGRAVITY_UNAVAILABLE, antigravityAgentDefinition, antigravityLaunchResolver, antigravitySignOutSuperseded } from "./antigravity-session.js";
+import { AcpDriver } from "./drivers/acp-driver.js";
+import { killTreeAndWait, spawnAgent } from "./spawn.js";
 
 // Every test installs fake releases from fake origins (fixtures/antigravity/fake-release.ts) whose
 // binary runs the credential-free fake CLI (fixtures/antigravity/fake-agy.mjs). No network is used.
@@ -487,6 +491,7 @@ test("a rollback that fails is reported as such, blocks new installs, and the ne
   try {
     assert.equal(failed.managedInstall?.operation?.failure, "rollback_failed");
     assert.notEqual(readlinkSync(join(managedRoot, "current")), working, "the rejected version is still current");
+    assert.equal(await setup.verifiedLaunchTarget(), null, "no session can launch the rejected version (#4779)");
     assert.ok(existsSync(join(managedRoot, "pending-activation.json")), "the pending record stays for a retry");
     // Nothing new is installed over a record that still names the last working version.
     assert.throws(() => setup.startInstall(), /hasn't restored the version before the last update/u);
@@ -499,6 +504,8 @@ test("a rollback that fails is reported as such, blocks new installs, and the ne
   assert.equal(recovered.status, "ready");
   assert.equal(recovered.executable?.version, "1.5.14");
   assert.equal(recovered.managedInstall?.active?.version, "1.5.14");
+  assert.equal((await setup.verifiedLaunchTarget())?.command, realpathSync(join(managedRoot, working, "agy")),
+    "after the restore, sessions launch the verified working generation");
   // Once restored, the outcome is the failed check the update began with, not a pending rollback.
   assert.equal(recovered.managedInstall?.operation?.failure, "access_check_failed");
   assertAllValid(views);
@@ -551,6 +558,15 @@ test("an update that passes its check but can't be committed is not reported as 
     assert.notEqual(failed.managedInstall?.operation?.status, "succeeded");
     assert.equal(failed.managedInstall?.operation?.failure, "rollback_failed");
     assert.ok(existsSync(join(managedRoot, "pending-activation.json")));
+    // The candidate passed its checks, the one after the failed rollback included, but was never
+    // committed (#4779): sessions keep launching the committed generation, which is still kept.
+    const candidate = realpathSync(join(managedRoot, "current", "agy"));
+    const committed = realpathSync(join(managedRoot, working, "agy"));
+    assert.notEqual(candidate, committed);
+    assert.equal(setup.current().status, "ready");
+    assert.equal((await setup.verifiedLaunchTarget())?.command, committed);
+    assert.equal(setup.launchableTarget()?.command, committed);
+    assert.ok(existsSync(committed));
   } finally {
     blocked.unblock();
   }
@@ -690,4 +706,144 @@ test("an update stops before it starts when the copy in use can't be checked in 
   assert.equal(checked.status, "ready");
   assert.equal(checked.executable?.version, "1.5.14");
   assertAllValid(published);
+});
+
+test("a session launch waits for a running install to verify before reading its target (#4779)", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  const { setup, managedRoot } = supervisor(server);
+  await setup.check("never");
+  assert.equal(await setup.verifiedLaunchTarget(), null, "nothing verified yet: a launch is refused");
+  setup.startInstall();
+  assert.equal(setup.current().managedInstall?.operation?.status, "running");
+  // Asked while the install runs, the answer waits for it, its verification included.
+  const target = await setup.verifiedLaunchTarget();
+  const view = setup.current();
+  assert.equal(view.managedInstall?.operation?.status, "succeeded", "the install, its verification included, finished first");
+  assert.equal(view.status, "ready");
+  // A session launches the verified generation by its own path, never the movable `current/agy`.
+  const generation = realpathSync(join(managedRoot, "current", "agy"));
+  assert.notEqual(generation, join(managedRoot, "current", "agy"));
+  assert.equal(target?.command, generation);
+  assert.equal(target?.context.env.AGY_CLI_DISABLE_AUTO_UPDATE, "true", "the managed copy launches with its updater off");
+  assert.ok((target?.accessObservedAt ?? 0) > 0);
+});
+
+test("a launch resolves its executable when it spawns, so two updates after its preparation can't remove it (#4779)", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  const { setup, managedRoot } = supervisor(server);
+  await install(setup);
+  // The launch is prepared against 1.5.14, then awaits (isolation, provider home) while two
+  // updates commit: the second prunes 1.5.14.
+  const prepared = await setup.verifiedLaunchTarget();
+  assert.ok(prepared && existsSync(prepared.command));
+  for (const version of ["1.6.0", "1.7.0"]) {
+    server.publish({ platform: PLATFORM, version, archive: release(version) });
+    assert.equal((await install(setup)).managedInstall?.operation?.status, "succeeded");
+  }
+  assert.equal(existsSync(prepared.command), false, "the generation chosen at preparation is gone");
+  const resolveLaunch = antigravityLaunchResolver(setup);
+  const spawned = resolveAcpLaunch(prepared.command, { profile: "antigravity", resumable: false, resolveLaunch });
+  assert.equal(spawned.command, realpathSync(join(managedRoot, "current", "agy")), "the committed 1.7.0, by its generation path");
+  assert.ok(existsSync(spawned.command));
+  assert.deepEqual(spawned.compatibility?.pinnedEnvironment, { [ANTIGRAVITY_DISABLE_AUTO_UPDATE_ENV]: "true" });
+  spawned.release?.();
+});
+
+test("a launcher that opens the resolved generation late still finds it after two commits (#4779)", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  const { setup, managedRoot } = supervisor(server);
+  await install(setup);
+  const g1 = realpathSync(join(managedRoot, "current", "agy"));
+  // A launcher (as bwrap or the cgroup helper would be) that opens the executable only once a gate
+  // file appears, long after the runner spawned it.
+  const gate = join(state, "launcher-gate");
+  const script = `while [ ! -f ${JSON.stringify(gate)} ]; do sleep 0.02; done; exec "$0" "$@"`;
+  let spawnedCommand: string | undefined;
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const driver = new AcpDriver({
+    command: g1, args: ["acp"], env: {}, cwd, config: {}, context: { kind: "native" },
+    acpCompatibility: { profile: "antigravity", resumable: false, resolveLaunch: antigravityLaunchResolver(setup) },
+  }, { onEvent: () => {}, onStderr: () => {}, onExit: () => {} } as never, {
+    spawn: (options) => {
+      spawnedCommand = options.command;
+      return spawnAgent({ ...options, command: "/bin/sh", args: ["-c", script, options.command, ...options.args] });
+    },
+  });
+  try {
+    assert.equal(spawnedCommand, g1);
+    for (const version of ["1.6.0", "1.7.0"]) {
+      server.publish({ platform: PLATFORM, version, archive: release(version) });
+      assert.equal((await install(setup)).managedInstall?.operation?.status, "succeeded");
+    }
+    assert.notEqual(realpathSync(join(managedRoot, "previous", "agy")), g1, "neither pointer names 1.5.14 any more");
+    assert.ok(existsSync(g1), "the launch still needs 1.5.14, so no commit removed it");
+    writeFileSync(gate, "open");
+    await driver.initialize();
+    // Answered: the launch no longer holds it, and the next commit removes it.
+    server.publish({ platform: PLATFORM, version: "1.8.0", archive: release("1.8.0") });
+    assert.equal((await install(setup)).managedInstall?.operation?.status, "succeeded");
+    assert.equal(existsSync(g1), false);
+  } finally {
+    driver.dispose();
+  }
+});
+
+test("a first install that passes its check but can't be committed is not offered in New Session (#4779)", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14") });
+  let block = false;
+  let managedFolder = "";
+  // No PATH copy: the candidate is the only Antigravity on this machine.
+  const created = supervisor(server, {
+    onUpdate: (view) => {
+      if (block && view.managedInstall?.operation?.stage === "activating" && view.status === "checking") {
+        block = false;
+        chmodSync(managedFolder, 0o500);
+      }
+    },
+  });
+  managedFolder = created.managedRoot;
+  const { setup } = created;
+  block = true;
+  setup.startInstall();
+  const failed = await until(setup, (view) => view.managedInstall?.operation?.status === "failed" && view.status !== "checking");
+  try {
+    assert.equal(failed.managedInstall?.operation?.failure, "rollback_failed");
+    assert.equal(failed.status, "ready", "the uncommitted candidate itself passed its check");
+    assert.equal(setup.launchableTarget(), null, "nothing committed can be launched");
+    assert.equal(await setup.verifiedLaunchTarget(), null);
+    const row = antigravityAgentDefinition(failed, setup.credentialContext(true), { mode: "provider", network: "inherit" },
+      setup.launchableTarget() !== null)!;
+    assert.equal(row.available, false, "New Session doesn't offer what every launch would refuse");
+    assert.equal(row.unavailableReason, ANTIGRAVITY_UNAVAILABLE.checkFailed);
+  } finally {
+    chmodSync(managedFolder, 0o700);
+  }
+});
+
+test("access is observed when the probe's session opens, before its cleanup, so a sign-out during cleanup stands (#4779)", async () => {
+  // Wall-clock based: request deadlines are computed on it.
+  let clock = Date.now();
+  const kills: number[] = [];
+  const { setup } = supervisor(new FakeReleaseServer(), {
+    resolveExecutable: async () => pathAgy,
+    now: () => clock,
+    // Every process cleanup takes a while on this clock.
+    kill: async (child) => {
+      kills.push(clock);
+      clock += 1_000;
+      return killTreeAndWait(child);
+    },
+  });
+  const view = await setup.check("never");
+  assert.equal(view.status, "ready");
+  const observed = setup.accessObservedAt();
+  const probeCleanup = kills.at(-1)!;
+  assert.ok(observed !== undefined && observed <= probeCleanup, "stamped before the access probe's cleanup began");
+  // A session reported the sign-out while the probe was being cleaned up: that check doesn't clear it.
+  assert.equal(antigravitySignOutSuperseded(view, observed, probeCleanup + 500), false);
+  assert.equal(antigravitySignOutSuperseded(view, observed, observed - 1), true);
 });

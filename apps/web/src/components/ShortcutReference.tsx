@@ -9,7 +9,6 @@ import {
   shortcutReferenceGroups,
   type ShortcutDefinition,
   type ShortcutReferenceGroup,
-  type ShortcutId,
   type ShortcutScope,
 } from "../shortcuts.js";
 import { railDigits, visibleRailViews } from "../rail-preferences.js";
@@ -57,10 +56,11 @@ function ShortcutGroupSection({ group }: { group: ShortcutReferenceGroup }) {
       {group.note && <p id={`${id}-note`} className="shortcut-group-note">{group.note}</p>}
       <dl className="shortcut-list">
         {group.rows.map((row) => (
-          <div className={`shortcut-row${group.note || row.reason ? " is-unavailable" : ""}`} key={row.id}>
+          <div className={`shortcut-row${group.note || row.reason ? " is-unavailable" : ""}${row.description ? " has-description" : ""}`} key={row.id}>
             <dt>{row.label}</dt>
             {row.reason && <dd className="shortcut-reason" title={row.reason}>{row.reason}</dd>}
             <dd className="shortcut-keys"><kbd>{row.keys}</kbd></dd>
+            {row.description && <dd className="shortcut-description">{row.description}</dd>}
           </div>
         ))}
       </dl>
@@ -76,7 +76,7 @@ export function ShortcutReference({
   filesSupported,
   conversationSteeringSupported,
   turnInterruptionSupported,
-  sidePanelShortcuts,
+  assistantThreadOpen,
 }: {
   onClose: () => void;
   /** The shortcut scope of the page and focus the reference was opened from. */
@@ -86,8 +86,7 @@ export function ShortcutReference({
   filesSupported: boolean;
   conversationSteeringSupported: boolean;
   turnInterruptionSupported: boolean;
-  /** With no session open, the Session shortcuts an Assistant thread's side panel answers (#4776). */
-  sidePanelShortcuts?: ReadonlySet<ShortcutId>;
+  assistantThreadOpen?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
@@ -111,7 +110,7 @@ export function ShortcutReference({
       conversationSteeringSupported,
       turnInterruptionSupported,
       hiddenRailViews: railPreferences.hidden,
-      ...(sidePanelShortcuts ? { sidePanelShortcuts } : {}),
+      assistantThreadOpen,
     },
     keys,
     query,

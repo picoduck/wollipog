@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import {
   DEFAULT_ASSISTANT_THREAD_LIMITS,
+  type AssistantDecisionDefault,
   type AssistantDecisionDelegation,
   type AssistantDecisionGrant,
   type AssistantThreadHarness,
@@ -30,6 +31,7 @@ export interface ThreadRow {
   archived_at: number | null;
   cost_limit_usd: number | null;
   launch_limit: number | null;
+  launch_paused: number;
   decision_grant: string | null;
   decision_grant_revision: number;
 }
@@ -87,6 +89,11 @@ export class AssistantThreadStore {
         runner_id TEXT,
         account_ref TEXT,
         PRIMARY KEY (owner_user_id, organization_id));
+      CREATE TABLE IF NOT EXISTS assistant_thread_decision_defaults (
+        owner_user_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        grant_json TEXT NOT NULL,
+        PRIMARY KEY (owner_user_id, organization_id));
       -- Sessions a thread's assistant launched (#4663): its work cards and its launch limit.
       CREATE TABLE IF NOT EXISTS assistant_thread_launches (
         session_id TEXT PRIMARY KEY,
@@ -120,6 +127,7 @@ export class AssistantThreadStore {
     // Fixed historical defaults for rows created before owners could set limits. NULL is unlimited.
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN cost_limit_usd REAL DEFAULT 25"); } catch { /* column already present */ }
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN launch_limit INTEGER DEFAULT 10"); } catch { /* column already present */ }
+    try { db.exec("ALTER TABLE assistant_threads ADD COLUMN launch_paused INTEGER NOT NULL DEFAULT 0"); } catch { /* column already present */ }
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN decision_grant TEXT"); } catch { /* column already present */ }
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN decision_grant_revision INTEGER NOT NULL DEFAULT 0"); } catch { /* column already present */ }
     // All earlier launches were subject to a budget, even when their allowance was not recorded.
@@ -291,9 +299,26 @@ export class AssistantThreadStore {
       .run(owner.userId, owner.organizationId, defaults.harness, defaults.providerAccount?.runnerId ?? null, defaults.providerAccount?.accountRef ?? null);
   }
 
+  defaultDecision(owner: HumanPrincipal): AssistantDecisionDefault | null {
+    const row = this.db.prepare("SELECT grant_json FROM assistant_thread_decision_defaults WHERE owner_user_id=? AND organization_id=?")
+      .get(owner.userId, owner.organizationId) as { grant_json: string } | undefined;
+    return row ? JSON.parse(row.grant_json) as AssistantDecisionDefault : null;
+  }
+
+  setDefaultDecision(owner: HumanPrincipal, grant: AssistantDecisionDefault | null): void {
+    if (grant === null) {
+      this.db.prepare("DELETE FROM assistant_thread_decision_defaults WHERE owner_user_id=? AND organization_id=?")
+        .run(owner.userId, owner.organizationId);
+      return;
+    }
+    this.db.prepare(`INSERT INTO assistant_thread_decision_defaults (owner_user_id, organization_id, grant_json)
+      VALUES (?, ?, ?) ON CONFLICT (owner_user_id, organization_id) DO UPDATE SET grant_json=excluded.grant_json`)
+      .run(owner.userId, owner.organizationId, JSON.stringify(grant));
+  }
+
   setLimits(threadId: string, limits: AssistantThreadLimits): void {
-    this.db.prepare("UPDATE assistant_threads SET cost_limit_usd=?, launch_limit=? WHERE id=?")
-      .run(limits.costUsd, limits.launchedSessions, threadId);
+    this.db.prepare("UPDATE assistant_threads SET cost_limit_usd=?, launch_limit=?, launch_paused=COALESCE(?, launch_paused) WHERE id=?")
+      .run(limits.costUsd, limits.launchedSessions, limits.launchPaused === undefined ? null : Number(limits.launchPaused), threadId);
   }
 
   setDecisionGrant(threadId: string, expectedRevision: number, grant: AssistantDecisionGrant | null): boolean {
@@ -311,8 +336,10 @@ export class AssistantThreadStore {
     return id;
   }
 
-  activate(id: string, sessionId: string, now: number): void {
-    this.db.prepare("UPDATE assistant_threads SET session_id=?, state='active', updated_at=? WHERE id=? AND state='creating'").run(sessionId, now, id);
+  activate(id: string, sessionId: string, now: number, grant: AssistantDecisionGrant | null = null): void {
+    this.db.prepare(`UPDATE assistant_threads SET session_id=?, state='active', updated_at=?,
+      decision_grant=?, decision_grant_revision=? WHERE id=? AND state='creating'`)
+      .run(sessionId, now, grant === null ? null : JSON.stringify(grant), grant === null ? 0 : 1, id);
   }
 
   forConnection(connectionId: string): ThreadRow | null {

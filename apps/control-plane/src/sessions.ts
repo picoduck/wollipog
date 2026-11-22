@@ -1,3 +1,5 @@
+import { isManagedModelChoice, resolveManagedModelChoice } from "@wollipog/protocol";
+import type { WollipogPromptOrigin } from "@wollipog/protocol";
 import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
 import { personalRuleDelegation } from "./personal-rule-delegation.js";
 import { scheduledAssistantOwner, type AssistantAutomationAuthorization } from "./assistant-automation-authority.js";
@@ -923,6 +925,8 @@ export interface PreStagedDeliveryPlan {
  * throwing from `stage` prevents materialization, while `activate` runs only after it completes. */
 export interface PreStagedDeliveryOptions {
   sessionId?: string;
+  /** Display provenance for a server-authored prompt. Never taken from the request. */
+  promptOrigin?: WollipogPromptOrigin;
   /** Trusted automation origin copied into every newly materialized session before it is visible. */
   automationOrigin?: SessionAutomationOrigin;
   /** Recovery-only exact commands read from the durable outbox. When present, resource
@@ -2242,7 +2246,8 @@ export function assistantThreadBudgetRefusal(costUsd: number): string {
   return `This Wollipog Assistant thread has spent or committed its whole $${costUsd} budget, so it cannot launch another session.`;
 }
 
-export function assistantThreadLaunchLimitMessage(launched: number, limit: number | null): string | null {
+export function assistantThreadLaunchLimitMessage(launched: number, limit: number | null, paused = false): string | null {
+  if (paused) return "This Wollipog Assistant thread has paused new launches.";
   return limit !== null && launched >= limit
     ? `This Wollipog Assistant thread has launched ${launched} of the ${limit} sessions it may launch, so it cannot launch another.`
     : null;
@@ -3748,7 +3753,7 @@ export class SessionsService {
     const call = assistantCallContext.getStore();
     const thread = call ? this.db.assistantThreads.forConnection(call.connectionId) : null;
     if (!thread) return null;
-    const refusal = this.assistantThreadLaunchLimitRefusal(thread.id, thread.launch_limit);
+    const refusal = this.assistantThreadLaunchLimitRefusal(thread);
     if (refusal) return { refusal };
     const launch = { threadId: thread.id, backingSessionId: thread.session_id };
     const limitUsd = thread.cost_limit_usd;
@@ -3764,17 +3769,18 @@ export class SessionsService {
     return { ...launch, budget: { limitUsd, heldUsd: launchedHeldUsd, remainingUsd } };
   }
 
-  assistantThreadLaunchLimitRefusal(threadId: string, limit: number | null): string | null {
-    if (limit === null) return null;
-    const launched = this.db.assistantThreads.launchedSessionIds(threadId).length +
-      this.db.assistantOwnerConfirmations.launchedCampaignIds(threadId).length;
-    const message = assistantThreadLaunchLimitMessage(launched, limit);
-    return message ? `${message} The owner can change the launch limit in Thread Settings.` : null;
+  assistantThreadLaunchLimitRefusal(thread: Pick<import("./assistant-thread-store.js").ThreadRow, "id" | "launch_limit" | "launch_paused">): string | null {
+    const paused = Boolean(thread.launch_paused);
+    if (thread.launch_limit === null && !paused) return null;
+    const launched = this.db.assistantThreads.launchedSessionIds(thread.id).length +
+      this.db.assistantOwnerConfirmations.launchedCampaignIds(thread.id).length;
+    const message = assistantThreadLaunchLimitMessage(launched, thread.launch_limit, paused);
+    return message ? `${message} The owner can change when launches are allowed in Thread Settings.` : null;
   }
 
   /** Both owner-facing editors write the thread limit. Existing spend and launches take priority. */
   updateAssistantThreadLimits(
-    row: Pick<import("./assistant-thread-store.js").ThreadRow, "id" | "session_id" | "cost_limit_usd" | "launch_limit">,
+    row: Pick<import("./assistant-thread-store.js").ThreadRow, "id" | "session_id" | "cost_limit_usd" | "launch_limit" | "launch_paused">,
     limits: AssistantThreadLimits,
     edit?: { config: SessionConfig; actor: GovernanceActor },
   ): ServiceResult<SessionView> {
@@ -3801,7 +3807,9 @@ export class SessionsService {
       if (edit || changed) {
         const { costBudgetUsd: _threadBudget, ...other } = edit?.config ?? {};
         const result = this.applySessionConfig(backing.id, { ...other, ...(changed ? { costBudgetUsd: target ?? 0 } : {}) }, edit?.actor);
-        if (!result.ok) this.db.assistantThreads.setLimits(row.id, { costUsd: row.cost_limit_usd, launchedSessions: row.launch_limit });
+        if (!result.ok) this.db.assistantThreads.setLimits(row.id, {
+          costUsd: row.cost_limit_usd, launchedSessions: row.launch_limit, launchPaused: Boolean(row.launch_paused),
+        });
         return result;
       }
       const updated = this.db.getSession(backing.id)!;
@@ -4825,19 +4833,31 @@ export class SessionsService {
           requestedConfig.effort = campaignBehavior.childEffort;
         }
       }
-      const preference = creationContext?.defaultOwnerUserId
+      if (isManagedModelChoice(requestedConfig.model)) {
+        return fail("Choose a specific model for this session. Latest applies through saved Agent Defaults.", 409);
+      }
+      const savedPreference = creationContext?.defaultOwnerUserId
         ? this.db.getAgentHarnessDefault(
           creationContext.defaultOwnerUserId,
           agentHarnessIdentityFor({ id: req.agentId, driver: launch.driver, context: launch.context }),
         )?.config
         : undefined;
+      const managedId = savedPreference?.model;
+      const managed = isManagedModelChoice(managedId);
+      const managedModel = managed && managedId ? resolveManagedModelChoice(launch.driver, agentCapabilities, managedId) : undefined;
+      const preference = managed ? (managedModel && { ...savedPreference, model: managedModel.id }) : savedPreference;
+
       // Saved defaults are all-or-nothing under capability drift. A stale combination is never
       // partially sent to a harness, while explicit per-session knobs retain field-level priority.
-      if (preference && agentCapabilities && installationSupportsDefault({
+      const compatible = preference && agentCapabilities && installationSupportsDefault({
         models: agentCapabilities.models.filter((model) => model.id !== "default" && !model.hidden),
         effortLevels: agentCapabilities.effortLevels ?? [],
         permissionModes: agentCapabilities.permissionModes ?? [],
-      }, preference)) {
+      }, preference);
+      if (managed && !compatible && requestedConfig.model === undefined && requestedConfig.effort === undefined) {
+        return fail("The saved Latest model is unavailable with these defaults. Choose a specific model or update Agent Defaults.", 409);
+      }
+      if (preference && compatible) {
         if (requestedConfig.model === undefined && requestedConfig.effort === undefined) {
           if (preference.model !== undefined) requestedConfig.model = preference.model;
           if (preference.effort !== undefined) requestedConfig.effort = preference.effort;
@@ -6751,6 +6771,7 @@ export class SessionsService {
     holdReader?: HoldAdviceReader,
     /** Trusted server notices may be retained unsent. Never populated from a caller's request. */
     retainNoticeDuringCampaignPause = false,
+    promptOrigin?: WollipogPromptOrigin,
   ): ServiceResult<PromptAdmissionView> {
     const pausedCampaign = this.db.campaignPaused(sessionId);
     if (pausedCampaign && (delivery || !retainNoticeDuringCampaignPause && !binding)) {
@@ -6975,10 +6996,12 @@ export class SessionsService {
       }
       commandImages = externalized.data;
     }
+    const origin = delivery?.promptOrigin ?? promptOrigin;
     const command: DurableSessionCommand = snapshotCommand ?? {
       type: "prompt_session",
       sessionId,
       text: effectiveText,
+      ...(origin ? { promptOrigin: origin } : {}),
       ...(binding?.reviewContinuation ? { reviewContinuation: true as const } : {}),
       images: nonEmpty(commandImages),
       slashCommand: effectiveSlashCommand,
@@ -7099,8 +7122,12 @@ export class SessionsService {
     });
   }
 
+  promptWollipogNotice(sessionId: string, text: string, origin?: WollipogPromptOrigin): ServiceResult<PromptAdmissionView> {
+    return this.prompt(sessionId, text, [], undefined, undefined, undefined, false, undefined, undefined, false, origin);
+  }
+
   private promptSystemNotice(sessionId: string, text: string): ServiceResult<PromptAdmissionView> {
-    return this.prompt(sessionId, text, [], undefined, undefined, undefined, false, undefined, undefined, true);
+    return this.prompt(sessionId, text, [], undefined, undefined, undefined, false, undefined, undefined, true, { kind: "system_notice" });
   }
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
@@ -9019,6 +9046,7 @@ export class SessionsService {
     const pause = this.db.campaignPause(id);
     if (!pause || pause.resumedAt !== undefined) return;
     if (pause.stoppedSessionIds.some(childId => this.db.hasSessionStopIntent(childId))) return;
+    const promptOrigin: WollipogPromptOrigin = { kind: actor === "scheduled" ? "scheduled_wake" : "system_notice" };
     const text = "The campaign has resumed. Continue the preserved work within its existing authority and budget. Main may have moved; fetch it and inspect dependencies before continuing.";
     // Restart keeps suspension active until every retained child has passed existing admission.
     // An unsuccessful restart stays in this durable list for the next sweep, without more grants.
@@ -9026,7 +9054,7 @@ export class SessionsService {
       const child = this.db.getSession(childId);
       if (!child || child.archived) continue;
       if (child.status === "stopped" && !this.restart(childId, { campaignResume: true }).ok) continue;
-      this.promptOutbox.stage(childId, child.runnerId, { type: "prompt_session", sessionId: childId, text }, now,
+      this.promptOutbox.stage(childId, child.runnerId, { type: "prompt_session", sessionId: childId, text, promptOrigin }, now,
         `campaign_resume_${id}_${pause.pausedAt}_${childId}`);
       pause.stoppedSessionIds = pause.stoppedSessionIds.filter(memberId => memberId !== childId);
       this.db.saveCampaignPause(id, pause);
@@ -9035,7 +9063,7 @@ export class SessionsService {
     for (const memberId of pause.inFlightSessionIds) {
       const member = this.db.getSession(memberId);
       if (!member || member.archived || isTerminal(member.status)) continue;
-      this.promptOutbox.stage(memberId, member.runnerId, { type: "prompt_session", sessionId: memberId, text }, now,
+      this.promptOutbox.stage(memberId, member.runnerId, { type: "prompt_session", sessionId: memberId, text, promptOrigin }, now,
         `campaign_resume_${id}_${pause.pausedAt}_${memberId}`);
     }
     pause.resumedAt = now; pause.resumedBy = actor;
@@ -17988,7 +18016,7 @@ export class SessionsService {
     }
     const { grant, revision } = threadDecisionDelegation(thread);
     if (!grant?.categories.includes("ui_evidence_review") || grant.expiresAt !== null && Date.now() >= grant.expiresAt) {
-      return fail("The thread needs a current UI Evidence Approval grant. The owner can change it in Decision Delegation.", 403);
+      return fail("The thread needs a current grant for Approve UI Evidence. The owner can change it in Decision Delegation.", 403);
     }
     const owner = this.db.operatingHumanPrincipal(thread.owner_user_id, thread.organization_id);
     const controller = this.db.getSession(decision.controllingSessionId);
@@ -18022,7 +18050,7 @@ export class SessionsService {
     const availability = assistantEvidenceReviewAvailability(this.db, session);
     if (!availability.available) return fail(availability.reason, 409);
     if (grant.evidenceDisclosureDigest !== availability.disclosureDigest) {
-      return fail("The thread’s provider, model or account changed. The owner needs to renew its UI Evidence Approval grant.", 409);
+      return fail("The thread’s provider, model or account changed. The owner needs to renew its grant for Approve UI Evidence.", 409);
     }
     const control = controller.orchestratorPolicy?.control;
     const boundary = control?.mode === "full_control" ? control.boundary : undefined;
@@ -19149,8 +19177,9 @@ export class SessionsService {
       return false;
     }
     const text = workflowDecisionResolutionPrompt(decision);
+    const origin = decision.assistantDelegation ? { kind: "delegation_notice" as const } : undefined;
     if (!runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "worktreeRecovery")) {
-      const delivered = this.prompt(child.id, text);
+      const delivered = this.promptWollipogNotice(child.id, text, origin);
       if (!delivered.ok) {
         this.log.warn(`workflow decision ${decision.occurrenceId} resolution not delivered to ${child.id}: ${delivered.error}`);
       }
@@ -19180,6 +19209,7 @@ export class SessionsService {
     let delivered: ReturnType<SessionsService["prompt"]>;
     try {
       delivered = this.prompt(child.id, text, [], undefined, undefined, {
+        promptOrigin: origin,
         ...(childIdle ? { admitAs: "queued" as const } : {}),
         // Staging is the success boundary: once the payload is durable, a failed flush is retried by
         // the outbox rather than reported, exactly as for a human's durable prompt.

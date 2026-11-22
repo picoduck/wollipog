@@ -1,4 +1,5 @@
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
+import { WollipogPromptRow } from "./WollipogPromptRow.js";
 import { useShowAgentLogs } from "../agent-logs.js";
 import type { AgentDefinition, AgentDriverKind, InPlaceHandoffTurn, ArtifactView } from "@wollipog/protocol";
 import { Profiler, createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
@@ -21,9 +22,11 @@ import { Markdown } from "./Markdown.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import {
-  AUTOMATIC_TURNS_HELD_SENTENCE, BACKGROUND_RESULTS_HELD_SENTENCE, describeTurnError, isAutomaticTurnsHeld,
-  isBackgroundResultsHeld,
+  AUTOMATIC_TURNS_HELD_SENTENCE, BACKGROUND_RESULTS_HELD_SENTENCE, agentLaunchFailure, describeTurnError, isAutomaticTurnsHeld,
+  isBackgroundResultsHeld, type AgentLaunchFailure,
 } from "../turn-error.js";
+import { viewPath } from "../navigation.js";
+import { useOptionalNavigate } from "../store.js";
 import {
   MeasuredVirtualList,
   type VirtualRevealOutcome,
@@ -2475,7 +2478,12 @@ function TimelineRowContent({
             : "Earlier messages were summarized to free context."}
         />
       );
+    case "wollipog_prompt":
+      return <WollipogPromptRow origin={item.promptOrigin} text={item.text} createdAt={item.createdAt} open={disclosureOpen} onToggle={onDisclosureToggle} />;
     case "user_message":
+      if (item.promptOrigin) {
+        return <WollipogPromptRow origin={item.promptOrigin} text={item.text} createdAt={item.createdAt} open={disclosureOpen} onToggle={onDisclosureToggle} />;
+      }
       return (
         <div className="tl-row user">
           <div className="tl-message-stack user">
@@ -2522,7 +2530,7 @@ function TimelineRowContent({
         <div className="tl-agent-msg">
           <MessageTimestamp timestamp={item.createdAt} />
           <ReplyArtifactScope text={item.text} settled={mediaSettled} previews={replyArtifacts}>
-            <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled}>{item.text}</Markdown>
+            <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled} streaming={!mediaSettled}>{item.text}</Markdown>
           </ReplyArtifactScope>
           {(standaloneCopy || insertable) && item.text && (
             <div className="tl-message-actions tl-reply-actions" role="group" aria-label="Message Actions">
@@ -2571,6 +2579,10 @@ function TimelineRowContent({
         <Notice tone="warning" title="Worktree Base Fallback"><p>{item.message}</p></Notice>
       );
       if (item.nonFatal) return <TurnProblemNotice message={item.message} />;
+      {
+        const launchFailure = agentLaunchFailure(item.message);
+        if (launchFailure) return <AgentLaunchFailureNotice failure={launchFailure} />;
+      }
       return isAutomaticTurnsHeld(item.message)
         ? <AutomaticTurnsHeldNotice message={item.message} />
         : isBackgroundResultsHeld(item.message)
@@ -3133,7 +3145,7 @@ function TurnFailedNotice({ message, prompt }: { message: string; prompt?: UserM
   const raw = withoutPromptFailedPrefix(message);
   const reason = prompt?.commandInvocation ? RETRY_TURN_COMMAND_REASON : retry?.unavailableReason;
   const retrying = prompt !== undefined && retry?.pendingPromptId === prompt.id;
-  const actions = retry && prompt && (
+  const actions = retry && prompt && (!prompt.promptOrigin || prompt.promptOrigin.kind === "legacy_confirmation") && (
     <BusyButton
       className="btn sm"
       busy={retrying}
@@ -3157,6 +3169,41 @@ function TurnFailedNotice({ message, prompt }: { message: string; prompt?: UserM
       {prompt !== undefined && retry?.error?.promptId === prompt.id && (
         <p className="notice-meta" role="alert">Couldn't retry the turn: {retry.error.message}</p>
       )}
+    </Notice>
+  );
+}
+
+/** An agent that could not start, needs sign-in, or could not resume on its machine (#4779). These are
+ * setup problems, not failed turns: each has its own heading and fix, and none offers Retry Turn. The
+ * runner's sentence stays behind Show Details without its generic launch prefix. */
+function AgentLaunchFailureNotice({ failure }: { failure: AgentLaunchFailure }) {
+  const navigate = useOptionalNavigate();
+  const connections = { name: "runners", section: "machines" } as const;
+  const openConnections = (
+    <a
+      className="btn sm"
+      href={viewPath(connections)}
+      onClick={(event) => {
+        if (!navigate || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        navigate(connections);
+      }}
+    >Open Connections</a>
+  );
+  const { agent } = failure;
+  const copy = failure.kind === "start"
+    ? { title: `${agent} Couldn't Start`, sentence: `Wollipog couldn't start ${agent} on this machine. Check that it's installed and set up in Connections.` }
+    : failure.kind === "sign_in"
+    ? { title: "Sign-In Required", sentence: `${agent} isn't signed in on this machine. Sign in from Connections, then try again.` }
+    : { title: "Conversation Can't Resume", sentence: `${agent} couldn't resume this conversation, so its history here is read-only. Start a new session to continue.` };
+  return (
+    <Notice
+      tone={failure.kind === "resume" ? "warning" : "danger"}
+      title={copy.title}
+      actions={failure.kind === "resume" ? undefined : openConnections}
+      details={<div className="code-well"><pre>{failure.text}</pre></div>}
+    >
+      <p>{copy.sentence}</p>
     </Notice>
   );
 }
@@ -3292,7 +3339,8 @@ function TurnFooter({ summary, onFork, forkAvailability, prompt, alone = false, 
   const fork = actions.find((action) => action.key === "fork");
   const forkUsable = fork !== undefined && transcriptActionAvailable(fork);
   const groups = [
-    ...(prompt ? [{ label: "Your Message", actions: messageActions(prompt, messageInput) }] : []),
+    ...(prompt && (!prompt.promptOrigin || prompt.promptOrigin.kind === "legacy_confirmation")
+      ? [{ label: "Your Message", actions: messageActions(prompt, messageInput) }] : []),
     { label: "This Turn", actions },
   ];
   return (

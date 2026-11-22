@@ -1,4 +1,5 @@
 import { AGENT_SPAWN_OBSERVATION_CAP } from "@wollipog/protocol";
+import { legacyOwnerConfirmationOrigin, type TimelinePromptOrigin } from "./wollipog-prompt-origin.js";
 import { policyHookOutcome, type GovernanceDecision } from "./governance.js";
 import type {
   AgentQuestion,
@@ -65,11 +66,13 @@ export function mergeTurnUsage(current: TurnUsage | undefined, addition: TurnUsa
 }
 
 export type TimelineItem =
+  | { kind: "wollipog_prompt"; id: number; text: string; promptOrigin: TimelinePromptOrigin; createdAt: number }
   | { kind: "artifact_attached"; id: number; artifact: ArtifactView; createdAt: number }
   | {
       kind: "user_message";
       id: number;
       text: string;
+      promptOrigin?: TimelinePromptOrigin;
       images?: PromptImageInput[];
       /** Runner queue id for reconciling a formerly queued prompt without text de-duplication. */
       turnId?: string;
@@ -948,10 +951,12 @@ export class TimelineBuilder {
         break;
       case "user_message": {
         this.breakText();
+        const promptOrigin = p.promptOrigin === undefined ? legacyOwnerConfirmationOrigin(p.text) : p.promptOrigin;
         const userIndex = this.items.push({
           kind: "user_message",
           id: ev.seq,
           text: p.text,
+          ...(promptOrigin ? { promptOrigin } : {}),
           images: p.images,
           turnId: p.turnId,
           commandId: p.commandId,
@@ -1013,6 +1018,14 @@ export class TimelineBuilder {
         this.pushText("command_output", ev.seq, p.text, undefined, p.parentToolUseId, undefined, p.textRefs);
         break;
       case "stderr":
+        if (p.backgroundPrompt) {
+          this.breakText();
+          this.markDirty(this.items.push({
+            kind: "wollipog_prompt", id: ev.seq, createdAt: ev.ts,
+            promptOrigin: p.backgroundPrompt.origin, text: p.backgroundPrompt.text,
+          }) - 1);
+          break;
+        }
         if (p.runnerMarker === "background_continuation_delivery") {
           this.breakText();
           break;

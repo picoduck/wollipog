@@ -14,6 +14,7 @@ import {
   builtInAgentHarnessName,
   canonicalAgentHarnessIdentity,
   installationSupportsDefault,
+  managedModelChoices,
   normalizeAgentHarnessIdentity,
 } from "@wollipog/protocol";
 export { agentHarnessIdentityKey, installationSupportsDefault } from "@wollipog/protocol";
@@ -82,7 +83,7 @@ export class AgentHarnessDefaultsSettings {
           runnerId: runner.runnerId,
           machineName: runner.displayName || runner.hostname || runner.runnerId,
           online: runner.status === "online",
-          models: visibleModels(agent.capabilities),
+          models: [...visibleModels(agent.capabilities), ...managedModelChoices(identity.driver, agent.capabilities)],
           effortLevels: [...(agent.capabilities?.effortLevels ?? [])],
           permissionModes: [...(agent.capabilities?.permissionModes ?? [])],
         };

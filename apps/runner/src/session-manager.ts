@@ -1,3 +1,4 @@
+import { OWNER_CONFIRMATION_NOTICE_PREFIX, type PromptSessionMessage, type WollipogPromptOrigin } from "@wollipog/protocol";
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
 import { isProviderCapacityFailure, PROVIDER_RETRY_CONTINUATION } from "./provider-turn-retry.js";
 import { artifactGuidance } from "./artifact-guidance.js";
@@ -173,6 +174,7 @@ import type {
   DriverSubscriptionUsageUpdate,
   StopReason,
 } from "./drivers/driver.js";
+import { AcpLaunchRefusedError } from "./acp-compatibility.js";
 import { coalesceDriverTextDeltas, type TextDeltaCoalescer } from "./text-delta-coalescer.js";
 import { CodexAppServerResumeError, CodexCommandSandboxUnavailableError } from "./drivers/codex-app-server.js";
 import type { CodexPromptTemplate } from "./discovery/codex-prompts.js";
@@ -507,6 +509,13 @@ export interface SessionLaunchPreparation {
   sessionCommandCatalogProvenance?: string;
   /** Codex App Server custom prompts read for this launch. Bodies never enter session metadata. */
   codexPrompts?: CodexPromptTemplate[];
+  /** ACP only: inherited variables this launch's agent must not see (its credential context). */
+  scrubInheritedEnv?: string[];
+  /** ACP only: narrow handling this launch's agent needs (see `acp-compatibility.ts`). */
+  acpCompatibility?: DriverOptions["acpCompatibility"];
+  /** The launch must not start a provider (nothing verified to run, #4779). The sentence is the
+   * runner's own and becomes the launch failure; no process is spawned. */
+  launchRefusal?: string;
 }
 
 /** Transcript text for an invoked provider command, spelled the way the harness expects: a
@@ -686,6 +695,7 @@ interface QueuedPrompt {
   /** Control-plane-authenticated campaign or review continuation, distinct from human input.
    * This historical name also persists in user_message and authentication-retry records. */
   campaignContinuation?: boolean;
+  promptOrigin?: WollipogPromptOrigin;
   /** Durable managed jobs whose barrier terminal observation caused this continuation. */
   backgroundJobIds?: string[];
   /** Submit-only continuation for a lost callback or an async question answered in a later turn. */
@@ -990,6 +1000,17 @@ export function providerStopError(stop: StopReason, client: Pick<Driver, "lastTu
   const detail = stop === "refusal" ? client.lastTurnError?.()?.trim() : undefined;
   const reason = stop === "cancelled" ? "canceled" : stop;
   return detail ? `provider ${reason}: ${detail}` : `provider ${reason}`;
+}
+
+/** A launch's ACP compatibility profile as its effective sandbox allows (#4779). Any runner-owned
+ * sandbox (bwrap, including the one a managed Linux worktree forces, or Seatbelt) leaves the
+ * agent's own state read-only, so resume is withheld whatever the configured isolation mode. */
+export function effectiveAcpCompatibility(
+  compatibility: DriverOptions["acpCompatibility"],
+  isolation: SpawnIsolation | undefined,
+): Pick<DriverOptions, "acpCompatibility"> {
+  if (!compatibility) return {};
+  return { acpCompatibility: isolation ? { ...compatibility, resumable: false } : compatibility };
 }
 
 function canResumeSession(meta: SessionMeta): boolean {
@@ -2045,6 +2066,9 @@ export class SessionManager {
   private readonly claudeInitCatalogQueue = new Map<string, Promise<void>>();
   /** Sessions whose init list merged before the provider was ready to authorize it. */
   private readonly claudeInitAwaitingAuthority = new Set<string>();
+  /** The ACP compatibility profile a launch's preparation returned, keyed by the exact metadata
+   * object that launch prepares and isolates (#4779). */
+  private readonly launchAcpCompatibility = new WeakMap<SessionMeta, NonNullable<DriverOptions["acpCompatibility"]>>();
   /** Async seam covers WSL markerless recovery without blocking runner startup. */
   private discoverClaudeTasksInContext: typeof discoverIncompleteClaudeTasksInContext = discoverIncompleteClaudeTasksInContext;
   private resolveDetachedClaudeEnvironment: (meta: SessionMeta) => Record<string, string> = () => ({});
@@ -10555,10 +10579,18 @@ export class SessionManager {
         providerHome: preparationHome,
         ...(providerHomeWait ? { providerHomeWait } : {}),
       });
+      this.rememberAcpCompatibility(meta, launchPreparation);
       // Launch preparation may await filesystem/provider discovery. A restart can replace this
       // session with a new generation (and even a different provider) during that window; the old
       // continuation must not patch or publish its stale launch-local metadata.
       if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
+      if (launchPreparation?.launchRefusal) {
+        // Nothing may be spawned (#4779): fail the launch with the runner's sentence, as a failed
+        // provider start would, before any isolation or provider process is set up.
+        this.emitEvent(sessionId, { kind: "error", message: `agent init failed: ${launchPreparation.launchRefusal}` });
+        this.emitStatus(sessionId, "failed", launchPreparation.launchRefusal);
+        return false;
+      }
       // Repository setup values are resolved runner-side from the immutable base-commit config.
       // Apply them after agent-config refresh so they reach hooks and the provider without ever
       // being persisted in meta.json or projected to the control plane.
@@ -10762,6 +10794,8 @@ export class SessionManager {
           args: preparedProjectMemoryArgs ?? launchPreparation?.codexLaunchArgs ?? meta.args,
           cwd,
           env: meta.env,
+          ...(launchPreparation?.scrubInheritedEnv?.length ? { scrubInheritedEnv: launchPreparation.scrubInheritedEnv } : {}),
+          ...effectiveAcpCompatibility(launchPreparation?.acpCompatibility, isolation),
           config: meta.config,
           artifactGuidance: meta.review ? "" : [artifactGuidance(meta, this.controlPlaneProtocolVersion()), shellGuidance(meta)].filter(Boolean).join(" "),
           ...(meta.review ? { review: true } : {}),
@@ -11004,7 +11038,8 @@ export class SessionManager {
       if (reviewWriter) this.driverReviewWriterTokens.set(client, reviewWriter);
     } catch (error) {
       if (launchHome) {
-        if (driverConstructionStarted) await this.retainProviderHomeReference(launchHome);
+        // An ACP profile's refusal comes before its spawn (#4779): no process used the HOME.
+        if (driverConstructionStarted && !(error instanceof AcpLaunchRefusedError)) await this.retainProviderHomeReference(launchHome);
         else await this.releaseProviderHomeReference(launchHome);
       }
       if (worktreeLeaseOwner) this.store.releaseWorktreeLease(sessionId, worktreeLeaseOwner);
@@ -11016,7 +11051,10 @@ export class SessionManager {
       // Only the driver's own lease acquisition can refuse with a lease code here. Keep the
       // established prefix: older web clients use it to recognize account failures in transcripts.
       const refusal = !driverConstructionStarted ? providerHomeLaunchRefusal(error, meta) : undefined;
-      const prefix = refusal ? "provider account unavailable" : "agent process could not be created";
+      // An ACP profile that found nothing verified to run when it was about to spawn (#4779) fails
+      // the launch the way a launch-preparation refusal does.
+      const prefix = refusal ? "provider account unavailable"
+        : error instanceof AcpLaunchRefusedError ? "agent init failed" : "agent process could not be created";
       this.emitEvent(sessionId, { kind: "error", message: `${prefix}: ${errText(error)}` });
       this.emitStatus(sessionId, "failed", errText(error));
       if (refusal) this.recordProviderHomeRefusal(sessionId, refusal);
@@ -11362,7 +11400,10 @@ export class SessionManager {
         path: protectedWorktree, gitWritableRoots, requiredReadOnlyPaths,
         ...(ownedWorktrees.length ? { ownedWorktrees } : {}),
       } } : {}),
-      ...(protectedWorktree && this.executionIsolation.mode === "provider" ? { preserveProviderHome: true } : {}),
+      // An ACP agent's home has no known preservable state; one whose compatibility profile accepts
+      // read-only state (Antigravity, #4779) runs in the protected worktree without it.
+      ...(protectedWorktree && this.executionIsolation.mode === "provider" &&
+        !(meta.driver === "acp" && this.launchAcpCompatibility.has(meta)) ? { preserveProviderHome: true } : {}),
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(guardStateMask ? { guardStateMask } : {}),
       ...(this.strictProjectIsolation(meta) ? { orchestratorScratchOnly: true } : {}),
@@ -11389,6 +11430,11 @@ export class SessionManager {
       join(homedir(), ".aws"), join(homedir(), ".codex"), join(homedir(), ".claude"),
       ...[meta.providerCredentialHome, meta.pendingProviderCredentialHome].filter((path): path is string => !!path),
     ]);
+  }
+
+  private rememberAcpCompatibility(meta: SessionMeta, preparation: SessionLaunchPreparation | void | undefined): void {
+    if (preparation?.acpCompatibility) this.launchAcpCompatibility.set(meta, preparation.acpCompatibility);
+    else this.launchAcpCompatibility.delete(meta);
   }
 
   private requiresManagedWorktreeBwrap(meta: SessionMeta): boolean {
@@ -11780,6 +11826,12 @@ export class SessionManager {
     this.nextQueueOrdinalBySession.delete(sessionId);
   }
 
+  promptFromControlPlane(command: PromptSessionMessage, durable?: DurableCommandLifecycle): boolean {
+    return this.prompt(command.sessionId, command.text, command.images, command.slashCommand, command.config,
+      durable, false, undefined, false, undefined, undefined, undefined,
+      Boolean(durable && (command.campaignContinuation || command.reviewContinuation)), false, false, command.promptOrigin);
+  }
+
   prompt(
     sessionId: string,
     text: string,
@@ -11797,6 +11849,7 @@ export class SessionManager {
     /** The launch's own initial prompt, which precedes whatever queued up while it was admitted. */
     launchInitialPrompt = false,
     providerRecovery = false,
+    promptOrigin?: WollipogPromptOrigin,
   ): boolean {
     const recoveryLaunch = this.launchGenerations.get(sessionId);
     const admittedRecoveryLaunch = recoveryLaunch !== undefined && this.preLaunchAdmissionGenerations.get(sessionId) === recoveryLaunch;
@@ -11940,6 +11993,7 @@ export class SessionManager {
           reservedOrdinal,
           recoveredQuestion,
           campaignContinuation,
+          promptOrigin,
         );
       }
       this.emitEvent(sessionId, {
@@ -11972,7 +12026,7 @@ export class SessionManager {
         images,
         slashCommand,
         config: effectiveConfig, durable, syntheticRecovery, providerRecovery, backgroundJobIds, recoveredQuestion,
-        campaignContinuation,
+        campaignContinuation, promptOrigin,
       });
       if (!this.recoveryLaunching.has(sessionId)) {
         setImmediate(() => void this.recoverQueuedAppServer(sessionId).catch((error) =>
@@ -11999,7 +12053,7 @@ export class SessionManager {
         id: queuedPromptId ?? durable?.commandId ?? randomUUID(),
         ordinal: reservedOrdinal ?? this.nextQueueOrdinal(sessionId), text, images, slashCommand,
         config: effectiveConfig, durable, syntheticRecovery, providerRecovery, backgroundJobIds, recoveredQuestion,
-        campaignContinuation,
+        campaignContinuation, promptOrigin,
       });
       this.preLaunchQueues.set(sessionId, queue);
       this.emitQueue(sessionId);
@@ -12023,6 +12077,7 @@ export class SessionManager {
         queuedPromptId,
         campaignContinuation,
         providerRecovery,
+        promptOrigin,
       ).catch((error) => {
         // resumeAndPrompt handles EXPECTED failures internally (durable.failed / error events). An
         // UNEXPECTED throw (e.g. a JSON.stringify RangeError writing a pathological config) escapes
@@ -12066,7 +12121,7 @@ export class SessionManager {
       images,
       slashCommand,
       config: effectiveConfig, durable, syntheticRecovery, providerRecovery, backgroundJobIds, recoveredQuestion,
-      campaignContinuation,
+      campaignContinuation, promptOrigin,
     });
     this.emitQueue(sessionId);
     this.scheduleDrain(sessionId);
@@ -12717,7 +12772,7 @@ export class SessionManager {
               operation.result?.disposition !== "uncertain" || operation.result.reason !== "transport_uncertain" || operation.resolved ||
               this.active.get(request.sessionId)?.client !== entry!.client) return;
           if (!this.appendAcceptedSteeringEvent(request.sessionId, request.turnId,
-            request.submissionId, displayText, imageInputs)) return;
+            request.submissionId, displayText, imageInputs, undefined, source?.promptOrigin)) return;
           operation.result = this.makeSteeringResult(request, "accepted", "accepted", { providerTurnId });
           operation.promise = Promise.resolve(operation.result);
           const current = this.active.get(request.sessionId);
@@ -12773,6 +12828,7 @@ export class SessionManager {
       displayText,
       imageInputs,
       source?.durable,
+      source?.promptOrigin,
     );
     if (!persisted) {
       return this.makeSteeringResult(request, "uncertain", "history_integrity_failure", {
@@ -13024,6 +13080,7 @@ export class SessionManager {
     text: string,
     images: PromptImageInput[],
     durable?: DurableCommandLifecycle,
+    promptOrigin?: WollipogPromptOrigin,
   ): boolean {
     // Landing pending text can itself latch a history failure, so check only after it.
     this.flushTextDeltas(sessionId);
@@ -13036,6 +13093,7 @@ export class SessionManager {
         turnId,
         submissionId,
         deliveryIntent: "steer",
+        ...this.promptEventOrigin(text, promptOrigin),
         ...(durable ? { commandId: durable.commandId } : {}),
       };
       const stored = this.store.appendEvent(sessionId, payload);
@@ -13154,6 +13212,9 @@ export class SessionManager {
   private queuedPromptEditEligibility(prompt: QueuedPrompt): { eligible: true } | { eligible: false; message: string } {
     if (prompt.durable) {
       return { eligible: false, message: "Messages controlled by durable delivery cannot be edited until delivery resolves." };
+    }
+    if (prompt.promptOrigin) {
+      return { eligible: false, message: "Wollipog notices cannot be edited after admission." };
     }
     if (prompt.sessionCommand) {
       return { eligible: false, message: "Provider commands cannot be edited after admission." };
@@ -13950,6 +14011,7 @@ export class SessionManager {
     queuedPromptId?: string,
     campaignContinuation = false,
     providerRecovery = false,
+    promptOrigin?: WollipogPromptOrigin,
   ): Promise<void> {
     const meta = this.store.readMeta(sessionId);
     if (providerRecovery && (!meta || meta.status === "stopped" || !meta.agentSessionId || !canResumeSession(meta))) return;
@@ -14109,7 +14171,7 @@ export class SessionManager {
         providerRecovery,
         backgroundJobIds,
         recoveredQuestion,
-        campaignContinuation,
+        campaignContinuation, promptOrigin,
       });
       this.preLaunchQueues.set(sessionId, queue);
     }
@@ -14195,6 +14257,7 @@ export class SessionManager {
           reservedOrdinal,
           recoveredQuestion,
           campaignContinuation,
+          promptOrigin,
         );
       } else if (blocked?.providerAuthBlock?.delivery === "not_delivered" &&
           blocked.providerAuthRetryAttemptedRecoveryId !== blocked.providerAuthBlock.recoveryId &&
@@ -14206,6 +14269,7 @@ export class SessionManager {
               ...(reservedOrdinal ? { ordinal: reservedOrdinal } : {}),
               text,
               images: [],
+              ...(promptOrigin ? { promptOrigin } : {}),
               ...(slashCommand ? { slashCommand } : {}),
               ...(config ? { config } : {}),
             },
@@ -14272,6 +14336,7 @@ export class SessionManager {
         campaignContinuation,
         false,
         providerRecovery,
+        promptOrigin,
       );
     }
   }
@@ -17255,10 +17320,12 @@ export class SessionManager {
                 backgroundJobIds.includes(job.id) && job.restartedAt !== undefined && !job.restartResumed)
               ? "Runner reported the background work of the conversation the restart replaced."
               : "Runner continued after managed background work completed.",
+          ...(backgroundJobIds?.length ? { backgroundPrompt: { origin: { kind: "background_result" as const }, text } } : {}),
         })
       : this.emitEvent(sessionId, {
           kind: "user_message",
           text: displayText,
+          ...this.promptEventOrigin(displayText, queued.promptOrigin),
           images: imageInputs.length ? imageInputs : undefined,
           ...(campaignContinuation ? { campaignContinuation: true as const } : {}),
           ...(durable ? { commandId: durable.commandId } : {}),
@@ -18199,6 +18266,8 @@ export class SessionManager {
     // driver's own reference holds the HOME, or when the fork gives up before that.
     const forkPreparationHome = this.launchPreparationProviderHome();
     let forkConstructionStarted = false;
+    // An ACP profile refused before spawning (#4779): no process ever used the provider HOME.
+    let forkRefusedBeforeSpawn = false;
     // The Claude target fork's reference: settled on the fork probe's own tree proof once
     // forkSession returns or throws; released unproven only if forkSession was never called.
     let claudeForkHome: ProviderHomeReference | null = null;
@@ -18315,7 +18384,9 @@ export class SessionManager {
           isCurrent: forkIsCurrent,
           providerHome: forkPreparationHome,
         });
+        this.rememberAcpCompatibility(source, launchPreparation);
         if (!forkIsCurrent()) throw new Error("conversation fork preparation was canceled");
+        if (launchPreparation?.launchRefusal) throw new Error(launchPreparation.launchRefusal);
         if (sameSlashCommandCatalog(priorSessionSlashCommands, source.sessionSlashCommands)) {
           source.sessionSlashCommands = priorSessionSlashCommands;
         }
@@ -18378,6 +18449,8 @@ export class SessionManager {
             args: launchPreparation?.codexLaunchArgs ?? source.args,
             cwd: source.worktreePath,
             env: source.env,
+            ...(launchPreparation?.scrubInheritedEnv?.length ? { scrubInheritedEnv: launchPreparation.scrubInheritedEnv } : {}),
+            ...effectiveAcpCompatibility(launchPreparation?.acpCompatibility, isolation),
             config: source.config,
             context: source.context,
             capabilities: source.capabilities,
@@ -18738,6 +18811,7 @@ export class SessionManager {
         ...(retainedPrompt ? { retainedPrompt } : {}),
       };
     } catch (err) {
+      if (err instanceof AcpLaunchRefusedError) forkRefusedBeforeSpawn = true;
       if (forkedThreadId && client?.archiveSession) {
         try {
           await client.archiveSession(forkedThreadId);
@@ -18814,7 +18888,7 @@ export class SessionManager {
       } else if (forkHome) {
         const unused = forkHome;
         forkHome = null;
-        if (forkConstructionStarted) await this.retainProviderHomeReference(unused);
+        if (forkConstructionStarted && !forkRefusedBeforeSpawn) await this.retainProviderHomeReference(unused);
         else await this.releaseProviderHomeReference(unused);
       }
       if (claudeForkHome) {
@@ -19356,6 +19430,7 @@ export class SessionManager {
           prompt.campaignContinuation,
           false,
           prompt.providerRecovery,
+          prompt.promptOrigin,
         );
       }
     });
@@ -22036,6 +22111,13 @@ export class SessionManager {
     this.textDeltaCoalescers.delete(sessionId);
   }
 
+  private promptEventOrigin(text: string, origin?: WollipogPromptOrigin): { promptOrigin?: WollipogPromptOrigin | null } {
+    if (origin) return { promptOrigin: origin };
+    if (text.startsWith(OWNER_CONFIRMATION_NOTICE_PREFIX) &&
+        runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "wollipogPromptOrigin")) return { promptOrigin: null };
+    return {};
+  }
+
   private emitEvent(
     sessionId: string,
     payload: SessionEventPayload,
@@ -24688,6 +24770,7 @@ export class SessionManager {
     reservedOrdinal: number | undefined,
     recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
     campaignContinuation = false,
+    promptOrigin?: WollipogPromptOrigin,
   ): boolean {
     const block = meta.providerAuthBlock;
     if (!block) return false;
@@ -24720,6 +24803,7 @@ export class SessionManager {
         ...(slashCommand ? { slashCommand } : {}),
         ...(config ? { config } : {}),
         ...(campaignContinuation ? { campaignContinuation: true as const } : {}),
+        ...(promptOrigin ? { promptOrigin } : {}),
         ...(recoveredQuestion ? { recoveredQuestion } : {}),
       };
       this.ensureQueueOrdinal(meta.sessionId, retry);
@@ -24852,6 +24936,7 @@ export class SessionManager {
           "recoveredQuestion" in retry ? retry.recoveredQuestion : undefined,
           undefined,
           "campaignContinuation" in retry && retry.campaignContinuation === true,
+          false, false, retry.promptOrigin,
         );
         if (!accepted && "commandId" in retry && retry.recoveredQuestion) {
           refusedRecoveredQuestion = { commandId: retry.commandId, question: retry.recoveredQuestion };

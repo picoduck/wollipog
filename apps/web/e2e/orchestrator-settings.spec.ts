@@ -72,7 +72,7 @@ for (const viewport of [{ width: 1280, height: 1000 }, { width: 390, height: 844
     const childModel = page.getByRole("button", { name: /Child Model: Automatic/ });
     await childModel.focus();
     await page.keyboard.press("ArrowDown");
-    await expect(page.getByRole("listbox", { name: "Child Model" })).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "Child Model" })).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(childModel).toBeFocused();
 
@@ -83,7 +83,8 @@ for (const viewport of [{ width: 1280, height: 1000 }, { width: 390, height: 844
     await childHarness.click();
     await page.getByRole("option", { name: /Codex App Server · Native/ }).click();
     await page.getByRole("button", { name: /Child Model: Automatic/ }).click();
-    await page.getByRole("option", { name: /GPT-5.6 Sol/ }).click();
+    await page.getByRole("searchbox", { name: "Search Models" }).fill("GPT-5.6 Sol");
+    await page.getByRole("radio", { name: /GPT-5.6 Sol/, exact: false }).last().click();
     await page.getByRole("button", { name: /Child Effort: Automatic/ }).click();
     await page.getByRole("option", { name: /High/ }).click();
     await expect(page.getByRole("button", { name: /Child Harness: Codex App Server · Native/ })).toBeVisible();
@@ -336,4 +337,36 @@ for (const theme of ["dark", "light"]) {
       }
     });
   }
+}
+
+
+for (const viewport of [{ width: 1280, height: 1000 }, { width: 390, height: 844 }]) {
+  test("family model picker reveals exact releases without crowding the viewport at " + viewport.width, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/settings-rows-e2e.html?theme=dark&section=orchestrator&orchestrator=machines");
+    const trigger = page.getByRole("button", { name: "Child Model: Opus Latest" });
+    await trigger.click();
+    const picker = page.getByRole("dialog", { name: "Child Model" });
+    const latest = picker.getByRole("radio", { name: "Opus Latest", exact: true });
+    await expect(latest).toBeChecked();
+    await expect(picker.getByRole("radio", { name: "Opus 5.5", exact: true })).toHaveCount(1);
+    await expect(picker.getByRole("radio", { name: "Opus 4.8", exact: true })).toHaveCount(0);
+    await picker.getByRole("button", { name: /^Show Older Versions/ }).click();
+    await expect(picker.getByRole("radio", { name: "Opus 4.8", exact: true })).toBeVisible();
+    await expect(picker.getByRole("radio", { name: /New Agentic Coding Model/ })).toHaveCount(1);
+    expect(await picker.evaluate(element => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight &&
+        element.scrollWidth <= element.clientWidth;
+    })).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath("family-model-picker-" + viewport.width + ".png") });
+    const search = picker.getByRole("searchbox", { name: "Search Models" });
+    await search.fill("claude-opus-4-8");
+    await picker.getByRole("radio", { name: "Opus 4.8", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Child Model: Opus 4.8" })).toBeFocused();
+    await page.getByRole("button", { name: "Child Model: Opus 4.8" }).click();
+    await expect(picker.getByRole("radio", { name: "Opus 4.8", exact: true })).toBeChecked();
+    await page.keyboard.press("Escape");
+    await expect(picker).toHaveCount(0);
+  });
 }

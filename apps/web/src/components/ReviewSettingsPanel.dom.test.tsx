@@ -96,14 +96,20 @@ test("colliding reviewer model names remain distinguishable and save their exact
     for (const id of ["opus", "claude-opus-5-5"]) {
       const trigger = container.querySelector<HTMLButtonElement>('button[aria-label^="Reviewer Model:"]')!;
       await act(async () => { fireDomEvent.click(trigger); });
-      const options = [...dom.document.querySelectorAll('[role="option"]')];
-      const names = options.map(option => option.getAttribute("aria-labelledby")!.split(" ")
-        .map(labelId => dom.document.getElementById(labelId)!.textContent).join(" "));
-      assert.deepEqual(names, ["Automatic", "Opus 5.5 (opus)", "Opus 5.5 (claude-opus-5-5)", "Sonnet", "custom-model"]);
-      const chosen = options[names.indexOf(`Opus 5.5 (${id})`)]!;
-      assert.equal(chosen.textContent, `Opus 5.5 (${id})`, "visible text matches the accessible option name");
+      const expand = [...container.querySelectorAll<HTMLButtonElement>('[aria-expanded="false"]')]
+        .find(button => button.textContent === "Opus");
+      if (expand) await act(async () => { fireDomEvent.click(expand); });
+      const options = [...dom.document.querySelectorAll('[data-model-choice]')];
+      const names = options.map(option => {
+        const labelId = option.getAttribute("aria-labelledby");
+        return labelId ? dom.document.getElementById(labelId)?.textContent : option.textContent;
+      });
+      assert.deepEqual(names, ["Automatic", "Opus Latest", "Opus 5.5", "Sonnet Latest", "custom-model"]);
+      const label = id === "opus" ? "Opus Latest" : "Opus 5.5";
+      const chosen = options[names.indexOf(label)]!;
+      assert.equal(chosen.querySelector(".menu-text")?.textContent, label, "visible text matches the accessible option name");
       await act(async () => { fireDomEvent.click(chosen as unknown as Element); });
-      assert.equal(trigger.textContent, `Opus 5.5 (${id})`);
+      assert.equal(trigger.textContent, label);
       await act(async () => { fireDomEvent.click(button("Save Defaults")); });
       assert.equal(saved.at(-1), id);
     }

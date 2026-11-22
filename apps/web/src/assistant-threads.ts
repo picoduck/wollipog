@@ -11,6 +11,7 @@
  * are ones the control plane returned.
  */
 import type {
+  AssistantDecisionDefault,
   AssistantDecisionDelegation,
   AssistantDecisionHistoryPage,
   AssistantThread,
@@ -20,6 +21,7 @@ import type {
   AssistantThreadHarness,
   AssistantThreadHarnessOption,
   AssistantThreadLaunchDefaults,
+  AssistantThreadLaunchDefaultsPatch,
   AssistantThreadListResponse,
   AssistantThreadLimits,
   AssistantThreadResponse,
@@ -62,9 +64,17 @@ export function assistantThreadRoutes(req: JsonRequest) {
     assistantThreadDefaults: () => req<AssistantThreadDefaults>(`${ASSISTANT_THREADS_PATH}/defaults`),
     setAssistantThreadLaunchDefaults: (defaults: AssistantThreadLaunchDefaults) =>
       req<AssistantThreadDefaults>(`${ASSISTANT_THREADS_PATH}/defaults/launch`, { method: "PUT", body: JSON.stringify(defaults) }),
+    patchAssistantThreadLaunchDefaults: (defaults: AssistantThreadLaunchDefaultsPatch) =>
+      req<AssistantThreadDefaults>(`${ASSISTANT_THREADS_PATH}/defaults/launch`, { method: "PATCH", body: JSON.stringify(defaults) }),
+    setAssistantThreadDecisionDefault: (grant: AssistantDecisionDefault | null) =>
+      req<{ grant: AssistantDecisionDefault | null }>(`${ASSISTANT_THREADS_PATH}/defaults/delegation`, {
+        method: "PUT", body: JSON.stringify({ grant }),
+      }),
     assistantThreadLimitDefaults: () => req<AssistantThreadLimits>(`${ASSISTANT_THREADS_PATH}/defaults/limits`),
     setAssistantThreadLimitDefaults: (limits: AssistantThreadLimits) =>
       req<AssistantThreadLimits>(`${ASSISTANT_THREADS_PATH}/defaults/limits`, { method: "PUT", body: JSON.stringify(limits) }),
+    patchAssistantThreadLimitDefaults: (limits: Partial<AssistantThreadLimits>) =>
+      req<AssistantThreadLimits>(`${ASSISTANT_THREADS_PATH}/defaults/limits`, { method: "PATCH", body: JSON.stringify(limits) }),
     setAssistantThreadLimits: (threadId: string, limits: AssistantThreadLimits) =>
       req<AssistantThreadResponse>(`${threadPath(threadId)}/limits`, { method: "PUT", body: JSON.stringify(limits) }),
     setAssistantThreadDelegation: (threadId: string, delegation: AssistantDecisionDelegation) =>
@@ -157,11 +167,13 @@ export function assistantThreadHarnessLabel(
   return options?.find((option) => option.id === harness)?.label || ASSISTANT_THREAD_HARNESS_LABELS[harness] || harness;
 }
 
-/** "Full Access · Ask Before Destructive": the thread's access level as its header shows it. */
-export function assistantThreadAccessLabel(access: AssistantThreadAccess): string {
-  const level = access.level === "full_access" ? "Full Access" : "Limited Access";
-  const destructive = access.destructive === "ask" ? "Ask Before Destructive" : "Destructive Allowed";
-  return `${level} · ${destructive}`;
+/** The thread's access level and destructive-action setting in Details. */
+export function assistantThreadAccessSentence(access: AssistantThreadAccess): string {
+  const level = access.level === "full_access" ? "Full access." : "Limited access.";
+  const destructive = access.destructive === "ask"
+    ? "Asks before destructive actions."
+    : "Can take destructive actions without asking.";
+  return level + " " + destructive;
 }
 
 /** The thread list's order: newest activity first, as the server sends it, and stable on ties. */

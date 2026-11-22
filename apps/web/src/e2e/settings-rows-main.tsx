@@ -13,6 +13,7 @@ import {
 import {
   ARCHIVED_HISTORY_RETENTION_LIMITS,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
+  managedModelChoices,
   type AgentHarnessDefaultConfig,
   type AgentHarnessDefaultsView,
   type ArchivedHistoryRetentionView,
@@ -44,7 +45,7 @@ import {
   parseColorScheme,
   type ColorScheme,
 } from "../theme.js";
-import { assistantConnectionsView, SETTINGS_SECTIONS, viewFromPath, viewPath, type SettingsSection, type View } from "../navigation.js";
+import { SETTINGS_SECTIONS, viewFromPath, viewPath, type SettingsSection, type View } from "../navigation.js";
 import { browserInstanceManager, InstancesContextProvider, type InstanceManager } from "../instances-context.js";
 import type { TailnetAccessSetting } from "../tailnet-access.js";
 import { DecisionModelPanel } from "../components/DecisionModelPanel.js";
@@ -314,9 +315,14 @@ const harnessDefaultsTransport: ApiTransport = {
     if (path === "/api/assistant-threads/defaults") return Response.json({
       harness: "claude-code",
       launchDefaults: { harness: "claude-code", providerAccount: null },
+      decisionDefault: null,
       harnesses: [{ id: "claude-code", label: "Claude Code", available: true }, { id: "codex", label: "Codex", available: true }],
     });
     if (path === "/api/assistant-threads/defaults/limits") return Response.json({ costUsd: 25, launchedSessions: 10 });
+    if (path === "/api/assistant-connections") return Response.json({
+      connections: [], installation: { id: "settings-fixture", name: "Home Studio", canRename: true },
+      operations: [], projects: [],
+    });
     // Behavior › Evidence (#3023). Unstubbed, the read fell through to the agent defaults below and
     // every Behavior capture showed a load failure. `artifact=save-fails` makes a change fail the way
     // a dropped connection does, for the danger notice and its Retry.
@@ -425,7 +431,11 @@ const harnessDefaultsTransport: ApiTransport = {
       if (mode === "machines") {
         const models = [
           { id: "opus", displayName: "Opus 5.5", efforts: ["high", "max"] },
-          { id: "claude-opus-5", displayName: "Opus 5", efforts: ["high", "max"] },
+          { id: "claude-opus-5-5", displayName: "Opus 5.5", efforts: ["high", "max"] },
+          ...[
+            ["5", "5"], ["4-8", "4.8"], ["4-7", "4.7"], ["4-6", "4.6"], ["4-5", "4.5"],
+          ].map(([id, release]) => ({ id: "claude-opus-" + id, displayName: "Opus " + release, efforts: ["high", "max"] })),
+          { id: "provider-new-model", displayName: "New Agentic Coding Model With a Very Long Name", efforts: ["high"] },
         ];
         return new Response(JSON.stringify({
           defaults,
@@ -514,6 +524,18 @@ const harnessDefaultsTransport: ApiTransport = {
     const body = mode === "agent-repair" && window.location.hash === "#repair"
       ? harnessDefaultsRepairedView
       : harnessDefaultsState;
+    if (mode === "agent-managed") {
+      const view = structuredClone(body);
+      const installation = view.defaults[0]?.installations[0];
+      if (installation) {
+        const models = [
+          { id: "gpt-6.2-sol", displayName: "GPT-6.2 Sol", efforts: ["high"] },
+          { id: "gpt-6.1-sol", displayName: "GPT-6.1 Sol", efforts: ["high"] },
+        ];
+        installation.models.push(...models, ...managedModelChoices("codex-app-server", { models, modelSource: "live" }));
+      }
+      return Response.json(view);
+    }
     return new Response(JSON.stringify(body), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -552,7 +574,7 @@ function Harness() {
   const askedFor = params.get("topology") as Topology | null;
   const topology: Topology = askedFor && TOPOLOGIES.includes(askedFor) ? askedFor : "full";
   const requestedSection = params.get("section") as SettingsSection | null;
-  const showAgentDefaults = ["agent", "agent-missing", "agent-repair", "agent-loading", "agent-empty", "agent-save-fails"]
+  const showAgentDefaults = ["agent", "agent-missing", "agent-repair", "agent-loading", "agent-empty", "agent-save-fails", "agent-managed"]
     .includes(params.get("defaults") ?? "");
   // #1646's and #3028's desktop update states; absent, the About panel renders as it does in a browser.
   const requestedUpdates = params.get("updates");
@@ -735,9 +757,9 @@ function Harness() {
                 </FeedbackProvider>
               ),
               assistant: <FeedbackProvider><ApiProvider client={harnessDefaultsApi}>
-                <AssistantThreadDefaultsPanel onOpenThreads={() => navigate({ name: "assistants" })} />
-                <AssistantConnectionsGroup onOpen={() => navigate(assistantConnectionsView())} />
-                <AssistantDelegationPanel onOpenGrant={(threadId) => navigate({ name: "assistants", threadId, delegation: true })} />
+                <AssistantThreadDefaultsPanel />
+                <AssistantDelegationPanel />
+                <AssistantConnectionsGroup onNavigate={navigate} />
               </ApiProvider></FeedbackProvider>,
               network: (
                 <ApiProvider client={harnessDefaultsApi}><NetworkPanel

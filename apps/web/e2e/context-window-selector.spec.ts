@@ -126,3 +126,20 @@ test("mobile: the Context Window group in the composer menu", async ({ page }) =
   await page.keyboard.press("Escape");
   await expect(page.locator(".composer-bar .context-control")).toHaveCount(0);
 });
+
+
+test("a running session shows the resolved Opus model and offers only specific releases", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/session-usage-e2e.html?width=1280&context=choice&resolved=1");
+  const trigger = page.getByRole("button", { name: "Model Settings: Opus 5.5, 1M, High" });
+  await trigger.click();
+  const picker = page.getByRole("dialog", { name: "Model Settings" });
+  const models = picker.getByRole("radiogroup", { name: "Model", exact: true });
+  await expect(models.getByRole("radio")).toHaveText(["Opus 5.5", "Sonnet 5"]);
+  await expect(models.getByRole("radio", { name: "Opus 5.5", exact: true })).toBeChecked();
+  await expect(picker.getByRole("radiogroup", { name: "Context Window" }).getByRole("radio", { name: "1M" })).toBeChecked();
+  await page.screenshot({ path: testInfo.outputPath("running-session-exact-model.png") });
+  await models.getByRole("radio", { name: "Sonnet 5", exact: true }).click();
+  expect(await page.evaluate(() => (window as unknown as { __configPatches: unknown[] }).__configPatches))
+    .toEqual([{ model: "claude-sonnet-5", effort: "", serviceTier: "" }]);
+});

@@ -5,6 +5,7 @@ import {
   antigravityCheckFailureSentence,
   antigravityInstallFailureSentence,
   antigravityInstallStageSentence,
+  antigravitySessions,
   antigravityTerminalSetup,
   antigravitySetupPresentation,
   antigravitySignInEnding,
@@ -28,13 +29,14 @@ const NAME = "Google Antigravity";
 
 type Running = "check" | "start" | "submit" | "cancel" | "install" | null;
 
-/** Google Antigravity's row in a machine's Agents section (#4780). It is setup only: Antigravity is
- * not offered in New Session yet, so the row says so instead of listing it as an agent. */
+/** Google Antigravity's setup row in a machine's Agents section (#4780). It also says whether the
+ * setup makes Antigravity available in New Session (#4779). */
 export function AntigravitySetupRow({ runner, online, machineName }: { runner: RunnerView; online: boolean; machineName: string }) {
   const [open, setOpen] = useState(false);
   const opener = useRef<HTMLElement | null>(null);
   const presentation = antigravitySetupPresentation(runner, online);
   const setup = presentation.setup;
+  const sessions = antigravitySessions(runner, machineName);
   const failed = presentation.install?.failed;
   const attention = failed && !presentation.install?.running
     ? failed.operation.kind === "update" ? "update_failed" as const : "install_failed" as const
@@ -53,7 +55,7 @@ export function AntigravitySetupRow({ runner, online, machineName }: { runner: R
                   className="machine-agent-status" />
               </span>
               <span className="row-sub machine-agent-meta">
-                <span>Setup Only</span>
+                <span>{sessions.label}</span>
                 {/* A failed install or update stays visible on the row, at every width, beside a
                     status that can still be Ready (the kept or PATH copy works). */}
                 {attention && <StatusBadge meta={statusMeta("antigravityInstall", attention)} inline />}
@@ -202,7 +204,7 @@ export function AntigravitySetupDialog({ runner, presentation, machineName, retu
           <dt>Sign-In</dt>
           <dd>Shared by everything that runs as this machine's runner user, because Antigravity keeps it in that user's system keyring.</dd>
         </div>
-        <div><dt>Sessions</dt><dd>Not available yet. Wollipog can set up Antigravity here, but can't start Antigravity sessions.</dd></div>
+        <div><dt>Sessions</dt><dd>{antigravitySessions(runner, machineName).sentence}</dd></div>
         {setup && setup.status !== "checking" && <div><dt>Last Check</dt><dd>{relativeTime(setup.checkedAt)}</dd></div>}
       </dl>
     </Modal>

@@ -927,7 +927,7 @@ test("Network in a browser names this window's server and where Tailnet access i
   await expect(panel.locator(".settings-group-foot"))
     .toHaveText("Set up secure remote access on the computer running this server.");
   await expect(panel.locator(".settings-group-title")).toHaveText(["Connection"]);
-  await expect(panel.getByRole("button", {name: /Manage Assistant Connections/})).toHaveCount(0);
+  await expect(panel.getByRole("button", {name: /All Connections/})).toHaveCount(0);
   await expect(panel).not.toContainText(/not built yet|instance menu|control plane/i);
 });
 
@@ -1171,6 +1171,14 @@ const skipWithoutBaselines = () => test.skip(!hasBaselines() && test.info().conf
   `no ${process.platform} baselines committed — run with --update-snapshots to create them`);
 
 for (const theme of THEMES) {
+  test(`Assistant Thread Defaults rows render in ${theme}`, async ({ page }) => {
+    skipWithoutBaselines();
+    await useHarness(page, theme, { section: "assistant" });
+    const defaults = page.getByRole("region", { name: "Thread Defaults", exact: true });
+    await expect(defaults.getByRole("button")).toHaveCount(5);
+    await expect(defaults.locator(".settings-group-surface")).toHaveScreenshot(`assistant-thread-defaults-${theme}.png`, PIXELS);
+  });
+
   test(`the affordances render as expected in ${theme}`, async ({ page }) => {
     skipWithoutBaselines();
     for (const [name, key] of [
@@ -1447,7 +1455,7 @@ test.describe("with a touch pointer", () => {
     const model = dialog.getByRole("button", { name: /^Model:/ });
     await expect(model).toHaveAccessibleName(/Luna/);
     await model.click();
-    await page.getByRole("option", { name: "Sol" }).click();
+    await page.getByRole("radio", { name: "Sol", exact: true }).click();
     await expect(dialog.getByRole("button", { name: /^Reasoning Effort:/ })).toHaveAccessibleName(/Wollipog Default/);
 
     await dialog.getByRole("button", { name: "Cancel" }).click();
@@ -1457,7 +1465,7 @@ test.describe("with a touch pointer", () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await codexEdit.click();
     await dialog.getByRole("button", { name: /^Model:/ }).click();
-    await page.getByRole("option", { name: "Sol" }).click();
+    await page.getByRole("radio", { name: "Sol", exact: true }).click();
     await dialog.getByRole("button", { name: "Save Defaults" }).click();
     // A model with efforts needs one: the field says so and nothing is saved.
     await expect(dialog.locator(".field-error")).toHaveText("Choose a reasoning effort for this model.");
@@ -2476,4 +2484,26 @@ test.describe("Decision Model group", () => {
       });
     });
   }
+});
+
+
+test("Codex Agent Defaults save a managed Latest choice independently of the displayed exact release", async ({ page }, testInfo) => {
+  await useHarness(page, "light", { section: "behavior", defaults: "agent-managed" });
+  const row = page.locator(".setting-row").filter({ has: page.getByText("Codex App Server", { exact: true }) });
+  await row.getByRole("button", { name: /^Edit…/ }).click();
+  const defaults = page.getByRole("dialog", { name: "Codex App Server Defaults" });
+  await defaults.getByRole("button", { name: /^Model:/ }).click();
+  const picker = page.getByRole("dialog", { name: "Model", exact: true });
+  await picker.getByRole("button", { name: "Sol", exact: true }).click();
+  const latest = picker.getByRole("radio", { name: "Sol Latest", exact: true });
+  await expect(latest).toHaveAccessibleDescription(/Currently GPT-6.2 Sol/);
+  await expect(picker.getByRole("radio", { name: "GPT-6.2 Sol", exact: true })).toBeInViewport({ ratio: 1 });
+  await expect(picker.getByRole("radio", { name: "GPT-6.1 Sol", exact: true })).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("codex-managed-family.png") });
+  await latest.click();
+  await defaults.getByRole("button", { name: /^Reasoning Effort:/ }).click();
+  await page.getByRole("option", { name: "High", exact: true }).click();
+  await defaults.getByRole("button", { name: "Save Defaults" }).click();
+  await expect(defaults).toHaveCount(0);
+  await expect(row.locator(".setting-row-desc")).toContainText("Sol Latest");
 });

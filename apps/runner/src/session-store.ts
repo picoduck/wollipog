@@ -1,3 +1,4 @@
+import type { WollipogPromptOrigin } from "@wollipog/protocol";
 /**
  * Phase 2: the box's on-disk session store — the SOURCE OF TRUTH for sessions. Lives at
  * `<dataDir>/sessions/<sessionId>/` inside the runner-owned data root. Runner startup exclusively
@@ -363,6 +364,7 @@ export interface SessionMeta {
       config?: SessionConfig;
       /** Authenticated provenance of a retained automatic campaign prompt. */
       campaignContinuation?: true;
+      promptOrigin?: WollipogPromptOrigin;
       /** Complete recovered-question continuation state. Authentication temporarily replaces the
        * visible question card, so replay cannot reconstruct this correlation from pendingApproval. */
       recoveredQuestion?: {
@@ -377,6 +379,7 @@ export interface SessionMeta {
      * Keep the decision durable and content-free until the control plane replays those commands. */
     resolution?: "approved";
     retry?: {
+      promptOrigin?: WollipogPromptOrigin;
       /** Original runner-local FIFO position reserved before asynchronous launch/preflight. */
       ordinal?: number;
       text: string;

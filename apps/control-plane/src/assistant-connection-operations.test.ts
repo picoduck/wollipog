@@ -53,12 +53,14 @@ test("owner HTTP and MCP share connection, destination, subscription and deliver
     return JSON.parse(response.json().result.content[0].text);
   };
   const listed = await invoke("connection_list");
-  const ownerView = (await app.inject({method: "GET", url: "/api/assistant-connections"})).json() as
-    { connections: Array<{ id: string; lastUsedAt: number | null }> };
-  assert.equal(ownerView.connections.find(connection => connection.id === f.issued.connection.id)?.lastUsedAt,
-    f.db.assistantConnections.activity(f.issued.connection.id)[0]?.created_at);
-  assert.equal(ownerView.connections.find(connection => connection.id === f.second.connection.id)?.lastUsedAt, null);
-  assert.deepEqual(listed, { ...ownerView, connections: ownerView.connections.map(({ lastUsedAt, ...connection }) => connection) });
+  const ownerView = (await app.inject({method: "GET", url: "/api/assistant-connections"})).json();
+  const latest = f.db.assistantConnections.activity(f.issued.connection.id)[0]!;
+  assert.deepEqual(ownerView, {
+    ...listed,
+    connections: listed.connections.map((connection: { id: string }) => ({
+      ...connection, lastUsedAt: connection.id === f.issued.connection.id ? latest.created_at : null,
+    })),
+  });
   assert.equal(listed.connections.length, 2);
   const base = `/api/assistant-connections/${f.second.connection.id}`;
   for (const [name, suffix, args] of [["dest_list", "/destination-bindings", {connectionId: f.second.connection.id}],

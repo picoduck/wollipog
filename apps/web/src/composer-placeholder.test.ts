@@ -40,7 +40,7 @@ test("a ready composer says who a message goes to and what / and @ do", () => {
 });
 
 test("a composer that can send says when a message sent now will go", () => {
-  assert.equal(placeholder({ turnActive: true }), "Add a message. It sends when this turn ends.");
+  assert.equal(placeholder({ turnActive: true }), "Add a message. It sends when this turn ends; Ctrl+Enter steers now.");
   assert.equal(placeholder({ inputPending: true, turnActive: true }),
     "Messages you send now wait until you answer the request above.");
   assert.equal(placeholder({ unavailableReason: "Why not.", inputPending: true }), "Why not.");

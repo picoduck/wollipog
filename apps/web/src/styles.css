@@ -413,6 +413,7 @@
   --control-h-sm: 28px;
   --control-h: 32px;
   --control-h-lg: 40px;
+  --queue-action-h: 44px;
   --row-h: 40px;
   --row-h-2: 56px;
   --row-h-dense: 32px;
@@ -1653,6 +1654,10 @@ kbd {
   background: var(--bg-elev-3);
   border-color: var(--control-outline);
 }
+.choice-chips > .btn[aria-checked="true"] {
+  background: var(--bg-elev-3);
+  border-color: var(--control-outline);
+}
 .btn.primary {
   background: var(--primary-bg);
   border-color: transparent;
@@ -2030,8 +2035,11 @@ button.status { cursor: pointer; }
   align-items: center;
   gap: var(--space-1);
 }
-/* A 28px control in a 20px title line: the row keeps the title's height. */
-.notice-head > .notice-trailing { margin-top: calc(var(--space-1) * -1); margin-bottom: calc(var(--space-1) * -1); }
+/* Let small controls overhang the first 20px text line equally in both directions. */
+.notice-head > .notice-trailing,
+.notice:not(.compact) > .notice-trailing:not(:has(> .notice-dismiss:first-child:last-child)) {
+  margin: calc((1lh - var(--control-h-sm)) / 2) 0;
+}
 .notice-body { min-width: 0; }
 .notice-body > p { margin: 0; }
 .notice-body > p + p { margin-top: var(--space-1); }
@@ -2079,8 +2087,10 @@ button.status { cursor: pointer; }
 .notice:not(.page-banner) > .notice-content > .notice-actions > .notice-details-toggle:first-child {
   margin-inline-start: calc(-1 * (var(--space-2) + 1px));
 }
-.notice-dismiss { margin: calc(var(--space-1) * -1) calc(var(--space-2) * -1) 0 0; }
-.notice-head .notice-dismiss { margin: 0 calc(var(--space-2) * -1) 0 0; }
+.notice-dismiss { margin-right: calc(var(--space-2) * -1); }
+.notice:not(.compact) > .notice-trailing > .notice-dismiss:first-child:last-child {
+  margin: calc((20px - var(--control-h-sm)) / 2) calc(var(--space-2) * -1) calc((20px - var(--control-h-sm)) / 2) 0;
+}
 /* One line for field-group and composer notices: icon, sentence, one trailing action.
    Its parts line up on their first baselines rather than their centers, so once a notice wraps (a
    title beside or over a sentence of several lines, a sentence over two lines) the icon and an
@@ -2118,7 +2128,7 @@ button.status { cursor: pointer; }
 }
 .notice.compact .notice-body { flex: 1 1 12rem; }
 .notice.compact .notice-actions { margin-top: 0; }
-.notice.compact .notice-dismiss { margin: 0; }
+.notice.compact .notice-dismiss { margin-right: 0; }
 /* Opened details take the line under the sentence and its row; the icon stays on the first line. */
 .notice.compact .notice-details-body { flex-basis: 100%; margin-top: var(--space-2); }
 /* The page banner spans the top of the main area (§13.3): no radius, no side edges, a hairline
@@ -2679,6 +2689,15 @@ button.status { cursor: pointer; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.model-picker-search {
+  width: 100%;
+  min-width: 0;
+  margin-bottom: var(--space-2);
+}
+.model-picker-family {
+  padding-inline-start: var(--space-3);
+}
+
 .menu-item {
   display: flex;
   flex: none;
@@ -4229,14 +4248,17 @@ textarea {
   min-height: 0;
   padding: 0;
 }
-/* The panel notice slot on a phone (#2861, §13.2): its notices' buttons, "+N More" included, are
-   44px touch targets, and the resolving action fills the action row as in the session slot. A 44px
-   "+N More" overhangs its 20px title line by 8px each way, so the body stays close to the title. */
+/* The panel notice slot on a phone (#2861, §13.2): resolving actions keep their 44px visible
+   height. On coarse pointers, the title row's small buttons borrow their 44px hit area. */
 @media (max-width: 760px) {
+  .panel-notice-slot .notice-actions {
+    --control-h-sm: 44px;
+  }
+}
+@media (max-width: 760px) and (not (pointer: coarse)) {
   .panel-notice-slot .notice {
     --control-h-sm: 44px;
   }
-  .panel-notice-slot .notice-head > .notice-trailing { margin-top: calc(var(--space-2) * -1); margin-bottom: calc(var(--space-2) * -1); }
 }
 .agents-page {
   display: flex;
@@ -6908,16 +6930,16 @@ body.shell-dock-dragging * {
   padding-left: max(var(--space-3), calc((100% - var(--chat-max)) / 2));
   padding-right: max(var(--space-3), calc((100% - var(--chat-max)) / 2));
 }
-/* The queue tray (#2178): messages waiting behind the turn, docked on the composer card so they read
-   as lined up behind the one being written. Inset from the card's edges, solid edge, open at the
-   bottom where the card takes over, and a hairline between rows. Collapsed, it is only its summary. */
-.queue {
-  margin: 0 var(--space-3);
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-bottom: none;
-  border-top-left-radius: var(--radius-md);
-  border-top-right-radius: var(--radius-md);
+/* The queued messages share the card's edge and the editing strip's full-width position. */
+.composer-queue {
+  min-width: 0;
+  margin: 0 calc(-1 * var(--space-3));
+  border-bottom: 1px solid var(--border);
+}
+.composer-queue:first-child {
+  margin-top: calc(-1 * var(--space-2) - var(--space-0-5));
+  border-top-left-radius: inherit;
+  border-top-right-radius: inherit;
 }
 /* The tray starts as this one line (#2788): the §5.5 disclosure across the tray's full width, with
    the Held badge and the most severe row status after the count. It stays one line on a phone; the
@@ -6962,6 +6984,12 @@ body.shell-dock-dragging * {
   padding: 0;
   list-style: none;
 }
+.composer-queue:not(.is-single) .queue-rows {
+  /* Keep the transcript in view when a long queue is expanded. */
+  max-height: min(30dvh, calc(4 * (var(--control-h) + 2 * var(--space-1) + 1px)));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .queue-row {
   position: relative;
   display: flex;
@@ -6992,6 +7020,13 @@ body.shell-dock-dragging * {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+.composer-queue:not(.is-single) .queue-text {
+  /* Preserve the inset of a line centred beside the controls when the text wraps. */
+  padding-block: max(0px, calc((var(--control-h-sm) - 1lh) / 2));
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.queue-clock { flex: none; }
 .queue-clip {
   display: inline-block;
   margin-right: var(--space-1);
@@ -7012,22 +7047,27 @@ body.shell-dock-dragging * {
 }
 /* Phones (#2178): each row is its text and one 44px actions button. A status that differs moves under
    the text, so the words keep the line. */
-.queue.is-phone .queue-status {
+.composer-queue.is-phone:not(.is-single) .queue-text {
+  padding-block: max(0px, calc((var(--queue-action-h) - 1lh) / 2));
+}
+.composer-queue.is-phone .queue-status {
   order: 1;
 }
-.queue.is-phone .queue-status + .queue-text {
-  flex-basis: calc(100% - var(--space-2) - 44px);
+.composer-queue.is-phone:not(.is-single) .queue-status + .queue-text {
+  flex-basis: calc(100% - var(--space-2) - var(--queue-action-h));
 }
 .queue-more {
-  width: 44px;
-  height: 44px;
+  width: var(--queue-action-h);
+  height: var(--queue-action-h);
 }
-/* A lone queued message is the tray's one line in place of the summary (#3962): no hairline above
-   it, the queue's Held badge after its words, and on a phone a Steer as tall as the actions button
-   beside it, so one tap steers. */
-.queue.is-single .queue-row { border-top: none; }
+/* A lone message replaces the summary (#3962). On touch the actions button sets the row's
+   height and the smaller Steer Now borrows its 44px hit area vertically. */
+.composer-queue.is-single .queue-row { border-top: none; }
+.composer-queue.is-phone.is-single .queue-row { padding-block: 0; }
 .queue-held { flex: none; }
-.queue.is-phone .queue-steer { height: 44px; }
+@media (pointer: coarse) {
+  .composer-queue.is-phone .queue-steer::after { left: 0; right: 0; }
+}
 /* The composer's mode strip (#2194): editing a queued message is a state of the card, so it is the
    card's first row, full bleed across its 10px/12px padding, 40px tall at every width. Its actions
    are `.btn.sm.ghost`, 8px apart so each keeps its 44px touch area (§2.8). A recovered edit takes
@@ -7081,9 +7121,7 @@ body.shell-dock-dragging * {
   background: color-mix(in srgb, var(--tone) 7%, var(--bg-elev));
 }
 .composer-mode.is-recovered .composer-mode-icon { color: var(--tone); }
-/* The queue tray docks on the card, so the row above sits close to the strip. On a coarse pointer the
-   strip's actions take the strip's bottom edge, 8px from the row's actions above. Every 44px touch
-   area stays its own (§2.8); the strip stays 40px. */
+/* The editing strip's controls extend into the gap below it on touch. */
 @media (pointer: coarse) {
   .composer-mode-actions { align-self: end; }
 }
@@ -7630,12 +7668,8 @@ body.shell-dock-dragging * {
     overflow: visible;
   }
   .assistant-work-confirmations > .request-card { width: auto; }
-  /* Tall enough to show a whole request and the start of what follows. The Launched Sessions
-     toggle's row above it (#4776) comes out of the same allowance, so the transcript keeps its room. */
+  /* Tall enough to show a whole request and the start of what follows. */
   .assistant-work:has(> .assistant-work-confirmations) { max-height: 60vh; }
-  .assistant-thread-toggle-row ~ .assistant-work:has(> .assistant-work-confirmations) {
-    max-height: calc(60vh - var(--control-h-sm) - var(--space-2));
-  }
   .assistant-work:has(> .assistant-work-confirmations) > .assistant-work-cards {
     max-height: none;
     overflow-y: visible;
@@ -9024,6 +9058,55 @@ textarea {
 /* Absolutely positioned screen-reader text otherwise keeps its static inline position. When the
    timestamp lands exactly at the reader edge, the 1px hidden box extends scrollWidth by 1px. */
 .timeline .sr-only { inset-inline-start: 0; }
+.tl-wollipog-prompt {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--border);
+  color: var(--text);
+  font: var(--type-body);
+}
+.tl-prompt-icon {
+  display: flex;
+  align-items: center;
+  min-height: var(--control-h-sm);
+}
+.tl-prompt-content { flex: 1; min-width: 0; }
+.tl-prompt-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-height: var(--control-h-sm);
+  overflow-wrap: anywhere;
+}
+.tl-prompt-heading > span { min-width: 0; }
+.chip.tl-prompt-target {
+  height: auto;
+  min-height: var(--control-h-sm);
+  max-width: 100%;
+  gap: var(--space-2);
+  white-space: normal;
+  text-align: start;
+  overflow-wrap: anywhere;
+  overflow: clip;
+}
+.tl-prompt-target > span:first-child { min-width: 0; }
+.tl-prompt-target > .status { flex: none; }
+.tl-prompt-fact { color: var(--text-dim); font: var(--type-small); }
+.tl-prompt-message {
+  flex-direction: column;
+  align-items: stretch;
+  padding: var(--space-2);
+  overflow-wrap: anywhere;
+}
+.tl-prompt-message > pre { margin: var(--space-1) 0 0; white-space: pre-wrap; }
+@media (pointer: coarse) {
+  button.chip.tl-prompt-target,
+  .tl-prompt-details > summary { min-height: var(--control-h); }
+}
 .tl-row {
   display: flex;
 }
@@ -10118,13 +10201,29 @@ textarea {
 .md :is(h4, h5, h6) {
   font: var(--type-body-strong);
 }
-.md a {
+.md :is(a, .md-streaming-link) {
   color: var(--accent);
   text-decoration: none;
   overflow-wrap: anywhere;
 }
 .md a:hover {
   text-decoration: underline;
+}
+.md-streaming-caret {
+  display: inline-block;
+  width: 2px;
+  height: 0.9em;
+  margin-inline-start: var(--space-0-5);
+  vertical-align: -0.1em;
+  background: currentColor;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .md-streaming-caret {
+    animation: md-streaming-caret-blink 1s step-end infinite;
+  }
+}
+@keyframes md-streaming-caret-blink {
+  50% { opacity: 0; }
 }
 .md strong {
   font-weight: var(--weight-semibold);
@@ -11895,6 +11994,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     margin: 0 calc(-1 * var(--space-2));
     padding: 0 var(--space-2) 0 var(--space-4);
   }
+  /* The grabber's top margin and height remain reserved above the pinned Model Settings header. */
+  .model-settings .menu-head.persistent { top: var(--space-3); }
   /* Sheet rows read at the phone's reading size, like the dialog sheet's body. */
   .menu-item { font-size: var(--text-md); }
   /* A section label that only repeats the sheet's title row is dropped. */
@@ -12077,6 +12178,17 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   flex: none;
   margin-left: auto;
 }
+.shortcut-row.has-description {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  row-gap: var(--space-1);
+  padding-block: var(--space-1);
+}
+.shortcut-description {
+  grid-column: 1 / -1;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
 /* De-emphasised by TOKEN, not by subtree opacity. An unavailable row is documentation, not an
    inactive control, so it keeps the full text contrast requirement: `opacity: 0.62` took
    --text-faint to about 2.6:1 on the light modal. */
@@ -12165,7 +12277,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   display: flex;
   align-items: center;
   gap: var(--space-1);
-  margin: calc(var(--space-1) * -1) calc(var(--space-1) * -1) calc(var(--space-1) * -1) 0;
+  margin: calc((1lh - var(--control-h-sm)) / 2) 0;
 }
 /* Older toasts wait behind one control above the stack; their list opens upward from it. */
 .toast-region > .toast { flex-shrink: 0; }
@@ -12255,6 +12367,55 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   flex-wrap: wrap;
   gap: var(--space-2);
 }
+.delegation-dialog :is(.delegation-category, .form) > p { margin: 0; }
+.delegation-dialog .modal-foot > .delegation-revoke { margin-right: auto; }
+.delegation-groups,
+.delegation-scopes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  align-items: start;
+}
+.delegation-dialog .delegation-group {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.checkbox.delegation-group-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  padding-inline: var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev-2);
+  font: var(--type-body-strong);
+}
+.delegation-group-toggle .checkbox-helper { grid-column: auto; }
+.delegation-category {
+  display: grid;
+  gap: var(--space-2);
+}
+.delegation-dialog .seg {
+  display: grid;
+  grid-auto-flow: row;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+  height: auto;
+}
+.delegation-dialog .delegation-presets {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+.delegation-dialog .delegation-scope-choice {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.delegation-dialog .seg-option { min-height: var(--control-h); }
+.delegation-dialog .assistant-decision-choices {
+  display: grid;
+  gap: var(--space-2);
+}
 @media (max-width: 760px) {
   /* Grant restrictions must remain readable in full, including operation inventory details. */
   .assistant-fields .choice-row-desc {
@@ -12262,6 +12423,10 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     overflow: visible;
     white-space: normal;
   }
+  .delegation-groups,
+  .delegation-scopes { grid-template-columns: minmax(0, 1fr); }
+  .delegation-dialog .delegation-presets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .delegation-dialog .modal-foot > .btn { padding-inline: var(--space-2); }
 }
 /* Field anatomy (§8.1): the parts stack 8px apart, which puts the label 8px above the control.
    The helper sits 4px under the control: it, the error that replaces it (§8.5) and a
@@ -12849,20 +13014,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 /* The empty state's column starts where the Threads label and the rows' titles do. */
 .assistant-group > .state { padding-inline: var(--space-3); }
-.assistant-group-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-}
-.assistant-group-icon {
-  display: inline-flex;
-  color: var(--text-dim);
-}
-.assistant-group-title {
-  margin: 0;
-  font: var(--type-body-strong);
-}
 .assistant-threads-head {
   display: flex;
   align-items: center;
@@ -12874,11 +13025,61 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: 0;
   list-style: none;
 }
-/* The thread's bar (#4776), on the session bar's geometry (`.detail-bar.session-bar`): the title
-   gives way first, and the status badge and the actions never shrink. */
-.assistant-thread-bar > .status { flex: none; }
-/* The head of the thread's conversation column, under the bar and beside the side panel: the facts,
-   then what waits on the owner. */
+/* The thread title is the only part of the detail bar that shrinks. The tooltip belongs outside the
+   clipping box so it can show the whole title and wrap on a phone. */
+.assistant-thread-bar { padding-inline: var(--space-3); }
+.detail-bar-heading > .assistant-bar-title {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.assistant-bar-title > :is(h1, h2) { margin: 0; }
+.assistant-bar-title .detail-bar-title {
+  display: block;
+  width: 100%;
+  height: var(--control-h);
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: start;
+  cursor: pointer;
+}
+.assistant-bar-title-tooltip {
+  position: absolute;
+  z-index: var(--z-popover);
+  top: 100%;
+  inset-inline-start: 0;
+  width: max-content;
+  max-width: min(280px, calc(100vw - 2 * var(--page-gutter) - var(--control-h) - var(--space-2)));
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  background: var(--bg-elev-3);
+  box-shadow: var(--elev-2);
+  color: var(--text);
+  font: var(--type-small);
+  overflow-wrap: anywhere;
+  visibility: hidden;
+}
+.assistant-bar-title[data-open] > .assistant-bar-title-tooltip { visibility: visible; }
+@media (hover: hover) {
+  .assistant-bar-title:hover:not([data-open], [data-dismissed]) > .assistant-bar-title-tooltip {
+    visibility: visible;
+    transition: visibility var(--dur-fast) var(--ease-out) var(--delay-tooltip);
+  }
+}
+[data-assistant-panel-toggle] { position: relative; }
+.assistant-side-panel-dot {
+  position: absolute;
+  top: calc(50% - 11px);
+  inset-inline-end: calc(50% - 11px);
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--warning);
+  box-shadow: 0 0 0 2px var(--bg);
+}
+/* Waiting requests stay in the conversation column beside Work. */
 .assistant-thread-head {
   display: grid;
   flex: none;
@@ -12886,28 +13087,41 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: var(--space-3) var(--page-gutter) var(--space-3) var(--space-6);
   border-bottom: 1px solid var(--border);
 }
-/* Neutral facts (§11.3), as a project's meta line draws them. */
-.assistant-thread-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1) var(--space-3);
-  margin: 0;
-  padding: 0;
-  color: var(--text-dim);
-  font: var(--type-small);
-  list-style: none;
-}
-.assistant-thread-access { color: var(--text); }
-.assistant-thread-account {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
 .assistant-thread-account-picker .choice-row-title { overflow-wrap: anywhere; }
 .assistant-thread-account-picker .choice-row-body { gap: var(--space-1); }
-.assistant-thread-history {
-  max-height: 6rem;
-  overflow-y: auto;
+.assistant-thread-settings .modal-head { gap: var(--space-2); }
+.assistant-thread-spending-row { display: block; }
+.choice-chips,
+.assistant-launch-stepper {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }
+.choice-chips > .btn,
+.assistant-launch-stepper > .btn { min-width: var(--control-h); }
+.assistant-launch-stepper > input { width: 6rem; }
+.assistant-launch-stepper > input:disabled { background: var(--bg-elev-2); }
+.assistant-thread-defaults-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-h);
+  color: inherit;
+  text-decoration: underline;
+}
+.assistant-thread-spending-row .assistant-panel-meter > span { grid-column: 1 / -1; }
+.assistant-thread-account-label { overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .assistant-thread-settings .modal-back { display: none; }
+  .assistant-thread-settings-cancel { order: -1; }
+  .assistant-thread-account-label:not(.pid),
+  .assistant-thread-account-label .pid-value {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
+}
+.assistant-thread-head:empty { display: none; }
 /* AssistantWorkCards.tsx: in the thread header, what waits on the owner as one scrolling row of
    cards; each card opens its session, and a waiting approval rides on its card. Every other launched
    session is in the side panel's Launched Sessions tool (#4776). */
@@ -12991,20 +13205,50 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   flex-wrap: wrap;
   gap: var(--space-2);
 }
-/* The header's Launched Sessions toggle (#4776): its counts read whole, never squeezed by the title. */
-.assistant-launched-toggle {
-  flex: none;
+/* Thread tabs share the session panel's frame. */
+.assistant-thread-panel .rpanel-head > .tabs {
+  flex: 1;
+  gap: var(--space-2);
+}
+.assistant-thread-panel .tab { min-width: var(--control-h-lg); }
+.assistant-thread-panel .rpanel-head > .icon-btn { flex: none; }
+.assistant-thread-panel .rpanel-body[hidden] { display: none; }
+.assistant-thread-panel .rpanel-body { overflow-wrap: anywhere; }
+.assistant-panel-details {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-4);
+}
+.assistant-panel-details > :not(button) { width: 100%; }
+.assistant-panel-meter {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: var(--space-2);
   font-variant-numeric: tabular-nums;
 }
-.assistant-thread-toggle-row {
+.assistant-panel-meter > .meter { grid-column: 1 / -1; }
+.assistant-history-row {
   display: flex;
-  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
 }
-/* The side panel's Launched Sessions tool (#4776): Needs You, Active, then the folding Finished group,
-   each a column of cards at the panel's width. The panel body is the one scroller. */
+.assistant-history-row > .btn { flex: none; }
+.assistant-delegation-summary {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  margin-bottom: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev);
+}
+.assistant-delegation-summary p { margin: 0; }
 .launched-sessions {
   display: grid;
-  gap: var(--space-4);
+  gap: var(--space-2);
   min-width: 0;
 }
 .launched-sessions-group {
@@ -13013,26 +13257,38 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   min-width: 0;
 }
 .launched-sessions-group > .group-label { padding: 0; }
-.launched-sessions-fold {
-  display: flex;
-  margin: 0;
-  font: inherit;
-}
-.launched-sessions-fold .count {
-  margin-left: var(--space-1);
-  color: var(--text-faint);
-}
-.launched-sessions-cards {
+.launched-sessions-fold { margin: 0; font: inherit; }
+.launched-sessions-fold .disclosure-trigger { min-height: var(--control-h); }
+.launched-sessions-fold .count { color: var(--text-dim); }
+.launched-sessions-rows {
   display: grid;
-  gap: var(--space-2);
   margin: 0;
   padding: 0;
   list-style: none;
 }
-.launched-sessions-cards > .assistant-work-card {
+.assistant-work-row {
   min-width: 0;
-  max-width: none;
+  border-bottom: 1px solid var(--border);
 }
+.assistant-work-row > .assistant-work-open {
+  width: 100%;
+  min-height: var(--control-h-lg);
+  align-content: center;
+  gap: 0;
+}
+.assistant-work-review {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  justify-content: space-between;
+}
+.assistant-work-review > .assistant-work-request-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.assistant-work-review > .btn { flex: none; }
 @media (max-width: 760px) {
   .assistant-thread-head { padding: var(--space-2) var(--page-gutter); }
   .assistant-thread-pane-state { padding: var(--space-4) var(--page-gutter) var(--space-12); }
@@ -13693,18 +13949,54 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   font: var(--type-small);
 }
 .inbox-row-sender > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The phone card's first line: the sender and, trailing, the flags. */
-.inbox-row-sender-line > .inbox-row-flags { margin-left: auto; }
-/* The phone card's status line: the time is trailing, and the branch between gives way. */
-/* So does one with a pull request attention badge (#604), rather than clip its reason or the branch. */
-.stacked .inbox-row-status-line:has(.status + .status),
-.stacked .inbox-row-status-line:has(.inbox-row-pr .status) { height: auto; min-height: var(--space-5); flex-wrap: wrap; }
-.inbox-row-shell.stacked .inbox-row-status-line > .inbox-row-time { margin-left: auto; }
-/* Dense phone cards grow a status line rather than clipping either lifecycle or secondary label. */
-.inbox-row-shell.stacked .inbox-row-status-line > .row-status { flex: 0 1 auto; min-width: 0; max-width: 100%; flex-wrap: wrap; }
+/* The phone card's first line (#4791): the sender, then the time and the flags trailing it at the
+   card's right edge, above ⋯. The sender gives up width; the time and the flags never do. */
+.inbox-row-sender-line > .inbox-row-trail { gap: var(--space-1); }
+/* The phone card's status line (#4791) is one line across the whole card and never wraps, so every
+   card stays three lines. The branch gives way long before the status does, as the sender does on
+   the desktop status line; past that, `fitStatusLine()` drops the branch (keeping a pull request
+   that needs the person, #604), then the strip, then folds the secondary badge into its count, and
+   last ends that pull request in an ellipsis. The lifecycle badge always stays. */
 .inbox-row-shell.stacked .row-status > .status { flex: none; padding-inline: var(--space-1); }
-/* The branch gives way long before the status does, as the sender does on the desktop status line. */
 .inbox-row-shell.stacked .inbox-row-status-line > .inbox-row-git { flex-shrink: 100000; }
+/* Once its branch has gone, the group holds only a pull request that needs the person, which no longer
+   shrinks: the line overflows instead, so the later steps run. */
+.inbox-row-shell.stacked .inbox-row-status-line[data-fit~="branch"] > .inbox-row-git { flex: none; }
+/* A dropped branch and strip leave the eye only: the card's accessible name still says them, as
+   `.sr-only` text does. The folded secondary badge is named by its count instead. */
+.inbox-row-status-line[data-fit~="branch"] > .inbox-row-git:not(:has(.inbox-row-pr .status)),
+.inbox-row-status-line[data-fit~="branch"] > .inbox-row-git > :is(.inbox-row-branch, .inbox-row-base),
+.inbox-row-status-line[data-fit~="strip"] > .inbox-row-activity {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.inbox-row-status-line[data-fit~="badge"] .row-status > .status + .status,
+.inbox-row-status-line[data-fit~="badge"] .row-status-more { display: none; }
+.row-status-collapsed { display: none; }
+.inbox-row-status-line[data-fit~="badge"] .row-status-collapsed { display: inline; }
+/* Last, a pull request that needs the person ends in an ellipsis rather than being cut off; its
+   whole label stays in the card's name and its tooltip. */
+.inbox-row-shell.stacked .inbox-row-status-line[data-fit~="pr"] > .inbox-row-git { flex: 0 1 auto; }
+.inbox-row-status-line[data-fit~="pr"] .inbox-row-pr { flex: 0 1 auto; min-width: calc(var(--icon-sm) + var(--space-1) + 3em); overflow: hidden; }
+.inbox-row-status-line[data-fit~="pr"] .inbox-row-pr > .status {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.inbox-row-status-line[data-fit~="pr"] .inbox-row-pr > .status::before {
+  display: inline-block;
+  margin-right: var(--space-1);
+  vertical-align: 1px;
+}
 /* Meta (§11.3): plain text, each item after its 14px icon, 12px apart. */
 .inbox-row-git {
   display: flex;
@@ -13759,7 +14051,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 /* The one status (#2209, §11.1): the badge and a neutral "+N". */
 .row-status { display: inline-flex; flex: none; align-items: center; gap: var(--space-1); }
-.row-status-more {
+.row-status-more,
+.row-status-collapsed {
   color: var(--text-dim);
   font: var(--type-micro);
   font-variant-numeric: tabular-nums;
@@ -13827,7 +14120,10 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .inbox-row-action:not(.inbox-row-more) { display: none; }
   .icon-btn.inbox-row-more { width: var(--control-h); height: var(--control-h); }
   .inbox-row-shell .inbox-row { padding-right: var(--control-h); }
-  .inbox-row-shell.stacked .inbox-row { padding-right: calc(var(--control-h) + var(--space-2)); }
+  /* A phone card keeps the column for ⋯ on its title line only (#4791): the time and the flags above
+     ⋯ and the status line below it run to the card's own padding. */
+  .inbox-row-shell.stacked .inbox-row { padding-right: var(--inbox-row-pad-x); }
+  .inbox-row-shell.stacked .inbox-row-copy { padding-right: calc(var(--control-h) + var(--space-2) - var(--inbox-row-pad-x)); }
 }
 /* A wide list's rows (#2218, docs/design-system.md §6.3 "Rows use the width"). At 880px and wider the
    two lines keep their height. The status line's trailing cluster becomes fixed columns, the same on
@@ -18097,6 +18393,26 @@ button.setting-row { cursor: pointer; }
 .setting-row-value-part { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
 .setting-row-link-word { color: var(--text-dim); font: var(--type-small); white-space: nowrap; }
 .setting-row-chevron { display: inline-flex; color: var(--text-dim); }
+/* A default's current value is its edit button. Keep long account labels inside the control column. */
+.assistant-thread-defaults .setting-row-control > .btn {
+  display: block;
+  min-width: var(--control-h);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@container (max-width: 559px) {
+  .assistant-thread-defaults .setting-row { grid-template-columns: minmax(0, 1fr) fit-content(51%); }
+}
+.assistant-default-dialog .choice-rows { gap: var(--space-2); }
+@media (max-width: 560px) {
+  .assistant-connections-group .settings-group-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: var(--space-1);
+  }
+  .assistant-connections-group .settings-group-action { grid-column: 2; grid-row: 1 / 3; }
+}
 /* The switch row is the Switch button itself, so its track and Saved check are the row's own
    children: both in the control column, the track at its right edge and Saved just before it. */
 .setting-row-switch > .ui-switch,
@@ -19056,6 +19372,13 @@ a.tab { text-decoration: none; }
 .checkbox-mark > input { border-radius: var(--radius-xs); }
 .radio-mark > input { border-radius: var(--radius-pill); }
 .checkbox-mark > input:checked { border-color: var(--accent); background: var(--accent); }
+.checkbox-mark:has(> input:indeterminate)::after {
+  content: "";
+  position: absolute;
+  width: var(--space-2);
+  border-top: 2px solid currentColor;
+  pointer-events: none;
+}
 /* Radio: an accent ring plus a dot. */
 .radio-mark > input:checked { border-color: var(--accent); }
 .checkbox-check,
@@ -19492,7 +19815,8 @@ a.tab { text-decoration: none; }
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
-.assistant-connections-page .status {
+.assistant-connections-page .status,
+.assistant-connections-group .status {
   font-size: var(--text-sm);
 }
 .assistant-editor-save {
@@ -19542,7 +19866,8 @@ a.tab { text-decoration: none; }
   }
   .assistant-connections-content .seg { gap: var(--space-2); }
   .assistant-connections-content .choice-list { gap: var(--space-2); }
-  .assistant-connection-row + .assistant-connection-row { margin-top: var(--space-2); }
+  .assistant-connection-row + .assistant-connection-row,
+  .assistant-connections-group .assistant-connection-row + .setting-row-link { margin-top: var(--space-2); }
   .assistant-activity-table :is(tbody, td) { display: block; }
   .assistant-activity-table tbody tr {
     display: grid;
@@ -19715,6 +20040,8 @@ a.tab { text-decoration: none; }
     inset: -4px;
   }
   :is(.btn.sm, button.chip, .composer-btn)::after { inset: -5px; }
+  .toast-actions, .notice-trailing { gap: var(--space-2); }
+  .notice.compact > .notice-trailing::before { margin-right: calc(var(--space-2) * -1); }
   /* A segmented option cannot borrow from its neighbours, so it borrows the track's inset and edge
      instead: 38px option + 2px inset + 1px edge on each side = 44px, plus the option's own 1px
      border for the padding-edge reason above. A dense toolbar's track is a full control tall on

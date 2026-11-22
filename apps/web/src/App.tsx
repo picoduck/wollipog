@@ -33,7 +33,6 @@ import { sessionVisibleForReminderMode } from "./session-reminders.js";
 import { InboxView } from "./components/InboxView.js";
 import {
   handleSidePanelChord,
-  SIDE_PANEL_CHORDS,
   openGoToFile,
   openSideChat,
   terminalToolShowing,
@@ -82,7 +81,7 @@ import { OfflineBanner } from "./components/OfflineBanner.js";
 import { SecureDashboardNotice } from "./components/SecureDashboardNotice.js";
 import { PairingBanner } from "./components/PairingBanner.js";
 import { ChevronLeftIcon, KeyboardIcon, LockIcon, PlusIcon } from "./components/Icons.js";
-import { assistantConnectionsView, backLabel, viewDescription, viewHasHeaderTabs, viewPageWidth, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
+import { backLabel, viewDescription, viewHasHeaderTabs, viewPageWidth, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
 import { sessionDisplayTitle } from "./session-title.js";
 import { routedSessionPlaceholder } from "./detail-placeholder.js";
 import { useRoutedSessionLookup } from "./routed-session-lookup.js";
@@ -267,9 +266,8 @@ export function Shell() {
   const view = useStoreSelector((s) => s.view);
   const [reportedEntityTitle, reportEntityTitle] = useEntityTitleState();
   const entityTitle = reportedTitleFor(reportedEntityTitle, view);
-  // An Assistant thread showing its session's side panel (#4776): the thread page reports its title
-  // only while the thread is loaded, never for a missing one's placeholder.
-  const threadPanelShown = view.name === "assistants" && view.threadId !== undefined && entityTitle !== undefined;
+  // The thread reports its title after loading, so its shortcuts are described on the thread only.
+  const assistantThreadOpen = view.name === "assistants" && view.threadId !== undefined && entityTitle !== undefined;
   const viewRef = useRef(view);
   viewRef.current = view;
   const settingsReturnView = useStoreSelector((s) => s.settingsReturnView);
@@ -705,18 +703,10 @@ export function Shell() {
     return () => window.removeEventListener("keydown", onKey);
   }, [openShortcutReference]);
 
-  // Session-view panel shortcuts (Codex bindings). Registered without deps on purpose: the
-  // handler closes over this render's view/rightPanel, and re-registering per render keeps the
-  // mode toggle's "same mode → close" check reading fresh state. An open Assistant thread shows its
-  // session's side panel with the session bar's Side Panel toggle (#4776), so the side panel's own
-  // chords work there too; Files, Side Chat and Terminal stay the session page's.
+  // Session-view panel shortcuts. Register against each render's view and panel state.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || shortcutLayerActive(document, false, e) || xtermOwnsKey(e.target)) return;
-      if (threadPanelShown) {
-        handleSidePanelChord(e, rightPanel);
-        return;
-      }
       if (view.name !== "session") return;
       // Go to File: opens the panel on Files when needed and never closes it (#2852).
       if (matchesShortcut(e, "open-files")) {
@@ -969,9 +959,9 @@ export function Shell() {
                 approvals: <ApprovalsPanel policyId={view.policyId} />,
                 orchestrator: <><OrchestratorSettingsPanel discoveryRevision={runners} /><DecisionModelPanel /></>,
                 assistant: <>
-                  <AssistantThreadDefaultsPanel onOpenThreads={() => navigate({ name: "assistants" })} />
-                  <AssistantConnectionsGroup onOpen={() => navigate(assistantConnectionsView())} />
-                  <AssistantDelegationPanel onOpenGrant={(threadId) => navigate({ name: "assistants", threadId, delegation: true })} />
+                  <AssistantThreadDefaultsPanel />
+                  <AssistantDelegationPanel />
+                  <AssistantConnectionsGroup onNavigate={navigate} />
                 </>,
                 reviews: <ReviewSettingsPanel />,
                 network: <NetworkPanel tailnet={tailnet} onNavigate={navigate} />,
@@ -1036,7 +1026,7 @@ export function Shell() {
             sessionReading: view.name === "session" && !isMobile,
           })}
           sessionOpen={view.name === "session"}
-          sidePanelShortcuts={threadPanelShown ? SIDE_PANEL_CHORDS : undefined}
+          assistantThreadOpen={assistantThreadOpen}
           terminalSupported={terminalSupported}
           filesSupported={filesSupported}
           conversationSteeringSupported={conversationSteeringSupported}

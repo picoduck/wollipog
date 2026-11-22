@@ -73,7 +73,7 @@ export function composerPlaceholder(input: {
 }): string {
   if (input.unavailableReason !== null) return input.unavailableReason;
   if (input.inputPending) return "Messages you send now wait until you answer the request above.";
-  if (input.turnActive) return "Add a message. It sends when this turn ends.";
+  if (input.turnActive) return "Add a message. It sends when this turn ends; Ctrl+Enter steers now.";
   if (input.narrow) return `Message ${input.agent}`;
   return input.fileReferences
     ? `Message ${input.agent}. Type / for commands or @ for files.`

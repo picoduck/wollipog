@@ -3,6 +3,8 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  agentOwnsPermissionModes,
+  nativePlanModeActive,
   approvalControlLabel,
   approvalDeliveryUnverified,
   ApprovalsMenuChoices,
@@ -273,6 +275,49 @@ test("each permission mode is one two-line menu radio with its meaning, and unkn
   assert.equal(describedBy.length, 1);
   assert.match(describedBy[0]!, />Manual</);
 });
+test("an ACP agent's modes use its own names and meanings, never a native harness's for the same id (#4779)", () => {
+  // Google Antigravity 1.5.14's advertised modes.
+  const capabilities = {
+    models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+    permissionModes: ["default", "accept-edits", "auto", "plan"],
+    elicitation: { default: ["acp-permission" as const], "accept-edits": ["acp-permission" as const],
+      auto: ["acp-permission" as const], plan: ["acp-permission" as const] },
+    agentPermissionModes: [
+      { id: "default", name: "Default", description: "Ask before edits and commands, per your permission settings." },
+      { id: "accept-edits", name: "Accept edits", description: "Approve file edits in the workspace without asking." },
+      { id: "auto", name: "Auto", description: "Approve edits and safe commands; ask before irreversible actions." },
+      { id: "plan", name: "Plan" },
+    ],
+  };
+  // The agent owns every mode: plan stays in the menu, and there is no second, generic Default.
+  const controls = sessionPermissionModeControls({ driver: "acp", permissionMode: "auto" }, capabilities);
+  assert.deepEqual(controls.permModes, ["default", "accept-edits", "auto", "plan"]);
+  assert.equal(controls.showDefaultPermissionMode, false);
+  assert.equal(agentOwnsPermissionModes("acp", capabilities), true);
+  assert.equal(agentOwnsPermissionModes("claude-code", capabilities), false);
+  // Selecting the agent's Plan shows no read-only Plan pill; Claude's native plan still does.
+  assert.equal(nativePlanModeActive({ driver: "acp", permissionMode: "plan" }, capabilities), false);
+  assert.equal(approvalControlLabel("acp", "plan", "available", capabilities), "Plan");
+  assert.equal(nativePlanModeActive({ driver: "claude-code", permissionMode: "plan" }, undefined), true);
+  assert.equal(nativePlanModeActive({ driver: "acp", permissionMode: "plan" }, undefined), true, "an older runner keeps today's behavior");
+  assert.equal(sessionPermissionModeControls({ driver: "acp", permissionMode: "" }, { ...capabilities, agentPermissionModes: undefined })
+    .permModes.includes("plan"), false, "without the agent's names, plan keeps its existing handling");
+  const html = renderToStaticMarkup(React.createElement(ApprovalsMenuChoices, {
+    capabilities, driver: "acp", permModes: controls.permModes, permVal: "auto", apply: () => {}, close: () => {},
+    showDefault: controls.showDefaultPermissionMode,
+  }));
+  assert.equal((html.match(/>Default</g) ?? []).length, 1, "one Default: the agent's");
+  assert.match(html, /aria-checked="true"[^>]*>[\s\S]*?>Auto<[\s\S]*?The agent describes this mode as “Approve edits and safe commands; ask before irreversible actions\.”/);
+  assert.match(html, />Accept Edits<[\s\S]*?The agent describes this mode as “Approve file edits in the workspace without asking\.”/, "Title Case label from the agent's name");
+  assert.match(html, />Default<[\s\S]*?You&#x27;re asked only about actions the agent sends for approval\./, "Wollipog promises no more than the agent asks");
+  assert.match(html, />Plan<[\s\S]*?Wollipog doesn&#x27;t know what this mode permits\./);
+  assert.doesNotMatch(html, /AI-Reviewed|classifier|Ask Every Time|Plan Only|accept-edits<|Uses the agent/u);
+  assert.equal(approvalControlLabel("acp", "accept-edits", "available", capabilities), "Accept Edits");
+  // Without advertised names (an older runner), the existing labels stay.
+  assert.equal(approvalControlLabel("acp", "plan", "available"), "Plan Only (Read-Only)");
+  assert.equal(approvalControlLabel("claude-code", "auto", "available", capabilities), "Auto (AI-Reviewed)");
+});
+
 test("an active Plan mode remains the one checked state while staying outside selectable permission modes", () => {
   const html = renderToStaticMarkup(React.createElement(ApprovalsMenuChoices, {
     capabilities: {

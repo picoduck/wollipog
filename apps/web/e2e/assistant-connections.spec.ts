@@ -5,18 +5,18 @@ import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizont
 type Server = Awaited<ReturnType<typeof assistantUiServer>>;
 const nameField = (page: Page) => page.getByLabel("Connection Name", { exact: true });
 const credentialField = (page: Page) => page.getByLabel("Assistant Credential", { exact: true });
-const openList = (page: Page) => page.getByRole("button", { name: /^Manage Assistant Connections/ }).click();
+const openList = (page: Page) => page.getByRole("button", { name: /^All Connections/ }).click();
 const newConnection = (page: Page) => page.getByRole("button", { name: "New Connection", exact: true }).click();
 const createConnection = (page: Page) => page.getByRole("button", { name: "Create Connection", exact: true });
 const openRotate = (page: Page) => page.getByRole("button", { name: "Rotate Credential…", exact: true }).click();
 const confirmation = (page: Page, title: string) => page.getByRole("dialog", { name: title, exact: true });
 const done = (page: Page) => page.getByRole("button", { name: "Done", exact: true }).click();
 
-async function visit(page: Page, server: Server, theme = "dark", owner = true) {
+async function visit(page: Page, server: Server, theme = "dark", route = "") {
   await page.addInitScript(setup => {
     (window as unknown as { assistantTest: unknown }).assistantTest = setup;
-  }, { origin: server.origin, ownerCredential: owner ? server.ownerCredential : "unrecognized-fixture" });
-  await page.goto("/assistant-connections-e2e.html?theme=" + theme);
+  }, { origin: server.origin, ownerCredential: server.ownerCredential });
+  await page.goto("/assistant-connections-e2e.html?theme=" + theme + "&route=" + encodeURIComponent(route || "/settings/assistant"));
 }
 
 function ownerFor(server: Server) {
@@ -138,11 +138,24 @@ for (const width of [1440, 390]) {
           server.db.assistantConnections.record(issued.connection, "installation_rename", { kind: "control_plane", id: server.db.instanceId() }, "refused");
           server.db.assistantConnections.revoke(fixtures[7]!.connection.id);
 
-          await page.goto("/settings-rows-e2e.html?section=assistant&theme=" + theme);
+          await page.emulateMedia({ colorScheme: theme });
+          await page.goto("/assistants-e2e.html?limits=stress&path=" + encodeURIComponent("/settings/assistant"));
           const panel = page.locator(".settings-panel");
           await expect(panel.getByRole("heading", { name: "Thread Defaults" })).toBeVisible();
-          await expect(panel.getByRole("heading", { name: "Assistant Connections", exact: true })).toBeVisible();
-          await capture(page, theme, "settings-entry", page.getByRole("button", { name: /^Manage Assistant Connections/ }));
+          const group = panel.getByRole("region", { name: "Assistant Connections", exact: true });
+          const all = group.getByRole("button", { name: /^All Connections/ });
+          await expect(all).toContainText("9");
+          await expect(group.locator(".assistant-connection-row")).toHaveCount(3);
+          await targetSize(group.getByRole("button", { name: "New Connection", exact: true }), minimum);
+          await targetSize(all, minimum);
+          if (width === 390) {
+            const previews = await group.getByRole("button").all();
+            const boxes = await Promise.all(previews.slice(1).map(preview => preview.boundingBox()));
+            const gap = boxes.slice(1).map((box, index) => box!.y - boxes[index]!.y - boxes[index]!.height);
+            expect(Math.min(...gap)).toBeGreaterThanOrEqual(8);
+          }
+          await group.getByRole("heading").scrollIntoViewIfNeeded();
+          await capture(page, theme, "settings-entry", all);
           await visit(page, server, theme);
           await openList(page);
           await expect(page).toHaveURL(/settings%2Fassistant%2Fconnections/);
@@ -416,13 +429,38 @@ test("switching control planes clears the shown credential", async ({ page }) =>
   }
 });
 
-test("non-owner refusal offers no grant controls", async ({ page }) => {
+test("a forbidden owner read hides the Settings group and direct pages offer no grant controls", async ({ page }) => {
   const server = await assistantUiServer();
   try {
-    await visit(page, server, "dark", false);
-    await openList(page);
+    await page.route("**/api/assistant-connections", route => route.fulfill({
+      status: 403, json: { error: "Only an organization owner can manage Assistant Connections." },
+    }));
+    const response = page.waitForResponse(candidate => new URL(candidate.url()).pathname === "/api/assistant-connections");
+    await visit(page, server);
+    expect((await response).status()).toBe(403);
+    await expect(page.getByRole("region", { name: "Assistant Connections" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /^All Connections/ })).toHaveCount(0);
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    await visit(page, server, "dark", "/settings/assistant/connections");
     await expect(page.getByRole("alert")).toBeVisible();
     await expect(page.getByRole("button", { name: "New Connection", exact: true })).toHaveCount(0);
+  } finally {
+    await server.close();
+  }
+});
+
+test("Settings connection rows and the group action open their dedicated pages", async ({ page }) => {
+  const server = await assistantUiServer();
+  try {
+    server.db.assistantConnections.create(ownerFor(server), "Studio Assistant", { operations: "all", projects: "all" });
+    await visit(page, server);
+    const group = page.getByRole("region", { name: "Assistant Connections", exact: true });
+    await group.getByRole("button", { name: /^Studio Assistant/ }).click();
+    await expect(page.getByRole("heading", { name: "Studio Assistant", exact: true })).toBeVisible();
+    await page.goBack();
+    await group.getByRole("button", { name: "New Connection", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "New Connection", exact: true })).toBeVisible();
+    await expect(nameField(page)).toBeEmpty();
   } finally {
     await server.close();
   }

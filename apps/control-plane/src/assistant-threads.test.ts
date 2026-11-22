@@ -93,7 +93,7 @@ test("a new thread launches an assistant-role session whose every launch carries
       id: undefined, sessionId: undefined, lastActivityAt: undefined, createdAt: undefined, connectionId: undefined,
       assistant: "wollipog", title: "Weekly Cleanup", harness: "claude-code", status: "working",
       access: { level: "full_access", destructive: "ask" }, launchedSessionIds: [], archivedAt: null,
-      usage: { launchedSessions: { used: 0, limit: 10 }, costUsd: { used: 0, limit: 25 } }, limitsEditable: true, confirmations: [],
+      usage: { launchedSessions: { used: 0, limit: 10 }, costUsd: { used: 0, limit: 25 } }, limitsEditable: true, launchPaused: false, confirmations: [],
       decisionDelegation: { revision: 0, grant: null },
       evidenceReview: { available: false, reason: "This thread’s harness or model cannot receive verified evidence images." },
     });
@@ -132,7 +132,9 @@ test("saved limits belong to the owner and only apply on thread creation", async
     const defaults = `${path}/defaults/limits`;
     const original = (await h.call("POST", path, {})).body.thread as AssistantThread;
     assert.deepEqual((await h.call("GET", defaults)).body, { costUsd: 25, launchedSessions: 10 });
-    assert.equal((await h.call("PUT", defaults, { costUsd: 12.34, launchedSessions: 0 })).status, 200);
+    assert.equal((await h.call("PATCH", defaults, { launchPaused: true })).status, 400);
+    assert.deepEqual((await h.call("PATCH", defaults, { costUsd: 12.34 })).body, { costUsd: 12.34, launchedSessions: 10 });
+    assert.deepEqual((await h.call("PATCH", defaults, { launchedSessions: 0 })).body, { costUsd: 12.34, launchedSessions: 0 });
     const next = (await h.call("POST", path, {})).body.thread as AssistantThread;
     assert.deepEqual(next.usage, { costUsd: { used: 0, limit: 12.34 }, launchedSessions: { used: 0, limit: 0 } });
     assert.equal(h.sent.at(-1)!.spec.config?.costBudgetUsd, 12.34);
@@ -162,14 +164,17 @@ test("saved limits belong to the owner and only apply on thread creation", async
   } finally { await h.close(); }
 });
 
-test("install backfills pre-existing threads with the historical fixed limits", async () => {
+test("install backfills pre-existing threads with the historical limits and an unpaused flag", async () => {
   const h = await harness();
   try {
     const created = (await h.call("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
-    h.db.raw().exec("ALTER TABLE assistant_threads DROP COLUMN cost_limit_usd; ALTER TABLE assistant_threads DROP COLUMN launch_limit");
+    h.db.raw().exec(`ALTER TABLE assistant_threads DROP COLUMN cost_limit_usd;
+      ALTER TABLE assistant_threads DROP COLUMN launch_limit;
+      ALTER TABLE assistant_threads DROP COLUMN launch_paused`);
     const { AssistantThreadStore } = await import("./assistant-thread-store.js");
     AssistantThreadStore.install(h.db.raw());
     assert.deepEqual(h.threads.get(h.owner, created.id).usage, created.usage);
+    assert.equal(h.threads.get(h.owner, created.id).launchPaused, false);
   } finally { await h.close(); }
 });
 
@@ -436,11 +441,52 @@ test("an older runner or a missing harness refuses the thread with guidance and 
     assert.equal((await h.call("POST", "/api/assistant-threads", { role: "orchestrator" })).status, 400);
     assert.equal(h.sessionCount(), 0);
     const defaults = (await h.call("GET", "/api/assistant-threads/defaults")).body;
-    assert.deepEqual(defaults, { harness: "claude-code", launchDefaults: { harness: "claude-code", providerAccount: null }, harnesses: [
+    assert.deepEqual(defaults, { harness: "claude-code", launchDefaults: { harness: "claude-code", providerAccount: null }, decisionDefault: null, harnesses: [
       { id: "claude-code", label: "Claude Code", available: true,
         accountSelection: { runnerId: "r", workspaceId: "w", accounts: [] } },
       { id: "codex", label: "Codex", available: false, reason: "Install Codex on an online Machine to start a thread with it." },
     ] });
+  } finally { await h.close(); }
+});
+
+test("owner delegation defaults snapshot explicit grants and relative expiry only on new threads", async () => {
+  const h = await harness();
+  try {
+    const path = "/api/assistant-threads";
+    const settings = `${path}/defaults/delegation`;
+    const create = async () => {
+      const result = await h.call("POST", path, {});
+      assert.equal(result.status, 200, result.raw);
+      return result.body.thread as AssistantThread;
+    };
+    const existing = await create();
+    const preference = {
+      categories: ["owner_question", "pr_merge"], selectionMode: "all",
+      projects: ["project_one"], campaigns: "all", expiresAfterMs: 7 * 24 * 60 * 60_000,
+    };
+    assert.equal((await h.call("PUT", settings, { grant: { ...preference, categories: ["ui_evidence_review"] } })).status, 400);
+    h.as(null);
+    assert.equal((await h.call("PUT", settings, { grant: preference })).status, 403);
+    h.as(h.owner);
+    assert.deepEqual(await h.call("PUT", settings, { grant: preference }).then((result) => result.body), { grant: preference });
+    assert.deepEqual((await h.call("GET", `${path}/defaults`)).body.decisionDefault, preference);
+    h.as({ ...h.owner, userId: "usr_other_owner" });
+    assert.equal((await h.call("GET", `${path}/defaults`)).body.decisionDefault, null);
+    h.as(h.owner);
+
+    const delegated = await create();
+    const { expiresAfterMs, ...scope } = preference;
+    assert.deepEqual(delegated.decisionDelegation, {
+      revision: 1, grant: { ...scope, expiresAt: delegated.createdAt + expiresAfterMs },
+    });
+    assert.deepEqual((await h.call("GET", `${path}/${existing.id}`)).body.thread.decisionDelegation, { revision: 0, grant: null });
+
+    assert.equal((await h.call("PUT", settings, { grant: null })).status, 200);
+    assert.deepEqual((await create()).decisionDelegation, { revision: 0, grant: null });
+    assert.deepEqual((await h.call("GET", `${path}/${delegated.id}`)).body.thread.decisionDelegation, delegated.decisionDelegation);
+    const revoked = await h.call("PUT", `${path}/${delegated.id}/delegation`, { revision: 1, grant: null });
+    assert.equal(revoked.status, 200, revoked.raw);
+    assert.deepEqual(revoked.body.thread.decisionDelegation, { revision: 2, grant: null });
   } finally { await h.close(); }
 });
 
@@ -485,9 +531,11 @@ test("the Assistant default account applies to new threads, with an explicit Mac
     const launchDefaults = "/api/assistant-threads/defaults/launch";
     const chosen = { harness: "claude-code", providerAccount: { runnerId: "r", accountRef: accountRef("studio") } };
     assert.equal((await h.call("PUT", launchDefaults, { ...chosen, providerAccount: { runnerId: "r", accountRef: accountRef("sign-in") } })).status, 409);
-    const saved = await h.call("PUT", launchDefaults, chosen);
+    const saved = await h.call("PATCH", launchDefaults, { expectedHarness: chosen.harness, providerAccount: chosen.providerAccount });
     assert.equal(saved.status, 200, saved.raw);
     assert.deepEqual(saved.body.launchDefaults, chosen);
+    assert.equal((await h.call("PATCH", launchDefaults, { expectedHarness: "codex", providerAccount: null })).status, 409);
+    assert.deepEqual((await h.call("PATCH", launchDefaults, { harness: chosen.harness })).body.launchDefaults, chosen);
     const implicit = await h.call("POST", "/api/assistant-threads", {});
     assert.equal(implicit.body.thread.providerAccountLabel, "Studio Subscription");
     const policy = await h.call("POST", "/api/assistant-threads", { providerAccountRef: null });
