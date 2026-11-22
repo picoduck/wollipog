@@ -5836,8 +5836,10 @@ export class SessionsService {
 
   /** Every ingress that can start a provider turn refuses while the campaign waits for its owner's
    * first message, except that message's own delivery. */
-  private firstMessageFence(sessionId: string, session = this.db.getSession(sessionId)): string | null {
-    return this.firstMessageDelivery !== sessionId && (this.awaitingFirstMessage(session) || this.firstMessagesInFlight.has(sessionId))
+  private firstMessageFence(sessionId: string, session: Pick<SessionView, "orchestratorPolicy"> | null = {
+    orchestratorPolicy: this.db.sessionOrchestratorPolicy(sessionId) ?? undefined,
+  }): string | null {
+    return this.firstMessageDelivery !== sessionId && (awaitsFirstMessage(session?.orchestratorPolicy) || this.firstMessagesInFlight.has(sessionId))
       ? "This Full Control campaign starts from its owner's first message." : null;
   }
 
@@ -7224,15 +7226,8 @@ export class SessionsService {
       if (!campaign || campaign.archived || campaign.status !== "idle" || campaign.hasPendingApproval) continue;
       // Only its owner's first message may start a Full Control campaign launched without a task (#2940).
       if (this.firstMessageFence(campaignSessionId)) continue;
-      if (this.db.campaignContinuationAdmission(campaignSessionId).state !== "available") continue;
       if (!this.db.hasPendingCampaignContinuationEvents(campaignSessionId)) continue;
-      const projection = this.db.campaignProjection(campaignSessionId);
-      if (!projection || (projection.status === "waiting_human" &&
-          !this.db.campaignMayContinueWhileHumanWaiting(campaignSessionId)) || campaignStatusTerminal(projection.status) ||
-          !runnerSupportsProtocol(
-            this.db.getRunner(campaign.runnerId)?.protocolVersion,
-            "campaignContinuations",
-          )) continue;
+      if (!runnerSupportsProtocol(this.db.getRunner(campaign.runnerId)?.protocolVersion, "campaignContinuations")) continue;
       const currentLatest = this.db.latestCampaignContinuation(campaignSessionId);
       let resetAttemptCount = false;
       if (currentLatest?.state === "failed") {
@@ -7259,6 +7254,10 @@ export class SessionsService {
         ? promptAt + CAMPAIGN_CONTINUATION_FAN_IN_MS
         : events[0]!.createdAt + CAMPAIGN_CONTINUATION_COALESCE_MS;
       if (now < dueAt) continue;
+      if (this.db.campaignContinuationAdmission(campaignSessionId).state !== "available") continue;
+      const projection = this.db.campaignProjection(campaignSessionId);
+      if (!projection || (projection.status === "waiting_human" &&
+          !this.db.campaignMayContinueWhileHumanWaiting(campaignSessionId)) || campaignStatusTerminal(projection.status)) continue;
       const sessions = new Map<string, SessionView | null>();
       // Several turn ends of one child in this range are one entry, carrying its latest status and
       // how many it stands for (#4073). The range itself still covers every event.
@@ -7332,7 +7331,7 @@ export class SessionsService {
   }
 
   private async reconcileCampaignHandoffQuestionNow(campaignId: string): Promise<void> {
-    const root = this.db.getSession(campaignId);
+    const root = this.db.getSession(campaignId, { includeCampaignProjection: false });
     if (!root || root.archived || isTerminal(root.status) || root.orchestratorPolicy?.control?.mode !== "full_control" ||
         !runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "ownerQuestions")) return;
     const prior = this.db.campaignHandoffQuestion(campaignId);
@@ -7380,7 +7379,7 @@ export class SessionsService {
       if (prior?.status === "pending") this.revokeWorkflowDecision(prior, { reason: "authority_superseded",
         triggeredBy: { kind: "system", id: "campaign_handoffs" } });
       this.db.campaignRecovery.blockHandoffCredentials(campaignId, declineCoordinate, revision, Date.now());
-      this.campaignRecovery.synchronize(this.db.getSession(campaignId) ?? root, Date.now());
+      this.campaignRecovery.synchronize(this.db.getSession(campaignId, { includeCampaignProjection: false }) ?? root, Date.now());
     };
     if (previouslyDeclined) { blocked(); return; }
     if (prior?.resourceDigest === digest && prior.status !== "revoked") return;
@@ -7390,7 +7389,7 @@ export class SessionsService {
     // Handoff text is agent-written. Server-owned coordinates do not make its content trusted.
     if (credentialFormFloor(snapshot)) { blocked(); return; }
     const screen = await this.screenCredentialText(root, campaignId, "owner_decision", requestId, ownerDecisionScreenData(snapshot), true);
-    const latest = this.db.getSession(campaignId);
+    const latest = this.db.getSession(campaignId, { includeCampaignProjection: false });
     const current = this.db.campaignHandoffQuestion(campaignId);
     if (!latest || latest.archived || isTerminal(latest.status) || latest.orchestratorPolicy?.control?.mode !== "full_control" ||
         latest.parentControlPolicy?.revision !== root.parentControlPolicy?.revision ||
@@ -7522,7 +7521,7 @@ export class SessionsService {
   ): CampaignContinuationEventDetail {
     const base = { seq: event.seq, kind: event.kind, createdAt: event.createdAt };
     const session = (id: string) => {
-      if (!sessions.has(id)) sessions.set(id, this.db.getSession(id));
+      if (!sessions.has(id)) sessions.set(id, this.db.getSession(id, { includeCampaignProjection: false }));
       return sessions.get(id) ?? null;
     };
     const subject = (sessionId: string | undefined) => {
@@ -14857,13 +14856,14 @@ export class SessionsService {
   /** Upgrade recovery uses the stored consumed occurrence. A durable read fence precedes dispatch;
    * a lost read goes to the owner after restart, never to another mutation or an agent assertion. */
   async reconcileUncertainIssueClosures(campaignId: string): Promise<void> {
-    const root = this.db.getSession(campaignId);
-    if (!root || root.archived || isTerminal(root.status)) return;
+    let root: SessionView | null | undefined;
     for (const decision of this.db.campaignRecoverySettledDecisions(campaignId)) {
       if (decision.status !== "consumed" || decision.resourceSnapshot.category !== "issue_closure" ||
           decision.issueClosureResult?.outcome !== "uncertain" || this.issueClosureRecoveries.has(decision.occurrenceId)) continue;
       const pendingOwner = decision.issueClosureResult.reconciliation?.ownerDecisionOccurrenceId;
       if (pendingOwner && this.db.workflowDecisionByOccurrence(pendingOwner)?.status === "pending") continue;
+      root ??= this.db.getSession(campaignId, { includeCampaignProjection: false });
+      if (!root || root.archived || isTerminal(root.status)) return;
       this.issueClosureRecoveries.add(decision.occurrenceId);
       try {
         const snapshot = decision.resourceSnapshot;
@@ -21190,26 +21190,28 @@ export class SessionsService {
     if (previous && now - previous.at < 30_000) return;
     const children = this.db.archivedChildrenWithRefusedWorktrees(previous?.after ?? "", runnerId);
     this.refusedWorktreeSweep.set(key, { at: now, after: children.length === 64 ? children.at(-1)! : "" });
-    for (const childId of children) this.queueCampaignWorktreeRetirement(childId, false, now);
+    const rootPolicies = new Map<string, OrchestratorCampaignPolicy | null>();
+    for (const childId of children) this.queueCampaignWorktreeRetirement(childId, false, now, rootPolicies);
   }
 
   private reconcileRefusedCampaignWorktrees(projection: OrchestratorCampaignProjection | null): void {
+    const rootPolicies = new Map<string, OrchestratorCampaignPolicy | null>();
     for (const childId of new Set(projection?.cleanupWorktrees?.filter(item => item.status === "refused")
-      .map(item => item.sessionId))) this.queueCampaignWorktreeRetirement(childId);
+      .map(item => item.sessionId))) this.queueCampaignWorktreeRetirement(childId, false, Date.now(), rootPolicies);
   }
 
   /** A verified child and its archived flag are the durable intent. Reconnect replays this
    * request if the control plane exited before sending it; the runner owns deferred replay after
    * it accepts a request. Refusals only receive metadata reconciliation, never a deletion retry. */
-  private queueCampaignWorktreeRetirement(sessionId: string, retryDeferred = false, recheckAt = Date.now()): void {
-    const child = this.db.getSession(sessionId);
-    const campaignId = this.db.campaignForVerifiedChild(sessionId);
-    const campaign = campaignId ? this.db.getSession(campaignId) : null;
-    if (!child?.archived || child.archiveStatus || !campaign?.orchestratorPolicy ||
-        campaign.orchestratorPolicy.behavior.completion !== "stop_and_archive" ||
-        !runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "archiveWorktreeRetirement") ||
-        !this.hub.isRunnerOnline(child.runnerId) || this.archiveWorktreeRetirements.has(sessionId)) return;
-    const reconcileRefused = runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion,
+  private queueCampaignWorktreeRetirement(sessionId: string, retryDeferred = false, recheckAt = Date.now(),
+    rootPolicies = new Map<string, OrchestratorCampaignPolicy | null>()): void {
+    const child = this.db.campaignWorktreeRetirementState(sessionId);
+    if (!child?.archived || child.archivePending || this.archiveWorktreeRetirements.has(sessionId)) return;
+    const campaignId = this.db.campaignForVerifiedChild(sessionId, rootPolicies);
+    if (!campaignId || rootPolicies.get(campaignId)?.behavior.completion !== "stop_and_archive") return;
+    const protocol = this.db.getRunner(child.runnerId)?.protocolVersion;
+    if (!runnerSupportsProtocol(protocol, "archiveWorktreeRetirement") || !this.hub.isRunnerOnline(child.runnerId)) return;
+    const reconcileRefused = runnerSupportsProtocol(protocol,
       "campaignWorktreeRemovalReconciliation") &&
       (retryDeferred || recheckAt - (this.refusedWorktreeRecheckedAt.get(sessionId) ?? 0) >= 30_000);
     const pending = this.db.campaignWorktreeCleanup(sessionId).filter((item) =>
@@ -21223,8 +21225,8 @@ export class SessionsService {
       let retryDelayMs = 60_000;
       try {
         for (const item of pending) {
-          const current = this.db.getSession(sessionId);
-          if (!current?.archived || !this.db.campaignChildReportVerified(campaignId!, sessionId)) break;
+          const current = this.db.campaignWorktreeRetirementState(sessionId);
+          if (!current?.archived || !this.db.campaignChildReportVerified(campaignId, sessionId)) break;
           const worktree = current.worktrees?.find((candidate) => candidate.path === item.path);
           const worktreeId = worktree?.id ?? "";
           if (item.status !== this.db.campaignWorktreeCleanup(sessionId)
@@ -21243,7 +21245,7 @@ export class SessionsService {
                   !result.snapshot.worktrees?.some(tree => tree.path === item.path)) {
                 this.db.updateSessionFromSnapshot(sessionId, result.snapshot, Date.now());
                 this.hub.sessionChangedById(sessionId);
-                this.campaignViewsChanged(campaignId!, sessionId);
+                this.campaignViewsChanged(campaignId, sessionId);
               }
             } catch {
               this.log.warn(JSON.stringify({ event: "campaign_worktree_external_reconciliation_unavailable",
@@ -21293,7 +21295,7 @@ export class SessionsService {
             this.log.warn(`archive worktree retirement for ${sessionId} needs retry: ${String(error)}`);
           }
           this.hub.sessionChangedById(sessionId);
-          this.campaignViewsChanged(campaignId!, sessionId);
+          this.campaignViewsChanged(campaignId, sessionId);
         }
       } finally {
         this.archiveWorktreeRetirements.delete(sessionId);
@@ -21304,9 +21306,10 @@ export class SessionsService {
 
   /** A new control-plane process replays an archive request that was not delivered before exit. */
   reconcileArchivedCampaignWorktrees(runnerId: string): void {
+    const rootPolicies = new Map<string, OrchestratorCampaignPolicy | null>();
     for (const session of this.db.runnerSessionInventory(runnerId)) {
       if (session.archived && (session.worktreePath || session.worktrees?.length)) {
-        this.queueCampaignWorktreeRetirement(session.id, true);
+        this.queueCampaignWorktreeRetirement(session.id, true, Date.now(), rootPolicies);
       }
     }
   }
