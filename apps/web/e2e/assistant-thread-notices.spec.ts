@@ -29,7 +29,7 @@ const noticeSelector = ".composer .session-notice-slot .notice";
 async function open(page: Page, theme: string, fixture: string) {
   await page.clock.setFixedTime(Date.UTC(2026, 10, 20, 12, 48));
   await page.goto("/assistants-e2e.html?path=" + encodeURIComponent(viewPath({ name: "assistants", threadId: openThread })) + "&theme=" + theme +
-    "&accounts=choices&thread-health=" + fixture);
+    "&accounts=choices&thread-health=" + fixture + (fixture === "stress" ? "&threads=long" : ""));
   await expect(page.locator(bar).locator(".assistant-bar-title")).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   if (fixture === "reconnecting") await page.evaluate(() => {
@@ -130,7 +130,10 @@ for (const theme of ["light", "dark"] as const) {
         await expect(badge).toHaveText("Tools Unavailable");
         await expectFullyInViewport(badge);
         const row = page.locator('[data-thread-id="thr_triage"]');
-        if (!phone) await expect(row.locator(".status")).toHaveText("Tools Unavailable");
+        if (!phone) {
+          await expect(page.locator(".assistant-thread-list > li")).toHaveCount(12);
+          await expect(row.locator(".status")).toHaveText("Tools Unavailable");
+        }
         const more = notice.getByRole("button", { name: "+3 More" });
         await expect(more).toHaveAttribute("aria-expanded", "false");
         await expectPageNoHorizontalOverflow(page);
@@ -149,7 +152,9 @@ for (const theme of ["light", "dark"] as const) {
         await expect(badge).toHaveText("Tools Unavailable");
         if (phone) {
           await page.getByRole("button", { name: "Back to Assistants" }).click();
+          await expect(page.locator(".assistant-thread-list > li")).toHaveCount(12);
           await expect(row.locator(".status")).toHaveText("Tools Unavailable");
+          await expectNoHorizontalOverflow(page.locator(".assistant-thread-list"));
           await expectFullyInViewport(row);
           await capture(page, theme, "stress-list");
         }
