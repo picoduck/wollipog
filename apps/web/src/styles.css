@@ -2743,7 +2743,7 @@ button.status { cursor: pointer; }
   height: var(--icon);
 }
 .menu:has(.menu-icon) .menu-item:not(:has(> .menu-icon))::before,
-.model-settings-column:has(.menu-icon) .menu-item:not(:has(> .menu-icon))::before {
+.model-settings-detail:has(.menu-icon) .menu-item:not(:has(> .menu-icon))::before {
   content: "";
   flex: none;
   width: var(--icon);
@@ -8328,23 +8328,10 @@ textarea.composer-answer-input {
   max-width: 360px;
   flex: 0 1 auto;
 }
-/* Model Settings (#2191, docs/design-system.md §9.2): §9.1's radio rows in a popover. Its rows keep
-   the menu's inset, so it takes the menu's padding rather than the popover's. With a choice for
-   each column (ModelEffortMenuChoices renders the columns only then), the model and what belongs
-   to it sit beside the reasoning effort, and a composer pane too narrow for both lays them out in
-   one. */
+/* Model Settings uses menu rows and their inset inside a popover. */
 .popover.model-settings { padding: var(--space-1); }
-.popover.model-settings:has(.model-settings-columns) {
-  width: 536px;
-  max-width: min(536px, calc(100vw - var(--space-4)));
-}
-.model-settings-columns {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  align-items: start;
-  gap: 0 var(--space-2);
-}
-.model-settings-column,
+.model-setting-selector .menu-trail { flex: 0 1 auto; min-width: 0; max-width: 55%; }
+.model-setting-selector .menu-trail svg { flex: none; }
 .model-settings-group {
   display: flex;
   flex-direction: column;

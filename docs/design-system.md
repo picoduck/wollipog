@@ -4198,9 +4198,11 @@ These trade-offs are deliberate. Keep them in mind when a screen seems to argue 
    other list that stays anchored on phones (§9.1).
 10. **Model Settings is a popover of menu rows.** Model Settings (#2191) holds a segmented Context
     Window (§10.2), which a menu cannot contain, so it is a §9.2 popover (`role="dialog"`) of
-    labelled radio groups. Its Model, Reasoning Effort and Service Tier choices keep §9.1's rows
-    and trailing check, so the popover takes the menu's 4px inset instead of 16px, and it is 536px
-    wide when it has two columns. In those groups the arrow keys move between options without
+    labelled radio groups. The overview shows the selected Reasoning Effort and Speed in one row
+    each, above the model list. A row opens its choices in place, using the same Back and Escape
+    behavior as Session Usage. Choosing a value returns to the overview with focus on that row.
+    Model and selector options keep §9.1's rows and trailing check, so the popover uses the menu's
+    4px inset. In those groups the arrow keys move between options without
     choosing one, and Enter or Space chooses, as in the menu it replaced. Every choice is a live
     configuration request and a model change resets the effort, so arrowing past a model must not
     choose it. The segmented Context Window keeps §10.2's arrows-select behavior.

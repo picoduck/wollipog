@@ -135,13 +135,11 @@ test("Model Settings close control dismisses without selecting and restores trig
   await act(async () => {
     root.render(
       <ModelSettingsPopover label="Current Model" ariaLabel="Model Settings: Current Model">
-        {() => (
-          <div role="radiogroup" aria-label="Model">
-            <button type="button" role="radio" aria-checked="true" tabIndex={0} onClick={() => { selectionCount += 1; }}>
-              Current Model
-            </button>
-          </div>
-        )}
+        <div role="radiogroup" aria-label="Model">
+          <button type="button" role="radio" aria-checked="true" tabIndex={0} onClick={() => { selectionCount += 1; }}>
+            Current Model
+          </button>
+        </div>
       </ModelSettingsPopover>,
     );
   });
@@ -195,23 +193,21 @@ test("Model Settings close control dismisses without selecting and restores trig
   }
 });
 
-test("Tab from a row the arrow keys reached stays inside Model Settings and moves by group", async () => {
+test("Model Settings tabs between compact rows and wraps while arrows move without applying a choice", async () => {
+  const applied: Partial<SessionConfig>[] = [];
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   await act(async () => {
     root.render(
       <ModelSettingsPopover label="Current Model" ariaLabel="Model Settings: Current Model">
-        {(close) => (
-          <ModelEffortMenuChoices
-            models={[{ id: "gpt", displayName: "GPT" }, { id: "mini", displayName: "GPT Mini" }]}
-            modelVal="gpt"
-            modelEfforts={["low", "high"]}
-            effortVal="low"
-            close={close}
-            apply={() => undefined}
-          />
-        )}
+        <ModelEffortMenuChoices
+          models={[{ id: "gpt", displayName: "GPT" }, { id: "mini", displayName: "GPT Mini" }]}
+          modelVal="gpt"
+          modelEfforts={["low", "high"]}
+          effortVal="low"
+          apply={(patch) => applied.push(patch)}
+        />
       </ModelSettingsPopover>,
     );
   });
@@ -225,14 +221,22 @@ test("Tab from a row the arrow keys reached stays inside Model Settings and move
   try {
     await act(async () => { container.querySelector<HTMLButtonElement>(".model-chip")!.click(); });
     assert.ok(domWindow.document.activeElement === named("GPT"), "opens on the current model");
-    // Into the effort group, then onto High, which is not the group's Tab stop.
+    await press("Tab");
+    assert.ok(domWindow.document.activeElement === named("Close Model Settings"),
+      "Tab from the last group wraps to Close instead of leaving the popover");
+    await press("Tab");
+    assert.ok(domWindow.document.activeElement === named("Reasoning Effort: Low"));
+    await act(async () => { (named("Reasoning Effort: Low") as unknown as HTMLButtonElement).click(); });
+    assert.ok(domWindow.document.activeElement === named("Back to Model Settings"));
+    await press("Tab");
     await press("Tab");
     assert.ok(domWindow.document.activeElement === named("Low"));
     await press("ArrowDown");
     assert.ok(domWindow.document.activeElement === named("High"));
     await press("Tab");
-    assert.ok(domWindow.document.activeElement === named("Close Model Settings"),
-      "Tab from the last group wraps to Close instead of leaving the popover");
+    assert.ok(domWindow.document.activeElement === named("Back to Model Settings"));
+    await press("Escape");
+    assert.ok(domWindow.document.activeElement === named("Reasoning Effort: Low"));
     await press("Tab");
     assert.ok(domWindow.document.activeElement === named("Search Models"));
     await press("Tab");
@@ -241,68 +245,8 @@ test("Tab from a row the arrow keys reached stays inside Model Settings and move
     await press("Tab", true);
     assert.ok(domWindow.document.activeElement === named("Search Models"),
       "Shift+Tab from an arrowed-to model goes back to search");
-    await press("Tab", true);
-    assert.ok(domWindow.document.activeElement === named("Close Model Settings"));
-    await press("Tab", true);
-    assert.ok(domWindow.document.activeElement === named("Low"), "Shift+Tab from the first stop wraps to the last group");
+    assert.deepEqual(applied, [], "moving focus does not apply an effort or reset the model");
     assert.ok(domWindow.document.querySelector('[role="dialog"]'), "still open");
-  } finally {
-    await act(async () => { root.unmount(); });
-    container.remove();
-  }
-});
-
-test("Model Settings keeps descriptions and Service Tier selection in one popover, and arrows only move", async () => {
-  const applied: Partial<SessionConfig>[] = [];
-  let closeCount = 0;
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  await act(async () => {
-    root.render(
-      <div>
-        <ModelEffortMenuChoices
-          models={[
-            { id: "gpt", displayName: "GPT Astra", description: "GPT Astra · Best for complex work" },
-            { id: "mini", displayName: "GPT Mini" },
-          ]}
-          modelVal="gpt"
-          selectedModel={{ id: "gpt", displayName: "GPT Astra" }}
-          modelEfforts={["high"]}
-          effortVal="high"
-          serviceTierState={{
-            choices: [
-              { id: "default", name: "Standard", description: "Standard response speed." },
-              { id: "fast", name: "Fast", description: "Faster responses." },
-            ],
-            selected: { id: "default", name: "Standard", description: "Standard response speed." },
-          }}
-          close={() => { closeCount += 1; }}
-          apply={(patch) => applied.push(patch)}
-        />
-      </div>,
-    );
-  });
-
-  try {
-    assert.match(container.textContent ?? "", /GPT AstraBest for complex work\./);
-    assert.match(container.textContent ?? "", /Changes apply from the next turn\./);
-    // Arrowing past a model must not choose it: each choice is a live request and resets the effort.
-    const models = [...container.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="Model"] [role="radio"]')];
-    models[0]!.focus();
-    await act(async () => {
-      models[0]!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }) as never);
-    });
-    assert.ok((domWindow.document.activeElement as unknown) === models[1], "the arrow key moves to the next model");
-    assert.deepEqual(applied, [], "and does not choose it");
-    const tierGroup = container.querySelector('[role="radiogroup"][aria-label="Service Tier"]');
-    assert.ok(tierGroup);
-    const fast = [...tierGroup.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
-      .find((button) => button.textContent?.includes("Fast"));
-    assert.ok(fast);
-    await act(async () => { fast.click(); });
-    assert.deepEqual(applied, [{ serviceTier: "fast" }]);
-    assert.equal(closeCount, 1);
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
@@ -427,11 +371,9 @@ test("a refused person's composer setting is disabled with the reason and never 
   await act(async () => {
     root.render(
       <ModelSettingsPopover label="Current Model" ariaLabel="Model Settings: Current Model" title="Choose a model" disabledReason={reason}>
-        {() => (
-          <button type="button" role="radio" aria-checked="true" onClick={() => { selectionCount += 1; }}>
-            Current Model
-          </button>
-        )}
+        <button type="button" role="radio" aria-checked="true" onClick={() => { selectionCount += 1; }}>
+          Current Model
+        </button>
       </ModelSettingsPopover>,
     );
   });

@@ -119,17 +119,14 @@ function rowName(row: Element): { name: string; description: string } {
 function modelSettings(view: SessionView, usage = true) {
   return (
     <ModelSettingsPopover label="GPT" ariaLabel="Model Settings: GPT">
-      {(close) => (
-        <ModelEffortMenuChoices
-          models={[{ id: "gpt", displayName: "GPT" }]}
-          modelVal="gpt"
-          modelEfforts={["low", "high"]}
-          effortVal="low"
-          sessionUsage={usage ? <SessionUsageMenuGroup session={view} resolution={CAPACITY} /> : null}
-          close={close}
-          apply={() => undefined}
-        />
-      )}
+      <ModelEffortMenuChoices
+        models={[{ id: "gpt", displayName: "GPT" }]}
+        modelVal="gpt"
+        modelEfforts={["low", "high"]}
+        effortVal="low"
+        sessionUsage={usage ? <SessionUsageMenuGroup session={view} resolution={CAPACITY} /> : null}
+        apply={() => undefined}
+      />
     </ModelSettingsPopover>
   );
 }
