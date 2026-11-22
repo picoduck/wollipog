@@ -14,7 +14,7 @@ async function open(page: Page, theme: string, scenario: string, params = "") {
   await expect(dock(page)).toBeVisible();
 }
 
-async function capture(page: Page, theme: string, state: string) {
+async function capture(page: Page, theme: string, state: string, issue = 4809) {
   if (state !== "side-panel-overlaid") await expectTextContrast(dock(page));
   if (state !== "side-panel-overlaid" && !state.endsWith("-show-all")) {
     for (const content of await cards(page).first().locator(
@@ -46,22 +46,26 @@ async function capture(page: Page, theme: string, state: string) {
       }
     }
   }
+  await screenshot(page, theme, state, issue);
+}
+
+async function screenshot(page: Page, theme: string, state: string, issue = 4809) {
   const evidenceDir = process.env.ASSISTANT_DOCK_EVIDENCE_DIR;
   if (!evidenceDir) return;
   const { width, height } = page.viewportSize()!;
   await page.mouse.move(0, 0);
   await page.screenshot({
-    path: resolve(evidenceDir, `4809-dock-${width}x${height}-${theme}-${state}.png`),
+    path: resolve(evidenceDir, `${issue}-dock-${width}x${height}-${theme}-${state}.png`),
     animations: "disabled",
   });
 }
 
-async function layout(page: Page) {
+async function layout(page: Page, minimumTranscriptHeight = 80) {
   await expectPageNoHorizontalOverflow(page);
   const composer = page.locator(".composer");
   const transcript = page.getByRole("region", { name: "Session Activity", exact: true, includeHidden: true });
   await expectFullyInViewport(composer, "Thread composer");
-  expect((await transcript.boundingBox())!.height, "The transcript retains room to read").toBeGreaterThan(80);
+  expect((await transcript.boundingBox())!.height, "The transcript retains room to read").toBeGreaterThan(minimumTranscriptHeight);
   const box = (await dock(page).boundingBox())!;
   const reader = (await transcript.boundingBox())!;
   expect(reader.y + reader.height).toBeLessThanOrEqual(box.y + 1);
@@ -94,6 +98,127 @@ test("a short desktop keeps room for the transcript with the 320% spending notic
 });
 
 for (const theme of ["light", "dark"] as const) {
+  test.describe(`${theme}, 1280x560`, () => {
+    test.use({ viewport: { width: 1280, height: 560 }, colorScheme: theme, timezoneId: "UTC", locale: "en-US" });
+
+    test("the very short desktop keeps tool approval details reachable with the 320% notice", async ({ page }) => {
+      await open(page, theme, "tool", "spending=over");
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await expect(cards(page)).toHaveCount(1);
+      const card = cards(page).first();
+      const body = card.locator(".assistant-dock-card-body");
+      const summary = card.getByText("This session needs permission to run a tool.", { exact: true });
+      const target = card.locator(".assistant-dock-target");
+      const command = card.locator(".code-well pre");
+      await expect(command).toHaveText("pnpm install --frozen-lockfile --filter release-engineering-integration-test-fixtures --filter cross-platform-packaging-verification");
+
+      const notice = page.locator(".composer .assistant-spending-notice");
+      await expect(notice).toContainText("Over Budget by $54.93");
+      await expect(notice.getByRole("meter")).toHaveAttribute("aria-valuetext", "$79.93 of $25.00 spent");
+      await expectFullyInViewport(notice, "Spending notice");
+      await expectTextContrast(notice);
+      await expectTextContrast(dock(page));
+      await layout(page, 47);
+      await actionOrder(card, ["Open Session", "Deny", "Approve Once"]);
+      await expectFullyInViewport(summary, "Summary");
+      await expectFullyInViewport(target, "Target");
+      const { clientHeight, scrollHeight } = await body.evaluate(element => ({
+        clientHeight: element.clientHeight, scrollHeight: element.scrollHeight,
+      }));
+      expect(clientHeight, "The request body has room to render").toBeGreaterThan(0);
+      expect(scrollHeight, "The request body has more content to scroll").toBeGreaterThan(clientHeight);
+      const cue = card.locator(".assistant-dock-scroll-cue");
+      await expectFullyInViewport(cue, "Scroll cue above the actions");
+      await screenshot(page, theme, "tool-and-320percent-notice", 4838);
+
+      await body.hover();
+      await page.mouse.wheel(0, 400);
+      await expect.poll(() => body.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+      await expect(cue).toBeHidden();
+      await actionOrder(card, ["Open Session", "Deny", "Approve Once"]);
+      await expectFullyInViewport(command, "Full command");
+      await layout(page, 47);
+      await screenshot(page, theme, "tool-and-320percent-notice-command", 4838);
+    });
+
+    test("three requests in Show All scroll above the 320% notice", async ({ page }) => {
+      await open(page, theme, "tool", "spending=over&dockCount=3");
+      await dock(page).getByRole("button", { name: "Show All" }).click();
+      await expect(cards(page)).toHaveCount(3);
+      const notice = page.locator(".composer .assistant-spending-notice");
+      await expect(notice.getByRole("meter")).toHaveAttribute("aria-valuetext", "$79.93 of $25.00 spent");
+      await expectFullyInViewport(notice, "Spending notice");
+      await layout(page, 47);
+      const list = dock(page).getByRole("list", { name: "Pending Requests" });
+      expect(await list.evaluate(el => el.scrollHeight - el.clientHeight)).toBeGreaterThan(0);
+      for (const card of await cards(page).all()) {
+        await approve(card).scrollIntoViewIfNeeded();
+        await actionOrder(card, ["Open Session", "Deny", "Approve Once"]);
+      }
+      const firstCard = cards(page).first();
+      await firstCard.locator(".assistant-dock-actions").evaluate(element => element.scrollIntoView({ block: "end" }));
+      await expectFullyInViewport(firstCard.locator(".code-well pre"), "First request command in Show All");
+      await actionOrder(firstCard, ["Open Session", "Deny", "Approve Once"]);
+      await expectTextContrast(dock(page));
+      await expectTextContrast(notice);
+      await layout(page, 47);
+      await screenshot(page, theme, "three-show-all-and-320percent-notice", 4838);
+    });
+
+    test("a docked side panel leaves room for the notice and request text", async ({ page }) => {
+      await open(page, theme, "tool", "spending=over");
+      await page.getByRole("button", { name: /Side Panel/ }).click();
+      await expect(sidePanel(page)).toHaveAttribute("data-presentation", "docked");
+      const notice = page.locator(".composer .assistant-spending-notice");
+      const title = notice.getByText("Over Budget by $54.93", { exact: true });
+      const titleLines = await title.evaluate(element =>
+        element.getBoundingClientRect().height / parseFloat(getComputedStyle(element).lineHeight),
+      );
+      expect(titleLines).toBeLessThanOrEqual(2);
+      await expectNoHorizontalOverflow(notice);
+      await expectFullyInViewport(notice, "Spending notice beside a docked panel");
+      for (const action of await notice.getByRole("button").all()) {
+        await expectFullyInViewport(action, (await action.textContent())!);
+        const labelFits = await action.evaluate(button => {
+          const bounds = button.getBoundingClientRect();
+          const range = document.createRange();
+          range.selectNodeContents(button);
+          return [...range.getClientRects()].every(rect => rect.top >= bounds.top && rect.bottom <= bounds.bottom);
+        });
+        expect(labelFits, "All lines of the notice action fit in its button").toBe(true);
+      }
+      await layout(page, 47);
+      const card = cards(page).first();
+      await actionOrder(card, ["Open Session", "Deny", "Approve Once"]);
+      const body = card.locator(".assistant-dock-card-body");
+      // The narrow chat can show one line at a time. Check that every rendered text line
+      // fits somewhere within the body's scroll range.
+      const lines = await body.locator(".assistant-confirmation-summary, .assistant-dock-target .chip, .code-well pre")
+        .evaluateAll(elements => elements.map(element => {
+          const scroller = element.closest(".assistant-dock-card-body")!;
+          const top = scroller.getBoundingClientRect().top;
+          const range = document.createRange();
+          range.selectNodeContents(element);
+          return [...range.getClientRects()].map(rect => {
+            const first = Math.max(0, Math.ceil(rect.bottom - top - scroller.clientHeight));
+            const last = Math.min(scroller.scrollHeight - scroller.clientHeight, Math.floor(rect.top - top));
+            return first <= last;
+          });
+        }));
+      expect(lines).toHaveLength(3);
+      for (const readable of lines) {
+        expect(readable.length).toBeGreaterThan(0);
+        expect(readable).not.toContain(false);
+      }
+      const cue = card.locator(".assistant-dock-scroll-cue");
+      await expectFullyInViewport(cue, "Scroll cue beside a docked panel");
+      await body.hover();
+      await page.mouse.wheel(0, 400);
+      await expect(cue).toBeHidden();
+      await actionOrder(card, ["Open Session", "Deny", "Approve Once"]);
+    });
+  });
+
   for (const width of [1440, 390]) {
     const phone = width === 390;
     test.describe(`${theme}, ${width}px`, () => {
@@ -118,7 +243,7 @@ for (const theme of ["light", "dark"] as const) {
         expect(waiting!.y + waiting!.height).toBeLessThanOrEqual(spending!.y);
         expect(spending!.y + spending!.height).toBeLessThanOrEqual(input!.y);
         await expectTextContrast(notice);
-        await capture(page, theme, "dock-and-spending-notice");
+        await capture(page, theme, "dock-and-spending-notice", 4838);
       });
 
       test("one pending tool approval shows the command and ordered actions", async ({ page }) => {

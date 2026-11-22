@@ -7708,6 +7708,7 @@ body.shell-dock-dragging * {
   background: var(--bg-elev);
   padding: var(--space-2) var(--space-3);
 }
+.assistant-dock-scroll-cue { display: none; }
 .assistant-dock-resolve { margin-left: auto; }
 @media (max-width: 760px) {
   .assistant-dock-slot:not(:has([data-show-all])) { max-height: 74cqh; }
@@ -7748,6 +7749,41 @@ body.shell-dock-dragging * {
     }
     .detail-chat:has(.assistant-spending-notice) .assistant-dock-list:not([data-show-all]) .assistant-dock-actions {
       padding-block: var(--space-1);
+    }
+  }
+}
+@media (min-width: 1000px) and (max-height: 600px) {
+  /* Keep the title and actions in place while the request details scroll between them. */
+  .detail-chat:has(.assistant-spending-notice) .assistant-dock-slot:has(.assistant-dock-list) {
+    max-height: max(60cqh, calc(100cqh - var(--bar-h)));
+  }
+  .detail-chat:has(.assistant-spending-notice) .assistant-dock-list:not([data-show-all]) .assistant-dock-card-head {
+    padding-block: 0 var(--space-1);
+  }
+  .assistant-dock-actions { position: relative; }
+  .assistant-dock-card-body[data-clip-end] + .assistant-dock-actions > .assistant-dock-scroll-cue {
+    display: block;
+    position: absolute;
+    inset: 0 0 auto;
+    border-top: var(--space-1) solid var(--border-strong);
+    pointer-events: none;
+  }
+  @container chat-reading (max-height: 180px) {
+    /* A docked side panel can make the notice wrap. Share the card's row with the heading
+       when there is one request and no pager, leaving room between its title and actions. */
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock:not(:has(.assistant-dock-pager)) {
+      flex-direction: row;
+    }
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock:not(:has(.assistant-dock-pager)) > .assistant-dock-head {
+      align-self: start;
+      border-bottom: none;
+    }
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock:not(:has(.assistant-dock-pager)) > .assistant-dock-list {
+      flex: 1;
+      min-width: 0;
+    }
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock:not(:has(.assistant-dock-pager)) .assistant-dock-card-head {
+      padding-block: 0;
     }
   }
 }
@@ -13291,6 +13327,55 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .assistant-spending-total { font: var(--type-small); font-variant-numeric: tabular-nums; }
 .session-notice-slot .assistant-spending-notice .notice-actions { flex-wrap: wrap; }
 .session-notice-slot .assistant-spending-notice .notice-actions > .btn:first-child { flex: none; }
+@media (min-width: 1000px) and (max-height: 600px) {
+  /* Share the notice's rows so the dock and transcript have room on short desktops. */
+  .detail-chat:has(.assistant-dock) .assistant-spending-notice {
+    padding-block: var(--space-2);
+  }
+  .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-content {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) fit-content(70%);
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+  }
+  .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-body {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-row: 2;
+    grid-template-columns: minmax(0, 1fr) 25%;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+  }
+  .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-meta { grid-column: 1 / -1; }
+  .detail-chat:has(.assistant-dock) .assistant-spending-notice :is(.notice-actions, .assistant-spending-meter) { margin-top: 0; }
+  .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-actions > .btn {
+    height: auto;
+    min-height: var(--control-h-sm);
+  }
+  @container session-body (max-width: 540px) {
+    /* Give the actions the full row when a docked panel narrows the reading column. */
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-content {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-content:has(.assistant-spending-meter) {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 35%);
+    }
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-body { display: contents; }
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice :is(.notice-body > p, .notice-actions) {
+      grid-column: 1 / -1;
+    }
+    .detail-chat:has(.assistant-dock) .assistant-spending-meter {
+      grid-column: 2;
+      grid-row: 1;
+    }
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-actions { flex-wrap: nowrap; }
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-actions > .btn {
+      flex: 0 1 auto;
+      min-width: 0;
+      white-space: normal;
+    }
+  }
+}
 @media (pointer: coarse) {
   .assistant-spending-notice.compact .notice-content { row-gap: var(--space-2); }
 }
