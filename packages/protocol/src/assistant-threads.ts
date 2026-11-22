@@ -111,6 +111,14 @@ export interface RecordedAssistantDecisionResolution extends AssistantDecisionRe
   resolvedAt: number;
 }
 
+export type AssistantDecisionOutcome = RecordedAssistantDecisionResolution["outcome"];
+
+/** The grant catalog splits evidence review from sending evidence back, but their receipts share a category. */
+export function assistantDecisionActionLabel(category: AssistantDecisionCategory, outcome: AssistantDecisionOutcome): string {
+  return ASSISTANT_DECISION_CATEGORIES[category === "ui_evidence_approval" && outcome === "approved"
+    ? "ui_evidence_review" : category];
+}
+
 export interface AssistantDecisionHistoryEntry {
   occurrenceId: string;
   sessionId: string;
@@ -122,8 +130,10 @@ export interface AssistantDecisionHistoryEntry {
 }
 
 export interface AssistantDecisionHistoryPage {
-  /** Total for the whole filter, on the first page of a thread history. */
+  /** Total for the thread, on the first page. */
   total?: number;
+  /** Totals across all outcomes in the thread or campaign, on the first page. */
+  outcomeCounts?: Record<AssistantDecisionOutcome, number>;
   entries: AssistantDecisionHistoryEntry[];
   nextBefore?: string;
 }
@@ -147,6 +157,16 @@ export interface ChangeAssistantThreadHarnessRequest {
   providerAccountRef: string;
 }
 
+/** Current backing-session conditions. Error references point into the authorized transcript;
+ * provider messages and tool credentials are never copied into list or status payloads. */
+export interface AssistantThreadHealth {
+  usageLimit?: { resetsAt?: number };
+  turn?: { kind: "failed" | "rejected"; errorId: string; promptTurnId?: string };
+  automaticTurnsHeld?: string;
+  signInNeeded?: true;
+  toolsUnavailable?: true;
+}
+
 export interface AssistantThread {
   /** Absent on control planes that support denial only. */
   evidenceReview?: AssistantEvidenceReviewAvailability;
@@ -161,6 +181,9 @@ export interface AssistantThread {
   access: AssistantThreadAccess;
   /** The thread-scoped Assistant connection, once minted. Null until the runner proxy holds one. */
   connectionId: string | null;
+  /** Absent when the backing runner does not publish thread health. */
+  health?: AssistantThreadHealth;
+  runnerId?: string;
   /** Owner-only label of the currently bound account. */
   providerAccountLabel?: string;
   /** An older control plane does not offer account changes. */

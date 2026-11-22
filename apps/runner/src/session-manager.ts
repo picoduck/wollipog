@@ -89,6 +89,7 @@ import type {
   RunnerCapacityConfiguration,
   RunnerCapacityState,
   RunnerAutomaticAccountSwitchConfiguration,
+  AssistantThreadHealth,
   ProviderAccountDefinition,
   SubscriptionUsageSnapshot,
   RunnerToControlPlane,
@@ -935,6 +936,8 @@ interface ActiveSession {
   locationSwitchLookupRetry?: ReturnType<typeof setTimeout>;
   /** Structured exhausted-window observation from this exact provider turn. */
   usageWindowRejection?: UsageWindowRejection;
+  assistantUsageHold?: { limit: UsageWindowRejection; timer: ReturnType<typeof setTimeout> };
+  assistantTurnErrorId?: string;
   /** Exact canonical roots rendered into this live process's Seatbelt profile at launch. */
   seatbeltWritableRoots?: readonly string[];
   /** The session's other managed worktrees this live process's bwrap boundary binds (#3316). A
@@ -1775,6 +1778,8 @@ export class SessionManager {
    * preceding provable rejection, so automatic turns wait in the FIFO instead of reaching the
    * provider. Session-scoped so a provider exit and its automatic recovery keep it. A person's
    * prompt dispatches ahead of the held turns and clears it; Restart and Stop discard it. */
+  private readonly assistantRejectionErrorIds = new Map<string, string>();
+  private readonly assistantToolsUnavailable = new Set<string>();
   private readonly providerRejectionHolds = new Map<string, string>();
   /** Provider error of the immediately preceding submission the provider provably rejected without
    * starting a turn (#3100). Any other outcome, an uncertain failure included, clears it. Scoped like
@@ -4400,6 +4405,7 @@ export class SessionManager {
     const active = this.active.get(sessionId);
     if (!active || (expected && active !== expected)) return false;
     this.closeTextDeltas(sessionId);
+    clearTimeout(active.assistantUsageHold?.timer);
     if (releaseLease) this.releaseActiveWorktreeLease(active);
     const deleted = this.active.delete(sessionId);
     if (deleted) {
@@ -7003,10 +7009,40 @@ export class SessionManager {
         ? { backgroundFollowUp: this.backgroundFollowUp(meta) } : {}),
       ...(runnerSupportsProtocol(protocolVersion, "providerHomeWait")
         ? { providerHomeWait: this.providerHomeWaits.get(meta.sessionId)?.view ?? null } : {}),
+      ...(meta.assistant && runnerSupportsProtocol(protocolVersion, "assistantThreadHealth")
+        ? { assistantThreadHealth: this.assistantThreadHealth(meta) } : {}),
       ...(runnerSupportsProtocol(protocolVersion, "worktreeSwitchStatus")
         ? { worktreeSwitch: this.publishedWorktreeSwitches.get(meta.sessionId) ?? null } : {}),
       ...(runnerSupportsProtocol(protocolVersion, "campaignRetirementHold") ? this.campaignRetirementHold(meta) : {}),
     };
+  }
+
+  private assistantThreadHealth(meta: SessionMeta): AssistantThreadHealth {
+    const sessionId = meta.sessionId;
+    const automaticTurnsHeld = this.assistantRejectionErrorIds.get(sessionId);
+    const usageLimit = this.active.get(sessionId)?.assistantUsageHold?.limit;
+    return {
+      ...(meta.assistantThreadTurn ? { turn: meta.assistantThreadTurn } : {}),
+      ...(automaticTurnsHeld ? { automaticTurnsHeld } : {}),
+      ...(usageLimit ? { usageLimit } : {}),
+      ...(meta.providerAuthBlock || pendingRequests(meta.pendingApproval).some((request) => request.kind === "authentication")
+        ? { signInNeeded: true } : {}),
+      ...(this.assistantToolsUnavailable.has(sessionId) ? { toolsUnavailable: true } : {}),
+    };
+  }
+
+  private publishAssistantThreadHealth(sessionId: string): void {
+    const meta = this.store.readMeta(sessionId);
+    if (meta?.assistant && runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "assistantThreadHealth")) {
+      this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
+    }
+  }
+
+  setAssistantToolsUnavailable(sessionId: string, unavailable: boolean): void {
+    if (this.assistantToolsUnavailable.has(sessionId) === unavailable) return;
+    if (unavailable) this.assistantToolsUnavailable.add(sessionId);
+    else this.assistantToolsUnavailable.delete(sessionId);
+    this.publishAssistantThreadHealth(sessionId);
   }
 
   /** The worktree relaunch a session is waiting for or running (#3810). A rebind that only drops a
@@ -13465,7 +13501,7 @@ export class SessionManager {
           editRevision: this.queuedPromptEditRevision(q),
         };
       }),
-      ...(entry && (this.queueHeld(entry) || this.providerRejectionHolds.has(sessionId)) ? { held: true } : {}),
+      ...(entry && (this.queueHeld(entry) || entry.assistantUsageHold || this.providerRejectionHolds.has(sessionId)) ? { held: true } : {}),
       ...(entry?.providerInitiatedTurnActive && entry.providerInitiatedTurnId
         ? { activeTurnId: entry.providerInitiatedTurnId }
         : entry?.running && entry.activeTurnId ? { activeTurnId: entry.activeTurnId } : {}),
@@ -14581,6 +14617,16 @@ export class SessionManager {
         this.providerRejectionBlocker(sessionId, this.providerRejectionHolds.get(sessionId)!));
       return;
     }
+    const meta = this.store.readMeta(sessionId);
+    if (meta?.assistant) {
+      const limit = this.accountUsageLimit(meta, Date.now());
+      if (limit && this.providerAccountSwitchCanProceed(sessionId, entry) &&
+          this.scheduleAutomaticProviderAccountSwitch(sessionId, entry, limit)) {
+        await this.rebindSelectedProviderAccount(sessionId, entry);
+        return;
+      }
+      if (this.holdAssistantUsage(sessionId, entry, limit)) return;
+    }
     if (!this.acquireActiveTurn(sessionId)) return;
     if (!this.store.acquireLock(sessionId, this.lockOwner)) {
       if (this.active.get(sessionId) === entry) this.settleActiveWorkPermit(sessionId, entry);
@@ -14616,6 +14662,12 @@ export class SessionManager {
         }
         // A person's prompt is the way out of a rejection hold; the turns it held follow it.
         this.providerRejectionHolds.delete(sessionId);
+        this.assistantRejectionErrorIds.delete(sessionId);
+        entry.assistantTurnErrorId = undefined;
+        if (meta?.assistant && this.store.readMeta(sessionId)?.assistantThreadTurn) {
+          this.store.patchMeta(sessionId, { assistantThreadTurn: undefined });
+          this.publishAssistantThreadHealth(sessionId);
+        }
         entry.activeTurnId = next.id;
         this.emitQueue(sessionId); // it just left the queue and is about to run
         // This is the exact per-turn boundary. Reset before the first awaited configuration/image
@@ -14700,7 +14752,7 @@ export class SessionManager {
         }
         if (entry.pendingProviderAccountSwitch || this.requestRetiredWorktreeRebind(sessionId, entry) ||
             this.projectMemoryChanged(sessionId, entry)) break;
-        if (entry.authenticationBlocked || entry.historyQuarantined) break;
+        if (entry.authenticationBlocked || entry.historyQuarantined || entry.assistantUsageHold) break;
         if (this.steerFences(entry).size) {
           await this.waitForSteeringFences(entry);
           if (this.active.get(sessionId) !== entry) break;
@@ -14750,7 +14802,7 @@ export class SessionManager {
         await this.rebindProjectMemory(sessionId, entry);
       } else if (this.active.get(sessionId) === entry && entry.queue.length &&
           !entry.authenticationBlocked && !entry.historyQuarantined && !entry.historyIntegrityFailure &&
-          !entry.governanceTripped && !this.queueHeld(entry) && this.promotePromptPastRejectionHold(sessionId, entry)) {
+          !entry.governanceTripped && !entry.assistantUsageHold && !this.queueHeld(entry) && this.promotePromptPastRejectionHold(sessionId, entry)) {
         setImmediate(() => this.scheduleDrain(sessionId));
       }
     }
@@ -15048,7 +15100,7 @@ export class SessionManager {
         meta.status === "running" || meta.status === "starting" || meta.status === "queued" ||
         this.roleConversionPending(sessionId) || meta.pendingProviderAccountId || meta.pendingLocationSwitch ||
         meta.providerHistoryBlock || (this.hasPendingApproval(sessionId) && !isProviderAuthenticationBlock(meta.pendingApproval)) ||
-        (entry && (entry.queue.length > 0 || !this.providerAccountSwitchCanProceed(sessionId, entry)))) {
+        (entry && ((entry.queue.length > 0 && !entry.assistantUsageHold) || !this.providerAccountSwitchCanProceed(sessionId, entry)))) {
       return refuse("The thread isn't ready to change accounts. Wait for its turn or pending work to finish and try again.");
     }
     if (entry) this.captureAgentSessionId(sessionId, entry.client);
@@ -15599,17 +15651,56 @@ export class SessionManager {
     }
   }
 
+  private accountUsageLimit(meta: SessionMeta | null, now: number): UsageWindowRejection | null {
+    const usage = meta?.providerAccountId
+      ? this.subscriptionUsageInventory().find((snapshot) => snapshot.providerAccountId === meta.providerAccountId)
+      : undefined;
+    return usageWindowRejection(usage, now);
+  }
+
+  /** An exhausted Assistant account parks the FIFO before provider submission. A timer wakes
+   * that exact provider generation at reset (or rechecks allowance when no reset is known). */
+  private holdAssistantUsage(
+    sessionId: string, entry: ActiveSession, limit: UsageWindowRejection | null, recheck = false,
+  ): boolean {
+    const held = entry.assistantUsageHold;
+    if (!limit) {
+      if (held) {
+        clearTimeout(held.timer);
+        entry.assistantUsageHold = undefined;
+        this.publishAssistantThreadHealth(sessionId);
+        this.emitQueue(sessionId);
+      }
+      return false;
+    }
+    const changed = !held || held.limit.resetsAt !== limit.resetsAt;
+    if (changed || recheck) {
+      clearTimeout(held?.timer);
+      const delay = Math.min(30_000, Math.max(1, (limit.resetsAt ?? Infinity) - Date.now()));
+      const timer = setTimeout(() => {
+        if (this.active.get(sessionId) !== entry || entry.assistantUsageHold?.timer !== timer) return;
+        this.holdAssistantUsage(sessionId, entry, this.accountUsageLimit(this.store.readMeta(sessionId), Date.now()), true);
+        this.scheduleDrain(sessionId);
+      }, delay);
+      timer.unref();
+      entry.assistantUsageHold = { limit, timer };
+      if (changed) {
+        this.publishAssistantThreadHealth(sessionId);
+        this.emitQueue(sessionId);
+      }
+    }
+    return true;
+  }
+
   /** Decide and persist an automatic handoff only after the rejected provider promise settled.
    * The existing rebind lane performs the actual credential change after drain releases the turn. */
-  private scheduleAutomaticProviderAccountSwitch(sessionId: string, entry: ActiveSession): boolean {
+  private scheduleAutomaticProviderAccountSwitch(
+    sessionId: string,
+    entry: ActiveSession,
+    rejection: UsageWindowRejection | null,
+  ): boolean {
     const meta = this.store.readMeta(sessionId);
     const now = Date.now();
-    const currentUsage = meta?.providerAccountId
-      ? this.subscriptionUsageInventory().find((snapshot) =>
-        snapshot.providerAccountId === meta.providerAccountId)
-      : undefined;
-    const rejection = entry.usageWindowRejection ?? usageWindowRejection(currentUsage, now);
-    entry.usageWindowRejection = undefined;
     if (!this.automaticAccountSwitching || !this.automaticAccountSwitchAuthorityReady ||
         !rejection || entry.governanceTripped ||
         entry.authenticationBlocked || entry.pendingProviderAccountSwitch) return false;
@@ -17706,10 +17797,17 @@ export class SessionManager {
         if (!automaticTurn(queued) && this.active.get(sessionId) === entry) this.rearmLaunchHeldBackgroundContinuation(sessionId);
       }
       if (stop === "refusal" && !interrupted && !entry.governanceTripped) {
-        this.scheduleAutomaticProviderAccountSwitch(sessionId, entry);
-      } else {
-        entry.usageWindowRejection = undefined;
+        const current = this.store.readMeta(sessionId);
+        const limit = entry.usageWindowRejection ?? this.accountUsageLimit(current, Date.now());
+        const switching = this.scheduleAutomaticProviderAccountSwitch(sessionId, entry, limit);
+        if (current?.assistant && !switching && !this.holdAssistantUsage(sessionId, entry, limit)) {
+          const notDelivered = !inputMayHaveBeenDelivered && entry.client.lastPromptUndelivered?.() === true;
+          this.recordAssistantTurnFailure(sessionId, entry, notDelivered && !entry.providerCapacityFailure
+            ? "rejected" : "failed", entry.client.lastTurnError?.() ?? "The provider refused the turn.",
+          userEvent.payload.kind === "user_message" ? queued.id : undefined);
+        }
       }
+      entry.usageWindowRejection = undefined;
       if (interrupted) {
         this.emitEvent(sessionId, { kind: "turn_interrupted" });
         this.emitStatus(sessionId, "idle");
@@ -17777,6 +17875,10 @@ export class SessionManager {
         return;
       }
       this.emitEvent(sessionId, { kind: "error", message: `prompt failed: ${errText(err)}` }, durable);
+      if (this.store.readMeta(sessionId)?.assistant) {
+        this.recordAssistantTurnFailure(sessionId, entry, "failed", errText(err),
+          userEvent.payload.kind === "user_message" ? queued.id : undefined);
+      }
       if (entry.historyIntegrityFailure) return;
       if (continuationHoldBlocker) this.emitStatus(sessionId, "input_required", continuationHoldBlocker);
       else this.emitStatus(sessionId, "failed", errText(err));
@@ -21110,8 +21212,15 @@ export class SessionManager {
     this.providerRejectionHolds.set(sessionId, rejection);
     this.log(JSON.stringify({ event: "provider_rejection_hold", sessionId, queued: entry.queue.length }));
     const blocker = this.providerRejectionBlocker(sessionId, rejection);
+    const previousErrorId = entry.assistantTurnErrorId;
     // An error row stays visible in the transcript, where an Agent Log line would be hidden.
-    this.emitEvent(sessionId, { kind: "error", message: blocker });
+    const error = this.emitEvent(sessionId, { kind: "error", message: blocker });
+    if (error?.payload.kind === "error" && error.payload.assistantThreadErrorId) {
+      this.assistantRejectionErrorIds.set(sessionId, error.payload.assistantThreadErrorId);
+      // The hold is distinct from the individual provider rejection.
+      entry.assistantTurnErrorId = previousErrorId;
+      this.publishAssistantThreadHealth(sessionId);
+    }
     this.emitQueue(sessionId);
     return blocker;
   }
@@ -21505,6 +21614,7 @@ export class SessionManager {
     this.recoveryLaunching.delete(sessionId);
     this.recoveryHolds.delete(sessionId);
     this.providerRejectionHolds.delete(sessionId);
+    this.assistantRejectionErrorIds.delete(sessionId);
     this.lastProviderRejections.delete(sessionId);
   }
 
@@ -22032,6 +22142,19 @@ export class SessionManager {
     // Publish the matched turn at its actual start, without waiting for provider acceptance;
     // status-only messages cannot refresh the display-only follow-up facts at the control plane.
     this.publishBackgroundFollowUp(sessionId);
+    this.publishAssistantThreadHealth(sessionId);
+  }
+
+  private recordAssistantTurnFailure(
+    sessionId: string, entry: ActiveSession, kind: "failed" | "rejected", message: string, promptTurnId?: string,
+  ): void {
+    if (this.active.get(sessionId) !== entry || entry.historyIntegrityFailure ||
+        !runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "assistantThreadHealth")) return;
+    if (!entry.assistantTurnErrorId) this.emitEvent(sessionId, { kind: "error", message });
+    const errorId = entry.assistantTurnErrorId;
+    if (errorId) this.store.patchMeta(sessionId, {
+      assistantThreadTurn: { kind, errorId, ...(promptTurnId ? { promptTurnId } : {}) },
+    });
   }
 
   /** Contain authoritative history failures to one session. History itself remains strict: this
@@ -22152,8 +22275,14 @@ export class SessionManager {
       // Provider request ids are not occurrence identities: some providers may reuse one after a
       // restart or a later turn. Stamp the durable event before any snapshot or relay observes it
       // so delegated Parent Control can compare-and-set the exact pending occurrence.
+      const assistantErrorId = payload.kind === "error" && !payload.nonFatal && !payload.source &&
+        entry?.running && this.store.readMeta(sessionId)?.assistant &&
+        runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "assistantThreadHealth")
+        ? randomUUID() : undefined;
       const identifiedPayload: SessionEventPayload =
-        payload.kind === "permission_request" || payload.kind === "question_request"
+        payload.kind === "error" && assistantErrorId
+          ? { ...payload, assistantThreadErrorId: assistantErrorId }
+          : payload.kind === "permission_request" || payload.kind === "question_request"
           ? { ...payload, occurrenceId: preserveAsyncQuestionOccurrence &&
               payload.kind === "question_request" && payload.async && payload.occurrenceId
               ? payload.occurrenceId : `request_${randomUUID().replaceAll("-", "")}` }
@@ -22163,6 +22292,7 @@ export class SessionManager {
       // append: a complete-history failure is latched and contained to this session here.
       const stored = this.store.appendEvent(sessionId, identifiedPayload);
       if (!stored) throw new Error("session metadata disappeared before history append");
+      if (assistantErrorId && entry) entry.assistantTurnErrorId = assistantErrorId;
       try {
         // Relay what was stored: the store may have shortened an oversized record (#4288).
         this.accrueMeta(sessionId, stored.payload);
