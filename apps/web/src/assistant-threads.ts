@@ -11,6 +11,7 @@
  * are ones the control plane returned.
  */
 import type {
+  AssistantDecisionDefault,
   AssistantDecisionDelegation,
   AssistantDecisionHistoryPage,
   AssistantThread,
@@ -20,6 +21,7 @@ import type {
   AssistantThreadHarness,
   AssistantThreadHarnessOption,
   AssistantThreadLaunchDefaults,
+  AssistantThreadLaunchDefaultsPatch,
   AssistantThreadListResponse,
   AssistantThreadLimits,
   AssistantThreadResponse,
@@ -62,9 +64,17 @@ export function assistantThreadRoutes(req: JsonRequest) {
     assistantThreadDefaults: () => req<AssistantThreadDefaults>(`${ASSISTANT_THREADS_PATH}/defaults`),
     setAssistantThreadLaunchDefaults: (defaults: AssistantThreadLaunchDefaults) =>
       req<AssistantThreadDefaults>(`${ASSISTANT_THREADS_PATH}/defaults/launch`, { method: "PUT", body: JSON.stringify(defaults) }),
+    patchAssistantThreadLaunchDefaults: (defaults: AssistantThreadLaunchDefaultsPatch) =>
+      req<AssistantThreadDefaults>(`${ASSISTANT_THREADS_PATH}/defaults/launch`, { method: "PATCH", body: JSON.stringify(defaults) }),
+    setAssistantThreadDecisionDefault: (grant: AssistantDecisionDefault | null) =>
+      req<{ grant: AssistantDecisionDefault | null }>(`${ASSISTANT_THREADS_PATH}/defaults/delegation`, {
+        method: "PUT", body: JSON.stringify({ grant }),
+      }),
     assistantThreadLimitDefaults: () => req<AssistantThreadLimits>(`${ASSISTANT_THREADS_PATH}/defaults/limits`),
     setAssistantThreadLimitDefaults: (limits: AssistantThreadLimits) =>
       req<AssistantThreadLimits>(`${ASSISTANT_THREADS_PATH}/defaults/limits`, { method: "PUT", body: JSON.stringify(limits) }),
+    patchAssistantThreadLimitDefaults: (limits: Partial<AssistantThreadLimits>) =>
+      req<AssistantThreadLimits>(`${ASSISTANT_THREADS_PATH}/defaults/limits`, { method: "PATCH", body: JSON.stringify(limits) }),
     setAssistantThreadLimits: (threadId: string, limits: AssistantThreadLimits) =>
       req<AssistantThreadResponse>(`${threadPath(threadId)}/limits`, { method: "PUT", body: JSON.stringify(limits) }),
     setAssistantThreadDelegation: (threadId: string, delegation: AssistantDecisionDelegation) =>

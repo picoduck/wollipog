@@ -646,10 +646,10 @@ export type SessionDetailProps = {
   header?: ReactNode;
   /** The Assistant thread's panel, rendered in the same row as the conversation. */
   assistantPanel?: (onOverlayChange: (overlay: boolean) => void) => ReactNode;
-  /** Heads the expanded chat column, under the bar and beside the side panel. */
-  columnLead?: ReactNode;
   /** A host-owned request dock between the reader and the composer notice slot. */
   assistantRequestDock?: (focusComposer: () => void) => ReactNode;
+  /** Usage warnings from the Assistant thread that owns this conversation. */
+  assistantSpendingNotices?: readonly SessionNoticeEntry[];
   /** Transport-owned policy seam. Native passthrough commands default to the existing send path. */
   providerCommandAttachmentPolicy?: ProviderComposerCommand["attachmentPolicy"];
   /** Registers preview-only paging ownership and live-follow actions with the Inbox key layer. */
@@ -1173,8 +1173,8 @@ function SessionDetailLoaded({
   topbarControls,
   header,
   assistantPanel,
-  columnLead,
   assistantRequestDock,
+  assistantSpendingNotices = [],
   providerCommandAttachmentPolicy = "send",
   onPreviewNavigationReady,
   onPreviewForkReady,
@@ -5046,7 +5046,8 @@ function SessionDetailLoaded({
   const runnerOfflineReason = runnerOnline ? null : `${runnerDisp.name || "This machine"} is offline.`;
   const accountSwitchApplicable = sessionAccountSwitchApplicable(session);
   const accountSwitchSupported = runnerSupportsProtocol(runner?.protocolVersion, "sessionProviderAccountSwitch");
-  const sessionNotices: SessionNoticeEntry[] = [];
+  const sessionNotices: SessionNoticeEntry[] = [...assistantSpendingNotices];
+  const spendingBelowDock = assistantSpendingNotices.length > 0;
   if (worktreeRecovery && worktreeMissingOrder) {
     sessionNotices.push({
       ...worktreeMissingOrder,
@@ -7374,10 +7375,6 @@ function SessionDetailLoaded({
               onFocusLost={() => scrollRef.current?.focus({ preventScroll: true })}
             />
           )}
-          {/* The conversation is inert behind an overlay, including the column lead. */}
-          {mode === "expanded" && columnLead !== undefined && (
-            <div className="detail-column-lead">{columnLead}</div>
-          )}
           {/* Campaign notices, not session notices (§13.2; #2036): they describe the campaign, not
               whether this session can take its next turn, so they head the chat column directly
               under the session bar, in this order, on its edges (#2157), rather than in the notice
@@ -7694,12 +7691,12 @@ function SessionDetailLoaded({
             <span className="sr-only" role="status" data-transcript-recovery-status>{recoveryAnnouncement}</span>
           </div>
           {assistantRequestDock?.(focusComposerOrTitle)}
-          {/* While a request is pending it takes the notice slot ahead of every notice, which wait
-              behind the "+N More" in its card's head line (§13.2). */}
+          {/* Requests usually lead the slot. A thread with spending notices keeps the request
+              dock visible above the composer's notice slot. */}
           {mode === "expanded" && requestDockLead && (
             <SessionNoticeSlot
               sessionId={session.id}
-              entries={sessionNotices}
+              entries={spendingBelowDock ? [] : sessionNotices}
               lead={requestDockLead}
               onFocusLost={focusComposerOrTitle}
             />
@@ -7721,7 +7718,7 @@ function SessionDetailLoaded({
             >
             {/* The one notice slot (§13.2): the most severe session condition, the rest behind
                 "+N More". Session notices are entries of it, never banners of their own. */}
-            {!requestDockLead && (
+            {(!requestDockLead || spendingBelowDock) && (
               <SessionNoticeSlot sessionId={session.id} entries={sessionNotices} onFocusLost={focusComposerOrTitle} />
             )}
             {switchAccountOpen && (

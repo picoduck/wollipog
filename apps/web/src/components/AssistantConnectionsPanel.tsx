@@ -1,6 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 import { useApi } from "../api-context.js";
-import { useInstanceScope } from "../instance-scope.js";
 import type { AssistantActivity, AssistantConnection, AssistantConnectionsView, AssistantGrant } from "../assistant-connections.js";
 import { Modal } from "./Modal.js";
 import { useFeedback } from "./FeedbackProvider.js";
@@ -9,24 +8,11 @@ import { Notice } from "./Notice.js";
 import { ChoiceRows, Select } from "./ui/ChoiceControls.js";
 import { LinkRow, SettingsGroup, StaticRow, ValueRow } from "./ui/SettingsRows.js";
 
-export function AssistantConnectionsPanel() {
-  return <AssistantConnectionsLauncher key={useInstanceScope()} />;
-}
-function AssistantConnectionsLauncher() {
-  const [open, setOpen] = useState(false);
-  return <>
-    <SettingsGroup title="Assistant Connections" scope="This Server">
-      <LinkRow title="Manage Assistant Connections" description="Organization owners can grant, inspect or revoke standing access for external assistants." hasPopup="dialog" onClick={() => setOpen(true)} />
-    </SettingsGroup>
-    {open && <AssistantConnectionsDialog onClose={() => setOpen(false)} />}
-  </>;
-}
-
 /** Unmounting (close or instance switch) discards credentials. Never persist them in browser storage. */
-export function AssistantConnectionsDialog({onClose}: {onClose(): void}) {
+export function AssistantConnectionsDialog({onClose, create = false}: {onClose(): void; create?: boolean}) {
   const api = useApi();
   const [view, setView] = useState<AssistantConnectionsView | null>(null);
-  const [selected, setSelected] = useState<string | "new" | null>(null);
+  const [selected, setSelected] = useState<string | "new" | null>(create ? "new" : null);
   const [secret, setSecret] = useState<string | null>(null);
   const [reveal, setReveal] = useState(false);
   const [activity, setActivity] = useState<AssistantActivity[] | null>(null);

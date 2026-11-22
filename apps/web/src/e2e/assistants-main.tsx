@@ -6,9 +6,11 @@ import {
   type AssistantDecisionCategory,
   removePendingRequest,
   type AgentHarnessDefaultsView,
+  type AssistantDecisionDefault,
   type AssistantDecisionDelegation,
   type AssistantThreadLimits,
   type AssistantThreadLaunchDefaults,
+  type AssistantThreadLaunchDefaultsPatch,
   type ControlPlaneToUi,
   type PendingApproval,
   type ProjectView,
@@ -55,6 +57,7 @@ const streamingReply = params.has("streaming-reply");
 const scenario = params.get("threads") ?? "some";
 const attentionCount = Number(params.get("attention") ?? 0);
 const limitsScenario = params.get("limits");
+const spendingScenario = params.get("spending");
 const overBudgetBar = params.get("thread-bar") === "over-budget";
 const panelScenario = params.get("thread-panel");
 const campaignScenario = params.has("campaign");
@@ -423,15 +426,16 @@ let threads: AssistantThread[] = scenario === "long" ? [
   thread("thr_retired", "sess-cleanup", { title: "Retire the Old Runner", status: "archived", archivedAt: NOW - 2 * 24 * 60 * minute,
     lastActivityAt: NOW - 3 * 24 * 60 * minute }),
 ] : [];
-if (delegationScenario === "many") {
+if (delegationScenario === "many" || delegationScenario === "active-expired") {
   const grant: Omit<NonNullable<AssistantDecisionDelegation["grant"]>, "expiresAt"> = {
     categories: ["owner_question", "pr_merge"], campaigns: "all", projects: "all",
   };
   const future = NOW + 11 * 24 * 60 * minute;
-  threads[0]!.decisionDelegation = { revision: 1, grant: { ...grant, expiresAt: future } };
-  for (let index = 1; index <= 9; index += 1) {
+  threads[0]!.decisionDelegation = { revision: 1, grant: { ...grant, ...(delegationScenario === "active-expired" ? { selectionMode: "all" as const } : {}), expiresAt: future } };
+  const count = delegationScenario === "many" ? 9 : 1;
+  for (let index = 1; index <= count; index += 1) {
     threads.push(thread(`thr_grant_${index}`, "sess-release", {
-      title: index === 1 ? longTitle(index + 1) : `Delegated Release Review ${index}`,
+      title: index === 1 ? count > 1 ? longTitle(index + 1) : "Release Follow-Up" : `Delegated Release Review ${index}`,
       decisionDelegation: { revision: 1, grant: { ...grant, expiresAt: index % 2 ? NOW - minute : null } },
     }));
   }
@@ -503,6 +507,27 @@ if (limitsScenario) {
   }
 }
 
+if (spendingScenario) {
+  const current = threads.find((candidate) => candidate.id === "thr_triage")!;
+  delete current.launchLimitRefusal;
+  const isLaunchLimit = spendingScenario === "launch-limit";
+  if (isLaunchLimit) current.launchedSessionIds = current.launchedSessionIds.slice(-10);
+  current.title = (longTitle(1) + " and report what remains").slice(0, 120);
+  current.usage = {
+    costUsd: { used: spendingScenario === "over" ? 79.93 : spendingScenario === "used-up" ? 25 : isLaunchLimit ? 8.13 : 21.40, limit: 25 },
+    launchedSessions: { used: current.launchedSessionIds.length, limit: isLaunchLimit ? 10 : 60 },
+  };
+  for (const [index, id] of current.launchedSessionIds.entries()) {
+    sessions.get(id)!.title = "Session " + (index + 1) + " · " + longTitle(index + 1);
+  }
+  const second = threads.find((candidate) => candidate.id === "thr_release");
+  if (second) {
+    second.usage = { costUsd: { used: 21.40, limit: 25 }, launchedSessions: { used: 1, limit: 10 } };
+    second.launchedSessionIds = ["sess-unrelated-active"];
+    sessions.set("sess-unrelated-active", session("sess-unrelated-active", "Unrelated Running Session", { status: "running" }));
+  }
+}
+
 if (params.has("recorded-thread-model")) {
   for (const item of threads) {
     const backing = sessions.get(item.sessionId);
@@ -516,7 +541,7 @@ if (params.has("recorded-thread-model")) {
 if (panelScenario) {
   const current = threads[0]!;
   current.title = (current.title + " now and report what remains").slice(0, 120);
-  current.usage = { costUsd: { used: 8.13, limit: 25 }, launchedSessions: { used: 42, limit: 60 } };
+  current.usage ??= { costUsd: { used: 8.13, limit: 25 }, launchedSessions: { used: 42, limit: 60 } };
   current.earlierConversations = [{ sessionId: "sess-cleanup", harness: "codex", nextHarness: "claude-code", switchedAt: NOW - minute }];
   current.decisionDelegation = { revision: 1, grant: panelScenario === "delegated" ? {
     categories: Object.keys(ASSISTANT_DECISION_CATEGORIES) as AssistantDecisionCategory[],
@@ -535,7 +560,10 @@ const defaults: AssistantThreadDefaults = {
     { id: "codex", label: "Codex", available: true },
   ],
 };
-if (limitsScenario && limitsScenario !== "old") defaults.launchDefaults = { harness: "claude-code", providerAccount: null };
+if (limitsScenario && limitsScenario !== "old") {
+  defaults.launchDefaults = { harness: "claude-code", providerAccount: null };
+  if (limitsScenario !== "older-defaults") defaults.decisionDefault = null;
+}
 if (accountScenario || defaults.launchDefaults) {
   for (const harness of defaults.harnesses) {
     harness.accountSelection = { ...fixtureAccountChoices(harness.id), runnerId: "runner-1", workspaceId: "workspace-1" };
@@ -741,14 +769,26 @@ const client = {
     defaults.launchDefaults = next;
     return structuredClone(defaults);
   },
+  patchAssistantThreadLaunchDefaults: async (update: AssistantThreadLaunchDefaultsPatch) => {
+    const current = defaults.launchDefaults!;
+    defaults.launchDefaults = "harness" in update
+      ? { harness: update.harness, providerAccount: current.harness === update.harness ? current.providerAccount : null }
+      : { ...current, providerAccount: update.providerAccount };
+    defaults.harness = defaults.launchDefaults.harness;
+    return structuredClone(defaults);
+  },
+  setAssistantThreadDecisionDefault: async (grant: AssistantDecisionDefault | null) => {
+    defaults.decisionDefault = grant;
+    return { grant: structuredClone(grant) };
+  },
   assistantConnections: async () => ({
     installation: { id: "fixture-installation", name: "Home Studio", canRename: true },
-    connections: Array.from({ length: limitsScenario === "stress" ? 9 : 1 }, (_, index) => ({
+    connections: Array.from({ length: limitsScenario === "stress" ? 9 : 3 }, (_, index) => ({
       id: `asst_${index}`,
-      name: limitsScenario === "stress" ? longTitle(index + 1) : "Release Assistant",
+      name: limitsScenario === "stress" ? longTitle(index + 1) : ["Release Assistant", "Issue Triage", "Documentation"][index]!,
       ownerUserId: "usr_owner", organizationId: "org_fixture",
-      grant: { operations: "all", projects: "all", destructiveConfirmation: "confirm" },
-      revision: 1, revoked: false,
+      grant: { operations: index === 1 ? ["projects_list"] : "all", projects: "all", destructiveConfirmation: "confirm" },
+      revision: 1, revoked: index === 2, lastUsedAt: index === 0 ? NOW : null,
     })),
     operations: [], projects: [],
   }),
@@ -756,6 +796,10 @@ const client = {
     ? Promise.resolve(structuredClone(limitDefaults)) : unavailable()),
   setAssistantThreadLimitDefaults: async (limits: AssistantThreadLimits) => {
     limitDefaults = limits;
+    return structuredClone(limitDefaults);
+  },
+  patchAssistantThreadLimitDefaults: async (update: Partial<AssistantThreadLimits>) => {
+    limitDefaults = { ...limitDefaults, ...update };
     return structuredClone(limitDefaults);
   },
   setAssistantThreadLimits: async (threadId: string, limits: AssistantThreadLimits) => {
@@ -825,6 +869,12 @@ const client = {
     };
     if (limitsScenario && limitsScenario !== "old") {
       created.limitsEditable = true;
+      if (defaults.decisionDefault) {
+        const { expiresAfterMs, ...scope } = defaults.decisionDefault;
+        created.decisionDelegation = { revision: 1, grant: {
+          ...scope, expiresAt: expiresAfterMs === null ? null : created.createdAt + expiresAfterMs,
+        } };
+      }
       if (limitsScenario !== "legacy-pause") created.launchPaused = false;
       created.usage = {
         costUsd: { used: 0, limit: limitDefaults.costUsd },
@@ -937,6 +987,16 @@ const client = {
     }
     return { session: detail };
   },
+  prompt: async (id: string, message: string) => {
+    document.body.dataset.assistantPrompt = id + ":" + message;
+    return structuredClone(sessions.get(id)!);
+  },
+  stop: async (id: string) => {
+    const next = { ...sessions.get(id)!, status: "stopped" as const, updatedAt: Date.now() };
+    document.body.dataset.stoppedSessions = [document.body.dataset.stoppedSessions, id].filter(Boolean).join(",");
+    upsert(next);
+    return structuredClone(next);
+  },
   approve: async (id: string, body: { requestId: string; optionId: string | null }) => {
     if (params.has("dockFailure") && !document.body.dataset.dockAttempted) {
       document.body.dataset.dockAttempted = "true";
@@ -974,6 +1034,11 @@ function backingActivity() {
 }
 
 Object.assign(window, {
+  assistantsSpend: (used: number) => {
+    const current = found("thr_triage");
+    current.usage = { ...current.usage!, costUsd: { ...current.usage!.costUsd, used } };
+    publish(current);
+  },
   assistantsReplyChunk: (text: string, settle: boolean) => {
     if (!streamingReply) return;
     const id = "sess-triage";

@@ -39,10 +39,11 @@ function legacyLaunchLimit(threadId: string): number | null {
   return DEFAULT_ASSISTANT_THREAD_LIMITS.launchedSessions;
 }
 
-export function AssistantThreadLimitsDialog({ thread, model, effort, onClose, onChanged }: {
+export function AssistantThreadLimitsDialog({ thread, model, effort, startAtSpending, onClose, onChanged }: {
   thread: AssistantThread;
   model?: string;
   effort?: string;
+  startAtSpending?: boolean;
   onClose: () => void;
   onChanged: (thread: AssistantThread) => void;
 }) {
@@ -65,6 +66,7 @@ export function AssistantThreadLimitsDialog({ thread, model, effort, onClose, on
   const [delegation, setDelegation] = useState<AssistantDecisionDelegation>();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const spendingRef = useRef<HTMLHeadingElement>(null);
   const errorRef = useRef<HTMLElement>(null);
   useEffect(() => {
     if (error) errorRef.current?.scrollIntoView?.({ block: "nearest" });
@@ -170,6 +172,7 @@ export function AssistantThreadLimitsDialog({ thread, model, effort, onClose, on
   return <>
     {editor !== "confirm" && <Modal title="Thread Settings" phoneSheet="full" onClose={saving ? () => {} : onClose}
       className="assistant-thread-settings"
+      initialFocusRef={startAtSpending ? spendingRef : undefined}
       headerActions={phone ? <>
         <button type="button" className="btn assistant-thread-settings-cancel" onClick={onClose} disabled={saving}>Cancel</button>
         {saveButton}
@@ -196,7 +199,7 @@ export function AssistantThreadLimitsDialog({ thread, model, effort, onClose, on
         {conversation && <div className="field-row">
           <button type="button" className="btn ghost" disabled={conversationDisabled} onClick={() => setConversation(null)}>Undo Conversation Change</button>
         </div>}
-        <SettingsGroup title="Spending">
+        <SettingsGroup title="Spending" headingRef={spendingRef}>
           <div className="setting-row assistant-thread-spending-row">
             <div className="field">
               <strong className="setting-row-title">Budget</strong>

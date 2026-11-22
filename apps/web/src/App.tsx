@@ -137,7 +137,7 @@ const AppearancePanel = lazy(() => import("./components/SettingsView.js").then((
 const NavigationRailPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NavigationRailPanel })));
 const BehaviorPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.BehaviorPanel })));
 const AssistantThreadDefaultsPanel = lazy(() => import("./components/AssistantThreadDefaultsPanel.js").then((module) => ({ default: module.AssistantThreadDefaultsPanel })));
-const AssistantConnectionsPanel = lazy(() => import("./components/AssistantConnectionsPanel.js").then((module) => ({ default: module.AssistantConnectionsPanel })));
+const AssistantConnectionsGroup = lazy(() => import("./components/AssistantConnectionsGroup.js").then((module) => ({ default: module.AssistantConnectionsGroup })));
 const AssistantDelegationPanel = lazy(() => import("./components/AssistantDelegationPanel.js").then((module) => ({ default: module.AssistantDelegationPanel })));
 const AgentDefaultsPanel = lazy(() => import("./components/AgentDefaultsPanel.js").then((module) => ({ default: module.AgentDefaultsPanel })));
 const NetworkPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NetworkPanel })));
@@ -956,9 +956,9 @@ export function Shell() {
                 approvals: <ApprovalsPanel policyId={view.policyId} />,
                 orchestrator: <><OrchestratorSettingsPanel discoveryRevision={runners} /><DecisionModelPanel /></>,
                 assistant: <>
-                  <AssistantThreadDefaultsPanel onOpenThreads={() => navigate({ name: "assistants" })} />
-                  <AssistantConnectionsPanel />
-                  <AssistantDelegationPanel onOpenGrant={(threadId) => navigate({ name: "assistants", threadId, delegation: true })} />
+                  <AssistantThreadDefaultsPanel />
+                  <AssistantDelegationPanel />
+                  <AssistantConnectionsGroup />
                 </>,
                 reviews: <ReviewSettingsPanel />,
                 network: <NetworkPanel tailnet={tailnet} onNavigate={navigate} />,
