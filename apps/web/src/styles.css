@@ -12489,23 +12489,90 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: 0;
   font: var(--type-section);
 }
-.assistant-decision-choices,
-.assistant-decision-history {
+.assistant-decision-choices {
   overflow-wrap: anywhere;
 }
-.assistant-decision-history .btn {
-  max-width: 100%;
-  white-space: normal;
-}
-.assistant-decision-history > li {
+.assistant-decision-history {
   display: grid;
   gap: var(--space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
+.assistant-decision-filters .chip {
+  gap: var(--space-1);
+  height: var(--control-h-sm);
+  font: var(--type-small);
+}
+.assistant-decision-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-2);
+  padding-block: var(--space-2);
+}
+.assistant-decision-outcome {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--tone) var(--tint), transparent);
+  color: var(--tone-text);
+}
+.assistant-decision-content {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.assistant-decision-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0 var(--space-2);
+  width: 100%;
+}
+.assistant-decision-meta strong { font: var(--type-body-strong); }
+.assistant-decision-meta time {
+  color: var(--text-dim);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+}
+.assistant-decision-subject code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  white-space: normal;
+}
+.assistant-decision-reason { color: var(--text-dim); }
+.assistant-decision-reason[data-expanded="false"] {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.assistant-decision-history .link {
+  display: inline-flex;
+  align-items: center;
+  text-align: start;
+  max-width: 100%;
+  min-width: var(--control-h-sm);
+  min-height: var(--control-h-sm);
+}
+.assistant-decision-content > .link + .link { margin-top: var(--space-1); }
 .assistant-decision-history p { margin: 0; }
+.assistant-decision-history .assistant-decision-empty { padding: var(--space-4) 0; }
+.assistant-decision-results > .assistant-decision-pagination { margin-top: var(--space-2); }
 .assistant-decision-pagination {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
+}
+@media (max-width: 760px) {
+  .assistant-decision-history { --control-h-sm: 44px; }
+  .assistant-decision-history :is(.chip, .btn) { min-width: var(--control-h-sm); }
+  .assistant-decision-history :is(button.chip, button.btn, .link)::after { content: none; }
 }
 .delegation-dialog :is(.delegation-category, .form) > p { margin: 0; }
 .delegation-dialog .modal-foot > .delegation-revoke { margin-right: auto; }
@@ -13295,8 +13362,22 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .assistant-thread-panel .rpanel-head > .tabs {
   flex: 1;
   gap: var(--space-2);
+  margin-left: calc(-1 * var(--space-1));
+  margin-right: calc(-1 * var(--space-1));
+  padding-inline: var(--space-1);
 }
 .assistant-thread-panel .tab { min-width: var(--control-h-lg); }
+.assistant-thread-panel .tab:focus-visible { outline: none; }
+/* Give the tab label breathing room without crossing the scrollport or the active underline. */
+.assistant-thread-panel .tab:focus-visible::before {
+  position: absolute;
+  inset: var(--space-1) calc(-1 * var(--space-1));
+  border-radius: var(--radius-sm);
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: calc(-1 * var(--focus-width));
+  pointer-events: none;
+  content: "";
+}
 .assistant-thread-panel .rpanel-head > .icon-btn { flex: none; }
 .assistant-thread-panel .rpanel-body[hidden] { display: none; }
 .assistant-thread-panel .rpanel-body { overflow-wrap: anywhere; }

@@ -254,13 +254,16 @@ export function registerAssistantDecisionHistory(app: FastifyInstance, db: Contr
   app.get("/api/assistant-decision-history", (request, reply) => {
     const owner = requestHuman(request);
     if (owner?.role !== "owner") return reply.code(403).send({ error: "Only the owner can read their Assistant decision history." });
-    const { campaignId, threadId, before } = request.query as Record<string, unknown>;
+    const { campaignId, threadId, before, outcome } = request.query as Record<string, unknown>;
     const validId = (id: unknown): id is string => typeof id === "string" && /^[a-zA-Z0-9_-]{1,128}$/u.test(id);
     const cursor = typeof before === "string" ? /^(\d{1,16}):([a-zA-Z0-9_-]{1,128})$/u.exec(before) : null;
     if ((campaignId !== undefined && !validId(campaignId)) || (threadId !== undefined && !validId(threadId)) ||
-        (before !== undefined && !cursor)) return reply.code(400).send({ error: "Invalid decision history filter." });
+        (before !== undefined && !cursor) ||
+        (outcome !== undefined && outcome !== "approved" && outcome !== "denied" && outcome !== "answered")) {
+      return reply.code(400).send({ error: "Invalid decision history filter." });
+    }
     reply.header("cache-control", "no-store");
-    return db.assistantDecisionHistory(owner, { campaignId, threadId,
+    return db.assistantDecisionHistory(owner, { campaignId, threadId, outcome,
       ...(cursor ? { before: { at: Number(cursor[1]), id: cursor[2]! } } : {}),
     });
   });

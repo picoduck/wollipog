@@ -1,7 +1,7 @@
 import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS, issueClosureDeliveryGap, knownProviderCommandHomeWriteSeparation } from "@wollipog/protocol";
 import { validCampaignLaunchDisclosure, ownerResourceLabel, campaignPublicationTitle } from "@wollipog/protocol";
 import { assistantDecisionCategory, ciRerunSubject, isRequesterForgeDecisionCategory,
-  releaseDecisionSubject, type AssistantDecisionHistoryPage } from "@wollipog/protocol";
+  releaseDecisionSubject, type AssistantDecisionHistoryPage, type AssistantDecisionOutcome } from "@wollipog/protocol";
 import { withoutProviderAccountNames } from "./agent-account-view.js";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, CAMPAIGN_PENDING_CAUSES, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
@@ -24991,9 +24991,12 @@ export class ControlPlaneDb {
     );
   }
 
-  assistantDecisionHistory(owner: HumanPrincipal, filter: { campaignId?: string; threadId?: string; before?: { at: number; id: string } }): AssistantDecisionHistoryPage {
+  assistantDecisionHistory(owner: HumanPrincipal, filter: {
+    campaignId?: string; threadId?: string; outcome?: AssistantDecisionOutcome; before?: { at: number; id: string };
+  }): AssistantDecisionHistoryPage {
     const limit = 5;
     const time = "json_extract(assistant_delegation, '$.resolvedAt')";
+    const outcome = "json_extract(assistant_delegation, '$.outcome')";
     const scope = `FROM workflow_decisions WHERE assistant_delegation IS NOT NULL
       AND json_extract(assistant_delegation, '$.ownerUserId')=? AND json_extract(assistant_delegation, '$.organizationId')=?
       ${filter.campaignId ? "AND json_extract(assistant_delegation, '$.campaignId')=?" : ""}
@@ -25001,24 +25004,36 @@ export class ControlPlaneDb {
     const scopeArgs = [owner.userId, owner.organizationId,
       ...(filter.campaignId ? [filter.campaignId] : []), ...(filter.threadId ? [filter.threadId] : [])];
     const rows = this.stmt(`SELECT * ${scope}
+      ${filter.outcome ? `AND ${outcome}=?` : ""}
       ${filter.before ? `AND (${time}, occurrence_id) < (?, ?)` : ""}
       ORDER BY ${time} DESC, occurrence_id DESC LIMIT ?`).all(...scopeArgs,
+        ...(filter.outcome ? [filter.outcome] : []),
         ...(filter.before ? [filter.before.at, filter.before.id] : []), limit + 1);
-    const total = filter.threadId && !filter.before
-      ? (this.stmt(`SELECT count(*) AS total ${scope}`).get(...scopeArgs) as { total: number }).total
-      : undefined;
+    const outcomeCounts = !filter.before ? { approved: 0, denied: 0, answered: 0 } : undefined;
+    if (outcomeCounts) {
+      const groups = this.stmt(`SELECT ${outcome} AS outcome, count(*) AS total ${scope} GROUP BY ${outcome}`)
+        .all(...scopeArgs) as { outcome: string; total: number }[];
+      for (const group of groups) {
+        if (group.outcome === "approved" || group.outcome === "denied" || group.outcome === "answered") {
+          outcomeCounts[group.outcome] = group.total;
+        }
+      }
+    }
+    const total = filter.threadId && outcomeCounts ? Object.values(outcomeCounts).reduce((sum, count) => sum + count, 0) : undefined;
     const entries = rows.slice(0, limit).flatMap((row) => {
       const decision = workflowDecisionFromRow(row);
       const category = decision && assistantDecisionCategory(decision.resourceSnapshot);
       if (!decision?.assistantDelegation || !category) return [];
       return [{ occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, category, resourceKey: decision.resourceKey,
         ...(decision.resourceSnapshot.category === "ci_rerun" ? { subject: ciRerunSubject(decision.resourceSnapshot) } :
+          decision.resourceSnapshot.category === "merged_branch_deletion" ? { subject: decision.resourceSnapshot.branch } :
           decision.resourceSnapshot.category === "release_tag" || decision.resourceSnapshot.category === "release_publish"
             ? { subject: releaseDecisionSubject(decision.resourceSnapshot) } : {}),
         delegation: decision.assistantDelegation }];
     });
     const last = entries.at(-1);
-    return { entries, ...(total === undefined ? {} : { total }), ...(rows.length > limit && last ? { nextBefore: `${last.delegation.resolvedAt}:${last.occurrenceId}` } : {}) };
+    return { entries, ...(total === undefined ? {} : { total }), ...(outcomeCounts ? { outcomeCounts } : {}),
+      ...(rows.length > limit && last ? { nextBefore: `${last.delegation.resolvedAt}:${last.occurrenceId}` } : {}) };
   }
 
   pendingWorkflowDecisionsForSession(sessionId: string): WorkflowDecisionView[] {
