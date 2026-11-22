@@ -901,11 +901,12 @@ test("thread previews summarize attention, spending and the latest reply for the
     h.as(h.owner);
     h.db.raw().prepare("UPDATE sessions SET cost_usd=? WHERE id=?").run(79.93, sessionId);
     assert.equal(await latest(), "Spent $79.93 of its $25.00 budget.");
+    const shapedText = "می\u200cخواهم \u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}";
     h.db.setPendingApproval(sessionId, {
-      requestId: "first", title: "Approve the upload test", options: [],
+      requestId: "first", title: "Approve " + shapedText, options: [],
       additionalRequests: [{ requestId: "second", title: "Review the logs", options: [] }],
     });
-    assert.equal(await latest(), "Waiting for you: Approve the upload test, and 1 more");
+    assert.equal(await latest(), `Waiting for you: Approve ${shapedText}, and 1 more`);
     h.db.setPendingApproval(sessionId, null);
     h.db.updateSessionStatus(sessionId, "input_required", now + 4);
     assert.equal(await latest(), "Waiting for you…");

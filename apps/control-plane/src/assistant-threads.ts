@@ -151,7 +151,7 @@ const previewSentences = new Intl.Segmenter("en", { granularity: "sentence" });
 const previewDollars = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 
 function previewLine(text: string): string {
-  return text.replace(/\p{Cf}/gu, (character) => character === "\u200d" ? character : "")
+  return text.replace(/\p{Bidi_Control}/gu, "")
     .replace(/[\p{Cc}\s]+/gu, " ").trim();
 }
 
