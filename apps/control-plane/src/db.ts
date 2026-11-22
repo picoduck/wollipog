@@ -22904,9 +22904,12 @@ export class ControlPlaneDb {
     const attempts = this.stmt("SELECT work_item_id, ordinal, ended_at, end_reason FROM campaign_work_attempts WHERE campaign_session_id=? AND session_id=?")
       .all(campaignId, childId) as Array<{ work_item_id: string; ordinal: number; ended_at: number | null; end_reason: string | null }>;
     if (!attempts.length || this.campaignDescendantIds(childId).length || this.unconsumedWorkflowDecisionsForSession(childId).length) return false;
+    if (attempts.some((attempt) => attempt.ended_at === null ||
+      !["failed", "superseded", "reassigned"].includes(attempt.end_reason ?? ""))) return false;
+    // #4851: delivery facts from one snapshot, never `detail`, which replays every item's timings.
+    const items = this.campaignWorkLedger.deliveryFacts(campaignId, attempts.map((attempt) => attempt.work_item_id));
     return attempts.every((attempt) => {
-      if (attempt.ended_at === null || !["failed", "superseded", "reassigned"].includes(attempt.end_reason ?? "")) return false;
-      const item = this.campaignWorkLedger.detail(campaignId, attempt.work_item_id, Date.now());
+      const item = items.get(attempt.work_item_id);
       if (item?.primaryState !== "delivered") return false;
       return item.attempts.some((successor) => successor.ordinal > attempt.ordinal && successor.sessionId !== childId &&
         successor.sessionId !== null && this.campaignChildReportVerified(campaignId, successor.sessionId) &&
