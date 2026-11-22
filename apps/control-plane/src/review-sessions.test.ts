@@ -640,6 +640,7 @@ test("review children preserve project attribution and never reserve implementat
     assert.equal(h.db.getSession("s1")!.liveChildCapacity!.occupied, 0);
     assert.equal(h.db.listSessions().find(s => s.id === "s1")!.liveChildCapacity!.occupied, 0);
     assert.equal(h.db.campaignAncestryRoot(id), "none");
+    h.db.setPendingApproval(id, { requestId: "question", kind: "question", title: "Question", options: [] });
     assert.deepEqual(h.db.listSessionDescendantRequestCandidates("s1"), []);
     assert.equal(h.svc.prompt(id, "implement this").status, 409);
   } finally { h.db.close(); }
