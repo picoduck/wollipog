@@ -95,6 +95,8 @@ for (const theme of ["light", "dark"] as const) {
           await notice.getByRole("button", { name: "Hide Details" }).tap();
           const requestBody = dock.locator(".assistant-dock-card-body");
           expect(await requestBody.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(0);
+          await expect(requestBody).toHaveAttribute("data-clip-end", "");
+          await expect(requestBody).toHaveCSS("mask-image", /^linear-gradient/);
           await requestBody.evaluate((element) => { element.scrollTop = element.scrollHeight; });
           await expect(requestBody).not.toHaveAttribute("data-clip-end");
           await expect(requestBody).toHaveCSS("mask-image", "none");
