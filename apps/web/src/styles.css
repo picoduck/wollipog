@@ -7758,7 +7758,7 @@ body.shell-dock-dragging * {
     max-height: max(60cqh, calc(100cqh - var(--bar-h)));
   }
   .detail-chat:has(.assistant-spending-notice) .assistant-dock-list:not([data-show-all]) .assistant-dock-card-head {
-    padding-block-start: 0;
+    padding-block: 0 var(--space-1);
   }
   .assistant-dock-actions { position: relative; }
   .assistant-dock-card-body[data-clip-end] + .assistant-dock-actions > .assistant-dock-scroll-cue {
@@ -7783,7 +7783,7 @@ body.shell-dock-dragging * {
       min-width: 0;
     }
     .detail-chat:has(.assistant-spending-notice) .assistant-dock:not(:has(.assistant-dock-pager)) .assistant-dock-card-head {
-      padding-block-end: 0;
+      padding-block: 0;
     }
   }
 }
@@ -13348,6 +13348,26 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   }
   .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-meta { grid-column: 1 / -1; }
   .detail-chat:has(.assistant-dock) .assistant-spending-notice :is(.notice-actions, .assistant-spending-meter) { margin-top: 0; }
+  @container session-body (max-width: 540px) {
+    /* Give the actions the full row when a docked panel narrows the reading column. */
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-content {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 35%);
+    }
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-body { display: contents; }
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice :is(.notice-body > p, .notice-actions) {
+      grid-column: 1 / -1;
+    }
+    .detail-chat:has(.assistant-dock) .assistant-spending-meter {
+      grid-column: 2;
+      grid-row: 1;
+    }
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-actions { flex-wrap: nowrap; }
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-actions > .btn {
+      flex: 0 1 auto;
+      min-width: 0;
+      white-space: normal;
+    }
+  }
 }
 @media (pointer: coarse) {
   .assistant-spending-notice.compact .notice-content { row-gap: var(--space-2); }
