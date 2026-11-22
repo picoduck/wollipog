@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
+import fs, { createWriteStream, type WriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -159,7 +161,7 @@ test("the archive download is hashed while it streams and bounded in size", asyn
   assert.equal(await failure(downloadAntigravityArchive(archiveUrl, fresh("hang"), { fetch: server.fetch, timeoutMs: 50 })), "timed_out");
 });
 
-async function extract(archive: Buffer, limits: { maxBinaryBytes?: number } = {}): Promise<{ destination: string; error?: string }> {
+async function extract(archive: Buffer, limits: { maxBinaryBytes?: number } = {}, fixture = "archive"): Promise<{ destination: string; error?: string }> {
   const folder = mkdtempSync(join(root, "extract-"));
   const file = join(folder, "release.tar.gz");
   writeFileSync(file, archive);
@@ -168,8 +170,8 @@ async function extract(archive: Buffer, limits: { maxBinaryBytes?: number } = {}
     await extractAntigravityBinary(file, destination, limits);
     return { destination };
   } catch (error) {
-    assert.ok(error instanceof AntigravityInstallError, String(error));
-    assert.equal(existsSync(destination), false, "a refused archive leaves no binary behind");
+    assert.ok(error instanceof AntigravityInstallError, `${fixture}: ${String(error)}`);
+    assert.equal(existsSync(destination), false, `${fixture}: a refused archive leaves no binary behind`);
     return { destination, error: error.failure };
   }
 }
@@ -216,11 +218,72 @@ test("unsafe, partial or ambiguous archives are refused whole", async () => {
     ["not tar", gzipSync(Buffer.alloc(1_024, 7))],
   ];
   for (const [name, archive] of cases) {
-    assert.equal((await extract(archive)).error, "archive_invalid", name);
+    assert.equal((await extract(archive, {}, name)).error, "archive_invalid", name);
   }
-  assert.equal((await extract(fakeTarGz([{ name: "antigravity", content: "x".repeat(2_000) }]), { maxBinaryBytes: 1_000 })).error, "archive_invalid");
+  assert.equal((await extract(fakeTarGz([{ name: "antigravity", content: "x".repeat(2_000) }]), { maxBinaryBytes: 1_000 }, "oversized binary")).error, "archive_invalid");
   // Record padding (zeros past the two end blocks) is fine.
   assert.equal((await extract(fakeTarGz([binary], { trailing: Buffer.alloc(9_216, 0) }))).error, undefined);
+});
+
+test("archive refusal waits for a pending output open and close before removing the binary", { timeout: 5_000 }, async (t) => {
+  const folder = mkdtempSync(join(root, "delayed-open-"));
+  const archive = join(folder, "release.tar.gz");
+  const destination = join(folder, "agy");
+  writeFileSync(archive, fakeTarGz([
+    { name: "antigravity", content: "binary" },
+    { name: "./antigravity", content: "duplicate" },
+  ]));
+  let signalDestroyed!: () => void;
+  let signalRemoved!: () => void;
+  let allowOpen!: () => void;
+  const destroyed = new Promise<void>((resolve) => { signalDestroyed = resolve; });
+  const removed = new Promise<void>((resolve) => { signalRemoved = resolve; });
+  const openAllowed = new Promise<void>((resolve) => { allowOpen = resolve; });
+  let output: WriteStream | undefined;
+  let removalBeforeClose = false;
+  let pendingAtDestroy = false;
+  const originalRm = fsPromises.rm;
+  const originalCreateWriteStream = createWriteStream;
+  t.mock.method(fs, "createWriteStream", (path: Parameters<typeof createWriteStream>[0], options: Parameters<typeof createWriteStream>[1]) => {
+    output = originalCreateWriteStream(path, {
+      ...options as object,
+      fs: {
+        open: (path, flags, mode, callback) => {
+          void openAllowed.then(() => fs.open(path, flags, mode, callback));
+        },
+        close: fs.close,
+        write: fs.write,
+      },
+    });
+    const stream = output;
+    const originalDestroy = stream.destroy;
+    t.mock.method(stream, "destroy", function (this: WriteStream, error?: Error) {
+      pendingAtDestroy = this.pending;
+      const result = originalDestroy.call(this, error);
+      signalDestroyed();
+      return result;
+    });
+    return stream;
+  });
+  t.mock.method(fsPromises, "rm", async (...args: Parameters<typeof originalRm>) => {
+    removalBeforeClose = !output?.closed;
+    await originalRm(...args);
+    signalRemoved();
+  });
+  syncBuiltinESMExports();
+  t.after(() => { allowOpen(); t.mock.restoreAll(); syncBuiltinESMExports(); });
+
+  const extraction = failure(extractAntigravityBinary(archive, destination));
+  await destroyed;
+  assert.equal(pendingAtDestroy, true, "duplicate member is rejected while output open is pending");
+  // With the old ordering, finish removal before allowing open, forcing the file to reappear.
+  if (removalBeforeClose) await removed;
+  allowOpen();
+  assert.equal(await extraction, "archive_invalid");
+  assert.ok(output);
+  if (!output.closed) await new Promise<void>((resolve) => output!.once("close", resolve));
+  assert.equal(existsSync(destination), false, "the binary cannot reappear after the pending open settles");
+  assert.equal(removalBeforeClose, false, "removal waits for output closure");
 });
 
 function release(version: string): AntigravityManagedRelease {
