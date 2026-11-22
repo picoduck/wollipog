@@ -7,13 +7,13 @@ const cases = [
   { fixture: "usage_limit", tone: "warning", title: "Account at Its Usage Limit", badge: "Usage Limit",
     body: /Studio Subscription reached its usage limit.*resets at 2:00 PM, in 1 hour 12 minutes/, actions: ["Switch Account…"] },
   { fixture: "turn_failed", tone: "danger", title: "Turn Failed", badge: "Turn Failed",
-    body: /The connection to the provider was lost\. Your message is kept\./, actions: ["Retry Turn", "Show Details"] },
+    body: /The connection to the provider was lost\. Your message is kept\./, actions: ["Show Details", "Retry Turn"] },
   { fixture: "turn_rejected", tone: "danger", title: "Provider Rejected the Turn", badge: "Turn Rejected",
     body: /The provider rejected the turn before it started\./, actions: ["Show Details"] },
   { fixture: "automatic_turns_held", tone: "warning", title: "Automatic Turns Held", badge: "Automatic Turns Held",
     body: /The provider rejected two turns in a row with the same error/, actions: ["Show Details"] },
   { fixture: "sign_in_needed", tone: "danger", title: "Sign In Needed", badge: "Sign In Needed",
-    body: /Sign in to Studio Subscription to continue this thread\./, actions: ["Sign In…", "Switch Account…"] },
+    body: /Sign in to Studio Subscription to continue this thread\./, actions: ["Switch Account…", "Sign In…"] },
   { fixture: "machine_offline", tone: "warning", title: "Build Box Is Offline", badge: "Machine Offline",
     body: /Messages wait until it reconnects\./, actions: ["Open Machine"] },
   { fixture: "tools_unavailable", tone: "danger", title: "Assistant Tools Unavailable", badge: "Tools Unavailable",
@@ -181,4 +181,16 @@ test("an older control plane leaves the Assistant notice slot absent", async ({ 
   await open(page, "light", "legacy");
   await expect(page.locator(noticeSelector)).toHaveCount(0);
   await expect(page.locator(".composer").locator(".composer-box")).toBeVisible();
+});
+
+test("a refused restart keeps focus and the server's detail in the Assistant notice", async ({ page }) => {
+  const path = viewPath({ name: "assistants", threadId: openThread });
+  await page.goto("/assistants-e2e.html?" + new URLSearchParams({ path, "thread-health": "tools_unavailable", "restart-refusal": "1" }));
+  const notice = page.locator(noticeSelector);
+  const restart = notice.getByRole("button", { name: "Restart Thread" });
+  await restart.click();
+  await expect(notice.getByRole("alert")).toHaveText("Couldn't restart this thread. Try again.");
+  await expect(restart).toBeFocused();
+  await notice.getByRole("button", { name: "Show Details" }).click();
+  await expect(notice.locator(".notice-details-body")).toContainText("The saved tool key must be replaced.");
 });

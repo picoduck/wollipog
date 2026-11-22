@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { useApi } from "../api-context.js";
 import { assistantOperationTitle, type AssistantActivity } from "../assistant-connections.js";
 import { relativeTime, titleCaseLabel } from "../format.js";
+import { BusyButton } from "./ui/BusyButton.js";
 import { Notice } from "./Notice.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { SettingsGroup, StaticRow } from "./ui/SettingsRows.js";
@@ -28,11 +29,11 @@ export function AssistantConnectionActivity({ id }: { id: string }) {
 
   return (
     <SettingsGroup title="Activity" intro="Shows the latest 100 actions. Credentials and tool arguments are excluded."
-      action={<button className="btn sm" type="button" disabled={loading} onClick={() => {
+      action={<BusyButton className="btn sm ghost" busy={loading} progress="Loading connection activity…" onClick={() => {
         setError("");
         setLoading(true);
         setRefresh(attempt => attempt + 1);
-      }}>Refresh</button>}
+      }}>Refresh</BusyButton>}
       notice={error && <Notice tone="danger" role="alert" compact>{error}</Notice>}>
       {activity?.length ? (
         <div className="assistant-activity-scroll" role="region" aria-label="Recent Actions" tabIndex={0}>
@@ -42,7 +43,7 @@ export function AssistantConnectionActivity({ id }: { id: string }) {
             </thead>
             <tbody role="rowgroup">{activity.map((item, index) => (
               <tr key={index} role="row">
-                <td role="cell">{assistantOperationTitle(item.operation)} <code>{item.operation}</code></td>
+                <td role="cell">{assistantOperationTitle(item.operation)}</td>
                 <td role="cell"><span className="assistant-activity-target" title={item.targetLabel}>{item.targetLabel}</span></td>
                 <td role="cell"><StatusBadge label={titleCaseLabel(item.outcome)} tone={item.outcome === "succeeded" ? "success" : item.outcome === "refused" ? "warning" : "danger"} /></td>
                 <td role="cell">

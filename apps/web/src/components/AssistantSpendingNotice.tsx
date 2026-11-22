@@ -38,13 +38,13 @@ export function AssistantSpendingNotice({ state, trailing, onRaise, onSettings, 
     </> : trailing} compact={near || launches}
     onDismiss={near ? onDismiss : undefined} dismissLabel="Dismiss Near Budget"
     actions={<>
-      <button className="btn sm" type="button" onClick={onRaise}>{paused ? "Manage Launches…" : launches ? "Raise Limit…" : "Raise Budget…"}</button>
       {exhausted && <button className="btn sm ghost" type="button" onClick={onSettings}>Thread Settings</button>}
       {over && <>
-        <button className="btn sm" type="button" onClick={onStop} disabled={!canStop}
+        <button className="btn sm ghost danger" type="button" onClick={onStop} disabled={!canStop}
           aria-describedby={canStop ? undefined : stopReason}>Stop Launched Sessions…</button>
         <button className="btn sm ghost" type="button" onClick={onBreakdown}>Show Breakdown</button>
       </>}
+      <button className="btn sm primary" type="button" onClick={onRaise}>{paused ? "Manage Launches…" : launches ? "Raise Limit…" : "Raise Budget…"}</button>
     </>}>
     <p id={detailsId}>{message}</p>
     {limit !== null && <div id={meterId} className="assistant-spending-meter">

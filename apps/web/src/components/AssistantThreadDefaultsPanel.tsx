@@ -131,7 +131,7 @@ function DefaultEditDialog({ title, onClose, onSave, children }: {
     }
   };
   return <Modal title={title} className="assistant-default-dialog" phoneSheet="full" onClose={busy ? () => {} : onClose} footer={<>
-    <button type="button" className="btn" onClick={onClose} disabled={busy}>Cancel</button>
+    <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
     <BusyButton className="btn primary" form={form} type="submit" busy={busy} progress="Saving default…">Save Default</BusyButton>
   </>}>
     <form id={form} className="form" onSubmit={(event) => { event.preventDefault(); void save(); }}>

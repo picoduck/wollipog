@@ -3183,6 +3183,7 @@ export function TurnFailedNotice({ message, prompt, retryControl, trailing, kept
       trailing={trailing}
       role={kept ? "alert" : undefined}
       actions={actions || undefined}
+      detailsFirst={kept}
       details={<div className="code-well"><pre>{raw}</pre></div>}
     >
       <p>{describeTurnError(message)}{kept && " Your message is kept."}</p>

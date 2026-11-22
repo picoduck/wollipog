@@ -264,7 +264,7 @@ export function AssistantDecisionDelegationDialog(props: DelegationEditorProps) 
     onClose={busy ? () => {} : onClose}
     footer={saveInHeader ? undefined : <>
       {revokeButton}
-      <button className="btn" type="button" disabled={busy} onClick={onClose}>Cancel</button>
+      <button className="btn ghost" type="button" disabled={busy} onClick={onClose}>Cancel</button>
       {saveButton}
     </>}>
     <form id={form} onSubmit={(event) => { event.preventDefault(); void save(); }}>

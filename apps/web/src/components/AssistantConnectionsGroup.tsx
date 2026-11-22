@@ -40,7 +40,7 @@ function ConnectionsGroup({ onNavigate }: ConnectionsGroupProps) {
   if (unavailable) return null;
   return (
     <SettingsGroup title="Assistant Connections" scope="This Server" className="assistant-connections-group"
-      action={view && <button type="button" className="btn" onClick={() => onNavigate(assistantConnectionsView({ kind: "new" }))}>New Connection</button>}
+      action={view && <button type="button" className="btn ghost" onClick={() => onNavigate(assistantConnectionsView({ kind: "new" }))}>New Connection</button>}
       failure={error ? {
         message: "Couldn't load connections.", detail: error, onRetry: () => setAttempt((count) => count + 1),
       } : null}>

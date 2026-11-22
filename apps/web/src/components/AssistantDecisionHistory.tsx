@@ -12,6 +12,7 @@ import { useStoreActions, useStoreSelector } from "../store.js";
 import { CampaignSection } from "./CampaignSections.js";
 import { ErrorIcon, MessageSquareIcon, SuccessIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
+import { BusyButton } from "./ui/BusyButton.js";
 
 type HistoryState = { kind: "loading" } | { kind: "ready"; page: AssistantDecisionHistoryPage } | { kind: "error" };
 type OutcomeFilter = "all" | AssistantDecisionOutcome;
@@ -41,11 +42,15 @@ function DecisionSubject({ category, resourceKey, subject }: AssistantDecisionHi
     return subject ? <code>{subject}</code> : "GitHub Release";
   }
   if (category === "merged_branch_deletion") {
-    const branch = /^merged_branch_deletion:[^:]+:(.+)$/u.exec(resourceKey)?.[1];
-    return <code>{subject ?? branch ?? resourceKey}</code>;
+    const branch = subject ?? /^merged_branch_deletion:[^:]+:(.+)$/u.exec(resourceKey)?.[1];
+    return branch ? <code>{branch}</code> : "Branch";
   }
-  if (category === "pr_merge" || category === "issue_closure") return <code>{subject ?? resourceKey}</code>;
-  return subject ?? resourceKey;
+  if (category === "pr_merge" || category === "issue_closure") {
+    // Older records can still identify a forge target without a display subject.
+    const reference = subject ?? /^(?:(?:pr_merge|issue_closure):)?([\w.-]+\/[\w./-]+[#!]\d+)$/u.exec(resourceKey)?.[1];
+    return reference ? <code>{reference}</code> : category === "pr_merge" ? "Pull Request" : "Issue";
+  }
+  return subject ?? "Target Unavailable";
 }
 
 function DecisionReason({ reason }: { reason: string }) {
@@ -105,9 +110,13 @@ function DecisionHistory({ campaignId, threadId, onCount }: {
   const [filter, setFilter] = useState<OutcomeFilter>("all");
   const [cursors, setCursors] = useState<string[]>([]);
   const [retry, setRetry] = useState(0);
+  const [retrying, setRetrying] = useState(false);
+  const [retryFailed, setRetryFailed] = useState(false);
+  const retryInFlight = useRef(false);
   const [state, setState] = useState<HistoryState>({ kind: "loading" });
   const [summary, setSummary] = useState<{ counts: ReturnType<typeof countOutcomes>; exact: boolean }>();
   const results = useRef<HTMLDivElement>(null);
+  const retryButton = useRef<HTMLButtonElement>(null);
   const before = cursors.at(-1);
   const refreshRevision = useStoreSelector((store) => store.snapshotRevision);
   useEffect(() => {
@@ -120,6 +129,7 @@ function DecisionHistory({ campaignId, threadId, onCount }: {
           ...(filter !== "all" ? { outcome: filter } : {}),
         }, controller.signal);
         if (controller.signal.aborted) return;
+        if (retryButton.current === document.activeElement) results.current?.focus({ preventScroll: true });
         setState({ kind: "ready", page });
         // Older control planes ignore the outcome query and can only show counts for the current page.
         setSummary((current) => page.outcomeCounts ? { counts: page.outcomeCounts, exact: true }
@@ -127,8 +137,14 @@ function DecisionHistory({ campaignId, threadId, onCount }: {
         if (!before) onCount?.(page.total?.toString() ?? (page.entries.length + (page.nextBefore ? "+" : "")));
       } catch {
         if (controller.signal.aborted) return;
+        setRetryFailed(retryInFlight.current);
         setState({ kind: "error" });
         if (!before) onCount?.(null);
+      } finally {
+        if (!controller.signal.aborted) {
+          retryInFlight.current = false;
+          setRetrying(false);
+        }
       }
     });
     return () => controller.abort();
@@ -163,14 +179,18 @@ function DecisionHistory({ campaignId, threadId, onCount }: {
         <span className="sr-only">Loading delegated decisions…</span>
         {[0, 1, 2].map((index) => <div aria-hidden="true" className="skeleton-row" key={index} />)}
       </div>}
-      {state.kind === "error" && <Notice tone="danger" role="alert" actions={<button className="btn sm" type="button"
-        onClick={() => {
-          results.current?.focus();
-          setState({ kind: "loading" });
+      {state.kind === "error" && <Notice tone="danger" role="alert" actions={<BusyButton className="btn sm primary"
+        ref={retryButton} busy={retrying} progress="Loading delegated decisions…"
+        onClick={event => {
+          event.currentTarget.focus({ preventScroll: true });
+          setRetryFailed(false);
+          retryInFlight.current = true;
+          setRetrying(true);
           setRetry((current) => current + 1);
-        }}>Retry</button>}>
+        }}>Retry</BusyButton>}>
         <p>Couldn't load delegated decisions.</p>
       </Notice>}
+      {state.kind === "error" && <span role="status" className="sr-only">{retryFailed ? "Retry failed. Couldn't load delegated decisions." : ""}</span>}
       {entries?.length === 0 && <p className="assistant-decision-empty muted">{filter === "all"
         ? "No delegated decisions yet."
         : summary?.exact ? "No matching decisions." : "No matching decisions on this page."}</p>}
@@ -178,8 +198,8 @@ function DecisionHistory({ campaignId, threadId, onCount }: {
         {entries.map((entry) => <DecisionRow entry={entry} key={entry.occurrenceId} showThread={campaignId !== undefined} />)}
       </ul>}
       {page && (before || next) && <div className="assistant-decision-pagination">
-        {before && <button type="button" className="btn sm" onClick={() => goToPage(cursors.slice(0, -1))}>Newer Decisions</button>}
-        {next && <button type="button" className="btn sm" onClick={() => goToPage([...cursors, next])}>Older Decisions</button>}
+        {before && <button type="button" className="btn sm ghost" onClick={() => goToPage(cursors.slice(0, -1))}>Newer Decisions</button>}
+        {next && <button type="button" className="btn sm ghost" onClick={() => goToPage([...cursors, next])}>Older Decisions</button>}
       </div>}
     </div>
   </div>;

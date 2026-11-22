@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useApi } from "../api-context.js";
 import { formatAssistantDelegationSummary } from "../assistant-decision-delegation.js";
 import { assistantThreadTitle, assistantThreadsOwnerOnly, assistantThreadsUnavailable, type AssistantThread } from "../assistant-threads.js";
@@ -24,8 +24,16 @@ function DelegationGroup() {
   const [attempt, setAttempt] = useState(0);
   const [removing, setRemoving] = useState<string | null>(null);
   const [removeError, setRemoveError] = useState<string | null>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const removedControl = useRef<HTMLElement | null>(null);
   const threads = grants.kind === "ready" ? grants.threads : [];
   const now = useTimelineClock(threads.some((thread) => thread.decisionDelegation?.grant?.expiresAt != null));
+
+  useLayoutEffect(() => {
+    if (!removedControl.current || removedControl.current.isConnected) return;
+    removedControl.current = null;
+    if (document.activeElement === document.body) heading.current?.focus({ preventScroll: true });
+  }, [grants]);
 
   useEffect(() => {
     let current = true;
@@ -44,12 +52,14 @@ function DelegationGroup() {
   const clear = async (thread: AssistantThread, expired: boolean) => {
     if (!thread.decisionDelegation?.grant || removing) return;
     const revision = thread.decisionDelegation.revision;
-    const remove = async () => {
+    const remove = async (afterRemove: () => void) => {
       await api.setAssistantThreadDelegation(thread.id, { revision, grant: null });
+      afterRemove();
       setGrants((current) => current.kind === "ready"
         ? { kind: "ready", threads: current.threads.filter((item) => item.id !== thread.id) } : current);
     };
     if (!expired) {
+      const returnFocus = { current: null as HTMLElement | null };
       await confirm({
         title: "Revoke Delegation",
         message: `“${assistantThreadTitle(thread)}” will lose permission to resolve decisions on your behalf.`,
@@ -57,14 +67,18 @@ function DelegationGroup() {
         tone: "danger",
         progress: "Revoking delegation…",
         cancelWhileRunning: false,
-        onConfirm: remove,
+        returnFocus,
+        onConfirm: () => remove(() => { returnFocus.current = heading.current; }),
       });
       return;
     }
     setRemoving(thread.id);
     setRemoveError(null);
     try {
-      await remove();
+      const trigger = document.activeElement;
+      await remove(() => {
+        if (trigger instanceof HTMLElement && trigger === document.activeElement) removedControl.current = trigger;
+      });
     } catch (cause) {
       setRemoveError(cause instanceof Error ? cause.message : String(cause));
       setAttempt((count) => count + 1);
@@ -72,7 +86,7 @@ function DelegationGroup() {
       setRemoving(null);
     }
   };
-  return <SettingsGroup title="Active Delegations" scope="Your Account"
+  return <SettingsGroup className="assistant-active-delegations" title="Active Delegations" scope="Your Account" headingRef={heading}
     notice={removeError && <Notice role="alert" tone="danger">{removeError}</Notice>}
     failure={grants.kind === "failed" ? {
       message: "Couldn't load delegation grants.", detail: grants.message,
@@ -90,7 +104,8 @@ function DelegationGroup() {
         badge={<StatusBadge noDot size="md" tone={expired ? "neutral" : "success"} label={expired ? "Expired" : "Active"} />}
         description={formatAssistantDelegationSummary(grant, now)}
         actionLabel={expired ? "Remove" : "Revoke…"} hasPopup={expired ? undefined : "dialog"}
-        disabled={removing !== null} onAction={() => void clear(thread, expired)} />;
+        pending={expired ? { busy: removing === thread.id, progress: "Removing the expired delegation…" } : undefined}
+        disabled={removing !== null && removing !== thread.id} onAction={() => void clear(thread, expired)} />;
     })}
   </SettingsGroup>;
 }

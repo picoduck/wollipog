@@ -7593,6 +7593,7 @@ body.shell-dock-dragging * {
   overflow-wrap: anywhere;
 }
 .assistant-confirmation-arguments code {
+  border: 0;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
@@ -7677,7 +7678,7 @@ body.shell-dock-dragging * {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.assistant-dock-card .code-well { min-width: 0; }
+:is(.assistant-dock-card, .assistant-thread-notice-slot, .assistant-campaign-review) .code-well { border: 0; }
 .assistant-dock-card .code-well pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .assistant-dock-target,
 .assistant-dock-actions,
@@ -7691,10 +7692,15 @@ body.shell-dock-dragging * {
   display: block;
   overflow: hidden;
   align-content: center;
+  border: 0;
+  background: var(--bg-elev-2);
   text-overflow: ellipsis;
 }
 .assistant-dock-target > .status { flex: none; }
 .assistant-dock-details { justify-self: start; }
+:is(.assistant-dock, .assistant-thread-panel, .detail-bar:has(.assistant-bar-title)) :is(.chip, .count, .status) {
+  font-size: var(--text-sm);
+}
 .assistant-dock-facts { display: grid; gap: var(--space-1); min-width: 0; }
 .assistant-dock-facts .facts { margin: 0; }
 .assistant-dock-choices { min-width: 0; }
@@ -7714,6 +7720,13 @@ body.shell-dock-dragging * {
 .assistant-dock-resolve { margin-left: auto; }
 @media (max-width: 760px) {
   .assistant-dock-slot:not(:has([data-show-all])) { max-height: 74cqh; }
+  @container chat-reading (min-height: 480px) {
+    /* A single request with expanded facts can use more of a tall reading column while
+       leaving at least a fifth for the transcript. Short reading columns keep their lower cap. */
+    .assistant-dock-slot:not(:has([data-show-all], .assistant-dock-pager)):has(.assistant-dock-facts) {
+      max-height: 78cqh;
+    }
+  }
   .assistant-dock-head { padding-inline: var(--space-2); }
   .assistant-dock-card-head,
   .assistant-dock-card-body,
@@ -12572,10 +12585,11 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .assistant-decision-meta {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 0 var(--space-2);
   width: 100%;
+  min-height: var(--space-6);
 }
 .assistant-decision-meta strong { font: var(--type-body-strong); }
 .assistant-decision-meta time {
@@ -12621,6 +12635,15 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 .delegation-dialog :is(.delegation-category, .form) > p { margin: 0; }
 .delegation-dialog .modal-foot > .delegation-revoke { margin-right: auto; }
+@media (min-width: 761px) {
+  .delegation-dialog .modal-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .delegation-dialog .modal-heading { display: contents; }
+  .delegation-dialog .modal-desc { grid-area: 2 / 1 / auto / -1; }
+  .delegation-dialog .modal-close { grid-area: 1 / 2; }
+}
 .delegation-groups,
 .delegation-scopes {
   display: grid;
@@ -12631,16 +12654,12 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .delegation-dialog .delegation-group {
   display: grid;
   gap: var(--space-2);
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
 }
 .checkbox.delegation-group-toggle {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   padding-inline: var(--space-2);
-  border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   background: var(--bg-elev-2);
   font: var(--type-body-strong);
@@ -12679,7 +12698,14 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .delegation-scopes { grid-template-columns: minmax(0, 1fr); }
   .delegation-dialog .delegation-presets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .delegation-dialog .modal-foot > .btn { padding-inline: var(--space-2); }
-  .delegation-dialog .modal-head > .btn { flex: none; }
+  .delegation-dialog .modal-head:has(> .btn) { align-items: flex-start; }
+  .delegation-dialog .modal-head:has(> .btn) .modal-heading {
+    padding-block-start: calc((var(--control-h) - var(--space-6)) / 2);
+  }
+  .delegation-dialog .modal-head > .btn {
+    flex: none;
+    padding-inline: var(--space-2);
+  }
   .delegation-dialog .form > .delegation-revoke { justify-self: start; }
 }
 /* Field anatomy (§8.1): the parts stack 8px apart, which puts the label 8px above the control.
@@ -13290,6 +13316,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: var(--space-2);
   resize: vertical;
   font: var(--type-body);
+  border: 0;
 }
 .new-assistant-thread-chips,
 .new-assistant-thread-suggestions,
@@ -13306,6 +13333,10 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding-inline: var(--page-gutter);
 }
 .new-assistant-option {
+  display: inline-grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-content: center;
+  align-items: start;
   height: auto;
   min-height: var(--control-h);
   min-width: 0;
@@ -13314,7 +13345,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   text-align: start;
 }
 .new-assistant-option > span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
-.new-assistant-option > svg { flex: none; }
+.new-assistant-option > svg { margin-block-start: calc((1lh - var(--icon-sm)) / 2); }
 .new-assistant-option-panel .menu-head {
   z-index: var(--z-sticky);
   justify-content: space-between;
@@ -13346,8 +13377,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   display: grid;
   gap: var(--space-1);
   padding: var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xs);
   color: var(--text-dim);
   font: var(--type-small);
 }
@@ -13425,6 +13454,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .assistant-threads-foot .count { font-size: var(--text-sm); }
 @media (max-width: 760px) {
   .assistant-threads-foot { padding-inline: var(--page-gutter); }
+  .detail-bar-heading:has(> .assistant-bar-title) { gap: var(--space-1); }
 }
 /* The thread title is the only part of the detail bar that shrinks. The tooltip belongs outside the
    clipping box so it can show the whole title and wrap on a phone. */
@@ -13483,6 +13513,14 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .assistant-thread-account-picker .choice-row-title { overflow-wrap: anywhere; }
 .assistant-thread-account-picker .choice-row-body { gap: var(--space-1); }
 .assistant-thread-settings .modal-head { gap: var(--space-2); }
+.assistant-thread-settings .settings-group-surface { border: 0; }
+.assistant-thread-settings .setting-row-trailing:has(.setting-row-control > .btn) {
+  align-items: start;
+  align-content: center;
+}
+.assistant-thread-settings .setting-row-trailing:has(.setting-row-control > .btn) .setting-row-text {
+  padding-block-start: calc((var(--control-h) - var(--space-5)) / 2);
+}
 .assistant-thread-spending-row { display: block; }
 .choice-chips,
 .assistant-launch-stepper {
@@ -13506,6 +13544,10 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 @media (max-width: 760px) {
   .assistant-thread-settings .modal-back { display: none; }
   .assistant-thread-settings-cancel { order: -1; }
+  /* Keep room between the pinned Save action and the first Conversation row when the
+     defaults link at the end of the form is brought into view. */
+  .assistant-thread-settings .modal-body { padding-block-end: var(--space-2); }
+  .assistant-thread-settings .modal-body > .form { gap: var(--space-2); }
   .assistant-thread-account-label:not(.pid),
   .assistant-thread-account-label .pid-value {
     display: -webkit-box;
@@ -13581,6 +13623,12 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   gap: var(--space-4);
 }
 .assistant-panel-details > :not(button) { width: 100%; }
+.assistant-panel-details > .link {
+  min-height: var(--control-h);
+  font: var(--type-body-strong);
+  cursor: pointer;
+  text-decoration: underline;
+}
 .assistant-panel-meter {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -13601,8 +13649,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 .assistant-spending-total { font: var(--type-small); font-variant-numeric: tabular-nums; }
 @media (pointer: coarse) {
-  .assistant-thread-notice-slot .btn.sm { --control-h-sm: var(--control-h); }
-  .assistant-thread-notice-slot .btn.sm::after { content: none; }
+  .assistant-thread-notice-slot { --control-h-sm: var(--control-h); }
+  .assistant-thread-notice-slot :is(.btn.sm, .icon-btn.sm)::after { content: none; }
   .menu.assistant-thread-notice-slot > .menu-item + .menu-item { margin-top: var(--space-2); }
 }
 @media (max-width: 760px) {
@@ -13753,11 +13801,17 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 @media (pointer: coarse) {
   .assistant-spending-notice.compact .notice-content { row-gap: var(--space-2); }
 }
+.assistant-history > .group-label { padding-inline: 0; }
 .assistant-history-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-2);
+}
+.assistant-history-row > p {
+  margin: 0;
+  padding-block-start: calc((var(--control-h-sm) - var(--space-5)) / 2);
+  font: var(--type-body);
 }
 .assistant-history-row > .btn { flex: none; }
 .assistant-delegation-summary {
@@ -18897,7 +18951,21 @@ button.setting-row { cursor: pointer; }
 .setting-row-value-part { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
 .setting-row-link-word { color: var(--text-dim); font: var(--type-small); white-space: nowrap; }
 .setting-row-chevron { display: inline-flex; color: var(--text-dim); }
-/* A default's current value is its edit button. Keep long account labels inside the control column. */
+/* Centre the trailing button on the title's first line even if that title wraps. */
+:is(.assistant-thread-defaults, .assistant-active-delegations) .setting-row-trailing {
+  align-items: start;
+  align-content: center;
+}
+:is(.assistant-thread-defaults, .assistant-active-delegations) .setting-row-trailing .setting-row-text {
+  padding-block-start: calc((var(--control-h) - var(--space-5)) / 2);
+}
+.assistant-active-delegations .setting-row-trailing { grid-template-columns: minmax(0, 1fr) auto; }
+.assistant-active-delegations .setting-row-title-line {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-0-5);
+}
+/* The button shows the current value. Keep long account labels inside the control column. */
 .assistant-thread-defaults .setting-row-control > .btn {
   display: block;
   min-width: var(--control-h);
@@ -20313,6 +20381,18 @@ a.tab { text-decoration: none; }
   flex-direction: row;
   gap: var(--space-2);
 }
+.assistant-installation-row .setting-row-desc {
+  padding: 0;
+  border: 0;
+  background: none;
+}
+.assistant-connection-row {
+  align-items: start;
+  align-content: center;
+}
+.assistant-connection-row .setting-row-control {
+  padding-block-start: calc((var(--space-5) - var(--icon)) / 2);
+}
 .assistant-connection-row .setting-row-title {
   display: -webkit-box;
   overflow: hidden;
@@ -20348,13 +20428,6 @@ a.tab { text-decoration: none; }
   overflow-wrap: anywhere;
 }
 .assistant-activity-table tbody tr { border-top: 1px solid var(--border); }
-.assistant-activity-table code {
-  display: block;
-  width: fit-content;
-  max-width: 100%;
-  color: var(--text-dim);
-  font-size: inherit;
-}
 .assistant-credential-visibility { align-self: flex-start; }
 .assistant-credential-revealed {
   font-family: var(--font-mono);
@@ -20382,7 +20455,6 @@ a.tab { text-decoration: none; }
   }
   .assistant-activity-table td { padding: 0; }
   .assistant-activity-table td:nth-child(-n+2) { grid-column: 1 / -1; }
-  .assistant-activity-table code { white-space: nowrap; }
   .assistant-activity-target {
     display: -webkit-box;
     overflow: hidden;
