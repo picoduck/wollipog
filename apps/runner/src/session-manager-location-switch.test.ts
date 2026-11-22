@@ -14,6 +14,7 @@ import { buildCodexTurnParams } from "./drivers/codex-app-server.js";
 import { managedWorktreeLaunchRefusal } from "./execution-isolation.js";
 import { commandTargetsManagedWorktree } from "./managed-worktree-protection.js";
 import { reusedWorktreeNotice, SessionManager } from "./session-manager.js";
+import { shutdownLocationSwitchManagers } from "./test-support/location-switch-shutdown.js";
 import { SessionStore } from "./session-store.js";
 import { nativePathSpelling, parseWorktreePorcelain, recoveredBranchPlacement, sameWorktreePath } from "./worktree.js";
 
@@ -129,7 +130,7 @@ async function withSession(name: string, body: (h: Harness) => Promise<void>,
         return runner(next);
       } });
   } finally {
-    for (const manager of managers) manager.shutdownAll();
+    await shutdownLocationSwitchManagers(managers);
     if (previousClaudeHome === undefined) delete process.env.CLAUDE_CONFIG_DIR;
     else process.env.CLAUDE_CONFIG_DIR = previousClaudeHome;
     rmSync(root, { recursive: true, force: true });

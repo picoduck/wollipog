@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { claudeProjectPathKey } from "./claude-background-work.js";
 import { SessionManager } from "./session-manager.js";
+import { shutdownLocationSwitchManagers } from "./test-support/location-switch-shutdown.js";
 import { SessionStore } from "./session-store.js";
 import { requestedSlot, requestedWorktreeBoundary, worktreeIdForPath, type WorktreeCleanupRecord } from "./worktree.js";
 
@@ -132,13 +133,44 @@ async function withSession(name: string, body: (h: Harness) => Promise<void>): P
     };
     await body(harness);
   } finally {
-    for (const manager of managers) manager.shutdownAll();
+    await shutdownLocationSwitchManagers(managers);
     if (previousClaudeHome === undefined) delete process.env.CLAUDE_CONFIG_DIR;
     else process.env.CLAUDE_CONFIG_DIR = previousClaudeHome;
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
     rmSync(root, { recursive: true, force: true });
   }
 }
+
+test("fixture teardown waits for a worktree writer that outlives synchronous shutdown", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-switch-shutdown-")));
+  const store = new SessionStore(join(root, "sessions"));
+  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+    fakeProvider().factory as never, root, 2);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const internals = manager as unknown as {
+    runWorktreeOperation: (id: string, operation: () => Promise<void>) => Promise<void>;
+  };
+  const writer = internals.runWorktreeOperation("s_shutdown_writer", async () => {
+    await gate;
+    writeFileSync(join(root, "late-journal-write"), "settled");
+  });
+  let settled = false;
+  const shutdown = shutdownLocationSwitchManagers([manager]).then(() => { settled = true; });
+  try {
+    // Longer than the removed sleep: elapsed time alone is never proof that this writer ended.
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    assert.equal(settled, false, "teardown must still own the directory while the writer is blocked");
+    release();
+    await writer;
+    await shutdown;
+    assert.equal(readFileSync(join(root, "late-journal-write"), "utf8"), "settled");
+  } finally {
+    release();
+    await writer;
+    await shutdown;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 /** The configuration lives on the branch the switch recovers, as the base commit setup reads. */
 function commitSetup(h: Harness, config: unknown, branch = "fix/install-link"): void {
@@ -2334,8 +2366,7 @@ test("a launch that loses after remaking a session worktree on a branch with its
     assert.equal(git(app, "rev-parse", `refs/heads/agent/${sessionId}`), tip, "the branch and its commit stay");
     assert.ok(git(app, "reflog", "show", "--format=%H", `refs/heads/agent/${sessionId}`).includes(tip), "and so does its reflog");
   } finally {
-    manager.shutdownAll();
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await shutdownLocationSwitchManagers([manager]);
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -3685,8 +3716,7 @@ test("a session worktree made again where one was kept goes with the session as 
     await manager.delete(sessionId);
     assert.equal(existsSync(worktree), false, "and it goes with the session");
   } finally {
-    manager.shutdownAll();
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await shutdownLocationSwitchManagers([manager]);
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -3815,8 +3845,7 @@ test("a worktree a launch makes again after a refused rollback is never removed 
     assert.deepEqual(files(worktree), kept, "with everything in it");
     assert.equal(git(app, "rev-parse", "--verify", `refs/heads/agent/${sessionId}`).length, 40);
   } finally {
-    for (const manager of managers) manager.shutdownAll();
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await shutdownLocationSwitchManagers(managers);
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -3892,8 +3921,7 @@ test(`a launch whose worktree is left behind when ${how} gives back that worktre
     assert.deepEqual(owners.filter((owner) => after.get(owner) !== undefined), [], "no port block outlives the session");
     if (worktree) assert.equal(existsSync(worktree), false, "and neither does the worktree its launch made");
   } finally {
-    for (const manager of managers) manager.shutdownAll();
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await shutdownLocationSwitchManagers(managers);
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -3935,8 +3963,7 @@ test("a launch that fails after its setup keeps work written once setup ended: i
     assert.ok(store.readMeta(sessionId)?.keptWorktreePaths?.includes(worktree), "and so is the worktree, so deletion leaves it too");
     assert.deepEqual((manager as unknown as { cleanupJournal: { list(): WorktreeCleanupRecord[] } }).cleanupJournal.list(), []);
   } finally {
-    manager.shutdownAll();
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await shutdownLocationSwitchManagers([manager]);
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -3999,8 +4026,7 @@ test(`a launch rollback retried after a restart ${written ? "keeps work written 
       assert.equal(existsSync(worktree), false, "a worktree only the launch touched still goes");
     }
   } finally {
-    for (const manager of managers) manager.shutdownAll();
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await shutdownLocationSwitchManagers(managers);
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -4100,8 +4126,7 @@ test("a launch rollback leaves a worktree Git cannot answer from inside byte for
     assert.deepEqual(files(worktree), taken, "with everything done in it since");
     assert.equal((manager as unknown as { cleanupJournal: { list(): WorktreeCleanupRecord[] } }).cleanupJournal.list().length, 0);
   } finally {
-    for (const manager of managers) manager.shutdownAll();
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await shutdownLocationSwitchManagers(managers);
     rmSync(root, { recursive: true, force: true });
   }
 });
