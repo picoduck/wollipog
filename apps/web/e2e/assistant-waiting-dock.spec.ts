@@ -120,6 +120,7 @@ for (const theme of ["light", "dark"] as const) {
       await expectTextContrast(dock(page));
       await layout(page, 48);
       expect(await body.evaluate(element => element.clientHeight), "The request body has room to render").toBeGreaterThan(0);
+      await expect(dock(page)).toHaveAttribute("data-clip-end", "");
       await screenshot(page, theme, "tool-and-320percent-notice", 4838);
 
       await dock(page).hover();
@@ -130,10 +131,11 @@ for (const theme of ["light", "dark"] as const) {
         await expectFullyInViewport(content, label);
       }
       const deny = card.getByRole("button", { name: "Deny", exact: true });
-      await approve(card).scrollIntoViewIfNeeded();
+      await page.mouse.wheel(0, 400);
+      await expect(dock(page)).not.toHaveAttribute("data-clip-end");
+      await command.scrollIntoViewIfNeeded();
       await expectFullyInViewport(approve(card), "Approve Once");
       await expectFullyInViewport(deny, "Deny");
-      await command.scrollIntoViewIfNeeded();
       await expectFullyInViewport(command, "Full command");
       await layout(page, 48);
       await screenshot(page, theme, "tool-and-320percent-notice-command", 4838);

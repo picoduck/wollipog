@@ -79,6 +79,7 @@ export function AssistantWaitingDock({ thread, work, onConfirmationAnswered, foc
   const toastClearanceRef = useToastChrome<HTMLDivElement>();
   const heading = useRef<HTMLHeadingElement>(null);
   const list = useRef<HTMLUListElement>(null);
+  useClipEdges(dock);
   useClipEdges(list);
   const headingId = useId();
   const listId = useId();

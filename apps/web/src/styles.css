@@ -7759,6 +7759,7 @@ body.shell-dock-dragging * {
       overflow: auto;
       overscroll-behavior: contain;
     }
+    .assistant-dock[data-clip-end] { box-shadow: inset 0 -1px var(--border-strong); }
     .detail-chat:has(.assistant-spending-notice) .assistant-dock-list:not([data-show-all]),
     .detail-chat:has(.assistant-spending-notice) .assistant-dock-list:not([data-show-all]) .assistant-dock-card-body {
       flex: none;
