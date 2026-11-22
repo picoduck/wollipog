@@ -99,6 +99,8 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // Instructions' file chips (#1980): §11.3 meta chips (`button.chip` with `aria-pressed`, as the
   // issue specifies) that choose which file the one view shows. A view switch, not a form choice.
   ["components/SkillInstructions.tsx", "aria-pressed", 1],
+  // Outcome chips switch the rows shown in the same paged decision log, like the file chips above.
+  ["components/AssistantDecisionHistory.tsx", "aria-pressed", 1],
   // A page-header toggle secondary (§3.1), Sessions' Snoozed (#2159): one on/off filter, never one
   // of N options. The view switch beside it is the SegmentedControl.
   ["components/PageHeader.tsx", "aria-pressed", 1],
