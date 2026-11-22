@@ -60,10 +60,14 @@ test("1440px: Reasoning Effort opens from a compact row, and a window switch kee
   await expect(popover.getByRole("radiogroup", { name: "Model" }).locator('[aria-checked="true"] .menu-check')).toHaveCount(1);
 
   // Stage High, then switch the window: the switch carries High rather than resetting it.
+  const overviewLabel = await row.locator(".menu-text").first().boundingBox();
   await row.click();
   const effort = popover.getByRole("radiogroup", { name: "Reasoning Effort" });
   await expect(effort.locator('[aria-checked="true"] .menu-check')).toHaveCount(1);
-  await effort.getByRole("radio", { name: "High", exact: true }).click();
+  const high = effort.getByRole("radio", { name: "High", exact: true });
+  const optionLabel = await high.locator(".menu-text").boundingBox();
+  expect(Math.abs(overviewLabel!.x - optionLabel!.x)).toBeLessThanOrEqual(1);
+  await high.click();
   await expect(popover.getByRole("button", { name: "Reasoning Effort: High" })).toBeFocused();
   await popover.getByRole("radiogroup", { name: "Context Window" }).getByRole("radio", { name: "200K" }).click();
   const patches = await page.evaluate(() => (window as unknown as { __configPatches?: unknown[] }).__configPatches ?? []);

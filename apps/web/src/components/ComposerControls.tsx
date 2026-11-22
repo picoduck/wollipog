@@ -616,7 +616,9 @@ export function ModelEffortMenuChoices({
   useEffect(() => {
     if (orphaned) detail?.back();
   }, [orphaned, detail]);
-  if (usageDetail && !orphaned) return <div className="model-settings-detail">{sessionUsage}</div>;
+  if (usageDetail && !orphaned) {
+    return <div className="model-settings-detail model-settings-usage-breakdown">{sessionUsage}</div>;
+  }
 
   const currentEffort = pendingEffort?.() ?? effortVal;
   const defaultEffortLabel = selectedModel?.defaultEffort

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { Window } from "happy-dom";
+import { Window, type HTMLButtonElement as HappyButton } from "happy-dom";
 import type { SessionConfig } from "@wollipog/protocol";
 import {
   ApprovalsMenuChoices,
@@ -247,6 +247,56 @@ test("Model Settings tabs between compact rows and wraps while arrows move witho
       "Shift+Tab from an arrowed-to model goes back to search");
     assert.deepEqual(applied, [], "moving focus does not apply an effort or reset the model");
     assert.ok(domWindow.document.querySelector('[role="dialog"]'), "still open");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("the overview shows staged defaults before the session configuration catches up", async () => {
+  const applied: Partial<SessionConfig>[] = [];
+  let pending: Partial<SessionConfig> = {};
+  const standard = { id: "default", name: "Standard", description: "Standard response speed." };
+  const fast = { id: "fast", name: "Fast", description: "Faster responses." };
+  const model = { id: "gpt", displayName: "GPT", defaultEffort: "low" };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const button = (name: string) =>
+    domWindow.document.querySelector<HappyButton>(`button[aria-label="${name}"]`)!;
+  const radio = (label: string) =>
+    [...domWindow.document.querySelectorAll<HappyButton>('[role="radio"]')]
+      .find(option => option.querySelector(".menu-text")?.textContent === label)!;
+  const click = (element: HappyButton) => act(async () => { element.click(); });
+  try {
+    await act(async () => {
+      root.render(
+        <ModelSettingsPopover label="GPT" ariaLabel="Model Settings: GPT">
+          <ModelEffortMenuChoices
+            models={[model]}
+            modelVal={model.id}
+            selectedModel={model}
+            modelEfforts={["low", "high"]}
+            effortVal="high"
+            pendingEffort={() => pending.effort}
+            serviceTierState={{ choices: [standard, fast], selected: fast }}
+            pendingServiceTier={() => pending.serviceTier}
+            apply={(patch) => { applied.push(patch); pending = { ...pending, ...patch }; }}
+          />
+        </ModelSettingsPopover>,
+      );
+    });
+    await click(button("Model Settings: GPT"));
+    await click(button("Reasoning Effort: High"));
+    await click(radio("Default (Low)"));
+    assert.ok(domWindow.document.activeElement === button("Reasoning Effort: Default (Low)"));
+
+    await click(button("Speed: Fast"));
+    await click(radio("Standard"));
+    assert.ok(domWindow.document.activeElement === button("Speed: Standard"));
+    await click(button("Speed: Standard"));
+    assert.equal(radio("Standard").getAttribute("aria-checked"), "true");
+    assert.deepEqual(applied, [{ effort: "" }, { serviceTier: "default" }]);
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

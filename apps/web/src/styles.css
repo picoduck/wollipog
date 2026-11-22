@@ -8920,9 +8920,8 @@ textarea {
   font-variant-numeric: tabular-nums;
 }
 .session-usage-group-capacity { color: var(--text-dim); }
-/* A breakdown in Model Settings' place keeps its popover's type and spacing; on a phone it slides in
-   from the right, as a dialog pushed onto a sheet does (§7.5). */
-.model-settings-detail {
+/* Usage breakdowns keep their own type and spacing. Selector choices use the same inset as the overview. */
+.model-settings-usage-breakdown {
   padding: var(--space-2) var(--space-2) var(--space-1);
   font-size: var(--text-sm);
 }
