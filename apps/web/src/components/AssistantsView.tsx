@@ -114,7 +114,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   const generation = useRef(0);
   /** A read is in flight, and whether another was asked for while it was. */
   const reading = useRef(false);
-  const rereadQueued = useRef(false);
+  const rereadQueued = useRef<"all" | "active" | null>(null);
   // The control plane publishes each thread change (`assistant_thread_upsert`); the store keeps the
   // newest of them, numbered. `appliedSeq` is the newest one the list reflects.
   const events = useStoreSelector((state) => state.assistantThreadEvents);
@@ -123,20 +123,27 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   const appliedSeq = useRef(0);
 
   /** Reads the list, superseding any read still in flight: a mutation's reconciliation and Retry. */
-  const load = useCallback(async () => {
+  const load = useCallback(async (scope: "all" | "active" = "all") => {
     const mine = ++generation.current;
     reading.current = true;
     // Events that land while the read is in flight are newer than what it returns.
     const startSeq = eventsRef.current?.at(-1)?.seq ?? 0;
     try {
-      const { threads } = await api.assistantThreads({ includeArchived: true });
+      const { threads } = await api.assistantThreads(scope === "all" ? { includeArchived: true } : undefined);
       if (mine === generation.current) {
         const kept = eventsRef.current ?? [];
-        setList({ kind: "ready", threads: applyAssistantThreadEvents(threads, kept, startSeq) });
+        setList((previous) => {
+          // A working-thread poll retains the archive from full reads and live upserts.
+          const listed = new Set(threads.map((thread) => thread.id));
+          const archives = scope === "active" && previous.kind === "ready"
+            ? previous.threads.filter((thread) => thread.status === "archived" && !listed.has(thread.id))
+            : [];
+          return { kind: "ready", threads: applyAssistantThreadEvents([...threads, ...archives], kept, startSeq) };
+        });
         appliedSeq.current = Math.max(appliedSeq.current, kept.at(-1)?.seq ?? 0);
         // More changed during the read than the store kept: what was dropped may be one this read
         // predates, so read again once this one has landed.
-        if (!replayComplete(kept, startSeq)) rereadQueued.current = true;
+        if (!replayComplete(kept, startSeq)) rereadQueued.current = "all";
       }
     } catch (cause) {
       if (mine !== generation.current) return;
@@ -152,17 +159,19 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
         reading.current = false;
         // Activity during the read asked for a newer list: read once more, now that this one landed.
         if (rereadQueued.current) {
-          rereadQueued.current = false;
-          void load();
+          const scope = rereadQueued.current;
+          rereadQueued.current = null;
+          void load(scope);
         }
       }
     }
   }, [api]);
   /** A background refresh: behind a read in flight it waits its turn rather than discarding it, so a
    * session that streams faster than the list answers still sees each answer land. */
-  const refresh = useCallback(() => {
-    if (reading.current) rereadQueued.current = true;
-    else void load();
+  const refresh = useCallback((scope: "all" | "active" = "all") => {
+    if (reading.current) {
+      if (scope === "all" || rereadQueued.current === null) rereadQueued.current = scope;
+    } else void load(scope);
   }, [load]);
 
   useEffect(() => { void load(); }, [load]);
@@ -251,7 +260,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
     })));
   const wasLaunchedWorkActive = useRef(false);
   useEffect(() => {
-    if (wasLaunchedWorkActive.current && !launchedWorkActive) refresh();
+    if (wasLaunchedWorkActive.current && !launchedWorkActive) refresh("active");
     wasLaunchedWorkActive.current = launchedWorkActive;
   }, [launchedWorkActive, refresh]);
   const refreshInBackground = launchedWorkActive || threads.some((thread) => thread.status === "working");
@@ -271,7 +280,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   }, [api, dismissedBudgets, threads]);
   useEffect(() => {
     if (!refreshInBackground) return;
-    const timer = setInterval(refresh, WORKING_POLL_MS);
+    const timer = setInterval(() => refresh("active"), WORKING_POLL_MS);
     return () => clearInterval(timer);
   }, [refreshInBackground, refresh]);
 

@@ -5,6 +5,36 @@ import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizont
 const inbox = (page: Page) => page.getByRole("complementary", { name: "Assistants" });
 const rows = (list: Locator) => list.locator("[data-thread-id]");
 
+test("background polls refresh active threads and keep the archived list", async ({ page }) => {
+  await page.clock.install();
+  await page.goto("/assistants-e2e.html?threads=inbox&track-list-reads");
+  const list = inbox(page);
+  await expect(list.getByRole("button", { name: /^Archived Threads 1/ })).toBeVisible();
+  const body = page.locator("body");
+  const fullReads = await body.getAttribute("data-full-thread-reads");
+  await page.clock.fastForward(16_000);
+  await expect(body).toHaveAttribute("data-active-thread-reads", "1");
+  await expect(body).toHaveAttribute("data-full-thread-reads", fullReads!);
+  await list.getByRole("button", { name: /^Archived Threads 1/ }).click();
+  await expect(list.getByRole("button", { name: /^Retire the Old Runner/ })).toBeVisible();
+});
+
+test("archiving a thread removes transcript edit actions and keeps copy", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, "light");
+  const list = inbox(page);
+  await list.getByRole("button", { name: /^Triage Open Issues/ }).click();
+  const prompt = page.locator(".tl-row.user").filter({ hasText: "Last night's CI had two failures." });
+  await expect(prompt.getByRole("button", { name: "Edit as a New Turn" })).toHaveCount(1);
+  await page.getByRole("button", { name: "Thread Actions" }).click();
+  await page.getByRole("menuitem", { name: "Archive Thread…" }).click();
+  await page.getByRole("dialog", { name: "Archive Thread" }).getByRole("button", { name: "Archive Thread" }).click();
+  await list.getByRole("button", { name: /^Archived Threads 2/ }).click();
+  await list.getByRole("button", { name: /^Triage Open Issues/ }).click();
+  await expect(prompt.getByRole("button", { name: "Copy Message" })).toHaveCount(1);
+  await expect(prompt.getByRole("button", { name: "Edit as a New Turn" })).toHaveCount(0);
+});
+
 async function open(page: Page, theme: string, query = "threads=inbox") {
   await page.clock.setFixedTime(Date.UTC(2026, 10, 22, 17, 0));
   await page.goto(`/assistants-e2e.html?theme=${theme}&${query}`);

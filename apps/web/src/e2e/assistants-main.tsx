@@ -826,6 +826,10 @@ const client = {
   }),
   artifactUploadSettings: async () => ({ preference: "manual" }),
   assistantThreads: (options: { includeArchived?: boolean } = {}) => {
+    if (params.has("track-list-reads")) {
+      const key = options.includeArchived ? "fullThreadReads" : "activeThreadReads";
+      document.body.dataset[key] = String(Number(document.body.dataset[key] ?? 0) + 1);
+    }
     if (scenario === "failed") return Promise.reject(new ApiError("Service unavailable", 503));
     const refusal = refused();
     if (refusal) return refusal;

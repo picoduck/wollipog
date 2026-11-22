@@ -879,7 +879,7 @@ test("thread previews summarize attention, spending and the latest reply for the
     const latest = async () => (await h.call("GET", path)).body.threads[0]?.preview;
     const now = Date.now();
     const reply = h.db.appendEvent(sessionId, {
-      kind: "agent_message", final: true, text: "I checked the rollout. The upload test\n now passes.",
+      kind: "agent_message", final: true, text: "I checked the rollout. The upload test\n now \u202epasses.",
     }, now);
     h.db.updateSessionStatus(sessionId, "idle", now);
     h.hub.sessionEvent(reply);

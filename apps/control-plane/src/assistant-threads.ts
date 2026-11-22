@@ -150,8 +150,13 @@ export function assistantThreadStatus(state: StoredThreadState, session: Session
 const previewSentences = new Intl.Segmenter("en", { granularity: "sentence" });
 const previewDollars = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 
+function previewLine(text: string): string {
+  return text.replace(/\p{Cf}/gu, (character) => character === "\u200d" ? character : "")
+    .replace(/[\p{Cc}\s]+/gu, " ").trim();
+}
+
 function singleLinePreview(text: string): string | undefined {
-  const characters = Array.from(text.replace(/[\p{Cc}\s]+/gu, " ").trim());
+  const characters = Array.from(text);
   return characters.length > 240 ? characters.slice(0, 239).join("") + "…" : characters.join("") || undefined;
 }
 
@@ -165,7 +170,7 @@ function threadPreview(
     const [confirmation] = confirmations;
     const subject = confirmation ? `${confirmation.title}: ${confirmation.target.label}` : request?.title;
     const more = confirmations.length + requests.length - 1;
-    const target = subject && singleLinePreview(subject);
+    const target = subject && previewLine(subject);
     if (!target) return "Waiting for you…";
     const shortTarget = Array.from(target).slice(0, 180).join("");
     return `Waiting for you: ${shortTarget}${shortTarget !== target ? "…" : ""}${more > 0 ? `, and ${more} more` : ""}`;
@@ -173,7 +178,7 @@ function threadPreview(
   if (status !== "archived" && budget !== null && spentUsd >= 0.8 * budget) {
     return `Spent ${previewDollars.format(spentUsd)} of its ${previewDollars.format(budget)} budget.`;
   }
-  const reply = latestReply()?.replace(/[\p{Cc}\s]+/gu, " ").trim();
+  const reply = previewLine(latestReply() ?? "");
   if (!reply) return undefined;
   let last = "";
   for (const { segment } of previewSentences.segment(reply)) last = segment;
