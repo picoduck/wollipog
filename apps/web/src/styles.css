@@ -7751,6 +7751,21 @@ body.shell-dock-dragging * {
     }
   }
 }
+@container chat-reading (max-height: 220px) {
+  @media (min-width: 761px) {
+    /* The header and actions leave too little room for a separately scrolling body here.
+       Let the whole dock scroll within the same cap, so even the header can move out of the way. */
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock:has(> .assistant-dock-list:not([data-show-all])) {
+      overflow: auto;
+      overscroll-behavior: contain;
+    }
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock-list:not([data-show-all]),
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock-list:not([data-show-all]) .assistant-dock-card-body {
+      flex: none;
+      overflow: visible;
+    }
+  }
+}
 @media (pointer: coarse) {
   .assistant-dock :is(.btn.sm, .icon-btn.sm) { --control-h-sm: var(--control-h); }
   .assistant-dock :is(.btn.sm, .icon-btn.sm)::after { content: none; }
