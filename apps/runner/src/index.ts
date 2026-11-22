@@ -537,6 +537,7 @@ const agentControlRelays = new AgentControlRelaySockets(relayAgentControlRequest
 const assistantProxies = new AssistantProxies({
   // Kept in the hook state directory, which every sandboxed launch hides from other sessions.
   configDir: claudeHookHost.configDir,
+  credentialRejected: (sessionId, rejected) => sessions.setAssistantToolsUnavailable(sessionId, rejected),
   register: (sessionId, tokenHash) => {
     if (ws && ws.readyState === WebSocket.OPEN && registered) sendUp({ type: "assistant_credential", sessionId, tokenHash });
   },

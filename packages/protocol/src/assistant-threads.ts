@@ -157,6 +157,16 @@ export interface ChangeAssistantThreadHarnessRequest {
   providerAccountRef: string;
 }
 
+/** Current backing-session conditions. Error references point into the authorized transcript;
+ * provider messages and tool credentials are never copied into list or status payloads. */
+export interface AssistantThreadHealth {
+  usageLimit?: { resetsAt?: number };
+  turn?: { kind: "failed" | "rejected"; errorId: string; promptTurnId?: string };
+  automaticTurnsHeld?: string;
+  signInNeeded?: true;
+  toolsUnavailable?: true;
+}
+
 export interface AssistantThread {
   /** Absent on control planes that support denial only. */
   evidenceReview?: AssistantEvidenceReviewAvailability;
@@ -171,6 +181,9 @@ export interface AssistantThread {
   access: AssistantThreadAccess;
   /** The thread-scoped Assistant connection, once minted. Null until the runner proxy holds one. */
   connectionId: string | null;
+  /** Absent when the backing runner does not publish thread health. */
+  health?: AssistantThreadHealth;
+  runnerId?: string;
   /** Owner-only label of the currently bound account. */
   providerAccountLabel?: string;
   /** An older control plane does not offer account changes. */

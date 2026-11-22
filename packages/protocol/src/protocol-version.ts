@@ -1563,6 +1563,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // v407 slot
   // v408 slot
   // v409 slot
+  // 409: Optional Assistant thread health and correlated transcript error notices (Refs #4813).
+  409,
   // v410 slot
   // v411 slot
   // v412 slot

@@ -119,11 +119,16 @@ import {
 } from "./common.js";
 import { SessionPreviewBar, type PreviewSessionMenuOpener } from "./SessionPreviewBar.js";
 import { Notice } from "./Notice.js";
+import { RequestCard } from "./requests/RequestCard.js";
+import { ProviderLoginCard } from "./ProviderLoginCard.js";
+import { AssistantThreadProblemNotice } from "./AssistantThreadProblemNotice.js";
+import type { AssistantThreadProblem } from "../assistant-thread-health.js";
 import { LaterActivityControl } from "./LaterActivityControl.js";
 import { QueuedMessages, queuedMessageExcerpt } from "./QueuedMessages.js";
 import { sessionArchivedAtRest } from "../status-meta.js";
 import {
   EventTimeline,
+  TurnFailedNotice,
   type TimelineReadingState,
   TranscriptErrorAlert,
   transcriptTurnsById,
@@ -650,6 +655,11 @@ export type SessionDetailProps = {
   assistantRequestDock?: (focusComposer: () => void) => ReactNode;
   /** Usage warnings from the Assistant thread that owns this conversation. */
   assistantSpendingNotices?: readonly SessionNoticeEntry[];
+  assistantThreadHealth?: {
+    thread: import("@wollipog/protocol").AssistantThread;
+    problems: readonly AssistantThreadProblem[];
+    onSwitchAccount: () => void;
+  };
   /** Transport-owned policy seam. Native passthrough commands default to the existing send path. */
   providerCommandAttachmentPolicy?: ProviderComposerCommand["attachmentPolicy"];
   /** Registers preview-only paging ownership and live-follow actions with the Inbox key layer. */
@@ -1097,12 +1107,22 @@ function sameComposerTriggers(left: ComposerTriggers, right: ComposerTriggers): 
  * shows the chunks streamed into the trailing reply since `items` was derived from
  * `itemsDerivedFrom`, which render the transcript without the session view around it (#2763).
  */
-const ProfiledEventTimeline = memo(function ProfiledEventTimeline({ liveSessionId, itemsDerivedFrom, readLocal, items, ...props }:
-  ComponentProps<typeof EventTimeline> & { liveSessionId: string; itemsDerivedFrom: SessionEvent[] | undefined; readLocal?: boolean }) {
+const ProfiledEventTimeline = memo(function ProfiledEventTimeline({ liveSessionId, itemsDerivedFrom, readLocal, items,
+  assistantTurnErrorId, assistantHoldErrorId, ...props }:
+  ComponentProps<typeof EventTimeline> & {
+    liveSessionId: string; itemsDerivedFrom: SessionEvent[] | undefined; readLocal?: boolean;
+    assistantTurnErrorId?: string; assistantHoldErrorId?: string;
+  }) {
   const liveItems = useLiveTimelineTail(liveSessionId, readLocal ? undefined : itemsDerivedFrom, items);
+  const visibleItems = useMemo(() => {
+    const source = readLocal ? items : liveItems;
+    if (readLocal || (!assistantTurnErrorId && !assistantHoldErrorId)) return source;
+    return source.filter((item) => item.kind !== "error" || !item.assistantThreadErrorId ||
+      (item.assistantThreadErrorId !== assistantTurnErrorId && item.assistantThreadErrorId !== assistantHoldErrorId));
+  }, [readLocal, items, liveItems, assistantTurnErrorId, assistantHoldErrorId]);
   return (
     <Profiler id={TRANSCRIPT_PROBE} onRender={reportRenderProbe}>
-      <EventTimeline {...props} items={readLocal ? items : liveItems} />
+      <EventTimeline {...props} items={visibleItems} />
     </Profiler>
   );
 });
@@ -1175,6 +1195,7 @@ function SessionDetailLoaded({
   assistantPanel,
   assistantRequestDock,
   assistantSpendingNotices = [],
+  assistantThreadHealth,
   providerCommandAttachmentPolicy = "send",
   onPreviewNavigationReady,
   onPreviewForkReady,
@@ -1369,7 +1390,10 @@ function SessionDetailLoaded({
   // composer (#2179, #2205), in attention priority order; a worker's stay in the Agents panel.
   const prioritizedRequests = useMemo(() => prioritizedPendingRequests(session.pendingApproval),
     [session.pendingApproval]);
-  const dockedRequests = useMemo(() => dockRequests(prioritizedRequests), [prioritizedRequests]);
+  const signInNeededInSlot = assistantThreadHealth?.problems.some((problem) => problem.key === "sign_in_needed") ?? false;
+  const dockedRequests = useMemo(() => dockRequests(signInNeededInSlot
+    ? prioritizedRequests.filter((request) => request.kind !== "authentication")
+    : prioritizedRequests), [prioritizedRequests, signInNeededInSlot]);
   const topRequestDocked = prioritizedRequests[0] !== undefined && dockedRequests.includes(prioritizedRequests[0]);
   useEvidenceDraftRetirement(session.id, dockedRequests);
   const chatReadingRef = useRef<HTMLDivElement>(null);
@@ -5047,7 +5071,84 @@ function SessionDetailLoaded({
   const accountSwitchApplicable = sessionAccountSwitchApplicable(session);
   const accountSwitchSupported = runnerSupportsProtocol(runner?.protocolVersion, "sessionProviderAccountSwitch");
   const sessionNotices: SessionNoticeEntry[] = [...assistantSpendingNotices];
-  const spendingBelowDock = assistantSpendingNotices.length > 0;
+  const noticesBelowDock = assistantSpendingNotices.length > 0 || assistantThreadHealth !== undefined;
+  const assistantHealth = assistantThreadHealth?.thread.health;
+  const assistantReconnecting = assistantThreadHealth?.problems.some((problem) => problem.key === "reconnecting");
+  const assistantTurnErrorId = assistantHealth?.turn?.errorId;
+  const assistantPromptTurnId = assistantHealth?.turn?.promptTurnId;
+  const assistantHoldErrorId = assistantHealth?.automaticTurnsHeld;
+  const assistantTurnItems = useMemo(() => {
+    if (!assistantTurnErrorId && !assistantHoldErrorId) return {};
+    const error = items.find((item): item is Extract<TimelineItem, { kind: "error" }> =>
+      item.kind === "error" && item.assistantThreadErrorId === assistantTurnErrorId);
+    const hold = items.find((item): item is Extract<TimelineItem, { kind: "error" }> =>
+      item.kind === "error" && item.assistantThreadErrorId === assistantHoldErrorId);
+    const prompt = assistantPromptTurnId === undefined ? undefined
+      : items.find((item): item is Extract<TimelineItem, { kind: "user_message" }> =>
+        item.kind === "user_message" && item.turnId === assistantPromptTurnId && item.deliveryIntent !== "steer");
+    return { error, hold, prompt };
+  }, [items, assistantTurnErrorId, assistantHoldErrorId, assistantPromptTurnId]);
+  const authenticationRequest = signInNeededInSlot
+    ? prioritizedRequests.find((request) => request.kind === "authentication") : undefined;
+  const [assistantSignInOpen, setAssistantSignInOpen] = useState(false);
+  const [assistantSignInError, setAssistantSignInError] = useState<string>();
+  const [assistantSignInPending, setAssistantSignInPending] = useState(false);
+  const assistantSignInFlight = useRef(false);
+  const openThreadMachine = () => navigate({ name: "runners", section: "machines", machineId: session.runnerId });
+  const assistantLogin = runner?.providerLogins?.find((login) =>
+    (login.sessionId === session.id || (!authenticationRequest && login.accountId === session.providerAccountId)) &&
+    login.status !== "succeeded" && login.status !== "cancelled");
+  const signInToThread = async () => {
+    if (assistantSignInFlight.current || !runnerOnline) return;
+    setAssistantSignInError(undefined);
+    if (assistantLogin || (authenticationRequest && !authenticationRequest.options.some((option) => option.optionId === "auth:login"))) {
+      setAssistantSignInOpen(true);
+      return;
+    }
+    assistantSignInFlight.current = true;
+    setAssistantSignInPending(true);
+    try {
+      if (authenticationRequest) {
+        loadSession(await api.approve(session.id, { requestId: authenticationRequest.requestId, optionId: "auth:login" }));
+      } else if (session.providerAccountId) {
+        await api.startProviderLogin(session.runnerId, { accountId: session.providerAccountId });
+      }
+      setAssistantSignInOpen(true);
+    } catch {
+      setAssistantSignInError("The sign-in couldn’t start. Try again.");
+    } finally {
+      assistantSignInFlight.current = false;
+      setAssistantSignInPending(false);
+    }
+  };
+  if (assistantThreadHealth) {
+    const { thread, problems, onSwitchAccount } = assistantThreadHealth;
+    for (const problem of problems) {
+      sessionNotices.push({
+        ...problem,
+        title: problem.key === "machine_offline" ? runnerDisp.name + " Is Offline" : problem.title,
+        render: ({ trailing }) => problem.key === "turn_failed" ? (
+          <TurnFailedNotice message={assistantTurnItems.error?.message ?? ""}
+            prompt={assistantTurnItems.prompt} retryControl={turnRetry} trailing={trailing} kept={Boolean(assistantPromptTurnId)} />
+        ) : (
+          <AssistantThreadProblemNotice key={problem.key} problem={problem} thread={thread} machine={runnerDisp.name}
+            trailing={trailing} details={problem.key === "automatic_turns_held"
+              ? assistantTurnItems.hold?.message : assistantTurnItems.error?.message}
+            switchAccount={<button type="button" className={problem.key === "usage_limit" ? "btn sm primary" : "btn sm ghost"}
+              disabled={!runnerOnline || busy || thread.accountChangeSupported !== true}
+              onClick={onSwitchAccount}>Switch Account…</button>}
+            signIn={<BusyButton className="btn sm primary" busy={assistantSignInPending} progress="Starting sign-in…"
+              disabled={!runnerOnline || runner?.canManage === false || (!authenticationRequest && !session.providerAccountId)}
+              onClick={() => void signInToThread()}>Sign In…</BusyButton>}
+            restart={<BusyButton className="btn sm primary" busy={restartPending} progress="Restarting the thread…"
+              disabled={!runnerOnline || busy || restartRefusal !== null || headerRestartPending}
+              onClick={() => void restartFromRefusal()}>Restart Thread</BusyButton>}
+            openMachine={<button type="button" className="btn sm ghost" onClick={openThreadMachine}>Open Machine</button>}
+            actionError={problem.key === "sign_in_needed" ? assistantSignInError : undefined} />
+        ),
+      });
+    }
+  }
   if (worktreeRecovery && worktreeMissingOrder) {
     sessionNotices.push({
       ...worktreeMissingOrder,
@@ -7446,7 +7547,7 @@ function SessionDetailLoaded({
                 Recent activity is readable as a snapshot while full history loads. Refresh to check for new activity.
               </div>
             )}
-            {!historyPreview.active && (transcript.notice === "stale" || transcript.notice === "error") && (
+            {!historyPreview.active && ((transcript.notice === "stale" && !assistantReconnecting) || transcript.notice === "error") && (
               <div className="transcript-history-band">
                 <LiveTranscriptHistoryNotice
                   sessionId={sessionId}
@@ -7583,6 +7684,8 @@ function SessionDetailLoaded({
                         driver={session.driver}
                         items={timelineItems}
                         itemsDerivedFrom={evs}
+                        assistantTurnErrorId={assistantTurnErrorId}
+                        assistantHoldErrorId={assistantHoldErrorId}
                         liveSessionId={sessionId}
                         sessionActive={isTimelineSessionActive(session.status) ||
                           (eventWindow?.openingStartSeq !== undefined && eventWindow.laterGap !== undefined)}
@@ -7691,12 +7794,11 @@ function SessionDetailLoaded({
             <span className="sr-only" role="status" data-transcript-recovery-status>{recoveryAnnouncement}</span>
           </div>
           {assistantRequestDock?.(focusComposerOrTitle)}
-          {/* Requests usually lead the slot. A thread with spending notices keeps the request
-              dock visible above the composer's notice slot. */}
+          {/* In Assistant threads requests stay above the composer's notice slot. */}
           {mode === "expanded" && requestDockLead && (
             <SessionNoticeSlot
               sessionId={session.id}
-              entries={spendingBelowDock ? [] : sessionNotices}
+              entries={noticesBelowDock ? [] : sessionNotices}
               lead={requestDockLead}
               onFocusLost={focusComposerOrTitle}
             />
@@ -7718,8 +7820,18 @@ function SessionDetailLoaded({
             >
             {/* The one notice slot (§13.2): the most severe session condition, the rest behind
                 "+N More". Session notices are entries of it, never banners of their own. */}
-            {(!requestDockLead || spendingBelowDock) && (
-              <SessionNoticeSlot sessionId={session.id} entries={sessionNotices} onFocusLost={focusComposerOrTitle} />
+            {(!requestDockLead || noticesBelowDock) && (
+              <SessionNoticeSlot sessionId={session.id} entries={sessionNotices} onFocusLost={focusComposerOrTitle}
+                className={assistantThreadHealth ? "assistant-thread-notice-slot" : undefined}
+                menuClassName={assistantThreadHealth ? "assistant-thread-notice-slot" : undefined} />
+            )}
+            {assistantSignInOpen && signInNeededInSlot && (
+              <Modal title="Provider Sign-In" onClose={() => setAssistantSignInOpen(false)}>
+                {authenticationRequest ? <RequestCard session={session} request={authenticationRequest}
+                  runnerOnline={runnerOnline} presentation="panel" onSessionUpdate={loadSession} />
+                  : assistantLogin ? <ProviderLoginCard runnerId={session.runnerId} login={assistantLogin} embedded />
+                  : <p>Starting sign-in…</p>}
+              </Modal>
             )}
             {switchAccountOpen && (
               <SwitchAccountDialog

@@ -15,6 +15,7 @@ import {
   type ProviderAccountDefinition,
   type RunnerMetadata,
   type StartSessionMessage,
+  type SessionSnapshot,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
@@ -837,4 +838,30 @@ test("install adds the retirement columns to a membership table an earlier build
     const columns = (db.prepare("PRAGMA table_info(assistant_thread_members)").all() as Array<{ name: string }>).map((column) => column.name);
     assert.ok(columns.includes("retired_cost_usd") && columns.includes("retired_cap_usd"), columns.join(", "));
   } finally { db.close(); }
+});
+
+test("thread health is additive on owner reads and upserts, and can clear without changing the thread", async () => {
+  const h = await harness();
+  try {
+    const path = "/api/assistant-threads";
+    const thread = (await h.call("POST", path, {})).body.thread as AssistantThread;
+    assert.equal(thread.health, undefined);
+    const snapshot: SessionSnapshot = {
+      id: thread.sessionId, workspaceId: "repo", agentId: "claude", title: thread.title,
+      status: "idle", driver: "claude-code", useWorktree: false, worktreePath: null,
+      config: {}, preview: null, pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0,
+      seq: 0, createdAt: thread.createdAt, updatedAt: Date.now(),
+    };
+    const health = { turn: { kind: "failed", errorId: "transcript-error" }, toolsUnavailable: true } as const;
+    h.svc.applySessionRuntimeUpdate("r", { ...snapshot, assistantThreadHealth: health });
+    const listed = (await h.call("GET", path)).body.threads[0] as AssistantThread;
+    assert.deepEqual(listed.health, health);
+    assert.equal(listed.runnerId, "r");
+    assert.deepEqual(h.dashboard.threads().at(-1)?.health, health);
+    assert.deepEqual(h.stranger.threads(), []);
+    h.svc.applySessionRuntimeUpdate("r", snapshot);
+    assert.deepEqual((await h.call("GET", path + "/" + thread.id)).body.thread.health, health, "an omitted field is not a clear");
+    h.svc.applySessionRuntimeUpdate("r", { ...snapshot, assistantThreadHealth: {} });
+    assert.deepEqual((await h.call("GET", path + "/" + thread.id)).body.thread.health, {});
+  } finally { await h.close(); }
 });

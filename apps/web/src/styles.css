@@ -7729,7 +7729,7 @@ body.shell-dock-dragging * {
 }
 /* At phone widths that fit all three actions, keep Open Session beside the equal resolving pair. */
 @media (min-width: 380px) and (max-width: 760px) {
-  .detail-chat:has(.assistant-spending-notice) .assistant-dock-resolve:has(> [data-dock-action="approve"]) {
+  .detail-chat:has(.assistant-spending-notice, .assistant-thread-notice-slot) .assistant-dock-resolve:has(> [data-dock-action="approve"]) {
     flex: 1;
     width: auto;
   }
@@ -13406,6 +13406,16 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   background: repeating-linear-gradient(135deg, var(--tone) 0 2px, var(--bg-elev-3) 2px 5px);
 }
 .assistant-spending-total { font: var(--type-small); font-variant-numeric: tabular-nums; }
+@media (pointer: coarse) {
+  .assistant-thread-notice-slot .btn.sm { --control-h-sm: var(--control-h); }
+  .assistant-thread-notice-slot .btn.sm::after { content: none; }
+  .menu.assistant-thread-notice-slot > .menu-item + .menu-item { margin-top: var(--space-2); }
+}
+@media (max-width: 760px) {
+  .detail-chat:has(.assistant-dock) .assistant-thread-notice-slot[data-notice-key="tools_unavailable"] > .notice {
+    padding-block: var(--space-2);
+  }
+}
 .session-notice-slot .assistant-spending-notice .notice-actions { flex-wrap: wrap; }
 .session-notice-slot .assistant-spending-notice .notice-actions > .btn:first-child { flex: none; }
 @media (min-width: 1000px) and (max-height: 600px) {

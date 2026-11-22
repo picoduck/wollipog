@@ -117,6 +117,13 @@ export const SESSION_NOTICE_RANK = {
   // A queued message whose delivery failed or could not be confirmed (#2178), after the composer's
   // own entries: the draft in hand comes before a message already sent.
   queuedMessageError: 16,
+  assistantToolsUnavailable: 5.1,
+  assistantSignInNeeded: 5.2,
+  assistantTurnFailed: 5.3,
+  assistantUsageLimit: 5.4,
+  assistantAutomaticTurnsHeld: 5.5,
+  assistantMachineOffline: 5.6,
+  assistantReconnecting: 6.5,
   assistantBudget: 17,
   assistantLaunchLimit: 18,
   assistantNearBudget: 19,
@@ -208,7 +215,7 @@ export function revealSessionNotice(sessionId: string, key: string, focus: boole
 }
 
 export function SessionNoticeSlot({
-  sessionId, entries, lead, label = "Session Notices", className, order = "severity", onFocusLost, claimRemovedFocus,
+  sessionId, entries, lead, label = "Session Notices", className, menuClassName, order = "severity", onFocusLost, claimRemovedFocus,
 }: {
   /** Whose info dismissals these are. The Sessions list's slot passes its own fixed scope. */
   sessionId: string;
@@ -218,6 +225,7 @@ export function SessionNoticeSlot({
   /** The "+N More" menu's name, Title Case. */
   label?: string;
   className?: string;
+  menuClassName?: string;
   /** Which entry shows first: the most severe (the session, list and terminal slots), or the lowest
    * rank (the side panel's, whose one table already orders its severities). */
   order?: "severity" | "rank";
@@ -348,6 +356,7 @@ export function SessionNoticeSlot({
           anchor={{ trigger: menu.triggerRef }}
           id={menu.menuId}
           label={label}
+          className={menuClassName}
           align="end"
           onDismiss={() => menu.close(true)}
           onKeyDown={menu.onMenuKeyDown}

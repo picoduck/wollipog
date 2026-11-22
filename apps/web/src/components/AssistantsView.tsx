@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useApi } from "../api-context.js";
 import type { ApiClient } from "../api.js";
+import { assistantThreadProblems } from "../assistant-thread-health.js";
 import { threadSpendingCopy, threadSpendingStates } from "../assistant-thread-spending.js";
 import {
   applyAssistantThreadEvents,
@@ -32,7 +33,7 @@ import { NewAssistantThreadDialog, THREADS_UNAVAILABLE_MESSAGE } from "./NewAssi
 import { Notice } from "./Notice.js";
 import { ActionsMenu, DetailBar, PageHeader, type ActionsMenuChoice, type PageMenuAction } from "./PageHeader.js";
 import { SessionDetail } from "./SessionDetail.js";
-import { SESSION_NOTICE_RANK, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
+import { compareSessionNotices, SESSION_NOTICE_RANK, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
 import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -90,6 +91,8 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   const { confirm, showToast } = useFeedback();
   const isMobile = useIsMobile();
   const conn = useStoreSelector((state) => state.conn);
+  const runners = useStoreSelector((state) => state.runners);
+  const [accountSettingsFor, setAccountSettingsFor] = useState<string | null>(null);
   const panel = useAssistantPanelState();
   const waitingDock = useRef<AssistantWaitingDockHandle>(null);
   const [list, setList] = useState<ListState>({ kind: "loading" });
@@ -166,6 +169,9 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   const threads = list.kind === "ready" ? list.threads : [];
   const listed = threadId === undefined ? undefined : threads.find((thread) => thread.id === threadId);
   const selected = listed ?? (extra?.id === threadId ? extra : undefined);
+  const problemsFor = (thread: AssistantThread) => assistantThreadProblems(thread, conn,
+    thread.runnerId ? runners.get(thread.runnerId) : undefined);
+  const badgeFor = (thread: AssistantThread, hideDone = false) => threadStatusBadge(thread, problemsFor(thread)[0], hideDone);
   const model = useStoreSelector((state) => {
     const backing = selected ? state.sessions.get(selected.sessionId) : undefined;
     return backing?.resolvedModel ?? backing?.model;
@@ -411,7 +417,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
           title={selected ? assistantThreadTitle(selected) : "Thread"}
           backLabel={backLabel("assistants")}
           onBack={toList}
-          status={selected ? threadBarStatus(selected) : undefined}
+          status={selected ? badgeFor(selected, true) : undefined}
           menu={selected ? threadMenu(selected) : []}
           menuLabel="Thread Actions"
           menuSheetTitle={selected ? assistantThreadTitle(selected) : undefined}
@@ -434,6 +440,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
               onOpen={openThread}
               onNewThread={() => setCreating(true)}
               onRetry={() => void load()}
+              badgeFor={badgeFor}
             />
           </div>
         </aside>
@@ -501,6 +508,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
                   thread={selected}
                   work={launchedWork!}
                   menu={threadMenu(selected)}
+                  status={badgeFor(selected, true)}
                   sidePanelOpen={panel.open}
                   onToggleSidePanel={panel.toggle}
                 />
@@ -513,6 +521,11 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
                 focusComposer={focusComposer}
               />}
               assistantSpendingNotices={spendingNotices}
+              assistantThreadHealth={selected.health ? {
+                thread: selected,
+                problems: problemsFor(selected),
+                onSwitchAccount: () => setAccountSettingsFor(selected.id),
+              } : undefined}
             />
           )}
         </div>
@@ -539,14 +552,18 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
           }}
         />
       )}
-      {limits && selected && (
+      {selected && (limits || accountSettingsFor === selected.id) && (
         <AssistantThreadLimitsDialog
           key={selected.id}
           thread={selected}
           startAtSpending={limits === "spending"}
+          startAtAccount={accountSettingsFor === selected.id}
           model={model ? resolvedModelLabel(model) : undefined}
           effort={effort ? effortLabel(effort) : undefined}
-          onClose={() => navigate({ name: "assistants", threadId: selected.id }, { replace: true })}
+          onClose={() => {
+            setAccountSettingsFor(null);
+            if (limits) navigate({ name: "assistants", threadId: selected.id }, { replace: true });
+          }}
           onChanged={replace}
         />
       )}
@@ -565,12 +582,13 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
 }
 
 /** The list pane's threads and New Thread action. */
-function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
+function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry, badgeFor }: {
   list: ListState;
   selectedId: string | null;
   onOpen: (threadId: string) => void;
   onNewThread: () => void;
   onRetry: () => void;
+  badgeFor: (thread: AssistantThread) => React.ReactNode;
 }) {
   const threads = list.kind === "ready" ? list.threads : [];
   // Re-renders each row's "5m ago" as time passes.
@@ -627,7 +645,7 @@ function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
                   <span className="row-body">
                     <span className="row-line">
                       <span className="row-title" title={assistantThreadTitle(thread)}>{assistantThreadTitle(thread)}</span>
-                      {threadStatusBadge(thread)}
+                      {badgeFor(thread)}
                     </span>
                     <span className="row-sub">
                       {assistantThreadHarnessLabel(thread.harness)} · {relativeTime(thread.lastActivityAt)}
@@ -644,10 +662,11 @@ function ThreadList({ list, selectedId, onOpen, onNewThread, onRetry }: {
 }
 
 /** The desktop thread bar spans the conversation and the side panel that opens beneath it. */
-function ThreadBar({ thread, work, menu, sidePanelOpen, onToggleSidePanel }: {
+function ThreadBar({ thread, work, menu, status, sidePanelOpen, onToggleSidePanel }: {
   thread: AssistantThread;
   work: LaunchedWork;
   menu: PageMenuAction[];
+  status: React.ReactNode;
   sidePanelOpen: boolean;
   onToggleSidePanel: () => void;
 }) {
@@ -655,7 +674,7 @@ function ThreadBar({ thread, work, menu, sidePanelOpen, onToggleSidePanel }: {
     <header className="detail-bar assistant-thread-bar">
       <div className="detail-bar-heading">
         <ThreadBarTitle title={assistantThreadTitle(thread)} />
-        {threadBarStatus(thread)}
+        {status}
       </div>
       <div className="detail-bar-actions">
         <ActionsMenu label="Thread Actions" items={menu} />
@@ -666,13 +685,16 @@ function ThreadBar({ thread, work, menu, sidePanelOpen, onToggleSidePanel }: {
   );
 }
 
-/** Spending supersedes lifecycle on the row and both bars. The bars omit the at-rest badge. */
-function threadBarStatus(thread: AssistantThread) {
-  return threadStatusBadge(thread, true);
-}
-
-function threadStatusBadge(thread: AssistantThread, hideDone = false) {
+/** The row and both bars use the same order as the notice slot. */
+function threadStatusBadge(
+  thread: AssistantThread, problem: ReturnType<typeof assistantThreadProblems>[number] | undefined, hideDone: boolean,
+) {
   const spending = threadSpendingStates(thread)[0];
+  if (problem && (!spending || compareSessionNotices(problem, {
+    key: spending.kind,
+    rank: SESSION_NOTICE_RANK.assistantBudget,
+    severity: spending.kind === "over_budget" ? "danger" : "warning",
+  }) < 0)) return <StatusBadge meta={problem.badge} />;
   if (spending) return <StatusBadge meta={statusMeta("assistantThreadSpending", spending.kind)} />;
   return hideDone && thread.status === "done" ? null : <StatusBadge meta={statusMeta("assistantThread", thread.status)} />;
 }

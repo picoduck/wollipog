@@ -365,6 +365,16 @@ const VOCABULARY = {
     done: success("Done"),
     archived: neutral("Archived"),
   },
+  assistantThreadHealth: {
+    tools_unavailable: danger("Tools Unavailable"),
+    sign_in_needed: danger("Sign In Needed"),
+    turn_failed: danger("Turn Failed"),
+    turn_rejected: danger("Turn Rejected"),
+    usage_limit: warning("Usage Limit"),
+    automatic_turns_held: warning("Automatic Turns Held"),
+    machine_offline: warning("Machine Offline"),
+    reconnecting: info("Reconnecting"),
+  },
   assistantThreadSpending: {
     near_budget: warning("Near Budget"),
     budget_used_up: warning("Budget Used Up"),
