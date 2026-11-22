@@ -114,7 +114,7 @@ for (const theme of ["dark", "light"] as const) {
       // Thread Settings is in Thread Actions, not a button of its own.
       await expect(page.getByRole("button", { name: "Thread Settings", exact: true })).toHaveCount(0);
       await bar.getByRole("button", { name: "Thread Actions" }).click();
-      await expect(page.getByRole("menuitem", { name: "Thread Settings" })).toBeVisible();
+      await expect(page.getByRole("menuitem", { name: "Thread Settings…" })).toBeVisible();
       await page.keyboard.press("Escape");
       // The Side Panel toggle follows Thread Actions at the bar's end, as the session bar's does.
       const sidePanel = bar.getByRole("button", { name: "Side Panel" });

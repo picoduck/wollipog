@@ -28,7 +28,7 @@ async function open(page: Page, theme: "dark" | "light", scenario: "ready" | "fa
 async function settings(page: Page) {
   // Thread Settings is in Thread Actions (⋯), as the session bar keeps its settings (#4776).
   await page.getByRole("button", { name: "Thread Actions", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Thread Settings", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Thread Settings…", exact: true }).click();
   return page.getByRole("dialog", { name: "Thread Settings", exact: true });
 }
 

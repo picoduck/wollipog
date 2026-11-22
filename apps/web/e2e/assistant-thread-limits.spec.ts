@@ -204,7 +204,7 @@ async function open(page: Page, path: string, theme: "dark" | "light" = "dark", 
 async function editThread(page: Page) {
   // Thread Settings is in Thread Actions (⋯), as the session bar keeps its settings (#4776).
   await page.getByRole("button", { name: "Thread Actions", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Thread Settings", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Thread Settings…", exact: true }).click();
   return page.getByRole("dialog", { name: "Thread Settings", exact: true });
 }
 
@@ -316,9 +316,8 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
         await expect.poll(() => title.evaluate((heading) => heading.clientWidth), {
           message: "The phone thread title keeps room for the short name beside its actions",
         }).toBeGreaterThanOrEqual(145);
-        await expect(page.getByRole("button", { name: "Search", exact: true })).toHaveCount(0);
-        await page.getByRole("button", { name: "Thread Actions", exact: true }).click();
-        await page.getByRole("menuitem", { name: "Search", exact: true }).click();
+        await page.getByRole("button", { name: "Back to Assistants", exact: true }).click();
+        await page.getByRole("button", { name: "Search", exact: true }).click();
         const search = page.getByRole("dialog", { name: "Search", exact: true });
         await expect(search).toBeVisible();
         await page.keyboard.press("Escape");

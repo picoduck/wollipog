@@ -75,7 +75,7 @@ for (const theme of ["dark", "light"] as const) {
         const path = "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA";
         const openChange = async () => {
           await page.getByRole("button", { name: "Thread Actions" }).click();
-          await page.getByRole("menuitem", { name: "Thread Settings" }).click();
+          await page.getByRole("menuitem", { name: "Thread Settings…" }).click();
           await page.getByRole("button", { name: "Change… Account" }).click();
         };
         await open(page, theme, "accounts=default");
@@ -221,7 +221,7 @@ for (const theme of ["dark", "light"] as const) {
       // is in flight, then let it land. The read began before the change, so the change must stay.
       await page.evaluate(() => (window as unknown as { assistantsHoldNextList: () => void }).assistantsHoldNextList());
       await page.locator(".assistant-thread-bar").getByRole("button", { name: "Thread Actions" }).click();
-      await page.getByRole("menuitem", { name: "Rename" }).click();
+      await page.getByRole("menuitem", { name: "Rename…" }).click();
       const rename = page.getByRole("dialog", { name: "Rename Thread" });
       await expect(rename.getByRole("textbox", { name: "Title" })).toHaveAttribute("maxlength", "120");
       await rename.getByRole("textbox", { name: "Title" }).fill("Triage Last Night's CI");
@@ -271,7 +271,7 @@ for (const theme of ["dark", "light"] as const) {
       // send more changes to another thread than the store keeps, each in its own render.
       await page.evaluate(() => (window as unknown as Fixture).assistantsHoldNextList());
       await page.locator(".assistant-thread-bar").getByRole("button", { name: "Thread Actions" }).click();
-      await page.getByRole("menuitem", { name: "Rename" }).click();
+      await page.getByRole("menuitem", { name: "Rename…" }).click();
       const rename = page.getByRole("dialog", { name: "Rename Thread" });
       await rename.getByRole("textbox", { name: "Title" }).fill("Triage Last Night's CI");
       await rename.getByRole("button", { name: "Rename" }).click();
@@ -340,14 +340,14 @@ for (const theme of ["dark", "light"] as const) {
       await expect(threadRow(page, "Plan the Next Release").locator(".row-sub")).toContainText("Codex");
 
       await page.locator(".assistant-thread-bar").getByRole("button", { name: "Thread Actions" }).click();
-      await page.getByRole("menuitem", { name: "Rename" }).click();
+      await page.getByRole("menuitem", { name: "Rename…" }).click();
       const rename = page.getByRole("dialog", { name: "Rename Thread" });
       await rename.getByRole("textbox", { name: "Title" }).fill("Plan Release 0.31");
       await rename.getByRole("button", { name: "Rename" }).click();
       await expect(threadRow(page, "Plan Release 0.31")).toBeVisible();
 
       await page.locator(".assistant-thread-bar").getByRole("button", { name: "Thread Actions" }).click();
-      await page.getByRole("menuitem", { name: "Archive" }).click();
+      await page.getByRole("menuitem", { name: "Archive Thread…" }).click();
       await page.getByRole("dialog", { name: "Archive Thread" }).getByRole("button", { name: "Archive Thread" }).click();
       await expect(threadRow(page, "Plan Release 0.31")).toHaveCount(0);
       await expect(threadsList(page).locator("[data-thread-id]")).toHaveCount(3);
