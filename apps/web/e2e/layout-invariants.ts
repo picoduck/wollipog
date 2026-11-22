@@ -59,29 +59,44 @@ export async function expectPageNoHorizontalOverflow(page: Page) {
 }
 
 /** Read both the real control box and the shared coarse-pointer hit-area expansion. */
-export async function expectTouchTargets(container: Locator) {
-  const targets = await container.getByRole("button").evaluateAll((buttons) => buttons.flatMap((button) => {
-    if (button.matches(":disabled") || !button.getClientRects().length) return [];
+export async function expectTouchTargets(container: Locator, selector?: string) {
+  const controls = selector ? container.locator(selector) : container.getByRole("button");
+  const targets = await controls.evaluateAll((buttons, measureAll) => buttons.flatMap((button) => {
+    if ((!measureAll && button.matches(":disabled")) || !button.getClientRects().length) return [];
     const rect = button.getBoundingClientRect();
     const after = getComputedStyle(button, "::after");
     const style = getComputedStyle(button);
     const expands = after.content !== "none" && after.position === "absolute" && after.pointerEvents !== "none";
     const inset = (edge: "left" | "right" | "top" | "bottom", border: string) =>
       expands ? Math.min(0, (parseFloat(after[edge]) || 0) + parseFloat(border)) : 0;
-    return [{
-      name: button.getAttribute("aria-label") || button.textContent?.trim(),
+    const target = {
+      name: button.getAttribute("aria-label") || button.textContent?.trim() || button.outerHTML.slice(0, 140),
       left: rect.left + inset("left", style.borderLeftWidth),
       right: rect.right - inset("right", style.borderRightWidth),
       top: rect.top + inset("top", style.borderTopWidth),
       bottom: rect.bottom - inset("bottom", style.borderBottomWidth),
-    }];
-  }));
+    };
+    const visible = { ...target };
+    if (measureAll) for (let parent = button.parentElement; parent; parent = parent.parentElement) {
+      const bounds = parent.getBoundingClientRect();
+      const { overflowX, overflowY } = getComputedStyle(parent);
+      if (overflowX !== "visible") {
+        visible.left = Math.max(visible.left, bounds.left);
+        visible.right = Math.min(visible.right, bounds.right);
+      }
+      if (overflowY !== "visible") {
+        visible.top = Math.max(visible.top, bounds.top);
+        visible.bottom = Math.min(visible.bottom, bounds.bottom);
+      }
+    }
+    return [{ ...target, visible }];
+  }), Boolean(selector));
   for (const [index, first] of targets.entries()) {
     expect(first.right - first.left, first.name + " hit width in CSS px").toBeGreaterThanOrEqual(44);
     expect(first.bottom - first.top, first.name + " hit height in CSS px").toBeGreaterThanOrEqual(44);
     for (const second of targets.slice(index + 1)) {
-      const width = Math.min(first.right, second.right) - Math.max(first.left, second.left);
-      const height = Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top);
+      const width = Math.min(first.visible.right, second.visible.right) - Math.max(first.visible.left, second.visible.left);
+      const height = Math.min(first.visible.bottom, second.visible.bottom) - Math.max(first.visible.top, second.visible.top);
       expect(width > 0.5 && height > 0.5, first.name + " overlaps " + second.name).toBe(false);
     }
   }
