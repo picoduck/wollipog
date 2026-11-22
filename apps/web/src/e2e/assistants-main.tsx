@@ -1322,7 +1322,7 @@ installMobileViewportFallback();
 function FixtureToast() {
   const { showToast } = useFeedback();
   React.useEffect(() => {
-    const notify = () => showToast("Thread settings saved.", { tone: "success" });
+    const notify = () => showToast("Thread settings saved.", { tone: "success", durationMs: 0 });
     window.addEventListener("assistants-fixture-toast", notify);
     return () => window.removeEventListener("assistants-fixture-toast", notify);
   }, [showToast]);

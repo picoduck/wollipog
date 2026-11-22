@@ -7754,7 +7754,13 @@ body.shell-dock-dragging * {
     }
   }
 }
-@media (max-width: 760px), (min-width: 1000px) and (max-height: 600px) {
+@media (max-width: 760px) {
+  .assistant-dock-card-body[data-clip-end] {
+    mask-image: linear-gradient(to top, transparent, #000 var(--space-6));
+  }
+  .assistant-dock-card-body[data-clip-end] + .assistant-dock-actions { box-shadow: none; }
+}
+@media (min-width: 1000px) and (max-height: 600px) {
   .assistant-dock-actions { position: relative; }
   .assistant-dock-card-body[data-clip-end] + .assistant-dock-actions > .assistant-dock-scroll-cue {
     display: block;
@@ -7763,8 +7769,6 @@ body.shell-dock-dragging * {
     border-top: var(--space-1) solid var(--border-strong);
     pointer-events: none;
   }
-}
-@media (min-width: 1000px) and (max-height: 600px) {
   /* Keep the title and actions in place while the request details scroll between them. */
   .detail-chat:has(.assistant-spending-notice) .assistant-dock-slot:has(.assistant-dock-list) {
     max-height: max(60cqh, calc(100cqh - var(--bar-h)));
@@ -13618,9 +13622,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .assistant-thread-pane :is(.composer-input, .composer-box.idle-collapsed .composer-idle-preview) {
     min-height: var(--control-h);
   }
-  /* While typing, keep the full notice scrollable and leave room for the request actions.
-     Focus also covers browsers that resize the layout viewport and report no keyboard inset. */
-  .detail-chat:has(.assistant-dock) .composer:has(.composer-input:focus) .session-notice-slot {
+  /* Keep other long notices scrollable while typing. Focus works with both keyboard resize modes. */
+  .detail-chat:has(.assistant-dock) .composer:has(.composer-input:focus) .session-notice-slot:not(:has(.assistant-spending-notice)) {
     max-height: calc(2 * var(--control-h) + var(--space-8));
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -13669,6 +13672,33 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .detail-chat:has(.assistant-dock-pager) .assistant-spending-meter {
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
+  }
+}
+@media (max-width: 760px) and (pointer: coarse) {
+  /* Keep the spending warning visible while typing, with room left for both the transcript
+     and the request actions. The existing notice controls return when the composer loses focus. */
+  .detail-chat:has(.composer-input:focus):has(.composer .assistant-spending-notice)
+    .assistant-dock-slot:has(.assistant-dock-pager):not(:has([data-show-all])) {
+    max-height: min(100cqh, max(calc(4 * var(--control-h) - var(--space-4)), 40cqh));
+  }
+  .detail-chat:has(.composer-input:focus):has(.composer .assistant-spending-notice) .assistant-dock-actions {
+    padding-block: var(--space-1);
+  }
+  .detail-chat:has(.assistant-dock) .composer:has(.composer-input:focus):has(.assistant-spending-notice) {
+    padding-block: var(--space-2);
+  }
+  .detail-chat:has(.assistant-dock) .composer:has(.composer-input:focus) .assistant-spending-notice {
+    align-items: center;
+    padding-block: var(--space-1);
+  }
+  .detail-chat:has(.assistant-dock) .composer:has(.composer-input:focus) .assistant-spending-notice
+    :is(.notice-head, .notice-icon) {
+    height: auto;
+    min-height: 0;
+  }
+  .detail-chat:has(.assistant-dock) .composer:has(.composer-input:focus) .assistant-spending-notice
+    :is(.notice-body, .notice-actions, .notice-trailing) {
+    display: none;
   }
 }
 @media (min-width: 1000px) and (max-height: 600px) {

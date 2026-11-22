@@ -19,6 +19,7 @@ async function surface(root: Locator) {
 
 async function capture(page: Page, theme: string, view: string, state: string) {
   if (process.env.ASSISTANT_PHONE_EVIDENCE !== "1") return;
+  if (process.env.ASSISTANT_PHONE_EVIDENCE_THREADS_ONLY === "1" && view !== "thread") return;
   const { width, height } = page.viewportSize()!;
   const id = [view, width + "x" + height, theme, state, ...(width === 390 ? ["target44csspx"] : [])].join("-");
   await page.screenshot({ path: join("playwright-report", "4818", id + ".png"), animations: "disabled" });
@@ -95,7 +96,8 @@ for (const theme of ["light", "dark"] as const) {
           const requestBody = dock.locator(".assistant-dock-card-body");
           expect(await requestBody.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(0);
           await requestBody.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-          await expect(dock.locator(".assistant-dock-scroll-cue")).toBeHidden();
+          await expect(requestBody).not.toHaveAttribute("data-clip-end");
+          await expect(requestBody).toHaveCSS("mask-image", "none");
           await expectFullyInViewport(approve);
         } else {
           await expect(page.locator(".assistant-spending-notice .notice-trailing")).toBeHidden();
@@ -158,6 +160,10 @@ for (const theme of ["light", "dark"] as const) {
             height = 528;
             viewport.dispatchEvent(new Event("resize"));
           });
+          document.addEventListener("dismiss-keyboard", () => {
+            height = innerHeight;
+            viewport.dispatchEvent(new Event("resize"));
+          });
         });
         const dock = await open(page, theme);
         const composer = page.locator(".composer");
@@ -179,7 +185,9 @@ for (const theme of ["light", "dark"] as const) {
           const { y, height } = (await target.boundingBox())!;
           expect(y + height).toBeLessThanOrEqual(528);
         }
-        await expectFullyInViewport(composer.locator(".assistant-spending-notice"));
+        const notice = composer.locator(".assistant-spending-notice");
+        await expectFullyInViewport(notice);
+        await expect(notice.getByRole("button")).toHaveCount(0);
         await expectFullyInViewport(toast);
         const bar = (await page.locator(".page > .detail-bar").boundingBox())!;
         expect((await toast.boundingBox())!.y).toBeGreaterThanOrEqual(bar.y + bar.height);
@@ -187,6 +195,9 @@ for (const theme of ["light", "dark"] as const) {
           const box = (await toast.boundingBox())!;
           return box.y + box.height;
         }).toBeLessThanOrEqual(Math.min((await composer.boundingBox())!.y, (await page.locator(".assistant-dock").boundingBox())!.y));
+        const reader = page.getByRole("region", { name: "Session Activity", exact: true });
+        await expect.poll(async () => (await reader.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+        await expect(reader.getByText(/The upload test times out/)).toBeInViewport({ ratio: 0.25 });
         await surface(composer);
         await surface(dock);
         if (process.env.ASSISTANT_PHONE_EVIDENCE === "1") {
@@ -196,8 +207,12 @@ for (const theme of ["light", "dark"] as const) {
             marker.style.cssText = "position:fixed;inset:528px 0 0;z-index:9999;background:var(--bg-elev-2);color:var(--text);display:grid;place-items:center";
             document.body.append(marker);
           });
+          await expectFullyInViewport(toast);
           await capture(page, theme, "thread", "keyboard-open");
         }
+        await page.evaluate(() => document.dispatchEvent(new Event("dismiss-keyboard")));
+        await expect(input).not.toBeFocused();
+        await expectFullyInViewport(notice.getByRole("button", { name: "Raise Budget…" }));
       });
     });
   }
