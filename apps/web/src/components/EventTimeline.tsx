@@ -3139,8 +3139,15 @@ export const RETRY_TURN_COMMAND_REASON = "Run the command again from the compose
 
 /** A failed turn, said once at the end of its turn (§13.2): a plain sentence from describeTurnError,
  * Retry Turn to submit the turn's prompt again, and the provider's own words behind Show Details. */
-function TurnFailedNotice({ message, prompt }: { message: string; prompt?: UserMessageItem }) {
-  const retry = useContext(TurnRetryContext);
+export function TurnFailedNotice({ message, prompt, retryControl, trailing, kept }: {
+  message: string;
+  prompt?: UserMessageItem;
+  retryControl?: TurnRetryControl;
+  trailing?: ReactNode;
+  kept?: boolean;
+}) {
+  const contextRetry = useContext(TurnRetryContext);
+  const retry = retryControl ?? contextRetry;
   const reasonId = useId();
   const raw = withoutPromptFailedPrefix(message);
   const reason = prompt?.commandInvocation ? RETRY_TURN_COMMAND_REASON : retry?.unavailableReason;
@@ -3161,10 +3168,12 @@ function TurnFailedNotice({ message, prompt }: { message: string; prompt?: UserM
     <Notice
       tone="danger"
       title="Turn Failed"
+      trailing={trailing}
+      role={kept ? "alert" : undefined}
       actions={actions || undefined}
       details={<div className="code-well"><pre>{raw}</pre></div>}
     >
-      <p>{describeTurnError(message)}</p>
+      <p>{describeTurnError(message)}{kept && " Your message is kept."}</p>
       {actions && reason !== undefined && <p className="notice-meta" id={reasonId}>{reason}</p>}
       {prompt !== undefined && retry?.error?.promptId === prompt.id && (
         <p className="notice-meta" role="alert">Couldn't retry the turn: {retry.error.message}</p>

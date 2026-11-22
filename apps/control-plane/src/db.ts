@@ -1027,6 +1027,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   provider_account_label TEXT,
   provider_account_automatically_selected INTEGER NOT NULL DEFAULT 0 CHECK (provider_account_automatically_selected IN (0, 1)),
   provider_account_switch_failure TEXT,
+  assistant_thread_health TEXT,
   location_switch TEXT,
   provider_profile_id TEXT,
   provider_home_refusal TEXT,
@@ -3470,6 +3471,7 @@ interface SessionRow {
   provider_account_selection?: string | null;
   provider_account_automatically_selected: number;
   provider_account_switch_failure: string | null;
+  assistant_thread_health: string | null;
   location_switch?: string | null;
   provider_profile_id: string | null;
   provider_home_refusal: string | null;
@@ -7951,6 +7953,7 @@ export class ControlPlaneDb {
       "provider_account_label TEXT",
       "provider_account_automatically_selected INTEGER NOT NULL DEFAULT 0 CHECK (provider_account_automatically_selected IN (0, 1))",
       "provider_account_switch_failure TEXT",
+      "assistant_thread_health TEXT",
       // #4353: why this session started on its account, as reason codes that name no account.
       "provider_account_selection TEXT",
       // #4138: the runner's pending or failed Location switch for the live session.
@@ -19786,6 +19789,10 @@ export class ControlPlaneDb {
             ? JSON.stringify(snap.providerAccountSwitchFailure)
             : null, snap.id);
       }
+      if (snap.assistantThreadHealth !== undefined) {
+        this.stmt("UPDATE sessions SET assistant_thread_health=? WHERE id=?")
+          .run(JSON.stringify(snap.assistantThreadHealth), snap.id);
+      }
       this.writeSessionProviderProfileId(snap.id, snap.providerProfileId);
       this.writeSessionProviderHomeRefusal(snap.id, snap.providerHomeRefusal);
       this.writeSessionProviderHomeWait(snap.id, snap.providerHomeWait);
@@ -20151,6 +20158,10 @@ export class ControlPlaneDb {
       this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=?, provider_account_automatically_selected=? WHERE id=?")
         .run(snap.providerAccountId, snap.providerAccountLabel ?? snap.providerAccountId,
           snap.providerAccountAutomaticallySelected ? 1 : 0, id);
+    }
+    if (snap.assistantThreadHealth !== undefined) {
+      this.stmt("UPDATE sessions SET assistant_thread_health=? WHERE id=?")
+        .run(JSON.stringify(snap.assistantThreadHealth), id);
     }
     this.writeSessionProviderProfileId(id, snap.providerProfileId);
     this.writeSessionProviderHomeRefusal(id, snap.providerHomeRefusal);
@@ -30785,6 +30796,9 @@ export class ControlPlaneDb {
       providerAccountAutomaticallySelected: row.provider_account_automatically_selected === 1 || undefined,
       ...(row.provider_account_selection
         ? { providerAccountSelection: parseJson<ProviderAccountSelectionRecord>(row.provider_account_selection) ?? undefined } : {}),
+      ...(row.assistant_thread_health && row.assistant_thread_id ? {
+        assistantThreadHealth: parseJson<SessionView["assistantThreadHealth"]>(row.assistant_thread_health) ?? undefined,
+      } : {}),
       providerAccountSwitchFailure:
         parseJson<ProviderAccountSwitchFailureView>(row.provider_account_switch_failure) ?? undefined,
       ...(row.location_switch ? { locationSwitch: parseJson<NonNullable<SessionView["locationSwitch"]>>(row.location_switch) ?? undefined } : {}),

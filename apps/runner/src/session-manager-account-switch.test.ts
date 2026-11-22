@@ -1184,3 +1184,67 @@ test("live launch preparation replaces a stale creation version for the memory g
     assert.equal(made.store.readMeta(spec.sessionId)?.agentVersion, "2.1.284");
   } finally { made.manager.shutdownAll(); rmSync(root, { recursive: true, force: true }); }
 });
+
+for (const automatic of [true, false]) {
+  test("an Assistant thread " + (automatic ? "switches at a usage limit" : "holds its FIFO until the usage limit resets"), async () => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-assistant-usage-hold-"));
+    const messages: RunnerToControlPlane[] = [];
+    const delivered: Array<{ home?: string; prompt: string }> = [];
+    const { manager, store } = makeManager(root, (_driver: unknown, launch: { env: Record<string, string> }) => ({
+      initialize: async () => {},
+      newSession: async () => {},
+      prompt: async (prompt: string) => {
+        delivered.push({ home: launch.env.CODEX_HOME, prompt });
+        return "end_turn" as const;
+      },
+      cancel: () => {},
+      dispose: () => {},
+      setConfig: async () => {},
+      resolvePermission: () => false,
+      agentSessionId: () => "codex-thread",
+    }), messages);
+    try {
+      const spec = launchSpec(root, "codex-app-server", "work");
+      assert.equal(await manager.start(spec), true);
+      store.patchMeta(spec.sessionId, { assistant: { threadId: "thr_usage" }, agentSessionId: "codex-thread" });
+      const resetsAt = Date.now() + 1_000;
+      const usage = (id: "work" | "backup"): SubscriptionUsageSnapshot => ({
+        sourceId: id, runnerId: "runner", agentId: "codex", provider: "codex",
+        providerAccountId: id, state: "available", fetchedAt: Date.now(),
+        buckets: [{ id: "five_hour", label: "Five Hour",
+          remainingPercent: id === "work" ? 0 : 90,
+          status: id === "work" ? "exhausted" : "available",
+          resetsAt }],
+      });
+      const observed = [usage("work"), usage("backup")];
+      const internals = manager as unknown as {
+        providerAccounts: () => ProviderAccountDefinition[];
+        subscriptionUsageInventory: () => SubscriptionUsageSnapshot[];
+      };
+      internals.providerAccounts = () => [accounts.work, accounts.backup].map(({ id, label, provider }) =>
+        ({ id, label, provider, authStatus: "authenticated" }));
+      internals.subscriptionUsageInventory = () => observed;
+      assert.equal(manager.configureAutomaticAccountSwitch({ enabled: automatic, revision: 1 }), true);
+      manager.setAutomaticAccountSwitchAuthorityReady(true);
+
+      assert.equal(manager.prompt(spec.sessionId, "First message"), true);
+      assert.equal(manager.prompt(spec.sessionId, "Second message"), true);
+      const reports = () => messages.flatMap((message) => message.type === "session_runtime_updated" &&
+        message.snapshot.id === spec.sessionId ? [message.snapshot.assistantThreadHealth] : []);
+      if (!automatic) {
+        await waitFor(() => reports().some((health) => health?.usageLimit?.resetsAt === resetsAt), "expected usage hold");
+        assert.deepEqual(delivered, []);
+      }
+      await waitFor(() => delivered.length === 2, "the queued messages did not resume");
+      assert.deepEqual(delivered, ["First message", "Second message"].map((prompt) => ({
+        home: automatic ? accounts.backup.credentialHome : accounts.work.credentialHome,
+        prompt,
+      })));
+      assert.equal(reports().at(-1)?.usageLimit, undefined);
+      assert.equal(store.readMeta(spec.sessionId)?.providerAccountId, automatic ? "backup" : "work");
+    } finally {
+      manager.shutdownAll();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}

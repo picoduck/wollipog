@@ -214,6 +214,8 @@ export class AssistantThreads {
       access: { level: "full_access", destructive: "ask" },
       connectionId: row.connection_id,
       accountChangeSupported: true,
+      ...(session?.assistantThreadHealth && row.state === "active"
+        ? { health: session.assistantThreadHealth, runnerId: session.runnerId } : {}),
       ...(session && row.state === "active" && !session.archived && this.deps.harnessChangeSupported?.(session.runnerId)
         ? { harnessChangeSupported: true } : {}),
       ...(earlierConversations.length ? { earlierConversations } : {}),

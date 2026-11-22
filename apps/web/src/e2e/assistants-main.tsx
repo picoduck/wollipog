@@ -60,6 +60,7 @@ const limitsScenario = params.get("limits");
 const spendingScenario = params.get("spending");
 const overBudgetBar = params.get("thread-bar") === "over-budget";
 const panelScenario = params.get("thread-panel");
+const healthScenario = params.get("thread-health");
 const campaignScenario = params.has("campaign");
 const resultScenario = params.get("confirmation-result");
 const delegationScenario = params.get("delegation");
@@ -107,7 +108,7 @@ const runner: RunnerView = {
   displayName: migrationScenario && migrationScenario !== "old" ? "Shared Engineering Machine" : "Build Box",
   os: "linux",
   version: "1",
-  status: "online",
+  status: healthScenario === "machine_offline" || healthScenario === "stress" ? "offline" : "online",
   agents: [
     { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code", available: true },
     { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: true },
@@ -612,6 +613,53 @@ if (streamingReply) {
   ];
 }
 
+if (healthScenario && healthScenario !== "legacy") {
+  const thread = threads[0]!;
+  const sessionId = thread.sessionId;
+  const stress = healthScenario === "stress";
+  thread.runnerId = runner.runnerId;
+  thread.providerAccountLabel = stress ? stressAccountLabel : "Studio Subscription";
+  thread.accountChangeSupported = true;
+  thread.health = {
+    ...(healthScenario === "usage_limit" || stress ? { usageLimit: { resetsAt: NOW + 72 * minute } } : {}),
+    ...(healthScenario === "automatic_turns_held" || stress ? { automaticTurnsHeld: "fixture-hold" } : {}),
+    ...(healthScenario === "tools_unavailable" || stress ? { toolsUnavailable: true } : {}),
+    ...(healthScenario === "sign_in_needed" ? { signInNeeded: true } : {}),
+    ...(healthScenario === "turn_failed" || healthScenario === "turn_rejected"
+      ? { turn: { kind: healthScenario === "turn_failed" ? "failed" : "rejected", errorId: "fixture-turn", promptTurnId: "fixture-prompt" } } : {}),
+  };
+  thread.status = "done";
+  if (!stress) thread.launchedSessionIds = [];
+  const transcript = events[sessionId]!;
+  if (stress) for (let index = 0; index < 10; index++) {
+    transcript.push(event(sessionId, NOW - minute + index, { kind: "user_message",
+      text: "Check release candidate " + (index + 1) + ": " + "NorthAmericanEngineeringWorkspace".repeat(8) }));
+    transcript.push(event(sessionId, NOW - minute + index, { kind: "agent_message", final: true,
+      text: "The candidate is still awaiting packages from the downstream validation jobs." }));
+  }
+  if (thread.health.turn) {
+    transcript.push(event(sessionId, NOW - 3_000, { kind: "user_message", text: "Check the failed build again.", turnId: "fixture-prompt" }));
+    transcript.push(event(sessionId, NOW - 2_000, { kind: "error", assistantThreadErrorId: "fixture-turn",
+      message: healthScenario === "turn_failed" ? "prompt failed: network error" : "The provider refused this model selection." }));
+  }
+  if (thread.health.automaticTurnsHeld) {
+    transcript.push(event(sessionId, NOW - 1_000, { kind: "error", assistantThreadErrorId: "fixture-hold",
+      message: "Claude Code rejected two turns in a row with the same error: invalid option. Automatic turns are held until you send a message or restart the session." }));
+  }
+  sessions.set(sessionId, {
+    ...sessions.get(sessionId)!, role: "assistant", status: thread.health.signInNeeded ? "input_required" : "idle",
+    messageCount: transcript.length, providerAccountId: "studio", providerAccountLabel: thread.providerAccountLabel,
+    assistantThreadHealth: thread.health,
+    pendingApproval: thread.health.signInNeeded ? {
+      kind: "authentication", requestId: "fixture-auth", title: "Authentication Required",
+      options: [
+        { optionId: "auth:login", name: "Start Sign-In", kind: "allow_once" },
+        { optionId: "auth:revalidate", name: "Retry", kind: "allow_once" },
+      ],
+    } : null,
+  });
+}
+
 class FixtureSocket implements UiSocket {
   readonly readyState = UI_SOCKET_OPEN;
   onopen: (() => void) | null = null;
@@ -991,6 +1039,12 @@ const client = {
     document.body.dataset.assistantPrompt = id + ":" + message;
     return structuredClone(sessions.get(id)!);
   },
+  restart: async (id: string) => {
+    document.body.dataset.restartedThread = id;
+    const next = { ...sessions.get(id)!, status: "idle" as const };
+    upsert(next);
+    return structuredClone(next);
+  },
   stop: async (id: string) => {
     const next = { ...sessions.get(id)!, status: "stopped" as const, updatedAt: Date.now() };
     document.body.dataset.stoppedSessions = [document.body.dataset.stoppedSessions, id].filter(Boolean).join(",");
@@ -1072,6 +1126,7 @@ Object.assign(window, {
     publish(threads.find((candidate) => candidate.id === "thr_triage")!);
   },
   assistantsActivity: backingActivity,
+  assistantsDisconnect: () => socket?.onclose?.({ code: 1006 }),
   assistantsReplaceConversation: () => {
     const current = found("thr_triage");
     const sessionId = "sess-triage-replacement";
