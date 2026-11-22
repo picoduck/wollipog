@@ -1,4 +1,5 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { holdFieldFocus } from "./requests/hold-field-focus.js";
 import { PROVIDER_ACCOUNT_SKIP_TEXT, type AssistantThreadAccountChoices, type AssistantThreadLimits } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { ApiError } from "../api.js";
@@ -60,9 +61,10 @@ const suggestions = [
 ];
 
 /** Mount in an explicit New Thread pane or in the empty Assistants detail pane. */
-export function NewAssistantThreadComposer({ onCancel, onCreated }: {
+export function NewAssistantThreadComposer({ onCancel, onCreated, onCreationPendingChange }: {
   onCancel?: () => void;
-  onCreated: (result: NewAssistantThreadResult) => void;
+  onCreated: (result: NewAssistantThreadResult, composerOpen: boolean) => void;
+  onCreationPendingChange?: (pending: boolean) => void;
 }) {
   const api = useApi();
   const scope = useInstanceScope();
@@ -76,8 +78,17 @@ export function NewAssistantThreadComposer({ onCancel, onCreated }: {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const submitting = useRef(false);
+  const mounted = useRef(false);
   const [failure, setFailure] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (submitting.current) onCreationPendingChange?.(false);
+    };
+  }, [onCreationPendingChange]);
 
   useEffect(() => {
     let current = true;
@@ -115,6 +126,7 @@ export function NewAssistantThreadComposer({ onCancel, onCreated }: {
   const start = async () => {
     if (!defaults || !harness || !account || !message.trim() || submitting.current) return;
     submitting.current = true;
+    onCreationPendingChange?.(true);
     setBusy(true);
     setFailure(null);
     let thread: AssistantThread;
@@ -126,11 +138,13 @@ export function NewAssistantThreadComposer({ onCancel, onCreated }: {
           : launchDefaults ? { providerAccountRef: null } : {}),
       }));
     } catch (cause) {
+      submitting.current = false;
+      if (!mounted.current) return;
       const block = threadBlock(cause);
       if (block) setState(block);
       else setFailure(errorMessage(cause));
-      submitting.current = false;
       setBusy(false);
+      onCreationPendingChange?.(false);
       return;
     }
 
@@ -153,7 +167,9 @@ export function NewAssistantThreadComposer({ onCancel, onCreated }: {
       };
     }
     // Once create succeeded, retries belong in the backing conversation.
-    onCreated({ thread, firstMessageFailure });
+    submitting.current = false;
+    if (mounted.current) onCreationPendingChange?.(false);
+    onCreated({ thread, firstMessageFailure }, mounted.current);
   };
 
   return (
@@ -216,7 +232,7 @@ export function NewAssistantThreadComposer({ onCancel, onCreated }: {
           </div>
         </>}
       </div>
-      <div className="new-assistant-thread-actions">
+      <div className="new-assistant-thread-actions" onMouseDown={holdFieldFocus}>
         {onCancel && <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button>}
         {defaults && <BusyButton type="submit" className="btn primary" busy={busy}
           progress="Starting the thread…" disabled={!canStart}>Start Thread</BusyButton>}

@@ -28,7 +28,9 @@ import { AssistantDecisionDelegationDialog } from "./AssistantDecisionDelegation
 import { useLaunchedWorkGroups } from "./AssistantWorkCards.js";
 import type { LaunchedWork } from "../assistant-launched-work.js";
 import { ConfirmationFailure, useFeedback } from "./FeedbackProvider.js";
-import { AssistantsIcon, PlusIcon } from "./Icons.js";
+import { AgentIcon } from "./AgentIcon.js";
+import { AssistantsIcon, ChevronLeftIcon, ChevronRightIcon, PlusIcon, SearchIcon } from "./Icons.js";
+import { ListFoot } from "./ListFoot.js";
 import { Modal } from "./Modal.js";
 import { NewAssistantThreadComposer, THREADS_UNAVAILABLE_MESSAGE, type NewAssistantThreadResult } from "./NewAssistantThreadComposer.js";
 import { Notice } from "./Notice.js";
@@ -99,7 +101,9 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   const panel = useAssistantPanelState();
   const waitingDock = useRef<AssistantWaitingDockHandle>(null);
   const [list, setList] = useState<ListState>({ kind: "loading" });
-  /** An open thread the list leaves out (archived), read on its own. */
+  const [showArchive, setShowArchive] = useState(false);
+  const [emptyCreationPending, setEmptyCreationPending] = useState(false);
+  /** A deep link that the list doesn't carry, read on its own. */
   const [extra, setExtra] = useState<AssistantThread | null>(null);
   const [missing, setMissing] = useState(false);
   const [unsentFirstMessage, setUnsentFirstMessage] = useState<
@@ -116,7 +120,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   const generation = useRef(0);
   /** A read is in flight, and whether another was asked for while it was. */
   const reading = useRef(false);
-  const rereadQueued = useRef(false);
+  const rereadQueued = useRef<"all" | "active" | null>(null);
   // The control plane publishes each thread change (`assistant_thread_upsert`); the store keeps the
   // newest of them, numbered. `appliedSeq` is the newest one the list reflects.
   const events = useStoreSelector((state) => state.assistantThreadEvents);
@@ -125,20 +129,27 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   const appliedSeq = useRef(0);
 
   /** Reads the list, superseding any read still in flight: a mutation's reconciliation and Retry. */
-  const load = useCallback(async () => {
+  const load = useCallback(async (scope: "all" | "active" = "all") => {
     const mine = ++generation.current;
     reading.current = true;
     // Events that land while the read is in flight are newer than what it returns.
     const startSeq = eventsRef.current?.at(-1)?.seq ?? 0;
     try {
-      const { threads } = await api.assistantThreads();
+      const { threads } = await api.assistantThreads(scope === "all" ? { includeArchived: true } : undefined);
       if (mine === generation.current) {
         const kept = eventsRef.current ?? [];
-        setList({ kind: "ready", threads: applyAssistantThreadEvents(threads, kept, startSeq) });
+        setList((previous) => {
+          // A working-thread poll retains the archive from full reads and live upserts.
+          const listed = new Set(threads.map((thread) => thread.id));
+          const archives = scope === "active" && previous.kind === "ready"
+            ? previous.threads.filter((thread) => thread.status === "archived" && !listed.has(thread.id))
+            : [];
+          return { kind: "ready", threads: applyAssistantThreadEvents([...threads, ...archives], kept, startSeq) };
+        });
         appliedSeq.current = Math.max(appliedSeq.current, kept.at(-1)?.seq ?? 0);
         // More changed during the read than the store kept: what was dropped may be one this read
         // predates, so read again once this one has landed.
-        if (!replayComplete(kept, startSeq)) rereadQueued.current = true;
+        if (!replayComplete(kept, startSeq)) rereadQueued.current = "all";
       }
     } catch (cause) {
       if (mine !== generation.current) return;
@@ -154,17 +165,19 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
         reading.current = false;
         // Activity during the read asked for a newer list: read once more, now that this one landed.
         if (rereadQueued.current) {
-          rereadQueued.current = false;
-          void load();
+          const scope = rereadQueued.current;
+          rereadQueued.current = null;
+          void load(scope);
         }
       }
     }
   }, [api]);
   /** A background refresh: behind a read in flight it waits its turn rather than discarding it, so a
    * session that streams faster than the list answers still sees each answer land. */
-  const refresh = useCallback(() => {
-    if (reading.current) rereadQueued.current = true;
-    else void load();
+  const refresh = useCallback((scope: "all" | "active" = "all") => {
+    if (reading.current) {
+      if (scope === "all" || rereadQueued.current === null) rereadQueued.current = scope;
+    } else void load(scope);
   }, [load]);
 
   useEffect(() => { void load(); }, [load]);
@@ -211,7 +224,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
     selected ? assistantThreadTitle(selected) : null,
   );
 
-  // A deep link to a thread the list doesn't carry (an archived one): read that thread alone, and
+  // A deep link to a thread the list doesn't carry: read that thread alone, and
   // again whenever the event log can no longer say what changed it (`extraRevision`).
   const [extraRevision, setExtraRevision] = useState(0);
   useEffect(() => {
@@ -231,15 +244,14 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   }, [api, threadId, list.kind, listed, extraRevision]);
 
   // Thread changes arrive as events: status, title, activity and each session the assistant
-  // launches. Applied in order to the rows on screen, and to an archived thread open on its own.
+  // launches. Applied in order to the list and to a thread read on its own.
   useEffect(() => {
     const kept = events ?? [];
     const from = appliedSeq.current;
     const newest = kept.at(-1)?.seq ?? 0;
     if (newest <= from) return;
     appliedSeq.current = newest;
-    // More changed than the store kept since the last render: the list itself is the answer, and an
-    // archived thread open on its own, which the list leaves out, is read again too.
+    // More changed than the store kept since the last render: read the list and any deep link it missed.
     if (!replayComplete(kept, from)) {
       refresh();
       setExtraRevision((revision) => revision + 1);
@@ -262,7 +274,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
     })));
   const wasLaunchedWorkActive = useRef(false);
   useEffect(() => {
-    if (wasLaunchedWorkActive.current && !launchedWorkActive) refresh();
+    if (wasLaunchedWorkActive.current && !launchedWorkActive) refresh("active");
     wasLaunchedWorkActive.current = launchedWorkActive;
   }, [launchedWorkActive, refresh]);
   const refreshInBackground = launchedWorkActive || threads.some((thread) => thread.status === "working");
@@ -282,7 +294,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   }, [api, dismissedBudgets, threads]);
   useEffect(() => {
     if (!refreshInBackground) return;
-    const timer = setInterval(refresh, WORKING_POLL_MS);
+    const timer = setInterval(() => refresh("active"), WORKING_POLL_MS);
     return () => clearInterval(timer);
   }, [refreshInBackground, refresh]);
 
@@ -298,9 +310,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   const replace = (thread: AssistantThread) => {
     setList((previous) => previous.kind !== "ready" ? previous : {
       kind: "ready",
-      threads: sortAssistantThreads(thread.status === "archived"
-        ? previous.threads.filter((candidate) => candidate.id !== thread.id)
-        : [thread, ...previous.threads.filter((candidate) => candidate.id !== thread.id)]),
+      threads: sortAssistantThreads([thread, ...previous.threads.filter((candidate) => candidate.id !== thread.id)]),
     });
     void load();
   };
@@ -311,11 +321,13 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   const toList = () => navigate({ name: "assistants" });
   const cancelNewThread = () => navigate({ name: "assistants" }, { replace: true });
   const startThread = () => navigate({ name: "assistants", newThread: true });
-  const finishNewThread = ({ thread, firstMessageFailure }: NewAssistantThreadResult) => {
+  const finishNewThread = ({ thread, firstMessageFailure }: NewAssistantThreadResult, fromEmptyInbox: boolean, composerOpen: boolean) => {
     replace(thread);
     if (firstMessageFailure) setUnsentFirstMessage({ sessionId: thread.sessionId, ...firstMessageFailure });
     const view = currentView.read();
-    if (view.name === "assistants" && view.newThread) {
+    if (composerOpen && view.name === "assistants" &&
+        (fromEmptyInbox ? !view.newThread && view.threadId === undefined : view.newThread)) {
+      setShowArchive(false);
       navigate({ name: "assistants", threadId: thread.id }, { replace: true });
     }
   };
@@ -323,7 +335,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   const archive = async (thread: AssistantThread, reopen: () => void) => {
     const accepted = await confirm({
       title: "Archive Thread",
-      message: `“${assistantThreadTitle(thread)}” leaves the thread list. Its session and transcript are kept.`,
+      message: `“${assistantThreadTitle(thread)}” moves to Archived Threads, where you can still read it.`,
       confirmLabel: "Archive Thread",
       tone: "danger",
       back: { label: "Back to Thread Actions", run: reopen },
@@ -366,6 +378,9 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
     ];
   };
 
+  const emptyInbox = list.kind === "ready" && threads.length === 0;
+  // Creation is published to the list before the first message finishes sending.
+  const showEmptyComposer = (emptyInbox || emptyCreationPending) && !showArchive && threadId === undefined && !newThread;
   const phoneDetail = isMobile && (threadId !== undefined || newThread);
   // The open thread's launched work, for the header toggle and the Work tab. Kept
   // the same object while the thread's lists are, so their live counts don't recompute each render.
@@ -472,25 +487,28 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
         // New Thread belongs to the assistant's Threads list, so the page header offers no second one.
         <PageHeader title={ASSISTANTS.name} description={ASSISTANTS.description} />
       )}
-      <div className="master-detail assistants-md" data-detail-open={threadId !== undefined || newThread ? "" : undefined}>
+      <div className="master-detail assistants-md" data-detail-open={threadId !== undefined || newThread || showEmptyComposer ? "" : undefined}>
         <aside className="master-detail-list" aria-label={ASSISTANTS.name} data-focus-zone="list" tabIndex={-1}>
-          <div className="master-detail-list-body clip-focus">
-            <ThreadList
-              list={unsentFirstMessage && list.kind === "ready" ? { ...list, threads: threads.map(titleForDisplay) } : list}
-              selectedId={threadId ?? null}
-              unsentSessionId={unsentFirstMessage?.sessionId}
-              onOpen={openThread}
-              onNewThread={startThread}
-              onRetry={() => void load()}
-              badgeFor={badgeFor}
-            />
-          </div>
+          <ThreadList
+            list={unsentFirstMessage && list.kind === "ready" ? { ...list, threads: threads.map(titleForDisplay) } : list}
+            showArchive={showArchive}
+            composingFirstThread={showEmptyComposer}
+            onShowArchive={setShowArchive}
+            selectedId={threadId ?? null}
+            onOpen={openThread}
+            onNewThread={startThread}
+            onRetry={() => void load()}
+            badgeFor={(thread) => badgeFor(thread, true)}
+          />
         </aside>
         <div className="assistant-thread-pane" data-focus-zone="main" tabIndex={-1}>
-          {newThread ? creationBlock ? (
+          {newThread || showEmptyComposer ? creationBlock ? (
             <div className="assistant-thread-pane-state"><State compact icon={<AssistantsIcon />}
               title={creationBlock.title} headingLevel={2}>{creationBlock.message}</State></div>
-          ) : <NewAssistantThreadComposer onCancel={isMobile ? undefined : cancelNewThread} onCreated={finishNewThread} />
+          ) : <NewAssistantThreadComposer key={newThread ? "explicit" : "empty"}
+            onCancel={newThread && !isMobile ? cancelNewThread : undefined}
+            onCreationPendingChange={showEmptyComposer ? setEmptyCreationPending : undefined}
+            onCreated={(result, composerOpen) => finishNewThread(result, showEmptyComposer, composerOpen)} />
           : threadId === undefined && (list.kind === "unavailable" || list.kind === "ownerOnly") ? (
             // The list already says why there are no threads here; an invitation to choose one would
             // contradict it, so the pane stays empty.
@@ -524,6 +542,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
               key={selected.sessionId}
               sessionId={selected.sessionId}
               mode="expanded"
+              archivedAssistantThread={selected.status === "archived"}
               rightPanel={{
                 ...rightPanel,
                 open: panel.open,
@@ -564,7 +583,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
                   onToggleSidePanel={panel.toggle}
                 />
               )}
-              assistantRequestDock={(focusComposer) => <AssistantWaitingDock
+              assistantRequestDock={selected.status === "archived" ? undefined : (focusComposer) => <AssistantWaitingDock
                 ref={waitingDock}
                 thread={selected}
                 work={launchedWork!}
@@ -572,7 +591,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
                 focusComposer={focusComposer}
               />}
               assistantSpendingNotices={firstMessageNotice ? [firstMessageNotice, ...spendingNotices] : spendingNotices}
-              assistantThreadHealth={selected.health ? {
+              assistantThreadHealth={selected.health && selected.status !== "archived" ? {
                 thread: selected,
                 problems: problemsFor(selected),
                 onSwitchAccount: () => setAccountSettingsFor(selected.id),
@@ -623,83 +642,184 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
 }
 
 /** The list pane's threads and New Thread action. */
-function ThreadList({ list, selectedId, unsentSessionId, onOpen, onNewThread, onRetry, badgeFor }: {
+function ThreadList({ list, showArchive, composingFirstThread, onShowArchive, selectedId, onOpen, onNewThread, onRetry, badgeFor }: {
   list: ListState;
+  showArchive: boolean;
+  composingFirstThread: boolean;
+  onShowArchive: (show: boolean) => void;
   selectedId: string | null;
-  unsentSessionId?: string;
   onOpen: (threadId: string) => void;
   onNewThread: () => void;
   onRetry: () => void;
-  badgeFor: (thread: AssistantThread, hideDone?: boolean) => React.ReactNode;
+  badgeFor: (thread: AssistantThread) => React.ReactNode;
 }) {
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const searchButton = useRef<HTMLButtonElement>(null);
+  const searchField = useRef<HTMLInputElement>(null);
+  const archiveButton = useRef<HTMLButtonElement>(null);
+  const archiveBack = useRef<HTMLButtonElement>(null);
   const threads = list.kind === "ready" ? list.threads : [];
-  // Re-renders each row's "5m ago" as time passes.
-  useTimelineClock(threads.length > 0);
+  const archived = threads.filter((thread) => thread.status === "archived");
+  const active = threads.filter((thread) => thread.status !== "archived");
+  const visible = showArchive ? archived : active;
+  const search = query.trim().toLowerCase();
+  const matching = visible.filter((thread) => !search || [assistantThreadTitle(thread), thread.preview]
+    .some((value) => value?.toLowerCase().includes(search)));
+  const needsYou = matching.filter((thread) => thread.status === "needs_you");
+  const recent = matching.filter((thread) => thread.status !== "needs_you");
+  useTimelineClock(visible.length > 0);
+
+  const closeSearch = () => {
+    setSearchOpen(false);
+    setQuery("");
+    searchButton.current?.focus();
+  };
+  const openArchive = (show: boolean) => {
+    setSearchOpen(false);
+    setQuery("");
+    onShowArchive(show);
+    requestAnimationFrame(() => (show ? archiveBack : archiveButton).current?.focus());
+  };
+  const renderRows = (rows: AssistantThread[]) => (
+    <ul className="assistant-thread-list">
+      {rows.map((thread) => {
+        const selected = thread.id === selectedId;
+        const title = assistantThreadTitle(thread);
+        const badge = badgeFor(thread);
+        return (
+          <li key={thread.id}>
+            <button
+              type="button"
+              className={`row assistant-inbox-row${selected ? " is-selected" : ""}`}
+              aria-current={selected ? "true" : undefined}
+              data-thread-id={thread.id}
+              onClick={() => onOpen(thread.id)}
+            >
+              <span className="assistant-thread-glyph">
+                <AgentIcon driver={thread.harness} size={20} />
+              </span>
+              <span className="row-body">
+                <span className="row-line assistant-thread-title-line">
+                  <span className="row-title assistant-thread-list-title" title={title}>{title}</span>
+                  <span className="row-sub">{relativeTime(thread.lastActivityAt)}</span>
+                </span>
+                {(badge || thread.preview) && <span className="row-line assistant-thread-preview-line">
+                  {badge}
+                  {thread.preview && <span className="row-sub" title={thread.preview}>{thread.preview}</span>}
+                </span>}
+              </span>
+              <span className="sr-only">{assistantThreadHarnessLabel(thread.harness)}</span>
+            </button>
+          </li>
+        );
+      })}
+    </ul>
+  );
   return (
-    <section className="assistant-group" aria-labelledby="assistant-threads-title">
-      <div className="assistant-threads-head">
-        <h2 id="assistant-threads-title" className="group-label">Threads{threads.length > 0 && <span className="count">{threads.length}</span>}</h2>
-        {/* With no threads the empty state offers New Thread itself, so the head steps aside (§12.1). */}
-        {threads.length > 0 && (
-          <button type="button" className="btn sm ghost" onClick={onNewThread}><PlusIcon />New Thread</button>
+    <>
+      <div className="master-detail-list-head assistant-threads-head">
+        {showArchive && (
+          <button ref={archiveBack} type="button" className="icon-btn" title="Back to Threads"
+            aria-label="Back to Threads" onClick={() => openArchive(false)}><ChevronLeftIcon /></button>
+        )}
+        <h2 id="assistant-threads-title" className="group-label">{showArchive ? "Archived Threads" : "Threads"}</h2>
+        {list.kind === "ready" && visible.length > 0 && (
+          <button ref={searchButton} type="button" className="icon-btn" title="Search Threads" aria-label="Search Threads"
+            aria-expanded={searchOpen} aria-controls={searchOpen ? "assistant-threads-search" : undefined}
+            onClick={() => {
+              if (searchOpen) closeSearch();
+              else {
+                setSearchOpen(true);
+                requestAnimationFrame(() => searchField.current?.focus());
+              }
+            }}><SearchIcon /></button>
+        )}
+        {!showArchive && !composingFirstThread && (threads.length > 0 || list.kind === "loading" || list.kind === "failed") && (
+          <button type="button" className="btn primary" onClick={onNewThread}><PlusIcon />New Thread</button>
         )}
       </div>
-      {list.kind === "loading" ? (
-        <div className="skeleton" role="status">
-          <span className="sr-only">Loading threads</span>
-          <div aria-hidden="true">
-            {Array.from({ length: 4 }, (_, index) => (
-              <div className="row row-2" key={index}>
-                <span className="row-body"><span className="skeleton-bar title" /><span className="skeleton-bar" /></span>
-              </div>
-            ))}
-          </div>
+      {searchOpen && (
+        <div className="master-detail-list-head assistant-threads-search">
+          <input id="assistant-threads-search" ref={searchField} type="search" value={query}
+            aria-label="Search Threads" placeholder="Search threads…" onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape" || event.defaultPrevented) return;
+              event.preventDefault();
+              closeSearch();
+            }} />
         </div>
-      ) : list.kind === "failed" ? (
-        <Notice tone="danger" role="alert" title="Couldn't Load Threads"
-          actions={<button type="button" className="btn sm" onClick={onRetry}>Retry</button>}
-          details={<code>{list.message}</code>}>
-          Retry to load the threads again.
-        </Notice>
-      ) : list.kind === "ownerOnly" ? (
-        // Not an empty list but a person who can't have one: no New Thread to offer.
-        <State compact icon={<AssistantsIcon />} title="Threads Are for Owners">{list.message}</State>
-      ) : list.kind === "unavailable" ? (
-        <State compact icon={<AssistantsIcon />} title="Threads Aren't Available Yet">{THREADS_UNAVAILABLE_MESSAGE}</State>
-      ) : threads.length === 0 ? (
-        <State compact icon={<AssistantsIcon />} title="No Threads Yet"
-          actions={<button type="button" className="btn" onClick={onNewThread}>New Thread</button>}>
-          Start a thread to ask the assistant for help.
-        </State>
-      ) : (
-        <ul className="assistant-thread-list">
-          {threads.map((thread) => {
-            const selected = thread.id === selectedId;
-            return (
-              <li key={thread.id}>
-                <button
-                  type="button"
-                  className={`row row-2${selected ? " is-selected" : ""}`}
-                  aria-current={selected ? "true" : undefined}
-                  data-thread-id={thread.id}
-                  onClick={() => onOpen(thread.id)}
-                >
-                  <span className="row-body">
-                    <span className="row-line">
-                      <span className="row-title" title={assistantThreadTitle(thread)}>{assistantThreadTitle(thread)}</span>
-                      {badgeFor(thread, thread.sessionId === unsentSessionId)}
-                    </span>
-                    <span className="row-sub">
-                      {assistantThreadHarnessLabel(thread.harness)} · {relativeTime(thread.lastActivityAt)}
-                    </span>
-                  </span>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
       )}
-    </section>
+      <section className="master-detail-list-body clip-focus assistant-group" aria-labelledby="assistant-threads-title">
+        {list.kind === "loading" ? (
+          <div className="skeleton" role="status">
+            <span className="sr-only">Loading threads</span>
+            <div aria-hidden="true">
+              {Array.from({ length: 4 }, (_, index) => (
+                <div className="row row-2" key={index}>
+                  <span className="row-body"><span className="skeleton-bar title" /><span className="skeleton-bar" /></span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : list.kind === "failed" ? (
+          <Notice tone="danger" role="alert" title="Couldn't Load Threads"
+            actions={<button type="button" className="btn" onClick={onRetry}>Retry</button>}
+            details={<code>{list.message}</code>}>
+            Retry to load the threads again.
+          </Notice>
+        ) : list.kind === "ownerOnly" ? (
+          // Not an empty list but a person who can't have one: no New Thread to offer.
+          <State compact icon={<AssistantsIcon />} title="Threads Are for Owners">{list.message}</State>
+        ) : matching.length === 0 && search && visible.length > 0 ? (
+          <State compact icon={<SearchIcon />} title="No Matching Threads" headingLevel={3}
+            actions={<button className="btn" type="button" onClick={() => {
+              setQuery("");
+              searchField.current?.focus();
+            }}>Clear Search</button>}>
+            No threads match “{query.trim()}”.
+          </State>
+        ) : showArchive ? (
+          archived.length > 0 ? renderRows(matching) : (
+            <State compact icon={<AssistantsIcon />} title="No Archived Threads">
+              Archived threads will appear here.
+            </State>
+          )
+        ) : list.kind === "unavailable" ? (
+          <State compact icon={<AssistantsIcon />} title="Threads Aren't Available Yet">{THREADS_UNAVAILABLE_MESSAGE}</State>
+        ) : active.length === 0 ? (
+          <State compact title="No Threads Yet" />
+        ) : (
+          <>
+            {needsYou.length > 0 && (
+              <section aria-labelledby="assistant-threads-needs-you">
+                <h3 className="group-label" id="assistant-threads-needs-you">
+                  Needs You <span className="count">{needsYou.length}</span>
+                </h3>
+                {renderRows(needsYou)}
+              </section>
+            )}
+            {recent.length > 0 && (
+              <section aria-labelledby="assistant-threads-recent">
+                <h3 className="group-label" id="assistant-threads-recent">Recent</h3>
+                {renderRows(recent)}
+              </section>
+            )}
+          </>
+        )}
+      </section>
+      {list.kind === "ready" && threads.length > 0 && !showArchive && !composingFirstThread && (
+        <div className="assistant-threads-foot">
+          <ListFoot>
+            <button ref={archiveButton} type="button" className="row" onClick={() => openArchive(true)}>
+              <span className="row-title">Archived Threads</span>
+              <span className="row-trail count">{archived.length}</span>
+              <ChevronRightIcon />
+            </button>
+          </ListFoot>
+        </div>
+      )}
+    </>
   );
 }
 

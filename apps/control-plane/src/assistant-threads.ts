@@ -7,6 +7,7 @@ import {
   PROVIDER_ACCOUNT_SKIP_TEXT,
   resolveAgentHarnessRow,
   isProviderAccountRef,
+  prioritizedPendingRequests,
   runnerCapabilityRequirementError,
   runnerSupportsProtocol,
   type AgentDefinition,
@@ -146,6 +147,44 @@ export function assistantThreadStatus(state: StoredThreadState, session: Session
   return "done";
 }
 
+const previewSentences = new Intl.Segmenter("en", { granularity: "sentence" });
+const previewDollars = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+
+function previewLine(text: string): string {
+  return text.replace(/\p{Bidi_Control}/gu, "")
+    .replace(/[\p{Cc}\s]+/gu, " ").trim();
+}
+
+function singleLinePreview(text: string): string | undefined {
+  const characters = Array.from(text);
+  return characters.length > 240 ? characters.slice(0, 239).join("") + "…" : characters.join("") || undefined;
+}
+
+function threadPreview(
+  status: AssistantThreadStatus, confirmations: AssistantOwnerConfirmation[], session: SessionView | null,
+  spentUsd: number, budget: number | null, latestReply: () => string | undefined,
+): string | undefined {
+  if (status === "needs_you") {
+    const requests = prioritizedPendingRequests(session?.pendingApproval);
+    const [request] = requests;
+    const [confirmation] = confirmations;
+    const subject = confirmation ? `${confirmation.title}: ${confirmation.target.label}` : request?.title;
+    const more = confirmations.length + requests.length - 1;
+    const target = subject && previewLine(subject);
+    if (!target) return "Waiting for you…";
+    const shortTarget = Array.from(target).slice(0, 180).join("");
+    return `Waiting for you: ${shortTarget}${shortTarget !== target ? "…" : ""}${more > 0 ? `, and ${more} more` : ""}`;
+  }
+  if (status !== "archived" && budget !== null && spentUsd >= 0.8 * budget) {
+    return `Spent ${previewDollars.format(spentUsd)} of its ${previewDollars.format(budget)} budget.`;
+  }
+  const reply = previewLine(latestReply() ?? "");
+  if (!reply) return undefined;
+  let last = "";
+  for (const { segment } of previewSentences.segment(reply)) last = segment;
+  return singleLinePreview(last);
+}
+
 export interface AssistantThreadDeps {
   connections: AssistantConnections;
   /** The thread owner as an active owner now, or null; a thread credential never outlives it. */
@@ -153,6 +192,7 @@ export interface AssistantThreadDeps {
   listRunners(owner: HumanPrincipal): RunnerView[];
   isRunnerOnline(runnerId: string): boolean;
   getSession(sessionId: string): SessionView | null;
+  latestReply?(sessionId: string): string | undefined;
   evidenceReview?(session: SessionView): AssistantEvidenceReviewAvailability;
   /** Creates the backing session exactly as an owner's New Session would, with the trusted
    * assistant marker. Never accepts the marker from request JSON. */
@@ -199,6 +239,8 @@ export class AssistantThreads {
     const status = assistantThreadStatus(row.state, session, confirmations.length);
     const launchCount = launched.length + campaigns.length;
     const costs = this.store.costs(row.id);
+    const preview = threadPreview(status, confirmations, session, costs.spentUsd, row.cost_limit_usd,
+      () => row.session_id ? this.deps.latestReply?.(row.session_id) : undefined);
     const earlierConversations = this.store.history(row.id);
     const launchLimitRefusal = status === "archived" ? null : assistantThreadLaunchLimitMessage(launchCount, row.launch_limit, Boolean(row.launch_paused))
       ?? (row.cost_limit_usd !== null && floorBudgetCents(row.cost_limit_usd - costs.launchedHeldUsd - costs.backingSpentUsd) < 0.01
@@ -232,6 +274,7 @@ export class AssistantThreads {
       decisionDelegation: threadDecisionDelegation(row),
       ...(session && this.deps.evidenceReview ? { evidenceReview: this.deps.evidenceReview(session) } : {}),
       confirmations,
+      ...(preview ? { preview } : {}),
       lastActivityAt: Math.max(row.updated_at, session?.updatedAt ?? 0),
       createdAt: row.created_at,
       archivedAt: row.archived_at,
@@ -790,6 +833,7 @@ export function createAssistantThreads(db: ControlPlaneDb, hub: Hub, svc: Sessio
     listRunners: (owner) => db.listRunnersForPrincipal(owner),
     isRunnerOnline: (runnerId) => hub.isRunnerOnline(runnerId),
     getSession: (sessionId) => db.getSession(sessionId),
+    latestReply: (sessionId) => db.latestAssistantReplyTail(sessionId),
     evidenceReview: (session) => assistantEvidenceReviewAvailability(db, session),
     createBackingSession: (owner, request, threadId, stagedSessionId) => {
       // The owner's New Session launch path, but never in a Project or a shared scope: the session

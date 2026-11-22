@@ -47,7 +47,8 @@ import "../styles.css";
  * `?threads=owner-only` is a person who isn't an organization owner (every route answers 403),
  * `?threads=unavailable` is a control plane without the Thread API (every route answers 404),
  * `?threads=empty` one with no threads yet, `?threads=long` a dozen threads with titles at the
- * 120-character limit, and the default three threads, the first of which
+ * 120-character limit, `?threads=inbox` a busy inbox with server previews and archived threads,
+ * `?threads=failed` a failed list read, and the default three threads, the first of which
  * launched two sessions, one of them waiting on a tool approval. The SPA path rides in `?path=`.
  * `window.assistantsAdvance()` finishes the running launched session, as its stream would.
  * `?confirm=N` (1–8) gives the first thread N owner confirmations waiting for its owner (#4665).
@@ -83,6 +84,7 @@ const NOW = Date.now();
 const minute = 60_000;
 const accountScenario = params.get("accounts");
 const newThreadScenario = params.get("new-thread");
+let releaseFirstMessage: (() => void) | undefined;
 const fixtureAccountRef = (index: number) => `acct:${index.toString(16).padStart(16, "0")}`;
 const fixtureAccounts: AssistantThreadAccountChoices["accounts"] = [
   { accountRef: fixtureAccountRef(1), label: "Studio Subscription" },
@@ -442,14 +444,39 @@ let threads: AssistantThread[] = scenario === "long" ? [
   ...Array.from({ length: 11 }, (_unused, index) => thread(`thr_long_${index + 2}`, index % 2 ? "sess-cleanup" : "sess-release", {
     title: longTitle(index + 2), status: index % 3 === 0 ? "working" : "done", lastActivityAt: NOW - (index + 2) * minute,
   })),
-] : scenario === "some" ? [
+] : scenario === "some" || scenario === "inbox" ? [
   triage(streamingReply ? { status: "working", launchedSessionIds: [] } : {}),
   thread("thr_release", "sess-release", { status: attentionCount > 1 ? "needs_you" : "working", harness: "codex", lastActivityAt: NOW - 3 * minute }),
   thread("thr_cleanup", "sess-cleanup", { status: "done" }),
-  // Archived: the list leaves it out, and a link to it opens it on its own.
+  // Archived: listed separately from active threads.
   thread("thr_retired", "sess-cleanup", { title: "Retire the Old Runner", status: "archived", archivedAt: NOW - 2 * 24 * 60 * minute,
     lastActivityAt: NOW - 3 * 24 * 60 * minute }),
 ] : [];
+if (scenario === "inbox") {
+  Object.assign(threads[0]!, { preview: "Waiting for you: stop Fix the Flaky Upload Test, and 2 more." });
+  Object.assign(threads[1]!, {
+    preview: "Spent $79.93 of its $25.00 budget.",
+    usage: { costUsd: { used: 79.93, limit: 25 }, launchedSessions: { used: 3, limit: 10 } },
+  });
+  Object.assign(threads[2]!, { preview: "Removed three stale worktrees.", lastActivityAt: NOW - 4 * minute });
+  Object.assign(threads[3]!, { preview: "The old runner is disconnected." });
+  threads.push(
+    thread("thr_inbox_long", "sess-release", {
+      title: "Review the nightly upload tests and verify rollout notes before sharing a complete summary with the release team tonight",
+      lastActivityAt: NOW - 6 * minute,
+      preview: "The release checklist is ready for review.",
+    }),
+    thread("thr_inbox_unbroken", "sess-release", {
+      title: "WOLLIPOGWORKERWORKFLOWMONITORINGWITHWEEKLYWORKSPACEWARNINGSANDWEBHOOKS",
+      lastActivityAt: NOW - 7 * minute,
+      preview: "The workspace checks are complete.",
+    }),
+    ...Array.from({ length: 12 }, (_, index) => thread(`thr_inbox_extra_${index}`, "sess-release", {
+      title: `Release Checklist ${index + 1}`, lastActivityAt: NOW - (8 + index) * minute,
+      preview: "Ready for the next release.",
+    })),
+  );
+}
 if (delegationScenario === "many" || delegationScenario === "active-expired") {
   const grant: Omit<NonNullable<AssistantDecisionDelegation["grant"]>, "expiresAt"> = {
     categories: ["owner_question", "pr_merge"], campaigns: "all", projects: "all",
@@ -623,6 +650,14 @@ const events: Record<string, SessionEvent[]> = {
         text: `The evidence decision is still pending. I need to inspect ${missingEvidenceIds.length} screenshots before I can approve it.`, final: true }),
     ] : []),
   ],
+  ...(scenario === "inbox" ? { "sess-cleanup": [
+    event("sess-cleanup", NOW - 3 * 24 * 60 * minute, {
+      kind: "user_message", text: "Confirm that we can retire the old runner.",
+    }),
+    event("sess-cleanup", NOW - 3 * 24 * 60 * minute + 1_000, {
+      kind: "agent_message", final: true, text: "No sessions are using it. The old runner is disconnected.",
+    }),
+  ] } : {}),
   ...(resultScenario === "background" ? {
     "sess-flaky": confirmationResultFixture("background").map((payload, index) =>
       event("sess-flaky", NOW - 15 * minute + index * minute, payload)),
@@ -820,6 +855,11 @@ const client = {
   }),
   artifactUploadSettings: async () => ({ preference: "manual" }),
   assistantThreads: (options: { includeArchived?: boolean } = {}) => {
+    if (params.has("track-list-reads")) {
+      const key = options.includeArchived ? "fullThreadReads" : "activeThreadReads";
+      document.body.dataset[key] = String(Number(document.body.dataset[key] ?? 0) + 1);
+    }
+    if (scenario === "failed") return Promise.reject(new ApiError("Service unavailable", 503));
     const refusal = refused();
     if (refusal) return refusal;
     const read = { threads: structuredClone(threads.filter((candidate) => options.includeArchived || candidate.status !== "archived")) };
@@ -1077,6 +1117,12 @@ const client = {
   },
   prompt: async (id: string, message: string) => {
     if (id.startsWith("sess-new-")) {
+      if (newThreadScenario === "hold-first-message") {
+        await new Promise<void>((resolve) => {
+          releaseFirstMessage = resolve;
+          document.body.dataset.firstMessageHeld = "true";
+        });
+      }
       if (newThreadScenario === "first-message-failure" && !document.body.dataset.refusedFirstMessage) {
         document.body.dataset.refusedFirstMessage = "true";
         throw new ApiError("The Machine did not accept the message.", 409);
@@ -1228,6 +1274,10 @@ Object.assign(window, {
     publish(threads.find((candidate) => candidate.id === threadId)!);
   },
   assistantsHoldNextList: () => { holdNextList = true; },
+  assistantsReleaseFirstMessage: () => {
+    releaseFirstMessage?.();
+    releaseFirstMessage = undefined;
+  },
   assistantsSlowLists: (ms: number) => { slowListMs = ms; },
   assistantsReleaseList: () => {
     initialListGate = undefined;

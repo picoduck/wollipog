@@ -220,6 +220,8 @@ export interface AssistantThread {
   /** Additive (#4665): destructive commands of this thread's assistant waiting for the owner, oldest
    * first. While any is listed the thread's status is `needs_you`. */
   confirmations?: AssistantOwnerConfirmation[];
+  /** Owner-only single-line summary of attention, spending, or the latest Assistant reply. */
+  preview?: string;
   lastActivityAt: number;
   createdAt: number;
   archivedAt: number | null;

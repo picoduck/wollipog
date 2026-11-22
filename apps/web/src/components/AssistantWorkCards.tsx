@@ -117,7 +117,7 @@ function cardFocusTarget(list: HTMLElement | null, sessionId: string | null): HT
   return card?.querySelector<HTMLElement>(".assistant-work-open") ?? null;
 }
 
-export function AssistantWorkPanel({ work, onReview }: { work: LaunchedWork; onReview: (sessionId: string, request: PendingApproval) => void }) {
+export function AssistantWorkPanel({ work, onReview }: { work: LaunchedWork; onReview?: (sessionId: string, request: PendingApproval) => void }) {
   const { ids, groups } = useLaunchedWorkGroups(work);
   const [query, setQuery] = useState("");
   const [finishedOpen, setFinishedOpen] = useState<boolean | null>(null);
@@ -191,7 +191,7 @@ export function AssistantWorkPanel({ work, onReview }: { work: LaunchedWork; onR
 function AssistantWorkRow({ sessionId, campaign, onReview }: {
   sessionId: string;
   campaign?: boolean;
-  onReview: (sessionId: string, request: PendingApproval) => void;
+  onReview?: (sessionId: string, request: PendingApproval) => void;
 }) {
   const session = useStoreSelector((state) => state.sessions.get(sessionId));
   const runnerOnline = useStoreSelector((state) => state.runners.get(session?.runnerId ?? "")?.status === "online");
@@ -216,7 +216,7 @@ function AssistantWorkRow({ sessionId, campaign, onReview }: {
       </button>
       {request && <div className="assistant-work-review">
         <p className="assistant-work-request-title" title={request.title}>{request.title}</p>
-        <button type="button" className="btn" onClick={() => onReview(sessionId, request)}>Review</button>
+        {onReview && <button type="button" className="btn" onClick={() => onReview(sessionId, request)}>Review</button>}
       </div>}
     </li>
   );

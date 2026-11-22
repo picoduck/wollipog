@@ -13245,6 +13245,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   overflow: hidden;
 }
 .assistant-thread-pane > .session-detail { flex: 1 1 0; min-height: 0; }
+.assistant-thread-archive-notice { margin: var(--space-2) var(--page-gutter); }
 .new-assistant-thread {
   display: flex;
   flex-direction: column;
@@ -13362,26 +13363,60 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   overflow-y: auto;
   padding: var(--space-5) var(--page-gutter) var(--space-12) var(--space-6);
 }
-/* One column as wide as the pane. An implicit `auto` column would grow to its rows' min-content, the
-   longest title on one line, and push the list and New Thread past the pane; this one lets each row's
-   title shrink and end in its ellipsis instead. */
-.assistant-group {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-1);
-}
 /* The empty state's column starts where the Threads label and the rows' titles do. */
 .assistant-group > .state { padding-inline: var(--space-3); }
 .assistant-threads-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: var(--space-2);
 }
+.assistant-threads-head > .group-label {
+  flex: 1;
+  min-width: 0;
+}
+.assistant-threads-search > input { width: 100%; }
+.assistant-threads-foot {
+  flex: none;
+  padding: 0 var(--space-2) var(--space-2) 0;
+}
+.assistant-threads-foot .list-foot { margin-top: 0; }
 .assistant-thread-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
   margin: 0;
   padding: 0;
   list-style: none;
+}
+.assistant-inbox-row {
+  align-items: flex-start;
+  gap: var(--space-2);
+  height: auto;
+  min-height: var(--row-h-2);
+  padding-block: var(--space-2);
+}
+.assistant-thread-glyph { display: inline-flex; flex: none; }
+.assistant-thread-title-line {
+  align-items: baseline;
+  justify-content: space-between;
+}
+.assistant-thread-title-line > .row-sub {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.assistant-thread-list-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.assistant-thread-preview-line { margin-top: var(--space-1); }
+.assistant-thread-preview-line > .status,
+.assistant-group .group-label > .count,
+.assistant-threads-foot .count { font-size: var(--text-sm); }
+@media (max-width: 760px) {
+  .assistant-threads-foot { padding-inline: var(--page-gutter); }
 }
 /* The thread title is the only part of the detail bar that shrinks. The tooltip belongs outside the
    clipping box so it can show the whole title and wrap on a phone. */
@@ -20414,6 +20449,7 @@ a.tab { text-decoration: none; }
   }
   :is(.btn.sm, button.chip, .composer-btn)::after { inset: -5px; }
   .toast-actions, .notice-trailing { gap: var(--space-2); }
+  .assistant-group .notice-actions { gap: var(--space-3); }
   .notice.compact > .notice-trailing::before { margin-right: calc(var(--space-2) * -1); }
   /* A segmented option cannot borrow from its neighbours, so it borrows the track's inset and edge
      instead: 38px option + 2px inset + 1px edge on each side = 44px, plus the option's own 1px
