@@ -14,7 +14,7 @@ import { buildCodexTurnParams } from "./drivers/codex-app-server.js";
 import { managedWorktreeLaunchRefusal } from "./execution-isolation.js";
 import { commandTargetsManagedWorktree } from "./managed-worktree-protection.js";
 import { reusedWorktreeNotice, SessionManager } from "./session-manager.js";
-import { shutdownLocationSwitchManagers } from "./test-support/location-switch-shutdown.js";
+import { shutdownLocationSwitchManagers, stopLocationSwitchManager } from "./test-support/location-switch-shutdown.js";
 import { SessionStore } from "./session-store.js";
 import { nativePathSpelling, parseWorktreePorcelain, recoveredBranchPlacement, sameWorktreePath } from "./worktree.js";
 
@@ -123,16 +123,19 @@ async function withSession(name: string, body: (h: Harness) => Promise<void>,
     });
     await body({ manager, store, sessionId, fake, sent, app, docs, claudeHome, dataDir, message,
       restartRunner: (next = fakeProvider()) => {
-        manager.shutdownAll();
+        stopLocationSwitchManager(manager);
         // A crashed process's session lock goes stale; model that rather than wait a minute.
         const lock = join(dataDir, "sessions", sessionId, "lock");
         if (existsSync(lock)) utimesSync(lock, new Date(0), new Date(0));
         return runner(next);
       } });
   } finally {
-    await shutdownLocationSwitchManagers(managers);
-    if (previousClaudeHome === undefined) delete process.env.CLAUDE_CONFIG_DIR;
-    else process.env.CLAUDE_CONFIG_DIR = previousClaudeHome;
+    try {
+      await shutdownLocationSwitchManagers(managers);
+    } finally {
+      if (previousClaudeHome === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousClaudeHome;
+    }
     rmSync(root, { recursive: true, force: true });
   }
 }

@@ -187,9 +187,12 @@ async function withCrashDuringSetup(
   } finally {
     doomed?.kill("SIGKILL");
     if (setupPid !== undefined && alive(setupPid)) process.kill(setupPid, "SIGKILL");
-    await shutdownLocationSwitchManagers(managers);
-    if (previousClaudeHome === undefined) delete process.env.CLAUDE_CONFIG_DIR;
-    else process.env.CLAUDE_CONFIG_DIR = previousClaudeHome;
+    try {
+      await shutdownLocationSwitchManagers(managers);
+    } finally {
+      if (previousClaudeHome === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousClaudeHome;
+    }
     rmSync(root, { recursive: true, force: true });
   }
 }

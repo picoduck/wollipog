@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { claudeProjectPathKey } from "./claude-background-work.js";
 import { SessionManager } from "./session-manager.js";
-import { shutdownLocationSwitchManagers } from "./test-support/location-switch-shutdown.js";
+import { shutdownLocationSwitchManagers, stopLocationSwitchManager } from "./test-support/location-switch-shutdown.js";
 import { SessionStore } from "./session-store.js";
 import { requestedSlot, requestedWorktreeBoundary, worktreeIdForPath, type WorktreeCleanupRecord } from "./worktree.js";
 
@@ -121,7 +121,7 @@ async function withSession(name: string, body: (h: Harness) => Promise<void>): P
         recoverBranch: "fix/install-link", ...overrides,
       }),
       restart: () => {
-        harness.manager.shutdownAll();
+        stopLocationSwitchManager(harness.manager);
         // A crashed process's session lock goes stale; model that rather than wait a minute.
         const lock = join(dataDir, "sessions", sessionId, "lock");
         if (existsSync(lock)) utimesSync(lock, new Date(0), new Date(0));
@@ -133,14 +133,18 @@ async function withSession(name: string, body: (h: Harness) => Promise<void>): P
     };
     await body(harness);
   } finally {
-    await shutdownLocationSwitchManagers(managers);
-    if (previousClaudeHome === undefined) delete process.env.CLAUDE_CONFIG_DIR;
-    else process.env.CLAUDE_CONFIG_DIR = previousClaudeHome;
+    try {
+      await shutdownLocationSwitchManagers(managers);
+    } finally {
+      if (previousClaudeHome === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousClaudeHome;
+    }
     rmSync(root, { recursive: true, force: true });
   }
 }
 
-test("fixture teardown waits for a worktree writer that outlives synchronous shutdown", async () => {
+for (const lane of ["worktree operation", "replacement before restart"] as const) {
+test(`fixture teardown waits for a ${lane} writer that outlives synchronous shutdown`, async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-switch-shutdown-")));
   const store = new SessionStore(join(root, "sessions"));
   const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
@@ -149,11 +153,19 @@ test("fixture teardown waits for a worktree writer that outlives synchronous shu
   const gate = new Promise<void>((resolve) => { release = resolve; });
   const internals = manager as unknown as {
     runWorktreeOperation: (id: string, operation: () => Promise<void>) => Promise<void>;
+    providerAccountSwitches: Map<string, { entry: { client: { dispose(): void } }; promise: Promise<void> }>;
   };
-  const writer = internals.runWorktreeOperation("s_shutdown_writer", async () => {
+  const writeLate = async () => {
     await gate;
     writeFileSync(join(root, "late-journal-write"), "settled");
-  });
+  };
+  const writer = lane === "worktree operation"
+    ? internals.runWorktreeOperation("s_shutdown_writer", writeLate) : writeLate();
+  if (lane === "replacement before restart") {
+    internals.providerAccountSwitches.set("s_shutdown_writer", { entry: { client: { dispose() {} } }, promise: writer });
+    stopLocationSwitchManager(manager);
+    assert.equal(internals.providerAccountSwitches.size, 0, "restart clears the original promise registry");
+  }
   let settled = false;
   const shutdown = shutdownLocationSwitchManagers([manager]).then(() => { settled = true; });
   try {
@@ -171,6 +183,7 @@ test("fixture teardown waits for a worktree writer that outlives synchronous shu
     rmSync(root, { recursive: true, force: true });
   }
 });
+}
 
 /** The configuration lives on the branch the switch recovers, as the base commit setup reads. */
 function commitSetup(h: Harness, config: unknown, branch = "fix/install-link"): void {
@@ -874,7 +887,7 @@ test("a runner going down during setup keeps the approved switch owed, and gives
     await answerTrust(h, "trust");
     await waitFor(() => stderrText(h).some((text) => text.startsWith("Running worktree setup")), "setup did not start");
     await new Promise<void>((resolve) => setTimeout(resolve, 200));
-    h.manager.shutdownAll();
+    stopLocationSwitchManager(h.manager);
     await waitFor(() => docsWorktrees(h).length === 1, "the worktree was not released");
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
     const meta = h.store.readMeta(h.sessionId)!;
@@ -3836,7 +3849,7 @@ test("a worktree a launch makes again after a refused rollback is never removed 
     writeFileSync(join(worktree, "fixes.txt"), "the person's fixes since\n");
     const kept = files(worktree);
 
-    manager.shutdownAll();
+    stopLocationSwitchManager(manager);
     ({ store, manager } = runner());
     manager.configureSharedDirectories(locations as never);
     manager.reconcileStore();
@@ -3897,7 +3910,7 @@ test(`a launch whose worktree is left behind when ${how} gives back that worktre
       const cards = () => store.readEvents(sessionId).map((event) => event.payload).filter((payload) => payload.kind === "permission_request");
       await waitFor(() => store.has(sessionId) && cards().length > 0, "the launch's setup did not ask for trust");
       if (how.startsWith("a runner shutdown")) {
-        manager.shutdownAll();
+        stopLocationSwitchManager(manager);
         await starting;
       } else {
         // A crash: this process never runs again, so its launch never finishes or rolls back. (It is
@@ -3910,7 +3923,7 @@ test(`a launch whose worktree is left behind when ${how} gives back that worktre
     const worktree = git(app, "worktree", "list", "--porcelain").split("\n").filter((line) => line.startsWith("worktree "))
       .map((line) => line.slice("worktree ".length)).find((path) => path !== realpathSync(app));
 
-    if (!how.startsWith("the runner crashes")) manager.shutdownAll();
+    if (!how.startsWith("the runner crashes")) stopLocationSwitchManager(manager);
     ({ store, manager } = runner());
     manager.configureSharedDirectories(locations as never);
     manager.reconcileStore();
@@ -4009,7 +4022,7 @@ test(`a launch rollback retried after a restart ${written ? "keeps work written 
     assert.ok((manager as unknown as { cleanupJournal: { list(): WorktreeCleanupRecord[] } }).cleanupJournal.list().length > 0,
       "the launch's rollback stays on record");
 
-    manager.shutdownAll();
+    stopLocationSwitchManager(manager);
     // While the rollback waits for the next start, a person works there.
     if (written) writeFileSync(join(worktree, "notes.txt"), "work written while the rollback waited\n");
     const before = written ? files(worktree) : undefined;
@@ -4082,7 +4095,7 @@ test("a launch rollback leaves a worktree Git cannot answer from inside byte for
       (store.readMeta(sessionId)?.keptWorktreePaths?.includes(worktree) ?? false)), "the rollback did not try");
     assert.deepEqual(files(worktree), before, "nothing in it is removed");
 
-    manager.shutdownAll();
+    stopLocationSwitchManager(manager);
     logs.length = 0;
     ({ store, manager } = runner());
     manager.configureSharedDirectories(locations as never);
@@ -4117,7 +4130,7 @@ test("a launch rollback leaves a worktree Git cannot answer from inside byte for
     const taken = files(worktree);
 
     // A later restart finds nothing to replay against it.
-    manager.shutdownAll();
+    stopLocationSwitchManager(manager);
     ({ store, manager } = runner());
     manager.configureSharedDirectories(locations as never);
     manager.reconcileStore();
