@@ -232,9 +232,11 @@ test("the owner grants and revokes exact typed resolution, and Assistant calls n
     const history = await h.ownerCall("GET", `/api/assistant-decision-history?threadId=${thread.id}&campaignId=root`);
     assert.equal(history.status, 200);
     assert.equal(history.body.total, 1);
+    assert.deepEqual(history.body.outcomeCounts, { approved: 1, denied: 0, answered: 0 });
+    assert.equal(history.body.entries[0].subject, snapshot.branch);
     assert.deepEqual(history.body.entries.map((item: { delegation: unknown }) => item.delegation), [recorded.assistantDelegation]);
     const otherOwnerHistory = h.db.assistantDecisionHistory({ ...h.owner, userId: "other-owner" }, { threadId: thread.id });
-    assert.deepEqual(otherOwnerHistory, { entries: [], total: 0 });
+    assert.deepEqual(otherOwnerHistory, { entries: [], total: 0, outcomeCounts: { approved: 0, denied: 0, answered: 0 } });
     await setGrant(6, grant);
     const evidence = h.svc.createWorkflowDecision("child", { requestId: "evidence", resourceKey: "screenshots",
       resourceSnapshot: { category: "ui_evidence_approval", evidence: [{ evidenceId: "preview",
@@ -248,6 +250,13 @@ test("the owner grants and revokes exact typed resolution, and Assistant calls n
     const evidenceDenial = await call("assistant_decision_resolve", { ...evidenceResolution, outcome: "deny" });
     assert.equal(evidenceDenial.isError, undefined, evidenceDenial.content[0].text);
     assert.equal(h.db.workflowDecisionByOccurrence(evidence.data.occurrenceId)?.assistantDelegation?.outcome, "denied");
+    const filtered = await h.ownerCall("GET", `/api/assistant-decision-history?threadId=${thread.id}&campaignId=root&outcome=denied`);
+    assert.equal(filtered.status, 200);
+    assert.deepEqual(filtered.body.outcomeCounts, { approved: 1, denied: 1, answered: 0 });
+    assert.equal(filtered.body.total, 2);
+    assert.deepEqual(filtered.body.entries.map((item: { occurrenceId: string }) => item.occurrenceId), [evidence.data.occurrenceId]);
+    const invalid = await h.ownerCall("GET", `/api/assistant-decision-history?threadId=${thread.id}&outcome=pending`);
+    assert.equal(invalid.status, 400);
     const outside = h.db.assistantConnections.create(h.owner, "Outside Assistant", { operations: "all", projects: "all" });
     assert.equal(h.operations.list(outside.connection).some((op) => op.name === "assistant_decision_resolve"), false);
     await assert.rejects(h.operations.call(h.db.assistantConnections.authenticate(outside.token)!, "assistant_decision_resolve", resolution), /requires an explicit grant/u);

@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   PROTOCOL_VERSION,
   ASSISTANT_DECISION_CATEGORIES,
+  type AssistantDecisionOutcome,
   type AssistantDecisionCategory,
   removePendingRequest,
   type AgentHarnessDefaultsView,
@@ -829,11 +830,18 @@ const client = {
     publish(current);
     return { thread: structuredClone(current) };
   },
-  assistantDecisionHistory: async (filter: { threadId?: string; before?: string }) => {
+  assistantDecisionHistory: async (filter: { threadId?: string; before?: string; outcome?: AssistantDecisionOutcome }) => {
+    const firstRequest = !document.body.dataset.assistantDecisionHistoryRequested;
     document.body.dataset.assistantDecisionHistoryRequested = "true";
-    if (filter.threadId && panelScenario === "not-delegated") return { entries: [], total: 0 };
-    const history = assistantDecisionHistoryFixture("campaign_0", filter.before, params.has("release-history"));
-    return filter.threadId && panelScenario && !filter.before ? { ...history, total: 24 } : history;
+    const scenario = params.get("decision-history");
+    if (scenario === "loading") await new Promise<void>((resolve) => Reflect.set(window, "releaseDecisionHistory", resolve));
+    if (scenario === "error" && firstRequest) throw new ApiError("Fixture failed to load decision history.", 503);
+    if (scenario === "empty" || panelScenario === "not-delegated") return { entries: [], total: 0 };
+    const history = assistantDecisionHistoryFixture("campaign_0", {
+      ...filter, release: params.has("release-history"), stress: scenario === "stress", legacy: scenario === "legacy",
+      evidence: scenario === "evidence",
+    });
+    return filter.threadId && !filter.before ? { ...history, total: 24 } : history;
   },
   setConfig: async (sessionId: string, patch: SessionConfig) => {
     const current = threads.find((thread) => thread.sessionId === sessionId);
