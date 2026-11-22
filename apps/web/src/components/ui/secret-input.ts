@@ -47,7 +47,7 @@ export function secretValueRef(
   value: string,
   // Wide enough for a ref that also holds Answer Mode's growing field (#4714).
   forward?: { current: HTMLInputElement | HTMLTextAreaElement | null },
-): (input: HTMLInputElement | null) => void {
+): (input: HTMLInputElement | HTMLTextAreaElement | null) => void {
   return (input) => {
     if (forward) forward.current = input;
     if (input && input.value !== value) input.value = value;
