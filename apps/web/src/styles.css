@@ -13348,6 +13348,10 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   }
   .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-meta { grid-column: 1 / -1; }
   .detail-chat:has(.assistant-dock) .assistant-spending-notice :is(.notice-actions, .assistant-spending-meter) { margin-top: 0; }
+  .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-actions > .btn {
+    height: auto;
+    min-height: var(--control-h-sm);
+  }
   @container session-body (max-width: 540px) {
     /* Give the actions the full row when a docked panel narrows the reading column. */
     .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-content {
@@ -13367,8 +13371,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-actions { flex-wrap: nowrap; }
     .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-actions > .btn {
       flex: 0 1 auto;
-      height: auto;
-      min-height: var(--control-h-sm);
       min-width: 0;
       white-space: normal;
     }
