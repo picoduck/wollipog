@@ -30,11 +30,11 @@ export function convertIncrementalVacuum(location: string, options: {
   let previousTemp: string | undefined;
   let tempChanged = false;
   try {
-    db.exec(FILE_BACKED_PAGE_CACHE_PRAGMA);
     db.exec("PRAGMA busy_timeout=0; PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;");
     // EXCLUSIVE retains the lock across the commit and the subsequent VACUUM. In WAL mode
     // even an idle connected owner prevents acquisition. The acknowledgement is still required:
     // SQLite cannot prove that an idle rollback-mode handle, or an operator, won't try to reopen.
+    db.exec(FILE_BACKED_PAGE_CACHE_PRAGMA);
     const pageSize = (db.prepare("PRAGMA page_size").get() as { page_size: number }).page_size;
     const pages = (db.prepare("PRAGMA page_count").get() as { page_count: number }).page_count;
     const databaseBytes = [BigInt(pageSize) * BigInt(pages), statSync(path, { bigint: true }).size]
