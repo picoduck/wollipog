@@ -2534,7 +2534,7 @@ export class SessionsService {
   /** When each campaign was last checked for leftovers to repair, so a tick never derives them all. */
   private readonly campaignRepairCheckedAt = new Map<string, number>();
   private readonly archiveWorktreeRetirements = new Set<string>();
-  private readonly archiveWorktreeRetryScheduled = new Set<string>();
+  private readonly archiveWorktreeRetries = new Map<string, { delay: number; due: boolean }>();
   private readonly refusedWorktreeRecheckedAt = new Map<string, number>();
   private readonly refusedWorktreeSweep = new Map<string, { at: number; after: string }>();
   /** Full Control campaigns whose first message is being established (#2940). */
@@ -21206,7 +21206,7 @@ export class SessionsService {
    * it accepts a request. Refusals only receive metadata reconciliation, never a deletion retry. */
   private queueCampaignWorktreeRetirement(sessionId: string, retryDeferred = false, recheckAt = Date.now(),
     rootPolicies = new Map<string, OrchestratorCampaignPolicy | null>(), previousRetryDelayMs = 0): void {
-    if (this.archiveWorktreeRetirements.has(sessionId) || this.archiveWorktreeRetryScheduled.has(sessionId)) return;
+    if (this.archiveWorktreeRetirements.has(sessionId)) return;
     const child = this.db.campaignWorktreeRetirementState(sessionId);
     if (!child?.archived || child.archivePending) return;
     const campaignId = this.db.campaignForVerifiedChild(sessionId, rootPolicies);
@@ -21216,9 +21216,10 @@ export class SessionsService {
     const reconcileRefused = runnerSupportsProtocol(protocol,
       "campaignWorktreeRemovalReconciliation") &&
       (retryDeferred || recheckAt - (this.refusedWorktreeRecheckedAt.get(sessionId) ?? 0) >= 30_000);
+    const discard = !this.archiveWorktreeRetries.has(sessionId);
     const pending = this.db.campaignWorktreeCleanup(sessionId).filter((item) =>
-      item.status === "pending" || (retryDeferred && item.status === "deferred") ||
-      (reconcileRefused && item.status === "refused"));
+      item.status === "refused" ? reconcileRefused
+        : discard && (item.status === "pending" || (retryDeferred && item.status === "deferred")));
     if (!pending.length) return;
     if (pending.some(item => item.status === "refused")) this.refusedWorktreeRecheckedAt.set(sessionId, recheckAt);
     this.archiveWorktreeRetirements.add(sessionId);
@@ -21314,14 +21315,25 @@ export class SessionsService {
         this.archiveWorktreeRetirements.delete(sessionId);
         if (retry) {
           const delay = Math.min(Math.max(minimumRetryDelayMs, 2 * previousRetryDelayMs), 60 * 60_000);
-          this.archiveWorktreeRetryScheduled.add(sessionId);
+          const scheduled = { delay, due: false };
+          this.archiveWorktreeRetries.set(sessionId, scheduled);
           setTimeout(() => {
-            this.archiveWorktreeRetryScheduled.delete(sessionId);
-            this.queueCampaignWorktreeRetirement(sessionId, retryDeferred, Date.now(), undefined, delay);
+            scheduled.due = true;
+            this.runDueArchiveWorktreeRetry(sessionId);
           }, delay).unref();
         }
+        this.runDueArchiveWorktreeRetry(sessionId);
       }
     })();
+  }
+
+  private runDueArchiveWorktreeRetry(sessionId: string): void {
+    const retry = this.archiveWorktreeRetries.get(sessionId);
+    // An independent refusal reconciliation may be in flight. Its finally block picks up the
+    // retry after the runner's reply so snapshots for this child are still applied serially.
+    if (!retry?.due || this.archiveWorktreeRetirements.has(sessionId)) return;
+    this.archiveWorktreeRetries.delete(sessionId);
+    this.queueCampaignWorktreeRetirement(sessionId, false, Date.now(), undefined, retry.delay);
   }
 
   /** A new control-plane process replays an archive request that was not delivered before exit. */

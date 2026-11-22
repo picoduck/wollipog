@@ -2013,6 +2013,77 @@ for (const failure of ["git", "forge"] as const) test(`archive retirement backs 
   }
 });
 
+test("retirement backoff leaves refused reconciliation and runner-owned deferred replay independent", async (t) => {
+  const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  try {
+    const child = spawn(parent.id, "Deliver issue");
+    const worktree = (id: string) => ({
+      id, path: `/worktrees/${child}/${id}`, branch: `agent/${id}`, source: "created" as const,
+    });
+    const pending = worktree("pending"), deferred = worktree("deferred"), refused = worktree("refused");
+    const worktrees = [pending, deferred, refused];
+    db.setWorktreePath(child, pending.path);
+    db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify(worktrees), child);
+    svc.onSessionStatus(child, "idle");
+    assert.ok(verify(child, report(child, "Delivered")).ok);
+    hub.online = false;
+    svc.onSessionStatus(child, "stopped");
+    db.recordCampaignWorktreeCleanup(child, deferred.path, deferred.id, "deferred", "provider_active", Date.now());
+    db.recordCampaignWorktreeCleanup(child, refused.path, refused.id, "refused", "uncommitted changes", Date.now());
+    hub.online = true;
+
+    let completeReconciliation: (() => void) | undefined;
+    let operatorRemoved = false;
+    const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+    hub.requestHandler = (message) => {
+      assert.equal(message.type, "session_worktree");
+      const base = { type: "session_worktree_result", requestId: message.requestId, sessionId: child } as const;
+      const view = (remaining: typeof worktrees) => snapshot({
+        id: child, status: "stopped", worktreePath: pending.path, worktrees: remaining,
+      });
+      if (message.operation === "reconcile_removal") {
+        assert.equal(message.path, refused.path);
+        const reply = { ...base, operation: "reconcile_removal", ok: true,
+          snapshot: view(operatorRemoved ? [pending, deferred] : worktrees) } as const;
+        if (!operatorRemoved) return reply;
+        return new Promise<RunnerRequestResult>((resolve) => {
+          completeReconciliation = () => resolve(reply);
+        });
+      }
+      assert.equal(message.operation, "discard");
+      return message.path === deferred.path
+        ? { ...base, operation: "discard", ok: true, retirement: { status: "deferred", reason: "provider_active" },
+          snapshot: view(worktrees) }
+        : { ...base, operation: "discard", ok: false, error: "worktree retained: Git state is unavailable or changed during cleanup" };
+    };
+    svc.reconcileArchivedCampaignWorktrees(RUNNER_ID);
+    await settle();
+    const requests = () => hub.sentOfType("session_worktree").map((message) => [message.operation, message.path]);
+    assert.deepEqual(requests(), [
+      ["discard", pending.path], ["discard", deferred.path], ["reconcile_removal", refused.path],
+    ]);
+    hub.sentToRunner.length = 0;
+
+    operatorRemoved = true;
+    t.mock.timers.tick(30_000);
+    svc.campaignProjection(parent.id);
+    await settle();
+    assert.deepEqual(requests(), [["reconcile_removal", refused.path]], "refusal reconciliation remains available during backoff");
+    t.mock.timers.tick(30_000);
+    assert.equal(requests().length, 1, "a due retry waits for the in-flight reconciliation");
+    assert.ok(completeReconciliation);
+    completeReconciliation();
+    await settle();
+    assert.deepEqual(requests(), [["reconcile_removal", refused.path], ["discard", pending.path]],
+      "the timed retry resumes without replaying the deferred worktree");
+    assert.deepEqual(db.campaignWorktreeCleanup(child).map((item) => item.status), ["pending", "deferred"]);
+  } finally {
+    t.mock.timers.reset();
+    db.close();
+  }
+});
+
 for (const trigger of ["campaign_read", "maintenance", "stopped_root", "archived_root"] as const) test(`Campaign Status reconciles refused external removal without retrying deletion: ${trigger}`, async () => {
   const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
   try {
