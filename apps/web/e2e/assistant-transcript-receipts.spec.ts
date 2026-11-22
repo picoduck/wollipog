@@ -118,9 +118,9 @@ for (const theme of ["light", "dark"] as const) {
         await expect(dock.getByRole("heading", { name: "Archive Session" })).toBeVisible();
         const transcriptColumn = page.locator(".detail-main[data-assistant-transcript]");
         if (width === 390) {
-          await expect(transcriptColumn).toHaveCSS("margin-block-end", "0px");
+          await expect(transcriptColumn).toHaveCSS("margin-bottom", "0px");
           await page.evaluate(() => document.documentElement.style.setProperty("--keyboard-inset", "320px"));
-          await expect(transcriptColumn).toHaveCSS("margin-block-end", "0px");
+          await expect(transcriptColumn).toHaveCSS("margin-bottom", "0px");
           await page.evaluate(() => document.documentElement.style.removeProperty("--keyboard-inset"));
         }
         await capture("request-waiting", requestMessage);
@@ -144,10 +144,10 @@ for (const theme of ["light", "dark"] as const) {
           await page.evaluate(() => document.documentElement.style.setProperty("--keyboard-inset", "320px"));
           await expect.poll(() => transcriptColumn.evaluate((column) => {
             const height = document.querySelector<HTMLElement>(".toast-region")?.offsetHeight;
-            return height === undefined ? Infinity : Number.parseFloat(getComputedStyle(column).marginBlockEnd) - height;
+            return height === undefined ? Infinity : Number.parseFloat(getComputedStyle(column).marginBottom) - height;
           })).toBe(8);
           await page.getByRole("button", { name: "Dismiss Notification" }).click();
-          await expect(transcriptColumn).toHaveCSS("margin-block-end", "0px");
+          await expect(transcriptColumn).toHaveCSS("margin-bottom", "0px");
         }
 
         await open(page, theme, "stress");
