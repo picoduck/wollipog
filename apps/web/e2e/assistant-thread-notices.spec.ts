@@ -50,14 +50,16 @@ async function checkTargets(controls: Locator, phone: boolean) {
     return { x, y, width, height };
   }));
   const size = phone ? 44 : 24;
+  // The browser can report integral layout sizes a few ten-thousandths of a pixel low.
+  const precision = 0.001;
   for (const [index, first] of targets.entries()) {
-    expect(first.width).toBeGreaterThanOrEqual(size);
-    expect(first.height).toBeGreaterThanOrEqual(size);
+    expect(first.width).toBeGreaterThanOrEqual(size - precision);
+    expect(first.height).toBeGreaterThanOrEqual(size - precision);
     if (!phone) continue;
     for (const second of targets.slice(index + 1)) {
       const horizontalGap = Math.max(first.x, second.x) - Math.min(first.x + first.width, second.x + second.width);
       const verticalGap = Math.max(first.y, second.y) - Math.min(first.y + first.height, second.y + second.height);
-      expect(Math.max(horizontalGap, verticalGap)).toBeGreaterThanOrEqual(8);
+      expect(Math.max(horizontalGap, verticalGap)).toBeGreaterThanOrEqual(8 - precision);
     }
   }
 }
@@ -66,7 +68,7 @@ for (const theme of ["light", "dark"] as const) {
   for (const phone of [false, true]) {
     test.describe(theme + (phone ? " phone" : " desktop"), () => {
       test.use({ viewport: phone ? { width: 390, height: 844 } : { width: 1440, height: 900 },
-        isMobile: phone, hasTouch: phone, colorScheme: theme, timezoneId: "UTC", locale: "en-US" });
+        isMobile: phone, hasTouch: phone, colorScheme: theme, reducedMotion: "reduce", timezoneId: "UTC", locale: "en-US" });
 
       for (const { fixture, tone, title, badge, body, actions } of cases) {
         test(title, async ({ page }) => {
