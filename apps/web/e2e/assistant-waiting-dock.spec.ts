@@ -118,27 +118,51 @@ for (const theme of ["light", "dark"] as const) {
       await expectFullyInViewport(notice, "Spending notice");
       await expectTextContrast(notice);
       await expectTextContrast(dock(page));
-      await layout(page, 48);
-      expect(await body.evaluate(element => element.clientHeight), "The request body has room to render").toBeGreaterThan(0);
-      await expect(dock(page)).toHaveAttribute("data-clip-end", "");
+      await layout(page, 47);
+      await actionOrder(card, ["Open Session", "Deny", "Approve Once"]);
+      await expectFullyInViewport(summary, "Summary");
+      await expectFullyInViewport(target, "Target");
+      const { clientHeight, scrollHeight } = await body.evaluate(element => ({
+        clientHeight: element.clientHeight, scrollHeight: element.scrollHeight,
+      }));
+      expect(clientHeight, "The request body has room to render").toBeGreaterThan(0);
+      expect(scrollHeight, "The request body has more content to scroll").toBeGreaterThan(clientHeight);
+      const cue = card.locator(".assistant-dock-scroll-cue");
+      await expectFullyInViewport(cue, "Scroll cue above the actions");
       await screenshot(page, theme, "tool-and-320percent-notice", 4838);
 
-      await dock(page).hover();
-      await page.mouse.wheel(0, 48);
-      await expect.poll(() => dock(page).evaluate(element => element.scrollTop)).toBeGreaterThan(0);
-      for (const [content, label] of [[summary, "Summary"], [target, "Target"]] as const) {
-        await content.scrollIntoViewIfNeeded();
-        await expectFullyInViewport(content, label);
-      }
-      const deny = card.getByRole("button", { name: "Deny", exact: true });
+      await body.hover();
       await page.mouse.wheel(0, 400);
-      await expect(dock(page)).not.toHaveAttribute("data-clip-end");
-      await command.scrollIntoViewIfNeeded();
-      await expectFullyInViewport(approve(card), "Approve Once");
-      await expectFullyInViewport(deny, "Deny");
+      await expect.poll(() => body.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+      await expect(cue).toBeHidden();
+      await actionOrder(card, ["Open Session", "Deny", "Approve Once"]);
       await expectFullyInViewport(command, "Full command");
-      await layout(page, 48);
+      await layout(page, 47);
       await screenshot(page, theme, "tool-and-320percent-notice-command", 4838);
+    });
+
+    test("three requests in Show All scroll above the 320% notice", async ({ page }) => {
+      await open(page, theme, "tool", "spending=over&dockCount=3");
+      await dock(page).getByRole("button", { name: "Show All" }).click();
+      await expect(cards(page)).toHaveCount(3);
+      const notice = page.locator(".composer .assistant-spending-notice");
+      await expect(notice.getByRole("meter")).toHaveAttribute("aria-valuetext", "$79.93 of $25.00 spent");
+      await expectFullyInViewport(notice, "Spending notice");
+      await layout(page, 47);
+      const list = dock(page).getByRole("list", { name: "Pending Requests" });
+      expect(await list.evaluate(el => el.scrollHeight - el.clientHeight)).toBeGreaterThan(0);
+      for (const card of await cards(page).all()) {
+        await approve(card).scrollIntoViewIfNeeded();
+        await actionOrder(card, ["Open Session", "Deny", "Approve Once"]);
+      }
+      const firstCard = cards(page).first();
+      await firstCard.locator(".assistant-dock-actions").evaluate(element => element.scrollIntoView({ block: "end" }));
+      await expectFullyInViewport(firstCard.locator(".code-well pre"), "First request command in Show All");
+      await actionOrder(firstCard, ["Open Session", "Deny", "Approve Once"]);
+      await expectTextContrast(dock(page));
+      await expectTextContrast(notice);
+      await layout(page, 47);
+      await screenshot(page, theme, "three-show-all-and-320percent-notice", 4838);
     });
   });
 

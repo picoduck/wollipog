@@ -79,7 +79,6 @@ export function AssistantWaitingDock({ thread, work, onConfirmationAnswered, foc
   const toastClearanceRef = useToastChrome<HTMLDivElement>();
   const heading = useRef<HTMLHeadingElement>(null);
   const list = useRef<HTMLUListElement>(null);
-  useClipEdges(dock);
   useClipEdges(list);
   const headingId = useId();
   const listId = useId();
@@ -374,6 +373,7 @@ function WaitingCard({ item, now, busy, begin, finish, onConfirmationAnswered, o
         </>}
       </div>
       <div className="assistant-dock-actions">
+        <span className="assistant-dock-scroll-cue" aria-hidden="true" />
         {openSessionId && otherAction("open", "Open Session", () => navigate(session && request
           ? { name: "session", id: openSessionId, attention: { eventEpoch: session.eventEpoch ?? 0, requestId: request.requestId } }
           : { name: "session", id: openSessionId }))}
