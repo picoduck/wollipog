@@ -13351,6 +13351,9 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   @container session-body (max-width: 540px) {
     /* Give the actions the full row when a docked panel narrows the reading column. */
     .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-content {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-content:has(.assistant-spending-meter) {
       grid-template-columns: minmax(0, 1fr) minmax(0, 35%);
     }
     .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-body { display: contents; }
@@ -13364,6 +13367,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-actions { flex-wrap: nowrap; }
     .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-actions > .btn {
       flex: 0 1 auto;
+      height: auto;
+      min-height: var(--control-h-sm);
       min-width: 0;
       white-space: normal;
     }

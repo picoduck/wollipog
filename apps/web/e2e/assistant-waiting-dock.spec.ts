@@ -179,6 +179,13 @@ for (const theme of ["light", "dark"] as const) {
       await expectFullyInViewport(notice, "Spending notice beside a docked panel");
       for (const action of await notice.getByRole("button").all()) {
         await expectFullyInViewport(action, (await action.textContent())!);
+        const labelFits = await action.evaluate(button => {
+          const bounds = button.getBoundingClientRect();
+          const range = document.createRange();
+          range.selectNodeContents(button);
+          return [...range.getClientRects()].every(rect => rect.top >= bounds.top && rect.bottom <= bounds.bottom);
+        });
+        expect(labelFits, "All lines of the notice action fit in its button").toBe(true);
       }
       await layout(page, 47);
       const card = cards(page).first();
