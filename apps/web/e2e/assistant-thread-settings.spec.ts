@@ -168,7 +168,7 @@ for (const { width, height, phone } of [{ width: 1440, height: 900, phone: false
         await expect(dialog).toHaveCount(0);
         await expect(page.getByRole("status").filter({ hasText: "paused new launches" })).toBeVisible();
         await page.getByRole("button", { name: "Thread Actions" }).click();
-        await page.getByRole("menuitem", { name: "Thread Settings" }).click();
+        await page.getByRole("menuitem", { name: "Thread Settings…" }).click();
         dialog = page.getByRole("dialog", { name: "Thread Settings" });
         await expect(pause).toBeChecked();
         await expect(count).toHaveValue("11");
@@ -300,7 +300,7 @@ test("an editable older server pauses with zero and resumes the remembered limit
   await dialog.getByRole("button", { name: "Save Changes" }).click();
   await expect(page.locator("body")).toHaveAttribute("data-thread-limits", '{"costUsd":25,"launchedSessions":0}');
   await page.getByRole("button", { name: "Thread Actions" }).click();
-  await page.getByRole("menuitem", { name: "Thread Settings" }).click();
+  await page.getByRole("menuitem", { name: "Thread Settings…" }).click();
   await expect(pause).toBeChecked();
   await expect(dialog.getByRole("textbox", { name: "Session Launch Limit" })).toHaveValue("4");
   await pause.click();

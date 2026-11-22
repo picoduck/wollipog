@@ -55,6 +55,8 @@ export interface PageMenuAction extends Omit<PageAction, "onClick"> {
   onClick: (choice: ActionsMenuChoice) => void;
   /** Destructive: drawn last, after a separator, in the danger text colour (§3.3). */
   danger?: boolean;
+  /** Starts a new group after the preceding visible item. */
+  separatorBefore?: boolean;
   /** The item's second line: a folded menu button's description, or why a disabled item is unavailable (§9.1). */
   description?: string;
   /** A checkbox item: its state is a trailing check (§9.1). */
@@ -285,7 +287,8 @@ export function DetailBar({
   secondary,
   menu = [],
   menuLabel,
-  searchInMenu = false,
+  menuSheetTitle,
+  hideSearch = false,
   controls,
   renderTitle,
 }: {
@@ -301,8 +304,10 @@ export function DetailBar({
   menu?: PageMenuAction[];
   /** ⋯'s name when it says more than "More Actions" (`ActionsMenu`'s `label`). */
   menuLabel?: string;
-  /** Keep the phone title readable when there is another action that needs a dedicated button. */
-  searchInMenu?: boolean;
+  /** Overrides the title shown in the phone action sheet. */
+  menuSheetTitle?: string;
+  /** Omit global Search on a detail bar that needs the space for entity controls. */
+  hideSearch?: boolean;
   /** Phone app bar controls that stay visible before ⋯. */
   controls?: ReactNode;
   /** A title that can reveal its full text on touch. Keep the page title ID for route focus. */
@@ -311,8 +316,7 @@ export function DetailBar({
   const compact = useIsCompact();
   const phone = useIsMobile();
   const onSearch = useContext(AppBarSearchContext);
-  const menuSearch = phone && searchInMenu ? onSearch : undefined;
-  const actions = menuSearch ? [{ label: "Search", icon: <SearchIcon />, onClick: menuSearch }, ...menu] : menu;
+  const showSearch = onSearch && !hideSearch;
   const headingRef = useRef<HTMLDivElement>(null);
   const hasStatus = Boolean(status);
   // Whether the badge is a dot is measured against the full badge, every time, so the answer never
@@ -378,12 +382,12 @@ export function DetailBar({
         {renderTitle ? renderTitle(title) : <h1 id="page-title" className="detail-bar-title" tabIndex={-1} title={title}>{title}</h1>}
         {status && <span className="detail-bar-status">{status}</span>}
       </div>
-      {(onSearch || primary || secondary || actions.length > 0 || controls) && (
+      {(showSearch || primary || secondary || menu.length > 0 || controls) && (
         <div className="detail-bar-actions">
-          {onSearch && !menuSearch && <AppBarSearch onSearch={onSearch} />}
+          {showSearch && <AppBarSearch onSearch={onSearch} />}
           {secondary && action(secondary, "btn")}
           {controls}
-          {actions.length > 0 && <ActionsMenu overflow="always" label={menuLabel} items={actions} />}
+          {menu.length > 0 && <ActionsMenu label={menuLabel} sheetTitle={menuSheetTitle} items={menu} />}
           {primary && action(primary, "btn primary")}
         </div>
       )}
@@ -507,11 +511,12 @@ function slotButtonShown(trigger: HTMLElement | null, slot: number): boolean {
  * and engines at the build floor that give `container-type` layout containment would make it the
  * containing block of a fixed-position menu and its backdrop.
  */
-export function ActionsMenu({ className, overflow = "always", label = "More Actions", size, items }: {
+export function ActionsMenu({ className, overflow = "always", label = "More Actions", sheetTitle, size, items }: {
   className?: string;
   overflow?: string;
   /** The ⋯ button's name and tooltip, and the menu's name: what the actions act on ("Project Actions"). */
   label?: string;
+  sheetTitle?: string;
   /** `sm`: a row's ⋯ (§5.2), beside the row's `.btn.sm`. */
   size?: "sm";
   items: ActionsMenuItem[];
@@ -624,6 +629,7 @@ export function ActionsMenu({ className, overflow = "always", label = "More Acti
           anchor={{ trigger: menu.triggerRef }}
           id={menu.menuId}
           label={label}
+          sheetTitle={sheetTitle}
           align="end"
           onDismiss={() => menu.close(true)}
           onFocus={(event) => {
@@ -641,7 +647,7 @@ export function ActionsMenu({ className, overflow = "always", label = "More Acti
         >
           {ordered.map((item, index) => (
             <Fragment key={item.label}>
-              {index === firstDanger && index > 0 && <MenuSeparator />}
+              {index > 0 && (item.separatorBefore || index === firstDanger) && <MenuSeparator />}
               <MenuItem
                 role={item.checked === undefined ? "menuitem" : "menuitemcheckbox"}
                 checked={item.checked}

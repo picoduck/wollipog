@@ -63,11 +63,6 @@ for (const theme of ["light", "dark"] as const) {
   }
 }
 
-async function threadAction(page: Page, name: string) {
-  await page.getByRole("button", { name: "Thread Actions", exact: true }).click();
-  await page.getByRole("menuitem", { name, exact: true }).click();
-}
-
 async function expectCiRerunHistory(scope: Locator) {
   const subject = scope.getByText("engineering/release-validation · Run 44699507825 · Attempt 2 · Build and Bundle", { exact: true });
   await subject.scrollIntoViewIfNeeded();
@@ -77,11 +72,9 @@ async function expectCiRerunHistory(scope: Locator) {
 
 test("a control plane without delegation support offers no grant or history actions", async ({ page }) => {
   await openAssistantFixture(page, thread, false);
-  await page.getByRole("button", { name: "Thread Actions", exact: true }).click();
-  await expect(page.getByRole("menuitem", { name: "Decision Delegation" })).toHaveCount(0);
-  await expect(page.getByRole("menuitem", { name: "Delegated Decisions" })).toHaveCount(0);
-  await page.keyboard.press("Escape");
   const decisions = await openDecisions(page);
+  await expect(decisions.getByRole("button", { name: /^(Manage|Delegate)…$/ })).toHaveCount(0);
+  await expect(decisions.getByRole("list", { name: "Delegated Decisions" })).toHaveCount(0);
   await expect(decisions).toContainText("This control plane does not support delegated decision history.");
   await expect(page.locator("body")).not.toHaveAttribute("data-assistant-decision-history-requested");
 });

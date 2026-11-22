@@ -337,7 +337,9 @@ export function MenuSurface({
         style={{ ...(fixedWidth === undefined ? null : { width: fixedWidth }), ...placement, ...style }}
       >
         <div className="sheet-grabber" aria-hidden="true" />
-        {head ?? <div className="menu-head" aria-hidden="true">{sheetTitle ?? label}</div>}
+        {head ?? <div className="menu-head" aria-hidden="true">
+          <span className="menu-head-title">{sheetTitle ?? label}</span>
+        </div>}
         {children}
       </div>
     </>

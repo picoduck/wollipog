@@ -31,7 +31,7 @@ import { AssistantsIcon, PlusIcon } from "./Icons.js";
 import { Modal } from "./Modal.js";
 import { NewAssistantThreadDialog, THREADS_UNAVAILABLE_MESSAGE } from "./NewAssistantThreadDialog.js";
 import { Notice } from "./Notice.js";
-import { ActionsMenu, DetailBar, PageHeader, type PageMenuAction } from "./PageHeader.js";
+import { ActionsMenu, DetailBar, PageHeader, type ActionsMenuChoice, type PageMenuAction } from "./PageHeader.js";
 import { SessionDetail } from "./SessionDetail.js";
 import { SESSION_NOTICE_RANK, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
 import { State } from "./State.js";
@@ -172,7 +172,6 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   });
   const effort = useStoreSelector((state) => selected ? state.sessions.get(selected.sessionId)?.effort : undefined);
   const canTogglePanel = useStoreSelector((state) => Boolean(selected && state.sessions.has(selected.sessionId)));
-  const decisionHistorySupported = useStoreSelector((state) => state.assistantDecisionHistorySupported);
   const togglePanel = panel.toggle;
   useEffect(() => {
     // There is no key listener on the loading or missing view, even when a saved panel is open.
@@ -292,11 +291,13 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
     navigate({ name: "assistants", threadId: id, limits: section });
   const toList = () => navigate({ name: "assistants" });
 
-  const archive = async (thread: AssistantThread) => {
+  const archive = async (thread: AssistantThread, reopen: () => void) => {
     const accepted = await confirm({
       title: "Archive Thread",
       message: `“${assistantThreadTitle(thread)}” leaves the thread list. Its session and transcript are kept.`,
       confirmLabel: "Archive Thread",
+      tone: "danger",
+      back: { label: "Back to Thread Actions", run: reopen },
     });
     if (!accepted) return;
     setArchiving(true);
@@ -312,19 +313,29 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
     }
   };
 
-  const threadMenu = (thread: AssistantThread): PageMenuAction[] => [
-    // In ⋯ as the session bar keeps its settings (#4776); it opens limits, harness and account.
-    { label: "Thread Settings", onClick: () => openThreadSettings(thread.id) },
-    { label: "Open as Session", onClick: () => navigate({ name: "session", id: thread.sessionId }) },
-    ...(decisionHistorySupported && canTogglePanel ? [{ label: "Delegated Decisions", onClick: () => panel.show("Decisions") }] : []),
-    ...(thread.status === "archived" ? [] : [
-      { label: "Rename", onClick: () => setRenaming(thread) },
-      ...(thread.decisionDelegation ? [{
-        label: "Decision Delegation", onClick: () => navigate({ name: "assistants", threadId: thread.id, delegation: true }),
-      }] : []),
-      { label: "Archive", disabled: archiving, onClick: () => void archive(thread) },
-    ]),
-  ];
+  const threadMenu = (thread: AssistantThread): PageMenuAction[] => {
+    const archived = thread.status === "archived";
+    return [
+      ...(archived ? [] : [{ label: "Rename…", onClick: () => setRenaming(thread) }]),
+      {
+        label: "Thread Settings…",
+        description: "Account, harness, budget and delegation",
+        onClick: () => openThreadSettings(thread.id),
+      },
+      {
+        label: "Open as Session",
+        description: "The full session view with Files and Terminal",
+        separatorBefore: !archived,
+        onClick: () => navigate({ name: "session", id: thread.sessionId }),
+      },
+      ...(archived ? [] : [{
+        label: "Archive Thread…",
+        danger: true,
+        disabled: archiving,
+        onClick: ({ reopen }: ActionsMenuChoice) => void archive(thread, reopen),
+      }]),
+    ];
+  };
 
   const phoneDetail = isMobile && threadId !== undefined;
   // The open thread's launched work, for the header toggle and the Work tab. Kept
@@ -403,7 +414,8 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
           status={selected ? threadBarStatus(selected) : undefined}
           menu={selected ? threadMenu(selected) : []}
           menuLabel="Thread Actions"
-          searchInMenu={Boolean(selected)}
+          menuSheetTitle={selected ? assistantThreadTitle(selected) : undefined}
+          hideSearch={Boolean(selected)}
           controls={canTogglePanel && launchedWork
             ? <AssistantSidePanelToggle work={launchedWork} open={panel.open} onToggle={panel.toggle} />
             : undefined}

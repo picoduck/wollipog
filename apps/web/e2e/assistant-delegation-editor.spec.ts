@@ -16,8 +16,10 @@ const layoutTargets = "button, label.checkbox, input:not([type=checkbox])";
 test.use({ timezoneId: "UTC", locale: "en-US" });
 
 async function openEditor(page: Page) {
-  await page.getByRole("button", { name: "Thread Actions", exact: true }).click();
-  await page.getByRole("menuitem", { name: editorName, exact: true }).click();
+  const panel = page.locator("#right-panel");
+  if (!(await panel.isVisible())) await page.getByRole("button", { name: /Show Side Panel/ }).click();
+  await panel.getByRole("tab", { name: /^Decisions/ }).click();
+  await panel.getByRole("tabpanel", { name: /^Decisions/ }).getByRole("button", { name: /^(Manage|Delegate)…$/ }).click();
   return page.getByRole("dialog", { name: editorName });
 }
 
