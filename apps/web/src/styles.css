@@ -13239,7 +13239,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .new-assistant-unavailable strong { color: var(--text); }
 @media (max-width: 760px) {
   .popover.new-assistant-account-panel:has(.new-assistant-unavailable[open]) {
-    max-height: calc(100dvh - var(--keyboard-inset, 0px));
+    max-height: calc(100dvh - var(--keyboard-inset, 0px) - env(safe-area-inset-top, 0px));
     scroll-padding-block-start: var(--bar-h);
   }
   .new-assistant-thread-body { flex: 1; padding-block-start: var(--space-4); }
