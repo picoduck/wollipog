@@ -62,7 +62,12 @@ async function checkBar(page: Page, phone: boolean, badge: string | null) {
   await expect(page.locator(".assistant-thread-head").getByText(/Full access\.|sessions launched|of \$\d+\.\d+ spent/)).toHaveCount(0);
   await expectNoHorizontalOverflow(bar, "The thread bar");
   await expectPageNoHorizontalOverflow(page);
-  await expectFullyInViewport(page.locator(".composer"), "The thread composer");
+  if (badge === "Archived") {
+    await expect(page.locator(".composer")).toHaveCount(0);
+    await expectFullyInViewport(page.getByText("This thread is read-only."), "The archived thread notice");
+  } else {
+    await expectFullyInViewport(page.locator(".composer"), "The thread composer");
+  }
   await expect(page.locator(".detail-body")).toBeVisible();
 
   const controls = await bar.getByRole("button").evaluateAll((buttons) => buttons.map((button) => {

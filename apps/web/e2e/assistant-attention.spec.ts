@@ -54,7 +54,8 @@ test("the badge counts each waiting thread once and clears as confirmations and 
   await expectCount(destination, 2);
   await expect(thread(page, "thr_triage")).toContainText("Needs You");
   await expect(thread(page, "thr_release")).toContainText("Needs You");
-  await expect(thread(page, "thr_cleanup")).toContainText("Done");
+  await expect(thread(page, "thr_cleanup")).toContainText("Weekly Cleanup");
+  await expect(thread(page, "thr_cleanup").locator(".status")).toHaveCount(0);
   await capture(page, "desktop-light-two");
   const inboxBefore = await sessions.getAttribute("data-rail-note");
   await thread(page, "thr_triage").click();

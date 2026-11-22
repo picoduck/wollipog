@@ -43,12 +43,13 @@ function thread(id: string, title: string, sessionId: string, count: number): As
 
 const CLEANUP = "Clean Up Last Week's Prototype Sessions Before the Release Branch Is Cut";
 const RELEASE = "Ship the Release Notes";
+const isThreadList = (url: URL) => url.pathname === "/api/assistant-threads";
 
 /** Serves the Thread API with `threads`; Approve Once and Deny settle the request they name. */
 async function serveThreads(page: Page, threads: AssistantThread[]) {
   let current = threads;
   const answers: string[] = [];
-  await page.route("**/api/assistant-threads", (route) => route.fulfill({ json: { threads: current } }));
+  await page.route(isThreadList, (route) => route.fulfill({ json: { threads: current } }));
   await page.route("**/api/assistant-threads/*/confirmations/*/*", (route) => {
     const [threadId, , confirmationId, intent] = route.request().url().split("/").slice(-4).map(decodeURIComponent);
     answers.push(`${confirmationId}:${intent}`);
@@ -157,7 +158,7 @@ test("past three threads the block names the first three, and +N More opens the 
 });
 
 test("a control plane without the Thread API shows no approvals", async ({ page }) => {
-  await page.route("**/api/assistant-threads", (route) => route.fulfill({ status: 404, json: { error: "not found" } }));
+  await page.route(isThreadList, (route) => route.fulfill({ status: 404, json: { error: "not found" } }));
   await page.goto("/command-inbox-projects-e2e.html?fullShell=1");
   await expect(sessionsPane(page)).toBeVisible();
   await expect(approvals(page)).toHaveCount(0);
