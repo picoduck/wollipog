@@ -550,6 +550,7 @@ function useToastClearance(active: boolean) {
     const root = document.documentElement;
     if (!active) {
       root.style.removeProperty("--toast-clear");
+      root.style.removeProperty("--toast-stack-height");
       return;
     }
     const measure = () => {
@@ -567,7 +568,8 @@ function useToastClearance(active: boolean) {
         if (Math.abs(box.bottom - stackTop) > 2) continue;
         stackTop = Math.min(stackTop, box.top);
       }
-      const column = document.querySelector(".toast-region")?.getBoundingClientRect();
+      const region = document.querySelector<HTMLElement>(".toast-region");
+      const column = region?.getBoundingClientRect();
       // The Assistant dock can have a notice between it and the composer. Clear it even when
       // there is a gap, so a success toast cannot cover the next request's controls.
       for (const element of chrome.filter((element) => element.matches(".modal-foot, .assistant-dock-slot"))) {
@@ -578,6 +580,7 @@ function useToastClearance(active: boolean) {
         stackTop = Math.min(stackTop, box.top);
       }
       root.style.setProperty("--toast-clear", `${Math.ceil(bottom - stackTop)}px`);
+      if (region) root.style.setProperty("--toast-stack-height", `${region.offsetHeight}px`);
     };
     // Event-driven rather than polled: the docked chrome changes when it mounts or unmounts (a
     // route change, a modal opening) or when it resizes (the composer growing with its draft).
@@ -613,6 +616,7 @@ function useToastClearance(active: boolean) {
       window.removeEventListener("resize", schedule);
       window.visualViewport?.removeEventListener("resize", schedule);
       root.style.removeProperty("--toast-clear");
+      root.style.removeProperty("--toast-stack-height");
     };
   }, [active]);
 }

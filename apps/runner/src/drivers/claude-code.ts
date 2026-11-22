@@ -23,7 +23,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { claudeFailureCategory, type ProviderFailureCategory } from "./provider-failure.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { BACKGROUND_HANDOFF_WAIT_MAX_MS, fullControlAutomaticResponseText, type AgentQuestion, type FullControlAutomaticResponse, type PlanEntry, type PromptImage, type SessionConfig } from "@wollipog/protocol";
+import { ASSISTANT_MCP_SERVER_NAME, BACKGROUND_HANDOFF_WAIT_MAX_MS, fullControlAutomaticResponseText, type AgentQuestion, type FullControlAutomaticResponse, type PlanEntry, type PromptImage, type SessionConfig } from "@wollipog/protocol";
+import { assistantTranscriptReceiptKey } from "./assistant-tool-result.js";
 import { approvalScopeContext } from "../approval-scope.js";
 import { campaignOperationEvidence } from "../campaign-operation-evidence.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
@@ -678,6 +679,7 @@ export class ClaudeCodeDriver implements Driver {
   private launchedRoutineControlChannelMode: string | null = null;
   /** requestId -> the tool input to echo back on allow (stdio control protocol). */
   private readonly pendingApprovals = new Map<string, Json>();
+  private readonly assistantToolCalls = new Set<string>();
   private readonly pendingAttentionOwners = new Map<string, { owner: string; question: boolean }>();
   /** Claude's message_start id scoped by parent Task. Entries close on message_stop/result, so
    * provider block identity never becomes transcript-lifetime state. */
@@ -3436,6 +3438,9 @@ export class ClaudeCodeDriver implements Driver {
         for (const b of blocks) {
           if (b?.type !== "tool_use") continue;
           const name: string = b.name ?? "tool";
+          if (name.startsWith(`mcp__${ASSISTANT_MCP_SERVER_NAME}__`) && typeof b.id === "string") {
+            this.assistantToolCalls.add(b.id);
+          }
           const input = b.input as Record<string, Json> | undefined;
           if (name === "TodoWrite" && Array.isArray(input?.todos)) {
             const entries: PlanEntry[] = (input!.todos as Json[]).map((t) => ({
@@ -3497,11 +3502,15 @@ export class ClaudeCodeDriver implements Driver {
             }
             this.pendingAttentionOwners.delete(requestId);
           }
+          const text = contentToText(b.content);
+          const receiptKey = this.assistantToolCalls.delete(b.tool_use_id) && !b.is_error
+            ? assistantTranscriptReceiptKey(text) : undefined;
           this.cb.onEvent({
             kind: "tool_call_update",
             toolCallId: b.tool_use_id ?? "tool",
             status: b.is_error ? "failed" : "completed",
-            text: truncate(contentToText(b.content), 400),
+            text: truncate(text, 400),
+            ...(receiptKey ? { assistantReceiptKey: receiptKey } : {}),
             ...pp,
           });
         }
@@ -3510,6 +3519,7 @@ export class ClaudeCodeDriver implements Driver {
 
       case "result": {
         this.streamingMessageIds.clear();
+        if (!parentId) this.assistantToolCalls.clear();
         // A request without `message_stop` was cut off; the result's totals are authoritative.
         if (!parentId) this.liveRequest = null;
         // A stop call never outlives its turn; one left without a tool result proves nothing later.

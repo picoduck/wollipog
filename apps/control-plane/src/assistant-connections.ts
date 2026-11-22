@@ -4,7 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { hashToken } from "./auth.js";
 import type { HumanPrincipal } from "./identity.js";
 
-import type { AssistantGrant, AssistantConnection } from "@wollipog/protocol";
+import type { AssistantGrant, AssistantConnection, AssistantTranscriptReceipt } from "@wollipog/protocol";
 export type { AssistantGrant, AssistantConnection } from "@wollipog/protocol";
 export interface AssistantTarget { kind: string; id: string; projectId?: string }
 export interface AssistantCredential { connectionId: string; tokenHash: string }
@@ -27,7 +27,12 @@ export class AssistantRefusal extends Error {}
  * limits to work it starts (#4663). Absent outside an Assistant call. `ownerConfirmationId` is
  * set only while the control plane runs a command its owner approved (#4665); nothing an
  * assistant sends can set it. */
-export const assistantCallContext = new AsyncLocalStorage<{ connectionId: string; ownerConfirmationId?: string }>();
+type RecordTranscriptReceipt = (receipt: AssistantTranscriptReceipt) => void;
+export const assistantCallContext = new AsyncLocalStorage<{
+  connectionId: string;
+  ownerConfirmationId?: string;
+  recordTranscriptReceipt?: RecordTranscriptReceipt;
+}>();
 
 /** Operations an Assistant thread may not call: each schedules future work, turns a session into
  * one that starts its own, or (a fork) materializes a session on the runner without the session
@@ -261,8 +266,9 @@ export class AssistantOperations {
     if (!operation.ownerCanAccess(owner, target)) throw new AssistantRefusal("The granting owner cannot access this target. Restore the owner's resource access or use another connection.");
     return owner;
   }
-  async call(credential: AssistantCredential, name: string, args: unknown): Promise<unknown> {
-    return this.run(() => this.connections.current(credential), name, args);
+  async call(credential: AssistantCredential, name: string, args: unknown,
+    recordTranscriptReceipt?: RecordTranscriptReceipt): Promise<unknown> {
+    return this.run(() => this.connections.current(credential), name, args, undefined, recordTranscriptReceipt);
   }
   /** Runs the exact command a thread's owner approved (#4665), as the thread's connection under
    * its current grant and owner, authorized live like any call. The thread's credential is not
@@ -275,7 +281,8 @@ export class AssistantOperations {
       return connection;
     }, name, args, ownerConfirmationId);
   }
-  private async run(currentConnection: () => AssistantConnection, name: string, args: unknown, ownerConfirmationId?: string): Promise<unknown> {
+  private async run(currentConnection: () => AssistantConnection, name: string, args: unknown, ownerConfirmationId?: string,
+    recordTranscriptReceipt?: RecordTranscriptReceipt): Promise<unknown> {
     const current = () => {
       const connection = currentConnection();
       if (connection.threadId && this.threadChangingHarness?.(connection.threadId)) {
@@ -296,7 +303,7 @@ export class AssistantOperations {
         return this.authorize(connection.id, name, target);
       };
       const owner = await recheck();
-      const result = await assistantCallContext.run({ connectionId: connection.id, ...(ownerConfirmationId ? { ownerConfirmationId } : {}) },
+      const result = await assistantCallContext.run({ connectionId: connection.id, ownerConfirmationId, recordTranscriptReceipt },
         () => operation.execute(args, { owner, connection, recheck }));
       // A delivered RPC can still report a refused service command or uncertain dispatch.
       // Registered services return receipts/status, never a private error in the activity row.

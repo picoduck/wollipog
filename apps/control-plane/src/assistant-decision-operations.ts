@@ -4,6 +4,8 @@ import {
   ASSISTANT_EVIDENCE_GET,
   DELEGATED_IMAGE_REVIEW_BRIEF_MAX_CHARS,
   assistantDecisionCategory,
+  ciRerunSubject,
+  releaseDecisionSubject,
   isRequesterForgeDecisionCategory,
   isOwnerQuestionSnapshot,
   type AssistantConnection,
@@ -11,7 +13,7 @@ import {
   type ResolveWorkflowDecisionRequest,
   type WorkflowDecisionView,
 } from "@wollipog/protocol";
-import { AssistantRefusal, type AssistantOperations } from "./assistant-connections.js";
+import { assistantCallContext, AssistantRefusal, type AssistantOperations } from "./assistant-connections.js";
 import { threadDecisionDelegation } from "./assistant-thread-store.js";
 import { assistantThreadDisplayTitle } from "./assistant-threads.js";
 import type { ControlPlaneDb } from "./db.js";
@@ -221,7 +223,7 @@ export function registerAssistantDecisionOperations(operations: AssistantOperati
           throw new AssistantRefusal("No typed workflow decision matches this occurrence in the session. Generic permissions require the owner.");
         }
         const { outcome, resourceDigest } = args;
-        const { campaign } = check(decision, owner, connection, name, live,
+        const { campaign, category } = check(decision, owner, connection, name, live,
           outcome === "approve" || outcome === "deny" ? outcome : undefined);
         if (!resolving) return { decision: svc.workflowDecision(decision.sessionId, decision.occurrenceId).data };
         if (outcome !== "approve" && outcome !== "deny") throw new AssistantRefusal("Choose approve or deny.");
@@ -243,6 +245,20 @@ export function registerAssistantDecisionOperations(operations: AssistantOperati
         };
         const result = svc.resolveAssistantDecision(decision, resolution, delegation, owner);
         if (!result.ok) throw new AssistantRefusal(result.error ?? "Wollipog refused the delegated decision.");
+        const recorded = result.data?.assistantDelegation;
+        if (decision.status === "pending" && recorded?.threadId === live.threadId) {
+          const snapshot = decision.resourceSnapshot;
+          const subject = snapshot.category === "pr_merge" ? `${snapshot.repository}#${snapshot.pullRequest}`
+            : snapshot.category === "ci_rerun" ? ciRerunSubject(snapshot)
+            : snapshot.category === "release_tag" || snapshot.category === "release_publish" ? releaseDecisionSubject(snapshot)
+            : snapshot.category === "merged_branch_deletion" ? snapshot.branch
+            : decision.resourceKey;
+          assistantCallContext.getStore()?.recordTranscriptReceipt?.({
+            kind: "decision", occurrenceId: decision.occurrenceId, category, subject,
+            outcome: recorded.outcome, reason: recorded.reason, resolvedAt: recorded.resolvedAt,
+            ...(live.grant.selectionMode ? { selectionMode: live.grant.selectionMode } : {}),
+          });
+        }
         return { decision: result.data, question: isOwnerQuestionSnapshot(decision.resourceSnapshot) };
       },
     });

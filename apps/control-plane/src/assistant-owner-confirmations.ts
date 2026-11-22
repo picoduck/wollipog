@@ -8,7 +8,7 @@ import {
   type AssistantOwnerConfirmationStatus,
   type OrchestratorCampaignBudgetDefault,
 } from "@wollipog/protocol";
-import { AssistantRefusal, type AssistantTarget } from "./assistant-connections.js";
+import { assistantCallContext, AssistantRefusal, type AssistantTarget } from "./assistant-connections.js";
 import type { HumanPrincipal } from "./identity.js";
 
 /** The exact command an owner confirmation is bound to. Equal to the binding the operation
@@ -256,8 +256,12 @@ export class AssistantOwnerConfirmations {
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)`)
       .run(id, binding.connectionId, thread.threadId, thread.ownerUserId, thread.organizationId, binding.operation, input.commandId,
         bindingJson, argumentsJson, JSON.stringify(input.target), targetLabel, impactJson, now, now + ASSISTANT_OWNER_CONFIRMATION_TTL_MS);
+    const view = this.view(this.row(id)!);
+    assistantCallContext.getStore()?.recordTranscriptReceipt?.({
+      kind: "request", confirmationId: view.id, title: view.title,
+    });
     this.changed(thread.threadId);
-    return this.view(this.row(id)!);
+    return view;
   }
 
   get(id: string): AssistantOwnerConfirmation | null {
@@ -289,11 +293,15 @@ export class AssistantOwnerConfirmations {
   }
 
   /** Durable record of independent roots. The Human launch and its identity commit together. */
-  launchedCampaignIds(threadId: string): string[] {
-    return (this.db.prepare(`SELECT h.session_id FROM assistant_owner_confirmations c
+  launchedCampaigns(threadId: string): NonNullable<import("@wollipog/protocol").AssistantThread["campaignReceiptLinks"]> {
+    return this.db.prepare(`SELECT c.id AS confirmationId, h.session_id AS sessionId FROM assistant_owner_confirmations c
       JOIN human_campaign_launches h ON h.user_id=c.owner_user_id AND h.request_id='assistant-'||c.id
       WHERE c.thread_id=? AND c.operation=? AND c.status='executed' ORDER BY c.resolved_at, h.session_id`)
-      .all(threadId, ASSISTANT_CAMPAIGN_START) as {session_id: string}[]).map(row => row.session_id);
+      .all(threadId, ASSISTANT_CAMPAIGN_START) as { confirmationId: string; sessionId: string }[];
+  }
+
+  launchedCampaignIds(threadId: string): string[] {
+    return this.launchedCampaigns(threadId).map(({ sessionId }) => sessionId);
   }
 
   /** The thread's requests waiting for its owner, oldest first. */

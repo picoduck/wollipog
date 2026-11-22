@@ -309,6 +309,11 @@ interface LabelFragment {
  */
 const LABEL_FRAGMENTS: readonly LabelFragment[] = [
   {
+    file: "components/AssistantTranscriptReceipts.tsx",
+    fragment: "more",
+    reason: 'the count suffix in the requested "+N more" launch receipt (#4814)',
+  },
+  {
     file: "components/GitDiffViewer.tsx",
     fragment: "s",
     reason: 'the plural suffix of "{hiddenCount} More Hunk{…}", which reads "3 More Hunks"',
