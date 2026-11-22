@@ -149,7 +149,7 @@ for (const theme of ["light", "dark"] as const) {
         await details.getByRole("button", { name: "Show Account" }).click();
         await expect(details.getByText(LONG_ACCOUNT, { exact: true })).toBeVisible();
         await checkPanel(page, phone);
-        await expect(page.locator(".assistant-thread-head")).not.toContainText("Full access.");
+        await expect(page.locator(".assistant-thread-bar, .page > .detail-bar")).not.toContainText("Full access.");
         await capture(page, theme, "panel-details", "long-account");
         await page.reload();
         await expect(body(page, "Details")).toBeVisible();

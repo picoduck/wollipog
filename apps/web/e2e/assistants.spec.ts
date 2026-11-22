@@ -173,11 +173,10 @@ for (const theme of ["dark", "light"] as const) {
 
     test("an open thread shows its transcript, composer and the waiting approval", async ({ page }) => {
       await open(page, theme, "", "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA");
-      const head = page.locator(".assistant-thread-head");
       // The bar spans the thread pane above the waiting requests.
       const bar = page.locator(".assistant-thread-bar");
       await expect(bar.getByRole("heading", { level: 2, name: "Triage Open Issues" })).toBeVisible();
-      await expect(head).not.toContainText("Full access.");
+      await expect(bar).not.toContainText("Full access.");
       // The backing session's transcript and composer.
       await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
       await expect(page.locator(".composer")).toBeVisible();
@@ -186,7 +185,7 @@ for (const theme of ["dark", "light"] as const) {
       await expect(bar.getByRole("button", { name: /Side Panel/ })).toHaveAccessibleName("Show Side Panel, 1 Session Needs You");
       const cards = page.getByRole("region", { name: "Waiting for You" }).locator(".assistant-dock-card");
       await expect(cards).toHaveCount(1);
-      await expect(head).not.toContainText("Fix the Flaky Upload Test");
+      await expect(cards.first()).not.toContainText("Fix the Flaky Upload Test");
       const waiting = cards.filter({ hasText: "Bump the Vite Group" });
       await expect(waiting).toContainText("Run pnpm install --frozen-lockfile");
       await expect(waiting.getByRole("button", { name: "Approve Once" })).toBeVisible();
@@ -385,7 +384,7 @@ for (const theme of ["dark", "light"] as const) {
       await threadRow(page, "Triage Open Issues").click();
       await expect(page.getByRole("button", { name: "Back to Assistants" })).toBeVisible();
       await expect(threadsList(page)).toBeHidden();
-      await expect(page.locator(".assistant-thread-head")).not.toContainText("Full access.");
+      await expect(page.locator(".page > .detail-bar")).not.toContainText("Full access.");
       await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
       await expect(page.getByRole("region", { name: "Waiting for You" }).getByRole("button", { name: "Approve Once" })).toBeVisible();
       // The waiting approval is whole on the screen: its title, its command and all three buttons sit
