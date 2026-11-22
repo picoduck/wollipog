@@ -80,7 +80,11 @@ for (const theme of ["light", "dark"] as const) {
               return { label: node.textContent?.trim(), left, right, width, height };
             }));
           expect(tabs).toHaveLength(3);
-          expect(tabs.every((tab) => tab.width > 0 && tab.height > 0)).toBe(true);
+          for (const [index, tab] of tabs.entries()) {
+            expect(tab.width, tab.label).toBeGreaterThanOrEqual(44);
+            expect(tab.height, tab.label).toBeGreaterThanOrEqual(44);
+            if (index > 0) expect(tab.left - tabs[index - 1]!.right).toBeGreaterThanOrEqual(8);
+          }
           console.log(`Existing phone Work tabs (${theme}), CSS px: ${tabs.map(({ label, width, height }) =>
             `${label} ${width}×${height}`).join(", ")}. Gaps: ${tabs.slice(1).map(({ left }, index) => left - tabs[index]!.right).join(", ")}.`);
         }
@@ -112,6 +116,13 @@ for (const theme of ["light", "dark"] as const) {
         const waiting = requestMessage.getByRole("button", { name: "Waiting for you: Stop Session", exact: true });
         const dock = page.getByRole("region", { name: /^Waiting for You/ });
         await expect(dock.getByRole("heading", { name: "Archive Session" })).toBeVisible();
+        const transcriptColumn = page.locator(".detail-main[data-assistant-transcript]");
+        if (width === 390) {
+          await expect(transcriptColumn).toHaveCSS("margin-block-end", "0px");
+          await page.evaluate(() => document.documentElement.style.setProperty("--keyboard-inset", "320px"));
+          await expect(transcriptColumn).toHaveCSS("margin-block-end", "0px");
+          await page.evaluate(() => document.documentElement.style.removeProperty("--keyboard-inset"));
+        }
         await capture("request-waiting", requestMessage);
         await waiting.click();
         await expect(dock.getByRole("listitem", { name: "Stop Session" })).toBeFocused();
@@ -129,6 +140,15 @@ for (const theme of ["light", "dark"] as const) {
           }).toBeLessThanOrEqual(1);
         }
         await capture("request-answered", requestMessage, "");
+        if (width === 390) {
+          await page.evaluate(() => document.documentElement.style.setProperty("--keyboard-inset", "320px"));
+          await expect.poll(() => transcriptColumn.evaluate((column) => {
+            const height = document.querySelector<HTMLElement>(".toast-region")?.offsetHeight;
+            return height === undefined ? Infinity : Number.parseFloat(getComputedStyle(column).marginBlockEnd) - height;
+          })).toBe(8);
+          await page.getByRole("button", { name: "Dismiss Notification" }).click();
+          await expect(transcriptColumn).toHaveCSS("margin-block-end", "0px");
+        }
 
         await open(page, theme, "stress");
         await expect(launchMessage(page).getByRole("button", { name: new RegExp(receiptStressTitle) })).toBeVisible();

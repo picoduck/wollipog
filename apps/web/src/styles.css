@@ -12494,8 +12494,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   }
   /* The Assistant dock can leave only a short transcript above it. Reserve a band for the
      notification so it clears both the dock controls and the transcript's last visible row. */
-  body:has(.toast-region:not(.under-menu)) .detail-main[data-assistant-transcript] {
-    margin-block-end: calc(var(--toast-stack-height) + var(--space-2) + var(--keyboard-inset, 0px));
+  body:has(.toast-region:not(.under-menu) > .toast) .detail-main[data-assistant-transcript] {
+    margin-block-end: calc(var(--toast-stack-height) + var(--space-2));
   }
 
   /* On a phone the stack and an open menu sheet compete for the same screen, and there is no free edge
