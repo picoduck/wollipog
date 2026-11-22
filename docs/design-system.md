@@ -394,6 +394,18 @@ gets a 44px band centered on its line. Components never add their own copies of 
 whose line sits closer than 12px to another target (dense prose) keeps its visual size and relies on
 the surrounding row being the target.
 
+**First-line alignment.** Center the leading icon and trailing controls on the first text line
+so they stay associated with the title or message when it wraps. Compute the control's block
+margins from the line and control heights, `calc((1lh - var(--control-h-sm)) / 2)` for small
+controls. Equal margins let the controls overhang without adding their full height to the row.
+On touch, borrow the hit area as above and leave clearance between targets. The toast and notice
+rules in `apps/web/src/styles.css` implement this (§13.1, §13.2).
+`apps/web/e2e/feedback-alignment.spec.ts` checks the touch geometry in “phone panel notices
+borrow the trailing hit area and keep the resolving action full size”. The layout invariants in
+`apps/web/e2e/assistant-polish.spec.ts` check first-line centers and overlap in tests such as
+“Waiting for You aligns its pager and orders actions for three requests” and “notices align the
+icon and overflow control with the title”.
+
 Every interactive element uses one of these heights. `min-height` never comes from padding. Icon
 buttons are square (`width: var(--control-h)`). Per-selector `min-height: 44px` patches on controls
 are replaced by this one block. Composer bar controls (`ComposerButton`, #2174) are `--composer-ctl`
@@ -513,12 +525,12 @@ than `--surface-selected`.
 | Variant | Class | Look | When to use |
 | --- | --- | --- | --- |
 | Primary | `.btn.primary` | Flat `--primary-bg`, `--primary-fg` text, no border. | The one action the region exists for: New Skill, Create Session, Save, Send. **At most one per region** (page header, dialog footer, card, sheet). |
-| Secondary | `.btn` | `--bg-elev-2` fill, 1px `--border-strong` edge, `--text`. | Other real actions next to a primary, or the main action of a region that has no primary. |
+| Secondary | `.btn` | `--bg-elev-2` fill, 1px `--border-strong` edge, `--text`. | Other real actions next to a primary, or the main action of a region that has no primary. In notices and cards, reserve fill for the resolving action. |
 | Ghost | `.btn.ghost` | Transparent, `--text-dim`, hover `--bg-elev-2` + `--text`. | Low-emphasis actions in dense places: Cancel in toolbars, Clear, Show More, toolbar toggles. |
 | Danger | `.btn.danger` | Solid `--danger-bg`, white text. | **Only** the confirm button of a destructive confirmation dialog. Nowhere else. |
 | Danger quiet | `.btn.ghost.danger` | Transparent, `--danger-text`. | A destructive action that must stay visible outside a menu (the tertiary slot of a dialog footer, §7.3). |
 | Icon | `.icon-btn` | Square, transparent, `--text-dim` icon. | Tool actions with a universally understood glyph (close, more, search, copy, panel toggles). Always has `aria-label` and a tooltip that match. |
-| Link | `.link` | `--accent` text, underline on hover. | Navigation inside prose and meta. Never styled as a button; buttons never underline (`a.btn { text-decoration: none }`). |
+| Link | `.link` | `--accent` text, underline on hover. | Navigation inside prose and meta. A standalone navigation control in a notice or card uses the ghost button style. Anchors styled as buttons never underline. |
 
 Sizes: `.btn.sm` (28), default (32), `.btn.lg` (40). Horizontal padding 8 / 12 / 16px; icon 14 /
 16 / 16px; gap 4 / 8 / 8px; text `--type-body-strong` (sm uses 12px). Icon
@@ -564,6 +576,14 @@ and fails when one is added, and each area removes its own as it rebuilds the sc
 
 Rules
 
+- **Quiet navigation in notices and cards.** Give the resolving action the only filled button.
+  Navigation and disclosure controls use `.btn.sm.ghost`, including anchors styled as buttons.
+  Inline prose links keep `.link`. This keeps the next decision visible when a card also offers
+  context or another destination. `apps/web/src/components/AssistantSettingsLink.tsx` defaults to
+  the ghost class, and `apps/web/src/components/AssistantSpendingNotice.tsx` keeps Thread Settings
+  and Show Breakdown quiet. The one-filled-button ratchet in
+  `apps/web/e2e/assistant-polish.spec.ts` runs in “notices align the icon and overflow control
+  with the title” and “Inbox previews and campaign approvals use the same button standard”.
 - Button text never wraps: `white-space: nowrap; flex: none`. If a row cannot fit its buttons, the
   **row** overflows into a ⋯ menu (§3.3); the button never shrinks. One exception: the phone sheet
   footer's equal pair (§7.5), whose halves are narrower than a long confirm label.
@@ -585,6 +605,18 @@ Rules
   [primary]**. Primary is last (rightmost on desktop). The overflow ⋯ sits immediately before the
   primary because it holds more secondaries. The phone app bar is the exception: its trailing icons
   are Search, the primary `+`, then ⋯ (§15.1).
+- **Request approval order.** Where a request offers navigation and a decision, put the ghost
+  **Open …** at the leading edge, leave flexible space, then show **Deny** and the primary
+  **Approve** (or **Approve Once**) last. The space separates reading context from taking the
+  decision. Omit Open if there is no destination. `apps/web/src/components/AssistantWaitingDock.tsx`
+  uses `BusyButton` (`apps/web/src/components/ui/BusyButton.tsx`) for Deny and Approve Once to
+  keep their labels, width and focus through submission. `.assistant-dock-resolve` in
+  `apps/web/src/styles.css` supplies the flexible space. `apps/web/e2e/assistant-waiting-dock.spec.ts`
+  checks the exact sequence in “one
+  pending tool approval shows the command and ordered actions”.
+  `apps/web/e2e/assistant-polish.spec.ts` rejects Deny after Approve, Open after Deny, an extra
+  filled action, or a filled action before the last button. “the ratchet detects an extra filled
+  action and reversed request actions” exercises the guard itself.
 - Gap 8px between buttons. Groups never mix heights: every control in one row uses the same
   control-height token.
 - Segmented and split buttons count as one control.
@@ -1022,7 +1054,20 @@ A path trail, such as the Files panel's folder path.
 
 Every session tool (Review, Files, Browser, Agents, Side Chat, Background Work, Campaign Status,
 Requests, Decision History, and Terminal in Right Panel placement, #2868) opens in one frame (#2843,
-`RightPanel.tsx`):
+`RightPanel.tsx`). The Assistant thread uses the same frame with its own tools (#4799). A host
+with four or fewer tools puts them directly in the 48px header as tabs. A larger tool set uses the
+tool switcher.
+
+**Tool tabs.** A short set fits in one bar and lets a person see and reach every tool without
+opening a menu or giving up a second row. `apps/web/src/components/AssistantThreadPanel.tsx`
+renders Work, Decisions and Details as a keyboard-navigable tab list.
+“first visit, 42 flat work rows and three tabs preserve the conversation” in
+`apps/web/e2e/assistant-thread-panel.spec.ts` covers this host. The “side panel Work aligns tabs
+and trailing controls”, “side panel Decisions aligns tabs and trailing controls” and “side panel
+Details aligns tabs and trailing controls” cases in `apps/web/e2e/assistant-polish.spec.ts` check
+header alignment. No test enforces the four-tool cutoff across hosts.
+
+The session frame's larger tool set uses these details:
 
 - **Column.** `.rpanel` is docked and flush: no margin or radius (§2.5), one 1px `--border` hairline
   on its leading edge, `--bg`, the full height under the session bar, 400px by default and 320px at
@@ -1032,8 +1077,9 @@ Requests, Decision History, and Terminal in Right Panel placement, #2868) opens 
   slot, Expand Panel, then Close Panel. The landmark is named "Side Panel". There is one close control in every
   tool. A tool's list has no back control; a pushed page has the frame's Back (below), and a request's
   detail keeps its own "All Requests" inside the body.
-- **Tool switcher.** The title is a button with the tool's 16px icon, its name in `--type-section`
-  and a caret. It opens a §9.1 menu built from `SESSION_TOOLS` (`session-tools.ts`, the same list
+- **Tool switcher.** For the larger session tool set, the title is a button with the tool's 16px
+  icon, its name in `--type-section` and a caret. It opens a §9.1 menu built from
+  `SESSION_TOOLS` (`session-tools.ts`, the same list
   the Session Tools list renders): Session Tools first, then the Code, Work and Decisions groups
   under section labels, the current tool checked, keycaps on fine pointers only. An unavailable tool
   stays focusable with its reason as its second line.
@@ -1323,15 +1369,26 @@ time under column tabs instead (§15.1, #2216).
 | Dense (trees, file lists) | `--row-h-dense` 32 | `.row.dense`: `[16 icon] Name ........ [meta]`, one line, `--type-body`. **Fine pointers only**: on coarse pointers the token is 44px, so a touch tree is never denser than a menu. Only for trees and file lists, where 40px rows would show too few items (the Files tree shows 16 at 40px). Never for lists of entities, except a confirmation's read-only list of what it affects (§7.4). |
 | Card row (sessions list) | `--row-h-2` on desktop and tablet; the three-line card on phone | **Desktop and tablet (#2209):** two lines, exactly `--row-h-2` whatever the row carries, with no gap between rows. Line 1, the status line: agent icon and "Agent · Project" (gives up width first), the branch only when there is one and the list is 600px or wider (`BranchIcon`, its base as "from <ref>", a pull request as `PullRequestIcon` and its state word), then trailing: the lifecycle and secondary badges with a neutral "+N" (§11.1), the activity strip, the flags (pin, unread dot) and the time (tabular, `--text-faint`; a snoozed row shows its return time after an alarm clock instead). Line 2, the title line: the title (`--type-body-strong`, one line, ellipsis, `sessionDisplayTitle()`) and the family chip, nothing else. **Phone:** the card (#882, #934): the sender with the flags, the title, then the status line with lifecycle and secondary badges, the strip, the branch and the time. Dense status lines wrap to keep labels readable. **Activity strip:** 48×12px, bars in `--blue`, `role="img"` named "Tool activity in the last 30 minutes", only while the session is Running or Starting or had tool activity in the last 10 minutes; always on the status line after the badge, never on the title line, and idle rows reserve no space for it. **Selected:** `--surface-selected` and the 2px `--accent` leading bar. **Unread:** an 8px `--blue` dot in the flags and a 600-weight title, never a fill, border or bar; a row that is both shows both. **Focus:** while the list has keyboard focus, its active row shows one inset `--focus` ring. Phones show no selected row. In the stacked layout, when the list is 880px or wider, the same two lines move status, activity, flags and time into fixed trailing columns, with the actions in a column of their own, and a parent's family chip moves under its status badge (§6.3, #2218, #3175). No row repeats a transcript excerpt or request after its title (#3175). **Snoozed time:** the return time reads in the zone the Snooze dialog names (`reminderDisplayZone()`, the browser's), whatever zone the reminder was saved from, in the row, its tooltip and the dialog alike. **Actions (#2214):** Snooze, Archive (`sessionArchiveControlLabel()`: "Archive", "Archive and Stop…", "Retry Stop…") and ⋯, trailing at the end of the title line over the row's own fill, so the status and time stay in view; on fine pointers on hover or focus-within, on coarse pointers only ⋯, always, at 44px in a column the row keeps free. Each tooltip names its key. ⋯, right-click, long-press and Shift+F10 open the session's context menu, which on desktop selects the row first, so the menu, the preview and the keys act on one session. The menu, in order, each item after its 16px icon with its keycap trailing: Reply (R), Rename Session…, Pin Session / Unpin Session (S), Mark Unread / Mark Read (U), Fork Conversation… (F; absent where the session can never fork, disabled with its reason otherwise), the reminder item (H), Dismiss Reminder (a returned reminder only), a separator, Copy Session ID (#3897; offered to everyone, a Viewer included, its toast showing the copied id in mono), a separator, then the archive item (E). There is no shortcut rail or activity footer: counts live on the tabs and the rail, keys on tooltips, menu keycaps and the Keyboard Shortcuts reference. |
 
+**Conversation preview row.** Show the title and trailing time first, then one status badge when
+needed and a sentence preview. This gives enough context to pick up a conversation without opening
+each thread. The title can wrap to two visual lines, the preview stays on one line with an
+ellipsis, and an older thread can have no preview. `ThreadList` in
+`apps/web/src/components/AssistantsView.tsx` renders the row with the `.assistant-inbox-row`
+styles in `apps/web/src/styles.css`. “groups owner attention above recent work and keeps titles,
+statuses and previews inside the pane” and “renders older rows without a preview or a page error”
+in `apps/web/e2e/assistant-inbox.spec.ts` cover both forms.
+
 Rules
 
 - Fixed heights: a list never mixes row heights except for group headers. Virtualised lists use one
   estimate. Form choice groups and checkbox rows are the exception and follow the content-height
-  rule in §8.4.
-- Text clamps: titles 1 line; descriptions 1 line in rows, 2 lines in cards (`line-clamp: 2`), full
-  text only in the detail view.
+  rule in §8.4. Conversation preview rows use `--row-h-2` as their minimum and grow for a wrapped
+  title.
+- Text clamps: titles 1 line (2 in conversation preview rows), descriptions 1 line in rows,
+  2 lines in cards (`line-clamp: 2`). Full text belongs in the detail view.
 - Metadata placement: identity (agent icon, machine, project) on line 2, left; time and counts
-  trailing, tabular, `--text-faint`; status badge trailing on line 1. At most two session status badges per row.
+  trailing, tabular, `--text-faint`; status badge trailing on line 1. At most two session status
+  badges per row. Conversation preview rows use the icon and badge placement above.
 - Meta items are separated by 12px space, each prefixed by a 14px icon or a short label, not by
   middle dots.
 - Hover: `--bg-elev-2` (fine pointers only). Selected: `--surface-selected` fill plus a 2px
@@ -2108,6 +2165,18 @@ wide as the trigger and at least 280px, never narrower, so descriptions do not w
 | File picker | A dropzone row: icon, "Drop files here or", `.btn.sm` "Choose Folder…". Never the native "Choose Files / No file chosen". |
 | Number with unit | `.w-xs` input with the unit as a suffix inside the field ("30 s"). The field's end padding is the 12px inset, the unit as drawn and a 4px gap: `affixSuffixRef` on the unit measures it into `--affix-suffix-w` (2em until measured, #3185), because the unit is set in the row's type and the system face, not the field's. A number input with a unit has no spin buttons, whose room would cost a digit; the arrow keys still step it. |
 
+**Budget and quota values.** Offer preset chips for common amounts or counts, an explicit
+**No Limit** choice, and a separate switch for pausing launches. A person can see what is
+unlimited, what is paused and what will resume. Keep zero and empty-value encodings in the
+implementation. `apps/web/src/components/AssistantBudgetPresets.tsx` offers $25, $50, $100, $250,
+**Custom…** with a decimal field, and **No Limit**.
+`apps/web/src/components/AssistantThreadLimitsDialog.tsx` uses a count stepper with **No Limit**
+and a **Pause New Launches** switch that preserves the configured count on supported servers.
+`apps/web/e2e/assistant-thread-settings.spec.ts` checks these in “keeps every budget preset, a
+cents input, and the spend meter together” and “shows the stepper and preserves its configured
+value through pause and resume”. The count stepper is the current implementation, with no
+enforcing test for count preset chips.
+
 **Form heights and alignment.** Select and combobox triggers and single-line text fields in one
 form share `--control-h` (32px fine, 44px coarse). ChoiceRow and ChoiceList form rows use `--row-h`
 as a minimum (40px fine, 48px coarse); Checkbox rows use `--row-h-dense` as a minimum (32px fine,
@@ -2481,16 +2550,16 @@ carrying the one Held badge when the whole queue is held. While collapsed it als
 carries the most severe row status that needs the person (Delivery Failed, else Delivery Uncertain)
 or the spinner while steering.
 The expanded list scrolls at about four rows or 30% of the viewport height, whichever fits.
-Only the summary opens or closes the tray: arrivals, removals and status changes never do, the choice
-lasts while the session stays open, and every session starts collapsed. A queue held behind a
+Only the summary opens or closes the list inside the card. Arrivals, removals and status changes
+preserve that choice while the session stays open. Every session starts collapsed. A queue held behind a
 worktree or account handoff (#3752) says why in one sentence-case `.queue-note` right under the
 summary, collapsed or expanded (`.queue-hold`), followed by Proceed Now… (`.btn.sm`) when the runner
 can release the hold and the reader may stop the session's background jobs; a Viewer reads only the
 sentence. Proceed Now… asks first in the danger confirmation titled Proceed Now, with Cancel focused,
 saying that every unfinished background job ends and is recorded as killed and that the handoff and
 the queued messages then run in order; a refusal is a compact danger notice under the button, as
-Stop Job's is. Expanded, the tray says once
-in sentence case what holds for every row: the held explanation, a steering reason every row shares
+Stop Job's is. Expanded, the queue says once in sentence case what holds for every row: the held
+explanation, a steering reason every row shares
 ("Claude Code can't take steering mid-turn, so these send when the turn ends."), a cancel none of
 them can use, or a Viewer's refusal. A row carries
 a badge only where it differs from "Queued" (Steering…, Pending Delivery, Delivery Uncertain,
@@ -2504,8 +2573,8 @@ is a notice of the slot (§13.2), not part of the row.
 
 One queued message is its own row in place of the summary (#3962), so steering it takes one tap:
 the same single line with a clock, and the Held badge after its words when the queue is held. On desktop its
-row is the expanded row above, and what the expanded tray would say about it is said under it. Below
-760px, while the message can be steered and the reader may manage the queue, a small Steer Now
+row is the expanded row above, with the shared explanation under it. Below 760px, while the
+message can be steered and the reader may manage the queue, a small Steer Now
 button sits before the ⋯ button and borrows a 44px hit area on touch. The sheet leaves Steer into This Turn out; otherwise
 there is no Steer button and the sheet lists Steer into This Turn, disabled, with its reason. When a
 second message arrives the summary returns as the person last left it, opened only if focus was in
@@ -2523,6 +2592,34 @@ provider command in mono. Reasons come from one `deliveryReason(code)` table in
 message was delivered." Raw provider text and attempt counts wait behind Show Details. A steer the
 agent took keeps a quiet "Steered the Current Turn" under its canonical row. A failed message that
 has scrolled out of view raises "1 Message Not Sent" in the floating tail control (#2153).
+
+**Assistant work receipts.** Show what the assistant launched or decided where the reader can
+find it again in the transcript. A launched session or campaign gets a compact receipt at the
+message or request that led to it. A delegated decision gets an event row with its outcome and
+reason. The receipts preserve the visible consequences after a request leaves Waiting for You.
+`apps/web/src/components/AssistantTranscriptReceipts.tsx` renders both, with placement from
+`apps/web/src/assistant-transcript-placement.ts`. “an approved campaign gains a launch receipt
+at its original request” in `apps/web/e2e/assistant-transcript-receipts.spec.ts` checks that link
+to the original context. The “Assistant transcript receipts” cases in the same file cover
+launch and delegated-decision rows across widths and themes.
+
+**Wollipog event rows.** When Wollipog writes into a conversation, render an event by its
+recorded origin, with an icon, heading and relevant facts. Reserve the person's bubble for
+their own message so the transcript makes clear who did what.
+`apps/web/src/components/EventTimeline.tsx` routes tagged entries to `WollipogPromptRow` in
+`apps/web/src/components/WollipogPromptRow.tsx` for origin-specific presentation. Older entries
+without recorded origin keep their existing presentation. The “confirmation results, older
+events and busy transcripts” cases in `apps/web/e2e/assistant-confirmation-results.spec.ts`
+cover both paths.
+
+**Streaming Markdown.** Close open inline markers provisionally in the trailing streamed
+block so emphasis, strikethrough and inline code read as formatting while the rest of the
+answer arrives. Keep this treatment local to the unfinished block and leave the source and
+settled output canonical. `apps/web/src/components/Markdown.tsx` uses `streamMarkdownTail` in
+`apps/web/src/components/markdown-streaming.ts`. `apps/web/src/components/Markdown.dom.test.tsx`
+checks both states in “streaming Markdown previews bold and restores canonical output on
+settlement”. `apps/web/e2e/streaming-markdown.spec.ts` checks the visible result in “streams
+Tracker Reconciliation without literal markers in the assistant transcript”.
 
 **Agent rows** (#2183). Each agent a turn spawned is one `.tl-agent` row on the work rule, built
 like a step: the §5.5 chevron on a `button.disclosure-trigger[aria-expanded]`, a `Bot` icon, the
@@ -2724,7 +2821,16 @@ pointers only; its tooltip names the chord.
   many machines are signed in to it: sources group only by the provider identity's opaque key, each
   meter takes the newest window's most recent reading, and the machines fold into a disclosure.
   Switch Account stays per machine, because its credentials are.
-- The element carries `role="progressbar"` with `aria-valuemin`, `aria-valuemax`, `aria-valuenow`
+- **Spending and quota notices (§13.2).** Show the amount used against the known limit so the
+  reader can judge why the gate is close or has fired. Over a limit, fill up to the limit in the
+  tone and draw a hatched segment for the excess, scaled against the actual total.
+  `apps/web/src/components/AssistantSpendingNotice.tsx` uses `role="meter"` with the used and
+  limit values in `aria-valuetext`. `.assistant-spending-overflow` in `apps/web/src/styles.css`
+  draws the hatch. `apps/web/e2e/assistant-thread-limits.spec.ts` checks the value and the hatch
+  in “shows Over Budget above the composer with matching badges”. The quota case, “shows Launch
+  Limit Reached above the composer with matching badges”, checks the launch count and the absence
+  of hatching at the limit.
+- Other meters carry `role="progressbar"` with `aria-valuemin`, `aria-valuemax`, `aria-valuenow`
   and a Title Case `aria-label`. A meter that compares a level across rows, such as All Machines'
   Capacity (§6.1, #2986), is instead `role="img"` named by its level in sentence case ("29 of 40
   units in use"), and the figures beside it are hidden from assistive technology.
@@ -3007,7 +3113,13 @@ scroll to trigger it (#313).
   text the person may copy, such as a URL (`detailStyle: "mono"`), and wrapping so all of it shows.
   An optional link under it (`link`, "What's New") opens in the system browser on desktop. Title Case
   only in the action and the link ("Undo", "Retry Undo", "Open Session", "What's New").
-- One `.btn.sm.ghost` action (44px coarse) and a Lucide `X` close.
+- One `.btn.sm.ghost` action and a Lucide `X` close. Center both controls and the icon on the
+  message's first line so a long message or a detail line leaves the controls where the reader
+  expects them. `apps/web/src/components/FeedbackProvider.tsx` renders the row and
+  `.toast-actions` in `apps/web/src/styles.css` computes its margins from the line and control
+  heights (§2.8). Small controls borrow a 44px hit area on touch without making the copy taller.
+  “toast icons and trailing controls share the first line without adding vertical space” in
+  `apps/web/e2e/feedback-alignment.spec.ts` checks this geometry.
 - Info and success dismiss after 5s (paused on hover or focus); errors persist. Maximum 3 visible,
   newest on top; older ones collapse into "+2 More".
 - Redundant toasts are removed: nothing that the UI already shows (an attached file chip, a visible
@@ -3046,10 +3158,37 @@ scroll to trigger it (#313).
 | Title | Optional, `--type-body-strong`, Title Case. |
 | Title row | With a title, trailing controls (the slot's "+N More", then the dismiss button) sit in the title row only, so the body and the actions use the full width. |
 | Body | `--type-body`, 1–2 sentences, sentence case. Everything else behind "Show Details" (`Notice`'s `details`): a `.btn.sm.ghost` toggle at the end of the action row that reads "Hide Details" while open; the details are not in the DOM until it opens. When the toggle is the row's only action, its label lines up with the body's text (#3511). |
-| Actions | `.btn.sm` row under the body, left-aligned; the resolving action first (primary only if it is the page's main next step). An action a person cannot take now keeps a visible reason line in the body ("Build Box is offline.", a Viewer's refusal) that the button references with `aria-describedby`, never only a `title`. |
+| Actions | `.btn.sm` row under the body, left-aligned. Navigation and disclosures are ghost buttons (§3.1). The resolving action has the only fill. In Assistant notices, it comes last among the inline actions. An action a person cannot take now keeps a visible reason line in the body ("Build Box is offline.", a Viewer's refusal) that the button references with `aria-describedby`, never only a `title`. |
 | Compact | One line: icon + sentence + one `.btn.sm` trailing, 40px. For inline field-group and composer notices. When it wraps, titled or not, the icon stays on the first line, level with the title or the sentence's first line, and whatever shares that line (the sentence beside a title, the actions, the dismiss button) lines up on it (#3522). |
 | Placement | Directly where the problem is: above the composer for session state, above the footer for submit errors, at the top of a section for section state. Aligned to that column's edges. |
-| Budget | **One notice slot between the transcript and the composer.** When several session conditions hold (quarantine, recovery, a queued-message error), the highest severity shows and the rest collapse into its trailing "+2 More" menu. Receipts and queued rows are not notices and do not share this slot: receipts are rows of the transcript under their message (§11.2), and queued rows belong to the composer. This is the bottom-edge counterpart of the one-bar rule for the top of the session. A pending request (the request dock below) takes this slot ahead of every notice. |
+| Budget | **One notice slot between the transcript and the composer.** When several session conditions hold (quarantine, recovery, a queued-message error), the highest severity shows and the rest collapse into its trailing "+2 More" menu. Receipts belong in the transcript (§11.2), and queued rows belong inside the composer card. This is the bottom-edge counterpart of the one-bar rule for the top of the session. In a session, a pending request takes precedence in the notice slot. In an Assistant thread, Waiting for You sits above that slot and both can be visible. |
+
+**First-line alignment.** Center the icon and trailing controls on the title's first line,
+or the message's first line when there is no title. Wrapping copy leaves the controls near the
+words they act on. `apps/web/src/components/Notice.tsx` places the controls.
+`apps/web/src/styles.css` derives the margins from the control height and uses a first-line
+baseline for compact notices (§2.8). Borrow the touch hit area where there is clearance. The
+Assistant thread notice slot uses full-height touch controls instead.
+`apps/web/e2e/feedback-alignment.spec.ts` checks “notice trailing controls share the title or
+message's first line”, and `apps/web/e2e/assistant-polish.spec.ts` checks “notices align the
+icon and overflow control with the title”.
+
+**Spending and quota notices.** Include the meter wherever the limit is known, with a hatched
+overflow segment when spending passes its limit (§11.6). The notice explains the effect on
+launches and offers one filled action to change the budget or quota. Thread Settings and Show
+Breakdown stay quiet so the reader can pick out the resolution.
+`apps/web/src/components/AssistantSpendingNotice.tsx` implements this pattern.
+“shows Over Budget above the composer with matching badges” in
+`apps/web/e2e/assistant-thread-limits.spec.ts` checks the hatch and accessible value.
+
+**Composer queue.** Keep queued messages, including those being steered from the queue, in
+strips inside the composer card above the draft, so the draft and its delivery controls stay
+together. The edit strip comes first and a delivery failure uses the notice slot, with its
+status and Dismiss still on the queue row (§11.2).
+`apps/web/src/components/SessionDetail.tsx` mounts the edit strip and
+`apps/web/src/components/QueuedMessages.tsx` inside `.composer-box`.
+`apps/web/e2e/conversation-steering.spec.ts` checks “the queue stays inside the shared card
+across sizes and states” and “an Assistant thread has room for its waiting dock, notice, and queue”.
 
 **Session notice slot.** `SessionNoticeSlot` (`apps/web/src/components/SessionNoticeSlot.tsx`) is that
 slot: the first child of the composer column, on the composer's width and gutters. It takes a list of
@@ -3082,7 +3221,7 @@ exactly one: the most severe, then the lowest rank.
   so both can wait in the slot; every composer entry clears when the draft changes or the next send is
   accepted. A command that keeps the attached images for the next message is an info entry ("/review
   doesn't send images. They stay here for your next message."), dismissible like other info entries.
-  Nothing renders inside the composer card or between it and the slot.
+  These feedback entries stay in the slot. The queue and its edit strip are part of the card.
 - **Composer action errors** (#2511): every other action that reports through the slot (Cancel,
   Dismiss and Retry on a pending message, Stop Turn, Rewind, Fork, Recover Session, Restart, Retry
   Setup, an @ reference, Steer and Queue Again) follows the same rule, under its own title
@@ -3226,8 +3365,19 @@ action row while the slot is at most 480px wide, as in the session notice slot.
   under the head at the list's 8px pad, none is cut, and what the head leaves of its last row is space
   under the last whole row, just above the divider.
 
-**Request dock.** Pending permission requests and questions dock directly above the composer, in the
-notice slot, in attention priority order. The dock is the only amber surface for a request, and it
+**Assistant waiting dock.** The pending-request position above the composer uses one outlined
+**Waiting for You** container for different request kinds, including tool approvals, questions
+and owner confirmations. Page one request at a time with **Previous Request** and **Next Request**.
+**Show All** puts the requests in one scrolling list within that container, and **Show One**
+returns to paging. This keeps the composer and transcript available as requests accumulate.
+The notice slot can stay below the dock, including when it holds a spending notice. Use the
+action order in §3.2. `apps/web/src/components/AssistantWaitingDock.tsx` renders the dock.
+`apps/web/e2e/assistant-waiting-dock.spec.ts` checks “three requests page individually and share
+one outlined dock in Show All” and “the dock and 320% spending notice fit above the composer
+without overlap”.
+
+**Session request dock.** Pending permission requests and questions dock directly above the
+composer, in the notice slot, in attention priority order. The dock is the only amber surface for a request, and it
 follows these rules so it never crowds out the conversation it asks about:
 
 - **Mobile questions have two states** (#3308). In a full session, a question starts as the single
