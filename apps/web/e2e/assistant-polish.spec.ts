@@ -80,6 +80,40 @@ async function expectButtonStandard(surface: Locator) {
   expect(await buttonStandardViolations(surface)).toEqual([]);
 }
 
+function nestedBorderViolations(surface: Locator) {
+  return surface.evaluate(root => {
+    const regions = ".assistant-dock, .assistant-dock-card, .notice, .request-card";
+    const isBorderedContainer = (node: Element) => {
+      // A control outline and a one-sided divider do not create a nested box.
+      if (node.matches("button, input, select, textarea, a, summary, label:has(input), [role=button]") ||
+          !node.getClientRects().length) return false;
+      const style = getComputedStyle(node);
+      return style.visibility === "visible" && ["top", "right", "bottom", "left"].every(side =>
+        parseFloat(style.getPropertyValue("border-" + side + "-width")) > 0 &&
+        style.getPropertyValue("border-" + side + "-color") !== "rgba(0, 0, 0, 0)");
+    };
+    const name = (node: Element) => node.getAttribute("class") || node.tagName;
+    return [...root.querySelectorAll("*")].flatMap(node => {
+      if (!node.closest(regions) || !isBorderedContainer(node)) return [];
+      for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+        if (!parent.closest(regions)) break;
+        if (isBorderedContainer(parent)) return [name(node) + " inside " + name(parent)];
+      }
+      return [];
+    });
+  });
+}
+
+test("the border ratchet detects a boxed command inside the dock", async ({ page }) => {
+  await open(page, "light", threadPath, "dock=tool");
+  const dock = page.locator(".assistant-dock");
+  const command = dock.locator(".code-well");
+  await expect(command).toBeVisible();
+  expect(await nestedBorderViolations(dock)).toEqual([]);
+  await command.evaluate(node => { (node as HTMLElement).style.border = "1px solid currentColor"; });
+  expect(await nestedBorderViolations(dock)).toContain("code-well inside assistant-dock");
+});
+
 test("the ratchet detects an extra filled action and reversed request actions", async ({ page }) => {
   await open(page, "light", threadPath, "dock=owner&confirm=1");
   const card = page.locator(".assistant-dock-card");
@@ -101,6 +135,7 @@ async function check(surface: Locator, id: string, theme: string, state: string)
   await expectPageNoHorizontalOverflow(page);
   await expectNoHorizontalOverflow(surface, id);
   await expectButtonStandard(surface);
+  expect(await nestedBorderViolations(surface), id + " does not nest bordered containers").toEqual([]);
   await expectTextContrast(surface);
   if (page.viewportSize()?.width === 390) {
     if (id === "thread-list") {
@@ -191,6 +226,17 @@ for (const theme of ["light", "dark"] as const) {
         await check(dock, "waiting-dock", theme, "all-three-requests");
       });
 
+      test("a tool request shows its exact command on a borderless background", async ({ page }) => {
+        await open(page, theme, threadPath, "threads=long&launched=many&dock=tool&dockCount=3");
+        const dock = page.locator(".assistant-dock");
+        const command = dock.locator(".code-well");
+        await expect(command.locator("pre")).toContainText("pnpm install --frozen-lockfile");
+        await expect(command).toHaveCSS("border-top-width", "0px");
+        await expect(command).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+        await expect(command).toBeInViewport({ ratio: 1 });
+        await check(dock, "waiting-dock", theme, "tool-command");
+      });
+
       test("notices align the icon and overflow control with the title", async ({ page }) => {
         await open(page, theme, threadPath, "threads=long&launched=many&limits=enabled&spending=over&thread-health=stress");
         const notice = page.locator(".composer .session-notice-slot .notice");
@@ -203,6 +249,9 @@ for (const theme of ["light", "dark"] as const) {
         await open(page, theme, threadPath, "thread-health=turn_failed");
         await expect(notice.getByRole("button", { name: "Retry Turn", exact: true })).toBeVisible();
         await check(notice, "notices", theme, "retry-turn");
+        await notice.getByRole("button", { name: "Show Details" }).click();
+        await expect(notice.locator(".notice-details-body")).toBeVisible();
+        expect(await nestedBorderViolations(notice)).toEqual([]);
       });
 
       test("Inbox previews and campaign approvals use the same button standard", async ({ page }) => {

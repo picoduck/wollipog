@@ -7593,6 +7593,7 @@ body.shell-dock-dragging * {
   overflow-wrap: anywhere;
 }
 .assistant-confirmation-arguments code {
+  border: 0;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
@@ -7677,7 +7678,7 @@ body.shell-dock-dragging * {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.assistant-dock-card .code-well { border: 0; }
+:is(.assistant-dock-card, .assistant-thread-notice-slot, .assistant-campaign-review) .code-well { border: 0; }
 .assistant-dock-card .code-well pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .assistant-dock-target,
 .assistant-dock-actions,
@@ -7691,6 +7692,8 @@ body.shell-dock-dragging * {
   display: block;
   overflow: hidden;
   align-content: center;
+  border: 0;
+  background: var(--bg-elev-2);
   text-overflow: ellipsis;
 }
 .assistant-dock-target > .status { flex: none; }
