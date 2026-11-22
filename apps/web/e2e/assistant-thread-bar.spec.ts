@@ -96,7 +96,7 @@ for (const theme of ["light", "dark"] as const) {
       for (const { state, thread, badge } of [
         { state: "idle", thread: "thr_cleanup", badge: null },
         { state: "working", thread: "thr_release", badge: "Working" },
-        { state: "over-budget", thread: TRIAGE, badge: null },
+        { state: "over-budget", thread: TRIAGE, badge: "Over Budget" },
         { state: "archived", thread: "thr_retired", badge: "Archived" },
       ]) {
         test(`the ${state} thread has one detail bar`, async ({ page }) => {
@@ -105,9 +105,9 @@ for (const theme of ["light", "dark"] as const) {
           await checkBar(page, phone, badge);
           await expect(page.locator(BAR).locator(".assistant-side-panel-dot")).toHaveCount(0);
           if (overBudget) {
-            const notice = page.getByRole("status").filter({ hasText: "whole $25 budget" });
-            await expect(notice).toContainText("Thread Limit Reached");
-            await expectFullyInViewport(notice.getByRole("link", { name: "Thread Settings", exact: true }), "Budget notice action");
+            const notice = page.locator(".composer .session-notice-slot").getByRole("status");
+            await expect(notice).toContainText("Over Budget by $55.00");
+            await expectFullyInViewport(notice.getByRole("button", { name: "Raise Budget…" }), "Budget notice action");
           }
           await capture(page, theme, state);
         });

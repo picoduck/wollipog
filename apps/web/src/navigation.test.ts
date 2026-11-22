@@ -664,6 +664,7 @@ test("Assistant settings, thread settings and Guardrails have stable addresses",
   assert.deepEqual(viewFromPath("/settings/behavior"), { name: "settings", section: "behavior" });
   for (const view of [
     { name: "assistants", threadId: "thr_example", limits: true },
+    { name: "assistants", threadId: "thr_example", limits: "spending" },
     { name: "assistants", threadId: "thr_example", delegation: true },
     { name: "session", id: "sess_example", guardrails: true },
   ] as const) {
