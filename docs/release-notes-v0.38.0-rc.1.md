@@ -31,4 +31,11 @@ Upgrade the control plane before standalone or remote runners. Use matching comp
 
 For organizations with archived-history retention enabled, capable runners trim full logs after completed control-plane pruning, including for previously pruned sessions. Back up the runner data or disable the policy before upgrading if you need to preserve full logs. Reprocess cannot restore trimmed logs. Older runners refuse manifest format 2. See [archived-history retention](https://github.com/picoduck/wollipog/blob/v0.38.0-rc.1/docs/archived-history-retention.md#runner-logs-and-upgrades).
 
-The release includes desktop, standalone runner, and headless control-plane builds for all six supported native targets, plus the dashboard bundle, checksums, and signed desktop updater assets. A stable v0.38.0 requires its own versioned build.
+The control plane advertises the `wollipog-control-plane` service identity. Desktop v0.15.0 and later accept both the current and legacy service identities. Older clients may report `The address is not a Wollipog control plane.` Upgrade those clients before connecting.
+
+The release workflow builds for all six supported native targets. The base draft holds exactly 34 assets:
+14 desktop bundles, 12 runner names, 6 headless `wollipog-control-plane-<triple>` executables, the
+`wollipog-web.tar.gz` dashboard bundle, and `SHA256SUMS`. A signed tag run adds 12 updater signatures and
+`latest.json`, for 47 assets. Publishing the verified draft remains a manual operator step.
+
+A stable v0.38.0 requires its own versioned build.
