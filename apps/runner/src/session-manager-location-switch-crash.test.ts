@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { claudeProjectPathKey } from "./claude-background-work.js";
 import { SessionManager } from "./session-manager.js";
+import { shutdownLocationSwitchManagers } from "./test-support/location-switch-shutdown.js";
 import { SessionStore } from "./session-store.js";
 import { parseWorktreePorcelain, recoveredBranchPlacement, type WorktreeCleanupRecord } from "./worktree.js";
 
@@ -186,10 +187,12 @@ async function withCrashDuringSetup(
   } finally {
     doomed?.kill("SIGKILL");
     if (setupPid !== undefined && alive(setupPid)) process.kill(setupPid, "SIGKILL");
-    for (const manager of managers) manager.shutdownAll();
-    if (previousClaudeHome === undefined) delete process.env.CLAUDE_CONFIG_DIR;
-    else process.env.CLAUDE_CONFIG_DIR = previousClaudeHome;
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    try {
+      await shutdownLocationSwitchManagers(managers);
+    } finally {
+      if (previousClaudeHome === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousClaudeHome;
+    }
     rmSync(root, { recursive: true, force: true });
   }
 }
