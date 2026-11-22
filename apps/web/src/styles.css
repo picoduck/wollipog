@@ -7726,17 +7726,29 @@ body.shell-dock-dragging * {
 @container chat-reading (max-height: 479px) {
   .assistant-dock-slot:not(:has([data-show-all])) { max-height: 60cqh; }
 }
-/* Give the short reader enough room for the transcript when a spending notice joins the dock.
-   At phone widths that fit all three actions, keep Open Session beside the equal resolving pair. */
+/* At phone widths that fit all three actions, keep Open Session beside the equal resolving pair. */
 @media (min-width: 380px) and (max-width: 760px) {
   .detail-chat:has(.assistant-spending-notice) .assistant-dock-resolve:has(> [data-dock-action="approve"]) {
     flex: 1;
     width: auto;
   }
 }
+/* With a spending notice, let the dock use spare space in the short column while reserving
+   5.25rem or two control heights for the transcript when the column is tall enough. */
 @container chat-reading (max-height: 479px) {
   .detail-chat:has(.assistant-spending-notice) .assistant-dock-slot:not(:has([data-show-all])) {
-    max-height: max(60cqh, calc(100cqh - 2 * var(--control-h)));
+    max-height: max(60cqh, calc(100cqh - max(5.25rem, 2 * var(--control-h))));
+  }
+  @media (min-width: 761px) {
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock-list:not([data-show-all]) .assistant-dock-card-head {
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: center;
+      gap: var(--space-2);
+      padding-block: var(--space-1);
+    }
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock-list:not([data-show-all]) .assistant-dock-actions {
+      padding-block: var(--space-1);
+    }
   }
 }
 @media (pointer: coarse) {

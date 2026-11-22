@@ -79,6 +79,20 @@ async function actionOrder(card: Locator, names: string[]) {
   }
 }
 
+test("a short desktop keeps room for the transcript with the 320% spending notice", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 640 });
+  await open(page, "light", "tool", "spending=over");
+  await layout(page);
+  await expectFullyInViewport(approve(cards(page).first()), "Approve Once above the notice");
+  await expectFullyInViewport(page.locator(".composer .assistant-spending-notice"), "Spending notice");
+  const body = cards(page).first().locator(".assistant-dock-card-body");
+  const { clientHeight, scrollHeight } = await body.evaluate(element => ({
+    clientHeight: element.clientHeight, scrollHeight: element.scrollHeight,
+  }));
+  expect(clientHeight).toBeGreaterThan(0);
+  expect(scrollHeight).toBeGreaterThan(clientHeight);
+});
+
 for (const theme of ["light", "dark"] as const) {
   for (const width of [1440, 390]) {
     const phone = width === 390;
