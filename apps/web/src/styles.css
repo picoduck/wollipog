@@ -13213,6 +13213,16 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .new-assistant-option-content p { margin: 0; }
 .new-assistant-option-content .choice-row-title { overflow-wrap: anywhere; }
 .new-assistant-option-content .choice-rows { gap: var(--space-2); }
+.popover.new-assistant-account-panel { padding-block-start: 0; }
+.new-assistant-account-panel > .menu-head {
+  top: 0;
+  margin-block-start: 0;
+  border-bottom: 1px solid var(--border);
+}
+@media (min-width: 761px) {
+  .new-assistant-account-panel .choice-rows { gap: var(--space-1); }
+  .new-assistant-account-panel .choice-row { min-height: 32px; padding-block: var(--space-1); }
+}
 .new-assistant-unavailable > summary { justify-content: flex-start; width: 100%; }
 .new-assistant-unavailable .count { font: var(--type-small); }
 .new-assistant-unavailable > ul { display: grid; gap: var(--space-2); margin: var(--space-2) 0 0; padding: 0; list-style: none; }

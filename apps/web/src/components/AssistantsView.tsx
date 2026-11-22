@@ -99,7 +99,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   const [extra, setExtra] = useState<AssistantThread | null>(null);
   const [missing, setMissing] = useState(false);
   const [unsentFirstMessage, setUnsentFirstMessage] = useState<
-    (NonNullable<NewAssistantThreadResult["firstMessageFailure"]> & { sessionId: string }) | null
+    (NonNullable<NewAssistantThreadResult["firstMessageFailure"]> & { sessionId: string; dismissed?: true }) | null
   >(null);
   const [renaming, setRenaming] = useState<AssistantThread | null>(null);
   const [archiving, setArchiving] = useState(false);
@@ -167,9 +167,12 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   // A reconnect may have missed changes.
   useEffect(() => { if (conn === "online") refresh(); }, [conn, refresh]);
 
+  const titleForDisplay = (thread: AssistantThread) => thread.sessionId === unsentFirstMessage?.sessionId &&
+    assistantThreadTitle(thread) === "New Thread" ? { ...thread, title: "Untitled Thread" } : thread;
   const threads = list.kind === "ready" ? list.threads : [];
   const listed = threadId === undefined ? undefined : threads.find((thread) => thread.id === threadId);
-  const selected = listed ?? (extra?.id === threadId ? extra : undefined);
+  const selectedThread = listed ?? (extra?.id === threadId ? extra : undefined);
+  const selected = selectedThread && titleForDisplay(selectedThread);
   const model = useStoreSelector((state) => {
     const backing = selected ? state.sessions.get(selected.sessionId) : undefined;
     return backing?.resolvedModel ?? backing?.model;
@@ -426,14 +429,15 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   const firstMessageNoticeTitle = unsentFirstMessage?.deliveryUnconfirmed
     ? "First Message Delivery Unconfirmed" : "First Message Wasn't Sent";
   const firstMessageNotice: SessionNoticeEntry | null =
-    unsentFirstMessage && !firstMessageDelivered && selected?.sessionId === unsentFirstMessage.sessionId ? {
+    unsentFirstMessage && !unsentFirstMessage.dismissed && !firstMessageDelivered &&
+      selected?.sessionId === unsentFirstMessage.sessionId ? {
       key: "assistant-first-message-unsent",
       severity: "warning",
       rank: SESSION_NOTICE_RANK.composerError,
       title: firstMessageNoticeTitle,
       render: ({ trailing }) => (
         <Notice tone="warning" role="status" title={firstMessageNoticeTitle} trailing={trailing}
-          onDismiss={() => setUnsentFirstMessage(null)}>
+          onDismiss={() => setUnsentFirstMessage((current) => current && { ...current, dismissed: true })}>
           Your draft is kept. {unsentFirstMessage.reason}
           {unsentFirstMessage.deliveryUnconfirmed && " Check the transcript before sending again."}
         </Notice>
@@ -465,7 +469,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
         <aside className="master-detail-list" aria-label={ASSISTANTS.name} data-focus-zone="list" tabIndex={-1}>
           <div className="master-detail-list-body clip-focus">
             <ThreadList
-              list={list}
+              list={unsentFirstMessage && list.kind === "ready" ? { ...list, threads: threads.map(titleForDisplay) } : list}
               selectedId={threadId ?? null}
               onOpen={openThread}
               onNewThread={startThread}

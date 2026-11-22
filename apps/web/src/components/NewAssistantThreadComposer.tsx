@@ -224,10 +224,11 @@ export function NewAssistantThreadComposer({ onCancel, onCreated }: {
   );
 }
 
-function ThreadOption({ label, value, disabled, children }: {
+function ThreadOption({ label, value, disabled, className, children }: {
   label: string;
   value: string;
   disabled: boolean;
+  className?: string;
   children: (close: () => void) => ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -242,7 +243,8 @@ function ThreadOption({ label, value, disabled, children }: {
     </button>
     {open && !disabled && <MenuSurface surfaceRef={popover.panelRef} contentRef={contentRef}
       anchor={{ trigger: popover.triggerRef }} boundary=".new-assistant-thread" kind="popover" role="dialog"
-      label={label} className="new-assistant-option-panel" id={popover.panelId} tabIndex={-1}
+      label={label} className={className ? "new-assistant-option-panel " + className : "new-assistant-option-panel"}
+      id={popover.panelId} tabIndex={-1}
       onDismiss={close} onKeyDown={popover.onPanelKeyDown}
       head={<div className="menu-head persistent">
         <span className="menu-head-title">{label}</span>
@@ -270,11 +272,14 @@ function ThreadAccountOption({ choices, value, disabled, onChange }: {
   const unavailable = accounts.flatMap((account, index) => account.reason ? [{
     ref: account.accountRef, title: titles[index]!,
     reason: "This account " + PROVIDER_ACCOUNT_SKIP_TEXT[account.reason] +
-      (account.retryAt === undefined ? "" : " until " + formatCalendarTime(account.retryAt)) + ".",
+      (account.retryAt === undefined ? "" : account.reason === "cooldown"
+        ? ". Try again after " + formatCalendarTime(account.retryAt)
+        : " until " + formatCalendarTime(account.retryAt)) + ".",
   }] : []);
   const usePolicy = !choices || canUseMachineAccountPolicy(choices);
   const options = usePolicy ? [{ value: MACHINE_ACCOUNT_POLICY, title: policyTitle }, ...eligible] : eligible;
-  return <ThreadOption label="Account" value={value === MACHINE_ACCOUNT_POLICY ? policyTitle : titles[selectedIndex] ?? "Choose"} disabled={disabled}>
+  return <ThreadOption label="Account" value={value === MACHINE_ACCOUNT_POLICY ? policyTitle : titles[selectedIndex] ?? "Choose"}
+    disabled={disabled} className="new-assistant-account-panel">
     {() => <>
       {labels.some(isPersonalIdentifier) && <AccountIdentifierRevealButton label="Emails" revealed={revealed}
         onToggle={toggle} withText />}

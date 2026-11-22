@@ -13,6 +13,7 @@ const list = (page: Page) => page.getByRole("complementary", { name: "Assistants
 const transcript = (page: Page) => pane(page).getByRole("region", { name: "Session Activity" });
 const sentMessage = (page: Page) => transcript(page).getByText("Review the open work that's ready to ship.", { exact: false });
 const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
+const evidenceStates = process.env.WOLLIPOG_EVIDENCE_STATES?.split(",");
 
 async function expectTargetLayout(targets: Locator, phone: boolean) {
   const boxes = await targets.evaluateAll((nodes) => nodes.map((target) => {
@@ -64,7 +65,7 @@ for (const theme of ["light", "dark"] as const) {
       }
 
       async function capture(page: Page, state: string, measured = false) {
-        if (evidenceDir) {
+        if (evidenceDir && (!evidenceStates || evidenceStates.includes(state))) {
           const dimensions = measured ? phone ? "-target44csspx-gap8csspx" : "-target24csspx" : "";
           await page.screenshot({ path: join(evidenceDir, prefix + "-" + state + dimensions + ".png"), animations: "disabled" });
         }
@@ -133,6 +134,9 @@ for (const theme of ["light", "dark"] as const) {
         await expect(account.getByText("Field Subscription")).toBeHidden();
         expect(await eligible.evaluate((choices) =>
           Boolean(choices.compareDocumentPosition(choices.parentElement!.querySelector("details")!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+        await expectFullyInViewport(eligible.getByText("Operations Subscription"), "Last eligible account");
+        await expectFullyInViewport(unavailable.locator("summary"), "Folded Unavailable group");
+        expect(await account.evaluate((panel) => panel.scrollHeight - panel.clientHeight)).toBeLessThanOrEqual(1);
         await expectNoHorizontalOverflow(account, "Account choices");
         await expectTargetLayout(account.locator(".choice-row, .icon-btn, summary"), phone);
         await expectReadable(account);
@@ -149,6 +153,13 @@ for (const theme of ["light", "dark"] as const) {
           "This account is at a usage limit until",
         ]) await expectFullyInViewport(unavailable.getByText(reason, { exact: !reason.endsWith("until") }), reason);
         await expect(unavailable.getByText(/usage limit until .+\./)).toBeVisible();
+        expect(await account.evaluate((panel) => {
+          const heading = panel.querySelector(".menu-head")!;
+          const clip = panel.getBoundingClientRect();
+          const head = heading.getBoundingClientRect();
+          return Math.abs(head.top - clip.top) <= 2 &&
+            heading.contains(document.elementFromPoint(head.left + 32, head.top + 4));
+        })).toBe(true);
         await expectNoHorizontalOverflow(account, "Expanded account choices");
         await expectReadable(account);
         await capture(page, "accounts-expanded");
@@ -184,6 +195,8 @@ for (const theme of ["light", "dark"] as const) {
         const title = phone ? page.locator("#page-title") : pane(page).getByRole("heading", { name: firstLine, exact: true });
         await expect(title).toHaveText(firstLine);
         await expect(sentMessage(page)).toBeVisible();
+        await expect(page.locator(phone ? "header:has(#page-title)" : ".assistant-thread-bar").getByText("Working")).toBeVisible();
+        if (phone) await expect(page.getByRole("link", { name: "Assistants", exact: true })).toHaveAccessibleDescription(/1 thread waiting on you/);
         await expectPageNoHorizontalOverflow(page);
         await capture(page, "created");
       });
@@ -208,6 +221,8 @@ for (const theme of ["light", "dark"] as const) {
         await start(page).click();
         await expect(form(page)).toHaveCount(0);
         const notice = pane(page).getByText("First Message Wasn't Sent", { exact: true });
+        const title = phone ? page.locator("#page-title") : pane(page).locator(".assistant-thread-bar h2");
+        await expect(title).toHaveText("Untitled Thread");
         await expect(notice).toBeVisible();
         await expect(pane(page)).toContainText("The Machine did not accept the message.");
         const draft = pane(page).locator(".composer textarea");
@@ -219,6 +234,7 @@ for (const theme of ["light", "dark"] as const) {
 
         await pane(page).getByRole("button", { name: "Send", exact: true }).click();
         await expect(sentMessage(page)).toBeVisible();
+        await expect(title).toHaveText(firstLine);
         await expect(notice).toHaveCount(0);
         await expect(page.locator("body")).toHaveAttribute("data-thread-create-count", "1");
       });

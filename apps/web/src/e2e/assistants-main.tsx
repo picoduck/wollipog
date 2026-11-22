@@ -1005,8 +1005,10 @@ const client = {
       }
       const thread = threads.find((candidate) => candidate.sessionId === id)!;
       const now = Date.now();
-      const next = { ...sessions.get(id)!, title: thread.title || titleFromPrompt(message), messageCount: 1, updatedAt: now };
+      const next = { ...sessions.get(id)!, title: thread.title || titleFromPrompt(message), messageCount: 1,
+        updatedAt: now, status: "running" as const };
       thread.title = next.title;
+      thread.status = "working";
       thread.lastActivityAt = now;
       const delivered = event(id, now, { kind: "user_message", text: message, images: [] });
       (events[id] ??= []).push(delivered);
