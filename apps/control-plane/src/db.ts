@@ -6248,8 +6248,6 @@ export class ControlPlaneDb {
   /** A child's human gate cannot starve unrelated work, but only a current Full Control
    * boundary permits that continuation. This never clears the child's gate. */
   campaignMayContinueWhileHumanWaiting(campaignId: string): boolean {
-    // This predicate is also used while projecting a campaign. A SessionView embeds that
-    // projection, so read the authority/lifecycle row directly rather than recursively mapping it.
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
     const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
     return Boolean(row && policy?.control?.mode === "full_control" &&
@@ -6269,6 +6267,13 @@ export class ControlPlaneDb {
   /** Shared live CP preflight for recovery, scheduler, projection and outbox. Read rows rather
    * than SessionView: a view contains the projection which calls this predicate. */
   campaignContinuationAdmission(campaignId: string): NonNullable<import("@wollipog/protocol").CampaignRecoveryProjection["automation"]> {
+    return this.readCampaignContinuationAdmission(campaignId, () => this.campaignRecoveryCompletion(campaignId));
+  }
+
+  private readCampaignContinuationAdmission(
+    campaignId: string,
+    readCompletion: () => ReturnType<ControlPlaneDb["campaignRecoveryCompletion"]>,
+  ): ReturnType<ControlPlaneDb["campaignContinuationAdmission"]> {
     if (this.campaignPaused(campaignId)) return { state: "lifecycle_held", reason: "The campaign is paused." };
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
     const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
@@ -6281,7 +6286,7 @@ export class ControlPlaneDb {
     if (full && !campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy: this.parentControlPolicy(campaignId) ?? undefined })) {
       return { state: "authority_unavailable", reason: "The current authority boundary is unavailable; recovery cannot enlarge it." };
     }
-    const completion = this.campaignRecoveryCompletion(campaignId);
+    const completion = readCompletion();
     // The one wake-up the server's repair of a delivered campaign's leftovers records (#4146) is how
     // the Orchestrator learns of owed cleanup; it dispatches no recovery record. Held scoped work
     // stays held: its original obligation is reconciled first, so the repair records no wake for it.
@@ -6364,11 +6369,21 @@ export class ControlPlaneDb {
     state: "children_unfinished" | "complete" | "recovery_ready" | "recovery_held";
     recoveryIds: string[];
   } {
+    return this.readCampaignRecoveryCompletion(campaignId, now);
+  }
+
+  private readCampaignRecoveryCompletion(
+    campaignId: string,
+    now: number,
+    verified = this.validCampaignChildReportIds(campaignId),
+    reviewerCleanup = () => this.campaignReviewerCleanup(campaignId),
+  ): ReturnType<ControlPlaneDb["campaignRecoveryCompletion"]> {
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
     const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
-    const children = this.campaignCompletionChildIds(campaignId), verified = this.validCampaignChildReportIds(campaignId);
+    const children = this.campaignCompletionChildIds(campaignId);
     const childRows = children.map(id => this.stmt("SELECT archived FROM sessions WHERE id=?").get(id) as { archived: number });
-    if (!row || !policy || this.campaignReviewerCleanup(campaignId).length > 0 || children.length === 0 || children.some((id, i) => !(verified.has(id) || this.campaignChildFailureSuperseded(campaignId, id)) ||
+    if (!row || !policy || reviewerCleanup().length > 0 || children.length === 0 ||
+        children.some((id, i) => !(verified.has(id) || this.campaignChildFailureSuperseded(campaignId, id, verified)) ||
         policy.behavior.completion !== "retain" && (childRows[i]!.archived !== 1 || this.campaignWorktreeCleanup(id).length > 0)) ||
         pendingRequests(parseJson<PendingApproval>(row.pending_approval)).length > 0 ||
         this.stmt("SELECT 1 FROM workflow_decisions WHERE controlling_session_id=? AND status='pending'").get(campaignId)) {
@@ -22898,7 +22913,7 @@ export class ControlPlaneDb {
 
   /** A failed attempt is never delivery. A separately verified successor can settle its owed
    * work, leaving any preserved worktree visible as cleanup rather than unverified work. */
-  campaignChildFailureSuperseded(campaignId: string, childId: string): boolean {
+  campaignChildFailureSuperseded(campaignId: string, childId: string, verified?: ReadonlySet<string>): boolean {
     const child = this.stmt("SELECT status FROM sessions WHERE id=?").get(childId) as { status: string } | undefined;
     if (child?.status !== "failed" && !(child?.status === "stopped" && this.sessionStopProvenance(childId)?.confirmation)) return false;
     const attempts = this.stmt("SELECT work_item_id, ordinal, ended_at, end_reason FROM campaign_work_attempts WHERE campaign_session_id=? AND session_id=?")
@@ -22912,7 +22927,8 @@ export class ControlPlaneDb {
       const item = items.get(attempt.work_item_id);
       if (item?.primaryState !== "delivered") return false;
       return item.attempts.some((successor) => successor.ordinal > attempt.ordinal && successor.sessionId !== childId &&
-        successor.sessionId !== null && this.campaignChildReportVerified(campaignId, successor.sessionId) &&
+        successor.sessionId !== null &&
+        (verified ? verified.has(successor.sessionId) : this.campaignChildReportVerified(campaignId, successor.sessionId)) &&
         item.verifications.some((v) => v.attemptId === successor.id && v.outcome === "delivered"));
     });
   }
@@ -23764,7 +23780,8 @@ export class ControlPlaneDb {
   /** The campaign's status and the counts behind it, derived once for both the full projection and
    * the session summary's status-only fact (#2940), so the two can never disagree. Reads no session
    * view, so it cannot re-enter a projection. */
-  private campaignStatusState(campaign: SessionRow, policy: OrchestratorCampaignPolicy, campaignSessionId: string) {
+  private campaignStatusState(campaign: SessionRow, policy: OrchestratorCampaignPolicy, campaignSessionId: string,
+    reads = this.campaignProjectionReads(campaign.id)) {
     const resolvedCampaignId = campaign.id;
     const childIds = this.campaignCompletionChildIds(resolvedCampaignId);
     const rows = childIds.length ? (this.stmt(
@@ -23776,7 +23793,7 @@ export class ControlPlaneDb {
       worktrees: string | null; pending_approval: string | null; worktree_recovery: string | null;
       queue_hold: string | null;
     }>) : [];
-    const verified = this.validCampaignChildReportIds(resolvedCampaignId);
+    const verified = reads.verifiedReports();
     const pending = this.stmt(
       `SELECT session_id, occurrence_id, authority FROM workflow_decisions
        WHERE controlling_session_id=? AND status='pending'`,
@@ -23795,7 +23812,7 @@ export class ControlPlaneDb {
     let active = 0;
     let blocked = 0;
     let fullyVerified = 0;
-    let cleanupPending = this.campaignReviewerCleanup(resolvedCampaignId).length;
+    let cleanupPending = reads.reviewerCleanup().length;
     const cleanupWorktrees: NonNullable<OrchestratorCampaignProjection["cleanupWorktrees"]> = [];
     const heldChildren: NonNullable<OrchestratorCampaignProjection["heldChildren"]> = [];
     const genericOrchestratorRequests: Array<{ sessionId: string; occurrenceId: string }> = [];
@@ -23838,7 +23855,7 @@ export class ControlPlaneDb {
       if (childHasHumanRequest) waitingHuman += 1;
       // A retained child may receive more work after verification. Re-check both the exact
       // latest report and terminal-for-review state instead of trusting a durable row forever.
-      const reportVerified = verified.has(child.id) || this.campaignChildFailureSuperseded(resolvedCampaignId, child.id);
+      const reportVerified = verified.has(child.id) || this.campaignChildFailureSuperseded(resolvedCampaignId, child.id, verified);
       const childCleanup = reportVerified && policy.behavior.completion === "stop_and_archive"
         ? this.campaignWorktreeCleanup(child.id) : [];
       cleanupWorktrees.push(...childCleanup);
@@ -23905,12 +23922,12 @@ export class ControlPlaneDb {
         const rootPending = pendingRequests(parseJson<PendingApproval>(campaign.pending_approval)).length > 0 ||
           pending.some((decision) => decision.session_id === campaign.id);
         const terminal = this.campaignTerminalStatus(resolvedCampaignId, policy,
-          { childCount: total, worktreesPending: cleanupPending > 0, rootPending });
+          { childCount: total, worktreesPending: cleanupPending > 0, rootPending }, reads.recoveryCompletion);
         baseStatus = terminal.status;
         recoveryIds = terminal.recoveryIds;
         if (baseStatus === "stuck") stuckItems.push(...terminal.stuckItems);
         if (baseStatus === "complete_needs_cleanup") {
-          cleanupItems = this.campaignCleanupItems(resolvedCampaignId, cleanupWorktrees, terminal.handoffs);
+          cleanupItems = this.campaignCleanupItems(resolvedCampaignId, cleanupWorktrees, terminal.handoffs, reads.reviewerCleanup());
         }
       }
     }
@@ -23919,7 +23936,7 @@ export class ControlPlaneDb {
     // every view, since a pending continuation is live work, and projected on the root's own view only.
     // A campaign that never had a child has finished nothing, so nothing it owes holds its wake-ups.
     const continuation = this.campaignContinuationProjection(campaign,
-      total === 0 && campaignStatusTerminal(baseStatus) ? "stuck" : baseStatus);
+      total === 0 && campaignStatusTerminal(baseStatus) ? "stuck" : baseStatus, fullControl, reads.continuationAdmission);
     // A campaign whose own wake-up failed or lost its result has a stalled continuation (#1352). It
     // is not live work, so with nothing else live an unfinished campaign reads Campaign Stuck.
     const stalled = continuation.continuation?.state === "failed" ? "continuation_failed" as const
@@ -23974,13 +23991,14 @@ export class ControlPlaneDb {
    * waiting on a person, reads Waiting for You. Reads rows only, never a SessionView.
    */
   private campaignTerminalStatus(campaignId: string, policy: OrchestratorCampaignPolicy,
-    facts: { childCount: number; worktreesPending: boolean; rootPending: boolean }): {
+    facts: { childCount: number; worktreesPending: boolean; rootPending: boolean },
+    readCompletion: () => ReturnType<ControlPlaneDb["campaignRecoveryCompletion"]>): {
     status: "waiting_human" | "complete_needs_cleanup" | "verified_complete" | "stuck";
     recoveryIds: string[];
     stuckItems: CampaignStuckItem[];
     handoffs: OrchestratorCampaignHandoff[];
   } {
-    const completion = this.campaignRecoveryCompletion(campaignId);
+    const completion = readCompletion();
     const ledger = this.campaignWorkLedger.completionFacts(campaignId);
     const fullControl = policy.control?.mode === "full_control";
     const scope = fullControl ? policy.issueScope : undefined;
@@ -24039,8 +24057,9 @@ export class ControlPlaneDb {
    * work items handed to a person or an outside party. Bounded by CAMPAIGN_CLEANUP_ITEMS_LIMIT. */
   private campaignCleanupItems(campaignId: string,
     worktrees: NonNullable<OrchestratorCampaignProjection["cleanupWorktrees"]>,
-    handoffs: readonly OrchestratorCampaignHandoff[]): CampaignCleanupItem[] {
-    const items: CampaignCleanupItem[] = this.campaignReviewerCleanup(campaignId).map(sessionId => {
+    handoffs: readonly OrchestratorCampaignHandoff[],
+    reviewerCleanup: readonly string[]): CampaignCleanupItem[] {
+    const items: CampaignCleanupItem[] = reviewerCleanup.map(sessionId => {
       const failed = Boolean(this.sessionStopIntent(sessionId)?.operation.failure);
       return { kind: "image_reviewer", sessionId,
         reason: failed ? "The image reviewer's Stop failed; archival is still pending."
@@ -24306,13 +24325,18 @@ export class ControlPlaneDb {
   /** The controlling sessions of this campaign's branch deletions that were approved or attempted,
    * found on their own: a deletion need not share its merge's controller. */
   private campaignDeletionControllers(campaignId: string): string[] {
+    // Each arm can use a partial index. UNION deduplicates controllers qualifying in both.
     const ids = (this.stmt(
-      `SELECT DISTINCT decision.controlling_session_id AS id FROM workflow_decisions decision
+      `SELECT decision.controlling_session_id AS id FROM workflow_decisions decision
        JOIN sessions controller ON controller.id=decision.controlling_session_id
-       WHERE decision.category='merged_branch_deletion'
-         AND (decision.forge_action IS NOT NULL OR decision.status IN ('approved','consumed'))
+       WHERE decision.category='merged_branch_deletion' AND decision.status IN ('approved','consumed')
+         AND (decision.controlling_session_id=? OR controller.parent_session_id IS NOT NULL)
+       UNION
+       SELECT decision.controlling_session_id AS id FROM workflow_decisions decision
+       JOIN sessions controller ON controller.id=decision.controlling_session_id
+       WHERE decision.category='merged_branch_deletion' AND decision.forge_action IS NOT NULL
          AND (decision.controlling_session_id=? OR controller.parent_session_id IS NOT NULL)`,
-    ).all(campaignId) as Array<{ id: string }>).map((row) => row.id);
+    ).all(campaignId, campaignId) as Array<{ id: string }>).map((row) => row.id);
     return ids.filter((id) => this.sessionWithinCampaign(id, campaignId));
   }
 
@@ -24517,14 +24541,30 @@ export class ControlPlaneDb {
     return campaign && policy ? this.campaignStatusState(campaign, policy, campaignSessionId).status : null;
   }
 
+  /** Share these reads within one synchronous projection. The next projection (or any scheduler
+   * or outbox admission) reads live state again. */
+  private campaignProjectionReads(campaignId: string) {
+    let verified: Set<string> | undefined;
+    let reviewers: string[] | undefined;
+    let completion: ReturnType<ControlPlaneDb["campaignRecoveryCompletion"]> | undefined;
+    let admission: ReturnType<ControlPlaneDb["campaignContinuationAdmission"]> | undefined;
+    const verifiedReports = () => verified ??= this.validCampaignChildReportIds(campaignId);
+    const reviewerCleanup = () => reviewers ??= this.campaignReviewerCleanup(campaignId);
+    const recoveryCompletion = () => completion ??= this.readCampaignRecoveryCompletion(
+      campaignId, Date.now(), verifiedReports(), reviewerCleanup);
+    const continuationAdmission = () => admission ??= this.readCampaignContinuationAdmission(campaignId, recoveryCompletion);
+    return { verifiedReports, reviewerCleanup, recoveryCompletion, continuationAdmission };
+  }
+
   campaignProjection(campaignSessionId: string): OrchestratorCampaignProjection | null {
     const campaign = this.resolvedCampaignSession(campaignSessionId);
     if (!campaign) return null;
     const policy = orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy);
     if (!policy) return null;
     const resolvedCampaignId = campaign.id;
+    const reads = this.campaignProjectionReads(resolvedCampaignId);
     const { childIds, pendingHuman, pendingOrchestrator, pendingGenericHuman, pendingGenericOrchestrator, humanRequestTokens, orchestratorRequestTokens, waitingHuman, active, blocked, fullyVerified, cleanupPending, cleanupWorktrees, heldChildren, total, continuation: continuationState, stalled, status, activity, cleanupItems, stuckItems } =
-      this.campaignStatusState(campaign, policy, campaignSessionId);
+      this.campaignStatusState(campaign, policy, campaignSessionId, reads);
     // The continuation and its stall ride on the root campaign's own view only, as before #4146.
     const continuation = resolvedCampaignId === campaignSessionId ? continuationState : {};
     const followUps = this.stmt(
@@ -24590,7 +24630,7 @@ export class ControlPlaneDb {
       recovery.unattendedReady = false;
       recovery.automation = { state: "lifecycle_held" };
     } else if (recovery) {
-      recovery.automation = this.campaignContinuationAdmission(resolvedCampaignId);
+      recovery.automation = reads.continuationAdmission();
       recovery.unattendedReady &&= recovery.automation.state === "available";
     }
     return {
@@ -24748,6 +24788,8 @@ export class ControlPlaneDb {
   private campaignContinuationProjection(
     campaign: SessionRow,
     campaignStatus: OrchestratorCampaignProjection["status"],
+    fullControl: boolean,
+    readAdmission: () => ReturnType<ControlPlaneDb["campaignContinuationAdmission"]>,
   ): Pick<OrchestratorCampaignProjection, "continuation"> {
     const cursor = this.campaignContinuationCursor(campaign.id);
     const pendingEvents = Number((this.stmt(
@@ -24760,9 +24802,8 @@ export class ControlPlaneDb {
       "campaignContinuations",
     );
     const held = campaign.archived === 1 || isTerminal(campaign.status as SessionStatus) ||
-      this.campaignContinuationAdmission(campaign.id).state !== "available" ||
-      campaign.status === "input_required" || (campaignStatus === "waiting_human" &&
-        !this.campaignMayContinueWhileHumanWaiting(campaign.id)) ||
+      readAdmission().state !== "available" ||
+      campaign.status === "input_required" || (campaignStatus === "waiting_human" && !fullControl) ||
       // A finished campaign takes no automatic turn, except the one wake-up its server's repair of
       // owed cleanup records (#4146): that is how the Orchestrator learns what is left.
       (campaignStatusTerminal(campaignStatus) && !this.campaignCleanupWakePending(campaign.id)) || !runnerCompatible;
