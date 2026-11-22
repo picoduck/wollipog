@@ -103,6 +103,26 @@ test("supersession checks read no timing history and keep their verdicts (#4851)
   } finally { h.db.close(); }
 });
 
+test("one campaign projection shares report, reviewer and recovery reads (#4858)", (t) => {
+  const h = retainedCampaign();
+  try {
+    const reads = h.db as unknown as Record<"validCampaignChildReportIds" | "campaignReviewerCleanup" |
+      "readCampaignRecoveryCompletion", (campaignId: string) => unknown>;
+    const reports = t.mock.method(reads, "validCampaignChildReportIds");
+    const reviewers = t.mock.method(reads, "campaignReviewerCleanup");
+    const completion = t.mock.method(reads, "readCampaignRecoveryCompletion");
+    const counts = () => [reports.mock.callCount(), reviewers.mock.callCount(), completion.mock.callCount()];
+
+    assert.equal(h.db.getSession("root")?.orchestratorCampaign?.children.verified, SUPERSEDED * 2);
+    assert.deepEqual(counts(), [1, 1, 1]);
+
+    // A later result invalidates the old verification and the failed child's supersession.
+    h.db.appendEvent("successor-0", { kind: "agent_message", text: "New result.", final: true }, Date.now());
+    assert.equal(h.db.getSession("root")?.orchestratorCampaign?.children.verified, SUPERSEDED * 2 - 2);
+    assert.deepEqual(counts(), [2, 2, 2]);
+  } finally { h.db.close(); }
+});
+
 test("work-item detail still reports its timing metrics (#4851)", () => {
   const h = retainedCampaign();
   try {

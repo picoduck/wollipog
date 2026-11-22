@@ -884,7 +884,7 @@ test("bare campaign projections sent to an agent, such as get_campaign and verif
   }
 });
 
-test("Campaign Status shows the campaign's Decision verdicts, reasons and their separate usage (#4101)", async () => {
+test("Campaign Status shows the campaign's Decision verdicts, reasons and their separate usage (#4101)", async (t) => {
   const { db, root, child, ownBy } = campaignFixture();
   const member = child(root, "Member");
   const other = campaignFixture();
@@ -915,6 +915,7 @@ test("Campaign Status shows the campaign's Decision verdicts, reasons and their 
     stranger: agent(other.root, true),
   });
   try {
+    const projection = t.mock.method(db, "campaignProjection");
     const read = await get<CampaignDecisionsResponse>("alice", `/api/sessions/${member}/campaign/decisions`);
     assert.equal(read.status, 200);
     assert.equal(read.body.campaignSessionId, root);
@@ -932,6 +933,7 @@ test("Campaign Status shows the campaign's Decision verdicts, reasons and their 
     assert.equal(agentRead.body.canClassify, false);
     assert.equal((await get("stranger", `/api/sessions/${root}/campaign/decisions`)).status, 403);
     assert.equal((await get("bob", `/api/sessions/${root}/campaign/decisions`)).status, 404);
+    assert.equal(projection.mock.callCount(), 0, "reading decisions does not build a campaign projection");
     // Decision usage never enters the managed worker cost the summary reports.
     const summary = await get<CampaignWorkSummaryResponse>("alice", `/api/sessions/${root}/campaign/summary`);
     assert.equal(JSON.stringify(summary.body).includes("unpriced-model"), false);

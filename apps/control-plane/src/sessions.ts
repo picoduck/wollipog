@@ -24114,7 +24114,7 @@ export class SessionsService {
    * response as one that arrived live (#2940): otherwise a request parked while the runner was away
    * would wait for a response nobody owes it. Outside Full Control this settles nothing new. */
   private applyStandingCampaignResponses(sessionId: string): void {
-    for (const request of pendingRequests(this.db.getSession(sessionId)?.pendingApproval)) {
+    for (const request of pendingRequests(this.db.getSession(sessionId, { includeCampaignProjection: false })?.pendingApproval)) {
       if (request.kind === "workflow_decision" || isGuardrailApproval(request)) continue;
       this.executeStandingRootRequest(sessionId, request, Boolean(request.async));
     }
