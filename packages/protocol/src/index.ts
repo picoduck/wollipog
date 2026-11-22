@@ -363,7 +363,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   assistantThreadProviderAccount: 388,
   assistantEvidenceReview: 397,
   assistantThreadHarnessChange: 402,
-  assistantThreadHealth: 407,
+  assistantThreadHealth: 409,
   assistantCampaignLaunch: 391,
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,

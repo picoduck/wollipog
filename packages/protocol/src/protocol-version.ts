@@ -1561,10 +1561,10 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 406: Preserve Assistant thread launch limits while new launches are paused (Refs #4811).
   406,
   // v407 slot
-  // 407: Optional Assistant thread health and correlated transcript error notices (Refs #4813).
-  407,
   // v408 slot
   // v409 slot
+  // 409: Optional Assistant thread health and correlated transcript error notices (Refs #4813).
+  409,
   // v410 slot
   // v411 slot
   // v412 slot
