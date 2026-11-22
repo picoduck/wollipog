@@ -5,6 +5,23 @@ import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizont
 const inbox = (page: Page) => page.getByRole("complementary", { name: "Assistants" });
 const rows = (list: Locator) => list.locator("[data-thread-id]");
 
+test("returning to the list during a first send does not revive or redirect the old composer", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, "light", "threads=empty&limits=enabled&new-thread=hold-first-message");
+  const composer = page.getByRole("form", { name: "What should the assistant work on?" });
+  await composer.getByRole("button", { name: "Plan a Task" }).click();
+  await composer.getByRole("button", { name: "Start Thread" }).click();
+  await expect(page.locator("body")).toHaveAttribute("data-first-message-held", "true");
+  await rows(inbox(page)).first().click();
+  await expect(composer).toHaveCount(0);
+  await page.goBack();
+  await expect(inbox(page).getByRole("button", { name: "New Thread", exact: true })).toBeVisible();
+  await expect(composer).toHaveCount(0);
+  await page.evaluate(() => Reflect.get(window, "assistantsReleaseFirstMessage")());
+  await expect(rows(inbox(page)).first()).toContainText("Help me plan a task");
+  await expect(page.getByRole("heading", { name: "Choose a Thread" })).toBeVisible();
+});
+
 test("background polls refresh active threads and keep the archived list", async ({ page }) => {
   await page.clock.install();
   await page.goto("/assistants-e2e.html?threads=inbox&track-list-reads");

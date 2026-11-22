@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { holdFieldFocus } from "./requests/hold-field-focus.js";
 import { PROVIDER_ACCOUNT_SKIP_TEXT, type AssistantThreadAccountChoices, type AssistantThreadLimits } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
@@ -63,7 +63,7 @@ const suggestions = [
 /** Mount in an explicit New Thread pane or in the empty Assistants detail pane. */
 export function NewAssistantThreadComposer({ onCancel, onCreated, onCreationPendingChange }: {
   onCancel?: () => void;
-  onCreated: (result: NewAssistantThreadResult) => void;
+  onCreated: (result: NewAssistantThreadResult, composerOpen: boolean) => void;
   onCreationPendingChange?: (pending: boolean) => void;
 }) {
   const api = useApi();
@@ -78,8 +78,17 @@ export function NewAssistantThreadComposer({ onCancel, onCreated, onCreationPend
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const submitting = useRef(false);
+  const mounted = useRef(false);
   const [failure, setFailure] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (submitting.current) onCreationPendingChange?.(false);
+    };
+  }, [onCreationPendingChange]);
 
   useEffect(() => {
     let current = true;
@@ -129,10 +138,11 @@ export function NewAssistantThreadComposer({ onCancel, onCreated, onCreationPend
           : launchDefaults ? { providerAccountRef: null } : {}),
       }));
     } catch (cause) {
+      submitting.current = false;
+      if (!mounted.current) return;
       const block = threadBlock(cause);
       if (block) setState(block);
       else setFailure(errorMessage(cause));
-      submitting.current = false;
       setBusy(false);
       onCreationPendingChange?.(false);
       return;
@@ -157,8 +167,9 @@ export function NewAssistantThreadComposer({ onCancel, onCreated, onCreationPend
       };
     }
     // Once create succeeded, retries belong in the backing conversation.
-    onCreated({ thread, firstMessageFailure });
-    onCreationPendingChange?.(false);
+    submitting.current = false;
+    if (mounted.current) onCreationPendingChange?.(false);
+    onCreated({ thread, firstMessageFailure }, mounted.current);
   };
 
   return (

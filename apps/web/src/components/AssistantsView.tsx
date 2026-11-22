@@ -320,11 +320,12 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   const toList = () => navigate({ name: "assistants" });
   const cancelNewThread = () => navigate({ name: "assistants" }, { replace: true });
   const startThread = () => navigate({ name: "assistants", newThread: true });
-  const finishNewThread = ({ thread, firstMessageFailure }: NewAssistantThreadResult, fromEmptyInbox: boolean) => {
+  const finishNewThread = ({ thread, firstMessageFailure }: NewAssistantThreadResult, fromEmptyInbox: boolean, composerOpen: boolean) => {
     replace(thread);
     if (firstMessageFailure) setUnsentFirstMessage({ sessionId: thread.sessionId, ...firstMessageFailure });
     const view = currentView.read();
-    if (view.name === "assistants" && (fromEmptyInbox ? !view.newThread && view.threadId === undefined : view.newThread)) {
+    if (composerOpen && view.name === "assistants" &&
+        (fromEmptyInbox ? !view.newThread && view.threadId === undefined : view.newThread)) {
       setShowArchive(false);
       navigate({ name: "assistants", threadId: thread.id }, { replace: true });
     }
@@ -506,7 +507,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
           ) : <NewAssistantThreadComposer key={newThread ? "explicit" : "empty"}
             onCancel={newThread && !isMobile ? cancelNewThread : undefined}
             onCreationPendingChange={showEmptyComposer ? setEmptyCreationPending : undefined}
-            onCreated={(result) => finishNewThread(result, showEmptyComposer)} />
+            onCreated={(result, composerOpen) => finishNewThread(result, showEmptyComposer, composerOpen)} />
           : threadId === undefined && (list.kind === "unavailable" || list.kind === "ownerOnly") ? (
             // The list already says why there are no threads here; an invitation to choose one would
             // contradict it, so the pane stays empty.
