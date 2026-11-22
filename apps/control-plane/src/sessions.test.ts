@@ -1952,6 +1952,67 @@ test("Stop and Archive leaves old runners pending and retries an undelivered arc
   }
 });
 
+for (const failure of ["git", "forge"] as const) test(`archive retirement backs off and only publishes changes: ${failure}`, async (t) => {
+  const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  try {
+    const child = spawn(parent.id, "Deliver issue");
+    const path = `/worktrees/${child}/original`;
+    db.setWorktreePath(child, path);
+    db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify([
+      { id: "original", path, branch: "agent/original", source: "created" },
+    ]), child);
+    let attempts = 0;
+    let recovered = false;
+    hub.requestHandler = (message) => {
+      assert.equal(message.type, "session_worktree");
+      assert.equal(message.operation, "discard");
+      attempts++;
+      const reply = { type: "session_worktree_result", requestId: message.requestId,
+        sessionId: child, operation: "discard" } as const;
+      return recovered
+        ? { ...reply, ok: true, retirement: { status: "removed" },
+          snapshot: snapshot({ id: child, status: "stopped", worktreePath: null, worktrees: [] }) }
+        : { ...reply, ok: false, error: failure === "forge"
+          ? "worktree retained: forge state is temporarily unavailable"
+          : "worktree retained: Git state is unavailable or changed during cleanup" };
+    };
+    svc.onSessionStatus(child, "idle");
+    assert.ok(verify(child, report(child, "Delivered")).ok);
+    svc.onSessionStatus(child, "stopped");
+    const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+    hub.sessionChangedByIdCalls.length = 0;
+    await settle();
+    assert.equal(attempts, 1);
+    assert.deepEqual(hub.sessionChangedByIdCalls, failure === "forge" ? [child, parent.id] : [],
+      "only the first forge error changes the pending cleanup reason");
+    hub.sessionChangedByIdCalls.length = 0;
+
+    const delays = failure === "forge" ? [5, 10, 20, 40, 60, 60] : [1, 2, 4, 8, 16, 32, 60, 60];
+    for (const [index, minutes] of delays.entries()) {
+      t.mock.timers.tick(minutes * 60_000 - 1);
+      svc.reconcileArchivedCampaignWorktrees(RUNNER_ID);
+      assert.equal(attempts, index + 1, "reconnect cannot bypass the scheduled retry");
+      t.mock.timers.tick(1);
+      await settle();
+      assert.equal(attempts, index + 2);
+    }
+    assert.deepEqual(hub.sessionChangedByIdCalls, [], "unchanged failures publish neither child nor campaign upserts");
+    t.diagnostic(`${delays.length} unchanged retry attempts, 0 child/campaign publish calls (previously 2 per failure)`);
+
+    recovered = true;
+    t.mock.timers.tick(60 * 60_000);
+    await settle();
+    assert.deepEqual(hub.sessionChangedByIdCalls, [child, parent.id], "successful cleanup still publishes");
+    assert.deepEqual(db.campaignWorktreeCleanup(child), []);
+    t.mock.timers.tick(60 * 60_000);
+    assert.equal(attempts, delays.length + 2, "successful cleanup stops retrying");
+  } finally {
+    t.mock.timers.reset();
+    db.close();
+  }
+});
+
 for (const trigger of ["campaign_read", "maintenance", "stopped_root", "archived_root"] as const) test(`Campaign Status reconciles refused external removal without retrying deletion: ${trigger}`, async () => {
   const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
   try {

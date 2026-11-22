@@ -8,9 +8,11 @@ import type {
   SessionSnapshot,
   SessionView,
 } from "@wollipog/protocol";
-import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, SESSION_UPSERT_BACKGROUND_REUSE_UI_PROTOCOL } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub, SESSION_STREAMING_UPSERT_INTERVAL_MS, type Socket } from "./hub.js";
+import { LOCAL_OWNER_USER_ID, PERSONAL_ORGANIZATION_ID } from "./identity.js";
+import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { SessionsService } from "./sessions.js";
 
 /**
@@ -302,16 +304,120 @@ test("an upsert whose only change is a nested timestamp is a transition, not a s
   assert.equal(dashboard.upserts("s").at(-1)?.preview, "c");
 });
 
-test("republishing an unchanged record is a deliberate resend and is not paced", (t) => {
+test("identical views are suppressed across pacing windows while a new socket gets its own first upsert", (t) => {
   const h = harness(t);
   const dashboard = new Dashboard();
   h.hub.addUiClient(dashboard);
   const id = startSession(h);
   const before = dashboard.upserts(id).length;
-  // A per-viewer projection (permissions, an acknowledgment) can change while the record does not.
   h.hub.sessionChangedById(id);
+  t.mock.timers.tick(60_000);
   h.hub.sessionChangedById(id);
-  assert.equal(dashboard.upserts(id).length, before + 2);
+  assert.equal(dashboard.upserts(id).length, before);
+  const next = new Dashboard();
+  h.hub.addUiClient(next);
+  h.hub.sessionChangedById(id);
+  assert.equal(next.upserts(id).length, 1);
+  assert.equal(dashboard.upserts(id).length, before);
+});
+
+test("an identical shared view still publishes an acknowledgment to the viewer whose projection changed", (t) => {
+  const h = harness(t);
+  const id = startSession(h);
+  const owner = new Dashboard();
+  const shared = new Dashboard();
+  h.hub.addUiClient(owner, { deviceId: null, close() {}, principal: {
+    kind: "human", actorId: LOCAL_OWNER_USER_ID, userId: LOCAL_OWNER_USER_ID, userName: "Owner",
+    organizationId: PERSONAL_ORGANIZATION_ID, organizationName: "Personal", role: "owner",
+    deviceId: null, localBootstrap: true,
+  } });
+  h.hub.addUiClient(shared);
+  h.svc.onSessionEvent(id, { kind: "agent_message", text: "Delivered", final: true }, 1, Date.now());
+  h.svc.onSessionEvent(id, { kind: "agent_response_completed" }, 2, Date.now());
+  const revision = h.db.getSession(id)?.attention?.result?.revision;
+  assert.ok(revision);
+  assert.equal(owner.upserts(id).at(-1)?.attention?.acknowledgedRevision, null);
+  const sharedCount = shared.upserts(id).length;
+  assert.ok(h.db.acknowledgeSessionResult(id, LOCAL_OWNER_USER_ID, revision));
+  h.hub.sessionChangedById(id);
+  assert.equal(owner.upserts(id).at(-1)?.attention?.acknowledgedRevision, revision);
+  assert.equal(shared.upserts(id).length, sharedCount);
+});
+
+test("session upserts reuse retained background history only after that socket was sent the same inventory", async (t) => {
+  const h = harness(t);
+  const id = "s_campaign";
+  h.db.createSession({ id, runnerId: RUNNER_ID, workspaceId: "ws", agentId: "agent", title: "Campaign",
+    useWorktree: false, driver: "claude-code", config: { permissionMode: "orchestrator" }, now: Date.now(),
+    orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default") });
+  const current = new Dashboard(true);
+  const legacy = new Dashboard();
+  let snapshotSent = () => {};
+  let snapshotFailed = () => {};
+  const firstFrame = new Promise<void>((resolve, reject) => {
+    snapshotSent = resolve;
+    snapshotFailed = () => reject(new Error("campaign fixture snapshot could not be sent"));
+  });
+  const send = current.send.bind(current);
+  current.send = (data, complete) => { send(data, complete); snapshotSent(); };
+  assert.ok(h.hub.addUiClient(current, {
+    deviceId: null, close: snapshotFailed, uiProtocolVersion: SESSION_UPSERT_BACKGROUND_REUSE_UI_PROTOCOL,
+  }));
+  h.hub.addUiClient(legacy);
+  const initial: SessionView = {
+    ...h.db.getSession(id)!,
+    backgroundJobsTruncated: true,
+    backgroundJobsAvailable: true,
+    backgroundJobs: Array.from({ length: 128 }, (_, i) => ({
+      id: `job-shell-${i}`, parentTurnId: `turn-${i}`, launchType: "shell", sourcePresent: true,
+      registeredAt: 1_000_000, lastObservedAt: 1_000_001,
+      ...(i < 126 ? { terminalStatus: "completed", terminalObservedAt: 1_000_002,
+        continuationId: `background-continuation-${i}`, assistantResultPersistedAt: 1_000_003 } as const : {}),
+    })),
+    backgroundDeliveries: Array.from({ length: 32 }, (_, i) => ({
+      parentTurnId: `turn-${i}`, continuationId: `background-continuation-${i}`, jobCount: 4, terminalCount: 4,
+      acceptedAt: 1_000_002, transcriptProjectedAt: 1_000_003, dashboardObservedAt: 1_000_004,
+    })),
+  };
+  assert.ok(initial.orchestratorCampaign);
+  const lastUpsert = (dashboard: Dashboard) => dashboard.frames.filter((frame) => frame.type === "session_upsert").at(-1)!;
+  const upsert = () => lastUpsert(current);
+  h.hub.sessionChanged(initial);
+  h.hub.sessionChanged({ ...initial, title: "Renamed before the first upsert is dispatched" });
+  await firstFrame;
+  current.drain();
+  const first = upsert();
+  assert.equal(first.reuseBackgroundInventory, undefined);
+  assert.deepEqual(first.session.backgroundJobs, initial.backgroundJobs,
+    "coalescing must not discard the inventory a later upsert would need");
+  h.hub.sessionChanged({ ...initial, title: "Renamed after the first upsert is dispatched" });
+  current.drain();
+  const compact = upsert();
+  const full = lastUpsert(legacy);
+  assert.equal(compact.reuseBackgroundInventory, true);
+  assert.equal(compact.session.backgroundJobs, undefined);
+  assert.equal(compact.session.backgroundJobsTruncated, undefined);
+  assert.equal(compact.session.backgroundDeliveries, undefined);
+  assert.deepEqual(full.session.backgroundJobs, initial.backgroundJobs);
+  assert.deepEqual(full.session.backgroundDeliveries, initial.backgroundDeliveries);
+  const bytes = (frame: ControlPlaneToUi) => Buffer.byteLength(JSON.stringify(frame));
+  t.diagnostic(`Retained-history fixture: ${bytes(full)} bytes full, ${bytes(compact)} bytes when inventory is unchanged`);
+  assert.ok(bytes(compact) < bytes(full) / 4);
+
+  const settled = { ...initial, backgroundJobs: [], backgroundJobsTruncated: undefined, backgroundDeliveries: [] };
+  h.hub.sessionChanged(settled);
+  current.drain();
+  assert.equal(upsert().reuseBackgroundInventory, undefined);
+  assert.deepEqual(upsert().session.backgroundJobs, []);
+  assert.deepEqual(upsert().session.backgroundDeliveries, []);
+
+  h.hub.sessionChanged(initial);
+  h.hub.sessionRemoved(id);
+  h.hub.sessionChanged({ ...initial, title: "Reappeared" });
+  current.drain();
+  assert.equal(upsert().session.title, "Reappeared");
+  assert.equal(upsert().reuseBackgroundInventory, undefined, "a remove followed by reappearance needs a fresh base");
+  assert.deepEqual(upsert().session.backgroundJobs, initial.backgroundJobs);
 });
 
 test("a paced flush that finds the database closing neither throws nor sends", (t) => {

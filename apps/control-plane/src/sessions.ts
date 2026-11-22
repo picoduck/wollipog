@@ -2534,6 +2534,7 @@ export class SessionsService {
   /** When each campaign was last checked for leftovers to repair, so a tick never derives them all. */
   private readonly campaignRepairCheckedAt = new Map<string, number>();
   private readonly archiveWorktreeRetirements = new Set<string>();
+  private readonly archiveWorktreeRetryScheduled = new Set<string>();
   private readonly refusedWorktreeRecheckedAt = new Map<string, number>();
   private readonly refusedWorktreeSweep = new Map<string, { at: number; after: string }>();
   /** Full Control campaigns whose first message is being established (#2940). */
@@ -21204,9 +21205,10 @@ export class SessionsService {
    * request if the control plane exited before sending it; the runner owns deferred replay after
    * it accepts a request. Refusals only receive metadata reconciliation, never a deletion retry. */
   private queueCampaignWorktreeRetirement(sessionId: string, retryDeferred = false, recheckAt = Date.now(),
-    rootPolicies = new Map<string, OrchestratorCampaignPolicy | null>()): void {
+    rootPolicies = new Map<string, OrchestratorCampaignPolicy | null>(), previousRetryDelayMs = 0): void {
+    if (this.archiveWorktreeRetirements.has(sessionId) || this.archiveWorktreeRetryScheduled.has(sessionId)) return;
     const child = this.db.campaignWorktreeRetirementState(sessionId);
-    if (!child?.archived || child.archivePending || this.archiveWorktreeRetirements.has(sessionId)) return;
+    if (!child?.archived || child.archivePending) return;
     const campaignId = this.db.campaignForVerifiedChild(sessionId, rootPolicies);
     if (!campaignId || rootPolicies.get(campaignId)?.behavior.completion !== "stop_and_archive") return;
     const protocol = this.db.getRunner(child.runnerId)?.protocolVersion;
@@ -21222,7 +21224,7 @@ export class SessionsService {
     this.archiveWorktreeRetirements.add(sessionId);
     void (async () => {
       let retry = false;
-      let retryDelayMs = 60_000;
+      let minimumRetryDelayMs = 60_000;
       try {
         for (const item of pending) {
           const current = this.db.campaignWorktreeRetirementState(sessionId);
@@ -21257,6 +21259,7 @@ export class SessionsService {
           const campaignDeliveredPullRequests = runnerSupportsProtocol(
             this.db.getRunner(child.runnerId)?.protocolVersion, "worktreePatchDelivery")
             ? this.db.campaignChildDeliveredPullRequests(sessionId) : undefined;
+          let changed = false;
           try {
             const result = await this.hub.requestFromRunner(child.runnerId, requestId, {
               type: "session_worktree", requestId, sessionId, operation: "discard", path: item.path,
@@ -21270,6 +21273,7 @@ export class SessionsService {
             }
             if (result.ok && result.snapshot && result.retirement) {
               this.db.updateSessionFromSnapshot(sessionId, result.snapshot, Date.now());
+              changed = true;
               if (result.retirement.status === "deferred" &&
                   this.db.campaignWorktreeCleanup(sessionId).find((candidate) => candidate.path === item.path)
                     ?.status !== "refused") {
@@ -21277,15 +21281,22 @@ export class SessionsService {
                   "deferred", result.retirement.reason ?? "runner cleanup is pending", Date.now());
               }
             } else if (!result.ok && result.error === "worktree retained: forge state is temporarily unavailable") {
-              this.db.recordCampaignWorktreeCleanup(sessionId, item.path, worktreeId,
-                "pending", "forge state is temporarily unavailable; retirement will retry", Date.now());
+              const currentCleanup = this.db.campaignWorktreeCleanup(sessionId)
+                .find((candidate) => candidate.path === item.path);
+              const reason = "forge state is temporarily unavailable; retirement will retry";
+              if (currentCleanup?.status === item.status &&
+                  (currentCleanup.status !== "pending" || currentCleanup.reason !== reason)) {
+                this.db.recordCampaignWorktreeCleanup(sessionId, item.path, worktreeId, "pending", reason, Date.now());
+                changed = true;
+              }
               retry = true;
-              retryDelayMs = 5 * 60_000;
+              minimumRetryDelayMs = 5 * 60_000;
             } else if (!result.ok && result.error?.startsWith("worktree retained: ") &&
                 /^(?:attached operator-owned worktrees|the worktree has a detached HEAD|the worktree is checked out on branch|runner ownership could not be proven|the worktree has uncommitted changes|the branch has no upstream|the branch has unpushed commits|the worktree head is not on the default branch|the linked pull request is not verified as merged)/u
                   .test(result.error.slice("worktree retained: ".length))) {
               this.db.recordCampaignWorktreeCleanup(sessionId, item.path, worktreeId,
                 "refused", result.error.slice("worktree retained: ".length, 1050), Date.now());
+              changed = true;
             } else {
               retry = true;
               this.log.warn(`archive worktree retirement for ${sessionId} needs retry: ${result.error ?? "incomplete runner reply"}`);
@@ -21294,12 +21305,21 @@ export class SessionsService {
             retry = true;
             this.log.warn(`archive worktree retirement for ${sessionId} needs retry: ${String(error)}`);
           }
-          this.hub.sessionChangedById(sessionId);
-          this.campaignViewsChanged(campaignId, sessionId);
+          if (changed) {
+            this.hub.sessionChangedById(sessionId);
+            this.campaignViewsChanged(campaignId, sessionId);
+          }
         }
       } finally {
         this.archiveWorktreeRetirements.delete(sessionId);
-        if (retry) setTimeout(() => this.queueCampaignWorktreeRetirement(sessionId), retryDelayMs).unref();
+        if (retry) {
+          const delay = Math.min(Math.max(minimumRetryDelayMs, 2 * previousRetryDelayMs), 60 * 60_000);
+          this.archiveWorktreeRetryScheduled.add(sessionId);
+          setTimeout(() => {
+            this.archiveWorktreeRetryScheduled.delete(sessionId);
+            this.queueCampaignWorktreeRetirement(sessionId, retryDeferred, Date.now(), undefined, delay);
+          }, delay).unref();
+        }
       }
     })();
   }
