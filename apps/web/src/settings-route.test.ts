@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   approvalsPolicyAnchorId,
   approvalsPolicyView,
+  assistantConnectionsView,
   EXTRA_PALETTE_DESTINATIONS,
   GLOBAL_VIEW_ITEMS,
   SETTINGS_SECTIONS,
@@ -33,6 +34,17 @@ test("every section round-trips through the URL", () => {
     // silently falls back to Appearance would make "see Settings → Network" wrong.
     assert.deepEqual(viewFromPath(path), { name: "settings", section: id });
   }
+});
+
+test("Assistant Connections list, new and detail routes round-trip independently", () => {
+  const list = assistantConnectionsView();
+  const create = assistantConnectionsView({ kind: "new" });
+  const detail = assistantConnectionsView({ kind: "detail", id: "asst_ü/a?b" });
+  assert.equal(viewPath(list), "/settings/assistant/connections");
+  assert.equal(viewPath(create), "/settings/assistant/connections/new");
+  assert.match(viewPath(detail), /^\/settings\/assistant\/connections\/~[A-Za-z0-9_-]+$/);
+  for (const view of [list, create, detail]) assert.deepEqual(viewFromPath(viewPath(view)), view);
+  assert.equal(viewFromPath("/settings/assistant/connections/~!!"), null);
 });
 
 test("Approvals and Reviews sit between Behavior and Orchestrator, in the section list and the palette", () => {

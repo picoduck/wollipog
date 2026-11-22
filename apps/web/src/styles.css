@@ -12532,17 +12532,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .delegation-dialog .delegation-presets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .delegation-dialog .modal-foot > .btn { padding-inline: var(--space-2); }
 }
-.assistant-id-control {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-}
-.assistant-id-control > input {
-  flex: 1;
-  min-width: 0;
-  font-family: var(--font-mono);
-}
 /* Field anatomy (§8.1): the parts stack 8px apart, which puts the label 8px above the control.
    The helper sits 4px under the control: it, the error that replaces it (§8.5) and a
    `.field-foot` pull up by --space-1 (rule below, with the other field parts). */
@@ -19843,6 +19832,104 @@ a.tab { text-decoration: none; }
 .settings-detail > .settings-view { margin: var(--space-5) var(--page-gutter) 0; }
 .settings-detail .settings-panel-heading { display: none; }
 .settings-detail .settings-panel-head:not(:has(> .settings-panel-scope, > .settings-panel-action)) { display: none; }
+
+.assistant-connections-page > .detail-bar {
+  margin-left: calc(-1 * var(--page-gutter));
+  margin-right: calc(-1 * var(--page-gutter));
+}
+.assistant-connections-list > .detail-bar {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+}
+.assistant-connections-content {
+  padding-top: var(--space-5);
+  --setting-control-w: 264px;
+}
+.assistant-connections-content .assistant-installation-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.assistant-installation-row .setting-row-control {
+  flex-direction: row;
+  gap: var(--space-2);
+}
+.assistant-connection-row .setting-row-title {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.assistant-connections-page .status,
+.assistant-connections-group .status {
+  font-size: var(--text-sm);
+}
+.assistant-editor-save {
+  align-self: flex-start;
+}
+.assistant-connections-content .choice-row-desc {
+  display: block;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.assistant-activity-scroll {
+  max-height: 420px;
+  overflow: auto;
+}
+.assistant-activity-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font: var(--type-small);
+}
+.assistant-activity-table :is(th, td) {
+  padding: var(--space-2);
+  text-align: start;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.assistant-activity-table tbody tr { border-top: 1px solid var(--border); }
+.assistant-activity-table code {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  color: var(--text-dim);
+  font-size: inherit;
+}
+.assistant-credential-visibility { align-self: flex-start; }
+.assistant-credential-revealed {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+  resize: none;
+}
+@media (max-width: 760px) {
+  .assistant-connections-content .assistant-installation-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .assistant-installation-row .setting-row-control {
+    justify-content: flex-start;
+  }
+  .assistant-connections-content .seg { gap: var(--space-2); }
+  .assistant-connections-content .choice-list { gap: var(--space-2); }
+  .assistant-connection-row + .assistant-connection-row,
+  .assistant-connections-group .assistant-connection-row + .setting-row-link { margin-top: var(--space-2); }
+  .assistant-activity-table :is(tbody, td) { display: block; }
+  .assistant-activity-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    padding: var(--space-3);
+  }
+  .assistant-activity-table td { padding: 0; }
+  .assistant-activity-table td:nth-child(-n+2) { grid-column: 1 / -1; }
+  .assistant-activity-table code { white-space: nowrap; }
+  .assistant-activity-target {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+}
 
 
 

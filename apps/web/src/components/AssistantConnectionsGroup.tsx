@@ -1,21 +1,23 @@
 import { useEffect, useState } from "react";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
-import type { AssistantConnectionsView } from "../assistant-connections.js";
+import {
+  assistantConnectionAccessSummary, formatAssistantConnectionLastUsed, type AssistantConnectionsView,
+} from "../assistant-connections.js";
 import { useInstanceScope } from "../instance-scope.js";
-import { AssistantConnectionsDialog } from "./AssistantConnectionsPanel.js";
-import { LinkRow, SettingsGroup, StaticRow } from "./ui/SettingsRows.js";
+import { assistantConnectionsView, type View } from "../navigation.js";
+import { AssistantConnectionStatusBadge } from "./AssistantConnectionStatusBadge.js";
+import { LinkRow, SettingsGroup } from "./ui/SettingsRows.js";
 
-const lastUsed = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+type ConnectionsGroupProps = { onNavigate(view: View): void };
 
-export function AssistantConnectionsGroup() {
-  return <ConnectionsGroup key={useInstanceScope()} />;
+export function AssistantConnectionsGroup(props: ConnectionsGroupProps) {
+  return <ConnectionsGroup key={useInstanceScope()} {...props} />;
 }
 
-function ConnectionsGroup() {
+function ConnectionsGroup({ onNavigate }: ConnectionsGroupProps) {
   const api = useApi();
   const [view, setView] = useState<AssistantConnectionsView | null>(null);
-  const [dialog, setDialog] = useState<"all" | "new" | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [unavailable, setUnavailable] = useState(false);
@@ -36,27 +38,26 @@ function ConnectionsGroup() {
   }, [api, attempt]);
 
   if (unavailable) return null;
-  return <>
+  return (
     <SettingsGroup title="Assistant Connections" scope="This Server" className="assistant-connections-group"
-      action={view && <button type="button" className="btn" aria-haspopup="dialog" onClick={() => setDialog("new")}>New Connection</button>}
+      action={view && <button type="button" className="btn" onClick={() => onNavigate(assistantConnectionsView({ kind: "new" }))}>New Connection</button>}
       failure={error ? {
         message: "Couldn't load connections.", detail: error, onRetry: () => setAttempt((count) => count + 1),
       } : null}>
       {view && <>
-        {view.connections.slice(0, 3).map((connection) => <StaticRow key={connection.id} title={connection.name}
+        {view.connections.slice(0, 3).map((connection) => <LinkRow key={connection.id} title={connection.name} className="assistant-connection-row"
+          badge={<AssistantConnectionStatusBadge connection={connection} />}
           description={<>
-            {connection.revoked ? "Revoked" : "Active"} · {connection.grant.operations === "all" ? "Full Access" : "Configured Access"}
+            {assistantConnectionAccessSummary(connection.grant)}
             <br />
-            {connection.lastUsedAt === undefined ? "Last use unavailable"
-              : connection.lastUsedAt === null ? "Never used"
-                : <>Last used <time dateTime={new Date(connection.lastUsedAt).toISOString()}>{lastUsed.format(connection.lastUsedAt)}</time></>}
-          </>} />)}
-        <LinkRow title="All Connections" trailing={String(view.connections.length)} hasPopup="dialog" onClick={() => setDialog("all")} />
+            {connection.lastUsedAt == null
+              ? formatAssistantConnectionLastUsed(connection.lastUsedAt)
+              : <time dateTime={new Date(connection.lastUsedAt).toISOString()}>
+                {formatAssistantConnectionLastUsed(connection.lastUsedAt)}
+              </time>}
+          </>} onClick={() => onNavigate(assistantConnectionsView({ kind: "detail", id: connection.id }))} />)}
+        <LinkRow title="All Connections" trailing={String(view.connections.length)} onClick={() => onNavigate(assistantConnectionsView())} />
       </>}
     </SettingsGroup>
-    {dialog && <AssistantConnectionsDialog create={dialog === "new"} onClose={() => {
-      setDialog(null);
-      setAttempt((count) => count + 1);
-    }} />}
-  </>;
+  );
 }
