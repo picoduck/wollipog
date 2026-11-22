@@ -466,6 +466,34 @@ function recordCommitSynchronousLevels(db: ControlPlaneDb): number[] {
   return levels;
 }
 
+test("file-backed database connections use a 32 MiB page cache", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-db-page-cache-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const server = ControlPlaneDb.open(path);
+    try {
+      assert.equal(server.raw().prepare("PRAGMA cache_size").get()?.cache_size, -32_768);
+      for (const readOnly of [false, true]) {
+        const attached = ControlPlaneDb.attach(path, { readOnly });
+        try {
+          assert.equal(attached.raw().prepare("PRAGMA cache_size").get()?.cache_size, -32_768);
+        } finally { attached.close(); }
+      }
+    } finally { server.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("in-memory databases retain SQLite's default page cache setting", () => {
+  const defaults = new DatabaseSync(":memory:");
+  try {
+    const db = ControlPlaneDb.open(":memory:");
+    try {
+      assert.equal(db.raw().prepare("PRAGMA cache_size").get()?.cache_size,
+        defaults.prepare("PRAGMA cache_size").get()?.cache_size);
+    } finally { db.close(); }
+  } finally { defaults.close(); }
+});
+
 test("a connection attached beside a live writer reads through its lock and waits out its commit (#3789)", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-attached-db-"));
   const path = join(root, "control-plane.db");

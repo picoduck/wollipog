@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -299,7 +299,11 @@ test("offline conversion checks both locations, preserves WAL and rows, and is i
   const checked: string[] = [];
   try {
     const result = convertIncrementalVacuum(f.path, { ownerStopped: true,
-      availableBytes: (p) => { checked.push(p); return 10n ** 15n; } });
+      availableBytes: (p) => {
+        assert.equal(existsSync(`${f.path}-shm`), false, "offline conversion uses an exclusive WAL index in memory");
+        checked.push(p);
+        return 10n ** 15n;
+      } });
     assert.equal(result.converted, true);
     assert.ok(checked.includes(realpathSync(f.dir))); assert.ok(checked.includes(realpathSync(tmpdir())));
     assert.equal(result.requiredBytes, incrementalVacuumConversionRequiredBytes(result.databaseBytes));
