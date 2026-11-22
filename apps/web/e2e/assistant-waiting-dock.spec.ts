@@ -86,6 +86,27 @@ for (const theme of ["light", "dark"] as const) {
       test.use({ viewport: { width, height: phone ? 844 : 900 }, hasTouch: phone, isMobile: phone,
         colorScheme: theme, timezoneId: "UTC", locale: "en-US" });
 
+      test("the dock and 320% spending notice fit above the composer without overlap", async ({ page }) => {
+        await open(page, theme, "tool", "spending=over");
+        await expect(cards(page)).toHaveCount(1);
+        const notice = page.locator(".composer .session-notice-slot .assistant-spending-notice");
+        const composer = page.locator(".composer-box");
+        const transcript = page.getByRole("region", { name: "Session Activity", exact: true });
+        await expect(notice.getByRole("meter")).toHaveAttribute("aria-valuetext", "$79.93 of $25.00 spent");
+        await expectFullyInViewport(notice, "Spending notice");
+        await expectFullyInViewport(composer, "Composer input with both surfaces");
+        await expectFullyInViewport(approve(cards(page).first()), "Approve Once above the notice");
+        await layout(page);
+        const [reader, waiting, spending, input] = await Promise.all(
+          [transcript, dock(page), notice, composer].map(item => item.boundingBox()),
+        );
+        expect(reader!.y + reader!.height).toBeLessThanOrEqual(waiting!.y);
+        expect(waiting!.y + waiting!.height).toBeLessThanOrEqual(spending!.y);
+        expect(spending!.y + spending!.height).toBeLessThanOrEqual(input!.y);
+        await expectTextContrast(notice);
+        await capture(page, theme, "dock-and-spending-notice");
+      });
+
       test("one pending tool approval shows the command and ordered actions", async ({ page }) => {
         await open(page, theme, "tool");
         const card = cards(page).first();
