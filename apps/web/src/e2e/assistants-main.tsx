@@ -108,7 +108,7 @@ const runner: RunnerView = {
   displayName: migrationScenario && migrationScenario !== "old" ? "Shared Engineering Machine" : "Build Box",
   os: "linux",
   version: "1",
-  status: healthScenario === "machine_offline" || healthScenario === "stress" ? "offline" : "online",
+  status: healthScenario === "machine_offline" ? "offline" : "online",
   agents: [
     { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code", available: true },
     { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: true },
@@ -625,7 +625,7 @@ if (healthScenario && healthScenario !== "legacy") {
     ...(healthScenario === "automatic_turns_held" || stress ? { automaticTurnsHeld: "fixture-hold" } : {}),
     ...(healthScenario === "tools_unavailable" || stress ? { toolsUnavailable: true } : {}),
     ...(healthScenario === "sign_in_needed" ? { signInNeeded: true } : {}),
-    ...(healthScenario === "turn_failed" || healthScenario === "turn_rejected"
+    ...(healthScenario === "turn_failed" || healthScenario === "turn_rejected" || stress
       ? { turn: { kind: healthScenario === "turn_failed" ? "failed" : "rejected", errorId: "fixture-turn", promptTurnId: "fixture-prompt" } } : {}),
   };
   thread.status = "done";

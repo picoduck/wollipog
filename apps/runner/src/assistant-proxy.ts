@@ -197,9 +197,10 @@ export class AssistantProxies {
       credential.refusal = "expired";
       credential = await this.ready(sessionId, state, signal);
       response = await send(credential, body);
-      if (response.status === 401 && this.states.get(sessionId) === state && state.credential === credential) {
-        this.deps.credentialRejected?.(sessionId, true);
-      }
+    }
+    if ((response.status === 401 || response.ok) &&
+        this.states.get(sessionId) === state && state.credential === credential) {
+      this.deps.credentialRejected?.(sessionId, response.status === 401);
     }
     const responseBody = await response.text();
     if (!inspect || !response.ok || !responseBody) return { status: response.status, body: responseBody };

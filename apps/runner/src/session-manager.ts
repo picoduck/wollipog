@@ -15660,7 +15660,9 @@ export class SessionManager {
 
   /** An exhausted Assistant account parks the FIFO before provider submission. A timer wakes
    * that exact provider generation at reset (or rechecks allowance when no reset is known). */
-  private holdAssistantUsage(sessionId: string, entry: ActiveSession, limit: UsageWindowRejection | null): boolean {
+  private holdAssistantUsage(
+    sessionId: string, entry: ActiveSession, limit: UsageWindowRejection | null, recheck = false,
+  ): boolean {
     const held = entry.assistantUsageHold;
     if (!limit) {
       if (held) {
@@ -15671,23 +15673,21 @@ export class SessionManager {
       }
       return false;
     }
-    if (!held || held.limit.resetsAt !== limit.resetsAt) {
+    const changed = !held || held.limit.resetsAt !== limit.resetsAt;
+    if (changed || recheck) {
       clearTimeout(held?.timer);
       const delay = Math.min(30_000, Math.max(1, (limit.resetsAt ?? Infinity) - Date.now()));
       const timer = setTimeout(() => {
         if (this.active.get(sessionId) !== entry || entry.assistantUsageHold?.timer !== timer) return;
-        entry.assistantUsageHold = undefined;
-        this.holdAssistantUsage(sessionId, entry, this.accountUsageLimit(this.store.readMeta(sessionId), Date.now()));
-        if (!entry.assistantUsageHold) {
-          this.publishAssistantThreadHealth(sessionId);
-          this.emitQueue(sessionId);
-        }
+        this.holdAssistantUsage(sessionId, entry, this.accountUsageLimit(this.store.readMeta(sessionId), Date.now()), true);
         this.scheduleDrain(sessionId);
       }, delay);
       timer.unref();
       entry.assistantUsageHold = { limit, timer };
-      this.publishAssistantThreadHealth(sessionId);
-      this.emitQueue(sessionId);
+      if (changed) {
+        this.publishAssistantThreadHealth(sessionId);
+        this.emitQueue(sessionId);
+      }
     }
     return true;
   }

@@ -1390,7 +1390,7 @@ function SessionDetailLoaded({
   // composer (#2179, #2205), in attention priority order; a worker's stay in the Agents panel.
   const prioritizedRequests = useMemo(() => prioritizedPendingRequests(session.pendingApproval),
     [session.pendingApproval]);
-  const signInNeededInSlot = Boolean(assistantThreadHealth?.thread.health?.signInNeeded);
+  const signInNeededInSlot = assistantThreadHealth?.problems.some((problem) => problem.key === "sign_in_needed") ?? false;
   const dockedRequests = useMemo(() => dockRequests(signInNeededInSlot
     ? prioritizedRequests.filter((request) => request.kind !== "authentication")
     : prioritizedRequests), [prioritizedRequests, signInNeededInSlot]);
@@ -5073,6 +5073,7 @@ function SessionDetailLoaded({
   const sessionNotices: SessionNoticeEntry[] = [...assistantSpendingNotices];
   const noticesBelowDock = assistantSpendingNotices.length > 0 || assistantThreadHealth !== undefined;
   const assistantHealth = assistantThreadHealth?.thread.health;
+  const assistantReconnecting = assistantThreadHealth?.problems.some((problem) => problem.key === "reconnecting");
   const assistantTurnErrorId = assistantHealth?.turn?.errorId;
   const assistantPromptTurnId = assistantHealth?.turn?.promptTurnId;
   const assistantHoldErrorId = assistantHealth?.automaticTurnsHeld;
@@ -7546,7 +7547,7 @@ function SessionDetailLoaded({
                 Recent activity is readable as a snapshot while full history loads. Refresh to check for new activity.
               </div>
             )}
-            {!historyPreview.active && (transcript.notice === "stale" || transcript.notice === "error") && (
+            {!historyPreview.active && ((transcript.notice === "stale" && !assistantReconnecting) || transcript.notice === "error") && (
               <div className="transcript-history-band">
                 <LiveTranscriptHistoryNotice
                   sessionId={sessionId}

@@ -41,7 +41,7 @@ async function capture(page: Page, theme: string, state: string) {
   if (process.env.ASSISTANT_NOTICE_EVIDENCE !== "1") return;
   const { width, height } = page.viewportSize()!;
   const id = "assistant-notices-" + width + "x" + height + "-" + theme + "-" + state;
-  await page.screenshot({ path: join("playwright-report", "4813", id + ".png"), animations: "disabled" });
+  await page.screenshot({ path: join("playwright-report", process.env.ASSISTANT_NOTICE_EVIDENCE_DIR ?? "4813", id + ".png"), animations: "disabled" });
 }
 
 async function checkTargets(controls: Locator, phone: boolean) {
@@ -77,7 +77,13 @@ for (const theme of ["light", "dark"] as const) {
           await expect(notice.locator(".notice-title")).toHaveText(title);
           await expect(notice.locator(".notice-body")).toHaveText(body);
           await expect(notice.getByRole("button")).toHaveText(actions);
-          if (fixture === "reconnecting") await expect(notice).toHaveClass(/compact/);
+          if (fixture === "reconnecting") {
+            await expect(notice).toHaveClass(/compact/);
+            await expect(page.getByText("Showing cached activity while disconnected.")).toHaveCount(0);
+          }
+          if (fixture === "turn_failed") {
+            await expect(notice.getByRole("button", { name: "Retry Turn" })).toHaveClass(/primary/);
+          }
           await expect(page.locator(bar).locator(".status")).toHaveText(badge);
           const composer = page.locator(".composer");
           await expect(composer.locator(".composer-box")).toBeVisible();
@@ -119,7 +125,7 @@ for (const theme of ["light", "dark"] as const) {
         const notice = page.locator(noticeSelector);
         await expect(notice.locator(".notice-title")).toHaveText("Assistant Tools Unavailable");
         const dock = page.locator(".assistant-dock");
-        const transcript = page.locator(".detail-body");
+        const transcript = page.getByRole("region", { name: "Session Activity" });
         const composerInput = page.locator(".composer").locator(".composer-box");
         await expect(dock.getByText("Waiting for You", { exact: false }).first()).toBeVisible();
         await expect(transcript.getByText(/Check release candidate 10/)).toBeVisible();
@@ -139,16 +145,22 @@ for (const theme of ["light", "dark"] as const) {
         await expectPageNoHorizontalOverflow(page);
         await expectNoHorizontalOverflow(page.locator(".composer"));
         await checkTargets(notice.getByRole("button"), phone);
-        await capture(page, theme, "stress-collapsed");
+        const restart = notice.getByRole("button", { name: "Restart Thread" });
+        await expect(restart).toHaveClass(/primary/);
+        await expect(restart).toBeEnabled();
+        await expectTextContrast(notice);
+        const transcriptHeight = Math.floor((await transcript.boundingBox())!.height);
+        expect(transcriptHeight, "visible transcript height in CSS px").toBeGreaterThanOrEqual(phone ? 220 : 280);
+        await capture(page, theme, "stress-collapsed-transcript" + transcriptHeight + "csspx");
         await more.click();
         const menu = page.getByRole("menu", { name: "Session Notices" });
         const entries = menu.getByRole("menuitem");
-        await expect(entries).toHaveText(["Account at Its Usage Limit", "Automatic Turns Held", "Build Box Is Offline"]);
+        await expect(entries).toHaveText(["Provider Rejected the Turn", "Account at Its Usage Limit", "Automatic Turns Held"]);
         await checkTargets(entries, phone);
         await expectTextContrast(menu);
         await capture(page, theme, "stress-expanded");
         await entries.last().click();
-        await expect(notice.locator(".notice-title")).toHaveText("Build Box Is Offline");
+        await expect(notice.locator(".notice-title")).toHaveText("Automatic Turns Held");
         await expect(badge).toHaveText("Tools Unavailable");
         if (phone) {
           await page.getByRole("button", { name: "Back to Assistants" }).click();

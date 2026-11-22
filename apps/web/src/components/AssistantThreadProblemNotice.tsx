@@ -53,7 +53,7 @@ export function AssistantThreadProblemNotice({ problem, thread, machine, trailin
       actions = openMachine;
       break;
     case "tools_unavailable":
-      body = "Wollipog rejected this thread’s tool key. Restart the thread to reconnect its tools.";
+      body = "Wollipog rejected this thread’s tool key.";
       actions = restart;
       break;
     default:

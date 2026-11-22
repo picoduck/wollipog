@@ -1185,18 +1185,28 @@ test("live launch preparation replaces a stale creation version for the memory g
   } finally { made.manager.shutdownAll(); rmSync(root, { recursive: true, force: true }); }
 });
 
-for (const automatic of [true, false]) {
-  test("an Assistant thread " + (automatic ? "switches at a usage limit" : "holds its FIFO until the usage limit resets"), async () => {
+for (const { automatic, firstTurnRefused, title } of [
+  { automatic: true, firstTurnRefused: false, title: "switches at a usage limit" },
+  { automatic: false, firstTurnRefused: false, title: "holds its FIFO until the usage limit resets" },
+  { automatic: false, firstTurnRefused: true, title: "holds later messages after a usage-limit refusal" },
+]) {
+  test("an Assistant thread " + title, async () => {
     const root = mkdtempSync(join(tmpdir(), "wollipog-assistant-usage-hold-"));
     const messages: RunnerToControlPlane[] = [];
     const delivered: Array<{ home?: string; prompt: string }> = [];
+    let exhausted = !firstTurnRefused;
     const { manager, store } = makeManager(root, (_driver: unknown, launch: { env: Record<string, string> }) => ({
       initialize: async () => {},
       newSession: async () => {},
       prompt: async (prompt: string) => {
+        if (!exhausted) {
+          exhausted = true;
+          return "refusal" as const;
+        }
         delivered.push({ home: launch.env.CODEX_HOME, prompt });
         return "end_turn" as const;
       },
+      lastTurnError: () => "usage limit reached",
       cancel: () => {},
       dispose: () => {},
       setConfig: async () => {},
@@ -1223,7 +1233,7 @@ for (const automatic of [true, false]) {
       };
       internals.providerAccounts = () => [accounts.work, accounts.backup].map(({ id, label, provider }) =>
         ({ id, label, provider, authStatus: "authenticated" }));
-      internals.subscriptionUsageInventory = () => observed;
+      internals.subscriptionUsageInventory = () => exhausted ? observed : [observed[1]!];
       assert.equal(manager.configureAutomaticAccountSwitch({ enabled: automatic, revision: 1 }), true);
       manager.setAutomaticAccountSwitchAuthorityReady(true);
 
@@ -1235,8 +1245,9 @@ for (const automatic of [true, false]) {
         await waitFor(() => reports().some((health) => health?.usageLimit?.resetsAt === resetsAt), "expected usage hold");
         assert.deepEqual(delivered, []);
       }
-      await waitFor(() => delivered.length === 2, "the queued messages did not resume");
-      assert.deepEqual(delivered, ["First message", "Second message"].map((prompt) => ({
+      const retained = firstTurnRefused ? ["Second message"] : ["First message", "Second message"];
+      await waitFor(() => delivered.length === retained.length, "the queued messages did not resume");
+      assert.deepEqual(delivered, retained.map((prompt) => ({
         home: automatic ? accounts.backup.credentialHome : accounts.work.credentialHome,
         prompt,
       })));

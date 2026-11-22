@@ -3154,7 +3154,7 @@ export function TurnFailedNotice({ message, prompt, retryControl, trailing, kept
   const retrying = prompt !== undefined && retry?.pendingPromptId === prompt.id;
   const actions = retry && prompt && (!prompt.promptOrigin || prompt.promptOrigin.kind === "legacy_confirmation") && (
     <BusyButton
-      className="btn sm"
+      className={kept ? "btn sm primary" : "btn sm"}
       busy={retrying}
       progress="Retrying the turn…"
       disabled={reason !== undefined || (retry.pendingPromptId !== undefined && !retrying)}
