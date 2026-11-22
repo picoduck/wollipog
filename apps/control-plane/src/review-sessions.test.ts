@@ -640,6 +640,7 @@ test("review children preserve project attribution and never reserve implementat
     assert.equal(h.db.getSession("s1")!.liveChildCapacity!.occupied, 0);
     assert.equal(h.db.listSessions().find(s => s.id === "s1")!.liveChildCapacity!.occupied, 0);
     assert.equal(h.db.campaignAncestryRoot(id), "none");
+    h.db.setPendingApproval(id, { requestId: "question", kind: "question", title: "Question", options: [] });
     assert.deepEqual(h.db.listSessionDescendantRequestCandidates("s1"), []);
     assert.equal(h.svc.prompt(id, "implement this").status, 409);
   } finally { h.db.close(); }
@@ -695,7 +696,12 @@ test("reviews under a campaign remain outside its membership, counts, requests a
     assert.equal(h.db.isSessionDescendant("campaign", id), false);
     assert.equal(h.db.sessionResultOrchestrator(id), null);
     assert.equal(h.db.campaignBudgets.root(id), null);
+    for (const sessionId of ["s1", id]) {
+      h.db.setPendingApproval(sessionId, { requestId: "question", kind: "question", title: "Question", options: [] });
+    }
     assert.deepEqual(h.db.listSessionDescendantRequestCandidates("campaign").map(s => s.id), ["s1"]);
+    h.db.setPendingApproval("s1", null);
+    h.db.setPendingApproval(id, null);
     const plan = h.svc.recordCampaignPlan("campaign", { items: [{ key: "implementation" }], planComplete: true });
     assert.ok(plan.ok, plan.error ?? "campaign plan refused");
     const workItemId = plan.data!.items[0]!.workItemId;

@@ -17971,8 +17971,8 @@ export class ControlPlaneDb {
     `).get(targetId, ancestorId));
   }
 
-  /** Descendant request candidates only, so Parent Control does not hydrate complete session views
-   * or scan every archived session. UNION terminates malformed cycles and never returns self. */
+  /** Only descendants with a pending approval need request timestamps or card metadata.
+   * Keep the ancestry walk independent of pending state so it still reaches their children. */
   listSessionDescendantRequestCandidates(ancestorId: string): Array<{
     id: string;
     title: string;
@@ -18017,7 +18017,9 @@ export class ControlPlaneDb {
               )
           ) AS request_created_at_by_id
         FROM descendants d JOIN sessions s ON s.id=d.id
-        WHERE s.id<>? AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=s.id) ORDER BY s.created_at DESC, s.id ASC
+        WHERE s.id<>? AND s.pending_approval IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=s.id)
+        ORDER BY s.created_at DESC, s.id ASC
     `).all(ancestorId, ancestorId) as unknown as Array<{
       id: string;
       title: string;
