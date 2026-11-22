@@ -164,6 +164,32 @@ for (const theme of ["light", "dark"] as const) {
       await layout(page, 47);
       await screenshot(page, theme, "three-show-all-and-320percent-notice", 4838);
     });
+
+    test("a docked side panel leaves room for the notice and request text", async ({ page }) => {
+      await open(page, theme, "tool", "spending=over");
+      await page.getByRole("button", { name: /Side Panel/ }).click();
+      await expect(sidePanel(page)).toHaveAttribute("data-presentation", "docked");
+      const notice = page.locator(".composer .assistant-spending-notice");
+      const title = notice.getByText("Over Budget by $54.93", { exact: true });
+      const titleLines = await title.evaluate(element =>
+        element.getBoundingClientRect().height / parseFloat(getComputedStyle(element).lineHeight),
+      );
+      expect(titleLines).toBeLessThanOrEqual(2);
+      await expectNoHorizontalOverflow(notice);
+      await expectFullyInViewport(notice, "Spending notice beside a docked panel");
+      for (const action of await notice.getByRole("button").all()) {
+        await expectFullyInViewport(action, (await action.textContent())!);
+      }
+      await layout(page, 47);
+      const card = cards(page).first();
+      await actionOrder(card, ["Open Session", "Deny", "Approve Once"]);
+      const body = card.locator(".assistant-dock-card-body");
+      const { height, commandLineHeight } = await body.evaluate(element => ({
+        height: element.clientHeight,
+        commandLineHeight: parseFloat(getComputedStyle(element.querySelector("pre")!).lineHeight),
+      }));
+      expect(height, "Room to read a line of the command when scrolled").toBeGreaterThanOrEqual(commandLineHeight);
+    });
   });
 
   for (const width of [1440, 390]) {

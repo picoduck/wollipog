@@ -7768,6 +7768,21 @@ body.shell-dock-dragging * {
     border-top: var(--space-1) solid var(--border-strong);
     pointer-events: none;
   }
+  @container chat-reading (max-height: 180px) {
+    /* A docked side panel can make the notice wrap. Share the card's row with the heading
+       when there is one request and no pager, leaving room between its title and actions. */
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock:not(:has(.assistant-dock-pager)) {
+      flex-direction: row;
+    }
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock:not(:has(.assistant-dock-pager)) > .assistant-dock-head {
+      align-self: start;
+      border-bottom: none;
+    }
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock:not(:has(.assistant-dock-pager)) > .assistant-dock-list {
+      flex: 1;
+      min-width: 0;
+    }
+  }
 }
 @media (pointer: coarse) {
   .assistant-dock :is(.btn.sm, .icon-btn.sm) { --control-h-sm: var(--control-h); }
@@ -13316,7 +13331,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   }
   .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-content {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) fit-content(70%);
     align-items: center;
     gap: var(--space-1) var(--space-2);
   }
@@ -13324,7 +13339,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     display: grid;
     grid-column: 1 / -1;
     grid-row: 2;
-    grid-template-columns: minmax(0, 1fr) minmax(10rem, 25%);
+    grid-template-columns: minmax(0, 1fr) 25%;
     align-items: center;
     gap: var(--space-1) var(--space-2);
   }
