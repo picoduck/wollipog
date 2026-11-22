@@ -28,7 +28,8 @@ import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { AssistantThread, AssistantThreadDefaults, CreateAssistantThreadRequest } from "../assistant-threads.js";
 import type { AssistantOwnerConfirmation, AssistantThreadAccountChoices, ChangeAssistantThreadAccountRequest, ChangeAssistantThreadHarnessRequest, OrchestratorCampaignBudgetDefault } from "@wollipog/protocol";
-import { FeedbackProvider } from "../components/FeedbackProvider.js";
+import { FeedbackProvider, useFeedback } from "../components/FeedbackProvider.js";
+import { installMobileViewportFallback } from "../mobile-viewport.js";
 import { assistantDecisionHistoryFixture } from "./assistant-decision-fixture.js";
 import { assistantReceiptFixture, receiptStressTitle } from "./assistant-receipt-fixture.js";
 import { campaignProjection, workSummary } from "./campaign-status-fixtures.js";
@@ -1314,12 +1315,25 @@ const navigation: ViewNavigation = {
 
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root element");
+installMobileViewportFallback();
+
+function FixtureToast() {
+  const { showToast } = useFeedback();
+  React.useEffect(() => {
+    const notify = () => showToast("Thread settings saved.", { tone: "success" });
+    window.addEventListener("assistants-fixture-toast", notify);
+    return () => window.removeEventListener("assistants-fixture-toast", notify);
+  }, [showToast]);
+  return null;
+}
+
 createRoot(root).render(
   // As the app's own entry point renders it, so effects run twice on mount here too.
   <React.StrictMode>
   <InstanceScopeProvider instanceScope={SCOPE}>
     <ApiProvider client={client}>
       <FeedbackProvider>
+        <FixtureToast />
         <StoreProvider connection={connection} navigation={navigation}>
           <ThemeProvider><Shell /></ThemeProvider>
         </StoreProvider>

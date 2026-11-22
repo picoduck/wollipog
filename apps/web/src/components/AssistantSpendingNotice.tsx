@@ -1,4 +1,4 @@
-import { useId, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { threadSpendingCopy, type ThreadSpendingState } from "../assistant-thread-spending.js";
 import { formatUsd } from "../guardrail-values.js";
 import { Notice } from "./Notice.js";
@@ -20,12 +20,20 @@ export function AssistantSpendingNotice({ state, trailing, onRaise, onSettings, 
   const exhausted = kind === "budget_used_up" || kind === "budget_committed";
   const near = kind === "near_budget";
   const stopReason = useId();
+  const detailsId = useId();
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const { title, message } = threadSpendingCopy(state);
   const display = launches ? String : formatUsd;
   const max = Math.max(used, limit ?? 0) || 1;
   const fillPercent = limit === 0 && used === 0 ? 100 : 100 * Math.min(used, limit ?? 0) / max;
   return <Notice className="assistant-spending-notice" tone={over ? "danger" : "warning"} role="status"
-    title={title} trailing={trailing} compact={near || launches}
+    title={title} trailing={<>
+      {over && <button type="button" className="btn ghost assistant-budget-details"
+        aria-expanded={detailsOpen} aria-controls={detailsId} onClick={() => setDetailsOpen((open) => !open)}>
+        {detailsOpen ? "Hide Details" : "Show Details"}
+      </button>}
+      {trailing}
+    </>} compact={near || launches}
     onDismiss={near ? onDismiss : undefined} dismissLabel="Dismiss Near Budget"
     actions={<>
       <button className="btn sm" type="button" onClick={onRaise}>{paused ? "Manage Launches…" : launches ? "Raise Limit…" : "Raise Budget…"}</button>
@@ -36,7 +44,7 @@ export function AssistantSpendingNotice({ state, trailing, onRaise, onSettings, 
         <button className="btn sm ghost" type="button" onClick={onBreakdown}>Show Breakdown</button>
       </>}
     </>}>
-    <p>{message}</p>
+    <p id={detailsId}>{message}</p>
     {limit !== null && <div className="assistant-spending-meter">
       <div className={over ? "meter t-danger" : "meter t-warning"} role="meter"
         aria-label={launches ? "Session Launches" : "Budget"} aria-valuemin={0} aria-valuemax={max}
