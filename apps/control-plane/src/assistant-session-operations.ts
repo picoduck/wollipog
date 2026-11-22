@@ -1,7 +1,7 @@
 import type { CreateSessionRequest, SessionConfig, SessionView } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { SessionsService, ServiceResult } from "./sessions.js";
-import { AssistantOperations, AssistantRefusal, type AssistantOperation, type AssistantTarget } from "./assistant-connections.js";
+import { assistantCallContext, AssistantOperations, AssistantRefusal, type AssistantOperation, type AssistantTarget } from "./assistant-connections.js";
 import { AssistantCommandReceipts, assistantRequestDigest, type AssistantCommandReceipt } from "./assistant-command-receipts.js";
 import type { AssistantWorkOriginStore, AssistantSessionWorkOrigin, AuthenticatedAssistantWorkOrigin } from "./assistant-work-origin.js";
 import { AssistantCommandConfirmations } from "./assistant-command-confirmations.js";
@@ -151,7 +151,11 @@ export function registerAssistantSessionOperations(operations: AssistantOperatio
       if (!reserved.created) return {receipt: reserved.receipt, recovery: "Command already reserved. Reconcile receipt and target; never dispatch again. Accepted after interruption means uncertain delivery."};
       try {
         const result = await run(args, owner, sessionOrigin);
-        return {receipt: receipts.settle(current.id, commandId, result.ok ? "succeeded" : "failed", result.data?.id),
+        const receipt = receipts.settle(current.id, commandId, result.ok ? "succeeded" : "failed", result.data?.id);
+        if (name === "session_launch" && result.ok && result.data) {
+          assistantCallContext.getStore()?.recordTranscriptReceipt?.({ kind: "launch", sessionId: result.data.id });
+        }
+        return {receipt,
           ...(result.ok ? {sessionId: result.data?.id, ...(result.threadBudget ? {threadBudget: result.threadBudget} : {})} : {error: result.error,
             capabilityRequirement: result.capabilityRequirement, errorDetails: result.errorDetails,
             recovery: "Use the reported lifecycle/worktree recovery in this session's Wollipog detail, then submit a new command ID."}),

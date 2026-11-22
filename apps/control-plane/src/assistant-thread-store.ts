@@ -9,6 +9,7 @@ import {
   type AssistantThreadHistoryEntry,
   type AssistantThreadLaunchDefaults,
   type AssistantThreadLimits,
+  type AssistantTranscriptReceipt,
 } from "@wollipog/protocol";
 import type { HumanPrincipal } from "./identity.js";
 
@@ -94,6 +95,12 @@ export class AssistantThreadStore {
         organization_id TEXT NOT NULL,
         grant_json TEXT NOT NULL,
         PRIMARY KEY (owner_user_id, organization_id));
+      CREATE TABLE IF NOT EXISTS assistant_transcript_receipts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        receipt_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS assistant_transcript_receipts_session ON assistant_transcript_receipts(session_id);
       -- Sessions a thread's assistant launched (#4663): its work cards and its launch limit.
       CREATE TABLE IF NOT EXISTS assistant_thread_launches (
         session_id TEXT PRIMARY KEY,
@@ -171,6 +178,20 @@ export class AssistantThreadStore {
 
   get(id: string): ThreadRow | null {
     return (this.db.prepare("SELECT * FROM assistant_threads WHERE id=?").get(id) as ThreadRow | undefined) ?? null;
+  }
+
+  recordTranscriptReceipt(sessionId: string, receipt: AssistantTranscriptReceipt): string {
+    const id = randomUUID();
+    this.db.prepare("INSERT INTO assistant_transcript_receipts (id, session_id, receipt_json) VALUES (?, ?, ?)")
+      .run(id, sessionId, JSON.stringify(receipt));
+    return id;
+  }
+
+  transcriptReceipt(sessionId: string, key: string): AssistantTranscriptReceipt | undefined {
+    if (!/^[a-f0-9-]{36}$/u.test(key)) return undefined;
+    const row = this.db.prepare("SELECT receipt_json FROM assistant_transcript_receipts WHERE id=? AND session_id=?")
+      .get(key, sessionId) as { receipt_json: string } | undefined;
+    return row ? JSON.parse(row.receipt_json) as AssistantTranscriptReceipt : undefined;
   }
 
   forSession(sessionId: string): ThreadRow | null {

@@ -10,6 +10,7 @@ import {
   ASSISTANT_EVIDENCE_PREPARE,
   ASSISTANT_EVIDENCE_GET,
   ASSISTANT_EVIDENCE_RELAY_ACK,
+  ASSISTANT_TRANSCRIPT_RECEIPT_KEY,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   DEFAULT_ASSISTANT_THREAD_LIMITS,
   HUMAN_ONLY_PARENT_CONTROL_POLICY,
@@ -210,6 +211,11 @@ test("the owner grants and revokes exact typed resolution, and Assistant calls n
     assert.equal(recorded.assistantDelegation?.threadTitle, "Release Assistant");
     assert.equal(recorded.assistantDelegation?.reason, resolution.reason);
     assert.equal(recorded.assistantDelegation?.grantRevision, 5);
+    const receiptKey = JSON.parse(approved.content[0].text)[ASSISTANT_TRANSCRIPT_RECEIPT_KEY];
+    assert.deepEqual(h.db.assistantThreads.transcriptReceipt(thread.sessionId, receiptKey), {
+      kind: "decision", occurrenceId, category: "merged_branch_deletion", subject: snapshot.branch,
+      outcome: "approved", reason: resolution.reason, resolvedAt: recorded.assistantDelegation?.resolvedAt,
+    });
     assert.ok(decisionPrompts(h, "child").some((prompt) => prompt.includes(`Assistant thread "Release Assistant" ("${thread.id}") under your owner's delegation`)));
     const delegatedPrompt = h.db.raw().prepare(
       "SELECT payload_json FROM session_prompt_commands WHERE session_id=? AND json_extract(payload_json, '$.promptOrigin.kind')='delegation_notice'",
@@ -845,6 +851,47 @@ test("a runner without the proxy cannot start a thread", async () => {
 const launch = (id: number, locationId: string) => ({ jsonrpc: "2.0", id, method: "tools/call",
   params: { name: "session_launch", arguments: { commandId: `launch-${id}`, locationId, agentId: "claude", prompt: "Summarize the open pull requests" } } });
 const resultOf = (reply: { result: { content: Array<{ text: string }> } }) => JSON.parse(reply.result.content[0]!.text);
+
+test("tool results anchor only real launches and new owner requests in their backing conversation", async () => {
+  const h = await harness();
+  try {
+    const thread = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const other = (await h.ownerCall("POST", "/api/assistant-threads", {})).body.thread as AssistantThread;
+    const env = await h.provision(thread.sessionId);
+    const first = resultOf((await h.callTools(env, launch(1, h.location.id)))[0]);
+    assert.equal(first.receipt.status, "succeeded");
+    const key = first[ASSISTANT_TRANSCRIPT_RECEIPT_KEY];
+    assert.equal(typeof key, "string");
+    assert.equal(resultOf((await h.callTools(env, launch(1, h.location.id)))[0])[ASSISTANT_TRANSCRIPT_RECEIPT_KEY], undefined);
+
+    const stop = { jsonrpc: "2.0", id: 3, method: "tools/call",
+      params: { name: "session_stop", arguments: { commandId: "stop-1", sessionId: first.sessionId } } };
+    const asked = resultOf((await h.callTools(env, stop))[0]);
+    assert.equal(asked.ownerConfirmationRequired, true);
+    const confirmation = h.db.assistantOwnerConfirmations.pendingForThread(thread.id)[0]!;
+    assert.ok(confirmation);
+    assert.ok(!JSON.stringify(asked).includes(confirmation.id), "the tool result keeps the owner-only identifier private");
+    assert.equal(resultOf((await h.callTools(env, stop))[0])[ASSISTANT_TRANSCRIPT_RECEIPT_KEY], undefined);
+
+    const result = { kind: "tool_call_update", toolCallId: "provider-launch", status: "completed", assistantReceiptKey: key } as const;
+    h.svc.onSessionEvent(other.sessionId, { ...result, assistantReceipt: { kind: "launch", sessionId: first.sessionId } });
+    h.svc.onSessionEvent(thread.sessionId, result);
+    h.svc.onSessionEvent(thread.sessionId, {
+      ...result, toolCallId: "provider-stop", assistantReceiptKey: asked[ASSISTANT_TRANSCRIPT_RECEIPT_KEY],
+    });
+    assert.deepEqual(h.db.listEvents(other.sessionId).at(-1)?.payload,
+      { kind: "tool_call_update", toolCallId: "provider-launch", status: "completed" });
+    const [launched, pending] = h.db.listEvents(thread.sessionId).slice(-2).map(({ payload }) => payload);
+    assert.deepEqual(launched, {
+      kind: "tool_call_update", toolCallId: "provider-launch", status: "completed",
+      assistantReceipt: { kind: "launch", sessionId: first.sessionId },
+    });
+    assert.deepEqual(pending, {
+      kind: "tool_call_update", toolCallId: "provider-stop", status: "completed",
+      assistantReceipt: { kind: "request", confirmationId: confirmation.id, title: "Stop Session" },
+    });
+  } finally { await h.close(); }
+});
 
 test("a thread launches sessions within its limits and the assistant hears why it is stopped", async () => {
   const h = await harness();

@@ -29,6 +29,7 @@ import type { AssistantThread, AssistantThreadDefaults, CreateAssistantThreadReq
 import type { AssistantOwnerConfirmation, AssistantThreadAccountChoices, ChangeAssistantThreadAccountRequest, ChangeAssistantThreadHarnessRequest, OrchestratorCampaignBudgetDefault } from "@wollipog/protocol";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { assistantDecisionHistoryFixture } from "./assistant-decision-fixture.js";
+import { assistantReceiptFixture, receiptStressTitle } from "./assistant-receipt-fixture.js";
 import { campaignProjection, workSummary } from "./campaign-status-fixtures.js";
 import { confirmationResultFixture, longConfirmationTarget } from "./wollipog-prompt-fixture.js";
 import { ThemeProvider } from "../components/ThemeProvider.js";
@@ -63,6 +64,7 @@ const overBudgetBar = params.get("thread-bar") === "over-budget";
 const panelScenario = params.get("thread-panel");
 const campaignScenario = params.has("campaign");
 const resultScenario = params.get("confirmation-result");
+const receiptScenario = params.get("transcript-receipts");
 const delegationScenario = params.get("delegation");
 const showDelegation = delegationScenario === "stress" || delegationScenario === "ci-old" || delegationScenario === "release-old";
 const longScopes = params.has("long-scopes");
@@ -213,10 +215,21 @@ const sessions = new Map<string, SessionView>([
   ["sess-deps", session("sess-deps", dockScenario ? longConfirmationTarget : "Bump the Vite Group", {
     ...(resultScenario === "approved"
       ? { status: "stopped", archived: true }
-      : dockScenario === "owner" || dockScenario === "campaign" ? { status: "running" }
+      : dockScenario === "owner" || dockScenario === "campaign" || receiptScenario ? { status: "running" }
       : { status: "input_required", pendingApproval: depsApproval("occ-deps-1") }),
   })],
 ]);
+
+const receiptSessionIds = receiptScenario === "many" || receiptScenario === "stress"
+  ? Array.from({ length: 10 }, (_, index) => "sess-receipt-" + (index + 1))
+  : ["sess-flaky", "sess-deps"];
+for (const [index, id] of receiptSessionIds.entries()) {
+  if (sessions.has(id)) continue;
+  const title = receiptScenario === "stress" && index === 0 ? receiptStressTitle
+    : receiptScenario === "stress" ? `Verify Architecture Packaging and Deployment for the Release Candidate on Machine ${index + 1}`
+    : `Verification Session ${index + 1}`;
+  sessions.set(id, session(id, title, { status: index % 2 ? "completed" : "running", updatedAt: NOW - minute + index }));
+}
 
 if (params.has("ci-rerun")) {
   const id = "sess-ci-rerun";
@@ -412,6 +425,9 @@ const triage = (overrides: Partial<AssistantThread> = {}) =>
     } } : {}),
     ...(accountScenario ? { accountChangeSupported: true, providerAccountLabel: triageAccount.label } : {}),
     ...(confirmationCount > 0 ? { confirmations: Array.from({ length: confirmationCount }, (_unused, index) => confirmation(index)) } : {}),
+    ...(receiptScenario ? { launchedSessionIds: receiptSessionIds } : {}),
+    ...(receiptScenario === "request" || receiptScenario === "old"
+      ? { confirmations: [{ ...confirmation(1), createdAt: NOW - 2 * minute }, confirmation(0)] } : {}),
     ...overrides });
 
 let threads: AssistantThread[] = scenario === "long" ? [
@@ -605,6 +621,10 @@ const events: Record<string, SessionEvent[]> = {
       event("sess-flaky", NOW - 15 * minute + index * minute, payload)),
   } : {}),
 };
+if (receiptScenario) {
+  events["sess-triage"] = assistantReceiptFixture(receiptScenario, receiptSessionIds, confirmation(0).id, NOW - minute)
+    .map((payload, index) => event("sess-triage", NOW - 2 * minute + index * 1_000, payload));
+}
 if (streamingReply) {
   seq = 0;
   events["sess-triage"] = [
@@ -710,7 +730,8 @@ function settleConfirmation(threadId: string, confirmationId: string, intent: "a
     role: "orchestrator", status: "running", orchestratorCampaign: campaignProjection(workSummary(NOW)),
   }));
   const settled = { ...current, status: confirmations.length ? "needs_you" as const : "working" as const, confirmations,
-    ...(campaignId ? { launchedCampaignIds: [...(current.launchedCampaignIds ?? []), campaignId] } : {}) };
+    ...(campaignId ? { launchedCampaignIds: [...(current.launchedCampaignIds ?? []), campaignId],
+      campaignReceiptLinks: [...(current.campaignReceiptLinks ?? []), { confirmationId, sessionId: campaignId }] } : {}) };
   threads = threads.map((candidate) => candidate.id === threadId ? settled : candidate);
   publish(settled);
   return { confirmation: structuredClone(confirmation), thread: structuredClone(settled) };

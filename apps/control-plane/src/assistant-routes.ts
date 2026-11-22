@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { ASSISTANT_EVIDENCE_INSPECT, ASSISTANT_EVIDENCE_RELAY_ACK, ASSISTANT_EVIDENCE_RELAY_DELIVER } from "@wollipog/protocol";
+import { ASSISTANT_EVIDENCE_INSPECT, ASSISTANT_EVIDENCE_RELAY_ACK, ASSISTANT_EVIDENCE_RELAY_DELIVER, ASSISTANT_TRANSCRIPT_RECEIPT_KEY } from "@wollipog/protocol";
 import { ASSISTANT_EVIDENCE_ACKNOWLEDGEMENT } from "./assistant-decision-operations.js";
 import { extractBearer } from "./auth.js";
 import { PERSONAL_ORGANIZATION_ID, type HumanPrincipal } from "./identity.js";
@@ -251,8 +251,22 @@ export function registerAssistantRoutes(app: FastifyInstance, deps: {
         if (message.params.name === ASSISTANT_EVIDENCE_INSPECT) {
           throw new AssistantRefusal("Assistant screenshot inspection requires a compatible Wollipog runner.");
         }
-        const output = await deps.operations.call(credential, message.params.name, message.params.arguments ?? {});
-        result = { content: [{type: "text", text: JSON.stringify(output ?? null)}] };
+        const backingId = connection.threadId ? deps.db.assistantThreads.get(connection.threadId)?.session_id : undefined;
+        let receiptKey: string | undefined;
+        const output = await deps.operations.call(credential, message.params.name, message.params.arguments ?? {}, backingId
+          ? (receipt) => {
+              try {
+                receiptKey = deps.db.assistantThreads.recordTranscriptReceipt(backingId, receipt);
+              } catch {
+                // A missing display receipt must never change or invite a retry of the actual effect.
+                req.log.warn("Could not record an Assistant transcript receipt");
+              }
+            }
+          : undefined);
+        // The result carries only a correlation key. Its receipt facts, including any owner-only
+        // confirmation identifier, stay on the control plane.
+        const body = receiptKey ? { [ASSISTANT_TRANSCRIPT_RECEIPT_KEY]: receiptKey, ...output as object } : output;
+        result = { content: [{type: "text", text: JSON.stringify(body ?? null)}] };
       } else return rpcError(-32601, "Method not supported. Use initialize, ping, tools/list or tools/call with MCP Streamable HTTP.");
       return {jsonrpc: "2.0", id: message.id, result};
     } catch (error) {

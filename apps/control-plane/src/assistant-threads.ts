@@ -170,7 +170,7 @@ export interface AssistantThreadDeps {
   retireHarnessSource?(runnerId: string, sessionId: string): void;
   /** The thread's owner confirmations waiting for its owner (#4665). */
   pendingConfirmations?(threadId: string): AssistantOwnerConfirmation[];
-  launchedCampaignIds?(threadId: string): string[];
+  launchedCampaigns?(threadId: string): AssistantThread["campaignReceiptLinks"];
   now?(): number;
 }
 
@@ -194,7 +194,7 @@ export class AssistantThreads {
 
   view(row: ThreadRow, session = row.session_id ? this.deps.getSession(row.session_id) : null): AssistantThread {
     const launched = this.store.launchedSessionIds(row.id);
-    const campaigns = this.deps.launchedCampaignIds?.(row.id) ?? [];
+    const campaigns = this.deps.launchedCampaigns?.(row.id) ?? [];
     const confirmations = row.state === "active" ? this.deps.pendingConfirmations?.(row.id) ?? [] : [];
     const status = assistantThreadStatus(row.state, session, confirmations.length);
     const launchCount = launched.length + campaigns.length;
@@ -219,7 +219,7 @@ export class AssistantThreads {
       ...(earlierConversations.length ? { earlierConversations } : {}),
       ...(session?.providerAccountLabel ? { providerAccountLabel: session.providerAccountLabel } : {}),
       launchedSessionIds: launched,
-      ...(campaigns.length ? { launchedCampaignIds: campaigns } : {}),
+      ...(campaigns.length ? { launchedCampaignIds: campaigns.map(({ sessionId }) => sessionId), campaignReceiptLinks: campaigns } : {}),
       usage: {
         launchedSessions: { used: launchCount, limit: row.launch_limit },
         costUsd: { used: Math.round(costs.spentUsd * 10_000) / 10_000, limit: row.cost_limit_usd },
@@ -817,7 +817,7 @@ export function createAssistantThreads(db: ControlPlaneDb, hub: Hub, svc: Sessio
       svc.setArchived(sessionId, true);
     },
     pendingConfirmations: (threadId) => db.assistantOwnerConfirmations.pendingForThread(threadId),
-    launchedCampaignIds: (threadId) => db.assistantOwnerConfirmations.launchedCampaignIds(threadId),
+    launchedCampaigns: (threadId) => db.assistantOwnerConfirmations.launchedCampaigns(threadId),
   });
   hub.onAssistantSessionUpsert((view) => threads.sessionChanged(view));
   hub.observeSessions({

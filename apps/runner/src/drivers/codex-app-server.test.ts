@@ -2045,6 +2045,21 @@ test("commandExecution: started -> tool_call, completed -> tool_call_update + co
   assert.equal((h.events[1] as { status: string }).status, "completed");
 });
 
+test("Codex reports the Assistant receipt key on the exact completed provider call", () => {
+  const h = makeHarness();
+  const key = "340ec764-4c57-4f9f-ac49-a6da63c401e5";
+  const result = { content: [{ type: "text", text: JSON.stringify({ wollipogTranscriptReceipt: key }) }] };
+  const call = { type: "mcpToolCall", server: "wollipog_assistant", tool: "session_launch" };
+  h.onItem({ ...call, id: "launch" }, false);
+  h.onItem({ ...call, id: "ordinary", server: "outside", result }, true);
+  h.onItem({ ...call, id: "old", result: { content: [{ type: "text", text: "{}" }] } }, true);
+  h.onItem({ ...call, id: "failed", result: { ...result, isError: true } }, true);
+  h.onItem({ ...call, id: "launch", result }, true);
+  assert.deepEqual(h.events.filter((event) => "assistantReceiptKey" in event), [
+    { kind: "tool_call_update", toolCallId: "launch", status: "completed", assistantReceiptKey: key },
+  ]);
+});
+
 const skillRead = (path: string) => [{ type: "read", command: `sed -n '1,260p' ${path}`, name: "SKILL.md", path }];
 
 test("commandExecution: a pure read of a registered SKILL.md becomes a named skill row", () => {

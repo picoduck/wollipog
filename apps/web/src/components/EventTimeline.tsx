@@ -1,4 +1,8 @@
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
+import {
+  AssistantMessageReceipts, AssistantReceiptItem, AssistantReceiptPlacement, AssistantTranscriptContext,
+} from "./AssistantTranscriptReceipts.js";
+import { AssistantReceiptProjector } from "../assistant-transcript-placement.js";
 import { WollipogPromptRow } from "./WollipogPromptRow.js";
 import { useShowAgentLogs } from "../agent-logs.js";
 import type { AgentDefinition, AgentDriverKind, InPlaceHandoffTurn, ArtifactView } from "@wollipog/protocol";
@@ -772,9 +776,13 @@ export const EventTimeline = memo(function EventTimeline({
    */
   artifactSessionId?: string;
 }) {
+  const assistant = useContext(AssistantTranscriptContext) !== null;
+  const [receiptProjector] = useState(() => new AssistantReceiptProjector());
+  const placedReceipts = assistant ? receiptProjector.project(items) : null;
   const effectiveHistoryKey = historyKey ?? "timeline";
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
   return (
+    <AssistantReceiptPlacement.Provider value={placedReceipts?.messages}>
     <TimelineAgentsContext.Provider value={agents}>
     <HandoffContext.Provider value={handoff}>
     <TimelineSessionLinkContext.Provider value={onOpenSession}>
@@ -785,7 +793,7 @@ export const EventTimeline = memo(function EventTimeline({
     <TranscriptArtifactViewerProvider onOpenInBrowser={onOpenArtifact} sessionId={artifactSessionId}>
     <EventTimelineBody
       key={effectiveHistoryKey}
-      items={items}
+      items={placedReceipts?.items ?? items}
       onRewind={onRewind}
       rewindUnavailableReason={rewindUnavailableReason}
       onFork={onFork}
@@ -821,6 +829,7 @@ export const EventTimeline = memo(function EventTimeline({
     </TimelineSessionLinkContext.Provider>
     </HandoffContext.Provider>
     </TimelineAgentsContext.Provider>
+    </AssistantReceiptPlacement.Provider>
   );
 });
 
@@ -2478,6 +2487,8 @@ function TimelineRowContent({
             : "Earlier messages were summarized to free context."}
         />
       );
+    case "assistant_receipt":
+      return <AssistantReceiptItem receipt={item.receipt} open={disclosureOpen} onToggle={onDisclosureToggle} />;
     case "wollipog_prompt":
       return <WollipogPromptRow origin={item.promptOrigin} text={item.text} createdAt={item.createdAt} open={disclosureOpen} onToggle={onDisclosureToggle} />;
     case "user_message":
@@ -2532,6 +2543,7 @@ function TimelineRowContent({
           <ReplyArtifactScope text={item.text} settled={mediaSettled} previews={replyArtifacts}>
             <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled} streaming={!mediaSettled}>{item.text}</Markdown>
           </ReplyArtifactScope>
+          <AssistantMessageReceipts id={item.id} />
           {(standaloneCopy || insertable) && item.text && (
             <div className="tl-message-actions tl-reply-actions" role="group" aria-label="Message Actions">
               <CopyButton text={item.text} format={markdownPlainText} iconOnly ariaLabel="Copy Response" className="icon-btn sm" />

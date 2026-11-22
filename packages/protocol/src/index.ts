@@ -6567,6 +6567,10 @@ export type SessionEventPayload =
       exitCode?: number;
       /** v393: content-safe evidence from the provider's structured permission-denial result. */
       providerForgeRefusal?: import("./forge-decision-action.js").ProviderForgeRefusal;
+      /** Opaque key echoed from the authenticated Assistant MCP result (v408). */
+      assistantReceiptKey?: string;
+      /** Control-plane-authored, after checking the key against this backing session. */
+      assistantReceipt?: import("./assistant-threads.js").AssistantTranscriptReceipt;
     }
   | { kind: "plan"; entries: PlanEntry[]; parentToolUseId?: string }
   | { kind: "command_output"; text: string; textRefs?: EventPayloadReference[]; parentToolUseId?: string }

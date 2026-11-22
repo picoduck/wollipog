@@ -22460,13 +22460,23 @@ export class SessionsService {
     ts: number,
     staged?: StagedSessionEventPayload | null,
   ): ExternalizedSessionEventPayload {
-    if (staged === null) return { payload, artifactIds: [] };
-    try {
-      return staged ? staged.commit() : externalizeSessionEventPayload(this.db, sessionId, payload, ts);
-    } catch {
-      this.log.warn(`event payload externalization deferred for ${sessionId} (${payload.kind})`);
-      return { payload, artifactIds: [] };
+    let result: ExternalizedSessionEventPayload = { payload, artifactIds: [] };
+    if (staged !== null) {
+      try {
+        result = staged ? staged.commit() : externalizeSessionEventPayload(this.db, sessionId, payload, ts);
+      } catch {
+        this.log.warn(`event payload externalization deferred for ${sessionId} (${payload.kind})`);
+      }
     }
+    if (result.payload.kind !== "tool_call_update" ||
+        (result.payload.assistantReceiptKey === undefined && result.payload.assistantReceipt === undefined)) return result;
+    // All live and recovered tool events go through here. The provider can identify the tool
+    // result, but it cannot supply owner-facing facts or use a key from another backing session.
+    const { assistantReceiptKey, assistantReceipt: _untrusted, ...tool } = result.payload;
+    const receipt = typeof assistantReceiptKey === "string"
+      ? this.db.assistantThreads.transcriptReceipt(sessionId, assistantReceiptKey)
+      : undefined;
+    return { ...result, payload: { ...tool, ...(receipt ? { assistantReceipt: receipt } : {}) } };
   }
 
   /** Make a large payload's chunks durable off the event loop (#2794). Null keeps it inline. */

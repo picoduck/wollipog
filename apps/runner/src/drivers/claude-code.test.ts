@@ -4230,6 +4230,24 @@ test("user tool_result (success) -> tool_call_update completed", () => {
   ]);
 });
 
+test("Claude reports the Assistant receipt key even when tool results finish out of order", () => {
+  const h = makeHarness();
+  const keys = ["340ec764-4c57-4f9f-ac49-a6da63c401e5", "c0557b50-856a-443e-9d14-c5cc3f79807a"];
+  const call = (id: string, name: string) => ({ type: "tool_use", id, name, input: {} });
+  const result = (id: string, key: string, failed = false) => ({ type: "tool_result", tool_use_id: id, is_error: failed,
+    content: [{ type: "text", text: JSON.stringify({ wollipogTranscriptReceipt: key, filler: "x".repeat(800) }) }] });
+  h.feed({ type: "assistant", message: { content: [
+    call("launch", "mcp__wollipog_assistant__session_launch"),
+    call("request", "mcp__wollipog_assistant__session_stop"),
+    call("ordinary", "Bash"), call("failed", "mcp__wollipog_assistant__session_launch"),
+  ] } });
+  h.feed({ type: "user", message: { content: [
+    result("request", keys[1]!), result("ordinary", keys[1]!), result("failed", keys[1]!, true), result("launch", keys[0]!),
+  ] } });
+  assert.deepEqual(h.events.flatMap((event) => event.kind === "tool_call_update" && event.assistantReceiptKey
+    ? [[event.toolCallId, event.assistantReceiptKey]] : []), [["request", keys[1]], ["launch", keys[0]]]);
+});
+
 test("user tool_result error -> failed; array content is flattened", () => {
   const h = makeHarness();
   h.feed({

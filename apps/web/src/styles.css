@@ -9236,6 +9236,7 @@ textarea {
 .tl-prompt-target > span:first-child { min-width: 0; }
 .tl-prompt-target > .status { flex: none; }
 .tl-prompt-fact { color: var(--text-dim); font: var(--type-small); }
+.tl-wollipog-prompt[data-prompt-origin="delegated_decision"] .tl-prompt-fact { overflow-wrap: anywhere; }
 .tl-prompt-message {
   flex-direction: column;
   align-items: stretch;
@@ -9243,9 +9244,40 @@ textarea {
   overflow-wrap: anywhere;
 }
 .tl-prompt-message > pre { margin: var(--space-1) 0 0; white-space: pre-wrap; }
+.assistant-transcript-receipts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-block-start: var(--space-2);
+}
+.btn.assistant-transcript-receipt {
+  max-width: 100%;
+  min-height: var(--control-h-sm);
+  text-align: start;
+}
+.assistant-transcript-receipt > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.assistant-transcript-launch.btn {
+  justify-content: space-between;
+  width: 100%;
+}
+.assistant-transcript-launch > .status { flex: none; }
+.assistant-transcript-settled {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
 @media (pointer: coarse) {
   button.chip.tl-prompt-target,
   .tl-prompt-details > summary { min-height: var(--control-h); }
+  .assistant-transcript-receipt.btn.sm { --control-h-sm: var(--control-h); }
+  .assistant-transcript-receipt.btn.sm::after { content: none; }
 }
 .tl-row {
   display: flex;

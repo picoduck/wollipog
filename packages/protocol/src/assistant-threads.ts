@@ -138,6 +138,17 @@ export interface AssistantDecisionHistoryPage {
   nextBefore?: string;
 }
 
+/** Owner-visible facts produced by a successful Assistant tool call. The runner reports only
+ * an opaque correlation key from the MCP result; the control plane supplies these facts. */
+export type AssistantTranscriptReceipt =
+  | { kind: "launch"; sessionId: string }
+  | { kind: "request"; confirmationId: string; title: string }
+  | { kind: "decision"; occurrenceId: string; category: AssistantDecisionCategory;
+      outcome: AssistantDecisionOutcome; subject: string; reason: string; resolvedAt: number;
+      selectionMode?: AssistantDecisionGrant["selectionMode"] };
+
+export const ASSISTANT_TRANSCRIPT_RECEIPT_KEY = "wollipogTranscriptReceipt";
+
 export interface AssistantThreadUsage {
   launchedSessions: { used: number; limit: number | null };
   /** The backing session's cost plus every launched session's. */
@@ -181,6 +192,8 @@ export interface AssistantThread {
   launchedSessionIds: string[];
   /** Owner-approved independent roots. Their usage and descendants belong to their own campaign. */
   launchedCampaignIds?: string[];
+  /** Owner-approved campaigns, linked to the confirmation that originally asked to start them. */
+  campaignReceiptLinks?: { confirmationId: string; sessionId: string }[];
   /** Additive: the thread's limits and what it has used of them. */
   usage?: AssistantThreadUsage;
   /** Advertises the dedicated owner limits write route. Absent on older control planes. */

@@ -13,6 +13,7 @@
  */
 
 import {
+  ASSISTANT_MCP_SERVER_NAME,
   DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
   type AgentCapabilities,
   type AgentQuestion,
@@ -26,6 +27,7 @@ import {
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, posix } from "node:path";
 import { JsonRpcPeer, type RpcError } from "../jsonrpc.js";
+import { assistantTranscriptReceiptKey } from "./assistant-tool-result.js";
 import { campaignOperationEvidence } from "../campaign-operation-evidence.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import {
@@ -2948,6 +2950,11 @@ export class CodexAppServerDriver implements Driver {
           completed ? "completed" : "in_progress",
           parentToolUseId,
         );
+        if (completed && item.server === ASSISTANT_MCP_SERVER_NAME && !item.error && !item.result?.isError) {
+          const receiptKey = assistantTranscriptReceiptKey(item.result?.content?.[0]?.text);
+          if (receiptKey) this.cb.onEvent({ kind: "tool_call_update", toolCallId: id,
+            status: "completed", assistantReceiptKey: receiptKey, ...(parentToolUseId ? { parentToolUseId } : {}) });
+        }
         break;
       }
       case "todoList": {
