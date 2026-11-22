@@ -927,7 +927,7 @@ test("Network in a browser names this window's server and where Tailnet access i
   await expect(panel.locator(".settings-group-foot"))
     .toHaveText("Set up secure remote access on the computer running this server.");
   await expect(panel.locator(".settings-group-title")).toHaveText(["Connection"]);
-  await expect(panel.getByRole("button", {name: /Manage Assistant Connections/})).toHaveCount(0);
+  await expect(panel.getByRole("button", {name: /All Connections/})).toHaveCount(0);
   await expect(panel).not.toContainText(/not built yet|instance menu|control plane/i);
 });
 
@@ -1171,6 +1171,14 @@ const skipWithoutBaselines = () => test.skip(!hasBaselines() && test.info().conf
   `no ${process.platform} baselines committed — run with --update-snapshots to create them`);
 
 for (const theme of THEMES) {
+  test(`Assistant Thread Defaults rows render in ${theme}`, async ({ page }) => {
+    skipWithoutBaselines();
+    await useHarness(page, theme, { section: "assistant" });
+    const defaults = page.getByRole("region", { name: "Thread Defaults", exact: true });
+    await expect(defaults.getByRole("button")).toHaveCount(5);
+    await expect(defaults.locator(".settings-group-surface")).toHaveScreenshot(`assistant-thread-defaults-${theme}.png`, PIXELS);
+  });
+
   test(`the affordances render as expected in ${theme}`, async ({ page }) => {
     skipWithoutBaselines();
     for (const [name, key] of [

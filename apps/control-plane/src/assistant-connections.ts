@@ -183,6 +183,11 @@ export class AssistantConnections {
     if (!connection || connection.revoked) throw new AssistantRefusal("Assistant connection is missing or revoked. Create a new connection instead.");
     return connection.grant.destructiveConfirmation ?? "none";
   }
+  lastUsedAt(id: string): number | null {
+    const row = this.db.prepare("SELECT created_at FROM assistant_activity WHERE connection_id=? ORDER BY id DESC LIMIT 1")
+      .get(id) as { created_at: number } | undefined;
+    return row?.created_at ?? null;
+  }
   activity(id: string): AssistantActivityRecord[] { return this.db.prepare("SELECT connection_id,grant_revision,operation,target_json,outcome,created_at FROM assistant_activity WHERE connection_id=? ORDER BY id DESC LIMIT 100").all(id) as unknown as AssistantActivityRecord[]; }
   record(connection: AssistantConnection, operation: string, target: AssistantTarget, outcome: "succeeded" | "refused" | "failed"): void {
     // Only registered names and resolved resource identifiers. Never arguments or exception messages.
