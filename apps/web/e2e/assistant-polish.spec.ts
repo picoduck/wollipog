@@ -54,8 +54,8 @@ async function expectAligned(rows: Locator, text: string, trailing: string, lead
   expect(failures).toEqual([]);
 }
 
-async function expectButtonStandard(surface: Locator) {
-  const errors = await surface.evaluate(root => {
+function buttonStandardViolations(surface: Locator) {
+  return surface.evaluate(root => {
     const region = ".notice, .request-card, .assistant-dock-card, .modal-foot";
     return [root, ...root.querySelectorAll(region)].filter(node => node.matches(region)).flatMap(group => {
       if (!group.getClientRects().length) return [];
@@ -74,8 +74,26 @@ async function expectButtonStandard(surface: Locator) {
       return problems.map(problem => problem + ": " + labels.join(", "));
     });
   });
-  expect(errors).toEqual([]);
 }
+
+async function expectButtonStandard(surface: Locator) {
+  expect(await buttonStandardViolations(surface)).toEqual([]);
+}
+
+test("the ratchet detects an extra filled action and reversed request actions", async ({ page }) => {
+  await open(page, "light", threadPath, "dock=owner&confirm=1");
+  const card = page.locator(".assistant-dock-card");
+  await expect(card.getByRole("button", { name: "Approve Once" })).toBeVisible();
+  await expectButtonStandard(card);
+  const deny = card.getByRole("button", { name: "Deny", exact: true });
+  await deny.evaluate(button => button.classList.remove("ghost"));
+  expect(await buttonStandardViolations(card)).toContainEqual(expect.stringContaining("More than one filled action"));
+  await deny.evaluate(button => {
+    button.classList.add("ghost");
+    button.parentElement!.append(button);
+  });
+  expect(await buttonStandardViolations(card)).toContainEqual(expect.stringContaining("Deny follows Approve"));
+});
 
 async function check(surface: Locator, id: string, theme: string, state: string) {
   await expect(surface).toBeVisible();

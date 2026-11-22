@@ -1147,6 +1147,7 @@ const client = {
     return structuredClone(sessions.get(id)!);
   },
   restart: async (id: string) => {
+    if (params.has("restart-refusal")) throw new ApiError("The saved tool key must be replaced.", 409);
     document.body.dataset.restartedThread = id;
     const next = { ...sessions.get(id)!, status: "idle" as const };
     upsert(next);

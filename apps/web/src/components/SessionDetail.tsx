@@ -4705,7 +4705,7 @@ function SessionDetailLoaded({
   }, [api, busy, composerRestartOffered, loadSession, restartPending, restartRefusal, runnerOnline, session.id]);
   // The launch refusal notice's Restart Session (#3240): the same restart as the header's, for the
   // failed or stopped session the refusal left.
-  const restartFromRefusal = useCallback(async (waitForProviderHome = false, onFailure?: () => void) => {
+  const restartFromRefusal = useCallback(async (waitForProviderHome = false, onFailure?: (error: ComposerActionError) => void) => {
     if (!runnerOnline || busy || restartPending || restartRefusal !== null || session.archived ||
         turnRetryInFlightRef.current) return;
     const generation = viewGenerationRef.current;
@@ -4717,7 +4717,7 @@ function SessionDetailLoaded({
       loadSession(await api.restart(session.id, waitForProviderHome ? { waitForProviderHome } : undefined));
     } catch (cause) {
       if (viewGenerationRef.current === generation) {
-        if (onFailure) onFailure();
+        if (onFailure) onFailure(composerActionError("restart", cause, actionMachineNameRef.current));
         else showActionError("restart", cause);
       }
     } finally {
@@ -5099,7 +5099,7 @@ function SessionDetailLoaded({
     ? prioritizedRequests.find((request) => request.kind === "authentication") : undefined;
   const [assistantSignInOpen, setAssistantSignInOpen] = useState(false);
   const [assistantSignInError, setAssistantSignInError] = useState<string>();
-  const [assistantRestartError, setAssistantRestartError] = useState<string>();
+  const [assistantRestartError, setAssistantRestartError] = useState<ComposerActionError>();
   const [assistantSignInPending, setAssistantSignInPending] = useState(false);
   const assistantSignInFlight = useRef(false);
   const openThreadMachine = () => navigate({ name: "runners", section: "machines", machineId: session.runnerId });
@@ -5153,11 +5153,12 @@ function SessionDetailLoaded({
               onClick={event => {
                 event.currentTarget.focus({ preventScroll: true });
                 setAssistantRestartError(undefined);
-                void restartFromRefusal(false, () => setAssistantRestartError("Couldn't restart the thread. Try again."));
+                void restartFromRefusal(false, setAssistantRestartError);
               }}>Restart Thread</BusyButton>}
             openMachine={<button type="button" className="btn sm ghost" onClick={openThreadMachine}>Open Machine</button>}
             actionError={problem.key === "sign_in_needed" ? assistantSignInError
-              : problem.key === "tools_unavailable" ? assistantRestartError : undefined} />
+              : problem.key === "tools_unavailable" ? assistantRestartError?.message : undefined}
+            actionErrorDetail={problem.key === "tools_unavailable" ? assistantRestartError?.detail : undefined} />
         ),
       });
     }

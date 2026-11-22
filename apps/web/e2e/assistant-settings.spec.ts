@@ -112,6 +112,7 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
         await active.click();
         await revoke.click();
         await expect(grants.getByText("Triage Open Issues", { exact: true })).toHaveCount(0);
+        await expect(grants.getByRole("heading", { name: "Active Delegations" })).toBeFocused();
         await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", "null");
         await expired.click();
         await expect(grants.getByText("Release Follow-Up", { exact: true })).toHaveCount(0);

@@ -111,6 +111,8 @@ function DecisionHistory({ campaignId, threadId, onCount }: {
   const [cursors, setCursors] = useState<string[]>([]);
   const [retry, setRetry] = useState(0);
   const [retrying, setRetrying] = useState(false);
+  const [retryFailed, setRetryFailed] = useState(false);
+  const retryInFlight = useRef(false);
   const [state, setState] = useState<HistoryState>({ kind: "loading" });
   const [summary, setSummary] = useState<{ counts: ReturnType<typeof countOutcomes>; exact: boolean }>();
   const results = useRef<HTMLDivElement>(null);
@@ -135,10 +137,14 @@ function DecisionHistory({ campaignId, threadId, onCount }: {
         if (!before) onCount?.(page.total?.toString() ?? (page.entries.length + (page.nextBefore ? "+" : "")));
       } catch {
         if (controller.signal.aborted) return;
+        setRetryFailed(retryInFlight.current);
         setState({ kind: "error" });
         if (!before) onCount?.(null);
       } finally {
-        if (!controller.signal.aborted) setRetrying(false);
+        if (!controller.signal.aborted) {
+          retryInFlight.current = false;
+          setRetrying(false);
+        }
       }
     });
     return () => controller.abort();
@@ -177,11 +183,14 @@ function DecisionHistory({ campaignId, threadId, onCount }: {
         ref={retryButton} busy={retrying} progress="Loading delegated decisions…"
         onClick={event => {
           event.currentTarget.focus({ preventScroll: true });
+          setRetryFailed(false);
+          retryInFlight.current = true;
           setRetrying(true);
           setRetry((current) => current + 1);
         }}>Retry</BusyButton>}>
         <p>Couldn't load delegated decisions.</p>
       </Notice>}
+      {state.kind === "error" && <span role="status" className="sr-only">{retryFailed ? "Retry failed. Couldn't load delegated decisions." : ""}</span>}
       {entries?.length === 0 && <p className="assistant-decision-empty muted">{filter === "all"
         ? "No delegated decisions yet."
         : summary?.exact ? "No matching decisions." : "No matching decisions on this page."}</p>}

@@ -182,3 +182,15 @@ test("an older control plane leaves the Assistant notice slot absent", async ({ 
   await expect(page.locator(noticeSelector)).toHaveCount(0);
   await expect(page.locator(".composer").locator(".composer-box")).toBeVisible();
 });
+
+test("a refused restart keeps focus and the server's detail in the Assistant notice", async ({ page }) => {
+  const path = viewPath({ name: "assistants", threadId: openThread });
+  await page.goto("/assistants-e2e.html?" + new URLSearchParams({ path, "thread-health": "tools_unavailable", "restart-refusal": "1" }));
+  const notice = page.locator(noticeSelector);
+  const restart = notice.getByRole("button", { name: "Restart Thread" });
+  await restart.click();
+  await expect(notice.getByRole("alert")).toContainText("Couldn't restart");
+  await expect(restart).toBeFocused();
+  await notice.getByRole("button", { name: "Show Details" }).click();
+  await expect(notice.locator(".notice-details-body")).toContainText("The saved tool key must be replaced.");
+});

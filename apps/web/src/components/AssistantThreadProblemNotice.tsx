@@ -10,7 +10,7 @@ import { AUTOMATIC_TURNS_HELD_SENTENCE } from "../turn-error.js";
 import { Notice } from "./Notice.js";
 
 export function AssistantThreadProblemNotice({ problem, thread, machine, trailing, details, switchAccount, signIn,
-  restart, openMachine, actionError }: {
+  restart, openMachine, actionError, actionErrorDetail }: {
   problem: AssistantThreadProblem;
   thread: AssistantThread;
   machine: string;
@@ -21,6 +21,7 @@ export function AssistantThreadProblemNotice({ problem, thread, machine, trailin
   restart: ReactNode;
   openMachine: ReactNode;
   actionError?: string;
+  actionErrorDetail?: string;
 }) {
   const privacy = useAccountEmailPrivacy();
   const account = accountLabelText(thread.providerAccountLabel ?? "Machine Sign-In", "the selected account", privacy.hide);
@@ -62,8 +63,9 @@ export function AssistantThreadProblemNotice({ problem, thread, machine, trailin
   const hasDetails = problem.key === "turn_rejected" || problem.key === "automatic_turns_held";
   return <Notice tone={problem.severity} role={problem.severity === "danger" ? "alert" : "status"}
     title={title} trailing={trailing} compact={problem.key === "reconnecting"} actions={actions}
-    details={hasDetails ? <div className="code-well"><pre>
-      {details ? withoutPromptFailedPrefix(details) : "Provider details are unavailable."}
+    detailsFirst={Boolean(actionErrorDetail)}
+    details={hasDetails || actionErrorDetail ? <div className="code-well"><pre>
+      {actionErrorDetail ?? (details ? withoutPromptFailedPrefix(details) : "Provider details are unavailable.")}
     </pre></div> : undefined}>
     <p>{body}</p>
     {actionError && <p className="notice-meta" role="alert">{actionError}</p>}

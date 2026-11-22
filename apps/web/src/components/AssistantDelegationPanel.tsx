@@ -52,14 +52,14 @@ function DelegationGroup() {
   const clear = async (thread: AssistantThread, expired: boolean) => {
     if (!thread.decisionDelegation?.grant || removing) return;
     const revision = thread.decisionDelegation.revision;
-    const remove = async () => {
-      const trigger = document.activeElement;
+    const remove = async (afterRemove: () => void) => {
       await api.setAssistantThreadDelegation(thread.id, { revision, grant: null });
-      if (trigger instanceof HTMLElement && trigger === document.activeElement) removedControl.current = trigger;
+      afterRemove();
       setGrants((current) => current.kind === "ready"
         ? { kind: "ready", threads: current.threads.filter((item) => item.id !== thread.id) } : current);
     };
     if (!expired) {
+      const returnFocus = { current: null as HTMLElement | null };
       await confirm({
         title: "Revoke Delegation",
         message: `“${assistantThreadTitle(thread)}” will lose permission to resolve decisions on your behalf.`,
@@ -67,14 +67,18 @@ function DelegationGroup() {
         tone: "danger",
         progress: "Revoking delegation…",
         cancelWhileRunning: false,
-        onConfirm: remove,
+        returnFocus,
+        onConfirm: () => remove(() => { returnFocus.current = heading.current; }),
       });
       return;
     }
     setRemoving(thread.id);
     setRemoveError(null);
     try {
-      await remove();
+      const trigger = document.activeElement;
+      await remove(() => {
+        if (trigger instanceof HTMLElement && trigger === document.activeElement) removedControl.current = trigger;
+      });
     } catch (cause) {
       setRemoveError(cause instanceof Error ? cause.message : String(cause));
       setAttempt((count) => count + 1);

@@ -204,6 +204,10 @@ for (const theme of ["light", "dark"] as const) {
         await check(page, decisions);
         await page.getByRole("tab", { name: /^Decisions/ }).evaluate((tab: HTMLElement) => tab.blur());
         await capture(page, "decisions", theme, "error");
+        await retry.click();
+        await expect(log(decisions).getByRole("status").filter({ hasText: "Retry failed." }))
+          .toHaveText("Retry failed. Couldn't load delegated decisions.");
+        await expect(retry).toBeFocused();
         await page.evaluate(() => Reflect.get(window, "allowDecisionHistoryRetry")());
         await retry.click();
         await expect(rows(decisions)).toHaveCount(5);
