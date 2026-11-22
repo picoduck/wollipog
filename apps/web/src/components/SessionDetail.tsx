@@ -4717,7 +4717,7 @@ function SessionDetailLoaded({
       loadSession(await api.restart(session.id, waitForProviderHome ? { waitForProviderHome } : undefined));
     } catch (cause) {
       if (viewGenerationRef.current === generation) {
-        if (onFailure) onFailure(composerActionError("restart", cause, actionMachineNameRef.current));
+        if (onFailure) onFailure(composerActionError("restartThread", cause, actionMachineNameRef.current));
         else showActionError("restart", cause);
       }
     } finally {

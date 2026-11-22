@@ -189,7 +189,7 @@ test("a refused restart keeps focus and the server's detail in the Assistant not
   const notice = page.locator(noticeSelector);
   const restart = notice.getByRole("button", { name: "Restart Thread" });
   await restart.click();
-  await expect(notice.getByRole("alert")).toContainText("Couldn't restart");
+  await expect(notice.getByRole("alert")).toHaveText("Couldn't restart this thread. Try again.");
   await expect(restart).toBeFocused();
   await notice.getByRole("button", { name: "Show Details" }).click();
   await expect(notice.locator(".notice-details-body")).toContainText("The saved tool key must be replaced.");
