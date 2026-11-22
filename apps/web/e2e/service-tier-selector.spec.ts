@@ -42,7 +42,7 @@ for (const viewport of [
     await expect(group).toContainText("Standard response speed.");
     await expect(group).toContainText("Faster responses that use more ChatGPT credits.");
     await expect(group).not.toContainText("Applies to the next turn.");
-    await expect(dialog).toContainText("Changes apply from the next turn.");
+    await expect(dialog.getByText("Changes apply from the next turn.")).toBeInViewport({ ratio: 1 });
     await page.screenshot({ path: `${SHOT}/${viewport.name}-speed.png` });
     await page.keyboard.press("Escape");
     await expect(speed).toBeFocused();

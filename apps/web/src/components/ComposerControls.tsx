@@ -331,6 +331,7 @@ export function ModelSettingsPopover({
   // The row a closed breakdown returns focus to.
   const returnTo = useRef<ModelSettingsDetail | null>(null);
   const backRef = useRef<HTMLButtonElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const detailController = useMemo<ModelSettingsDetailController>(() => ({
     detail,
     open: setDetail,
@@ -408,6 +409,7 @@ export function ModelSettingsPopover({
       {open && !disabled && (
         <MenuSurface
           surfaceRef={popover.panelRef}
+          contentRef={contentRef}
           anchor={{ trigger: popover.triggerRef }}
           id={popover.panelId}
           kind="popover"
@@ -457,7 +459,7 @@ export function ModelSettingsPopover({
           }}
         >
           <ModelSettingsDetailContext.Provider value={detailController}>
-            {children}
+            <div ref={contentRef}>{children}</div>
           </ModelSettingsDetailContext.Provider>
         </MenuSurface>
       )}
