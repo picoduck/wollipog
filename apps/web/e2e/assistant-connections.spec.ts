@@ -341,6 +341,9 @@ for (const width of [1440, 390]) {
           await expect(rows.first()).toContainText("Revoked");
           await newConnection(page);
           await expect(page.getByRole("heading", { name: "New Connection", exact: true })).toBeVisible();
+          await expect(nameField(page)).toBeVisible();
+          await expect(page.getByRole("radiogroup", { name: "Management Access", exact: true })).toBeVisible();
+          await expect(page.getByText("Loading connections…", { exact: true })).toHaveCount(0);
           await capture(page, theme, "new-connection");
         } finally {
           await server.close();
