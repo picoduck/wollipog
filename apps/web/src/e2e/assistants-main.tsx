@@ -839,6 +839,7 @@ const client = {
     if (scenario === "empty" || panelScenario === "not-delegated") return { entries: [], total: 0 };
     const history = assistantDecisionHistoryFixture("campaign_0", {
       ...filter, release: params.has("release-history"), stress: scenario === "stress", legacy: scenario === "legacy",
+      evidence: scenario === "evidence",
     });
     return filter.threadId && !filter.before ? { ...history, total: 24 } : history;
   },

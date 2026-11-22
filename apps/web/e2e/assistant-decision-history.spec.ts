@@ -46,6 +46,8 @@ async function capture(page: Page, surface: string, theme: string, state: string
   const dir = process.env.DELEGATED_DECISIONS_EVIDENCE_DIR;
   if (!dir) return;
   const { width, height } = page.viewportSize()!;
+  if (process.env.DELEGATED_DECISIONS_EVIDENCE_ROUND === "2" &&
+      state !== "older-decisions-page2" && !(width === 390 && (state === "loading" || state === "error"))) return;
   await page.screenshot({
     path: join(dir, [surface, width + "x" + height, theme, state].join("-") + ".png"),
     animations: "disabled",
@@ -137,8 +139,9 @@ for (const theme of ["light", "dark"] as const) {
         await capture(page, "decisions", theme, "older-decisions");
         await more.click();
         await expect(rows(decisions)).toHaveCount(5);
-        await expect(history(decisions).getByText("picoduck/wollipog#120")).toBeVisible();
+        await expectFullyInViewport(history(decisions).getByText("picoduck/wollipog#120"), "Page Two Pull Request");
         await expect(history(decisions).getByText("picoduck/wollipog#126")).toHaveCount(0);
+        await capture(page, "decisions", theme, "older-decisions-page2");
         await decisions.getByRole("button", { name: "Newer Decisions" }).click();
         await expect(history(decisions).getByText("picoduck/wollipog#126")).toBeVisible();
 
@@ -188,6 +191,7 @@ for (const theme of ["light", "dark"] as const) {
         await expect(skeleton).toContainText("Loading delegated decisions…");
         await expect(skeleton.locator(".skeleton-row").first()).toBeVisible();
         await check(page, decisions);
+        await page.getByRole("tab", { name: /^Decisions/ }).evaluate((tab: HTMLElement) => tab.blur());
         await capture(page, "decisions", theme, "loading");
         await page.evaluate(() => Reflect.get(window, "releaseDecisionHistory")());
         await expect(rows(decisions)).toHaveCount(5);
@@ -198,10 +202,41 @@ for (const theme of ["light", "dark"] as const) {
         const retry = alert.getByRole("button", { name: "Retry", exact: true });
         await expectFullyInViewport(retry, "Retry");
         await check(page, decisions);
+        await page.getByRole("tab", { name: /^Decisions/ }).evaluate((tab: HTMLElement) => tab.blur());
         await capture(page, "decisions", theme, "error");
         await retry.click();
         await expect(rows(decisions)).toHaveCount(5);
         await expect(alert).toHaveCount(0);
+      });
+
+      test("keyboard focus fits inside the tab strip with space around the label", async ({ page }) => {
+        await openLog(page, theme);
+        const strip = page.getByRole("tablist", { name: "Thread Panel" });
+        const work = strip.getByRole("tab", { name: /^Work/ });
+        const decisions = strip.getByRole("tab", { name: /^Decisions/ });
+        await decisions.press("Home");
+        for (const tab of [work, decisions]) {
+          await expect(tab).toBeFocused();
+          const ring = await tab.evaluate((element) => {
+            const bounds = element.getBoundingClientRect();
+            const stripBounds = element.parentElement!.getBoundingClientRect();
+            const style = getComputedStyle(element, "::before");
+            return {
+              width: parseFloat(style.outlineWidth),
+              outsideLabel: -parseFloat(style.left),
+              insideStrip: bounds.left + parseFloat(style.left) >= stripBounds.left &&
+                bounds.right - parseFloat(style.right) <= stripBounds.right,
+              topGap: bounds.top + parseFloat(style.top) - stripBounds.top,
+              bottomGap: stripBounds.bottom - (bounds.bottom - parseFloat(style.bottom)),
+            };
+          });
+          expect(ring.width).toBe(2);
+          expect(ring.insideStrip).toBe(true);
+          expect(ring.outsideLabel).toBeGreaterThan(ring.width);
+          expect(ring.topGap).toBeGreaterThanOrEqual(4);
+          expect(ring.bottomGap).toBeGreaterThanOrEqual(4);
+          if (tab === work) await work.press("ArrowRight");
+        }
       });
     });
   }
@@ -216,4 +251,18 @@ test("older history servers keep page-local filtering and paging usable", async 
   await expect(rows(decisions).getByRole("img", { name: "Denied" })).toHaveCount(1);
   await decisions.getByRole("button", { name: "Older Decisions" }).click();
   await expect(rows(decisions).getByRole("img", { name: "Denied" })).toHaveCount(2);
+});
+
+test("the evidence action label matches the recorded approval or denial", async ({ page }) => {
+  const decisions = await openLog(page, "light", "evidence");
+  const evidenceRows = rows(decisions).filter({ hasText: "Screenshots" });
+  await expect(evidenceRows.filter({ has: page.getByRole("img", { name: "Approved" }) })).toContainText("Approve UI Evidence");
+  await expect(evidenceRows.filter({ has: page.getByRole("img", { name: "Denied" }) })).toContainText("Send Back UI Evidence");
+});
+
+test("campaigns without delegated decisions omit the section", async ({ page }) => {
+  await page.goto(campaignFixture("light").replace("decision-history=stress", "decision-history=empty"));
+  await page.getByRole("button", { name: /^Go to Section/ }).click();
+  await expect(page.getByRole("menuitem", { name: /^Summary/ })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: /^Delegated Decisions/ })).toHaveCount(0);
 });

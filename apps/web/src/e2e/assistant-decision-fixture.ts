@@ -7,9 +7,9 @@ const outcomes = ["approved", "answered", "denied"] as const;
 const stressReason = "ReleaseCandidateVerification".repeat(12).slice(0, 300);
 
 export function assistantDecisionHistoryFixture(campaignId: string, options: {
-  before?: string; outcome?: AssistantDecisionOutcome; release?: boolean; stress?: boolean; legacy?: boolean;
+  before?: string; outcome?: AssistantDecisionOutcome; release?: boolean; stress?: boolean; legacy?: boolean; evidence?: boolean;
 } = {}): AssistantDecisionHistoryPage {
-  const { before, outcome, release, stress, legacy } = options;
+  const { before, outcome, release, stress, legacy, evidence } = options;
   const entries: AssistantDecisionHistoryEntry[] = Array.from({ length: 24 }, (_, index) => ({
     occurrenceId: `workflow_${index}`,
     sessionId: campaignId,
@@ -35,6 +35,11 @@ export function assistantDecisionHistoryFixture(campaignId: string, options: {
       entries[index] = { ...entry, category,
         resourceKey: `${category}:engineering/release-validation:v0.38.0`, subject: "engineering/release-validation · v0.38.0",
         delegation: { ...entry.delegation, outcome: "approved", reason: "The approval binds the exact release target and payload." } };
+    }
+  }
+  if (evidence) {
+    for (const index of [0, 2]) {
+      entries[index] = { ...entries[index]!, category: "ui_evidence_approval", subject: "Screenshots" };
     }
   }
   const offset = Number(before ?? 0);

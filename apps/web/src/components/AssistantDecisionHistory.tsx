@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import {
-  ASSISTANT_DECISION_CATEGORIES,
+  assistantDecisionActionLabel,
   type AssistantDecisionHistoryEntry,
   type AssistantDecisionHistoryPage,
   type AssistantDecisionOutcome,
@@ -82,7 +82,7 @@ function DecisionRow({ entry, showThread }: { entry: AssistantDecisionHistoryEnt
     <span className={"assistant-decision-outcome " + tone} role="img" aria-label={label} title={label}>{icon}</span>
     <div className="assistant-decision-content">
       <div className="assistant-decision-meta">
-        <strong>{ASSISTANT_DECISION_CATEGORIES[category]}</strong>
+        <strong>{assistantDecisionActionLabel(category, delegation.outcome)}</strong>
         <time dateTime={new Date(delegation.resolvedAt).toISOString()}>{formatCalendarTime(delegation.resolvedAt)}</time>
       </div>
       <p className="assistant-decision-subject"><DecisionSubject {...entry} /></p>
@@ -184,7 +184,9 @@ function DecisionHistory({ campaignId, threadId, onCount }: {
     </div>
   </div>;
 
-  return campaignId ? <CampaignSection title="Delegated Decisions" count={allCount}>{body}</CampaignSection> : body;
+  if (!campaignId) return body;
+  if (!allCount && state.kind !== "error") return null;
+  return <CampaignSection title="Delegated Decisions" count={allCount}>{body}</CampaignSection>;
 }
 
 export function AssistantThreadDecisionHistory({ threadId, onCount }: {

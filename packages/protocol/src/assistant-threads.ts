@@ -113,6 +113,12 @@ export interface RecordedAssistantDecisionResolution extends AssistantDecisionRe
 
 export type AssistantDecisionOutcome = RecordedAssistantDecisionResolution["outcome"];
 
+/** The grant catalog splits evidence review from sending evidence back, but their receipts share a category. */
+export function assistantDecisionActionLabel(category: AssistantDecisionCategory, outcome: AssistantDecisionOutcome): string {
+  return ASSISTANT_DECISION_CATEGORIES[category === "ui_evidence_approval" && outcome === "approved"
+    ? "ui_evidence_review" : category];
+}
+
 export interface AssistantDecisionHistoryEntry {
   occurrenceId: string;
   sessionId: string;

@@ -1263,7 +1263,8 @@ if (params.get("typed") === "1") {
 const client = {
   ...api,
   assistantDecisionHistory: async (filter: Parameters<typeof assistantDecisionHistoryFixture>[1] & { campaignId: string }) =>
-    assistantDecisionHistoryFixture(filter.campaignId, {
+    params.get("decision-history") === "empty" ? { entries: [], outcomeCounts: { approved: 0, denied: 0, answered: 0 } }
+    : assistantDecisionHistoryFixture(filter.campaignId, {
       ...filter, release: params.has("release-history"), stress: params.get("decision-history") === "stress",
     }),
   ...(params.get("screen") === "ask" ? { session: async (id: string) => ({

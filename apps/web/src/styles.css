@@ -13362,8 +13362,21 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .assistant-thread-panel .rpanel-head > .tabs {
   flex: 1;
   gap: var(--space-2);
+  margin-inline: calc(-1 * var(--space-1));
+  padding-inline: var(--space-1);
 }
 .assistant-thread-panel .tab { min-width: var(--control-h-lg); }
+.assistant-thread-panel .tab:focus-visible { outline: none; }
+/* Give the tab label breathing room without crossing the scrollport or the active underline. */
+.assistant-thread-panel .tab:focus-visible::before {
+  position: absolute;
+  inset: var(--space-1) calc(-1 * var(--space-1));
+  border-radius: var(--radius-sm);
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: calc(-1 * var(--focus-width));
+  pointer-events: none;
+  content: "";
+}
 .assistant-thread-panel .rpanel-head > .icon-btn { flex: none; }
 .assistant-thread-panel .rpanel-body[hidden] { display: none; }
 .assistant-thread-panel .rpanel-body { overflow-wrap: anywhere; }
