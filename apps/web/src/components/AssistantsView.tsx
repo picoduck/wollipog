@@ -18,7 +18,7 @@ import { effortLabel, relativeTime, resolvedModelLabel } from "../format.js";
 import { backLabel, destination } from "../navigation.js";
 import { statusMeta } from "../status-meta.js";
 import { sessionDisplayTitle } from "../session-title.js";
-import { useStoreActions, useStoreSelector } from "../store.js";
+import { useStoreActions, useStoreSelector, useStoreValueSource } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { AssistantWaitingDock, type AssistantWaitingDockHandle } from "./AssistantWaitingDock.js";
 import { AssistantSpendingNotice } from "./AssistantSpendingNotice.js";
@@ -31,7 +31,7 @@ import { AgentIcon } from "./AgentIcon.js";
 import { AssistantsIcon, ChevronLeftIcon, ChevronRightIcon, PlusIcon, SearchIcon } from "./Icons.js";
 import { ListFoot } from "./ListFoot.js";
 import { Modal } from "./Modal.js";
-import { NewAssistantThreadDialog, THREADS_UNAVAILABLE_MESSAGE } from "./NewAssistantThreadDialog.js";
+import { NewAssistantThreadComposer, THREADS_UNAVAILABLE_MESSAGE, type NewAssistantThreadResult } from "./NewAssistantThreadComposer.js";
 import { Notice } from "./Notice.js";
 import { ActionsMenu, DetailBar, PageHeader, type ActionsMenuChoice, type PageMenuAction } from "./PageHeader.js";
 import { SessionDetail } from "./SessionDetail.js";
@@ -81,15 +81,17 @@ function newThreadBlock(list: ListState): { title: string; message: string } | u
  * routes. Every thread comes from the Thread API; a control plane without it (404) shows the empty
  * section and New Thread explains, never a failure.
  */
-export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
+export function AssistantsView({ threadId, limits, delegation, newThread, rightPanel }: {
   threadId?: string;
   limits?: true | "spending";
   delegation?: true;
+  newThread?: true;
   /** Opens a session tool if the conversation offers a link to one. */
   rightPanel: RightPanelState;
 }) {
   const api = useApi();
   const { navigate, dispatch, getSession, loadSession } = useStoreActions();
+  const currentView = useStoreValueSource((state) => state.view);
   const { confirm, showToast } = useFeedback();
   const isMobile = useIsMobile();
   const conn = useStoreSelector((state) => state.conn);
@@ -102,7 +104,9 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   /** A deep link that the list doesn't carry, read on its own. */
   const [extra, setExtra] = useState<AssistantThread | null>(null);
   const [missing, setMissing] = useState(false);
-  const [creating, setCreating] = useState(false);
+  const [unsentFirstMessage, setUnsentFirstMessage] = useState<
+    (NonNullable<NewAssistantThreadResult["firstMessageFailure"]> & { sessionId: string; dismissed?: true }) | null
+  >(null);
   const [renaming, setRenaming] = useState<AssistantThread | null>(null);
   const [archiving, setArchiving] = useState(false);
   const [budgetDismissal, setBudgetDismissal] = useState(() => ({
@@ -178,9 +182,12 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   // A reconnect may have missed changes.
   useEffect(() => { if (conn === "online") refresh(); }, [conn, refresh]);
 
+  const titleForDisplay = (thread: AssistantThread) => thread.sessionId === unsentFirstMessage?.sessionId &&
+    assistantThreadTitle(thread) === "New Thread" ? { ...thread, title: "Untitled Thread" } : thread;
   const threads = list.kind === "ready" ? list.threads : [];
   const listed = threadId === undefined ? undefined : threads.find((thread) => thread.id === threadId);
-  const selected = listed ?? (extra?.id === threadId ? extra : undefined);
+  const selectedThread = listed ?? (extra?.id === threadId ? extra : undefined);
+  const selected = selectedThread && titleForDisplay(selectedThread);
   const problemsFor = (thread: AssistantThread) => assistantThreadProblems(thread, conn,
     thread.runnerId ? runners.get(thread.runnerId) : undefined);
   const badgeFor = (thread: AssistantThread, hideDone = false) => threadStatusBadge(thread, problemsFor(thread)[0], hideDone);
@@ -189,6 +196,11 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
     return backing?.resolvedModel ?? backing?.model;
   });
   const effort = useStoreSelector((state) => selected ? state.sessions.get(selected.sessionId)?.effort : undefined);
+  const firstMessageDelivered = useStoreSelector((state) => unsentFirstMessage !== null &&
+    (state.sessions.get(unsentFirstMessage.sessionId)?.messageCount ?? 0) > 0);
+  useEffect(() => {
+    if (firstMessageDelivered) setUnsentFirstMessage(null);
+  }, [firstMessageDelivered]);
   const canTogglePanel = useStoreSelector((state) => Boolean(selected && state.sessions.has(selected.sessionId)));
   const togglePanel = panel.toggle;
   useEffect(() => {
@@ -206,7 +218,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   }, [canTogglePanel, togglePanel]);
   // The window title names the open thread.
   useReportEntityTitle(
-    threadId === undefined ? { name: "assistants" } : { name: "assistants", threadId, limits, delegation },
+    threadId === undefined ? { name: "assistants", newThread } : { name: "assistants", threadId, limits, delegation },
     selected ? assistantThreadTitle(selected) : null,
   );
 
@@ -305,6 +317,17 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
   const openThreadSettings = (id: string, section: true | "spending" = true) =>
     navigate({ name: "assistants", threadId: id, limits: section });
   const toList = () => navigate({ name: "assistants" });
+  const cancelNewThread = () => navigate({ name: "assistants" }, { replace: true });
+  const startThread = () => navigate({ name: "assistants", newThread: true });
+  const finishNewThread = ({ thread, firstMessageFailure }: NewAssistantThreadResult, fromEmptyInbox: boolean) => {
+    setShowArchive(false);
+    replace(thread);
+    if (firstMessageFailure) setUnsentFirstMessage({ sessionId: thread.sessionId, ...firstMessageFailure });
+    const view = currentView.read();
+    if (view.name === "assistants" && (view.newThread || (fromEmptyInbox && view.threadId === undefined))) {
+      navigate({ name: "assistants", threadId: thread.id }, { replace: true });
+    }
+  };
 
   const archive = async (thread: AssistantThread, reopen: () => void) => {
     const accepted = await confirm({
@@ -352,7 +375,9 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
     ];
   };
 
-  const phoneDetail = isMobile && threadId !== undefined;
+  const emptyInbox = list.kind === "ready" && threads.length === 0;
+  const showEmptyComposer = emptyInbox && !showArchive && threadId === undefined && !newThread;
+  const phoneDetail = isMobile && (threadId !== undefined || newThread);
   // The open thread's launched work, for the header toggle and the Work tab. Kept
   // the same object while the thread's lists are, so their live counts don't recompute each render.
   const launchedSessionIds = selected?.launchedSessionIds;
@@ -418,19 +443,37 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
     rightPanel.show(mode);
     navigate({ name: "session", id: selected.sessionId });
   };
+  const creationBlock = newThreadBlock(list);
+  const firstMessageNoticeTitle = unsentFirstMessage?.deliveryUnconfirmed
+    ? "First Message Delivery Unconfirmed" : "First Message Wasn't Sent";
+  const firstMessageNotice: SessionNoticeEntry | null =
+    unsentFirstMessage && !unsentFirstMessage.dismissed && !firstMessageDelivered &&
+      selected?.sessionId === unsentFirstMessage.sessionId ? {
+      key: "assistant-first-message-unsent",
+      severity: "warning",
+      rank: SESSION_NOTICE_RANK.composerError,
+      title: firstMessageNoticeTitle,
+      render: ({ trailing }) => (
+        <Notice tone="warning" role="status" title={firstMessageNoticeTitle} trailing={trailing}
+          onDismiss={() => setUnsentFirstMessage((current) => current && { ...current, dismissed: true })}>
+          Your draft is kept. {unsentFirstMessage.reason}
+          {unsentFirstMessage.deliveryUnconfirmed && " Check the transcript before sending again."}
+        </Notice>
+      ),
+    } : null;
 
   return (
     <section className="page full fill">
       {phoneDetail ? (
         <DetailBar
-          title={selected ? assistantThreadTitle(selected) : "Thread"}
+          title={newThread ? "New Thread" : selected ? assistantThreadTitle(selected) : "Thread"}
           backLabel={backLabel("assistants")}
-          onBack={toList}
+          onBack={newThread ? cancelNewThread : toList}
           status={selected ? badgeFor(selected, true) : undefined}
           menu={selected ? threadMenu(selected) : []}
           menuLabel="Thread Actions"
           menuSheetTitle={selected ? assistantThreadTitle(selected) : undefined}
-          hideSearch={Boolean(selected)}
+          hideSearch={Boolean(selected || newThread)}
           controls={canTogglePanel && launchedWork
             ? <AssistantSidePanelToggle work={launchedWork} open={panel.open} onToggle={panel.toggle} />
             : undefined}
@@ -440,21 +483,26 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
         // New Thread belongs to the assistant's Threads list, so the page header offers no second one.
         <PageHeader title={ASSISTANTS.name} description={ASSISTANTS.description} />
       )}
-      <div className="master-detail assistants-md" data-detail-open={threadId !== undefined ? "" : undefined}>
+      <div className="master-detail assistants-md" data-detail-open={threadId !== undefined || newThread || showEmptyComposer ? "" : undefined}>
         <aside className="master-detail-list" aria-label={ASSISTANTS.name} data-focus-zone="list" tabIndex={-1}>
           <ThreadList
-            list={list}
+            list={unsentFirstMessage && list.kind === "ready" ? { ...list, threads: threads.map(titleForDisplay) } : list}
             showArchive={showArchive}
             onShowArchive={setShowArchive}
             selectedId={threadId ?? null}
             onOpen={openThread}
-            onNewThread={() => setCreating(true)}
+            onNewThread={startThread}
             onRetry={() => void load()}
             badgeFor={(thread) => badgeFor(thread, true)}
           />
         </aside>
         <div className="assistant-thread-pane" data-focus-zone="main" tabIndex={-1}>
-          {threadId === undefined && (list.kind === "unavailable" || list.kind === "ownerOnly") ? (
+          {newThread || showEmptyComposer ? creationBlock ? (
+            <div className="assistant-thread-pane-state"><State compact icon={<AssistantsIcon />}
+              title={creationBlock.title} headingLevel={2}>{creationBlock.message}</State></div>
+          ) : <NewAssistantThreadComposer onCancel={newThread && !isMobile ? cancelNewThread : undefined}
+            onCreated={(result) => finishNewThread(result, showEmptyComposer)} />
+          : threadId === undefined && (list.kind === "unavailable" || list.kind === "ownerOnly") ? (
             // The list already says why there are no threads here; an invitation to choose one would
             // contradict it, so the pane stays empty.
             null
@@ -530,7 +578,7 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
                 onConfirmationAnswered={replace}
                 focusComposer={focusComposer}
               />}
-              assistantSpendingNotices={spendingNotices}
+              assistantSpendingNotices={firstMessageNotice ? [firstMessageNotice, ...spendingNotices] : spendingNotices}
               assistantThreadHealth={selected.health && selected.status !== "archived" ? {
                 thread: selected,
                 problems: problemsFor(selected),
@@ -540,18 +588,6 @@ export function AssistantsView({ threadId, limits, delegation, rightPanel }: {
           )}
         </div>
       </div>
-      {creating && (
-        <NewAssistantThreadDialog
-          blocked={newThreadBlock(list)}
-          onClose={() => setCreating(false)}
-          onCreated={(thread) => {
-            setCreating(false);
-            setShowArchive(false);
-            replace(thread);
-            openThread(thread.id);
-          }}
-        />
-      )}
       {renaming && (
         <RenameThreadDialog
           thread={renaming}
@@ -685,7 +721,7 @@ function ThreadList({ list, showArchive, onShowArchive, selectedId, onOpen, onNe
               }
             }}><SearchIcon /></button>
         )}
-        {!showArchive && (active.length > 0 || list.kind === "loading" || list.kind === "failed") && (
+        {!showArchive && (threads.length > 0 || list.kind === "loading" || list.kind === "failed") && (
           <button type="button" className="btn primary" onClick={onNewThread}><PlusIcon />New Thread</button>
         )}
       </div>
@@ -735,13 +771,10 @@ function ThreadList({ list, showArchive, onShowArchive, selectedId, onOpen, onNe
               Archived threads will appear here.
             </State>
           )
+        ) : list.kind === "unavailable" ? (
+          <State compact icon={<AssistantsIcon />} title="Threads Aren't Available Yet">{THREADS_UNAVAILABLE_MESSAGE}</State>
         ) : active.length === 0 ? (
-          <State compact icon={<AssistantsIcon />} title="No Threads Yet"
-            actions={<button type="button" className="btn" onClick={onNewThread}>New Thread</button>}>
-            {list.kind === "unavailable"
-              ? "Assistant threads aren't available on this control plane yet."
-              : "Start a thread to ask the assistant for help."}
-          </State>
+          <State compact title="No Threads Yet" />
         ) : (
           <>
             {needsYou.length > 0 && (
@@ -761,7 +794,7 @@ function ThreadList({ list, showArchive, onShowArchive, selectedId, onOpen, onNe
           </>
         )}
       </section>
-      {list.kind === "ready" && !showArchive && (
+      {list.kind === "ready" && threads.length > 0 && !showArchive && (
         <div className="assistant-threads-foot">
           <ListFoot>
             <button ref={archiveButton} type="button" className="row" onClick={() => openArchive(true)}>

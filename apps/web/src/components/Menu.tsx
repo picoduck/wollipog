@@ -114,6 +114,7 @@ function useMenuPlacement(
   beside: string | undefined,
   inline: boolean,
   prefer: "below" | "above" | undefined,
+  fitWithinViewport: boolean,
 ): { placement: Placement | undefined; box: FixedContainingBlockOffset } {
   const [placement, setPlacement] = useState<Placement>();
   const [box, setBox] = useState(VIEWPORT_BOX);
@@ -150,7 +151,8 @@ function useMenuPlacement(
       if (!surface || !rect) return;
       const box = containingBlock(rect);
       const edges = surface.offsetHeight - surface.clientHeight;
-      const wantedHeight = Math.min(surface.scrollHeight + edges, MENU_MAX_HEIGHT);
+      const heightLimit = fitWithinViewport ? window.innerHeight - 2 * VIEWPORT_MARGIN : MENU_MAX_HEIGHT;
+      const wantedHeight = Math.min(surface.scrollHeight + edges, heightLimit);
       // Fractional, not offsetWidth: a rounded width let the menu overhang its pane by a pixel.
       const surfaceWidth = surface.getBoundingClientRect().width;
       if (beside) {
@@ -181,7 +183,7 @@ function useMenuPlacement(
       // scroll there, rather than fitting the menu to the viewport over the trigger it came from.
       const below = window.innerHeight - VIEWPORT_MARGIN - rect.bottom - gap;
       const above = rect.top - gap - VIEWPORT_MARGIN;
-      if (wantedHeight > Math.max(below, above) && Math.max(below, above) >= MIN_SIDE_HEIGHT) {
+      if (!fitWithinViewport && wantedHeight > Math.max(below, above) && Math.max(below, above) >= MIN_SIDE_HEIGHT) {
         style.maxHeight = Math.max(below, above);
         if (above > below) {
           style.top = "auto";
@@ -225,7 +227,7 @@ function useMenuPlacement(
       window.cancelAnimationFrame(frame);
       observer?.disconnect();
     };
-  }, [sheet, surfaceRef, contentRef, trigger, pointX, pointY, align, gap, maxWidth, boundary, beside, inline, prefer]);
+  }, [sheet, surfaceRef, contentRef, trigger, pointX, pointY, align, gap, maxWidth, boundary, beside, inline, prefer, fitWithinViewport]);
   return { placement, box };
 }
 
@@ -256,6 +258,8 @@ export interface MenuSurfaceProps extends Omit<HTMLAttributes<HTMLDivElement>, "
   beside?: string;
   /** The side tried first on desktop: "above" for a menu from a bottom dock's head (§9.1). */
   prefer?: "below" | "above";
+  /** Allow an expanded list to use the viewport's height, moving it across the anchor if needed. */
+  fitWithinViewport?: boolean;
   /** A backdrop click. The shell's Escape ladder clicks the same backdrop. */
   onDismiss: () => void;
   /**
@@ -292,6 +296,7 @@ export function MenuSurface({
   boundary,
   beside,
   prefer,
+  fitWithinViewport = false,
   onDismiss,
   inline = false,
   className,
@@ -312,6 +317,7 @@ export function MenuSurface({
     beside,
     inline,
     prefer,
+    fitWithinViewport,
   );
   const fixedWidth = sheet || width === undefined
     ? undefined

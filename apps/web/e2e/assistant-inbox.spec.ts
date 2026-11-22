@@ -106,6 +106,28 @@ for (const theme of ["light", "dark"] as const) {
     test.describe(`${theme} inbox at ${viewport.width}px`, () => {
       test.use({ viewport, hasTouch: phone, isMobile: phone, colorScheme: theme });
 
+      test("mounts the first-thread composer and three starter prompts in an empty inbox", async ({ page }) => {
+        await open(page, theme, "threads=empty&limits=enabled");
+        const pane = page.locator(".assistant-thread-pane");
+        const composer = pane.getByRole("form", { name: "What should the assistant work on?" });
+        const start = composer.getByRole("button", { name: "Start Thread" });
+        const suggestions = composer.getByRole("group", { name: "Starter Prompts" }).getByRole("button");
+        await expect(composer).toBeVisible();
+        await expect(suggestions).toHaveText(["Check On Running Work", "Review Open Decisions", "Plan a Task"]);
+        for (const suggestion of await suggestions.all()) await expectFullyInViewport(suggestion);
+        await expect(start).toBeDisabled();
+        await expectFullyInViewport(start, "Start Thread");
+        await expect(inbox(page).getByRole("button", { name: "New Thread", exact: true })).toHaveCount(0);
+        await expectInboxLayout(composer, phone);
+        await expectPageNoHorizontalOverflow(page);
+        await capture(page, `${prefix}-empty-composer`);
+        await suggestions.getByText("Plan a Task").click();
+        await expect(start).toBeEnabled();
+        await start.click();
+        await expect(pane.locator(".composer")).toBeVisible();
+        await expect(composer).toHaveCount(0);
+      });
+
       test("groups owner attention above recent work and keeps titles, statuses and previews inside the pane", async ({ page }) => {
         await open(page, theme);
         const list = inbox(page);

@@ -21799,7 +21799,8 @@ export class SessionsService {
     const accounts = (runner.providerAccounts ?? []).filter((account) => account.provider === provider).map((account) => {
       const refusal = this.assistantThreadAccountIneligibility(runner, agent, account, usage);
       return { accountRef: providerAccountRef(runner.runnerId, account.id), label: account.label,
-        ...(refusal ? { reason: refusal.reason } : {}) };
+        ...(refusal ? { reason: refusal.reason } : {}),
+        ...(refusal?.retryAt !== undefined ? { retryAt: refusal.retryAt } : {}) };
     });
     const policyAccountRef = result.status === "selected" && result.accountId
       ? providerAccountRef(runner.runnerId, result.accountId)
