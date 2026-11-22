@@ -4,15 +4,30 @@ import { ApiError } from "./api.js";
 import { composerActionError, type ComposerAction } from "./composer-action-errors.js";
 import { titleCaseLabel } from "./format.js";
 
-const ACTIONS: ComposerAction[] = [
-  "cancelMessage", "dismissMessage", "retryMessage", "cancelQueuedMessage", "stopTurn", "rewind", "fork",
-  "editInFork", "recoverConversation", "restart", "retrySetup", "restartAfterSetup", "addReference",
-  "steerQueuedMessage", "queueAgain", "dismissSteering",
-];
+const ACTIONS = {
+  cancelMessage: true,
+  dismissMessage: true,
+  retryMessage: true,
+  cancelQueuedMessage: true,
+  stopTurn: true,
+  rewind: true,
+  fork: true,
+  editInFork: true,
+  recoverConversation: true,
+  restart: true,
+  restartThread: true,
+  stopWaiting: true,
+  retrySetup: true,
+  restartAfterSetup: true,
+  addReference: true,
+  steerQueuedMessage: true,
+  queueAgain: true,
+  dismissSteering: true,
+} satisfies Record<ComposerAction, true>;
 
 test("every action names its failure in Title Case and keeps the server's words for Show Details (#2511)", () => {
   const server = "session is locked by pod reconciliation 'pod-7' until the merge attempt settles";
-  for (const action of ACTIONS) {
+  for (const action of Object.keys(ACTIONS) as ComposerAction[]) {
     const error = composerActionError(action, new ApiError(server, 409));
     assert.equal(error.title, titleCaseLabel(error.title), `${action}: "${error.title}" is Title Case`);
     assert.notEqual(error.title, "Action Failed", action);
