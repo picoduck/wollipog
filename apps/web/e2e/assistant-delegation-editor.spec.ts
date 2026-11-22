@@ -17,7 +17,8 @@ test.use({ timezoneId: "UTC", locale: "en-US" });
 
 async function openEditor(page: Page) {
   const panel = page.locator("#right-panel");
-  if (!(await panel.isVisible())) await page.getByRole("button", { name: /Show Side Panel/ }).click();
+  const toggle = page.getByRole("button", { name: /^(Show|Hide) Side Panel/ });
+  if (await toggle.getAttribute("aria-pressed") === "false") await toggle.click();
   await panel.getByRole("tab", { name: /^Decisions/ }).click();
   await panel.getByRole("tabpanel", { name: /^Decisions/ }).getByRole("button", { name: /^(Manage|Delegate)…$/ }).click();
   return page.getByRole("dialog", { name: editorName });

@@ -629,7 +629,9 @@ export function ActionsMenu({ className, overflow = "always", label = "More Acti
           anchor={{ trigger: menu.triggerRef }}
           id={menu.menuId}
           label={label}
-          sheetTitle={sheetTitle}
+          head={sheetTitle ? <div className="menu-head" aria-hidden="true">
+            <span className="menu-head-title">{sheetTitle}</span>
+          </div> : undefined}
           align="end"
           onDismiss={() => menu.close(true)}
           onFocus={(event) => {
