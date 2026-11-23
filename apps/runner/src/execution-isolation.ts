@@ -361,6 +361,14 @@ function pathsOverlap(left: string, right: string): boolean {
   return pathWithinOrEqual(left, right) || pathWithinOrEqual(right, left);
 }
 
+/** agy's state directory: conversations, settings and sign-in (#4779). The helper below derives the
+ * same path, so a preserved directory and the helper's parent are one unaliased path or the launch
+ * fails closed. */
+function antigravityProviderStateRoot(state: IsolationStateOptions, inherited: NodeJS.ProcessEnv, runtime: IsolationDeps): string {
+  const home = absoluteHome(state.env.HOME ?? inherited.HOME ?? runtime.nativeHome(), "HOME on Linux");
+  return posix.join(home, ".gemini", "antigravity-cli");
+}
+
 async function antigravityTerminalHelperDirectory(
   state: IsolationStateOptions, protectedRoots: readonly string[], runtime: IsolationDeps,
 ): Promise<string> {
@@ -1136,21 +1144,32 @@ export async function resolveExecutionIsolation(
   }
   const mapping = state && statePath(state.driver);
   let writableBinds: Array<{ source: string; target: string }> = [];
+  let antigravityStateRoot: string | undefined;
   if (state?.preserveProviderHome) {
     if (!protectedWorktree || !commonGitDir) throw new Error("preserved provider home requires a protected worktree");
     const inherited = runtime.nativeEnvironment();
-    const root = providerCredentialRoot(state, inherited, runtime.nativeHome());
+    // The ACP driver serves many agents and knows no state directory of its own. Antigravity's
+    // profile does: agy keeps its conversations, settings and sign-in in ~/.gemini/antigravity-cli,
+    // and without them writable it cannot resume a conversation in the managed worktree.
+    const root = state.driver === "acp"
+      ? state.antigravityTerminalHelper ? antigravityProviderStateRoot(state, inherited, runtime) : null
+      : providerCredentialRoot(state, inherited, runtime.nativeHome());
     if (!root) throw new Error("managed worktree provider state cannot be preserved for this driver");
+    // agy's sign-in lives here: a directory this launch creates is private to the runner user.
+    if (state.driver === "acp") await runtime.mkdirNative([root], 0o700);
     const canonical = await canonicalManagedWritableRoot(root, "provider credential directory",
       protectedWorktree.parent, protectedWorktree.path, commonGitDir, runtime);
     // Credentials are replaced via temp-file rename, so their exact containing directory must
     // remain writable. Mount only that provider directory, never HOME or the worktree parent.
     writableBinds = [{ source: canonical, target: canonical }];
-    const transcript = posix.join(root, mapping!.relative.split("/").at(-1)!);
-    const canonicalTranscript = await canonicalManagedWritableRoot(transcript, "provider transcript directory",
-      protectedWorktree.parent, protectedWorktree.path, commonGitDir, runtime);
-    if (!pathWithinOrEqual(canonical, canonicalTranscript)) {
-      writableBinds.push({ source: canonicalTranscript, target: canonicalTranscript });
+    if (state.driver === "acp") antigravityStateRoot = canonical;
+    if (mapping) {
+      const transcript = posix.join(root, mapping.relative.split("/").at(-1)!);
+      const canonicalTranscript = await canonicalManagedWritableRoot(transcript, "provider transcript directory",
+        protectedWorktree.parent, protectedWorktree.path, commonGitDir, runtime);
+      if (!pathWithinOrEqual(canonical, canonicalTranscript)) {
+        writableBinds.push({ source: canonicalTranscript, target: canonicalTranscript });
+      }
     }
     const home = absoluteHome(state.env.HOME ?? inherited.HOME ?? runtime.nativeHome(), "HOME on Linux");
     for (const relativePath of MANAGED_LINUX_CACHE_PATHS) {
@@ -1207,10 +1226,14 @@ export async function resolveExecutionIsolation(
   const guardStateMask = resolvedMask
     ? { directory: resolvedMask.directory, readable: resolvedMask.readable, ...(resolvedMask.socket ? { socket: resolvedMask.socket } : {}) }
     : undefined;
+  // A preserved state directory is the helper's own parent by design: the launcher renders the
+  // session-private tmpfs after the writable binds, so `bin` never reaches the shared host directory.
+  // Every other mount must still stay clear of it.
   const antigravityTerminalHelper = state?.antigravityTerminalHelper && protectedWorktree && commonGitDir
     ? await antigravityTerminalHelperDirectory(state, [
       protectedWorktree.parent, commonGitDir, state.dataDir, ...readOnlyBinds,
-      ...writableBinds.map((bind) => bind.target), ...(guardStateMask ? [guardStateMask.directory] : []),
+      ...writableBinds.map((bind) => bind.target).filter((target) => target !== antigravityStateRoot),
+      ...(guardStateMask ? [guardStateMask.directory] : []),
     ], runtime)
     : undefined;
   return {
