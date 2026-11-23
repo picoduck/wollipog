@@ -8,7 +8,8 @@ Desktop bundles are built by CI, not by hand. The [`Release`](../.github/workflo
 workflow prepares one **draft** GitHub release before the native build jobs start. Those jobs build
 the per-platform control-plane and local-runner **sidecars** and the **Tauri bundle**, then upload
 them to that release by numeric ID. Reruns reuse the draft only if its tag, commit, and prerelease
-state match. If more than one release claims the tag, the workflow stops before building.
+state match. For an existing tag, the workflow checks the commit by resolving the tag itself.
+If more than one release claims the tag, the workflow stops before building.
 
 Why native runners (and not one cross-build machine): the sidecar is a Node Single-Executable
 that **embeds the host's Node runtime**, so it can't be cross-compiled —

@@ -11,7 +11,7 @@ const repo = "owner/repo";
 const collection = `repos/${repo}/releases`;
 const tag = "v0.38.0-rc.1";
 const commit = "a".repeat(40);
-const target = { tag, commit, prerelease: true };
+const target = { tag, commit, prerelease: true, refType: "branch" };
 const canonical = { id: 42, tag_name: tag, target_commitish: commit, draft: true, prerelease: true };
 
 test("a rerun recovers an accepted draft creation after a lost response", () => {
@@ -62,6 +62,23 @@ test("asset operations use the exact prepared draft ID and refuse a different re
   assert.throws(() => different.assets(""), /Release ID does not identify the expected draft/u);
 });
 
+test("tag runs verify the tag's commit even when the draft reports a branch", () => {
+  const release = { ...canonical, target_commitish: "main" };
+  let tagCommit = commit;
+  const read = (path) => {
+    if (path === `repos/${repo}/commits/refs%2Ftags%2F${tag}?per_page=1`) return { sha: tagCommit };
+    assert.equal(path, `${collection}/42`);
+    return release;
+  };
+  const draft = releaseDraft(repo, { ...target, refType: "tag" }, read,
+    (path) => path.endsWith("/assets?per_page=100") ? [] : [release]);
+  assert.equal(draft.prepare(), 42);
+  assert.deepEqual(draft.assets("42"), []);
+  tagCommit = "b".repeat(40);
+  assert.throws(() => draft.prepare(), /does not resolve to/u);
+  assert.throws(() => draft.assets("42"), /does not resolve to/u);
+});
+
 test("release CLI only replaces and downloads assets from the prepared draft", {
   skip: process.platform === "win32" ? "requires a POSIX gh fixture" : false,
 }, (t) => {
@@ -91,7 +108,8 @@ esac
 `, { mode: 0o755 });
   const env = {
     ...process.env, PATH: directory + delimiter + process.env.PATH,
-    GITHUB_REPOSITORY: repo, GITHUB_SHA: commit, RELEASE_TAG: tag, RELEASE_ID: "42", RELEASE_PRERELEASE: "true",
+    GITHUB_REPOSITORY: repo, GITHUB_SHA: commit, GITHUB_REF_TYPE: "branch",
+    RELEASE_TAG: tag, RELEASE_ID: "42", RELEASE_PRERELEASE: "true",
   };
   const run = (...args) => spawnSync(process.execPath, [script, ...args], { cwd: directory, env, encoding: "utf8" });
   writeFileSync(join(directory, "SHA256SUMS"), "bytes");

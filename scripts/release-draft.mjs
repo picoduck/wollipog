@@ -21,17 +21,29 @@ function list(path) {
   return ghJson("--paginate", "--slurp", path).flat();
 }
 
-export function releaseDraft(repo, { tag, commit, prerelease }, read = ghJson, pages = list) {
+export function releaseDraft(repo, { tag, commit, prerelease, refType }, read = ghJson, pages = list) {
   if (!/^[\w.-]+\/[\w.-]+$/u.test(repo ?? "") ||
       !/^v[\w.+-]+$/u.test(tag ?? "") ||
-      !/^[a-f0-9]{40}$/u.test(commit ?? "") || typeof prerelease !== "boolean") {
-    throw new Error("Release repository, tag, commit, and prerelease state are required");
+      !/^[a-f0-9]{40}$/u.test(commit ?? "") || typeof prerelease !== "boolean" ||
+      !["branch", "tag"].includes(refType)) {
+    throw new Error("Release repository, tag, commit, ref type, and prerelease state are required");
   }
-  const collection = `repos/${repo}/releases`;
+  const repository = `repos/${repo}`;
+  const collection = `${repository}/releases`;
+
+  function assertTagTarget() {
+    if (refType !== "tag") return;
+    // The commit endpoint resolves both lightweight and annotated tag refs to commits.
+    const ref = encodeURIComponent(`refs/tags/${tag}`);
+    if (read(`${repository}/commits/${ref}?per_page=1`).sha !== commit) {
+      throw new Error(`Tag ${tag} does not resolve to ${commit}`);
+    }
+  }
 
   function assertDraft(release) {
+    // GitHub ignores target_commitish when the tag already exists.
     if (!numericId(release?.id) || release.tag_name !== tag || release.draft !== true ||
-        release.prerelease !== prerelease || release.target_commitish !== commit) {
+        release.prerelease !== prerelease || (refType === "branch" && release.target_commitish !== commit)) {
       throw new Error(`Release ${release?.id ?? "(unknown)"} is not the expected draft for ${tag} at ${commit}`);
     }
     return release.id;
@@ -39,6 +51,7 @@ export function releaseDraft(repo, { tag, commit, prerelease }, read = ghJson, p
 
   return {
     prepare() {
+      assertTagTarget();
       const matches = pages(`${collection}?per_page=100`).filter((release) => release.tag_name === tag);
       if (matches.length > 1) throw new Error(`Found multiple releases for ${tag}`);
       if (matches.length === 1) return assertDraft(matches[0]);
@@ -52,15 +65,16 @@ export function releaseDraft(repo, { tag, commit, prerelease }, read = ghJson, p
       if (!numericId(id) || String(assertDraft(read(`${collection}/${id}`))) !== String(id)) {
         throw new Error("Release ID does not identify the expected draft");
       }
+      assertTagTarget();
       return pages(`${collection}/${id}/assets?per_page=100`);
     },
   };
 }
 
 function main([operation, ...args]) {
-  const { GITHUB_REPOSITORY: repo, RELEASE_TAG: tag, GITHUB_SHA: commit, RELEASE_PRERELEASE } = process.env;
+  const { GITHUB_REPOSITORY: repo, RELEASE_TAG: tag, GITHUB_SHA: commit, GITHUB_REF_TYPE: refType, RELEASE_PRERELEASE } = process.env;
   const prerelease = RELEASE_PRERELEASE === "true" ? true : RELEASE_PRERELEASE === "false" ? false : undefined;
-  const draft = releaseDraft(repo, { tag, commit, prerelease });
+  const draft = releaseDraft(repo, { tag, commit, prerelease, refType });
   if (operation === "prepare") {
     console.log(draft.prepare());
     return;
