@@ -22,3 +22,9 @@ Headless installations can select this version with `wollipog update --release v
 Upgrade the control plane before standalone or remote runners. Before upgrading, stop processes that share a mutable data directory and back up the control-plane database, runner data, and configuration. Retain the previous binaries. To roll back, stop the candidate processes, restore the backup, and start the previous binaries.
 
 If your organization has archived-history retention enabled, capable runners trim full logs after completed control-plane pruning, including for previously pruned sessions. Back up the runner data or disable the policy before upgrading if you need to preserve full logs. Reprocess cannot restore trimmed logs, and older runners refuse manifest format 2. See [Archived-History Retention](https://github.com/picoduck/wollipog/blob/v0.38.0-rc.2/docs/archived-history-retention.md#runner-logs-and-upgrades).
+
+The control plane advertises the `wollipog-control-plane` service identity. Desktop v0.15.0 and later accept both the current and legacy service identities. Older clients may report `The address is not a Wollipog control plane.` Upgrade those clients before connecting.
+
+## Release Assets
+
+The base draft holds exactly 34 assets across the six supported native targets: 14 desktop bundles, 12 runner names, 6 headless `wollipog-control-plane-<triple>` executables, the `wollipog-web.tar.gz` dashboard bundle, and `SHA256SUMS`. The signed prerelease adds 12 updater signatures and `latest.json`, bringing the total to 47 assets. Publishing the verified draft remains a manual operator step.
