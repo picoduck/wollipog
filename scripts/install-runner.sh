@@ -205,13 +205,14 @@ manifest_entry() {
   ' "$checksum_partial" || { echo "SHA256SUMS in release $release_tag has no unique exact entry for $1." >&2; return 1; }
 }
 fetch_verified_asset() {
-  # $1 asset name, $2 destination partial path
+  # $1 asset name, $2 exclusively reserved mktemp file owned by this invocation.
+  # Keep the reservation in place: gh otherwise refuses an existing output file.
   record=$(headless_record "$1")
   [ -n "$record" ] || { echo "Release $release_tag has no $1; update to a release that publishes headless assets." >&2; return 1; }
   digest=$(printf '%s\n' "$record" | cut -f2)
   printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || { echo "$1 has no valid GitHub SHA-256 digest; refusing an unverified install." >&2; return 1; }
   if [ "$use_gh" -eq 1 ]; then
-    gh release download "$release_tag" --repo "$repo" --pattern "$1" --output "$2" || return 1
+    gh release download "$release_tag" --repo "$repo" --pattern "$1" --output "$2" --clobber || return 1
   else
     curl -fL -o "$2" "$(printf '%s\n' "$record" | cut -f3)" || return 1
   fi
@@ -377,7 +378,7 @@ fi
 cli_partial=""
 if [ "$with_control_plane" -eq 1 ]; then
   cp_bin="$bindir/wollipog-control-plane"
-  cp_partial="${cp_bin}.download.$$"
+  cp_partial=""
   web_partial=""
   web_stage=""
   marker_partial=""
@@ -403,6 +404,7 @@ if [ "$with_control_plane" -eq 1 ]; then
   }
   trap 'cleanup_headless; cleanup' EXIT
   echo "Downloading $control_plane_asset from $release_tag..."
+  cp_partial=$(mktemp "${cp_bin}.download.XXXXXX")
   fetch_verified_asset "$control_plane_asset" "$cp_partial"
   chmod +x "$cp_partial"
   mv -f "$cp_partial" "$cp_bin"

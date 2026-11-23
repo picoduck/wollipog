@@ -83,6 +83,7 @@ while [ "$#" -gt 0 ]; do
 done
 case "$url" in
   https://api.github.com/repos/picoduck/wollipog/releases/latest | https://api.github.com/repos/picoduck/wollipog/releases/tags/"$TEST_RELEASE_TAG")
+    [ "$TEST_GH_FALLBACK" != 1 ] || exit 22
     cat "$TEST_RELEASE_JSON"; exit 0 ;;
   https://api.github.com/repos/picoduck/wollipog/releases/tags/*) exit 22 ;;
   https://download.test/"$TEST_RELEASE_TAG"/wollipog-runner-x86_64-unknown-linux-gnu | https://download.test/"$TEST_RELEASE_TAG"/wollipog-control-plane-x86_64-unknown-linux-gnu | https://download.test/"$TEST_RELEASE_TAG"/wollipog-web.tar.gz | https://download.test/"$TEST_RELEASE_TAG"/SHA256SUMS)
@@ -91,8 +92,41 @@ case "$url" in
   *) echo "unexpected fixture curl URL" >&2; exit 93 ;;
 esac
 `);
+  writeFileSync(join(root, "release.tsv"), `${releaseTag}\n${JSON.parse(assetsJson).assets.map((asset) => [asset.name, asset.digest, asset.browser_download_url].join("\t")).join("\n")}\n`);
   // Even a missing release must not fall through to ambient gh credentials or network.
   executable(join(fakeBin, "gh"), 'echo "unexpected fixture gh invocation" >&2\nexit 22\n');
+  if (options.ghFallback) executable(join(fakeBin, "gh"), `
+case "$1" in
+  api)
+    case "$2" in repos/picoduck/wollipog/releases/latest | repos/picoduck/wollipog/releases/tags/"$TEST_RELEASE_TAG") cat "$TEST_ROOT/release.tsv"; exit 0 ;; *) exit 22 ;; esac ;;
+  release) [ "$2" = download ] && [ "$3" = "$TEST_RELEASE_TAG" ] || exit 91; shift 3 ;;
+  *) exit 91 ;;
+esac
+out=
+asset=
+clobber=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --repo) [ "$2" = picoduck/wollipog ] || exit 91; shift 2 ;;
+    --pattern) asset="$2"; shift 2 ;;
+    --output) out="$2"; shift 2 ;;
+    --clobber) clobber=1; shift ;;
+    *) exit 91 ;;
+  esac
+done
+case "$out" in "$TEST_ROOT/"*) ;; *) exit 94 ;; esac
+if [ -e "$out" ] && [ "$clobber" -ne 1 ]; then
+  echo "$out already exists (use --clobber to overwrite file)" >&2; exit 1
+fi
+if [ "$clobber" -eq 1 ]; then
+  [ -f "$out" ] && [ ! -L "$out" ] && [ ! -s "$out" ] || exit 94
+fi
+printf '%s\\n' "$asset" >> "$TEST_ROOT/gh-downloads"
+if [ "$asset" = wollipog-web.tar.gz ] && [ "$TEST_FAULT" = download ]; then
+  printf partial > "$out"; exit 22
+fi
+cp "$TEST_ASSETS_DIR/$asset" "$out"
+`);
   executable(join(fakeBin, "tar"), `
 case "$1" in
   --version) ;;
@@ -203,6 +237,7 @@ exec cmp "$@"
       PATH: options.omitCmp ? fakeBin : `${fakeBin}:${process.env.PATH ?? ""}`,
       HOME: home,
       LC_ALL: "C",
+      TEST_GH_FALLBACK: options.ghFallback ? "1" : "0",
       TEST_RELEASE_JSON: join(root, "release.json"),
       TEST_ASSETS_DIR: assetsDir,
       TEST_RELEASE_TAG: releaseTag,
@@ -1165,4 +1200,42 @@ posixTest("install-runner.sh --control-plane fails closed on a tampered control 
   assert.equal(runnerOnly.status, 0, runnerOnly.stderr);
   assert.ok(!existsSync(join(plain.home, ".local", "bin", "wollipog-control-plane")), "without --control-plane nothing headless is installed");
   assert.ok(existsSync(join(plain.home, ".config", "wollipog", "runner.config.json")), "the starter config is still written for plain runner installs");
+});
+
+posixTest("authenticated headless downloads overwrite only reserved files and publish verified dashboard generations", (t) => {
+  const h = harness({ ghFallback: true });
+  t.after(() => rmSync(h.root, { recursive: true, force: true }));
+  for (let generation = 0; generation < 2; generation++) {
+    const result = h.run("--control-plane", "--release", releaseTag);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(join(siblingWeb(h), "index.html"), "utf8"), "<html>dashboard</html>");
+    assert.equal(readdirSync(join(h.home, ".local", "bin")).some((name) => /download|stage|install.lock/u.test(name)), false);
+  }
+  assert.equal(readFileSync(join(`${siblingWeb(h)}.previous`, "index.html"), "utf8"), "<html>dashboard</html>");
+  assert.deepEqual(readFileSync(join(h.root, "gh-downloads"), "utf8").trim().split("\n"),
+    Array(2).fill([runnerAsset, "SHA256SUMS", controlPlaneAsset, webAsset]).flat());
+});
+
+posixTest("authenticated dashboard failures preserve published generations and clean owned downloads", async (t) => {
+  for (const fault of ["download", "digest", "manifest", "extract", "promote"]) await t.test(fault, (t) => {
+    const h = harness({ ghFallback: true });
+    t.after(() => rmSync(h.root, { recursive: true, force: true }));
+    assert.equal(h.run("--control-plane").status, 0);
+    assert.equal(h.run("--control-plane").status, 0);
+    const before = snapshot(siblingWeb(h));
+    const previous = snapshot(`${siblingWeb(h)}.previous`);
+    if (fault === "digest") writeFileSync(join(h.root, "assets", webAsset), "tampered");
+    if (fault === "manifest") {
+      const path = join(h.root, "assets", "SHA256SUMS");
+      writeFileSync(path, readFileSync(path, "utf8").replace(new RegExp(`[a-f0-9]{64}  ${webAsset.replaceAll(".", "\\.")}`), `${"0".repeat(64)}  ${webAsset}`));
+    }
+    h.setFault(fault);
+    const result = h.run("--control-plane");
+    assert.notEqual(result.status, 0, result.stderr);
+    if (fault === "digest") assert.match(result.stderr, /failed SHA-256 verification/u);
+    if (fault === "manifest") assert.match(result.stderr, /SHA-256 verification failed/u);
+    assert.deepEqual(snapshot(siblingWeb(h)), before);
+    assert.deepEqual(snapshot(`${siblingWeb(h)}.previous`), previous);
+    assert.equal(readdirSync(join(h.home, ".local", "bin")).some((name) => /download|stage|install.lock/u.test(name)), false);
+  });
 });
