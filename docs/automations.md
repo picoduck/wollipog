@@ -85,7 +85,9 @@ The API retains `action.kind: "create_session"`, with `request.role: "orchestrat
 ```
 
 `fullControl` accepts the existing launch overrides except `session`; the root's settings live in
-the session request. Use `custom` to keep the configured individual decision owners. The Custom
+the session request. `request.orchestrator` is an object of optional `behavior`, `delegation` and
+`execution` overrides, never a boolean; omitted fields use the owner's Orchestrator defaults. Each
+refused field is named in the error. Use `custom` to keep the configured individual decision owners. The Custom
 aggregate allowance covers children in the inspected root Location. Agent-created schedules still
 require human approval of the complete configuration through the existing automation proposal flow.
 Signed triggers can fire the saved campaign but cannot replace its prompt, parameters or task scope.

@@ -23,22 +23,65 @@ const text = (v: unknown, max: number): v is string => typeof v === "string" && 
 const fail = (error: string, status = 409): ServiceResult<SessionView> => ({ ok: false, status, error });
 
 /** Strict public input. In particular no authority provenance or admission result can be stored
- * in a schedule. The ordinary campaign parsers remain authoritative for all policy fields. */
-export function validAutomationCampaign(request: Record<string, unknown>): boolean {
-  if (request.orchestrator !== undefined && !parseOrchestratorOverrides(request.orchestrator)) return false;
-  if (request.campaign === undefined) return request.role !== "orchestrator" && request.orchestrator === undefined;
+ * in a schedule. The ordinary campaign parsers remain authoritative for all policy fields. Each
+ * refusal names the field so a caller following the advertised schema can correct it (#4869). */
+export function automationCampaignError(request: Record<string, unknown>): string | null {
+  if (request.orchestrator !== undefined && !parseOrchestratorOverrides(request.orchestrator)) {
+    return "request.orchestrator must be an object of behavior, delegation and execution overrides with supported keys and values " +
+      "(for example behavior.followUps recommend_only or execute_approved, behavior.maximumConcurrentChildren 0 to 64, " +
+      "delegation.decisions human or orchestrator per category); omit a field to use the owner's Orchestrator defaults";
+  }
+  if (request.campaign === undefined) {
+    if (request.role === "orchestrator") return "A scheduled Orchestrator session requires request.campaign";
+    return request.orchestrator === undefined ? null : "request.orchestrator overrides require request.campaign and role orchestrator";
+  }
   const c = request.campaign;
-  if (request.role !== "orchestrator" || !object(c) ||
-      Object.keys(c).some(k => !["controlMode", "repository", "tasks", "fullControl"].includes(k)) ||
-      !["custom", "full_control"].includes(String(c.controlMode)) || !text(c.repository, 512) ||
-      c.repository !== c.repository.toLowerCase() || !campaignRepositoryLocation(c.repository) ||
-      !Array.isArray(c.tasks) || c.tasks.length > 100 || c.tasks.some(t => !object(t) ||
-        Object.keys(t).some(k => !["key", "title", "prompt"].includes(k)) || !text(t.key, 128) ||
-        !/^[a-zA-Z0-9_-]+$/.test(t.key) || !text(t.title, 120) || !text(t.prompt, 16_384)) ||
-      new Set(c.tasks.map(t => t.key)).size !== c.tasks.length) return false;
-  if (c.controlMode === "custom" && c.fullControl !== undefined) return false;
-  return c.fullControl === undefined || (object(c.fullControl) && !Object.hasOwn(c.fullControl, "session") &&
-    parseFullControlLaunchRequest({ runnerId: request.runnerId, workspaceId: request.workspaceId, overrides: c.fullControl }, false) !== null);
+  if (request.role !== "orchestrator") return "request.campaign requires request.role orchestrator";
+  if (!object(c)) return "request.campaign must be an object";
+  const unknown = Object.keys(c).filter(k => !["controlMode", "repository", "tasks", "fullControl"].includes(k));
+  if (unknown.length) return `request.campaign does not accept ${unknown.join(", ")}; use controlMode, repository, tasks and fullControl`;
+  if (!["custom", "full_control"].includes(String(c.controlMode))) return "request.campaign.controlMode must be custom or full_control";
+  if (!text(c.repository, 512) || c.repository !== c.repository.toLowerCase() || !campaignRepositoryLocation(c.repository)) {
+    return "request.campaign.repository must be the lowercase owner/name (or GitLab host/group/project) of the target workspace's origin";
+  }
+  if (!Array.isArray(c.tasks) || c.tasks.length > 100) return "request.campaign.tasks must be an array of at most 100 tasks";
+  for (const [index, t] of c.tasks.entries()) {
+    if (!object(t) || Object.keys(t).some(k => !["key", "title", "prompt"].includes(k)) || !text(t.key, 128) ||
+        !/^[a-zA-Z0-9_-]+$/.test(t.key) || !text(t.title, 120) || !text(t.prompt, 16_384)) {
+      return `request.campaign.tasks[${index}] must have only key (letters, digits, _ or -, at most 128), ` +
+        "title (at most 120 characters) and prompt (at most 16384 characters)";
+    }
+  }
+  if (new Set(c.tasks.map(t => (t as { key: string }).key)).size !== c.tasks.length) return "request.campaign.tasks keys must be unique";
+  if (c.fullControl === undefined) return null;
+  if (c.controlMode === "custom") return "request.campaign.fullControl applies only to controlMode full_control";
+  if (!object(c.fullControl) || Object.hasOwn(c.fullControl, "session") ||
+      parseFullControlLaunchRequest({ runnerId: request.runnerId, workspaceId: request.workspaceId, overrides: c.fullControl }, false) === null) {
+    return "request.campaign.fullControl accepts only objective, operations, delegatablePolicyIds, budget and issues launch overrides; " +
+      "the root's settings belong in the session request";
+  }
+  return null;
+}
+
+/** The aggregate allowance an occurrence receives: Full Control overrides only narrow the
+ * automation's finite ceilings and the campaign's concurrency. */
+function scheduledCampaignBudget(automation: Pick<AutomationSpec, "limits" | "action">, launch: PreparedCampaignLaunch) {
+  const override = automation.action.kind === "create_session" ? automation.action.request.campaign?.fullControl?.budget : undefined;
+  return { costUsd: Math.min(automation.limits.maxCostUsd, override?.costUsd ?? Infinity),
+    toolCalls: Math.min(automation.limits.maxToolCalls, override?.toolCalls ?? Infinity),
+    concurrency: Math.min(launch.policy.behavior.maximumConcurrentChildren, override?.concurrency ?? Infinity),
+    acceptedFollowUps: override?.acceptedFollowUps ?? (launch.policy.behavior.followUps === "execute_approved" ? 1 : 0) };
+}
+
+export interface ScheduledCampaignPreview {
+  controlMode: AutomationCampaign["controlMode"];
+  repository: string;
+  tasks: Array<{ key: string; title: string }>;
+  root: { runnerId: string; workspaceId: string; agentId: string; model: string | null; effort: string | null };
+  behavior: PreparedCampaignLaunch["policy"]["behavior"];
+  delegation: PreparedCampaignLaunch["policy"]["delegation"];
+  execution: PreparedCampaignLaunch["policy"]["execution"];
+  budget: ReturnType<typeof scheduledCampaignBudget>;
 }
 
 export function scheduledCampaignPrompt(prompt: string | undefined, campaign: AutomationCampaign): string {
@@ -75,31 +118,53 @@ export class ScheduledCampaignRuntime {
         catch (error) { if (error instanceof AssistantRefusal) return error.message; throw error; }
       }
       if (!human) return "Scheduled campaigns require an active authenticated human owner";
-      if (!this.db.canAccessRunner(human, target.runnerId) || !this.db.canAccessWorkspace(human, target.runnerId, target.workspaceId)) {
-        return "The scheduled campaign target is outside its owner's access";
-      }
-      if (!runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "campaignBudgetAdmission")) {
-        return "Update the selected campaign machine to support aggregate campaign allowances";
-      }
-      const agentId = target.installationBindings?.agent
-        ? this.db.resolveSavedHarnessInstallation(target.runnerId, target.installationBindings.agent) : target.agentId;
-      if (!agentId) return "The scheduled Orchestrator installation is unavailable";
-      // Ordinary preparation validates every fixed child combination and the root without writes.
-      const { campaign: _campaign, ...stored } = request;
-      const body = { ...stored, runnerId: target.runnerId, workspaceId: target.workspaceId, agentId,
-        projectId: target.projectId, projectLocationId: target.projectLocationId };
-      let plan: PreparedCampaignLaunch | undefined;
-      const result = this.sessions.createSession(body, undefined, this.scope(human), false, false, false, {
-        ...this.context(human), inspectLaunchPlan: value => { plan = value; },
-      });
-      if (!plan) return result.error ?? "The scheduled campaign configuration is unavailable";
-      const launch = plan as PreparedCampaignLaunch;
+      const launch = this.prepare(spec, target, human);
+      if (typeof launch === "string") return launch;
       const childError = this.customChildError(request.campaign!, launch, human, target.runnerId);
       if (childError) return childError;
       const accounting = this.db.campaignBudgetAccountingError(launch.driver, launch.config.model, true);
       if (accounting) return accounting;
     }
     return null;
+  }
+
+  /** Ordinary preparation validates every fixed child combination and the root without writes. */
+  private prepare(spec: AutomationSpec, target: AutomationRunnerTarget, human: HumanPrincipal): PreparedCampaignLaunch | string {
+    if (spec.action.kind !== "create_session") return "The scheduled campaign configuration is unavailable";
+    if (!this.db.canAccessRunner(human, target.runnerId) || !this.db.canAccessWorkspace(human, target.runnerId, target.workspaceId)) {
+      return "The scheduled campaign target is outside its owner's access";
+    }
+    if (!runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "campaignBudgetAdmission")) {
+      return "Update the selected campaign machine to support aggregate campaign allowances";
+    }
+    const agentId = target.installationBindings?.agent
+      ? this.db.resolveSavedHarnessInstallation(target.runnerId, target.installationBindings.agent) : target.agentId;
+    if (!agentId) return "The scheduled Orchestrator installation is unavailable";
+    const { campaign: _campaign, ...stored } = spec.action.request;
+    const body = { ...stored, runnerId: target.runnerId, workspaceId: target.workspaceId, agentId,
+      projectId: target.projectId, projectLocationId: target.projectLocationId };
+    let plan: PreparedCampaignLaunch | undefined;
+    const result = this.sessions.createSession(body, undefined, this.scope(human), false, false, false, {
+      ...this.context(human), inspectLaunchPlan: value => { plan = value; },
+    });
+    return plan ?? result.error ?? "The scheduled campaign configuration is unavailable";
+  }
+
+  /** The settings the next occurrence of the primary target would launch with, derived by the same
+   * preparation as save and launch, without writes, repository inspection or a launch (#4869). It
+   * reads the owner's current defaults, so omitted overrides show what applies now. Grants nothing. */
+  preview(spec: AutomationSpec, human: HumanPrincipal): ScheduledCampaignPreview | { error: string } {
+    if (spec.action.kind !== "create_session" || !spec.action.request.campaign) return { error: "The automation is not a scheduled campaign" };
+    const request = spec.action.request, campaign = request.campaign!;
+    const launch = this.prepare(spec, { runnerId: request.runnerId, workspaceId: request.workspaceId, agentId: request.agentId,
+      projectId: request.projectId, projectLocationId: request.projectLocationId, installationBindings: spec.action.installationBindings }, human);
+    if (typeof launch === "string") return { error: launch };
+    const { behavior, delegation, execution } = structuredClone(launch.policy);
+    return { controlMode: campaign.controlMode, repository: campaign.repository,
+      tasks: campaign.tasks.map(({ key, title }) => ({ key, title })),
+      root: { runnerId: launch.runnerId, workspaceId: launch.workspaceId, agentId: launch.agentId,
+        model: launch.config.model ?? null, effort: launch.config.effort ?? null },
+      behavior, delegation, execution, budget: scheduledCampaignBudget(spec, launch) };
   }
 
   private scope(human: HumanPrincipal) {
@@ -187,10 +252,7 @@ export class ScheduledCampaignRuntime {
     const childError = this.customChildError(campaign, launch, human, target.runnerId);
     if (childError) return fail(childError);
     const budget = { version: 1 as const, accounting: "managed_workers_only" as const, unpriced: "stop" as const,
-      costUsd: Math.min(automation.limits.maxCostUsd, campaign.fullControl?.budget?.costUsd ?? Infinity),
-      toolCalls: Math.min(automation.limits.maxToolCalls, campaign.fullControl?.budget?.toolCalls ?? Infinity),
-      concurrency: Math.min(launch.policy.behavior.maximumConcurrentChildren, campaign.fullControl?.budget?.concurrency ?? Infinity),
-      acceptedFollowUps: campaign.fullControl?.budget?.acceptedFollowUps ?? (launch.policy.behavior.followUps === "execute_approved" ? 1 : 0) };
+      ...scheduledCampaignBudget({ limits: automation.limits, action: automation.action }, launch) };
     const scheduled = { automationId: automation.automationId, executionId: execution.executionId, budget,
       tasks: campaign.tasks, ...(assistant ? {assistantAuthorization: assistant.authorization} : {}) };
     if (assistant) auditAssistantAutomationOccurrence(this.db, automation.automationId, execution.executionId, "authorized");

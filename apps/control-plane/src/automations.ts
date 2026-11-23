@@ -36,7 +36,8 @@ import {
 } from "./sessions.js";
 import { nextCronFire, parseCron, validateTimeZone } from "@wollipog/protocol/cron-schedule";
 import { automationCommandDigest, AutomationCommandOutbox } from "./automation-command-outbox.js";
-import { validAutomationCampaign, type ScheduledCampaignRuntime } from "./scheduled-campaigns.js";
+import { automationCampaignError, type ScheduledCampaignPreview, type ScheduledCampaignRuntime } from "./scheduled-campaigns.js";
+import type { HumanPrincipal } from "./identity.js";
 import { authorizeAssistantAutomation, scheduledAssistantOwner,
   auditAssistantAutomationOccurrence, type AssistantAutomationOperation } from "./assistant-automation-authority.js";
 import { AssistantRefusal } from "./assistant-connections.js";
@@ -238,11 +239,12 @@ function validateAction(value: unknown): string | null {
         (request.role !== undefined && request.role !== "normal" && request.role !== "orchestrator") ||
         (request.providerAccountId !== undefined && !boundedString(request.providerAccountId)) ||
         (request.executionTargetId !== undefined && !boundedString(request.executionTargetId)) ||
-        !validAutomationCampaign(request) ||
         !optionalString(request.title, 120) || !optionalString(request.prompt, 65_536) ||
         (request.useWorktree !== undefined && typeof request.useWorktree !== "boolean") || !validConfig(request.config)) {
       return "create-session action requires a secret-free runner/workspace/agent request, an exact Project assignment when supplied, and cannot persist images or ACP context";
     }
+    const campaignError = automationCampaignError(request);
+    if (campaignError) return campaignError;
   } else if (value.kind === "prompt_session") {
     if (!keysOnly(value, ["kind", "sessionId", "request"]) || !boundedString(value.sessionId) || !object(value.request) ||
         !keysOnly(value.request, ["text", "slashCommand", "config"]) ||
@@ -608,6 +610,15 @@ export class AutomationsService {
   delete(automationId: string, actor: GovernanceActor, now = Date.now()): ServiceResult<{ deleted: true }> {
     if (!this.db.deleteAutomation(automationId, actor, now)) return fail("automation not found", 404);
     return ok({ deleted: true });
+  }
+
+  /** Effective settings a scheduled campaign's next occurrence would launch with for `owner`, or
+   * null for other automations. Read-only: nothing is launched, inspected or persisted. */
+  campaignPreview(automation: AutomationSchedule, owner: HumanPrincipal): ScheduledCampaignPreview | { error: string } | null {
+    if (automation.action.kind !== "create_session" || !automation.action.request.campaign) return null;
+    if (!this.campaigns) return { error: "Scheduled campaigns are unavailable on this server" };
+    const { name, cron, timezone, enabled, misfirePolicy, runnerPolicy, concurrencyPolicy, limits, notifications, action } = automation;
+    return this.campaigns.preview({ name, cron, timezone, enabled, misfirePolicy, runnerPolicy, concurrencyPolicy, limits, notifications, action }, owner);
   }
 
   private campaignError(spec: AutomationSpec, actor: GovernanceActor, operation?: AssistantAutomationOperation): string | null {

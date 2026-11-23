@@ -67,7 +67,9 @@ export function registerAssistantAutomations(operations: AssistantOperations, db
         if (name === "auto_get") {
           const schedule = load(a), targets = authorize(schedule);
           const result = service.get(schedule.automationId);
-          return {...result.data, impact: {targets}};
+          // A scheduled campaign also reports the settings its next occurrence would use now.
+          const effectiveCampaign = service.campaignPreview(schedule, context.owner);
+          return {...result.data, impact: {targets}, ...(effectiveCampaign ? {effectiveCampaign} : {})};
         }
         let resultId: string | undefined;
         return mutations.run({connection: db.assistantConnections.get(context.connection.id)!, operation: name, args: a,

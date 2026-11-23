@@ -80,6 +80,17 @@ A later non-Assistant save clears the schedule's current Assistant binding atomi
 human edits do not inherit an old connection's restrictions. Previously authorized occurrences
 retain their own Assistant identity and launcher attribution during recovery.
 
+`auto_create` and `auto_update` advertise the scheduled campaign request the server accepts:
+`request.orchestrator` with optional `behavior` (Child Harness, Model and Effort, concurrency,
+follow-ups, completion and review policy), `delegation` and `execution` overrides, and
+`request.campaign` with `controlMode`, `repository`, keyed `tasks` and the Full Control launch
+overrides. Omitted overrides use the owner's Orchestrator defaults. An invalid field is refused
+with a message naming it. For a scheduled campaign, `auto_get.effectiveCampaign` reports what the
+next occurrence would launch with now: the root installation, model and effort, the resolved
+behavior, delegation and execution, the tasks and the aggregate allowance. It is derived by the
+same preparation as save and launch, without inspecting the repository, launching or persisting
+anything, and grants nothing. A failed preparation reads `{error}` instead.
+
 Skill impact reports potentially affected machines within the skill's ownership audience, including
 offline targets. Reported state is the last runner report, not a promise that an offline machine
 has synchronized. Shared push-on-change logic sends the desired state to online compatible runners;
