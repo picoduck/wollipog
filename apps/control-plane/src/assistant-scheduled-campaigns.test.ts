@@ -438,6 +438,14 @@ test("the effective readback reports stored checkpoints that the next occurrence
     if (launches) assert.equal(read.effectiveCampaign.error, undefined, `${automationId}: ${read.effectiveCampaign.error}`);
     else assert.match(read.effectiveCampaign.error, /checkpointsUsd must be at most 100 increasing positive amounts within the effective cost limit of 15/, automationId);
   }
+  // Another invalid stored budget value cannot hide the refusal; the readback names that field.
+  const combined = payload();
+  Object.assign(combined.action.request.campaign.fullControl.budget, { checkpointsUsd: [16], acceptedFollowUps: -1 });
+  f.db.createAutomation({ automationId: "auto_legacy_combined", spec: combined as unknown as AutomationSpec,
+    nextFireAt: Date.now() + 60_000, actor: { kind: "human", id: f.owner.userId }, now: Date.now() });
+  const read = await f.call("auto_get", { automationId: "auto_legacy_combined" });
+  assert.match(read.effectiveCampaign.error, /effective acceptedFollowUps of -1 must be an integer of at least 0/);
+  assert.equal(read.effectiveCampaign.behavior, undefined);
   assert.deepEqual(f.sent.map(message => message.type), []);
 });
 
@@ -464,8 +472,9 @@ test("an Assistant update outside the connection's grant gets the same refusal w
 test("an Assistant without auto_update gets the operation refusal whatever state the stored target is in", async t => {
   const f = fixture();
   t.after(async () => { await f.app.close(); f.db.close(); });
+  const project = f.db.createProject({ name: "Stored Placement" });
   f.db.createSession({ id: "present", runnerId: "r", workspaceId: "w", agentId: "parent", title: "Present", useWorktree: false,
-    driver: "claude-code", config: {}, now: 1 });
+    driver: "claude-code", config: {}, projectId: project.id, now: 1 });
   const promptSchedule = (automationId: string, sessionId: string) => f.db.createAutomation({ automationId, nextFireAt: null,
     spec: { name: automationId, cron: "0 9 * * *", timezone: "UTC", enabled: false, action: { kind: "prompt_session", sessionId, request: { text: "Run" } },
       misfirePolicy: { kind: "skip" }, runnerPolicy: { kind: "wait" }, concurrencyPolicy: "skip", limits: { maxCostUsd: 1, maxToolCalls: 10 },
@@ -480,6 +489,12 @@ test("an Assistant without auto_update gets the operation refusal whatever state
   const first = await refusal(resolvable.automationId), second = await refusal(unavailable.automationId);
   assert.match(first!, /Operation auto_update is excluded/);
   assert.equal(second, first, "the refusal cannot reveal the stored target's state");
+  // A refused call records its target in the connection's activity, so that record cannot carry
+  // the stored schedule's project placement either.
+  const refusedUpdates = f.db.assistantConnections.activity(f.issued.connection.id)
+    .filter(entry => entry.operation === "auto_update" && entry.outcome === "refused");
+  assert.equal(refusedUpdates.length, 2);
+  for (const entry of refusedUpdates) assert.doesNotMatch(entry.target_json, new RegExp(project.id));
 });
 
 test("the effective readback pins a legacy plain agent id the way dispatch does, without saving the pin", async t => {

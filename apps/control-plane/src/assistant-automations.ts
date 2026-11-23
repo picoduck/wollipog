@@ -11,8 +11,8 @@ function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new AssistantRefusal("An argument object is required.");
   return value as Record<string, unknown>;
 }
-function spec(value: unknown, previous?: AutomationSchedule): AutomationSpec {
-  const parsed = validateAutomationSpec(value, previous);
+function spec(value: unknown, previous?: AutomationSchedule, deferStoredLimits = false): AutomationSpec {
+  const parsed = validateAutomationSpec(value, previous, {deferCampaignLimits: deferStoredLimits});
   if (!parsed.ok) throw new AssistantRefusal(parsed.error ?? "Automation configuration is invalid.");
   return parsed.data!;
 }
@@ -38,17 +38,13 @@ export function registerAssistantAutomations(operations: AssistantOperations, db
       ? spec(a.payload, name === "auto_update" ? load(a) : undefined) : specOf(load(a, name === "auto_delete"));
     const target = (value: unknown): AssistantTarget => {
       if (name === "auto_list") return {kind: "automation", id: "list"};
-      // An update targets the stored schedule. Its replacement is validated against the stored
-      // values only after access checks (in impact and execute), and a stored target that no
-      // longer resolves is reported there too, so no refusal before the grant and access checks
-      // depends on the state of a schedule the caller may not read.
+      // Target resolution runs before the grant and access checks, and a refused call records its
+      // target in connection activity. So it reads only the submitted configuration: an update's
+      // Full Control limit values are compared with the stored schedule (and the stored targets
+      // authorized) after those checks, in impact and execute.
       const a = object(value);
-      let targets: AssistantTarget[] = [];
-      if (name === "auto_update") {
-        const stored = load(a);
-        try { targets = automationManagementTargets(db, stored); }
-        catch (error) { if (!(error instanceof AssistantRefusal)) throw error; }
-      } else targets = automationManagementTargets(db, proposed(a));
+      const submitted = name === "auto_update" ? spec(a.payload, undefined, true) : proposed(a);
+      const targets = automationManagementTargets(db, submitted);
       return {kind: "automation", id: name === "auto_create" ? "new" : load(a, name === "auto_delete").automationId, projectId: targets[0]?.projectId};
     };
     operations.register({name, description: ({auto_list: "List accessible automations and latest execution status.", auto_get: "Inspect configuration, revision, execution status and affected targets.",

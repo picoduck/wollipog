@@ -64,7 +64,7 @@ function refusedHarnessField(value: unknown, path: string): string {
  * in a schedule. The ordinary campaign parsers remain authoritative for all policy fields. Each
  * refusal names the field so a caller following the advertised schema can correct it (#4869). */
 export function automationCampaignError(request: Record<string, unknown>,
-  context: { maxCostUsd?: unknown; stored?: { fullControl?: unknown; maxCostUsd?: number } } = {}): string | null {
+  context: { maxCostUsd?: unknown; deferLimits?: boolean; stored?: { fullControl?: unknown; maxCostUsd?: number } } = {}): string | null {
   if (request.orchestrator !== undefined && !parseOrchestratorOverrides(request.orchestrator)) {
     const field = refusedOrchestratorField(request.orchestrator);
     return field === "request.orchestrator"
@@ -116,7 +116,9 @@ export function automationCampaignError(request: Record<string, unknown>,
   // saved, for example to pause it; launch still validates its effective boundary each time.
   const unchanged = context.stored !== undefined && isDeepStrictEqual(fullControl, context.stored.fullControl) &&
     context.maxCostUsd === context.stored.maxCostUsd;
-  return unchanged ? null : fullControlLimitError(fullControl as Record<string, unknown>, context.maxCostUsd);
+  // `deferLimits` checks shape only, for a caller that has not yet established access to the stored
+  // schedule; the full check runs once it has.
+  return unchanged || context.deferLimits ? null : fullControlLimitError(fullControl as Record<string, unknown>, context.maxCostUsd);
 }
 
 /** An occurrence's cost ceiling: overrides only narrow the automation's own finite limit. */
@@ -164,6 +166,29 @@ function scheduledCampaignBudget(automation: Pick<AutomationSpec, "limits" | "ac
     toolCalls: Math.min(automation.limits.maxToolCalls, override?.toolCalls ?? Infinity),
     concurrency: Math.min(launch.policy.behavior.maximumConcurrentChildren, override?.concurrency ?? Infinity),
     acceptedFollowUps: override?.acceptedFollowUps ?? (launch.policy.behavior.followUps === "execute_approved" ? 1 : 0) };
+}
+
+/** Why a Full Control occurrence would refuse its effective allowance, or null. A schedule stored
+ * before save checked these values can hold any of them, and stored JSON is not revalidated on
+ * read. Checkpoints are forwarded exactly as launch does (only a value with a length), and the
+ * verdict is launch's own validator's; each field is then named so the owner can correct it. */
+function effectiveBudgetError(budget: ReturnType<typeof scheduledCampaignBudget>, checkpoints: unknown): string | null {
+  const forwarded = (checkpoints as { length?: unknown } | null | undefined)?.length ? { checkpointsUsd: checkpoints } : {};
+  if (validCampaignBudgetAuthority({ version: 1, ...budget, ...forwarded, accounting: "managed_workers_only", unpriced: "stop" })) return null;
+  const refused = "; the next occurrence would be refused";
+  const at = "request.campaign.fullControl.budget";
+  const values = budget as Record<string, unknown>;
+  if (!(typeof values.costUsd === "number" && Number.isFinite(values.costUsd) && values.costUsd > 0)) {
+    return `${at}.costUsd gives an effective cost limit of ${String(values.costUsd)}, which must be a positive number${refused}`;
+  }
+  for (const key of ["toolCalls", "concurrency", "acceptedFollowUps"] as const) {
+    const minimum = key === "acceptedFollowUps" ? 0 : 1;
+    if (!(Number.isSafeInteger(values[key]) && (values[key] as number) >= minimum)) {
+      return `The effective ${key} of ${String(values[key])} must be an integer of at least ${minimum}; check ${at}.${key}` +
+        `${key === "concurrency" ? " and the Orchestrator's maximumConcurrentChildren" : ""}${refused}`;
+    }
+  }
+  return `${at}.checkpointsUsd must be at most 100 increasing positive amounts within the effective cost limit of ${budget.costUsd}${refused}`;
 }
 
 export interface ScheduledCampaignPreview {
@@ -265,16 +290,8 @@ export class ScheduledCampaignRuntime {
     const childError = this.customChildError(campaign, launch, human, target.runnerId);
     if (childError) return { error: childError };
     const budget = scheduledCampaignBudget({ limits: automation.limits, action }, launch);
-    // A schedule stored before save checked them can hold checkpoints launch refuses, including
-    // values of the wrong type: stored JSON is not revalidated on read. Forward them exactly as
-    // launch does (only a value with a length) and judge them with launch's own validator.
-    const checkpoints: unknown = campaign.fullControl?.budget?.checkpointsUsd;
-    const authority = { version: 1, ...budget, accounting: "managed_workers_only", unpriced: "stop" };
-    if ((checkpoints as { length?: unknown } | null | undefined)?.length && validCampaignBudgetAuthority(authority) &&
-        !validCampaignBudgetAuthority({ ...authority, checkpointsUsd: checkpoints })) {
-      return { error: "request.campaign.fullControl.budget.checkpointsUsd must be at most 100 increasing positive amounts within " +
-        `the effective cost limit of ${budget.costUsd}; the next occurrence would be refused` };
-    }
+    const budgetError = campaign.fullControl ? effectiveBudgetError(budget, campaign.fullControl.budget?.checkpointsUsd) : null;
+    if (budgetError) return { error: budgetError };
     const { behavior, delegation, execution } = structuredClone(launch.policy);
     return { controlMode: campaign.controlMode, repository: campaign.repository,
       tasks: campaign.tasks.map(({ key, title }) => ({ key, title })),

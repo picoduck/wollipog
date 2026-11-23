@@ -221,7 +221,7 @@ function optionalString(value: unknown, max: number): boolean {
   return value === undefined || (typeof value === "string" && value.length <= max);
 }
 
-function validateAction(value: unknown, previous?: AutomationSchedule, maxCostUsd?: unknown): string | null {
+function validateAction(value: unknown, previous?: AutomationSchedule, maxCostUsd?: unknown, deferCampaignLimits = false): string | null {
   if (!object(value) || !boundedString(value.kind, 32)) return "automation action is malformed";
   if (value.kind === "workflow_run" || value.kind === "retired") {
     return "Workflow runs were removed. Create a campaign automation instead.";
@@ -244,7 +244,7 @@ function validateAction(value: unknown, previous?: AutomationSchedule, maxCostUs
       return "create-session action requires a secret-free runner/workspace/agent request, an exact Project assignment when supplied, and cannot persist images or ACP context";
     }
     const campaignError = automationCampaignError(request,
-      { maxCostUsd, stored: previous?.action.kind === "create_session" ? { fullControl: previous.action.request.campaign?.fullControl, maxCostUsd: previous.limits.maxCostUsd } : undefined });
+      { maxCostUsd, deferLimits: deferCampaignLimits, stored: previous?.action.kind === "create_session" ? { fullControl: previous.action.request.campaign?.fullControl, maxCostUsd: previous.limits.maxCostUsd } : undefined });
     if (campaignError) return campaignError;
   } else if (value.kind === "prompt_session") {
     if (!keysOnly(value, ["kind", "sessionId", "request"]) || !boundedString(value.sessionId) || !object(value.request) ||
@@ -266,7 +266,8 @@ function validateAction(value: unknown, previous?: AutomationSchedule, maxCostUs
 
 /** `previous` is the stored schedule an update replaces: values it already holds were admitted
  * under earlier rules, so an unchanged action still saves (for example, to pause it). */
-export function validateAutomationSpec(value: unknown, previous?: AutomationSchedule): ServiceResult<AutomationSpec> {
+export function validateAutomationSpec(value: unknown, previous?: AutomationSchedule,
+  options: { deferCampaignLimits?: boolean } = {}): ServiceResult<AutomationSpec> {
   if (!object(value) || !keysOnly(value, [
     "name", "cron", "timezone", "enabled", "misfirePolicy", "runnerPolicy", "concurrencyPolicy",
     "limits", "notifications", "action",
@@ -279,7 +280,8 @@ export function validateAutomationSpec(value: unknown, previous?: AutomationSche
   } catch (error) {
     return fail((error as Error).message);
   }
-  const actionError = validateAction(value.action, previous, object(value.limits) ? value.limits.maxCostUsd : undefined);
+  const actionError = validateAction(value.action, previous, object(value.limits) ? value.limits.maxCostUsd : undefined,
+    options.deferCampaignLimits === true);
   if (actionError) return fail(actionError);
   if (!object(value.misfirePolicy) || !keysOnly(value.misfirePolicy, ["kind", "maxRuns"]) ||
       !["skip", "fire_once", "catch_up"].includes(String(value.misfirePolicy.kind)) ||
