@@ -91,7 +91,9 @@ field is refused at save with a message naming it. For a scheduled campaign,
 Machine, installation, model and effort, the resolved behavior, delegation and execution, the tasks
 and the aggregate allowance. It uses the target the scheduler would choose now, including an
 alternate when the primary is unavailable, and the principal launch would act as: the schedule's
-still-authorized Assistant owner or its sole human author, never the reader. It is derived by the
+still-authorized Assistant owner or its sole human author, never the reader. Because omitted
+overrides resolve from that person's own Orchestrator defaults, only that person sees the settings;
+another reader of the schedule gets an explanation instead. It is derived by the
 same preparation as save, without inspecting the repository, sending a runner message, launching
 or persisting anything, and grants nothing. When the occurrence would be refused (for example, the
 authorizing connection lost the operation, or no target is available), it reads `{error}` with

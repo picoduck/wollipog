@@ -202,8 +202,9 @@ export class ScheduledCampaignRuntime {
    * for the principal launch would act as: the schedule's still-authorized Assistant owner or its
    * sole human author, never the reader. Derived by the same preparation as save, without writes,
    * repository inspection, runner messages or a launch (#4869). Omitted overrides show the owner's
-   * current defaults. Grants nothing. */
-  preview(automation: AutomationSchedule, target: AutomationRunnerTarget): ScheduledCampaignPreview | { error: string } {
+   * current defaults, which are that person's own settings, so only that person (`reader`) sees
+   * them; anyone else who can read the schedule gets an explanation instead. Grants nothing. */
+  preview(automation: AutomationSchedule, target: AutomationRunnerTarget, reader: HumanPrincipal): ScheduledCampaignPreview | { error: string } {
     const action = automation.action;
     if (action.kind !== "create_session" || !action.request.campaign) return { error: "The automation is not a scheduled campaign" };
     let assistant: ReturnType<typeof scheduledAssistantOwner>;
@@ -211,6 +212,9 @@ export class ScheduledCampaignRuntime {
     catch (error) { if (error instanceof AssistantRefusal) return { error: error.message }; throw error; }
     const human = assistant?.owner ?? this.human(this.db.automationSoleHumanAuthor(automation.automationId, true) ?? undefined, target.runnerId);
     if (!human) return { error: "The campaign schedule no longer has one active authorizing human; review and recreate the schedule" };
+    if (human.userId !== reader.userId || human.organizationId !== reader.organizationId) {
+      return { error: "The effective settings come from the schedule owner's own Orchestrator defaults and are shown only to that owner" };
+    }
     const campaign = action.request.campaign;
     const launch = this.prepare(action.request, target, human);
     if (typeof launch === "string") return { error: launch };

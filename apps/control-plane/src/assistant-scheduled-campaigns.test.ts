@@ -329,6 +329,9 @@ test("the effective readback follows the schedule's launch authority and the sch
   f.offline.add("r2");
   assert.equal((await f.call("auto_get", { automationId })).effectiveCampaign.error, AUTOMATION_TARGET_UNAVAILABLE);
   f.offline.clear();
+  // The settings come from the launch owner's own defaults, so another reader gets no settings.
+  const otherReader = f.automations.campaignPreview(f.db.getAutomation(automationId)!, { ...f.owner, userId: "u_other_reader" });
+  assert.deepEqual(otherReader, { error: "The effective settings come from the schedule owner's own Orchestrator defaults and are shown only to that owner" });
   // The creating connection keeps read access but loses the operation that authorized the
   // schedule: the schedule still reads, while the next occurrence, and so the preview, is refused.
   f.db.assistantConnections.configure(f.issued.connection.id, { operations: ["auto_get"], projects: "all" });
