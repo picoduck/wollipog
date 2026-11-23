@@ -87,8 +87,13 @@ const STRESS_MODES = NUMBER_WORDS.map((word, index) => ({
 }));
 const modesStress = state === "modes-stress";
 const fullPermissions = state === "full-permissions";
-const agentModes = fullPermissions ? [ANTIGRAVITY_FULL_PERMISSIONS_MODE] : modesStress ? STRESS_MODES :
-  state === "auto-fallback" ? AGY_MODES.filter(({ id }) => id !== ANTIGRAVITY_AUTO_MODE.id) : AGY_MODES;
+/** The runner appends Wollipog's live Full Permissions Mode to agy's own modes (apps/runner/src/acp.ts). */
+const FULL_PERMISSIONS = { ...ANTIGRAVITY_FULL_PERMISSIONS_MODE,
+  description: "Approve every Antigravity action without asking. Runner isolation still applies." };
+/** Where agy's terminal sandbox is unavailable (AppArmor-restricted user namespaces), agy omits Auto. */
+const WITHOUT_AUTO = AGY_MODES.filter(({ id }) => id !== ANTIGRAVITY_AUTO_MODE.id);
+const agentModes = fullPermissions || state === "auto-fallback" ? [...WITHOUT_AUTO, FULL_PERMISSIONS]
+  : modesStress ? STRESS_MODES : AGY_MODES;
 const currentMode = fullPermissions ? ANTIGRAVITY_FULL_PERMISSIONS_MODE.id : modesStress ? "mode-5" : "default";
 
 /** What acpSessionPresentation (apps/runner/src/acp-session-state.ts) makes of agy's session: its
@@ -102,7 +107,8 @@ const capabilities: AgentCapabilities = {
   supportsApprovals: true,
   permissionModes,
   agentPermissionModes: agentModes,
-  elicitation: Object.fromEntries(permissionModes.map((mode) => [mode, [fullPermissions ? "none" : "acp-permission"]])),
+  elicitation: Object.fromEntries(permissionModes.map((mode) =>
+    [mode, [mode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id ? "none" : "acp-permission"]])),
 };
 
 const launchFailed = state === "install-failed" || state === "signin-failed" || state === "resume-failed";
@@ -167,7 +173,20 @@ switch (state) {
   case "auto-fallback":
     payloads.push({
       kind: "error", nonFatal: true, source: "antigravity_auto_mode_fallback",
-      message: "Google Antigravity could not enable Auto Mode. This session uses the provider’s current approval settings.",
+      // What the runner sends on an Ubuntu host (apps/runner/src/antigravity-apparmor.ts).
+      message: "Google Antigravity does not offer Auto Mode on this machine: AppArmor blocks the user namespaces its terminal sandbox needs (kernel.apparmor_restrict_unprivileged_userns = 1). To allow them for Antigravity only, run the command below on this machine, then start a new Antigravity session. This session uses Default mode. Choose Full Permissions Mode to skip Antigravity’s approval prompts.",
+      fixCommand: [
+        "sudo install -D -o root -g root -m 0755 '/home/user/.local/bin/agy' /usr/local/lib/wollipog-antigravity/agy",
+        "ln -sfn /usr/local/lib/wollipog-antigravity/agy '/home/user/.local/bin/agy'",
+        "sudo tee /etc/apparmor.d/wollipog-antigravity > /dev/null <<'EOF'",
+        "abi <abi/4.0>,",
+        "include <tunables/global>",
+        'profile wollipog-antigravity "/usr/local/lib/wollipog-antigravity/agy" flags=(unconfined) {',
+        "  userns,",
+        "}",
+        "EOF",
+        "sudo apparmor_parser -r /etc/apparmor.d/wollipog-antigravity",
+      ].join("\n"),
     });
     break;
   case "full-permissions":

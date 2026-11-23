@@ -2591,7 +2591,15 @@ function TimelineRowContent({
         <Notice tone="warning" title="Worktree Base Fallback"><p>{item.message}</p></Notice>
       );
       if (item.source === "antigravity_auto_mode_fallback") return (
-        <Notice tone="warning" title="Auto Mode Unavailable"><p>{item.message}</p></Notice>
+        <Notice tone="warning" title="Auto Mode Unavailable">
+          <p>{item.message}</p>
+          {item.fixCommand && (
+            <div className="code-well">
+              <pre>{item.fixCommand}</pre>
+              <CopyButton text={item.fixCommand} iconOnly ariaLabel="Copy Command" className="icon-btn sm" />
+            </div>
+          )}
+        </Notice>
       );
       if (item.nonFatal) return <TurnProblemNotice message={item.message} />;
       {

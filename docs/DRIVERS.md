@@ -1671,13 +1671,32 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
 - **Approvals.** Commands ask through `session/request_permission` (string request ids, `allow` and
   `deny` options) and the card's title is the command line. Deny prevents the command. New sessions
   default to Auto Mode. Wollipog selects ACP's `auto` before the first prompt or after resume if agy
-  supports it. If agy cannot enable it, the session shows a warning and uses the provider's current
-  approval settings. On Linux managed worktrees where agy's Auto sandbox cannot create its
+  supports it. agy 1.5.14 offers `auto` only where its OS terminal sandbox works; on Linux hosts
+  with `kernel.apparmor_restrict_unprivileged_userns = 1` (Ubuntu's default) its log says
+  "Terminal sandbox unavailable", `auto` is missing from the session's modes and `session/set_mode`
+  refuses it. The session then shows a warning that names the reason and Full Permissions Mode,
+  and runs in Default mode. When the runner reads that sysctl as `1` and launched agy outside
+  bwrap, the warning also carries `fixCommand`, which the dashboard shows as a copyable block. It is
+  the exact host command (`antigravity-apparmor.ts`) that installs the AppArmor profile
+  `wollipog-antigravity`, granting `userns` only to a file no unprivileged program can replace.
+  - If root owns the launched agy's realpath and every parent directory, and none of them is
+    group- or world-writable, that path is granted.
+  - Otherwise, for example `~/.local/bin/agy`, the command first installs a root-owned copy at
+    `/usr/local/lib/wollipog-antigravity/agy`, turns the old path into a symlink to it, and grants
+    only the copy. A profile on a user-writable path would let any program running as the user
+    gain user namespaces by writing itself there.
+  - A Wollipog-managed copy gets no command, because updates replace it in a user-owned directory.
+  - An agy self-update that replaces the symlink drops Auto again, and the warning returns with
+    the command.
+
+  Unlike setting the sysctl to `0`, the restriction stays on for every other program. On Linux managed worktrees where agy's Auto sandbox cannot create its
   nested namespace, a failed sandbox launch switches the session to Default mode once agy
   confirms the change. The runner displays the effective mode and never retries the command.
-  Explicitly choosing Full Permissions Mode at creation adds agy's
-  `--dangerously-skip-permissions` flag on each launch of that session under the same runner isolation.
-  Full Permissions Mode is fixed for the session. agy's own file edits are agent-owned
+  **Full Permissions Mode** is Wollipog's own live mode, listed after agy's modes for every
+  non-Orchestrator session, as T3 Code runs Antigravity full access: agy stays in its `default`
+  mode and the runner answers each `session/request_permission` with its allow option. It needs
+  no sandbox and no launch flag, so it can be chosen at creation or switched in or out between
+  turns, and every launch stays under the same runner isolation. agy's own file edits are agent-owned
   tools: in `default` mode real agy wrote a file without asking, so edits are not approval-gated by
   Wollipog, which does not claim otherwise. No ACP approval context is synthesized from agy's tool
   input, because governance policies match on that context.

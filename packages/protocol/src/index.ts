@@ -6615,6 +6615,10 @@ export type SessionEventPayload =
       nonFatal?: true;
       /** A non-fatal warning that can be shown before the first turn. */
       source?: "worktree_base_fallback" | "antigravity_auto_mode_fallback";
+      /** The exact shell command, run on the runner's host, that fixes what the message reports
+       * (Antigravity's Auto Mode on an AppArmor-restricted host). Older dashboards show only the
+       * message, which still says what to do. */
+      fixCommand?: string;
       /** Correlates a promoted notice with this authorized transcript entry. */
       assistantThreadErrorId?: string;
     }
