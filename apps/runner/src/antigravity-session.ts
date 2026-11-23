@@ -9,7 +9,10 @@
  * without Antigravity gain no Needs Setup entry; a found runtime that needs sign-in or failed its
  * check is listed under Needs Setup with that reason. */
 
-import { ANTIGRAVITY_AGENT_ID, type AgentDefinition, type AntigravitySetupView } from "@wollipog/protocol";
+import {
+  ANTIGRAVITY_AGENT_ID, ANTIGRAVITY_AUTO_MODE, ANTIGRAVITY_FULL_PERMISSIONS_MODE,
+  type AgentDefinition, type AntigravitySetupView,
+} from "@wollipog/protocol";
 import type { AcpCompatibility } from "./acp-compatibility.js";
 import {
   ANTIGRAVITY_AMBIENT_CREDENTIAL_ENV,
@@ -20,8 +23,7 @@ import type { RunnerExecutionIsolation } from "./config.js";
 
 export { ANTIGRAVITY_AGENT_ID };
 export const ANTIGRAVITY_AGENT_NAME = "Google Antigravity";
-/** The launch arguments. Never `--dangerously-skip-permissions`, `--login`, or a directory flag:
- * permissions follow the agent's advertised modes and the session's cwd is its worktree. */
+/** Base arguments shared by all sessions. The ACP client adds any launch-only permission flag. */
 export const ANTIGRAVITY_ACP_ARGS = ["acp"] as const;
 
 /** Real agy 1.5.14 answered initialize at once and opened a session in about a second; these bound
@@ -80,6 +82,7 @@ export function antigravityAgentDefinition(
       models: (ready ? setup.models ?? [] : []).map((model) => ({ id: model.id, displayName: model.name })),
       effortLevels: [],
       slashCommands: [],
+      permissionModes: [ANTIGRAVITY_AUTO_MODE.id, ANTIGRAVITY_FULL_PERMISSIONS_MODE.id],
       // agy 1.5.14 advertises image prompts; a live session reports its own handshake's value.
       supportsImages: true,
       supportsApprovals: true,

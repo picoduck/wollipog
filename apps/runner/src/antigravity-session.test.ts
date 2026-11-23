@@ -72,7 +72,8 @@ function setup(overrides: Partial<AntigravitySetupView>): AntigravitySetupView {
 const PROVIDER = { mode: "provider", network: "inherit" } as const;
 const BWRAP = { mode: "bwrap", network: "inherit" } as const;
 
-function calls(): Array<{ method: string; clientInfo?: { name?: string } | null; outcome?: unknown; mcpServerNames?: string[] }> {
+function calls(): Array<{ method: string; clientInfo?: { name?: string } | null; outcome?: unknown;
+  mcpServerNames?: string[]; fullPermissions?: boolean; activeMode?: string }> {
   const path = join(state, "calls.jsonl");
   return existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
 }
@@ -329,7 +330,8 @@ test("a session streams replies, advertises agy's models, efforts and modes, and
 test("a denied command never runs, an allowed one does, and Stop settles a pending approval", async () => {
   signIn();
   const cwd = mkdtempSync(join(root, "worktree-"));
-  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd);
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined,
+    { config: { permissionMode: "auto" } });
   await driver.initialize();
   await driver.newSession(cwd);
   const marker = join(cwd, "fixture-command-ran");
@@ -339,6 +341,8 @@ test("a denied command never runs, an allowed one does, and Stop settles a pendi
   let from = seen.events.length;
   const denied = driver.prompt("Please run the command.");
   const request = await permission(from);
+  assert.equal(calls().find((call) => call.method === "session/prompt")?.activeMode, "auto");
+  assert.equal(calls().find((call) => call.method === "initialize")?.fullPermissions, false);
   assert.equal(request.title, "touch fixture-command-ran", "the card names the command being approved");
   assert.deepEqual(request.options.map((option) => [option.optionId, option.kind]), [["allow", "allow_once"], ["deny", "reject_once"]]);
   assert.ok(seen.events.slice(from).some((event) => event.kind === "tool_call"), "the tool call is shown before the card");
@@ -367,6 +371,64 @@ test("a denied command never runs, an allowed one does, and Stop settles a pendi
   await waitFor(() => calls().some((call) => call.method === "session/prompt") ? true : undefined);
   driver.cancel();
   assert.equal(await waiting, "cancelled");
+});
+
+test("Auto Mode is restored on resume and falls back visibly when Antigravity withholds it", async () => {
+  signIn();
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const view = setup({ executable: { path: agy } });
+  const config = { permissionMode: "auto" };
+  const first = launchDriver(view, PROVIDER, cwd, undefined, { config });
+  await first.driver.initialize();
+  const id = await first.driver.newSession(cwd);
+  assert.equal(first.seen.state.at(-1)?.config.permissionMode, "auto");
+  assert.equal(first.seen.state.at(-1)?.capabilities.agentPermissionModes?.find((mode) => mode.id === "auto")?.name, "Auto Mode");
+  first.driver.dispose();
+
+  const resumed = launchDriver(view, PROVIDER, cwd, id, { config });
+  await resumed.driver.initialize();
+  assert.equal(await resumed.driver.newSession(cwd), id);
+  await resumed.driver.prompt("Say hello.");
+  assert.equal(calls().filter((call) => call.method === "session/prompt").at(-1)?.activeMode, "auto");
+  resumed.driver.dispose();
+
+  process.env.FAKE_AGY_MODE = "auto_unavailable";
+  const fallback = launchDriver(view, PROVIDER, cwd, id, { config });
+  await fallback.driver.initialize();
+  assert.equal(await fallback.driver.newSession(cwd), id);
+  assert.equal(fallback.seen.state.at(-1)?.config.permissionMode, "default");
+  assert.ok(fallback.seen.events.some((event) => event.kind === "error" && event.nonFatal &&
+    event.source === "antigravity_auto_mode_fallback"));
+  assert.equal(calls().filter((call) => call.method === "initialize").at(-1)?.fullPermissions, false);
+  const prompt = fallback.driver.prompt("Please run the command.");
+  const request = await waitFor(() => fallback.seen.events.find((event) => event.kind === "permission_request"));
+  fallback.driver.resolvePermission(request.requestId, "deny");
+  assert.equal(await prompt, "end_turn");
+  assert.equal(existsSync(join(cwd, "fixture-command-ran")), false);
+});
+
+test("Full Permissions Mode applies only at launch and stays effective on resume", async () => {
+  signIn();
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const view = setup({ executable: { path: agy } });
+  const config = { permissionMode: "antigravity-full-permissions" };
+  const first = launchDriver(view, PROVIDER, cwd, undefined, { config });
+  await first.driver.initialize();
+  const id = await first.driver.newSession(cwd);
+  assert.equal(first.seen.state.at(-1)?.config.permissionMode, config.permissionMode);
+  assert.deepEqual(first.seen.state.at(-1)?.capabilities.permissionModes, [config.permissionMode]);
+  await assert.rejects(first.driver.setConfig({ permissionMode: "auto" }), /fixed when/u);
+  assert.equal(await first.driver.prompt("Please run the command."), "end_turn");
+  assert.equal(existsSync(join(cwd, "fixture-command-ran")), true);
+  assert.equal(first.seen.events.some((event) => event.kind === "permission_request"), false);
+  first.driver.dispose();
+
+  const resumed = launchDriver(view, PROVIDER, cwd, id, { config });
+  await resumed.driver.initialize();
+  assert.equal(await resumed.driver.newSession(cwd), id);
+  assert.equal(resumed.seen.state.at(-1)?.config.permissionMode, config.permissionMode);
+  assert.deepEqual(calls().filter((call) => call.method === "initialize").map((call) => call.fullPermissions), [true, true]);
+  assert.equal(calls().some((call) => call.method === "session/set_mode"), false);
 });
 
 test("resume reuses the provider conversation under provider isolation and never falls back to session/load", async () => {

@@ -2590,6 +2590,9 @@ function TimelineRowContent({
       if (item.source === "worktree_base_fallback") return (
         <Notice tone="warning" title="Worktree Base Fallback"><p>{item.message}</p></Notice>
       );
+      if (item.source === "antigravity_auto_mode_fallback") return (
+        <Notice tone="warning" title="Auto Mode Unavailable"><p>{item.message}</p></Notice>
+      );
       if (item.nonFatal) return <TurnProblemNotice message={item.message} />;
       {
         const launchFailure = agentLaunchFailure(item.message);

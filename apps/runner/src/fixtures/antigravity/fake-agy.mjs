@@ -109,6 +109,7 @@ if (args[0] === "acp" && args[1] === "--login") {
   }
 } else if (args[0] === "acp") {
   recordEnvironment("acp");
+  const fullPermissions = args.includes("--dangerously-skip-permissions");
   if (modes.has("acp_exit")) process.exit(2);
   const lines = createInterface({ input: process.stdin });
   const send = (message) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
@@ -124,6 +125,9 @@ if (args[0] === "acp" && args[1] === "--login") {
     { id: "accept-edits", name: "Accept edits", description: "Approve file edits in the workspace without asking." },
     { id: "auto", name: "Auto", description: "Approve edits and safe commands; ask before irreversible actions." },
     { id: "plan", name: "Plan", description: "Plan carefully before executing a task." }] };
+  if (modes.has("auto_unavailable")) {
+    modeState.availableModes = modeState.availableModes.filter((mode) => mode.id !== "auto");
+  }
   const config = { model: "fixture-pro", thought_level: "high", mode: "default" };
   const configOptions = () => [
     { id: "model", name: "Model", category: "model", type: "select", currentValue: config.model,
@@ -167,6 +171,7 @@ if (args[0] === "acp" && args[1] === "--login") {
       update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "The command was denied, so nothing ran." } });
       return endTurn("end_turn");
     } };
+    if (fullPermissions) return turn.permission.settle({ outcome: "selected", optionId: "allow" });
     send({ id: permissionId, method: "session/request_permission", params: { sessionId, toolCall: {
       sessionUpdate: "tool_call", ...tool, status: "pending" },
       options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }] } });
@@ -199,7 +204,8 @@ if (args[0] === "acp" && args[1] === "--login") {
     }
     if (request.id === undefined) return;
     record({ method: request.method, ...(request.method === "initialize" ? { clientInfo: request.params?.clientInfo ?? null,
-      clientCapabilities: request.params?.clientCapabilities ?? null } : {}),
+      clientCapabilities: request.params?.clientCapabilities ?? null, fullPermissions } : {}),
+      ...(request.method === "session/prompt" ? { activeMode: config.mode } : {}),
       ...(request.params?.sessionId ? { sessionId: request.params.sessionId } : {}),
       ...(Array.isArray(request.params?.mcpServers)
         ? { mcpServerNames: request.params.mcpServers.map((server) => server.name) } : {}) });

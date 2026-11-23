@@ -17,7 +17,7 @@ import type {
   SessionConfig,
   SessionView,
 } from "@wollipog/protocol";
-import { runnerSupportsProtocol } from "@wollipog/protocol";
+import { ANTIGRAVITY_FULL_PERMISSIONS_MODE, runnerSupportsProtocol } from "@wollipog/protocol";
 import { ModelPickerList } from "./ModelPicker.js";
 import { isExactModelChoice } from "../model-picker.js";
 import { modelOptionLabel } from "../agent-presentation.js";
@@ -1111,6 +1111,14 @@ export function ApprovalsControl({ session, apply, disabledReason = null }: {
   const currentLabel = approvalControlLabel(session.driver, permVal, currentStatus, caps);
   const unrestricted = skipsApprovals(currentMode);
   const accessibleLabel = `Permission Mode: ${currentLabel}`;
+  if (session.driver === "acp" && currentMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) {
+    const fixed = `${accessibleLabel}. Fixed for this Antigravity session.`;
+    return (
+      <span className="cbar-permission-badge" role="img" aria-label={fixed} title={fixed}>
+        <span className="cbar-approvals unrestricted"><ShieldAlertIcon size={16} /></span>
+      </span>
+    );
+  }
   if (permModes.length === 1 && permModes[0] === "orchestrator") {
     // A mark, not a control: its name says why nobody changes it here.
     const fixed = `${accessibleLabel}. Fixed for Orchestrator sessions.`;

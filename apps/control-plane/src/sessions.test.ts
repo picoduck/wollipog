@@ -11824,6 +11824,40 @@ test("createSession persists and launches the capability-dependent Claude permis
   assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, undefined);
 });
 
+test("createSession launches Antigravity in Auto Mode by default and persists an explicit Full Permissions Mode", () => {
+  const { db, hub, svc } = makeHarness();
+  const agent = {
+    ...runnerMeta().agents.find(({ id }) => id === AGENT_ID)!,
+    id: "google-antigravity",
+    driver: "acp" as const,
+    capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+      permissionModes: ["auto", "antigravity-full-permissions"],
+    },
+  };
+  const legacy = { ...agent, id: "legacy-acp", capabilities: { ...agent.capabilities, permissionModes: ["default", "auto"] } };
+  db.updateRunnerAgents(RUNNER_ID, [agent, legacy], Date.now());
+  for (const { agentId, explicit, expected } of [
+    { agentId: agent.id, explicit: undefined, expected: "auto" },
+    { agentId: agent.id, explicit: "antigravity-full-permissions", expected: "antigravity-full-permissions" },
+    { agentId: legacy.id, explicit: undefined, expected: undefined },
+  ]) {
+    const result = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId,
+      ...(explicit ? { config: { permissionMode: explicit } } : {}),
+    });
+    assert.ok(result.ok && result.data, JSON.stringify(result));
+    assert.equal(db.getSession(result.data.id)!.permissionMode, expected ?? null);
+    assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, expected);
+    if (agentId === agent.id) {
+      const otherMode = { permissionMode: explicit ? "auto" : "antigravity-full-permissions" };
+      assert.equal(svc.setConfig(result.data.id, otherMode).status, 409);
+      assert.match(svc.prompt(result.data.id, "Change permissions", [], undefined, otherMode).error ?? "", /fixed at session creation/u);
+      assert.equal(db.getSession(result.data.id)!.permissionMode, expected);
+    }
+  }
+});
+
 test("createSession persists and launches the resolved concrete model and effort", () => {
   const { db, hub, svc } = makeHarness();
   db.updateRunnerAgents(

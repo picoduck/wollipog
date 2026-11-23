@@ -12,6 +12,9 @@ import {
 } from "react";
 import { providerAccountDescription, providerAccountExpectationSentence, providerAccountPreviewPlacement, providerAccountSelectionRefreshKey, providerAccountSkipLabel, useProviderAccountSelection } from "./ProviderAccountSelection.js";
 import {
+  ANTIGRAVITY_AGENT_ID,
+  ANTIGRAVITY_AUTO_MODE,
+  ANTIGRAVITY_FULL_PERMISSIONS_MODE,
   PROVIDER_ACCOUNT_CHOICE_REQUIRED,
   providerAccountPolicyMode,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
@@ -318,6 +321,7 @@ export function NewSessionDialog({
   const initialAgentOptions = agentOptions(runner?.agents ?? []);
   const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId], runner?.agents);
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
+  const [antigravityFullPermissionsRunner, setAntigravityFullPermissionsRunner] = useState<string | null>(null);
   const [providerAccountId, setProviderAccountId] = useState("");
   const [accountSelectionRefresh, setAccountSelectionRefresh] = useState(0);
   // `undefined` until the user chooses: a saved Orchestrator harness default then selects the role
@@ -600,6 +604,10 @@ export function NewSessionDialog({
     runnerSupportsProtocol(runner?.protocolVersion, "wslSafeLauncher") &&
     runner?.runtime?.executionIsolation?.mode === "bwrap";
   const hostExecutionTarget = !executionTarget || executionTarget.adapter === "host";
+  const antigravityPermissionMode = hostExecutionTarget && agent?.id === ANTIGRAVITY_AGENT_ID &&
+    agent.capabilities?.permissionModes?.includes(ANTIGRAVITY_FULL_PERMISSIONS_MODE.id)
+    ? (antigravityFullPermissionsRunner === runnerId ? ANTIGRAVITY_FULL_PERMISSIONS_MODE.id : ANTIGRAVITY_AUTO_MODE.id)
+    : undefined;
   const missingRequiredAccountChoice = hostExecutionTarget && (savedProviderAccountMissing || policyChoiceRequired) && !providerAccountId;
   // Availability is DERIVED from the sentence that explains it, so the two cannot disagree. The
   // preset card is rendered either way now — §11.3 — and a disabled card whose reason contradicted
@@ -805,6 +813,7 @@ export function NewSessionDialog({
 
   const selectAgent = (id: string) => {
     setAgentId(id);
+    if (id !== agentId) setAntigravityFullPermissionsRunner(null);
     setAgentDefaults((defaults) => saveAgentDefault(
       defaults, runnerId, id, instanceScope, runner?.agents.find((candidate) => candidate.id === id),
     ));
@@ -1116,7 +1125,7 @@ export function NewSessionDialog({
     const config: SessionConfig = {
       ...(roleOverride === "orchestrator" && (providerPermissionsPreset || !orchestratorRoleSupported)
         ? { permissionMode: "orchestrator" }
-        : {}),
+        : antigravityPermissionMode ? { permissionMode: antigravityPermissionMode } : {}),
       ...(executionTarget?.adapter === "cloud" ? { costBudgetUsd: cloudBudget } : {}),
     };
     const orchestratorDraft = policyDraft.values;
@@ -1557,7 +1566,7 @@ export function NewSessionDialog({
     { key: "harness", icon: <TerminalIcon size={14} />, label: launchSurface === "native_tui" ? "Native TUI" : "Direct" },
     { key: "working-copy", icon: useWorktree ? <BranchIcon size={14} /> : <FolderIcon size={14} />, label: useWorktree ? "Worktree" : "In Place" },
     ...(runOnOffered && executionTarget ? [{ key: "run-on", icon: <ComputerIcon size={14} />, label: executionTarget.name }] : []),
-    { key: "permissions", icon: <ShieldIcon size={14} />, label: permissionsValue },
+    ...(!antigravityPermissionMode ? [{ key: "permissions", icon: <ShieldIcon size={14} />, label: permissionsValue }] : []),
   ];
   const optionsAttention: SessionOptionsAttention[] = [
     ...(skillsUnavailable ? [{ key: "skills", label: "Skills Unavailable" }] : []),
@@ -1687,6 +1696,26 @@ export function NewSessionDialog({
                 </FieldWarning>
               ))}
           </div>
+
+          {antigravityPermissionMode && (
+            <div className="field">
+              <label className="new-session-field-label">Permission Mode</label>
+              <Select
+                className="new-session-choice-control"
+                label="Permission Mode"
+                value={antigravityPermissionMode}
+                onChange={(mode) => setAntigravityFullPermissionsRunner(
+                  mode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id ? runnerId : null,
+                )}
+                options={[
+                  { value: ANTIGRAVITY_AUTO_MODE.id, label: ANTIGRAVITY_AUTO_MODE.name,
+                    description: "Uses Antigravity’s Auto Mode when available. Otherwise Antigravity uses its regular approval settings." },
+                  { value: ANTIGRAVITY_FULL_PERMISSIONS_MODE.id, label: ANTIGRAVITY_FULL_PERMISSIONS_MODE.name,
+                    description: "Skips Antigravity’s own approval prompts for this session. Runner isolation and Wollipog governance still apply." },
+                ]}
+              />
+            </div>
+          )}
 
           {hostExecutionTarget && (providerAccounts.length > 1 || savedProviderAccountMissing || policyChoiceRequired) && (
             <div className="field">
@@ -1890,7 +1919,7 @@ export function NewSessionDialog({
                   )}
                 />
               )}
-              <ValueRow title="Permissions" value={permissionsValue} description={permissionsDescription} />
+              {!antigravityPermissionMode && <ValueRow title="Permissions" value={permissionsValue} description={permissionsDescription} />}
             </SettingsGroup>
             {providerPermissionsPreset && (
               <Notice tone="warning" title="Permissions Set by the Orchestrator Preset">

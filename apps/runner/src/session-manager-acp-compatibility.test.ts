@@ -51,6 +51,52 @@ test("launch preparation's credential scrub and ACP compatibility reach the prov
   }
 });
 
+test("a first prompt queued before Antigravity reports its Auto fallback runs in the effective mode", { timeout: 5_000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-acp-auto-fallback-"));
+  const store = new SessionStore(root);
+  const sessionId = "auto-fallback";
+  let resolvePrompt!: (mode: string | undefined) => void;
+  const prompted = new Promise<string | undefined>((resolve) => { resolvePrompt = resolve; });
+  const manager = new SessionManager(
+    () => {}, () => {}, store, "compat-runner", undefined,
+    (_kind, _opts, callbacks): Driver => ({
+      get pid() { return undefined; },
+      initialize: async () => {},
+      newSession: async () => {
+        assert.equal(manager.prompt(sessionId, "Run the queued prompt.", [], undefined, { permissionMode: "auto" }), true);
+        callbacks.onAcpSessionState?.({
+          capabilities: { models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+            permissionModes: ["default"] },
+          config: { permissionMode: "default" },
+        });
+        return "provider-session";
+      },
+      agentSessionId: () => "provider-session",
+      prompt: async () => {
+        resolvePrompt(store.readMeta(sessionId)?.config.permissionMode);
+        return "end_turn";
+      },
+      setConfig: (config) => assert.notEqual(config.permissionMode, "auto"),
+      cancel: () => {},
+      resolvePermission: () => false,
+      dispose: () => {},
+    }),
+    undefined, 4, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, [],
+    () => ({ acpCompatibility: { profile: "antigravity", resumable: false } }),
+  );
+  try {
+    assert.equal(await manager.start({
+      sessionId, workspaceId: "workspace", workspacePath: root, agentId: "google-antigravity",
+      driver: "acp", command: "agy", args: ["acp"], env: {}, useWorktree: false, title: "", titleSource: "generated",
+      config: { permissionMode: "auto" },
+    }), true);
+    assert.equal(await prompted, "default");
+  } finally {
+    manager.shutdownAll();
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
 // A launch whose preparation finds nothing verified to run (#4779) never constructs a driver: the
 // session fails with the runner's sentence, as a failed provider start would.
 test("a launch refusal from preparation fails the session without spawning a provider", async () => {

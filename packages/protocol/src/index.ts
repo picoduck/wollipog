@@ -6601,8 +6601,8 @@ export type SessionEventPayload =
       /** A problem the driver reported while the turn kept running (#3806), not a failed turn: a
        * dashboard shows it without Retry Turn. Older peers ignore the flag and show a failed turn. */
       nonFatal?: true;
-      /** A non-fatal warning from automatic worktree creation, before the first turn. */
-      source?: "worktree_base_fallback";
+      /** A non-fatal warning that can be shown before the first turn. */
+      source?: "worktree_base_fallback" | "antigravity_auto_mode_fallback";
       /** Correlates a promoted notice with this authorized transcript entry. */
       assistantThreadErrorId?: string;
     }

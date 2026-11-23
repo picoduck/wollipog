@@ -262,7 +262,7 @@ async function openModelSettings(page: Page, viewport: { width: number }): Promi
 const AGY_MODES = [
   ["Default", "Ask before edits and commands, per your permission settings"],
   ["Accept Edits", "Approve file edits in the workspace without asking"],
-  ["Auto", "Approve edits and safe commands; ask before irreversible actions"],
+  ["Auto Mode", "Approve edits and safe commands; ask before irreversible actions"],
   ["Plan", "Plan carefully before executing a task"],
 ] as const;
 const attributed = (description: string) =>
@@ -326,6 +326,24 @@ for (const viewport of VIEWPORTS) test.describe(`${viewport.width}x${viewport.he
     await expect(page.getByRole("button", { name: "Cancel" })).toBeInViewport();
     await expect(page.getByRole("button", { name: "Create Session" })).toBeInViewport();
     await capture(page, "new-session-available-closed", size, "body");
+    const mode = page.getByRole("button", { name: /^Permission Mode:/ });
+    await expect(mode).toHaveAccessibleName("Permission Mode: Auto Mode");
+    await mode.click();
+    await expect(page.getByRole("option", { name: /Full Permissions Mode/ })).toBeInViewport();
+    await capture(page, "new-session-permission-choices", size, "body");
+    await page.getByRole("option", { name: /Full Permissions Mode/ }).click();
+    await expect(mode).toHaveAccessibleName("Permission Mode: Full Permissions Mode");
+    await capture(page, "new-session-full-permissions", size, "body");
+  });
+
+  test(`Antigravity Auto Mode fallback and Full Permissions Mode, ${size}`, async ({ page }) => {
+    await openSession(page, "auto-fallback", viewport);
+    await expect(page.getByText("Auto Mode Unavailable", { exact: true })).toBeVisible();
+    await capture(page, "auto-mode-fallback", size, "body");
+    await openSession(page, "full-permissions", viewport);
+    await openComposerBar(page, viewport);
+    await expect(page.getByRole("img", { name: /^Permission Mode: Full Permissions Mode/ })).toBeVisible();
+    await capture(page, "full-permissions-composer", size, "body");
   });
 
   for (const { state, id, reason } of NEEDS_SETUP) {

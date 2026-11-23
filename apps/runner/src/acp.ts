@@ -41,7 +41,12 @@ import type {
   McpServer,
   NewSessionRequest,
 } from "@agentclientprotocol/sdk";
-import type { AcpRuntimeCapabilities, AcpSessionContextConfig, AgentCapabilities, AgentContext, AgentSlashCommand, PermissionOption, PromptImage, SessionConfig, SessionEventPayload } from "@wollipog/protocol";
+import {
+  ANTIGRAVITY_AUTO_MODE,
+  ANTIGRAVITY_FULL_PERMISSIONS_MODE,
+  type AcpRuntimeCapabilities, type AcpSessionContextConfig, type AgentCapabilities, type AgentContext,
+  type AgentSlashCommand, type PermissionOption, type PromptImage, type SessionConfig, type SessionEventPayload,
+} from "@wollipog/protocol";
 import {
   acpInitializeRequest,
   negotiateAcpInitialize,
@@ -137,6 +142,8 @@ export class AcpClient {
   private readonly terminals: AcpTerminalService;
   private readonly terminalEventOutput = new Map<string, { cursor: number }>();
   private readonly kill: typeof killTree;
+  private readonly antigravityFullPermissions: boolean;
+  private antigravityAutoModeRejected = false;
 
   constructor(
     opts: {
@@ -167,6 +174,7 @@ export class AcpClient {
       scrubInheritedEnv?: string[];
       /** Narrow handling for one agent (see `acp-compatibility.ts`). */
       compatibility?: AcpCompatibility;
+      initialPermissionMode?: string;
     },
     private readonly ev: AcpEvents,
     deps: Partial<AcpClientDeps> = {},
@@ -176,6 +184,9 @@ export class AcpClient {
     // when it was prepared. A refusal throws before anything is spawned.
     const launch = resolveAcpLaunch(opts.command, opts.compatibility);
     this.compatibility = launch.compatibility;
+    this.antigravityFullPermissions = launch.compatibility?.profile === "antigravity" &&
+      !opts.orchestrator && !opts.orchestratorRole &&
+      opts.initialPermissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id;
     // The resolved executable is held until the agent answers the handshake (it has then opened
     // it), so a launcher that opens it after this spawn (bwrap, the cgroup helper) still finds it.
     this.releaseLaunch = launch.release;
@@ -192,7 +203,8 @@ export class AcpClient {
     this.terminals = new AcpTerminalService(this.filesystem, context, opts.isolation, { cgroup: opts.reviewWriterCgroup });
     this.kill = deps.kill ?? killTree;
     try {
-      this.child = (deps.spawn ?? spawnAgent)({ ...opts, command: launch.command, env });
+      const args = this.antigravityFullPermissions ? [...opts.args, "--dangerously-skip-permissions"] : opts.args;
+      this.child = (deps.spawn ?? spawnAgent)({ ...opts, command: launch.command, args, env });
     } catch (error) {
       this.finishLaunch();
       throw error;
@@ -487,12 +499,22 @@ export class AcpClient {
 
   async setConfig(config: SessionConfig): Promise<void> {
     if (!this.sessionId) throw new Error("ACP session is not established");
+    const permissionMode = config.permissionMode;
+    if (this.compatibility?.profile === "antigravity" && permissionMode !== undefined) {
+      const fullPermissions = permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id;
+      if (fullPermissions !== this.antigravityFullPermissions) {
+        throw new Error("Full Permissions Mode is fixed when the Google Antigravity session starts");
+      }
+    }
     if (config.model !== undefined) await this.setSelectConfig("model", config.model);
     if (config.effort !== undefined) await this.setSelectConfig("thought_level", config.effort);
-    if (config.permissionMode !== undefined) {
-      if (this.modes) await this.setMode(config.permissionMode);
-      else await this.setSelectConfig("mode", config.permissionMode);
+    if (permissionMode !== undefined && !this.antigravityFullPermissions) {
+      await this.setPermissionMode(permissionMode);
     }
+  }
+
+  private setPermissionMode(mode: string): Promise<void> {
+    return this.modes ? this.setMode(mode) : this.setSelectConfig("mode", mode);
   }
 
   /** Reconcile persisted controls after new/resume/load. A provider may omit or narrow controls
@@ -509,7 +531,22 @@ export class AcpClient {
       supported.effort = config.effort;
     }
     const modeOption = optionForCategory(this.configOptions, "mode");
-    if (
+    // Set Auto independently of model and effort so a rejected model change cannot skip it.
+    if (this.compatibility?.profile === "antigravity" && config.permissionMode === ANTIGRAVITY_AUTO_MODE.id) {
+      try {
+        await this.setPermissionMode(ANTIGRAVITY_AUTO_MODE.id);
+      } catch {
+        this.antigravityAutoModeRejected = true;
+        this.emitSessionState();
+        this.ev.onEvent({
+          kind: "error",
+          nonFatal: true,
+          source: "antigravity_auto_mode_fallback",
+          message: "Google Antigravity could not enable Auto Mode. This session uses the provider’s current approval settings.",
+        });
+      }
+    } else if (
+      !this.antigravityFullPermissions &&
       config.permissionMode &&
       (this.modes?.availableModes.some((candidate) => candidate.id === config.permissionMode) ||
         (!this.modes && modeOption?.options.some((candidate) => candidate.value === config.permissionMode)))
@@ -781,9 +818,24 @@ export class AcpClient {
   }
 
   private emitSessionState(): void {
-    this.ev.onAcpSessionState?.(
-      acpSessionPresentation(this.modes, this.configOptions, this.commands, this.supportsImages),
-    );
+    const state = acpSessionPresentation(this.modes, this.configOptions, this.commands, this.supportsImages);
+    if (this.antigravityFullPermissions) {
+      const full = ANTIGRAVITY_FULL_PERMISSIONS_MODE;
+      state.config.permissionMode = full.id;
+      state.capabilities.permissionModes = [full.id];
+      state.capabilities.agentPermissionModes = [full];
+      state.capabilities.elicitation = { [full.id]: ["none"] };
+    } else if (this.compatibility?.profile === "antigravity") {
+      if (this.antigravityAutoModeRejected && state.config.permissionMode !== ANTIGRAVITY_AUTO_MODE.id) {
+        const autoId = ANTIGRAVITY_AUTO_MODE.id;
+        state.capabilities.permissionModes = state.capabilities.permissionModes?.filter((mode) => mode !== autoId);
+        state.capabilities.agentPermissionModes = state.capabilities.agentPermissionModes?.filter((mode) => mode.id !== autoId);
+        if (state.capabilities.elicitation) delete state.capabilities.elicitation[autoId];
+      }
+      const auto = state.capabilities.agentPermissionModes?.find((mode) => mode.id === ANTIGRAVITY_AUTO_MODE.id);
+      if (auto) auto.name = ANTIGRAVITY_AUTO_MODE.name;
+    }
+    this.ev.onAcpSessionState?.(state);
   }
 
   private handleUpdate(params: SessionNotification): void {
