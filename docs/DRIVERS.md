@@ -1678,9 +1678,18 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   and runs in Default mode. When the runner reads that sysctl as `1` and launched agy outside
   bwrap, the warning also carries `fixCommand`, which the dashboard shows as a copyable block. It is
   the exact host command (`antigravity-apparmor.ts`) that installs the AppArmor profile
-  `wollipog-antigravity`, granting `userns` to the realpath of the agy that session launched. A
-  managed copy's generation directory becomes a `*`, so updates keep it. The protection stays on
-  for every other program, unlike setting the sysctl to `0`. On Linux managed worktrees where agy's Auto sandbox cannot create its
+  `wollipog-antigravity`, granting `userns` only to a file no unprivileged program can replace.
+  - If root owns the launched agy's realpath and every parent directory, and none of them is
+    group- or world-writable, that path is granted.
+  - Otherwise, for example `~/.local/bin/agy`, the command first installs a root-owned copy at
+    `/usr/local/lib/wollipog-antigravity/agy`, turns the old path into a symlink to it, and grants
+    only the copy. A profile on a user-writable path would let any program running as the user
+    gain user namespaces by writing itself there.
+  - A Wollipog-managed copy gets no command, because updates replace it in a user-owned directory.
+  - An agy self-update that replaces the symlink drops Auto again, and the warning returns with
+    the command.
+
+  Unlike setting the sysctl to `0`, the restriction stays on for every other program. On Linux managed worktrees where agy's Auto sandbox cannot create its
   nested namespace, a failed sandbox launch switches the session to Default mode once agy
   confirms the change. The runner displays the effective mode and never retries the command.
   **Full Permissions Mode** is Wollipog's own live mode, listed after agy's modes for every

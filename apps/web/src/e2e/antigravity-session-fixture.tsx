@@ -176,10 +176,12 @@ switch (state) {
       // What the runner sends on an Ubuntu host (apps/runner/src/antigravity-apparmor.ts).
       message: "Google Antigravity does not offer Auto Mode on this machine: AppArmor blocks the user namespaces its terminal sandbox needs (kernel.apparmor_restrict_unprivileged_userns = 1). To allow them for Antigravity only, run the command below on this machine, then start a new Antigravity session. This session uses Default mode. Choose Full Permissions Mode to skip Antigravity’s approval prompts.",
       fixCommand: [
+        "sudo install -D -o root -g root -m 0755 '/home/user/.local/bin/agy' /usr/local/lib/wollipog-antigravity/agy",
+        "ln -sfn /usr/local/lib/wollipog-antigravity/agy '/home/user/.local/bin/agy'",
         "sudo tee /etc/apparmor.d/wollipog-antigravity > /dev/null <<'EOF'",
         "abi <abi/4.0>,",
         "include <tunables/global>",
-        'profile wollipog-antigravity "/home/user/.local/bin/agy" flags=(unconfined) {',
+        'profile wollipog-antigravity "/usr/local/lib/wollipog-antigravity/agy" flags=(unconfined) {',
         "  userns,",
         "}",
         "EOF",
