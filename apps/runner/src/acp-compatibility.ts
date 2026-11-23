@@ -1,8 +1,8 @@
 /** Narrow, per-agent compatibility handling for the shared ACP client (#4779).
  *
- * The shared client stays agent-neutral. A profile only removes ACP features an agent advertises
- * but that Wollipog must not use for it, and words its failures; it never adds behavior. Google
- * Antigravity (`agy acp`, verified with agy 1.5.14 on Linux) is the only profile:
+ * The shared client stays agent-neutral. A profile limits what it sends to an agent and words its
+ * failures and compatibility notices. Google Antigravity (`agy acp`, verified with agy 1.5.14 on
+ * Linux) is the only profile:
  *
  * - Sign-in and sign-out belong to the machine's setup in Connections, which runs Google's remote
  *   `agy acp --login` in the same credential context as sessions. The advertised ACP auth methods
@@ -16,6 +16,8 @@
  *   so nothing it says is persisted and resume is not offered either (`resumable: false`).
  * - agy writes its diagnostic log to stderr when it cannot open its log file (read-only state
  *   again), and that log names the signed-in account. Its stderr is therefore never mirrored.
+ * - Unsupported remote MCP transports are omitted on start and resume and reported in the session
+ *   log. agy 1.5.14 advertises neither HTTP nor SSE.
  * - Session listing is not offered: adopting a conversation started outside Wollipog would need
  *   `session/load`. */
 
