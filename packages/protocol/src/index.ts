@@ -4376,7 +4376,9 @@ function singleSessionAttentionStatus(
     return {
       kind: "input_required",
       label: `${requests.length} Actions Required`,
-      description: `${approvals} approvals, ${questions} questions, and ${authentication} authentication requests remain open.${handoffs ? ` ${handoffs} handoff notice${handoffs === 1 ? " needs" : "s need"} acknowledgment.` : ""} Of the ${requests.length} open requests, ${children} belong to child agents. Open Agents to inspect each request.`,
+      description: handoffs === 0
+        ? `${requests.length} unresolved requests: ${approvals} approvals, ${questions} questions, ${authentication} authentication requests; ${children} belong to child agents. Open Agents to inspect each request.`
+        : `${approvals} approvals, ${questions} questions, and ${authentication} authentication requests remain open. ${handoffs} handoff notice${handoffs === 1 ? " needs" : "s need"} acknowledgment. Of the ${requests.length} open requests, ${children} belong to child agents. Open Agents to inspect each request.`,
     };
   }
   if (isCampaignHandoffQuestion(pending?.workflowDecision)) {
