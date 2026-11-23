@@ -31,6 +31,32 @@ async function capture(page: Page, name: string) {
   if (evidenceDir) await page.screenshot({ path: join(evidenceDir, `${name}.png`), fullPage: true });
 }
 
+for (const [width, theme] of [[1440, "light"], [390, "dark"]] as const) {
+  test(`an ordinary automation can choose Pi's managed Latest at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    const path = `${automationRoute("automation-nightly-sweep")}/edit`;
+    await page.goto(`/automations-e2e.html?theme=${theme}&managedLatest=1&route=${encodeURIComponent(path)}`);
+    await page.getByRole("button", { name: /^Model:/ }).click();
+    const picker = page.getByRole("dialog", { name: "Model", exact: true });
+    await picker.getByRole("button", { name: "Opus", exact: true }).click();
+    const latest = picker.getByRole("radio", { name: "Opus Latest", exact: true });
+    await expect(latest).toHaveAccessibleDescription(/Currently Opus 5.5/);
+    await page.screenshot({ path: testInfo.outputPath("automation-latest.png") });
+    await latest.click();
+    await page.getByRole("button", { name: /^Reasoning Effort:/ }).click();
+    await expect(page.getByRole("option", { name: "High", exact: true })).toBeVisible();
+    await expect(page.getByRole("option", { name: "Low", exact: true })).toHaveCount(0);
+    await page.getByRole("option", { name: "High", exact: true }).click();
+    await page.getByRole("button", { name: "Save Changes" }).click();
+    await expect(page.getByText("Changes saved.", { exact: true })).toBeVisible();
+    const saved = await page.evaluate(() => (window as Window & { savedCampaignAutomation?: unknown }).savedCampaignAutomation);
+    expect(saved).toMatchObject({ action: { kind: "create_session",
+      request: { config: { model: "wollipog:latest:opus", effort: "high" } } } });
+    await expect(page.getByRole("button", { name: "Model: Opus Latest", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Reasoning Effort: High", exact: true })).toBeVisible();
+  });
+}
+
 for (const { label, viewport } of [
   { label: "desktop", viewport: { width: 1280, height: 900 } },
   { label: "mobile", viewport: { width: 375, height: 812 } },

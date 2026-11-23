@@ -59,3 +59,20 @@ test("a server-advertised managed Codex choice leads its group and stays out of 
   assert.deepEqual(exact.trailing, []);
   assert.deepEqual(exact.groups[0]?.options.map(row => row.value), ["gpt-6.2-sol"]);
 });
+
+test("Pi groups qualified releases, shows newer pins first, and reserves Google's alias for launch", () => {
+  const values = ["anthropic/claude-opus-5-5", "anthropic/claude-opus-5-10", "wollipog:latest:opus",
+    "google/gemini-4-carbon", "google/gemini-4-neon", "google/gemini-flash-latest", "google/gemini-3.8-flash"];
+  const options = values.map(value => ({ value, label: value }));
+  const launch = buildModelPicker(options, null, { mode: "launch", driver: "pi" });
+  assert.deepEqual(launch.groups.find(group => group.name === "Opus")?.options.map(row => [row.value, !!row.legacy]), [
+    ["wollipog:latest:opus", false], ["anthropic/claude-opus-5-10", false], ["anthropic/claude-opus-5-5", true],
+  ]);
+  assert.deepEqual(launch.groups.find(group => group.name === "Gemini 4")?.options.map(row => row.value),
+    ["google/gemini-4-neon", "google/gemini-4-carbon"]);
+  assert.equal(launch.groups.find(group => group.name === "Gemini Flash")?.options[0]?.label, "Gemini Flash Latest");
+  const exact = buildModelPicker(options, null, { mode: "exact", driver: "pi" });
+  assert.deepEqual(exact.groups.find(group => group.name === "Gemini Flash")?.options.map(row => row.value),
+    ["google/gemini-3.8-flash"]);
+  assert.equal(exact.groups.flatMap(group => group.options).some(row => row.value === "wollipog:latest:opus"), false);
+});

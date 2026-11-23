@@ -2059,6 +2059,7 @@ export function capabilityConfigError(
   config: SessionConfig | undefined,
   capabilities: AgentCapabilities | undefined,
 ): string | null {
+  if (isManagedModelChoice(config?.model)) return "Choose a specific model for this session configuration.";
   if (config?.permissionMode === "orchestrator" && !capabilities?.permissionModes?.includes("orchestrator")) {
     return "the orchestrator preset requires explicit support from this agent installation";
   }
@@ -4375,6 +4376,9 @@ export class SessionsService {
       /** Trusted Assistant command origin. Never copied from CreateSessionRequest JSON. */
       assistantWorkOrigin?: {connectionId: string; commandId: string};
       defaultOwnerUserId?: string;
+      /** Ordinary human session creation and ordinary create-session automations may pin Latest
+       * before validation. Protected launches keep the exact model inputs their approvals bind. */
+      allowManagedModelChoice?: boolean;
       /** Trusted launcher attribution (#3840) when it is not the authenticated human above, such as
        * a side chat's parent's launcher. A child or review session always inherits instead. */
       launcherUserId?: string;
@@ -4835,7 +4839,13 @@ export class SessionsService {
         }
       }
       if (isManagedModelChoice(requestedConfig.model)) {
-        return fail("Choose a specific model for this session. Latest applies through saved Agent Defaults.", 409);
+        if (!creationContext?.allowManagedModelChoice || campaignController || req.role === "orchestrator" ||
+            req.orchestrator || executionTarget.adapter !== "host" || usesOrchestratorPresetPermissions(requestedConfig)) {
+          return fail("Choose a specific model for this launch.", 409);
+        }
+        const model = resolveManagedModelChoice(launch.driver, agentCapabilities, requestedConfig.model!);
+        if (!model) return fail("Latest is unavailable for this installation. Choose a specific model or rediscover the harness.", 409);
+        requestedConfig.model = model.id;
       }
       const savedPreference = creationContext?.defaultOwnerUserId
         ? this.db.getAgentHarnessDefault(

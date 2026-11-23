@@ -12,7 +12,7 @@ import type {
 import { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import type { PreStagedDeliveryOptions, SessionsService } from "./sessions.js";
-import { AutomationsService, validateAutomationSpec } from "./automations.js";
+import { automationCapabilityError, AutomationsService, validateAutomationSpec } from "./automations.js";
 import { SessionsService as RealSessionsService } from "./sessions.js";
 import { signAutomationTrigger } from "./automation-trigger-ingress.js";
 
@@ -57,6 +57,28 @@ function modelCapabilities(model: string): AgentCapabilities {
     supportsApprovals: true,
   };
 }
+
+test("ordinary automation validates a Latest choice against each target's exact resolution", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const live = (model: string): AgentCapabilities => ({ ...modelCapabilities(model), modelSource: "live" });
+    db.registerRunner(runner("runner-1", live("gpt-6.2-sol"), "codex-app-server"), Date.now());
+    db.registerRunner(runner("runner-2", live("gpt-6.1-sol"), "codex-app-server"), Date.now());
+    const request = { runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+      config: { model: "wollipog:latest:sol", effort: "high" } };
+    const spec = baseSpec({
+      action: { kind: "create_session", request },
+      runnerPolicy: { kind: "alternate", targets: [{ runnerId: "runner-2", workspaceId: "ws-1", agentId: "agent-1" }] },
+    });
+    assert.equal(automationCapabilityError(db, spec), null);
+    assert.match(automationCapabilityError(db, { ...spec, action: { kind: "create_session",
+      request: { ...request, role: "orchestrator" } } }) ?? "", /specific model/);
+    db.updateRunnerAgents("runner-2", runner("runner-2", live("gpt-6.1-astra"), "codex-app-server").agents, Date.now());
+    assert.match(automationCapabilityError(db, spec) ?? "", /Latest family is unavailable/);
+  } finally {
+    db.close();
+  }
+});
 
 function baseSpec(overrides: Partial<AutomationSpec> = {}): AutomationSpec {
   return {

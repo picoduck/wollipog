@@ -11,6 +11,7 @@ import { Select } from "./ui/ChoiceControls.js";
 import {
   draftRepairNotice,
   effortsForDraft,
+  managedModelDriftText,
   permissionModeDisplayLabel,
   permissionModesForDraft,
   repairDraft,
@@ -99,6 +100,7 @@ export function AgentDefaultsDialog({
   }, [option]);
 
   const models = uniqueModels(option);
+  const managedDrift = managedModelDriftText(option, draft.model);
   const efforts = effortsForDraft(option, draft);
   const permissionModes = permissionModesForDraft(option, draft);
   // An effort belongs to a model when the agent lists models, so it waits for one.
@@ -238,6 +240,7 @@ export function AgentDefaultsDialog({
                   update(next);
                 }}
               />
+              {managedDrift && <p className="field-helper">{managedDrift}</p>}
             </div>
           )}
           {showEffort && (

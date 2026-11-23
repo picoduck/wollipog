@@ -65,6 +65,20 @@ if (params.has("capabilities")) runner.agents[0]!.capabilities = {
   supportsImages: false,
   supportsApprovals: true,
 };
+if (params.has("managedLatest")) {
+  Object.assign(runner.agents[0]!, {
+    driver: "pi",
+    capabilities: {
+      modelSource: "live",
+      models: [
+        { id: "anthropic/claude-opus-5", displayName: "Opus 5", efforts: ["low"] },
+        { id: "anthropic/claude-opus-5-5", displayName: "Opus 5.5", efforts: ["high"] },
+      ],
+      effortLevels: ["low", "high"], permissionModes: [], slashCommands: [],
+      supportsImages: true, supportsApprovals: false,
+    },
+  });
+}
 
 // `?accounts=priority|default|none` gives the machine two Claude accounts and answers the account
 // preview (#4512) as its Priority Order, its Default Account, or a Priority Order nothing can start.
@@ -643,7 +657,7 @@ const client = {
       ] },
   }),
   ...(accountPreview ? { providerAccountSelection: async () => structuredClone(accountPreview) } : {}),
-  ...(params.has("campaign") ? {
+  ...(params.has("campaign") || params.has("managedLatest") ? {
     updateAutomation: async (id: string, spec: AutomationSpec) => {
       const index = items.findIndex(item => item.automationId === id);
       items[index] = { ...items[index]!, ...spec };

@@ -1,5 +1,7 @@
 import { useEffect, useSyncExternalStore } from "react";
-import { isManagedModelChoice, managedModelChoiceId, type AgentDriverKind } from "@wollipog/protocol";
+import {
+  compareManagedModelVersions, isManagedModelChoice, managedModelChoiceId, managedModelChoiceLabel, managedModelFamilyLabel, type AgentDriverKind,
+} from "@wollipog/protocol";
 import bundledCatalog from "./model-picker-catalog.json";
 import type { SelectOption } from "./components/ui/ChoiceControls.js";
 
@@ -32,14 +34,36 @@ export interface ModelPickerFamily {
   options: ModelPickerOption[];
 }
 
-const movableRoutes = new Set([
-  "deepseek-flash", "kimi-for-coding", "kimi-for-coding-highspeed",
-  "gemini-flash-latest", "gemini-flash-lite-latest", "gemini-pro-latest",
+const providerRoutes = new Map([
+  ["deepseek-flash", "DeepSeek Flash"],
+  ["kimi-for-coding", "Kimi for Coding"],
+  ["kimi-for-coding-highspeed", "Kimi for Coding High Speed"],
+  ["gemini-flash-latest", "Gemini Flash"],
+  ["gemini-flash-lite-latest", "Gemini Flash-Lite"],
+  ["gemini-pro-latest", "Gemini Pro"],
 ]);
+const piRouteNamespaces = new Map([
+  ["google", /^gemini-/],
+  ["deepseek", /^deepseek-/],
+  ["kimi-coding", /^kimi-for-coding/],
+]);
+
+function providerRouteFamily(driver: AgentDriverKind | undefined, id: string): string | undefined {
+  if (driver !== "pi") return providerRoutes.get(id);
+  const [provider, model, ...rest] = id.split("/");
+  if (!provider || !model || rest.length || !piRouteNamespaces.get(provider)?.test(model)) return undefined;
+  return providerRoutes.get(model);
+}
+
+function providerLatest(option: ModelPickerOption, family: string): ModelPickerOption {
+  const label = family + " Latest";
+  return { ...option, label, selectedLabel: label, description: "Follows the version selected by the provider for new launches." };
+}
+
 const claudeRoutes = new Set(["opus", "best", "fable", "sonnet", "haiku", "opusplan"]);
 
 export function isExactModelChoice(id: string, driver?: AgentDriverKind): boolean {
-  if (id === "default" || isManagedModelChoice(id) || movableRoutes.has(id)) return false;
+  if (id === "default" || isManagedModelChoice(id) || providerRouteFamily(driver, id)) return false;
   return driver !== "claude-code" || !claudeRoutes.has(id.split("[", 1)[0]!);
 }
 
@@ -77,14 +101,25 @@ export function buildModelPicker(
         description: "Follows the version selected by the harness for new launches.",
       });
     }
-    if (mode === "launch" && driver === "codex-app-server") {
+    if (mode === "launch") {
       const id = managedModelChoiceId(family.label);
       const option = id ? take(id) : undefined;
       if (option) rows.push(option);
+      for (const id of byId.keys()) {
+        if (providerRouteFamily(driver, id) === family.label) rows.push(providerLatest(take(id)!, family.label));
+      }
+    }
+    const extraReleases = [...byId.values()].map(option => option.baseModelId ?? option.value)
+      .filter(id => managedModelFamilyLabel(driver, id) === family.label);
+    const releases = [...new Set([...family.releases, ...extraReleases])];
+    if (!family.siblings && extraReleases.some(id => !family.releases.includes(id))) {
+      releases.sort((a, b) => compareManagedModelVersions(b.split("/").at(-1)!, a.split("/").at(-1)!));
     }
     let foundCurrent = false;
-    for (const id of family.releases) {
-      const releaseOptions = [...byId.values()].filter(option => option.value === id || option.baseModelId === id);
+    for (const id of releases) {
+      const releaseOptions = [...byId.values()].filter(option =>
+        option.value === id || option.baseModelId === id ||
+        (driver === "pi" && id.startsWith("gemini-") && option.value === `google/${id}`));
       for (const release of releaseOptions) {
         const option = take(release.value)!;
         // The parenthetical id disambiguated this row from the alias before it was named Latest.
@@ -99,16 +134,14 @@ export function buildModelPicker(
   const trailing: ModelPickerOption[] = [...byId.keys()].flatMap(id => {
     const option = take(id)!;
     if (mode === "exact" && !isExactModelChoice(id, driver)) return [];
-    if (mode === "launch" && id === "deepseek-flash") return [{
-      ...option, label: "DeepSeek Flash Latest", selectedLabel: "DeepSeek Flash Latest",
-      description: "Follows the Flash release selected by DeepSeek.",
-    }];
+    const providerFamily = providerRouteFamily(driver, id);
+    if (mode === "launch" && providerFamily) return [providerLatest(option, providerFamily)];
     return [option];
   });
   if (value && ![...lead, ...groups.flatMap(group => group.options), ...trailing].some(option => option.value === value)) {
     const original = options.find(option => option.value === value);
     trailing.unshift({
-      label: original?.label ?? value,
+      label: original?.label ?? managedModelChoiceLabel(value) ?? value,
       value,
       description: original
         ? "This is the saved model route. Choose a specific model to change it."

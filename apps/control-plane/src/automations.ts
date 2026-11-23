@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { AUTOMATION_TARGET_INSTALLATION_UNAVAILABLE, AUTOMATION_TARGET_UNAVAILABLE, pendingRequests, runnerSupportsProtocol } from "@wollipog/protocol";
+import { AUTOMATION_TARGET_INSTALLATION_UNAVAILABLE, AUTOMATION_TARGET_UNAVAILABLE, isManagedModelChoice, launchModelChoice,
+  pendingRequests, runnerSupportsProtocol, usesOrchestratorPresetPermissions } from "@wollipog/protocol";
 import type {
   AutomationAction,
   AutomationAuditEvent,
@@ -339,19 +340,34 @@ export function automationCapabilityError(
     const request = spec.action.request;
     const config = request.config;
     if (!config) return null;
+    const managed = isManagedModelChoice(config.model);
+    if (managed && (request.campaign || request.role === "orchestrator" || request.orchestrator ||
+        usesOrchestratorPresetPermissions(config))) {
+      return "Choose a specific model for this campaign automation.";
+    }
     const targets = [
       { runnerId: request.runnerId, workspaceId: request.workspaceId, agentId: request.agentId,
         installationBindings: spec.action.installationBindings },
       ...(spec.runnerPolicy.kind === "alternate" ? spec.runnerPolicy.targets : []),
     ];
     for (const target of targets) {
+      const runner = db.getRunner(target.runnerId);
+      if (managed && request.executionTargetId &&
+          !runner?.executionTargets?.some(target => target.id === request.executionTargetId && target.adapter === "host")) {
+        return "Choose a specific model for a non-host automation target.";
+      }
       const agentId = target.installationBindings?.agent
         ? db.resolveSavedHarnessInstallation(target.runnerId, target.installationBindings.agent)
         : target.agentId;
-      if (!agentId) continue; // Shape validation requires this for create-session targets.
-      const agent = db.getRunner(target.runnerId)?.agents.find((candidate) => candidate.id === agentId);
+      const agent = runner?.agents.find((candidate) => candidate.id === agentId);
+      const resolved = managed ? launchModelChoice(agent?.driver, agent?.capabilities, config.model) : undefined;
+      if (managed && !resolved) {
+        return "The selected Latest family is unavailable on an automation target. Choose a specific model or rediscover its harness.";
+      }
       if (!agent) continue;
-      const validationConfig = claudeModelConfigForValidation(config, agent.capabilities, agent.driver ?? "acp");
+      const validationConfig = claudeModelConfigForValidation(
+        resolved ? { ...config, model: resolved.id } : config, agent.capabilities, agent.driver ?? "acp",
+      );
       const error = capabilityConfigError(validationConfig, agent.capabilities);
       if (error) {
         const identity = `${target.runnerId}/${target.workspaceId}/${agentId}`;
@@ -1624,7 +1640,10 @@ export class AutomationsService {
           maxToolCalls: automation.limits.maxToolCalls,
         },
       }, this.deliveryOptions(automation, execution, { sessionId: `s_auto_${execution.executionId}` }, now, target, commandSnapshots),
-      undefined, false, false, false, automationLauncher(this.db, automation, execution.executionId));
+      undefined, false, false, false, {
+        ...automationLauncher(this.db, automation, execution.executionId),
+        allowManagedModelChoice: true,
+      });
       result = created;
     } else if (automation.action.kind === "prompt_session") {
       const session = this.db.getSession(automation.action.sessionId)!;

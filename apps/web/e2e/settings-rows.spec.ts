@@ -2507,3 +2507,31 @@ test("Codex Agent Defaults save a managed Latest choice independently of the dis
   await expect(defaults).toHaveCount(0);
   await expect(row.locator(".setting-row-desc")).toContainText("Sol Latest");
 });
+
+for (const [width, theme] of [[1440, "light"], [390, "dark"]] as const) {
+  test(`Latest shows each machine's release in Agent Defaults at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    await useHarness(page, theme, { section: "behavior", defaults: "agent-managed-skew" });
+    const row = page.locator(".setting-row").filter({ has: page.getByText("Codex App Server", { exact: true }) });
+    await row.getByRole("button", { name: /^Edit…/ }).click();
+    const defaults = page.getByRole("dialog", { name: "Codex App Server Defaults" });
+    await defaults.getByRole("button", { name: /^Model:/ }).click();
+    const picker = page.getByRole("dialog", { name: "Model", exact: true });
+    await picker.getByRole("button", { name: "Sol", exact: true }).click();
+    const latest = picker.getByRole("radio", { name: "Sol Latest", exact: true });
+    const releases = /GPT-6\.2 Sol on Build Machine and GPT-6\.1 Sol on Laptop.*Release Validation Machine/;
+    await expect(latest).toHaveAccessibleDescription(releases);
+    await expect(latest).toBeInViewport({ ratio: 1 });
+    expect(await picker.evaluate(dialog => dialog.scrollWidth)).toBeLessThanOrEqual(width);
+    await page.screenshot({ path: testInfo.outputPath("latest-per-machine-picker.png") });
+    await latest.click();
+    await expect(defaults.getByText(releases)).toBeVisible();
+    await expect(defaults.getByRole("button", { name: "Save Defaults" })).toBeInViewport({ ratio: 1 });
+    expect(await defaults.evaluate(dialog => dialog.scrollWidth)).toBeLessThanOrEqual(width);
+    await page.screenshot({ path: testInfo.outputPath("latest-per-machine-selection.png") });
+    await defaults.getByRole("button", { name: /^Reasoning Effort:/ }).click();
+    await page.getByRole("option", { name: "High", exact: true }).click();
+    await defaults.getByRole("button", { name: "Save Defaults" }).click();
+    await expect(row.locator(".setting-row-desc")).toContainText(releases);
+  });
+}

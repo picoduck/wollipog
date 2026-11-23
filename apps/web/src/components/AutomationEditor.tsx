@@ -11,7 +11,7 @@ import {
   AUTOMATION_SAVED_ALTERNATE_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_ALTERNATE_ORCHESTRATOR_INSTALLATION_UNAVAILABLE,
   AUTOMATION_SAVED_ALTERNATE_ROLE_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_INSTALLATION_UNAVAILABLE,
   AUTOMATION_SAVED_ORCHESTRATOR_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_ROLE_INSTALLATION_UNAVAILABLE,
-  CODEX_EXEC_RETIRED_CONFIG_REASON, isRetiredCodexExec,
+  CODEX_EXEC_RETIRED_CONFIG_REASON, isManagedModelChoice, isRetiredCodexExec, launchModelChoice, managedModelChoices,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
@@ -330,24 +330,30 @@ function AutomationEditorForm({
   // Model, effort, and permission mode are agent-scoped: the runner advertises them per agent, and
   // the pickers must never offer a value the selected agent cannot honour. A value already stored
   // but no longer advertised is still listed, so editing an automation cannot silently rewrite it.
-  const agentCapabilities = selectedRunner?.agents.find((agent) => agent.id === form.agentId)?.capabilities;
+  const agent = selectedRunner?.agents.find((agent) => agent.id === form.agentId);
+  const agentCapabilities = agent?.capabilities;
   // An explicit alternate runs the SAME stored config on a different agent, so the finished spec is
   // validated against it on save. Narrowing the pickers instead was tried and reverted; see
   // `alternateConfigError`.
-  const alternateCapabilities = form.actionKind === "create_session" && form.runnerPolicy === "alternate"
-    ? selectedFallback?.agents.find((agent) => agent.id === form.fallbackAgentId)?.capabilities
+  const alternateAgent = form.actionKind === "create_session" && form.runnerPolicy === "alternate"
+    ? selectedFallback?.agents.find((agent) => agent.id === form.fallbackAgentId)
     : undefined;
+  const allowLatest = !form.campaign && form.sessionRole !== "orchestrator" &&
+    form.permissionMode !== "orchestrator" && !form.executionTargetId;
   const modelOptions = useMemo(() => {
-    const advertised = (agentCapabilities?.models ?? []).filter((model) => !model.hidden);
+    const advertised = [...(agentCapabilities?.models ?? []).filter((model) => !model.hidden),
+      ...(allowLatest ? managedModelChoices(agent?.driver, agentCapabilities) : [])];
+    // The shared picker retains a missing Latest choice and explains that it is unavailable.
+    if (isManagedModelChoice(form.model)) return advertised;
     return form.model && !advertised.some((model) => model.id === form.model)
       ? [{ id: form.model, displayName: form.model }, ...advertised]
       : advertised;
-  }, [agentCapabilities, form.model]);
+  }, [agent?.driver, agentCapabilities, allowLatest, form.model]);
   const effortOptions = useMemo(() => {
-    const model = agentCapabilities?.models.find((candidate) => candidate.id === form.model);
+    const model = launchModelChoice(agent?.driver, agentCapabilities, form.model);
     const advertised = (model?.efforts?.length ? model.efforts : agentCapabilities?.effortLevels) ?? [];
     return form.effort && !advertised.includes(form.effort) ? [form.effort, ...advertised] : advertised;
-  }, [agentCapabilities, form.model, form.effort]);
+  }, [agent?.driver, agentCapabilities, form.model, form.effort]);
   const permissionModeOptions = useMemo(() => {
     const advertised = agentCapabilities?.permissionModes ?? [];
     return form.permissionMode && !advertised.includes(form.permissionMode)
@@ -369,7 +375,8 @@ function AutomationEditorForm({
       projectsSupported,
       projects: projects.values(),
       ...(editingSpec ? { base: editingSpec } : {}),
-      ...(alternateCapabilities ? { alternateCapabilities } : {}),
+      alternateCapabilities: alternateAgent?.capabilities,
+      alternateDriver: alternateAgent?.driver,
     });
     if (spec.action.kind === "create_session") {
       const previous = editingSpec?.action.kind === "create_session" ? editingSpec.action : undefined;
@@ -698,14 +705,14 @@ function AutomationEditorForm({
               <>
                 <AutomationCampaignFields form={form} runner={runners.get(form.runnerId)} accountPlacement={accountPlacement}
                   onChange={next => setForm(() => next)} />
-                {(modelOptions.length > 0 || effortOptions.length > 0) && (
+                {(modelOptions.length > 0 || effortOptions.length > 0 || isManagedModelChoice(form.model)) && (
                   <div className="field-row">
-                    {modelOptions.length > 0 && (
+                    {(modelOptions.length > 0 || isManagedModelChoice(form.model)) && (
                       <div className="field">
                         <span className="field-label">Model</span>
                         <ModelPicker label="Model" value={form.model}
-                          context={{ mode: "launch", driver: selectedRunner?.agents.find(agent => agent.id === form.agentId)?.driver }}
-                          onChange={(value) => setForm((current) => withModel(current, value, agentCapabilities))}
+                          context={{ mode: "launch", driver: agent?.driver }}
+                          onChange={(value) => setForm((current) => withModel(current, value, agentCapabilities, agent?.driver))}
                           options={[{ value: "", label: "Agent Default" },
                             ...modelOptions.map((model) => ({
                               value: model.id,
