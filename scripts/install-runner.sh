@@ -406,7 +406,7 @@ if [ "$with_control_plane" -eq 1 ]; then
   echo "Downloading $control_plane_asset from $release_tag..."
   cp_partial=$(mktemp "${cp_bin}.download.XXXXXX")
   fetch_verified_asset "$control_plane_asset" "$cp_partial"
-  chmod +x "$cp_partial"
+  chmod 0755 "$cp_partial"
   mv -f "$cp_partial" "$cp_bin"
   cp_partial=""
   # Shared ancestors are public only when newly created. The data leaf is private;

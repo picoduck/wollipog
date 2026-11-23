@@ -1208,6 +1208,7 @@ posixTest("authenticated headless downloads overwrite only reserved files and pu
   for (let generation = 0; generation < 2; generation++) {
     const result = h.run("--control-plane", "--release", releaseTag);
     assert.equal(result.status, 0, result.stderr);
+    assert.equal(statSync(join(h.home, ".local", "bin", "wollipog-control-plane")).mode & 0o777, 0o755);
     assert.equal(readFileSync(join(siblingWeb(h), "index.html"), "utf8"), "<html>dashboard</html>");
     assert.equal(readdirSync(join(h.home, ".local", "bin")).some((name) => /download|stage|install.lock/u.test(name)), false);
   }
