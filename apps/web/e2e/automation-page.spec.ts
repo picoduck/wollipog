@@ -41,7 +41,8 @@ for (const [width, theme] of [[1440, "light"], [390, "dark"]] as const) {
     await picker.getByRole("button", { name: "Opus", exact: true }).click();
     const latest = picker.getByRole("radio", { name: "Opus Latest", exact: true });
     await expect(latest).toHaveAccessibleDescription(/Currently Opus 5.5/);
-    await page.screenshot({ path: testInfo.outputPath("automation-latest.png") });
+    await expect(latest).toBeInViewport({ ratio: 1 });
+    await page.screenshot({ path: testInfo.outputPath("automation-latest.png"), animations: "disabled" });
     await latest.click();
     await page.getByRole("button", { name: /^Reasoning Effort:/ }).click();
     await expect(page.getByRole("option", { name: "High", exact: true })).toBeVisible();

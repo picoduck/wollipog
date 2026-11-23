@@ -77,7 +77,8 @@ for (const [width, theme] of [[1440, "light"], [390, "dark"]] as const) {
     const picker = page.getByRole("dialog", { name: "Model", exact: true });
     const latest = picker.getByRole("radio", { name: "Sol Latest", exact: true });
     await expect(latest).toHaveAccessibleDescription(/Currently GPT-6.2 Sol/);
-    await page.screenshot({ path: testInfo.outputPath("handoff-latest.png") });
+    await expect(latest).toBeInViewport({ ratio: 1 });
+    await page.screenshot({ path: testInfo.outputPath("handoff-latest.png"), animations: "disabled" });
     await latest.click();
     await dialog.getByRole("button", { name: /^Effort:/ }).click();
     await expect(page.getByRole("option", { name: "High", exact: true })).toBeVisible();

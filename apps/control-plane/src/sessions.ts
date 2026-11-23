@@ -4820,6 +4820,7 @@ export class SessionsService {
     const agentCapabilities = selectedInstallationId ? undefined :
       snapshotSpec?.capabilities ?? runner.agents.find((agent) => agent.id === req.agentId)?.capabilities;
     const requestedConfig = { ...(snapshotSpec?.config ?? req.config ?? {}) };
+    const explicitManagedModel = !snapshotSpec && isManagedModelChoice(requestedConfig.model);
     if (!snapshotSpec) {
       const campaignBehavior = imageReview ? undefined : campaignController?.orchestratorPolicy?.behavior;
       if (campaignBehavior) {
@@ -4838,7 +4839,7 @@ export class SessionsService {
           requestedConfig.effort = campaignBehavior.childEffort;
         }
       }
-      if (isManagedModelChoice(requestedConfig.model)) {
+      if (explicitManagedModel) {
         if (!creationContext?.allowManagedModelChoice || campaignController || req.role === "orchestrator" ||
             req.orchestrator || executionTarget.adapter !== "host" || usesOrchestratorPresetPermissions(requestedConfig)) {
           return fail("Choose a specific model for this launch.", 409);
@@ -4929,6 +4930,10 @@ export class SessionsService {
     if (threadLaunch && role === "orchestrator") return fail(ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL, 409);
     const orchestrator = role === "orchestrator";
     const presetPermissions = usesOrchestratorPresetPermissions(requestedConfig);
+    // A saved permission mode can supply the Orchestrator preset after explicit model resolution.
+    if (explicitManagedModel && (orchestrator || presetPermissions)) {
+      return fail("Choose a specific model for this launch.", 409);
+    }
     let orchestratorPolicy: OrchestratorCampaignPolicy | undefined;
     if (orchestrator) {
       const configured = creationContext?.orchestratorDefaults;
