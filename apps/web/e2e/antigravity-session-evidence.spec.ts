@@ -390,11 +390,11 @@ for (const viewport of VIEWPORTS) test.describe(`${viewport.width}x${viewport.he
       }
       if (id === "pickers-effort") {
         const picker = await openModelSettings(page, viewport);
-        const effort = picker.getByText("Reasoning Effort", { exact: true });
-        await expect(effort).not.toBeInViewport();
-        await picker.getByText("Extra High", { exact: true }).scrollIntoViewIfNeeded();
+        const effort = picker.getByRole("button", { name: /^Reasoning Effort:/ });
         await expect(effort).toBeInViewport();
-        await expect(picker.getByText("Extra High", { exact: true })).toBeInViewport();
+        await expect(picker.getByRole("radio", { name: "Extra High" })).toHaveCount(0);
+        await effort.click();
+        await expect(picker.getByRole("radio", { name: "Extra High" })).toBeInViewport();
       }
       if (id === "modes") {
         await openComposerBar(page, viewport);
