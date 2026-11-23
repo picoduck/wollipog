@@ -46,6 +46,18 @@ export interface AcpCompatibility {
   resolveLaunch?: () => { command: string; pinnedEnvironment?: Readonly<Record<string, string>>; release?: () => void } | null;
 }
 
+/** agy 1.5.14 runs its Linux terminal sandbox by re-executing itself with new namespaces.
+ * A denied spawn has no exit code or command output. Match the provider's own executable and
+ * diagnostic so a shell error or command output cannot disable Auto Mode. */
+export function antigravitySandboxSpawnDenied(raw: unknown, executable: string): boolean {
+  if (!raw || typeof raw !== "object" || "exit_code" in raw || !("output" in raw) || typeof raw.output !== "string") {
+    return false;
+  }
+  const timestamps = /^Created At: [^\r\n]+\nCompleted At: [^\r\n]+\n/u.exec(raw.output);
+  return !!timestamps && raw.output.slice(timestamps[0].length) ===
+    `Command failed to run: fork/exec ${executable}: operation not permitted.\n\nNo output from the command.`;
+}
+
 /** A launch the profile refused when it was about to spawn (nothing verified to run). Its message
  * is the profile's start failure. */
 export class AcpLaunchRefusedError extends Error {

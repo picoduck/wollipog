@@ -6,6 +6,7 @@
  * See docs/ACP-NOTES.md for the exact wire shapes.
  */
 
+import { realpathSync } from "node:fs";
 import type {
   AuthenticateRequest,
   CloseSessionRequest,
@@ -74,6 +75,7 @@ import {
   acpClientFileWritesOffered,
   acpLaunchRequestOptions,
   acpRequestTimedOut,
+  antigravitySandboxSpawnDenied,
   compatibleAcpInitializeRequest,
   acpStderrMirrored,
   compatibleAcpEnvironment,
@@ -143,6 +145,8 @@ export class AcpClient {
   private readonly terminalEventOutput = new Map<string, { cursor: number }>();
   private readonly kill: typeof killTree;
   private readonly antigravityFullPermissions: boolean;
+  private readonly antigravitySandboxExecutable?: string;
+  private antigravitySandboxDeniedInTurn = false;
   private antigravityAutoModeRejected = false;
 
   constructor(
@@ -187,6 +191,11 @@ export class AcpClient {
     this.antigravityFullPermissions = launch.compatibility?.profile === "antigravity" &&
       !opts.orchestrator && !opts.orchestratorRole &&
       opts.initialPermissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id;
+    if (launch.compatibility?.profile === "antigravity" && !this.antigravityFullPermissions &&
+        opts.isolation?.backend === "bwrap" && opts.isolation.antigravityTerminalHelper) {
+      try { this.antigravitySandboxExecutable = realpathSync.native(launch.command); }
+      catch { /* The provider's spawn reports missing executables. */ }
+    }
     // The resolved executable is held until the agent answers the handshake (it has then opened
     // it), so a launcher that opens it after this spawn (bwrap, the cgroup helper) still finds it.
     this.releaseLaunch = launch.release;
@@ -514,6 +523,9 @@ export class AcpClient {
   }
 
   private setPermissionMode(mode: string): Promise<void> {
+    if (mode === ANTIGRAVITY_AUTO_MODE.id && this.antigravityAutoModeRejected) {
+      return Promise.reject(new Error("Auto Mode is unavailable in this Google Antigravity session"));
+    }
     return this.modes ? this.setMode(mode) : this.setSelectConfig("mode", mode);
   }
 
@@ -579,6 +591,18 @@ export class AcpClient {
       this.modeBarrier = null;
       throw new Error("ACP session mode update failed");
     }
+  }
+
+  private async fallBackFromAntigravitySandbox(): Promise<void> {
+    this.antigravityAutoModeRejected = true;
+    let message = "Google Antigravity’s terminal sandbox could not start inside this managed worktree.";
+    try {
+      await this.setPermissionMode("default");
+      message += " This session switched to Default mode and uses the provider’s approval settings.";
+    } catch {
+      message += " The provider could not switch this session to Default mode.";
+    }
+    this.ev.onEvent({ kind: "error", nonFatal: true, source: "antigravity_auto_mode_fallback", message });
   }
 
   private async setSelectConfig(
@@ -703,6 +727,7 @@ export class AcpClient {
     }
     if (content.length === 0) content.push({ type: "text", text: "" });
     this.streamedAgentResponse = false;
+    this.antigravitySandboxDeniedInTurn = false;
     try {
       let res: PromptResponse;
       try {
@@ -721,6 +746,8 @@ export class AcpClient {
       if (stopReason === "end_turn" && this.streamedAgentResponse) {
         this.ev.onEvent({ kind: "agent_response_completed" });
       }
+      // Wait for the turn to settle before changing mode. Never replay the failed command.
+      if (this.antigravitySandboxDeniedInTurn && stopReason !== "cancelled") await this.fallBackFromAntigravitySandbox();
       return stopReason;
     } finally {
       // User-write barriers exist only to reject stale notifications racing the write/next turn.
@@ -895,6 +922,11 @@ export class AcpClient {
         this.emitTerminalOutputs(u.content);
         break;
       case "tool_call_update":
+        if (u.status === "completed" && this.antigravitySandboxExecutable &&
+            (this.modes?.currentModeId ?? optionForCategory(this.configOptions, "mode")?.currentValue) === ANTIGRAVITY_AUTO_MODE.id &&
+            antigravitySandboxSpawnDenied(u.rawOutput, this.antigravitySandboxExecutable)) {
+          this.antigravitySandboxDeniedInTurn = true;
+        }
         this.ev.onEvent({
           kind: "tool_call_update",
           toolCallId: u.toolCallId ?? "tool",

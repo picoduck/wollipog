@@ -30,6 +30,7 @@ import { effectiveAcpCompatibility } from "./session-manager.js";
 import { AntigravitySetupSupervisor, antigravityCredentialContext } from "./antigravity-setup.js";
 import { AcpDriver } from "./drivers/acp-driver.js";
 import type { DriverOptions } from "./drivers/driver.js";
+import { spawnAgent } from "./spawn.js";
 
 // Google's CLI is the credential-free fixture fixtures/antigravity/fake-agy.mjs, which models the
 // ACP behavior observed from real agy 1.5.14 (see DRIVERS.md §4.3).
@@ -93,7 +94,8 @@ function launchDriver(
   cwd: string,
   resumeId?: string,
   overrides: { layeredEnv?: Record<string, string>; deadlines?: { handshakeMs: number; sessionMs: number }; config?: SessionConfig;
-    resolveLaunch?: AcpCompatibility["resolveLaunch"]; sessionContext?: DriverOptions["acpSessionContext"] } = {},
+    resolveLaunch?: AcpCompatibility["resolveLaunch"]; sessionContext?: DriverOptions["acpSessionContext"];
+    fixtureIsolation?: DriverOptions["isolation"] } = {},
 ): { driver: AcpDriver; seen: Observed } {
   const context = antigravityCredentialContext();
   const launch = antigravitySessionLaunch(view, context, isolation);
@@ -110,6 +112,7 @@ function launchDriver(
     config: overrides.config ?? {},
     acpSessionContext: overrides.sessionContext,
     context: { kind: "native" },
+    isolation: overrides.fixtureIsolation,
     ...(resumeId ? { resumeId } : {}),
   };
   const driver = new AcpDriver(options, {
@@ -119,7 +122,7 @@ function launchDriver(
     onAuthStatus: (status: string) => seen.auth.push(status),
     onAcpCapabilities: (capabilities: AcpRuntimeCapabilities) => seen.acp.push(capabilities),
     onAcpSessionState: (update: { capabilities: AgentCapabilities; config: SessionConfig }) => seen.state.push(update),
-  } as never);
+  } as never, overrides.fixtureIsolation ? { spawn: (opts) => spawnAgent({ ...opts, isolation: undefined }) } : {});
   cleanup.push(() => driver.dispose());
   return { driver, seen };
 }
@@ -405,6 +408,36 @@ test("Auto Mode is restored on resume and falls back visibly when Antigravity wi
   fallback.driver.resolvePermission(request.requestId, "deny");
   assert.equal(await prompt, "end_turn");
   assert.equal(existsSync(join(cwd, "fixture-command-ran")), false);
+});
+
+test("a denied native Auto sandbox switches to interactive Default mode without replaying the command", async () => {
+  signIn();
+  process.env.FAKE_AGY_MODE = "auto_sandbox_denied";
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), BWRAP, cwd, undefined, {
+    config: { permissionMode: "auto" }, layeredEnv: { FAKE_AGY_EXECUTABLE: agy },
+    fixtureIsolation: { backend: "bwrap", command: "bwrap", args: [], network: "inherit",
+      antigravityTerminalHelper: join(root, "bin") },
+  });
+  const marker = join(cwd, "fixture-command-ran");
+  await driver.initialize();
+  await driver.newSession(cwd);
+  assert.equal(seen.state.at(-1)?.config.permissionMode, "auto");
+  assert.equal(await driver.prompt("Please run the command."), "end_turn");
+  assert.equal(seen.state.at(-1)?.config.permissionMode, "default");
+  assert.ok(!seen.state.at(-1)?.capabilities.permissionModes?.includes("auto"));
+  assert.ok(seen.events.some((event) => event.kind === "error" && event.source === "antigravity_auto_mode_fallback"));
+  assert.deepEqual(calls().filter((call) => call.method === "session/prompt").map((call) => call.activeMode), ["auto"]);
+  assert.equal(existsSync(marker), false);
+
+  for (const decision of ["deny", "allow"] as const) {
+    const from = seen.events.length;
+    const turn = driver.prompt("Please run the command.");
+    const request = await waitFor(() => seen.events.slice(from).find((event) => event.kind === "permission_request"));
+    assert.equal(driver.resolvePermission(request.requestId, decision), true);
+    assert.equal(await turn, "end_turn");
+    assert.equal(existsSync(marker), decision === "allow");
+  }
 });
 
 test("Full Permissions Mode applies only at launch and stays effective on resume", async () => {
