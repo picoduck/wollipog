@@ -91,7 +91,9 @@ Every `run:` step in these two jobs has its own `timeout-minutes`, and the job b
 covers all of those bounds at once, both decoder install attempts included, plus five
 minutes for the pinned setup actions. A step that overruns therefore fails under its own
 name before the job budget can cancel the job. The **Unit Tests** step allows 18 minutes
-against about eleven expected with four shards ([timing evidence](ci-node-shards-2026-11-10.md)); the jobs allow 50 and 35 minutes. To add a shard, extend
+against about eleven expected with four shards ([timing evidence](ci-node-shards-2026-11-10.md)).
+The **Typecheck & Bundles** job allows 38 minutes, and each **Unit Tests** shard allows
+50 minutes. To add a shard, extend
 the matrix list and the `/4` denominators together. The workflow contract test requires
 them to agree, and pins each job's shape as it does the browser shards.
 
