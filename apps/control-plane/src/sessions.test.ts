@@ -11824,7 +11824,7 @@ test("createSession persists and launches the capability-dependent Claude permis
   assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, undefined);
 });
 
-test("createSession launches Antigravity in Auto Mode by default and persists an explicit Full Permissions Mode", () => {
+test("createSession launches Antigravity in Auto Mode by default, persists an explicit Full Permissions Mode, and both stay switchable", () => {
   const { db, hub, svc } = makeHarness();
   const agent = {
     ...runnerMeta().agents.find(({ id }) => id === AGENT_ID)!,
@@ -11853,10 +11853,13 @@ test("createSession launches Antigravity in Auto Mode by default and persists an
     assert.equal(db.getSession(result.data.id)!.permissionMode, expected ?? null);
     assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, expected);
     if (agentId === agent.id) {
+      // Full Permissions Mode is a live Antigravity mode (agy stays in Default and the runner approves
+      // its requests), so a session moves in and out of it between turns like any other mode.
       const otherMode = { permissionMode: explicit ? "auto" : "antigravity-full-permissions" };
-      assert.equal(svc.setConfig(result.data.id, otherMode).status, 409);
-      assert.match(svc.prompt(result.data.id, "Change permissions", [], undefined, otherMode).error ?? "", /fixed at session creation/u);
-      assert.equal(db.getSession(result.data.id)!.permissionMode, expected);
+      const changed = svc.setConfig(result.data.id, otherMode);
+      assert.ok(changed.ok, JSON.stringify(changed));
+      const prompted = svc.prompt(result.data.id, "Change permissions", [], undefined, otherMode);
+      assert.doesNotMatch(prompted.error ?? "", /fixed at session creation/u);
     }
   }
   const orchestrator = svc.createSession({

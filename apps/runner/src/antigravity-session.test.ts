@@ -315,7 +315,8 @@ test("a session streams replies, advertises agy's models, efforts and modes, and
   const presented = seen.state.at(-1)!;
   assert.deepEqual(presented.capabilities.models.map((model) => model.id), ["fixture-pro", "fixture-flash"]);
   assert.deepEqual(presented.capabilities.effortLevels, ["low", "medium", "high", "xhigh"]);
-  assert.deepEqual(presented.capabilities.permissionModes, ["default", "accept-edits", "auto", "plan"]);
+  assert.deepEqual(presented.capabilities.permissionModes,
+    ["default", "accept-edits", "auto", "plan", "antigravity-full-permissions"]);
   assert.deepEqual(presented.config, { model: "fixture-pro", effort: "high", permissionMode: "default" });
   assert.deepEqual(seen.acp.at(-1), { logout: false, loadSession: false, sessionList: false, sessionDelete: false,
     sessionResume: true, sessionClose: true });
@@ -400,8 +401,12 @@ test("Auto Mode is restored on resume and falls back visibly when Antigravity wi
   await fallback.driver.initialize();
   assert.equal(await fallback.driver.newSession(cwd), id);
   assert.equal(fallback.seen.state.at(-1)?.config.permissionMode, "default");
-  assert.ok(fallback.seen.events.some((event) => event.kind === "error" && event.nonFatal &&
-    event.source === "antigravity_auto_mode_fallback"));
+  assert.ok(fallback.seen.state.at(-1)?.capabilities.permissionModes?.includes("antigravity-full-permissions"),
+    "Full Permissions Mode stays available where Auto is not");
+  const warning = fallback.seen.events.find((event) => event.kind === "error" && event.nonFatal &&
+    event.source === "antigravity_auto_mode_fallback");
+  assert.match(warning?.kind === "error" ? warning.message : "",
+    /does not offer Auto Mode on this machine.*Default mode.*Full Permissions Mode/u);
   assert.equal(calls().filter((call) => call.method === "initialize").at(-1)?.fullPermissions, false);
   const prompt = fallback.driver.prompt("Please run the command.");
   const request = await waitFor(() => fallback.seen.events.find((event) => event.kind === "permission_request"));
@@ -440,28 +445,60 @@ test("a denied native Auto sandbox switches to interactive Default mode without 
   }
 });
 
-test("Full Permissions Mode applies only at launch and stays effective on resume", async () => {
+test("Full Permissions Mode is a live mode: agy stays in Default and Wollipog approves its requests", async () => {
   signIn();
+  // Real agy 1.5.14 withholds Auto where its terminal sandbox is unavailable; Full Permissions must not need it.
+  process.env.FAKE_AGY_MODE = "auto_unavailable";
   const cwd = mkdtempSync(join(root, "worktree-"));
+  const marker = join(cwd, "fixture-command-ran");
   const view = setup({ executable: { path: agy } });
-  const config = { permissionMode: "antigravity-full-permissions" };
-  const first = launchDriver(view, PROVIDER, cwd, undefined, { config });
+  const full = "antigravity-full-permissions";
+  const first = launchDriver(view, PROVIDER, cwd, undefined, { config: { permissionMode: full } });
   await first.driver.initialize();
   const id = await first.driver.newSession(cwd);
-  assert.equal(first.seen.state.at(-1)?.config.permissionMode, config.permissionMode);
-  assert.deepEqual(first.seen.state.at(-1)?.capabilities.permissionModes, [config.permissionMode]);
-  await assert.rejects(first.driver.setConfig({ permissionMode: "auto" }), /fixed when/u);
+  assert.equal(first.seen.state.at(-1)?.config.permissionMode, full);
+  assert.deepEqual(first.seen.state.at(-1)?.capabilities.permissionModes, ["default", "accept-edits", "plan", full],
+    "the composer offers agy's live modes and Full Permissions Mode together");
+  assert.equal(first.seen.state.at(-1)?.capabilities.agentPermissionModes?.at(-1)?.name, "Full Permissions Mode");
   assert.equal(await first.driver.prompt("Please run the command."), "end_turn");
-  assert.equal(existsSync(join(cwd, "fixture-command-ran")), true);
+  assert.equal(existsSync(marker), true);
+  rmSync(marker);
   assert.equal(first.seen.events.some((event) => event.kind === "permission_request"), false);
+  assert.deepEqual(calls().filter((call) => call.method === "permission_response").at(-1)?.outcome,
+    { outcome: "selected", optionId: "allow" }, "Wollipog answered agy's approval request");
+  assert.equal(calls().find((call) => call.method === "session/prompt")?.activeMode, "default");
+  assert.equal(calls().find((call) => call.method === "initialize")?.fullPermissions, false, "no launch flag");
+
+  // Leaving Full Permissions between turns restores agy's own approvals in the same process.
+  await first.driver.setConfig({ permissionMode: "default" });
+  assert.equal(first.seen.state.at(-1)?.config.permissionMode, "default");
+  let from = first.seen.events.length;
+  const asked = first.driver.prompt("Please run the command.");
+  const request = await waitFor(() => first.seen.events.slice(from).find((event) => event.kind === "permission_request"));
+  first.driver.resolvePermission(request.requestId, "deny");
+  assert.equal(await asked, "end_turn");
+  assert.equal(existsSync(marker), false);
+
+  // And entering it from agy's Accept Edits mode returns agy to Default first.
+  await first.driver.setConfig({ permissionMode: "accept-edits" });
+  await first.driver.setConfig({ permissionMode: full });
+  assert.equal(first.seen.state.at(-1)?.config.permissionMode, full);
+  from = first.seen.events.length;
+  assert.equal(await first.driver.prompt("Please run the command."), "end_turn");
+  assert.equal(existsSync(marker), true);
+  rmSync(marker);
+  assert.equal(first.seen.events.slice(from).some((event) => event.kind === "permission_request"), false);
+  assert.equal(calls().filter((call) => call.method === "session/prompt").at(-1)?.activeMode, "default");
   first.driver.dispose();
 
-  const resumed = launchDriver(view, PROVIDER, cwd, id, { config });
+  const resumed = launchDriver(view, PROVIDER, cwd, id, { config: { permissionMode: full } });
   await resumed.driver.initialize();
   assert.equal(await resumed.driver.newSession(cwd), id);
-  assert.equal(resumed.seen.state.at(-1)?.config.permissionMode, config.permissionMode);
-  assert.deepEqual(calls().filter((call) => call.method === "initialize").map((call) => call.fullPermissions), [true, true]);
-  assert.equal(calls().some((call) => call.method === "session/set_mode"), false);
+  assert.equal(resumed.seen.state.at(-1)?.config.permissionMode, full);
+  assert.equal(await resumed.driver.prompt("Please run the command."), "end_turn");
+  assert.equal(existsSync(marker), true);
+  assert.equal(resumed.seen.events.some((event) => event.kind === "permission_request"), false);
+  assert.ok(calls().filter((call) => call.method === "initialize").every((call) => call.fullPermissions === false));
 });
 
 test("resume reuses the provider conversation under provider isolation and never falls back to session/load", async () => {

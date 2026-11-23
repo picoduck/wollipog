@@ -1,6 +1,6 @@
 import { OWNER_CONFIRMATION_NOTICE_PREFIX, type PromptSessionMessage, type WollipogPromptOrigin } from "@wollipog/protocol";
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
-import { ANTIGRAVITY_AGENT_ID, ANTIGRAVITY_AUTO_MODE, ANTIGRAVITY_FULL_PERMISSIONS_MODE } from "@wollipog/protocol";
+import { ANTIGRAVITY_AGENT_ID, ANTIGRAVITY_AUTO_MODE } from "@wollipog/protocol";
 import { isProviderCapacityFailure, PROVIDER_RETRY_CONTINUATION } from "./provider-turn-retry.js";
 import { artifactGuidance } from "./artifact-guidance.js";
 import { providerCommandHomeWriteSeparationDiagnostic } from "./provider-command-home-write-separation.js";
@@ -11924,13 +11924,6 @@ export class SessionManager {
       return false;
     }
     const effectiveConfig = this.snapshotQueuedConfig(sessionId, config);
-    const meta = this.store.readMeta(sessionId);
-    const full = ANTIGRAVITY_FULL_PERMISSIONS_MODE.id;
-    if (meta?.driver === "acp" && meta.agentId === ANTIGRAVITY_AGENT_ID &&
-        (effectiveConfig.permissionMode === full) !== (meta.config.permissionMode === full)) {
-      durable?.failed("Full Permissions Mode is fixed at session creation", "INVALID_COMMAND");
-      return false;
-    }
     const rebindGeneration = this.launchGenerations.get(sessionId);
     // A normal rebind exposes its generation-owned pre-launch FIFO so prompts remain accepted.
     // Stop/cancel deliberately invalidate that generation; until the retiring provider settles,
@@ -14691,7 +14684,6 @@ export class SessionManager {
         const current = this.store.readMeta(sessionId);
         if (next.config?.permissionMode === ANTIGRAVITY_AUTO_MODE.id &&
             current?.driver === "acp" && current.agentId === ANTIGRAVITY_AGENT_ID &&
-            current.config.permissionMode !== ANTIGRAVITY_FULL_PERMISSIONS_MODE.id &&
             current.capabilities && !current.capabilities.permissionModes?.includes(ANTIGRAVITY_AUTO_MODE.id)) {
           // A prompt queued during launch may still carry the pre-negotiation Auto default.
           next.config = { ...next.config, permissionMode: current.config.permissionMode };
