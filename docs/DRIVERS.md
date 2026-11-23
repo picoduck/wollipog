@@ -1617,9 +1617,10 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   Worktree, execution-isolation and admission checks are the shared ACP launch's. The one
   provider-home difference: a managed Linux worktree forces bwrap even under `provider` isolation,
   and normally asks bwrap to keep the provider's own state writable, which no ACP agent can name.
-  An ACP launch whose profile accepts read-only state (Antigravity) runs there with HOME read-only
-  instead of being refused; every other ACP agent keeps that refusal. Find Sessions and adoption
-  never probe the setup-derived row, since they spawn adapters without its context or profile.
+  An Antigravity launch runs there with HOME read-only and a private temporary mount at
+  `~/.gemini/antigravity-cli/bin` for its generated `agentapi` shell helper (#4896). Its credentials,
+  settings, and conversations stay read-only. Every other ACP agent keeps the refusal. Find Sessions
+  and adoption never probe the setup-derived row, since they spawn adapters without its context or profile.
 - **Compatibility profile.** The ACP client withholds, for Antigravity only: every advertised auth
   method (they include an API key and Agent Platform ADC, which would change the account or billing;
   sign-in happens in Connections), `logout` (it would sign every session on the runner out of the
@@ -1662,8 +1663,8 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   worktree) lets agy persist its conversation, so only then does the session advertise
   `session/resume`, and a restart resumes by id without replaying history. Under any runner sandbox
   (bwrap, including a managed worktree's, or Seatbelt) agy's state directory
-  (`~/.gemini/antigravity-cli`, which also holds its OAuth token and settings) is read-only and
-  nothing is persisted, so no resume is advertised and a restart shows the existing "read-only
+  (`~/.gemini/antigravity-cli`, which also holds its OAuth token and settings) cannot persist
+  conversations, so no resume is advertised and a restart shows the existing "read-only
   history" refusal instead of starting a fresh conversation. A writable grant for agy's
   conversation state is a follow-up. `session/load` is never used: agy answers a load of an id it
   cannot read with an empty session, which would pass for a resumed conversation.
@@ -1671,7 +1672,10 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   `deny` options) and the card's title is the command line. Deny prevents the command. New sessions
   default to Auto Mode. Wollipog selects ACP's `auto` before the first prompt or after resume if agy
   supports it. If agy cannot enable it, the session shows a warning and uses the provider's current
-  approval settings. Explicitly choosing Full Permissions Mode at creation adds agy's
+  approval settings. On Linux managed worktrees where agy's Auto sandbox cannot create its
+  nested namespace, a failed sandbox launch switches the session to Default mode once agy
+  confirms the change. The runner displays the effective mode and never retries the command.
+  Explicitly choosing Full Permissions Mode at creation adds agy's
   `--dangerously-skip-permissions` flag on each launch of that session under the same runner isolation.
   Full Permissions Mode is fixed for the session. agy's own file edits are agent-owned
   tools: in `default` mode real agy wrote a file without asking, so edits are not approval-gated by

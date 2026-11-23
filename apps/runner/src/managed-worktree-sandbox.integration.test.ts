@@ -88,6 +88,68 @@ function managedWorktreeFixture(base = tmpdir()): { root: string; repoPath: stri
   return { root, repoPath, worktreePath, home };
 }
 
+test("an Antigravity provider can write and run its shell helper inside a real managed-worktree sandbox", {
+  skip: bubblewrapUsable() ? false : "bubblewrap cannot create a user namespace on this host",
+}, async () => {
+  const { root, repoPath, worktreePath, home } = managedWorktreeFixture(process.cwd());
+  const providerState = join(home, ".gemini", "antigravity-cli");
+  const helper = join(providerState, "bin", "agentapi");
+  const credentials = join(providerState, "antigravity-oauth-token");
+  mkdirSync(providerState, { recursive: true });
+  writeFileSync(credentials, "synthetic\n");
+  const readOnlyPaths = managedWorktreeReadOnlyPaths([{ worktreePath, repoPath }], true);
+  const isolation = await resolveExecutionIsolation(
+    { mode: "bwrap", network: "deny" }, { kind: "native" }, {}, {
+      driver: "acp", dataDir: join(root, "state"), env: { HOME: home }, sessionId: "s_managed", cwd: worktreePath,
+      antigravityTerminalHelper: true, readOnlyPaths,
+      protectedWorktree: { path: worktreePath,
+        gitWritableRoots: managedWorktreeGitWritableRoots(worktreePath, [{ worktreePath, repoPath }]),
+        requiredReadOnlyPaths: readOnlyPaths },
+    },
+  );
+  assert.ok(isolation?.backend === "bwrap");
+  const exec = (command: string, args: string[]) =>
+    run(isolation.command, buildBwrapArgs({ command, args, cwd: worktreePath }, isolation), worktreePath);
+  const result = exec("/bin/sh", ["-ec", `
+    test "$(cat "$2")" = synthetic
+    printf '%s\n' '#!/bin/sh' 'printf ACP_AUTO_PROBE' > "$1"
+    chmod +x "$1"
+    "$1"
+    if (printf changed > "$2") 2>/dev/null; then exit 11; fi
+    if (printf changed > .git) 2>/dev/null; then exit 12; fi
+    if (printf changed > ../other-worktree) 2>/dev/null; then exit 13; fi
+    printf writable > terminal-output
+  `, "terminal", helper, credentials]);
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.output, /ACP_AUTO_PROBE/);
+  assert.equal(readFileSync(join(worktreePath, "terminal-output"), "utf8"), "writable");
+  assert.equal(readFileSync(credentials, "utf8"), "synthetic\n");
+  assert.equal(existsSync(helper), false, "the executable never reaches the host");
+  assert.equal(exec("/usr/bin/test", ["!", "-e", helper]).status, 0, "a subsequent launch gets a fresh mount");
+});
+
+test("the Antigravity helper mount refuses aliases into shared Git state before creating a mount point", async () => {
+  const { root, repoPath, worktreePath, home } = managedWorktreeFixture();
+  const providerState = join(home, ".gemini", "antigravity-cli");
+  const commonGit = join(repoPath, ".git");
+  mkdirSync(dirname(providerState));
+  symlinkSync(commonGit, providerState);
+  const readOnlyPaths = managedWorktreeReadOnlyPaths([{ worktreePath, repoPath }], true);
+  await assert.rejects(resolveExecutionIsolation(
+    { mode: "bwrap", network: "inherit" }, { kind: "native" }, {
+      platform: "linux", uid: () => 1000,
+      resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
+    }, {
+      driver: "acp", dataDir: join(root, "state"), env: { HOME: home }, sessionId: "s_managed", cwd: worktreePath,
+      antigravityTerminalHelper: true, readOnlyPaths,
+      protectedWorktree: { path: worktreePath,
+        gitWritableRoots: managedWorktreeGitWritableRoots(worktreePath, [{ worktreePath, repoPath }]),
+        requiredReadOnlyPaths: readOnlyPaths },
+    },
+  ), /unaliased provider state directory/);
+  assert.equal(existsSync(join(commonGit, "bin")), false);
+});
+
 test("a real bwrap launch refuses provider writes to the managed worktree's Git link", {
   skip: bubblewrapUsable() ? false : "bubblewrap cannot create a user namespace on this host",
 }, async () => {

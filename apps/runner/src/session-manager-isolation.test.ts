@@ -15,7 +15,7 @@ import type {
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
-import { spawnAgent } from "./spawn.js";
+import { bwrapPathWritable, buildBwrapArgs, spawnAgent } from "./spawn.js";
 import { ProviderStateCleanupJournal } from "./provider-state-reconciliation.js";
 import { providerStateKey } from "./execution-isolation.js";
 import { wslBwrapSessionRoot } from "./wsl-bwrap-launcher.js";
@@ -189,13 +189,15 @@ test("a Linux managed worktree launch selects bwrap from provider mode and fails
   }
 });
 
-test("an ACP launch whose profile accepts read-only state runs in a Linux managed worktree from provider mode, without resume (#4779)", async () => {
+test("Antigravity gets a temporary terminal helper directory even when provider state is absent (#4896)", async () => {
   if (process.platform !== "linux") return;
   const root = mkdtempSync(join(tmpdir(), "wollipog-acp-managed-launch-"));
   const home = mkdtempSync(join(tmpdir(), "wollipog-acp-managed-home-"));
   let manager: SessionManager | undefined;
   try {
     const { repoPath, worktreePath } = hostWorktree(root, "s1");
+    const providerState = join(home, ".gemini", "antigravity-cli");
+    const helperDir = join(providerState, "bin");
     const store = new SessionStore(join(root, "sessions"));
     const acpMeta = (sessionId: string): SessionMeta => ({
       ...meta(), sessionId, agentId: "google-antigravity", driver: "acp", command: "agy", args: ["acp"],
@@ -246,6 +248,12 @@ test("an ACP launch whose profile accepts read-only state runs in a Linux manage
     assert.equal(isolation?.backend, "bwrap", "the managed worktree's forced bwrap still applies");
     assert.equal(isolation?.backend === "bwrap" && isolation.writableBinds?.some((bind) =>
       bind.target === home || bind.target.startsWith(`${home}/`)), false, "its HOME stays read-only");
+    assert.ok(isolation?.backend === "bwrap");
+    assert.ok(lstatSync(helperDir).isDirectory());
+    assert.equal(lstatSync(providerState).mode & 0o077, 0, "new provider state is private to the runner user");
+    const args = buildBwrapArgs({ command: "agy", args: ["acp"], cwd: worktreePath }, isolation);
+    assert.ok(args.some((arg, i) => arg === "--tmpfs" && args[i + 1] === helperDir));
+    assert.equal(bwrapPathWritable(args, join(providerState, "credentials.json")), false);
     assert.deepEqual(options?.acpCompatibility, { profile: "antigravity", resumable: false },
       "resume follows the effective sandbox, not the configured provider mode");
   } finally {

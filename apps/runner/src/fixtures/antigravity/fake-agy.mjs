@@ -154,6 +154,12 @@ if (args[0] === "acp" && args[1] === "--login") {
     const args = { CommandLine: "touch fixture-command-ran", WaitMsBeforeAsync: 5000, toolSummary: "Create a marker file" };
     const tool = { toolCallId, name: "run_command", args, kind: "execute", title: "touch fixture-command-ran", rawInput: args };
     update(sessionId, { sessionUpdate: "tool_call", ...tool, status: "in_progress" });
+    if (modes.has("auto_sandbox_denied") && config.mode === "auto") {
+      const output = `Created At: 2026-11-23T12:00:00Z\nCompleted At: 2026-11-23T12:00:01Z\nCommand failed to run: fork/exec ${process.env.FAKE_AGY_EXECUTABLE}: operation not permitted.\n\nNo output from the command.`;
+      update(sessionId, { sessionUpdate: "tool_call_update", toolCallId, status: "completed", rawOutput: { output },
+        content: [{ type: "content", content: { type: "text", text: output } }] });
+      return endTurn("end_turn");
+    }
     update(sessionId, { sessionUpdate: "tool_call_update", ...tool, status: "pending" });
     const permissionId = String(++permissionCounter);
     turn.permission = { id: permissionId, settle: (outcome) => {

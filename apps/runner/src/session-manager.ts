@@ -11441,6 +11441,8 @@ export class SessionManager {
       // read-only state (Antigravity, #4779) runs in the protected worktree without it.
       ...(protectedWorktree && this.executionIsolation.mode === "provider" &&
         !(meta.driver === "acp" && this.launchAcpCompatibility.has(meta)) ? { preserveProviderHome: true } : {}),
+      ...(protectedWorktree && this.launchAcpCompatibility.get(meta)?.profile === "antigravity"
+        ? { antigravityTerminalHelper: true } : {}),
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(guardStateMask ? { guardStateMask } : {}),
       ...(this.strictProjectIsolation(meta) ? { orchestratorScratchOnly: true } : {}),

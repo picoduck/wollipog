@@ -31,7 +31,7 @@ interface IsolationDeps {
   nativeEnvironment: () => NodeJS.ProcessEnv;
   nativeTmp: () => string;
   realpathNative: (path: string) => Promise<string>;
-  mkdirNative: (paths: string[]) => Promise<void>;
+  mkdirNative: (paths: string[], mode?: number) => Promise<void>;
   mkdirWsl: (context: Extract<AgentContext, { kind: "wsl" }>, paths: string[]) => Promise<void>;
   copyNative: (source: ProviderStateLocation, target: ProviderStateLocation) => Promise<void>;
   copyWsl: (context: Extract<AgentContext, { kind: "wsl" }>, source: ProviderStateLocation, target: ProviderStateLocation) => Promise<void>;
@@ -83,7 +83,7 @@ const defaultDeps: IsolationDeps = {
   nativeEnvironment: () => process.env,
   nativeTmp: tmpdir,
   realpathNative: realpath,
-  mkdirNative: async (paths) => { for (const path of paths) await mkdir(path, { recursive: true }); },
+  mkdirNative: async (paths, mode) => { for (const path of paths) await mkdir(path, { recursive: true, mode }); },
   mkdirWsl: async (context, paths) => {
     await runContextCommand(context, "mkdir", ["-p", "--", ...paths], { cwd: "/", timeoutMs: 5_000 });
   },
@@ -155,6 +155,8 @@ export interface IsolationStateOptions {
   /** Preserve the installed provider's real transcript and credential directory when a managed
    * Linux worktree forces bwrap over a runner configured for provider isolation. */
   preserveProviderHome?: boolean;
+  /** Give a setup-backed Antigravity launch a private mount for its generated shell helper. */
+  antigravityTerminalHelper?: boolean;
   /** Session-private roots that may be populated after launch (for example an agent-requested
    * worktree). They are materialized before sandbox construction and never shared across sessions. */
   additionalWritableRoots?: string[];
@@ -357,6 +359,27 @@ function pathWithinOrEqual(parent: string, path: string): boolean {
 
 function pathsOverlap(left: string, right: string): boolean {
   return pathWithinOrEqual(left, right) || pathWithinOrEqual(right, left);
+}
+
+async function antigravityTerminalHelperDirectory(
+  state: IsolationStateOptions, protectedRoots: readonly string[], runtime: IsolationDeps,
+): Promise<string> {
+  const inherited = runtime.nativeEnvironment();
+  const home = await runtime.realpathNative(absoluteHome(state.env.HOME ?? inherited.HOME ?? runtime.nativeHome(), "HOME on Linux"));
+  const gemini = posix.join(home, ".gemini");
+  const providerState = posix.join(gemini, "antigravity-cli");
+  const helper = posix.join(providerState, "bin");
+  const invalidPath = "Antigravity terminal helper requires an unaliased provider state directory outside other sandbox mounts";
+  if (protectedRoots.some((path) => pathsOverlap(providerState, path))) throw new Error(invalidPath);
+  for (const path of [gemini, providerState, helper]) {
+    // A missing component is safe to create, but even a dangling symlink is an alias.
+    if (await runtime.isSymbolicLinkNative(path)) throw new Error(invalidPath);
+  }
+  // bubblewrap cannot create a mount point in the read-only root. Create missing host directories
+  // with private permissions. The generated executable and subsequent writes live in tmpfs.
+  await runtime.mkdirNative([helper], 0o700);
+  if (await runtime.realpathNative(helper) !== helper) throw new Error(invalidPath);
+  return helper;
 }
 
 /** Whether a managed Linux writable mount at canonical `path` (requested as `requested`) would
@@ -1184,6 +1207,12 @@ export async function resolveExecutionIsolation(
   const guardStateMask = resolvedMask
     ? { directory: resolvedMask.directory, readable: resolvedMask.readable, ...(resolvedMask.socket ? { socket: resolvedMask.socket } : {}) }
     : undefined;
+  const antigravityTerminalHelper = state?.antigravityTerminalHelper && protectedWorktree && commonGitDir
+    ? await antigravityTerminalHelperDirectory(state, [
+      protectedWorktree.parent, commonGitDir, state.dataDir, ...readOnlyBinds,
+      ...writableBinds.map((bind) => bind.target), ...(guardStateMask ? [guardStateMask.directory] : []),
+    ], runtime)
+    : undefined;
   return {
     backend: "bwrap",
     command: binary.launch.command,
@@ -1191,6 +1220,7 @@ export async function resolveExecutionIsolation(
     network: policy.network,
     ...(state?.dataDir ? { claudePipeHelperDataDir: state.dataDir } : {}),
     ...(state?.preserveProviderHome ? { preservesProviderHome: true } : {}),
+    ...(antigravityTerminalHelper ? { antigravityTerminalHelper } : {}),
     ...(writableBinds.length ? { writableBinds } : {}),
     ...(state?.projectSharedWritableRoots?.length ? { projectSharedWritableRoots: [...state.projectSharedWritableRoots] } : {}),
     ...(protectedWorktree ? { protectedWorktree } : {}),
