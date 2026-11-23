@@ -68,7 +68,7 @@ export function registerAssistantAutomations(operations: AssistantOperations, db
           const schedule = load(a), targets = authorize(schedule);
           const result = service.get(schedule.automationId);
           // A scheduled campaign also reports the settings its next occurrence would use now.
-          const effectiveCampaign = service.campaignPreview(schedule, context.owner);
+          const effectiveCampaign = service.campaignPreview(schedule);
           return {...result.data, impact: {targets}, ...(effectiveCampaign ? {effectiveCampaign} : {})};
         }
         let resultId: string | undefined;

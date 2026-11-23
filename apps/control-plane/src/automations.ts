@@ -37,7 +37,6 @@ import {
 import { nextCronFire, parseCron, validateTimeZone } from "@wollipog/protocol/cron-schedule";
 import { automationCommandDigest, AutomationCommandOutbox } from "./automation-command-outbox.js";
 import { automationCampaignError, type ScheduledCampaignPreview, type ScheduledCampaignRuntime } from "./scheduled-campaigns.js";
-import type { HumanPrincipal } from "./identity.js";
 import { authorizeAssistantAutomation, scheduledAssistantOwner,
   auditAssistantAutomationOccurrence, type AssistantAutomationOperation } from "./assistant-automation-authority.js";
 import { AssistantRefusal } from "./assistant-connections.js";
@@ -612,13 +611,16 @@ export class AutomationsService {
     return ok({ deleted: true });
   }
 
-  /** Effective settings a scheduled campaign's next occurrence would launch with for `owner`, or
-   * null for other automations. Read-only: nothing is launched, inspected or persisted. */
-  campaignPreview(automation: AutomationSchedule, owner: HumanPrincipal): ScheduledCampaignPreview | { error: string } | null {
+  /** Effective settings a scheduled campaign's next occurrence would launch with now, or null for
+   * other automations. The target is the scheduler's own current choice among the primary and
+   * alternates, and the principal is the one launch would act as. Read-only: nothing is launched,
+   * inspected or persisted, and no runner message is sent. */
+  campaignPreview(automation: AutomationSchedule): ScheduledCampaignPreview | { error: string } | null {
     if (automation.action.kind !== "create_session" || !automation.action.request.campaign) return null;
     if (!this.campaigns) return { error: "Scheduled campaigns are unavailable on this server" };
-    const { name, cron, timezone, enabled, misfirePolicy, runnerPolicy, concurrencyPolicy, limits, notifications, action } = automation;
-    return this.campaigns.preview({ name, cron, timezone, enabled, misfirePolicy, runnerPolicy, concurrencyPolicy, limits, notifications, action }, owner);
+    const target = this.resolveTarget(automation);
+    if (!target.ok) return { error: target.error ?? AUTOMATION_TARGET_UNAVAILABLE };
+    return this.campaigns.preview(automation, target.data!.target);
   }
 
   private campaignError(spec: AutomationSpec, actor: GovernanceActor, operation?: AssistantAutomationOperation): string | null {

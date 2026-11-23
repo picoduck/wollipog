@@ -84,12 +84,18 @@ retain their own Assistant identity and launcher attribution during recovery.
 `request.orchestrator` with optional `behavior` (Child Harness, Model and Effort, concurrency,
 follow-ups, completion and review policy), `delegation` and `execution` overrides, and
 `request.campaign` with `controlMode`, `repository`, keyed `tasks` and the Full Control launch
-overrides. Omitted overrides use the owner's Orchestrator defaults. An invalid field is refused
-with a message naming it. For a scheduled campaign, `auto_get.effectiveCampaign` reports what the
-next occurrence would launch with now: the root installation, model and effort, the resolved
-behavior, delegation and execution, the tasks and the aggregate allowance. It is derived by the
-same preparation as save and launch, without inspecting the repository, launching or persisting
-anything, and grants nothing. A failed preparation reads `{error}` instead.
+overrides. Omitted overrides use the owner's Orchestrator defaults; a null `parentControl`
+inherits the saved one. The schema and the save validator accept the same values, and an invalid
+field is refused at save with a message naming it. For a scheduled campaign,
+`auto_get.effectiveCampaign` reports what the next occurrence would launch with now: the root
+Machine, installation, model and effort, the resolved behavior, delegation and execution, the tasks
+and the aggregate allowance. It uses the target the scheduler would choose now, including an
+alternate when the primary is unavailable, and the principal launch would act as: the schedule's
+still-authorized Assistant owner or its sole human author, never the reader. It is derived by the
+same preparation as save, without inspecting the repository, sending a runner message, launching
+or persisting anything, and grants nothing. When the occurrence would be refused (for example, the
+authorizing connection lost the operation, or no target is available), it reads `{error}` with
+the reason instead.
 
 Skill impact reports potentially affected machines within the skill's ownership audience, including
 offline targets. Reported state is the last runner report, not a promise that an offline machine

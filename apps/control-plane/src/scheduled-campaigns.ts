@@ -1,7 +1,7 @@
 import {
   campaignLaunchDisclosure, campaignRepositoryLocation, humanRequiredRulesExist, supportsPacedVideoReviewPeer, runnerSupportsProtocol,
   type AutomationCampaign, type AutomationExecution, type AutomationRunnerTarget, type AutomationSchedule,
-  type AutomationSpec, type CreateSessionRequest, type FullControlLaunchRequest, type GovernanceActor,
+  type AutomationSessionRequest, type AutomationSpec, type CreateSessionRequest, type FullControlLaunchRequest, type GovernanceActor,
   type PreparedCampaignLaunch, type SessionView,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
@@ -22,14 +22,37 @@ const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v ===
 const text = (v: unknown, max: number): v is string => typeof v === "string" && v.trim().length > 0 && v.length <= max && !v.includes("\0");
 const fail = (error: string, status = 409): ServiceResult<SessionView> => ({ ok: false, status, error });
 
+/** The path of the first override the shared parser refuses on its own, so a refusal names it.
+ * Each leaf is checked alone against the owner-default completion the parser applies; a value
+ * refused only in combination falls back to the container. */
+function refusedOrchestratorField(value: unknown): string {
+  const base = "request.orchestrator";
+  if (!object(value)) return base;
+  const unknown = Object.keys(value).find(key => !["behavior", "delegation", "execution"].includes(key));
+  if (unknown) return `${base}.${unknown}`;
+  for (const section of ["behavior", "delegation", "execution"] as const) {
+    const part = value[section];
+    if (part === undefined) continue;
+    if (!object(part)) return `${base}.${section}`;
+    for (const [key, entry] of Object.entries(part)) {
+      if (section === "delegation" && key === "decisions" && object(entry)) {
+        const category = Object.keys(entry).find(name => !parseOrchestratorOverrides({ delegation: { decisions: { [name]: entry[name] } } }));
+        if (category) return `${base}.delegation.decisions.${category}`;
+      } else if (!parseOrchestratorOverrides({ [section]: { [key]: entry } })) return `${base}.${section}.${key}`;
+    }
+  }
+  return base;
+}
+
 /** Strict public input. In particular no authority provenance or admission result can be stored
  * in a schedule. The ordinary campaign parsers remain authoritative for all policy fields. Each
  * refusal names the field so a caller following the advertised schema can correct it (#4869). */
 export function automationCampaignError(request: Record<string, unknown>): string | null {
   if (request.orchestrator !== undefined && !parseOrchestratorOverrides(request.orchestrator)) {
-    return "request.orchestrator must be an object of behavior, delegation and execution overrides with supported keys and values " +
-      "(for example behavior.followUps recommend_only or execute_approved, behavior.maximumConcurrentChildren 0 to 64, " +
-      "delegation.decisions human or orchestrator per category); omit a field to use the owner's Orchestrator defaults";
+    const field = refusedOrchestratorField(request.orchestrator);
+    return field === "request.orchestrator"
+      ? "request.orchestrator must be an object of optional behavior, delegation and execution overrides that the Orchestrator settings accept together"
+      : `${field} is not an accepted Orchestrator override or value; omit it to use the owner's Orchestrator defaults`;
   }
   if (request.campaign === undefined) {
     if (request.role === "orchestrator") return "A scheduled Orchestrator session requires request.campaign";
@@ -59,6 +82,32 @@ export function automationCampaignError(request: Record<string, unknown>): strin
       parseFullControlLaunchRequest({ runnerId: request.runnerId, workspaceId: request.workspaceId, overrides: c.fullControl }, false) === null) {
     return "request.campaign.fullControl accepts only objective, operations, delegatablePolicyIds, budget and issues launch overrides; " +
       "the root's settings belong in the session request";
+  }
+  return fullControlLimitError(c.fullControl);
+}
+
+/** The launch parser checks these overrides' keys only; their values reach the boundary validators
+ * at each occurrence. Refuse the values those validators would refuse at save instead (#4869). */
+function fullControlLimitError(overrides: Record<string, unknown>): string | null {
+  const integer = (v: unknown, min: number, max = Number.MAX_SAFE_INTEGER) => v === undefined || (Number.isSafeInteger(v) && (v as number) >= min && (v as number) <= max);
+  const positive = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v > 0;
+  const budget = overrides.budget as Record<string, unknown> | undefined, issues = overrides.issues as Record<string, unknown> | undefined;
+  const at = "request.campaign.fullControl";
+  if (budget?.costUsd !== undefined && !positive(budget.costUsd)) return `${at}.budget.costUsd must be a positive number`;
+  for (const key of ["toolCalls", "concurrency", "acceptedFollowUps"]) {
+    if (!integer(budget?.[key], key === "acceptedFollowUps" ? 0 : 1)) return `${at}.budget.${key} must be an integer of at least ${key === "acceptedFollowUps" ? 0 : 1}`;
+  }
+  const checkpoints = budget?.checkpointsUsd;
+  if (checkpoints !== undefined && (!Array.isArray(checkpoints) || checkpoints.length > 100 ||
+      checkpoints.some((v, i) => !positive(v) || (i > 0 && v <= checkpoints[i - 1])))) {
+    return `${at}.budget.checkpointsUsd must be at most 100 increasing positive amounts within the cost limit`;
+  }
+  if (issues?.relatedFollowUps !== undefined && typeof issues.relatedFollowUps !== "boolean") return `${at}.issues.relatedFollowUps must be a boolean`;
+  if (!integer(issues?.maxIssues, 1, 100)) return `${at}.issues.maxIssues must be an integer from 1 to 100`;
+  const reasons = issues?.closureReasons;
+  if (reasons !== undefined && (!Array.isArray(reasons) || new Set(reasons).size !== reasons.length ||
+      reasons.some(reason => reason !== "completed" && reason !== "not_planned"))) {
+    return `${at}.issues.closureReasons must list distinct completed or not_planned reasons`;
   }
   return null;
 }
@@ -118,7 +167,7 @@ export class ScheduledCampaignRuntime {
         catch (error) { if (error instanceof AssistantRefusal) return error.message; throw error; }
       }
       if (!human) return "Scheduled campaigns require an active authenticated human owner";
-      const launch = this.prepare(spec, target, human);
+      const launch = this.prepare(request, target, human);
       if (typeof launch === "string") return launch;
       const childError = this.customChildError(request.campaign!, launch, human, target.runnerId);
       if (childError) return childError;
@@ -129,8 +178,7 @@ export class ScheduledCampaignRuntime {
   }
 
   /** Ordinary preparation validates every fixed child combination and the root without writes. */
-  private prepare(spec: AutomationSpec, target: AutomationRunnerTarget, human: HumanPrincipal): PreparedCampaignLaunch | string {
-    if (spec.action.kind !== "create_session") return "The scheduled campaign configuration is unavailable";
+  private prepare(request: AutomationSessionRequest, target: AutomationRunnerTarget, human: HumanPrincipal): PreparedCampaignLaunch | string {
     if (!this.db.canAccessRunner(human, target.runnerId) || !this.db.canAccessWorkspace(human, target.runnerId, target.workspaceId)) {
       return "The scheduled campaign target is outside its owner's access";
     }
@@ -140,7 +188,7 @@ export class ScheduledCampaignRuntime {
     const agentId = target.installationBindings?.agent
       ? this.db.resolveSavedHarnessInstallation(target.runnerId, target.installationBindings.agent) : target.agentId;
     if (!agentId) return "The scheduled Orchestrator installation is unavailable";
-    const { campaign: _campaign, ...stored } = spec.action.request;
+    const { campaign: _campaign, ...stored } = request;
     const body = { ...stored, runnerId: target.runnerId, workspaceId: target.workspaceId, agentId,
       projectId: target.projectId, projectLocationId: target.projectLocationId };
     let plan: PreparedCampaignLaunch | undefined;
@@ -150,21 +198,30 @@ export class ScheduledCampaignRuntime {
     return plan ?? result.error ?? "The scheduled campaign configuration is unavailable";
   }
 
-  /** The settings the next occurrence of the primary target would launch with, derived by the same
-   * preparation as save and launch, without writes, repository inspection or a launch (#4869). It
-   * reads the owner's current defaults, so omitted overrides show what applies now. Grants nothing. */
-  preview(spec: AutomationSpec, human: HumanPrincipal): ScheduledCampaignPreview | { error: string } {
-    if (spec.action.kind !== "create_session" || !spec.action.request.campaign) return { error: "The automation is not a scheduled campaign" };
-    const request = spec.action.request, campaign = request.campaign!;
-    const launch = this.prepare(spec, { runnerId: request.runnerId, workspaceId: request.workspaceId, agentId: request.agentId,
-      projectId: request.projectId, projectLocationId: request.projectLocationId, installationBindings: spec.action.installationBindings }, human);
+  /** The settings an occurrence would launch with now on `target`, the scheduler's current choice,
+   * for the principal launch would act as: the schedule's still-authorized Assistant owner or its
+   * sole human author, never the reader. Derived by the same preparation as save, without writes,
+   * repository inspection, runner messages or a launch (#4869). Omitted overrides show the owner's
+   * current defaults. Grants nothing. */
+  preview(automation: AutomationSchedule, target: AutomationRunnerTarget): ScheduledCampaignPreview | { error: string } {
+    const action = automation.action;
+    if (action.kind !== "create_session" || !action.request.campaign) return { error: "The automation is not a scheduled campaign" };
+    let assistant: ReturnType<typeof scheduledAssistantOwner>;
+    try { assistant = scheduledAssistantOwner(this.db, automation); }
+    catch (error) { if (error instanceof AssistantRefusal) return { error: error.message }; throw error; }
+    const human = assistant?.owner ?? this.human(this.db.automationSoleHumanAuthor(automation.automationId, true) ?? undefined, target.runnerId);
+    if (!human) return { error: "The campaign schedule no longer has one active authorizing human; review and recreate the schedule" };
+    const campaign = action.request.campaign;
+    const launch = this.prepare(action.request, target, human);
     if (typeof launch === "string") return { error: launch };
+    const childError = this.customChildError(campaign, launch, human, target.runnerId);
+    if (childError) return { error: childError };
     const { behavior, delegation, execution } = structuredClone(launch.policy);
     return { controlMode: campaign.controlMode, repository: campaign.repository,
       tasks: campaign.tasks.map(({ key, title }) => ({ key, title })),
       root: { runnerId: launch.runnerId, workspaceId: launch.workspaceId, agentId: launch.agentId,
         model: launch.config.model ?? null, effort: launch.config.effort ?? null },
-      behavior, delegation, execution, budget: scheduledCampaignBudget(spec, launch) };
+      behavior, delegation, execution, budget: scheduledCampaignBudget({ limits: automation.limits, action }, launch) };
   }
 
   private scope(human: HumanPrincipal) {

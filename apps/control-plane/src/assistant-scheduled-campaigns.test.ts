@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import Fastify from "fastify";
-import { PROTOCOL_VERSION, type ControlPlaneToRunner, type RunnerMetadata } from "@wollipog/protocol";
+import { AUTOMATION_TARGET_UNAVAILABLE, DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, type ControlPlaneToRunner, type RunnerMetadata } from "@wollipog/protocol";
 import { nextCronFire } from "@wollipog/protocol/cron-schedule";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
@@ -59,8 +59,10 @@ function violation(schema: Schema, value: unknown, path = "payload"): string | n
     const properties = (schema.properties ?? {}) as Record<string, Schema>;
     for (const key of (schema.required ?? []) as string[]) if (!(key in value)) return `${path}.${key}: required`;
     for (const [key, item] of Object.entries(value)) {
-      if (properties[key]) {
-        const nested = violation(properties[key]!, item, `${path}.${key}`);
+      if (schema.propertyNames && violation(schema.propertyNames as Schema, key, `${path}.${key}`)) return `${path}.${key}: not allowed`;
+      const rule = properties[key] ?? (typeof schema.additionalProperties === "object" ? schema.additionalProperties as Schema : undefined);
+      if (rule) {
+        const nested = violation(rule, item, `${path}.${key}`);
         if (nested) return nested;
       } else if (schema.additionalProperties === false) return `${path}.${key}: not allowed`;
     }
@@ -86,10 +88,12 @@ function fixture() {
     runtime: { dataDir: "/fixture/data", worktreeRoot: "/fixture/worktrees", maxConcurrentSessions: 4,
       campaignLaunchInspection: { version: 3 }, executionIsolation: { mode: "provider", network: "inherit" } } };
   db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+  db.registerRunner({ ...meta, runnerId: "r2", hostname: "alternate" }, Date.now(), PROTOCOL_VERSION);
   const rate = { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001, cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 };
   db.setUsageRateTable(new Map([["claude-opus-5-5", rate], ["codex-fixture-model", rate]]));
   const hub = new Hub(db);
-  hub.isRunnerOnline = () => true;
+  const offline = new Set<string>();
+  hub.isRunnerOnline = runnerId => !offline.has(runnerId);
   const sent: ControlPlaneToRunner[] = [];
   hub.sendToRunner = (_runnerId, message) => { sent.push(message); return true; };
   const sessions = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
@@ -111,7 +115,13 @@ function fixture() {
     if (result.isError) throw new Error(result.content[0].text);
     return JSON.parse(result.content[0].text);
   };
-  return { db, app, call, issued, sent, automations };
+  return { db, app, call, issued, sent, automations, owner, offline };
+}
+
+/** The auto_create payload schema exactly as an Assistant receives it from discovery. */
+async function discoveredPayloadSchema(call: (name: string, args?: unknown) => Promise<any>): Promise<Schema> {
+  const discovery = await call("assistant_discover", { operations: ["auto_create"] });
+  return discovery.operations[0].inputSchema.properties.payload as Schema;
 }
 
 const behavior = {
@@ -225,8 +235,11 @@ test("Assistant campaign schedules refuse invalid fields, missing limits and mis
     return value;
   };
   const refusals: Array<[string, unknown, RegExp]> = [
-    ["boolean orchestrator", withRequest(r => { r.orchestrator = true; }), /request\.orchestrator must be an object of behavior, delegation and execution/],
-    ["unknown behavior", withRequest(r => { r.orchestrator = { behavior: { childModels: "x" } }; }), /request\.orchestrator must be an object/],
+    ["boolean orchestrator", withRequest(r => { r.orchestrator = true; }), /request\.orchestrator must be an object of optional behavior, delegation and execution overrides/],
+    ["unknown behavior", withRequest(r => { r.orchestrator = { behavior: { childModels: "x" } }; }),
+      /request\.orchestrator\.behavior\.childModels is not an accepted Orchestrator override/],
+    ["bad decision owner", withRequest(r => { r.orchestrator = { delegation: { decisions: { pr_merge: "anyone" } } }; }),
+      /request\.orchestrator\.delegation\.decisions\.pr_merge is not an accepted/],
     ["unknown campaign field", withRequest(r => { (r.campaign as Record<string, unknown>).schedule = "daily"; }), /does not accept schedule/],
     ["uppercase repository", withRequest(r => { (r.campaign as Record<string, unknown>).repository = "Owner/Repo"; }), /repository must be the lowercase/],
     ["bad task", withRequest(r => { (r.campaign as { tasks: unknown[] }).tasks.push({ key: "bad key", title: "Bad", prompt: "Bad" }); }), /tasks\[2\] must have only key/],
@@ -244,4 +257,85 @@ test("Assistant campaign schedules refuse invalid fields, missing limits and mis
   f.db.assistantConnections.configure(f.issued.connection.id, { operations: "all", projects: [] });
   await assert.rejects(f.call("auto_create", { operationId: "projects", payload: payload() }), /outside the selected projects|excluded/);
   assert.equal(f.automations.list().automations.length, 0);
+});
+
+test("the discovered schema and the save validator accept and refuse the same campaign inputs", async t => {
+  const f = fixture();
+  t.after(async () => { await f.app.close(); f.db.close(); });
+  const schema = await discoveredPayloadSchema(f.call);
+  type Request = ReturnType<typeof payload>["action"]["request"];
+  const variant = (change: (request: Request & Record<string, any>) => void) => {
+    const value = payload();
+    change(value.action.request as Request & Record<string, any>);
+    return value;
+  };
+  const refused: Array<[string, ReturnType<typeof payload>]> = [
+    ["undeclared budget key", variant(r => { (r.campaign.fullControl.budget as Record<string, unknown>).maxToolCalls = 5; })],
+    ["undeclared issues key", variant(r => { (r.campaign.fullControl.issues as Record<string, unknown>).epics = [1]; })],
+    ["empty child model", variant(r => { r.orchestrator.behavior.childModel = ""; })],
+    ["untrimmed child effort", variant(r => { r.orchestrator.behavior.childEffort = " medium "; })],
+    ["blank task title", variant(r => { r.campaign.tasks[0]!.title = "   "; })],
+    ["empty task prompt", variant(r => { r.campaign.tasks[1]!.prompt = ""; })],
+    ["blank objective", variant(r => { (r.campaign.fullControl as Record<string, unknown>).objective = "  "; })],
+    ["negative cost", variant(r => { r.campaign.fullControl.budget.costUsd = -1; })],
+    ["fractional tool calls", variant(r => { (r.campaign.fullControl.budget as Record<string, unknown>).toolCalls = 1.5; })],
+    ["too many issues", variant(r => { r.campaign.fullControl.issues.maxIssues = 101; })],
+    ["repeated closure reason", variant(r => { (r.campaign.fullControl.issues as Record<string, unknown>).closureReasons = ["completed", "completed"]; })],
+    ["unknown decision category", variant(r => { (r.orchestrator.delegation.decisions as Record<string, unknown>).issue_closure = "orchestrator"; })],
+    ["unknown parent control", variant(r => { (r.orchestrator.delegation as Record<string, unknown>).parentControl = "always"; })],
+  ];
+  for (const [label, value] of refused) {
+    assert.ok(violation(schema, value), `discovery refuses ${label}`);
+    await assert.rejects(f.call("auto_create", { operationId: `refused-${label.replaceAll(" ", "-")}`, payload: value }), label);
+  }
+  assert.equal(f.automations.list().automations.length, 0);
+  const accepted: Array<[string, ReturnType<typeof payload>]> = [
+    ["inherited parent control", variant(r => { (r.orchestrator.delegation as Record<string, unknown>).parentControl = null; })],
+    ["automatic child harness", variant(r => { Object.assign(r.orchestrator.behavior, { childHarness: null, childModel: null, childEffort: null }); })],
+    ["automatic reviewer", variant(r => { Object.assign(r.orchestrator.behavior, { reviewHarness: null, reviewModel: null, reviewEffort: null }); })],
+  ];
+  for (const [label, value] of accepted) {
+    assert.equal(violation(schema, value), null, `discovery accepts ${label}`);
+    await f.call("auto_create", { operationId: `accepted-${label.replaceAll(" ", "-")}`, payload: value });
+  }
+  assert.equal(f.automations.list().automations.length, accepted.length);
+});
+
+test("a null parent control inherits the owner's saved setting in the effective readback", async t => {
+  const f = fixture();
+  t.after(async () => { await f.app.close(); f.db.close(); });
+  f.db.setOrchestratorDefaults(f.owner.userId, { ...DEFAULT_ORCHESTRATOR_DEFAULTS,
+    delegation: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.delegation, parentControl: "questions" } });
+  const value = payload();
+  (value.action.request.orchestrator.delegation as Record<string, unknown>).parentControl = null;
+  const created = await f.call("auto_create", { operationId: "inherit", payload: value });
+  const read = await f.call("auto_get", { automationId: created.result.automationId });
+  assert.equal(read.effectiveCampaign.error, undefined, read.effectiveCampaign.error);
+  assert.equal(read.effectiveCampaign.delegation.parentControl, "questions");
+});
+
+test("the effective readback follows the schedule's launch authority and the scheduler's target, not the reader", async t => {
+  const f = fixture();
+  t.after(async () => { await f.app.close(); f.db.close(); });
+  const value = { ...payload(), runnerPolicy: { kind: "alternate", targets: [{ runnerId: "r2", workspaceId: "w", projectId: null, projectLocationId: null, agentId: "parent" }] } };
+  const created = await f.call("auto_create", { operationId: "alternate", payload: value });
+  const automationId = created.result.automationId as string;
+  assert.equal((await f.call("auto_get", { automationId })).effectiveCampaign.root.runnerId, "r");
+  // With the primary offline the scheduler picks the alternate, and so does the readback.
+  f.offline.add("r");
+  const alternate = await f.call("auto_get", { automationId });
+  assert.equal(alternate.effectiveCampaign.error, undefined, alternate.effectiveCampaign.error);
+  assert.equal(alternate.effectiveCampaign.root.runnerId, "r2");
+  f.offline.add("r2");
+  assert.equal((await f.call("auto_get", { automationId })).effectiveCampaign.error, AUTOMATION_TARGET_UNAVAILABLE);
+  f.offline.clear();
+  // The creating connection keeps read access but loses the operation that authorized the
+  // schedule: the schedule still reads, while the next occurrence, and so the preview, is refused.
+  f.db.assistantConnections.configure(f.issued.connection.id, { operations: ["auto_get"], projects: "all" });
+  const narrowed = await f.call("auto_get", { automationId });
+  assert.equal(narrowed.automation.automationId, automationId);
+  assert.match(narrowed.effectiveCampaign.error, /^assistant_/);
+  assert.equal(narrowed.effectiveCampaign.behavior, undefined);
+  assert.deepEqual(f.sent.map(message => message.type), [], "previews send the runner nothing");
+  assert.equal(f.automations.get(automationId).data!.executions.length, 0);
 });
