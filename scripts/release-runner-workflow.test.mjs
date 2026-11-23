@@ -7,6 +7,23 @@ import {
   EXPECTED_RELEASE_ASSET_COUNT,
 } from "./verify-runner-release-assets.mjs";
 
+test("parallel release builds cannot create or independently select a draft", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+  const prepare = workflow.slice(workflow.indexOf("  prepare-draft:"), workflow.indexOf("  build:"));
+  const build = workflow.slice(workflow.indexOf("  build:"), workflow.indexOf("  verify-runner-release:"));
+  const finalizer = workflow.slice(workflow.indexOf("  verify-runner-release:"));
+  assert.match(workflow, /cancel-in-progress: false/u);
+  assert.match(prepare, /needs: preflight/u);
+  assert.match(prepare, /release-draft\.mjs prepare/u);
+  assert.match(build, /needs: \[preflight, prepare-draft\]/u);
+  assert.ok(build.includes("releaseId: ${{ needs.prepare-draft.outputs.release_id }}"));
+  for (const job of [build, finalizer]) {
+    assert.ok(job.includes("RELEASE_ID: ${{ needs.prepare-draft.outputs.release_id }}"));
+  }
+  assert.doesNotMatch(build, /^\s+(?:tagName|releaseName|releaseDraft):/mu);
+  assert.doesNotMatch(workflow, /gh release (?:upload|download)/u);
+});
+
 test("stable releases check fresh exact-SHA certification before builds and after hosted assets", () => {
   const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
   const preflight = workflow.slice(workflow.indexOf("  preflight:"), workflow.indexOf("  build:"));
@@ -59,16 +76,16 @@ test("release workflow natively verifies dual runner assets and gates the final 
   assert.match(versionGate, /sed[\s\S]*version_source[\s\S]*tr -d '\\r'/u);
   assert.match(versionGate, /raw=\$\("\$runner_binary" --version\)[\s\S]*tr -d '\\r'/u);
   assert.match(workflow, /cmp -s "\$canonical" "\$legacy"/u);
-  assert.match(workflow, /gh release upload "\$RELEASE_TAG" "\$canonical" "\$legacy"/u);
-  assert.match(workflow, /verify-runner-release:[\s\S]*needs: \[preflight, build\]/u);
-  assert.match(workflow, /--pattern 'wollipog-runner-\*'[\s\S]*--pattern 'agent-manager-runner-\*'[\s\S]*--pattern 'wollipog-control-plane-\*'[\s\S]*--pattern 'wollipog-web\.tar\.gz'/u);
+  assert.match(workflow, /node scripts\/release-draft\.mjs upload "\$canonical" "\$legacy"/u);
+  assert.match(workflow, /verify-runner-release:[\s\S]*needs: \[preflight, prepare-draft, build\]/u);
+  assert.match(workflow, /release-draft\.mjs download runner-assets[\s\S]*'wollipog-runner-\*' 'agent-manager-runner-\*' 'wollipog-control-plane-\*' 'wollipog-web\.tar\.gz'/u);
   // Headless assets: the control-plane executable is the sidecar's exact bytes, version-verified
   // natively and digest-checked like the runner; the web bundle is built once in the verify job.
   assert.match(workflow, /control_plane="apps\/control-plane\/dist-bin\/wollipog-control-plane-\$\{TARGET_TRIPLE\}\$\{executable\}"/u);
   assert.match(workflow, /sh scripts\/verify-control-plane-release-version\.sh[\s\S]*apps\/control-plane\/src\/release-version\.ts[\s\S]*"\$control_plane"/u);
   assert.match(workflow, /cmp -s "\$control_plane" "apps\/desktop\/src-tauri\/binaries\/control-plane-\$\{TARGET_TRIPLE\}\$\{executable\}"/u);
-  assert.match(workflow, /gh release upload "\$RELEASE_TAG" "\$control_plane"/u);
-  assert.match(workflow, /pnpm --filter @wollipog\/web build[\s\S]*tar -C web-bundle -czf wollipog-web\.tar\.gz web[\s\S]*gh release upload "\$RELEASE_TAG" wollipog-web\.tar\.gz/u);
+  assert.match(workflow, /node scripts\/release-draft\.mjs upload "\$control_plane"/u);
+  assert.match(workflow, /pnpm --filter @wollipog\/web build[\s\S]*tar -C web-bundle -czf wollipog-web\.tar\.gz web[\s\S]*node scripts\/release-draft\.mjs upload wollipog-web\.tar\.gz/u);
   assert.match(workflow, /cmp -s wollipog-web\.tar\.gz runner-assets\/wollipog-web\.tar\.gz/u);
   assert.equal(sidecar.match(/publishLegacyRunnerAlias\(out, headlessControlPlane\)/gu)?.length, 1);
   const controlPlaneVersionGate = readFileSync(new URL("./verify-control-plane-release-version.sh", import.meta.url), "utf8");
@@ -76,10 +93,10 @@ test("release workflow natively verifies dual runner assets and gates the final 
   assert.match(controlPlaneVersionGate, /raw=\$\("\$control_plane_binary" --version\)[\s\S]*tr -d '\\r'/u);
   assert.match(releaseDocs, /wollipog-control-plane-<triple>/u);
   assert.match(releaseDocs, /wollipog-web\.tar\.gz/u);
-  assert.match(workflow, /--manifest SHA256SUMS[\s\S]*gh release upload "\$RELEASE_TAG" SHA256SUMS/u);
+  assert.match(workflow, /--manifest SHA256SUMS[\s\S]*node scripts\/release-draft\.mjs upload SHA256SUMS/u);
   assert.match(
     workflow,
-    /bash scripts\/verify-draft-runner-release\.sh[\s\S]*"\$GITHUB_REPOSITORY"[\s\S]*"\$RELEASE_TAG"[\s\S]*SHA256SUMS/u,
+    /bash scripts\/verify-draft-runner-release\.sh[\s\S]*"\$GITHUB_REPOSITORY"[\s\S]*"\$RELEASE_TAG"[\s\S]*"\$RELEASE_ID"[\s\S]*SHA256SUMS/u,
   );
   assert.doesNotMatch(workflow, /verify-draft-runner-release\.sh[^\n]*[\s\S]{0,120}\b27\b/u);
   assert.doesNotMatch(workflow, /releases\/tags\/\$\{RELEASE_TAG\}/u);
@@ -124,7 +141,7 @@ test("release workflow signs update packages, writes latest.json once, and gates
   const verify = workflow.slice(workflow.indexOf("  verify-runner-release:"));
   assert.match(
     verify,
-    /Verify update signatures & publish the update manifest[\s\S]*node scripts\/desktop-update-manifest\.mjs build[\s\S]*--version "\$DESKTOP_VERSION"[\s\S]*gh release upload "\$RELEASE_TAG" latest\.json/u,
+    /Verify update signatures & publish the update manifest[\s\S]*node scripts\/desktop-update-manifest\.mjs build[\s\S]*--version "\$DESKTOP_VERSION"[\s\S]*node scripts\/release-draft\.mjs upload latest\.json/u,
   );
   assert.match(verify, /set -- latest\.json "\$DESKTOP_VERSION"[\s\S]*bash scripts\/verify-draft-runner-release\.sh[\s\S]*SHA256SUMS \\\s+"\$@"/u);
 

@@ -5,8 +5,10 @@ For resumable preparation and supervision, including release-stage timing report
 below still apply.
 
 Desktop bundles are built by CI, not by hand. The [`Release`](../.github/workflows/release.yml)
-workflow builds the per-platform control-plane and local-runner **sidecars** plus the **Tauri bundle** on a native
-runner for each OS/arch, then uploads them all to a single **draft** GitHub release.
+workflow prepares one **draft** GitHub release before the native build jobs start. Those jobs build
+the per-platform control-plane and local-runner **sidecars** and the **Tauri bundle**, then upload
+them to that release by numeric ID. Reruns reuse the draft only if its tag, commit, and prerelease
+state match. If more than one release claims the tag, the workflow stops before building.
 
 Why native runners (and not one cross-build machine): the sidecar is a Node Single-Executable
 that **embeds the host's Node runtime**, so it can't be cross-compiled —
@@ -122,10 +124,10 @@ signed for [in-place desktop updates](#in-place-desktop-updates), which is every
 update signatures and `latest.json`, and the gate then requires exactly 47 release assets and the
 exact `latest.json` bytes the job verified. A missing, extra, empty, malformed, or mismatched asset
 fails the release workflow.
-Because GitHub's release-by-tag endpoint does not expose drafts, this final gate resolves exactly one
-draft from the paginated release collection, fetches every page of its asset endpoint by immutable
-numeric release ID, and retries both transient API errors and not-yet-converged verification
-failures under strict shell. It also verifies the non-empty `SHA256SUMS` asset's publisher digest
+Because GitHub's release-by-tag endpoint does not expose drafts, the final gate checks the
+paginated release collection for exactly one draft with the prepared release ID. It fetches every
+page of that draft's asset endpoint and retries transient API errors and incomplete verification
+results under strict shell. It also verifies the non-empty `SHA256SUMS` asset's publisher digest
 against the exact local manifest bytes before accepting any checksum entry.
 Consumers prefer the canonical name and retain the legacy fallback for rollback. This asset rename
 does not change the SSH-managed remote executable path (`~/.agent-manager/agent-manager-runner`) or
