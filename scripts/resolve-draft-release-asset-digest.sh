@@ -2,7 +2,7 @@
 set -eu
 
 repo=${1:?repository is required}
-release_tag=${2:?release tag is required}
+release_id=${2:?release ID is required}
 asset_name=${3:?asset name is required}
 attempts=${WOLLIPOG_RELEASE_METADATA_ATTEMPTS:-6}
 retry_delay=${WOLLIPOG_RELEASE_METADATA_RETRY_DELAY_SECONDS:-5}
@@ -10,26 +10,10 @@ retry_delay=${WOLLIPOG_RELEASE_METADATA_RETRY_DELAY_SECONDS:-5}
 case "$attempts" in *[!0-9]*|'') echo "invalid metadata attempt count" >&2; exit 2 ;; esac
 case "$retry_delay" in *[!0-9]*|'') echo "invalid metadata retry delay" >&2; exit 2 ;; esac
 [ "$attempts" -gt 0 ] || { echo "metadata attempt count must be positive" >&2; exit 2; }
+case "$release_id" in ''|0*|*[!0-9]*) echo "invalid release ID" >&2; exit 2 ;; esac
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 metadata_parser="$script_dir/release-asset-metadata.mjs"
-
-release_id=
-attempt=1
-while [ "$attempt" -le "$attempts" ]; do
-  release_pages=
-  if release_pages=$(gh api --paginate --slurp "repos/$repo/releases?per_page=100"); then
-    if release_id=$(printf '%s' "$release_pages" | node "$metadata_parser" draft-release-id "$release_tag"); then
-      break
-    fi
-  fi
-  release_id=
-  [ "$attempt" -eq "$attempts" ] || sleep "$retry_delay"
-  attempt=$((attempt + 1))
-done
-
-case "$release_id" in *[!0-9]*|'') echo "could not resolve the draft release id for $release_tag" >&2; exit 1 ;; esac
-[ "$release_id" -gt 0 ] || { echo "could not resolve the draft release id for $release_tag" >&2; exit 1; }
 
 remote_digest=
 attempt=1

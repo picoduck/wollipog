@@ -86,18 +86,8 @@ test("release and desktop producers emit Wollipog environment and build-global n
   assert.doesNotMatch(workflow, /^\s+MAM_RUNNER_RELEASE_TAG:/mu);
   assert.match(
     workflow,
-    /remote_digest=\$\(sh scripts\/resolve-draft-release-asset-digest\.sh "\$GITHUB_REPOSITORY" "\$RELEASE_TAG" "\$asset_name"\)/u,
+    /remote_digest=\$\(sh scripts\/resolve-draft-release-asset-digest\.sh "\$GITHUB_REPOSITORY" "\$RELEASE_ID" "\$asset_name"\)/u,
     "release publishing must resolve draft metadata through the behavior-tested retry helper",
-  );
-  assert.match(
-    releaseMetadata,
-    /if release_pages=\$\(gh api --paginate --slurp "repos\/\$repo\/releases\?per_page=100"\); then/u,
-    "release publishing must retry a failed draft-list request under strict shell",
-  );
-  assert.match(
-    releaseMetadata,
-    /if release_id=\$\(printf '%s' "\$release_pages" \| node "\$metadata_parser" draft-release-id "\$release_tag"\); then/u,
-    "release publishing must resolve an exact draft tag from an API that includes drafts",
   );
   assert.match(
     releaseMetadata,

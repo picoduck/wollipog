@@ -117,7 +117,7 @@ esac
         'PATH="$1:$PATH"; GH_LOG="$2"; GH_LIST_COUNT="$3"; GH_ASSET_COUNT="$4"; ' +
           'WOLLIPOG_RELEASE_METADATA_ATTEMPTS=5; WOLLIPOG_RELEASE_METADATA_RETRY_DELAY_SECONDS=0; ' +
           "export PATH GH_LOG GH_LIST_COUNT GH_ASSET_COUNT WOLLIPOG_RELEASE_METADATA_ATTEMPTS " +
-          'WOLLIPOG_RELEASE_METADATA_RETRY_DELAY_SECONDS; exec bash "$5" owner/repo v-test "$6"',
+          'WOLLIPOG_RELEASE_METADATA_RETRY_DELAY_SECONDS; exec bash "$5" owner/repo v-test 42 "$6"',
         "draft-release-test",
         shellPath(root),
         shellPath(ghLog),
@@ -150,7 +150,7 @@ test("draft hosted verification refuses an update manifest without the version i
   chmodSync(gh, 0o755);
   const result = spawnSync(shell, [
     "-c",
-    'PATH="$1:$PATH"; GH_LOG="$2"; export PATH GH_LOG; exec bash "$3" owner/repo v-test SHA256SUMS latest.json',
+    'PATH="$1:$PATH"; GH_LOG="$2"; export PATH GH_LOG; exec bash "$3" owner/repo v-test 42 SHA256SUMS latest.json',
     "draft-release-updater-args-test",
     shellPath(root),
     shellPath(ghLog),
@@ -161,7 +161,7 @@ test("draft hosted verification refuses an update manifest without the version i
   assert.equal(existsSync(ghLog), false, "no release request may run with a half-specified gate");
 });
 
-test("draft hosted verification exhausts bounded release-id retries before any asset request", {
+test("draft hosted verification refuses missing or different release IDs before any asset request", {
   skip: haveShell ? false : "requires bash",
 }, (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-draft-release-exhaustion-"));
@@ -170,25 +170,30 @@ test("draft hosted verification exhausts bounded release-id retries before any a
   const ghLog = join(root, "gh.log");
   const manifest = join(root, "SHA256SUMS");
   writeFileSync(manifest, "unused\n");
-  writeFileSync(gh, `#!/bin/sh\nprintf '%s\\n' "$*" >>"$GH_LOG"\nprintf '[]'\n`);
+  writeFileSync(gh, `#!/bin/sh\nprintf '%s\\n' "$*" >>"$GH_LOG"\nprintf '%s' "$GH_LIST"\n`);
   chmodSync(gh, 0o755);
 
-  const result = spawnSync(shell, [
-    "-c",
-    'PATH="$1:$PATH"; GH_LOG="$2"; WOLLIPOG_RELEASE_METADATA_ATTEMPTS=2; ' +
-      'WOLLIPOG_RELEASE_METADATA_RETRY_DELAY_SECONDS=0; export PATH GH_LOG ' +
-      'WOLLIPOG_RELEASE_METADATA_ATTEMPTS WOLLIPOG_RELEASE_METADATA_RETRY_DELAY_SECONDS; ' +
-      'exec bash "$3" owner/repo v-missing "$4"',
-    "draft-release-exhaustion-test",
-    shellPath(root),
-    shellPath(ghLog),
-    shellPath(helper),
-    shellPath(manifest),
-  ], { encoding: "utf8" });
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /could not resolve the draft release id for v-missing/u);
-  const calls = readFileSync(ghLog, "utf8").trim().split(/\r?\n/u);
-  assert.equal(calls.length, 2);
-  assert.ok(calls.every((call) => call.includes("/releases?per_page=100")));
-  assert.ok(calls.every((call) => !call.includes("/assets")));
+  for (const [releases, expectedCalls] of [
+    [[], 2],
+    [[[{ id: 43, tag_name: "v-test", draft: true }]], 1],
+  ]) {
+    writeFileSync(ghLog, "");
+    const result = spawnSync(shell, [
+      "-c",
+      'PATH="$1:$PATH"; GH_LOG="$2"; WOLLIPOG_RELEASE_METADATA_ATTEMPTS=2; ' +
+        'WOLLIPOG_RELEASE_METADATA_RETRY_DELAY_SECONDS=0; export PATH GH_LOG ' +
+        'WOLLIPOG_RELEASE_METADATA_ATTEMPTS WOLLIPOG_RELEASE_METADATA_RETRY_DELAY_SECONDS; ' +
+        'exec bash "$3" owner/repo v-test 42 "$4"',
+      "draft-release-identity-test",
+      shellPath(root),
+      shellPath(ghLog),
+      shellPath(helper),
+      shellPath(manifest),
+    ], { encoding: "utf8", env: { ...process.env, GH_LIST: JSON.stringify(releases) } });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /draft release ID for v-test did not match prepared release 42/u);
+    const calls = readFileSync(ghLog, "utf8").trim().split(/\r?\n/u);
+    assert.equal(calls.length, expectedCalls);
+    assert.ok(calls.every((call) => call.includes("/releases?per_page=100")));
+  }
 });

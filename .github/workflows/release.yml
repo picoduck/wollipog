@@ -22,12 +22,12 @@ on:
         default: false
 
 permissions:
-  contents: write # tauri-action creates the GitHub release + uploads assets
+  contents: read
 
-# A re-pushed tag (or re-dispatch from the same ref) supersedes an in-flight run.
+# Serialize release writers for the same ref, including across pushes and dispatches.
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   # Resolve the release tag once, and for real (tag-triggered) releases fail fast unless
@@ -142,9 +142,38 @@ jobs:
           CANDIDATE_SHA: ${{ github.sha }}
         run: node scripts/release-certification.mjs --repository "$GITHUB_REPOSITORY" --target-sha "$CANDIDATE_SHA"
 
+  prepare-draft:
+    name: Prepare release draft
+    needs: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.draft.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Create or reuse the draft before any builds start
+        id: draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          RELEASE_PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
+        run: |
+          release_id=$(node scripts/release-draft.mjs prepare)
+          echo "release_id=$release_id" >>"$GITHUB_OUTPUT"
+          echo "Draft release ID: $release_id"
+
   build:
     name: ${{ matrix.label }}
-    needs: preflight
+    needs: [preflight, prepare-draft]
+    env:
+      RELEASE_ID: ${{ needs.prepare-draft.outputs.release_id }}
+      RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+      RELEASE_PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
     runs-on: ${{ matrix.os }}
     # Preserve the Jammy/glibc 2.35 release userland on supported native 24.04 hosts.
     # Missing matrix.container evaluates to an empty string: Windows/macOS use the host.
@@ -158,7 +187,7 @@ jobs:
     # this environment. Every other leg, and an unsigned branch test run, uses no environment.
     environment: ${{ startsWith(matrix.os, 'windows') && (github.ref_type == 'tag' || inputs.windows_signing) && 'release' || '' }}
     permissions:
-      contents: write # tauri-action creates the GitHub release + uploads assets
+      contents: write # upload assets to the prepared release
       id-token: write # Windows legs exchange a GitHub OIDC token for Azure Artifact Signing access
     strategy:
       fail-fast: false # one platform failing must not cancel the others
@@ -494,21 +523,8 @@ jobs:
           # latest.json is written once by the verification job. The action's own writer
           # read-modify-writes one asset from all six parallel legs, which loses platforms.
           includeUpdaterJson: false
-          # Tag/label resolved by preflight: the pushed tag for a real release, or a unique
-          # v0.0.0-test.<run> for a branch dispatch. All matrix jobs share one draft release.
-          tagName: ${{ needs.preflight.outputs.release_tag }}
-          releaseName: Wollipog ${{ needs.preflight.outputs.release_tag }}
-          releaseBody: |
-            Desktop bundles for Wollipog. Each installer embeds a per-platform
-            control-plane sidecar, so the app is self-contained (no separate `pnpm dev`).
-
-            > macOS bundles are Developer ID signed and notarized, and Windows installers and
-            > executables are Authenticode signed through Azure Artifact Signing (a branch test
-            > dispatch without signing configured is unsigned). SmartScreen may still warn on
-            > the first Windows releases until the certificate builds reputation. Update packages
-            > carry a separate update signature, which the app checks before installing.
-          releaseDraft: true
-          prerelease: ${{ needs.preflight.outputs.prerelease }}
+          # With an ID and no tag/creation inputs, Tauri can only upload to this draft.
+          releaseId: ${{ needs.prepare-draft.outputs.release_id }}
 
       - name: Verify Linux Release Baseline
         if: startsWith(matrix.os, 'ubuntu')
@@ -596,7 +612,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_TRIPLE: ${{ matrix.target }}
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
         run: |
           case "$TARGET_TRIPLE" in
             *-pc-windows-msvc) executable=.exe ;;
@@ -610,11 +625,11 @@ jobs:
             "$legacy"
           cmp -s "$canonical" "$legacy"
           echo "uploading $canonical and $legacy -> $RELEASE_TAG"
-          gh release upload "$RELEASE_TAG" "$canonical" "$legacy" --repo "$GITHUB_REPOSITORY" --clobber
+          node scripts/release-draft.mjs upload "$canonical" "$legacy"
           for bin in "$canonical" "$legacy"; do
             asset_name=$(basename "$bin")
             local_sha=$(node -e 'const {createHash}=require("node:crypto");const {readFileSync}=require("node:fs");console.log(createHash("sha256").update(readFileSync(process.argv[1])).digest("hex"))' "$bin")
-            remote_digest=$(sh scripts/resolve-draft-release-asset-digest.sh "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$asset_name")
+            remote_digest=$(sh scripts/resolve-draft-release-asset-digest.sh "$GITHUB_REPOSITORY" "$RELEASE_ID" "$asset_name")
             if ! printf '%s' "$remote_digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
               echo "::error::$asset_name has no valid GitHub publisher digest"
               exit 1
@@ -633,7 +648,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_TRIPLE: ${{ matrix.target }}
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
         run: |
           case "$TARGET_TRIPLE" in
             *-pc-windows-msvc) executable=.exe ;;
@@ -645,10 +659,10 @@ jobs:
             "$control_plane"
           cmp -s "$control_plane" "apps/desktop/src-tauri/binaries/control-plane-${TARGET_TRIPLE}${executable}"
           echo "uploading $control_plane -> $RELEASE_TAG"
-          gh release upload "$RELEASE_TAG" "$control_plane" --repo "$GITHUB_REPOSITORY" --clobber
+          node scripts/release-draft.mjs upload "$control_plane"
           asset_name=$(basename "$control_plane")
           local_sha=$(node -e 'const {createHash}=require("node:crypto");const {readFileSync}=require("node:fs");console.log(createHash("sha256").update(readFileSync(process.argv[1])).digest("hex"))' "$control_plane")
-          remote_digest=$(sh scripts/resolve-draft-release-asset-digest.sh "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$asset_name")
+          remote_digest=$(sh scripts/resolve-draft-release-asset-digest.sh "$GITHUB_REPOSITORY" "$RELEASE_ID" "$asset_name")
           if ! printf '%s' "$remote_digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
             echo "::error::$asset_name has no valid GitHub publisher digest"
             exit 1
@@ -664,7 +678,11 @@ jobs:
   # This job also builds and publishes the platform-neutral web bundle for headless deployments.
   verify-runner-release:
     name: Verify runner release assets
-    needs: [preflight, build]
+    needs: [preflight, prepare-draft, build]
+    env:
+      RELEASE_ID: ${{ needs.prepare-draft.outputs.release_id }}
+      RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+      RELEASE_PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
     permissions:
       contents: write
       actions: read
@@ -692,14 +710,13 @@ jobs:
       - name: Build & publish the web bundle
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
         run: |
           pnpm --filter @wollipog/web build
           rm -rf web-bundle && mkdir web-bundle
           cp -R apps/web/dist web-bundle/web
           test -f web-bundle/web/index.html
           tar -C web-bundle -czf wollipog-web.tar.gz web
-          gh release upload "$RELEASE_TAG" wollipog-web.tar.gz --repo "$GITHUB_REPOSITORY" --clobber
+          node scripts/release-draft.mjs upload wollipog-web.tar.gz
 
       # Every update package is checked against the update public key exactly as the app will check
       # it, plus the signed file name, before latest.json is written. A missing, extra-keyed,
@@ -708,54 +725,38 @@ jobs:
         if: needs.preflight.outputs.updater_signing == '1'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           DESKTOP_VERSION: ${{ needs.preflight.outputs.desktop_version }}
           TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
         run: |
           mkdir updater-assets
-          gh release download "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern '*.sig' \
-            --pattern '*.app.tar.gz' \
-            --pattern '*.AppImage' \
-            --pattern '*.msi' \
-            --pattern '*-setup.exe' \
-            --pattern '*.deb' \
-            --pattern '*.rpm' \
-            --dir updater-assets
+          node scripts/release-draft.mjs download updater-assets \
+            '*.sig' '*.app.tar.gz' '*.AppImage' '*.msi' '*-setup.exe' '*.deb' '*.rpm'
           node scripts/desktop-update-manifest.mjs build \
             --assets-dir updater-assets \
             --version "$DESKTOP_VERSION" \
             --repo "$GITHUB_REPOSITORY" \
             --tag "$RELEASE_TAG" \
             --output latest.json
-          gh release upload "$RELEASE_TAG" latest.json --repo "$GITHUB_REPOSITORY" --clobber
+          node scripts/release-draft.mjs upload latest.json
 
       - name: Verify release assets & publish checksums
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
         run: |
           mkdir runner-assets
-          gh release download "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern 'wollipog-runner-*' \
-            --pattern 'agent-manager-runner-*' \
-            --pattern 'wollipog-control-plane-*' \
-            --pattern 'wollipog-web.tar.gz' \
-            --dir runner-assets
+          node scripts/release-draft.mjs download runner-assets \
+            'wollipog-runner-*' 'agent-manager-runner-*' 'wollipog-control-plane-*' 'wollipog-web.tar.gz'
           cmp -s wollipog-web.tar.gz runner-assets/wollipog-web.tar.gz
           node scripts/verify-runner-release-assets.mjs local \
             --assets-dir runner-assets \
             --manifest SHA256SUMS
-          gh release upload "$RELEASE_TAG" SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+          node scripts/release-draft.mjs upload SHA256SUMS
 
       # A release signed for updates must also carry every update package, its signature, and the
       # exact latest.json verified above; preflight guarantees that is every tag run.
       - name: Gate exact hosted release inventory & digests
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
           UPDATER_SIGNING: ${{ needs.preflight.outputs.updater_signing }}
           DESKTOP_VERSION: ${{ needs.preflight.outputs.desktop_version }}
         run: |
@@ -767,6 +768,7 @@ jobs:
           bash scripts/verify-draft-runner-release.sh \
             "$GITHUB_REPOSITORY" \
             "$RELEASE_TAG" \
+            "$RELEASE_ID" \
             SHA256SUMS \
             "$@"
 
