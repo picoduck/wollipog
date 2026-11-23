@@ -85,8 +85,11 @@ retain their own Assistant identity and launcher attribution during recovery.
 follow-ups, completion and review policy), `delegation` and `execution` overrides, and
 `request.campaign` with `controlMode`, `repository`, keyed `tasks` and the Full Control launch
 overrides. Omitted overrides use the owner's Orchestrator defaults; a null `parentControl`
-inherits the saved one. The schema and the save validator accept the same values, and an invalid
-field is refused at save with a message naming it. For a scheduled campaign,
+inherits the saved one. The schema and the save validator accept the same values (the schema
+describes the ordering and repository rules it cannot express), and an invalid field is refused at
+save with a message naming it. Full Control budget and issue values are checked when they change,
+so a schedule saved before these checks can still be paused or saved unchanged; each occurrence
+still validates its effective limits. For a scheduled campaign,
 `auto_get.effectiveCampaign` reports what the next occurrence would launch with now: the root
 Machine, installation, model and effort, the resolved behavior, delegation and execution, the tasks
 and the aggregate allowance. It uses the target the scheduler would choose now, including an

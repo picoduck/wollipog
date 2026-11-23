@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import {
   campaignLaunchDisclosure, campaignRepositoryLocation, humanRequiredRulesExist, supportsPacedVideoReviewPeer, runnerSupportsProtocol,
   type AutomationCampaign, type AutomationExecution, type AutomationRunnerTarget, type AutomationSchedule,
@@ -9,6 +10,7 @@ import type { Hub } from "./hub.js";
 import type { EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import type { HumanPrincipal } from "./identity.js";
 import { childHarnessAgents, childModelMachines, parseOrchestratorOverrides, type OrchestratorSettings } from "./orchestrator-settings.js";
+import { parseAgentHarnessIdentity } from "./agent-harness-defaults.js";
 import { campaignLaunchDigest, campaignLaunchPreflight, parseFullControlLaunchRequest } from "./campaign-launch-admission.js";
 import { authorizeFullControl } from "./campaign-authority.js";
 import { inspectCampaignWorkspace } from "./project-location-inspection.js";
@@ -38,16 +40,30 @@ function refusedOrchestratorField(value: unknown): string {
       if (section === "delegation" && key === "decisions" && object(entry)) {
         const category = Object.keys(entry).find(name => !parseOrchestratorOverrides({ delegation: { decisions: { [name]: entry[name] } } }));
         if (category) return `${base}.delegation.decisions.${category}`;
-      } else if (!parseOrchestratorOverrides({ [section]: { [key]: entry } })) return `${base}.${section}.${key}`;
+      } else if (!parseOrchestratorOverrides({ [section]: { [key]: entry } })) {
+        return section === "behavior" && key === "childHarness" ? refusedHarnessField(entry, `${base}.behavior.childHarness`) : `${base}.${section}.${key}`;
+      }
     }
   }
   return base;
 }
 
+/** The refused part of a Child Harness identity: each part is placed in an otherwise valid one. */
+function refusedHarnessField(value: unknown, path: string): string {
+  if (!object(value)) return path;
+  const unknown = Object.keys(value).find(key => !["agentId", "driver", "context"].includes(key));
+  if (unknown) return `${path}.${unknown}`;
+  const valid = { agentId: "agent", driver: "claude-code", context: { kind: "native" } };
+  const key = (["agentId", "driver", "context"] as const).find(name => !parseAgentHarnessIdentity({ ...valid, [name]: value[name] }));
+  if (key !== "context") return key ? `${path}.${key}` : path;
+  const context = value.context;
+  return object(context) && context.kind === "wsl" ? `${path}.context.distro` : `${path}.context`;
+}
+
 /** Strict public input. In particular no authority provenance or admission result can be stored
  * in a schedule. The ordinary campaign parsers remain authoritative for all policy fields. Each
  * refusal names the field so a caller following the advertised schema can correct it (#4869). */
-export function automationCampaignError(request: Record<string, unknown>): string | null {
+export function automationCampaignError(request: Record<string, unknown>, storedFullControl?: unknown): string | null {
   if (request.orchestrator !== undefined && !parseOrchestratorOverrides(request.orchestrator)) {
     const field = refusedOrchestratorField(request.orchestrator);
     return field === "request.orchestrator"
@@ -78,12 +94,19 @@ export function automationCampaignError(request: Record<string, unknown>): strin
   if (new Set(c.tasks.map(t => (t as { key: string }).key)).size !== c.tasks.length) return "request.campaign.tasks keys must be unique";
   if (c.fullControl === undefined) return null;
   if (c.controlMode === "custom") return "request.campaign.fullControl applies only to controlMode full_control";
-  if (!object(c.fullControl) || Object.hasOwn(c.fullControl, "session") ||
-      parseFullControlLaunchRequest({ runnerId: request.runnerId, workspaceId: request.workspaceId, overrides: c.fullControl }, false) === null) {
-    return "request.campaign.fullControl accepts only objective, operations, delegatablePolicyIds, budget and issues launch overrides; " +
-      "the root's settings belong in the session request";
+  const fullControl = c.fullControl;
+  const accepts = (overrides: unknown) => object(overrides) && !Object.hasOwn(overrides, "session") &&
+    parseFullControlLaunchRequest({ runnerId: request.runnerId, workspaceId: request.workspaceId, overrides }, false) !== null;
+  if (!accepts(fullControl)) {
+    const key = object(fullControl) ? Object.keys(fullControl).find(name => !accepts({ [name]: fullControl[name] })) : undefined;
+    return key === undefined || !["objective", "operations", "delegatablePolicyIds", "budget", "issues"].includes(key)
+      ? `request.campaign.fullControl${key === undefined ? "" : `.${key}`} is not accepted: use only objective, operations, ` +
+        "delegatablePolicyIds, budget and issues launch overrides; the root's settings belong in the session request"
+      : `request.campaign.fullControl.${key} is not an accepted launch override value`;
   }
-  return fullControlLimitError(c.fullControl);
+  // A stored schedule keeps the values it was admitted with, so an unchanged schedule can still be
+  // saved, for example to pause it; launch still validates its effective boundary each time.
+  return isDeepStrictEqual(fullControl, storedFullControl) ? null : fullControlLimitError(fullControl as Record<string, unknown>);
 }
 
 /** The launch parser checks these overrides' keys only; their values reach the boundary validators

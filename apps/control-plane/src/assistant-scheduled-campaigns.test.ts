@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import Fastify from "fastify";
-import { AUTOMATION_TARGET_UNAVAILABLE, DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, type ControlPlaneToRunner, type RunnerMetadata } from "@wollipog/protocol";
+import { AUTOMATION_TARGET_UNAVAILABLE, DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, type AutomationSpec, type ControlPlaneToRunner, type RunnerMetadata } from "@wollipog/protocol";
 import { nextCronFire } from "@wollipog/protocol/cron-schedule";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
@@ -33,8 +33,9 @@ function violation(schema: Schema, value: unknown, path = "payload"): string | n
   if (Array.isArray(schema.oneOf)) {
     const errors = (schema.oneOf as Schema[]).map(option => violation(option, value, path));
     const matches = errors.filter(error => error === null).length;
-    // Report the option that matched this level (its discriminator) but failed deeper down.
-    if (matches !== 1) return (matches ? null : errors.find(error => !error!.startsWith(`${path}:`))) ?? `${path}: matches ${matches} oneOf options`;
+    // Report the option whose discriminator matched (no `const` mismatch) but that failed deeper down.
+    const deeper = errors.find(error => error !== null && !error.startsWith(`${path}:`) && !/: expected "/.test(error));
+    if (matches !== 1) return (matches ? null : deeper) ?? `${path}: matches ${matches} oneOf options`;
   }
   if (typeof value === "number") {
     if (typeof schema.minimum === "number" && value < schema.minimum) return `${path}: below ${schema.minimum}`;
@@ -115,7 +116,7 @@ function fixture() {
     if (result.isError) throw new Error(result.content[0].text);
     return JSON.parse(result.content[0].text);
   };
-  return { db, app, call, issued, sent, automations, owner, offline };
+  return { db, app, call, issued, sent, automations, owner, offline, meta };
 }
 
 /** The auto_create payload schema exactly as an Assistant receives it from discovery. */
@@ -129,10 +130,11 @@ const behavior = {
   childModel: "codex-fixture-model", childEffort: "medium", maximumConcurrentChildren: 2,
   followUps: "execute_approved", completion: "stop_and_archive", reviewRoundBudget: 3,
 };
+// Every call returns an independent object, so one case's mutation never leaks into another.
 const payload = (tasks = [
   { key: "maintenance", title: "Maintenance", prompt: "Investigate stale flags." },
   { key: "coverage", title: "Coverage", prompt: "Investigate meaningful coverage gaps." },
-]) => ({
+]) => structuredClone({
   name: "Daily Campaign", cron: "0 9 * * *", timezone: "America/Chicago", enabled: true,
   misfirePolicy: { kind: "skip" }, runnerPolicy: { kind: "wait" }, concurrencyPolicy: "wait",
   limits: { maxCostUsd: 20, maxToolCalls: 200 }, notifications: { pushEvents: ["failed"] },
@@ -245,7 +247,7 @@ test("Assistant campaign schedules refuse invalid fields, missing limits and mis
     ["bad task", withRequest(r => { (r.campaign as { tasks: unknown[] }).tasks.push({ key: "bad key", title: "Bad", prompt: "Bad" }); }), /tasks\[2\] must have only key/],
     ["duplicate task", withRequest(r => { const c = r.campaign as { tasks: unknown[] }; c.tasks.push(c.tasks[0]); }), /keys must be unique/],
     ["custom with fullControl", withRequest(r => { (r.campaign as Record<string, unknown>).controlMode = "custom"; }), /fullControl applies only to controlMode full_control/],
-    ["fullControl session", withRequest(r => { ((r.campaign as Record<string, unknown>).fullControl as Record<string, unknown>).session = {}; }), /fullControl accepts only objective/],
+    ["fullControl session", withRequest(r => { ((r.campaign as Record<string, unknown>).fullControl as Record<string, unknown>).session = {}; }), /fullControl\.session is not accepted/],
     ["campaign without role", withRequest(r => { delete r.role; }), /requires request\.role orchestrator/],
     ["missing limits", (() => { const value: Record<string, unknown> = payload(); delete value.limits; return value; })(), /finite positive cost and tool ceilings/],
   ];
@@ -269,25 +271,45 @@ test("the discovered schema and the save validator accept and refuse the same ca
     change(value.action.request as Request & Record<string, any>);
     return value;
   };
-  const refused: Array<[string, ReturnType<typeof payload>]> = [
-    ["undeclared budget key", variant(r => { (r.campaign.fullControl.budget as Record<string, unknown>).maxToolCalls = 5; })],
-    ["undeclared issues key", variant(r => { (r.campaign.fullControl.issues as Record<string, unknown>).epics = [1]; })],
-    ["empty child model", variant(r => { r.orchestrator.behavior.childModel = ""; })],
-    ["untrimmed child effort", variant(r => { r.orchestrator.behavior.childEffort = " medium "; })],
-    ["blank task title", variant(r => { r.campaign.tasks[0]!.title = "   "; })],
-    ["empty task prompt", variant(r => { r.campaign.tasks[1]!.prompt = ""; })],
-    ["blank objective", variant(r => { (r.campaign.fullControl as Record<string, unknown>).objective = "  "; })],
-    ["negative cost", variant(r => { r.campaign.fullControl.budget.costUsd = -1; })],
-    ["fractional tool calls", variant(r => { (r.campaign.fullControl.budget as Record<string, unknown>).toolCalls = 1.5; })],
-    ["too many issues", variant(r => { r.campaign.fullControl.issues.maxIssues = 101; })],
-    ["repeated closure reason", variant(r => { (r.campaign.fullControl.issues as Record<string, unknown>).closureReasons = ["completed", "completed"]; })],
-    ["unknown decision category", variant(r => { (r.orchestrator.delegation.decisions as Record<string, unknown>).issue_closure = "orchestrator"; })],
-    ["unknown parent control", variant(r => { (r.orchestrator.delegation as Record<string, unknown>).parentControl = "always"; })],
+  // Each case changes one field of an otherwise valid payload. Discovery must refuse that field and
+  // the server must name it, so a regression in either side cannot hide behind another case.
+  const refused: Array<[string, ReturnType<typeof payload>, RegExp, RegExp]> = [
+    ["undeclared budget key", variant(r => { (r.campaign.fullControl.budget as Record<string, unknown>).maxToolCalls = 5; }),
+      /fullControl\.budget\.maxToolCalls: not allowed/, /fullControl\.budget is not an accepted/],
+    ["undeclared issues key", variant(r => { (r.campaign.fullControl.issues as Record<string, unknown>).epics = [1]; }),
+      /fullControl\.issues\.epics: not allowed/, /fullControl\.issues is not an accepted/],
+    ["empty child model", variant(r => { r.orchestrator.behavior.childModel = ""; }), /behavior\.childModel:/, /behavior\.childModel is not/],
+    ["untrimmed child effort", variant(r => { r.orchestrator.behavior.childEffort = " medium "; }), /behavior\.childEffort:/, /behavior\.childEffort is not/],
+    ["overlong child effort", variant(r => { r.orchestrator.behavior.childEffort = "e".repeat(65); }), /behavior\.childEffort: too long/, /behavior\.childEffort is not/],
+    ["blank WSL distro", variant(r => { (r.orchestrator.behavior as Record<string, unknown>).childHarness =
+      { agentId: "codex-app-server", driver: "codex-app-server", context: { kind: "wsl", distro: " " } }; }),
+    /childHarness\.context\.distro:/, /behavior\.childHarness\.context\.distro is not/],
+    ["uppercase repository", variant(r => { r.campaign.repository = "Owner/Repo"; }), /campaign\.repository:/, /repository must be the lowercase/],
+    ["blank task title", variant(r => { r.campaign.tasks[0]!.title = "   "; }), /tasks\[0\]\.title:/, /tasks\[0\] must have/],
+    ["empty task prompt", variant(r => { r.campaign.tasks[1]!.prompt = ""; }), /tasks\[1\]\.prompt:/, /tasks\[1\] must have/],
+    ["blank objective", variant(r => { (r.campaign.fullControl as Record<string, unknown>).objective = "  "; }),
+      /fullControl\.objective:/, /fullControl\.objective is not an accepted/],
+    ["negative cost", variant(r => { r.campaign.fullControl.budget.costUsd = -1; }), /budget\.costUsd:/, /budget\.costUsd must be/],
+    ["fractional tool calls", variant(r => { (r.campaign.fullControl.budget as Record<string, unknown>).toolCalls = 1.5; }),
+      /budget\.toolCalls:/, /budget\.toolCalls must be/],
+    ["too many issues", variant(r => { r.campaign.fullControl.issues.maxIssues = 101; }), /issues\.maxIssues:/, /issues\.maxIssues must be/],
+    ["repeated closure reason", variant(r => { (r.campaign.fullControl.issues as Record<string, unknown>).closureReasons = ["completed", "completed"]; }),
+      /issues\.closureReasons:/, /issues\.closureReasons must/],
+    ["unknown decision category", variant(r => { (r.orchestrator.delegation.decisions as Record<string, unknown>).issue_closure = "orchestrator"; }),
+      /decisions\.issue_closure: not allowed/, /delegation\.decisions\.issue_closure is not/],
+    ["unknown parent control", variant(r => { (r.orchestrator.delegation as Record<string, unknown>).parentControl = "always"; }),
+      /delegation\.parentControl:/, /delegation\.parentControl is not/],
   ];
-  for (const [label, value] of refused) {
-    assert.ok(violation(schema, value), `discovery refuses ${label}`);
-    await assert.rejects(f.call("auto_create", { operationId: `refused-${label.replaceAll(" ", "-")}`, payload: value }), label);
+  for (const [label, value, schemaField, serverField] of refused) {
+    assert.match(violation(schema, value) ?? "", schemaField, `discovery refuses ${label}`);
+    await assert.rejects(f.call("auto_create", { operationId: `refused-${label.replaceAll(" ", "-")}`, payload: value }), serverField, label);
   }
+  // Ordering is beyond JSON Schema, so discovery states the rule the server enforces.
+  const checkpoints = (((schema.properties as any).action.oneOf[0].properties.request.properties.campaign.properties
+    .fullControl.properties.budget.properties.checkpointsUsd) as Schema);
+  assert.match(String(checkpoints.description), /Increasing/);
+  const descending = variant(r => { (r.campaign.fullControl.budget as Record<string, unknown>).checkpointsUsd = [2, 1]; });
+  await assert.rejects(f.call("auto_create", { operationId: "refused-descending", payload: descending }), /checkpointsUsd must be at most 100 increasing/);
   assert.equal(f.automations.list().automations.length, 0);
   const accepted: Array<[string, ReturnType<typeof payload>]> = [
     ["inherited parent control", variant(r => { (r.orchestrator.delegation as Record<string, unknown>).parentControl = null; })],
@@ -341,4 +363,45 @@ test("the effective readback follows the schedule's launch authority and the sch
   assert.equal(narrowed.effectiveCampaign.behavior, undefined);
   assert.deepEqual(f.sent.map(message => message.type), [], "previews send the runner nothing");
   assert.equal(f.automations.get(automationId).data!.executions.length, 0);
+});
+
+test("a schedule stored before the save-time limit checks can still be paused unchanged", async t => {
+  const f = fixture();
+  t.after(async () => { await f.app.close(); f.db.close(); });
+  // Earlier releases checked only these overrides' keys, so such a value can already be stored;
+  // launch clamps it to the automation's own ceiling.
+  const stored = payload();
+  (stored.action.request.campaign.fullControl.budget as Record<string, unknown>).toolCalls = 2 ** 53;
+  const schedule = f.db.createAutomation({ automationId: "auto_legacy_limits", spec: stored as unknown as AutomationSpec,
+    nextFireAt: Date.now() + 60_000, actor: { kind: "human", id: f.owner.userId }, now: Date.now() });
+  const paused = await f.call("auto_pause", { operationId: "pause-legacy", automationId: schedule.automationId, expectedRevision: schedule.revision });
+  assert.equal(paused.result.enabled, false);
+  const read = await f.call("auto_get", { automationId: schedule.automationId });
+  assert.equal(read.automation.enabled, false);
+  assert.equal(read.automation.nextFireAt, undefined);
+  // Changing the stored overrides is a new configuration and gets the save-time check.
+  const changed = payload();
+  (changed.action.request.campaign.fullControl.budget as Record<string, unknown>).toolCalls = 2 ** 53 + 2;
+  await assert.rejects(f.call("auto_update", { operationId: "edit-legacy", automationId: schedule.automationId,
+    expectedRevision: read.automation.revision, payload: { ...changed, enabled: false } }), /budget\.toolCalls must be an integer/);
+});
+
+test("the effective readback pins a legacy plain agent id the way dispatch does, without saving the pin", async t => {
+  const f = fixture();
+  t.after(async () => { await f.app.close(); f.db.close(); });
+  const created = await f.call("auto_create", { operationId: "legacy-agent", payload: payload() });
+  const automationId = created.result.automationId as string;
+  const before = await f.call("auto_get", { automationId });
+  assert.equal(before.automation.action.installationBindings, undefined);
+  // The saved plain id now advertises exactly one installation, which dispatch pins before choosing a target.
+  const [parent, child] = f.meta.agents;
+  f.db.updateRunnerAgents("r", [{ ...parent!, installation: { id: "system", path: "/usr/bin/claude", via: "path" } }, child!], Date.now());
+  assert.ok(f.db.selectHarnessInstallation("r", "parent", "system"));
+  const read = await f.call("auto_get", { automationId });
+  assert.equal(read.effectiveCampaign.error, undefined, read.effectiveCampaign.error);
+  assert.equal(read.effectiveCampaign.root.runnerId, "r");
+  assert.equal(read.effectiveCampaign.root.agentId, "parent");
+  assert.equal(read.automation.revision, before.automation.revision, "the preview saves nothing");
+  assert.equal(read.automation.action.installationBindings, undefined);
+  assert.deepEqual(f.sent.map(message => message.type), []);
 });

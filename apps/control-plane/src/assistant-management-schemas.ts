@@ -32,8 +32,8 @@ export function skillPayloadSchema(name: string): Record<string, unknown> {
 
 const target = {runnerId: text, workspaceId: text, projectId: nullableText, projectLocationId: nullableText};
 // Identifiers are nonempty and trimmed; free text needs one non-space character.
-const identifier = {type: "string", pattern: "^\\S(.*\\S)?$"};
-const nullableIdentifier = {...identifier, type: ["string", "null"]};
+const identifier = {type: "string", pattern: "^\\S(.*\\S)?$", maxLength: 256};
+const nullableIdentifier = (maxLength = 256) => ({...identifier, type: ["string", "null"], maxLength});
 const prose = (maxLength: number) => ({type: "string", pattern: "\\S", maxLength});
 /** Mirrors parseOrchestratorOverrides: every field is optional and omitted ones use the owner's
  * saved Orchestrator defaults. Null selects Automatic, or inherits for parentControl. */
@@ -42,9 +42,9 @@ const orchestrator = strict({
     childHarness: {type: ["object", "null"], properties: {agentId: identifier, driver: {enum: ["acp", "claude-code", "codex", "codex-app-server", "pi"]},
       context: {oneOf: [object({kind: {const: "native"}}, ["kind"]), object({kind: {const: "wsl"}, distro: identifier}, ["kind", "distro"])]}},
     required: ["agentId", "driver", "context"]},
-    childModel: nullableIdentifier, childEffort: nullableIdentifier, maximumConcurrentChildren: integer(0, 64),
+    childModel: nullableIdentifier(), childEffort: nullableIdentifier(64), maximumConcurrentChildren: integer(0, 64),
     followUps: {enum: ["recommend_only", "execute_approved"]}, completion: {enum: ["retain", "stop_and_archive"]},
-    reviewHarness: {enum: ["codex", "claude-code", null]}, reviewModel: nullableIdentifier, reviewEffort: nullableIdentifier,
+    reviewHarness: {enum: ["codex", "claude-code", null]}, reviewModel: nullableIdentifier(), reviewEffort: nullableIdentifier(64),
     reviewRoundBudget: {type: ["integer", "null"], minimum: 1, maximum: 32},
   }),
   delegation: strict({parentControl: {enum: ["off", "questions", "questions_and_approvals", null]},
@@ -54,17 +54,17 @@ const orchestrator = strict({
 /** Mirrors automationCampaignError and the Full Control launch overrides it accepts. */
 const campaign = strict({
   controlMode: {enum: ["custom", "full_control"]},
-  repository: text,
+  repository: {type: "string", pattern: "^[^A-Z]+$", maxLength: 256, description: "Origin owner/name."},
   tasks: {type: "array", maxItems: 100, items: strict({key: {type: "string", pattern: "^[a-zA-Z0-9_-]{1,128}$"},
     title: prose(120), prompt: prose(16_384)}, ["key", "title", "prompt"])},
   fullControl: strict({objective: prose(4000), operations: {type: "array", minItems: 1, uniqueItems: true, items: {enum: FULL_CONTROL_LAUNCH_OPERATIONS}},
     delegatablePolicyIds: {type: "array", maxItems: 100, items: prose(256)},
-    budget: strict({costUsd: positive, toolCalls: integer(1), concurrency: integer(1), acceptedFollowUps: integer(0), checkpointsUsd: {type: "array", maxItems: 100, items: positive}}),
+    budget: strict({costUsd: positive, toolCalls: integer(1), concurrency: integer(1), acceptedFollowUps: integer(0), checkpointsUsd: {type: "array", maxItems: 100, items: positive, description: "Increasing, within costUsd."}}),
     issues: strict({relatedFollowUps: boolean, maxIssues: integer(1, 100), closureReasons: {type: "array", uniqueItems: true, items: {enum: ["completed", "not_planned"]}}})}),
 }, ["controlMode", "repository", "tasks"]);
 export const automationPayloadSchema = object({
-  name: text, cron: {...text, description: "Five-field minute/hour/day-of-month/month/day-of-week cron."},
-  timezone: {...text, description: "IANA timezone, for example America/Chicago."}, enabled: boolean,
+  name: text, cron: {...text, description: "Five-field cron."},
+  timezone: {...text, description: "IANA timezone."}, enabled: boolean,
   misfirePolicy: {oneOf: [object({kind: {enum: ["skip", "fire_once"]}}, ["kind"]),
     object({kind: {const: "catch_up"}, maxRuns: {type: "integer", minimum: 1}}, ["kind", "maxRuns"])]},
   runnerPolicy: {oneOf: [object({kind: {const: "wait"}}, ["kind"]),

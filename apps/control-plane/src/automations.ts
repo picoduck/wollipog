@@ -221,7 +221,7 @@ function optionalString(value: unknown, max: number): boolean {
   return value === undefined || (typeof value === "string" && value.length <= max);
 }
 
-function validateAction(value: unknown): string | null {
+function validateAction(value: unknown, previous?: AutomationSchedule["action"]): string | null {
   if (!object(value) || !boundedString(value.kind, 32)) return "automation action is malformed";
   if (value.kind === "workflow_run" || value.kind === "retired") {
     return "Workflow runs were removed. Create a campaign automation instead.";
@@ -243,7 +243,8 @@ function validateAction(value: unknown): string | null {
         (request.useWorktree !== undefined && typeof request.useWorktree !== "boolean") || !validConfig(request.config)) {
       return "create-session action requires a secret-free runner/workspace/agent request, an exact Project assignment when supplied, and cannot persist images or ACP context";
     }
-    const campaignError = automationCampaignError(request);
+    const campaignError = automationCampaignError(request,
+      previous?.kind === "create_session" ? previous.request.campaign?.fullControl : undefined);
     if (campaignError) return campaignError;
   } else if (value.kind === "prompt_session") {
     if (!keysOnly(value, ["kind", "sessionId", "request"]) || !boundedString(value.sessionId) || !object(value.request) ||
@@ -263,7 +264,9 @@ function validateAction(value: unknown): string | null {
   return null;
 }
 
-export function validateAutomationSpec(value: unknown): ServiceResult<AutomationSpec> {
+/** `previous` is the stored schedule an update replaces: values it already holds were admitted
+ * under earlier rules, so an unchanged action still saves (for example, to pause it). */
+export function validateAutomationSpec(value: unknown, previous?: AutomationSchedule): ServiceResult<AutomationSpec> {
   if (!object(value) || !keysOnly(value, [
     "name", "cron", "timezone", "enabled", "misfirePolicy", "runnerPolicy", "concurrencyPolicy",
     "limits", "notifications", "action",
@@ -276,7 +279,7 @@ export function validateAutomationSpec(value: unknown): ServiceResult<Automation
   } catch (error) {
     return fail((error as Error).message);
   }
-  const actionError = validateAction(value.action);
+  const actionError = validateAction(value.action, previous?.action);
   if (actionError) return fail(actionError);
   if (!object(value.misfirePolicy) || !keysOnly(value.misfirePolicy, ["kind", "maxRuns"]) ||
       !["skip", "fire_once", "catch_up"].includes(String(value.misfirePolicy.kind)) ||
@@ -577,7 +580,7 @@ export class AutomationsService {
   ): ServiceResult<AutomationSchedule> {
     const previous = this.db.getAutomation(automationId);
     if (!previous) return fail("automation not found", 404);
-    const parsed = validateAutomationSpec(input);
+    const parsed = validateAutomationSpec(input, previous);
     if (!parsed.ok) return fail(parsed.error ?? "automation request is malformed", parsed.status);
     const spec = pinAutomationSpec(this.db, parsed.data!, previous);
     const assistant = actor.kind === "agent" && actor.id?.startsWith("asst_");
@@ -620,9 +623,13 @@ export class AutomationsService {
   campaignPreview(automation: AutomationSchedule, reader: HumanPrincipal): ScheduledCampaignPreview | { error: string } | null {
     if (automation.action.kind !== "create_session" || !automation.action.request.campaign) return null;
     if (!this.campaigns) return { error: "Scheduled campaigns are unavailable on this server" };
-    const target = this.resolveTarget(automation);
+    // Dispatch first pins a legacy plain agent id to its sole installation, then picks the target.
+    // Do the same in memory; only dispatch persists the pin.
+    const pinned = pinAutomationSpec(this.db, { ...automation, action: automation.action }, automation);
+    const schedule = { ...automation, action: pinned.action, runnerPolicy: pinned.runnerPolicy };
+    const target = this.resolveTarget(schedule);
     if (!target.ok) return { error: target.error ?? AUTOMATION_TARGET_UNAVAILABLE };
-    return this.campaigns.preview(automation, target.data!.target, reader);
+    return this.campaigns.preview(schedule, target.data!.target, reader);
   }
 
   private campaignError(spec: AutomationSpec, actor: GovernanceActor, operation?: AssistantAutomationOperation): string | null {
