@@ -340,6 +340,11 @@ for (const viewport of VIEWPORTS) test.describe(`${viewport.width}x${viewport.he
     await openSession(page, "auto-fallback", viewport);
     await expect(page.getByText("Auto Mode Unavailable", { exact: true })).toBeVisible();
     await expect(page.getByText(/Choose Full Permissions Mode/)).toBeVisible();
+    // The exact host fix, whole and copyable, never only described.
+    await expect(page.getByText(/^sudo tee \/etc\/apparmor\.d\/wollipog-antigravity/)).toBeVisible();
+    await expect(page.getByText(/sudo apparmor_parser -r \/etc\/apparmor\.d\/wollipog-antigravity$/)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Copy Command" })).toBeVisible();
+    await expectNoHorizontalOverflow(page.locator(".notice").filter({ hasText: "Auto Mode Unavailable" }), "The Auto Mode notice");
     await capture(page, "auto-mode-fallback", size, "body");
     // Full Permissions Mode is a live choice beside agy's own modes, also where agy withholds Auto.
     await openComposerBar(page, viewport);

@@ -1675,7 +1675,12 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   with `kernel.apparmor_restrict_unprivileged_userns = 1` (Ubuntu's default) its log says
   "Terminal sandbox unavailable", `auto` is missing from the session's modes and `session/set_mode`
   refuses it. The session then shows a warning that names the reason and Full Permissions Mode,
-  and runs in Default mode. On Linux managed worktrees where agy's Auto sandbox cannot create its
+  and runs in Default mode. When the runner reads that sysctl as `1` and launched agy outside
+  bwrap, the warning also carries `fixCommand`, which the dashboard shows as a copyable block. It is
+  the exact host command (`antigravity-apparmor.ts`) that installs the AppArmor profile
+  `wollipog-antigravity`, granting `userns` to the realpath of the agy that session launched. A
+  managed copy's generation directory becomes a `*`, so updates keep it. The protection stays on
+  for every other program, unlike setting the sysctl to `0`. On Linux managed worktrees where agy's Auto sandbox cannot create its
   nested namespace, a failed sandbox launch switches the session to Default mode once agy
   confirms the change. The runner displays the effective mode and never retries the command.
   **Full Permissions Mode** is Wollipog's own live mode, listed after agy's modes for every

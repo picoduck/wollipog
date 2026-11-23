@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -95,7 +95,8 @@ function launchDriver(
   resumeId?: string,
   overrides: { layeredEnv?: Record<string, string>; deadlines?: { handshakeMs: number; sessionMs: number }; config?: SessionConfig;
     resolveLaunch?: AcpCompatibility["resolveLaunch"]; sessionContext?: DriverOptions["acpSessionContext"];
-    fixtureIsolation?: DriverOptions["isolation"] } = {},
+    fixtureIsolation?: DriverOptions["isolation"];
+    appArmorFix?: (executable: string | undefined) => string | undefined } = {},
 ): { driver: AcpDriver; seen: Observed } {
   const context = antigravityCredentialContext();
   const launch = antigravitySessionLaunch(view, context, isolation);
@@ -122,7 +123,11 @@ function launchDriver(
     onAuthStatus: (status: string) => seen.auth.push(status),
     onAcpCapabilities: (capabilities: AcpRuntimeCapabilities) => seen.acp.push(capabilities),
     onAcpSessionState: (update: { capabilities: AgentCapabilities; config: SessionConfig }) => seen.state.push(update),
-  } as never, overrides.fixtureIsolation ? { spawn: (opts) => spawnAgent({ ...opts, isolation: undefined }) } : {});
+  } as never, {
+    // Tests never read the real host's AppArmor setting.
+    antigravityAppArmorFix: overrides.appArmorFix ?? (() => undefined),
+    ...(overrides.fixtureIsolation ? { spawn: (opts) => spawnAgent({ ...opts, isolation: undefined }) } : {}),
+  });
   cleanup.push(() => driver.dispose());
   return { driver, seen };
 }
@@ -413,6 +418,24 @@ test("Auto Mode is restored on resume and falls back visibly when Antigravity wi
   fallback.driver.resolvePermission(request.requestId, "deny");
   assert.equal(await prompt, "end_turn");
   assert.equal(existsSync(join(cwd, "fixture-command-ran")), false);
+});
+
+test("where AppArmor withholds Auto, the warning carries the exact host command for the agy this session launched", async () => {
+  signIn();
+  process.env.FAKE_AGY_MODE = "auto_unavailable";
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const asked: Array<string | undefined> = [];
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined, {
+    config: { permissionMode: "auto" },
+    appArmorFix: (executable) => { asked.push(executable); return `fix ${executable}`; },
+  });
+  await driver.initialize();
+  await driver.newSession(cwd);
+  assert.deepEqual(asked, [realpathSync.native(agy)], "the command names the executable the kernel runs");
+  const warning = seen.events.find((event) => event.kind === "error" && event.source === "antigravity_auto_mode_fallback");
+  assert.ok(warning?.kind === "error");
+  assert.equal(warning.fixCommand, `fix ${realpathSync.native(agy)}`);
+  assert.match(warning.message, /AppArmor blocks the user namespaces.*run the command below.*start a new Antigravity session.*Full Permissions Mode/u);
 });
 
 test("a denied native Auto sandbox switches to interactive Default mode without replaying the command", async () => {

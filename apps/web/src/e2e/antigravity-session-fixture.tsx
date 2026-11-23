@@ -173,7 +173,18 @@ switch (state) {
   case "auto-fallback":
     payloads.push({
       kind: "error", nonFatal: true, source: "antigravity_auto_mode_fallback",
-      message: "Google Antigravity does not offer Auto Mode on this machine: it needs Antigravity’s terminal sandbox, which this host does not provide. This session uses Default mode. Choose Full Permissions Mode to skip Antigravity’s approval prompts.",
+      // What the runner sends on an Ubuntu host (apps/runner/src/antigravity-apparmor.ts).
+      message: "Google Antigravity does not offer Auto Mode on this machine: AppArmor blocks the user namespaces its terminal sandbox needs (kernel.apparmor_restrict_unprivileged_userns = 1). To allow them for Antigravity only, run the command below on this machine, then start a new Antigravity session. This session uses Default mode. Choose Full Permissions Mode to skip Antigravity’s approval prompts.",
+      fixCommand: [
+        "sudo tee /etc/apparmor.d/wollipog-antigravity > /dev/null <<'EOF'",
+        "abi <abi/4.0>,",
+        "include <tunables/global>",
+        'profile wollipog-antigravity "/home/user/.local/bin/agy" flags=(unconfined) {',
+        "  userns,",
+        "}",
+        "EOF",
+        "sudo apparmor_parser -r /etc/apparmor.d/wollipog-antigravity",
+      ].join("\n"),
     });
     break;
   case "full-permissions":

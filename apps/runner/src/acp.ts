@@ -84,6 +84,7 @@ import {
   type AcpCompatibility,
 } from "./acp-compatibility.js";
 import { materializeAcpMcpServers } from "./acp-session-context.js";
+import { antigravityAppArmorFix } from "./antigravity-apparmor.js";
 import {
   assertClaudeAgentAcpOrchestratorIdentity,
   orchestratorAcpSessionMeta,
@@ -110,6 +111,8 @@ export interface AcpEvents {
 interface AcpClientDeps {
   spawn: typeof spawnAgent;
   kill: typeof killTree;
+  /** The host command that would give agy its Auto Mode back (tests inject a host's answer). */
+  antigravityAppArmorFix: (executable: string | undefined) => string | undefined;
 }
 
 export interface AcpListedSession {
@@ -150,6 +153,8 @@ export class AcpClient {
    * many Linux hosts withhold (AppArmor-restricted user namespaces). */
   private antigravityFullPermissions: boolean;
   private readonly antigravitySandboxExecutable?: string;
+  private readonly antigravityHostExecutable?: string;
+  private readonly appArmorFix: AcpClientDeps["antigravityAppArmorFix"];
   private antigravitySandboxDeniedInTurn = false;
   private antigravityAutoModeRejected = false;
 
@@ -200,6 +205,12 @@ export class AcpClient {
       try { this.antigravitySandboxExecutable = realpathSync.native(launch.command); }
       catch { /* The provider's spawn reports missing executables. */ }
     }
+    // An AppArmor profile attaches to the path the kernel executes. Under bwrap agy runs inside
+    // bwrap's own profile, which that host fix would not change, so it is offered only outside it.
+    if (launch.compatibility?.profile === "antigravity" && opts.isolation?.backend !== "bwrap") {
+      try { this.antigravityHostExecutable = realpathSync.native(launch.command); }
+      catch { /* The provider's spawn reports missing executables. */ }
+    }
     // The resolved executable is held until the agent answers the handshake (it has then opened
     // it), so a launcher that opens it after this spawn (bwrap, the cgroup helper) still finds it.
     this.releaseLaunch = launch.release;
@@ -215,6 +226,7 @@ export class AcpClient {
     this.filesystem = new AcpFilesystemService(opts.cwd, context);
     this.terminals = new AcpTerminalService(this.filesystem, context, opts.isolation, { cgroup: opts.reviewWriterCgroup });
     this.kill = deps.kill ?? killTree;
+    this.appArmorFix = deps.antigravityAppArmorFix ?? ((executable) => antigravityAppArmorFix(executable));
     try {
       this.child = (deps.spawn ?? spawnAgent)({ ...opts, command: launch.command, env });
     } catch (error) {
@@ -563,13 +575,19 @@ export class AcpClient {
       } catch {
         this.antigravityAutoModeRejected = true;
         this.emitSessionState();
+        const withheld = this.modes?.availableModes.some((mode) => mode.id === ANTIGRAVITY_AUTO_MODE.id) === false;
+        const fixCommand = withheld ? this.appArmorFix(this.antigravityHostExecutable) : undefined;
+        const meanwhile = "This session uses Default mode. Choose Full Permissions Mode to skip Antigravity’s approval prompts.";
         this.ev.onEvent({
           kind: "error",
           nonFatal: true,
           source: "antigravity_auto_mode_fallback",
-          message: this.modes?.availableModes.some((mode) => mode.id === ANTIGRAVITY_AUTO_MODE.id) === false
-            ? "Google Antigravity does not offer Auto Mode on this machine: it needs Antigravity’s terminal sandbox, which this host does not provide. This session uses Default mode. Choose Full Permissions Mode to skip Antigravity’s approval prompts."
-            : "Google Antigravity could not enable Auto Mode. This session uses Default mode. Choose Full Permissions Mode to skip Antigravity’s approval prompts.",
+          message: fixCommand
+            ? "Google Antigravity does not offer Auto Mode on this machine: AppArmor blocks the user namespaces its terminal sandbox needs (kernel.apparmor_restrict_unprivileged_userns = 1). To allow them for Antigravity only, run the command below on this machine, then start a new Antigravity session. " + meanwhile
+            : withheld
+              ? "Google Antigravity does not offer Auto Mode on this machine: it needs Antigravity’s terminal sandbox, which this host does not provide. " + meanwhile
+              : "Google Antigravity could not enable Auto Mode. " + meanwhile,
+          ...(fixCommand ? { fixCommand } : {}),
         });
       }
     } else if (this.antigravityFullPermissions) {
