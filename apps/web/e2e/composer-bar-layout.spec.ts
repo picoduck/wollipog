@@ -154,7 +154,7 @@ test.describe("with a touch pointer", () => {
     // The segmented Context Window keeps a full touch-height track (§10.2).
     expect((await sheet.getByRole("radiogroup", { name: "Context Window" }).boundingBox())!.height).toBeGreaterThanOrEqual(44);
     await expect(sheet.getByRole("radiogroup", { name: "Model" })).toContainText("A 1M context window.");
-    for (const setting of ["Reasoning Effort", "Speed"]) {
+    for (const [setting, optionCount] of [["Reasoning Effort", 4], ["Speed", 2]] as const) {
       const selector = sheet.getByRole("button", { name: new RegExp(`^${setting}:`) });
       const choices = sheet.getByRole("radiogroup", { name: setting, exact: true });
       await expect(selector).toBeVisible();
@@ -164,7 +164,9 @@ test.describe("with a touch pointer", () => {
       const back = sheet.getByRole("button", { name: "Back to Model Settings" });
       await expect(back).toBeFocused();
       await expect(choices).toBeVisible();
-      for (const option of await choices.getByRole("radio").all()) {
+      const options = choices.getByRole("radio");
+      await expect(options).toHaveCount(optionCount);
+      for (const option of await options.all()) {
         expect((await option.boundingBox())!.height).toBeGreaterThanOrEqual(44);
       }
       await back.tap();
