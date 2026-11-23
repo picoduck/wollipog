@@ -189,7 +189,7 @@ test("a Linux managed worktree launch selects bwrap from provider mode and fails
   }
 });
 
-test("Antigravity gets a temporary terminal helper directory in a Linux managed worktree without writable provider state (#4896)", async () => {
+test("Antigravity gets a temporary terminal helper directory even when provider state is absent (#4896)", async () => {
   if (process.platform !== "linux") return;
   const root = mkdtempSync(join(tmpdir(), "wollipog-acp-managed-launch-"));
   const home = mkdtempSync(join(tmpdir(), "wollipog-acp-managed-home-"));
@@ -197,7 +197,6 @@ test("Antigravity gets a temporary terminal helper directory in a Linux managed 
   try {
     const { repoPath, worktreePath } = hostWorktree(root, "s1");
     const providerState = join(home, ".gemini", "antigravity-cli");
-    mkdirSync(providerState, { recursive: true });
     const helperDir = join(providerState, "bin");
     const store = new SessionStore(join(root, "sessions"));
     const acpMeta = (sessionId: string): SessionMeta => ({
@@ -250,6 +249,8 @@ test("Antigravity gets a temporary terminal helper directory in a Linux managed 
     assert.equal(isolation?.backend === "bwrap" && isolation.writableBinds?.some((bind) =>
       bind.target === home || bind.target.startsWith(`${home}/`)), false, "its HOME stays read-only");
     assert.ok(isolation?.backend === "bwrap");
+    assert.ok(lstatSync(helperDir).isDirectory());
+    assert.equal(lstatSync(providerState).mode & 0o077, 0, "new provider state is private to the runner user");
     const args = buildBwrapArgs({ command: "agy", args: ["acp"], cwd: worktreePath }, isolation);
     assert.ok(args.some((arg, i) => arg === "--tmpfs" && args[i + 1] === helperDir));
     assert.equal(bwrapPathWritable(args, join(providerState, "credentials.json")), false);

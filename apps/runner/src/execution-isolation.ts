@@ -31,7 +31,7 @@ interface IsolationDeps {
   nativeEnvironment: () => NodeJS.ProcessEnv;
   nativeTmp: () => string;
   realpathNative: (path: string) => Promise<string>;
-  mkdirNative: (paths: string[]) => Promise<void>;
+  mkdirNative: (paths: string[], mode?: number) => Promise<void>;
   mkdirWsl: (context: Extract<AgentContext, { kind: "wsl" }>, paths: string[]) => Promise<void>;
   copyNative: (source: ProviderStateLocation, target: ProviderStateLocation) => Promise<void>;
   copyWsl: (context: Extract<AgentContext, { kind: "wsl" }>, source: ProviderStateLocation, target: ProviderStateLocation) => Promise<void>;
@@ -83,7 +83,7 @@ const defaultDeps: IsolationDeps = {
   nativeEnvironment: () => process.env,
   nativeTmp: tmpdir,
   realpathNative: realpath,
-  mkdirNative: async (paths) => { for (const path of paths) await mkdir(path, { recursive: true }); },
+  mkdirNative: async (paths, mode) => { for (const path of paths) await mkdir(path, { recursive: true, mode }); },
   mkdirWsl: async (context, paths) => {
     await runContextCommand(context, "mkdir", ["-p", "--", ...paths], { cwd: "/", timeoutMs: 5_000 });
   },
@@ -366,19 +366,19 @@ async function antigravityTerminalHelperDirectory(
 ): Promise<string> {
   const inherited = runtime.nativeEnvironment();
   const home = await runtime.realpathNative(absoluteHome(state.env.HOME ?? inherited.HOME ?? runtime.nativeHome(), "HOME on Linux"));
-  const providerState = posix.join(home, ".gemini", "antigravity-cli");
+  const gemini = posix.join(home, ".gemini");
+  const providerState = posix.join(gemini, "antigravity-cli");
   const helper = posix.join(providerState, "bin");
-  if (protectedRoots.some((path) => pathsOverlap(providerState, path)) ||
-      await runtime.realpathNative(providerState).catch(() => undefined) !== providerState ||
-      !await runtime.existsNative(providerState) || await runtime.isSymbolicLinkNative(helper)) {
-    throw new Error("Antigravity terminal helper requires an existing, unaliased provider state directory outside other sandbox mounts");
+  const invalidPath = "Antigravity terminal helper requires an unaliased provider state directory outside other sandbox mounts";
+  if (protectedRoots.some((path) => pathsOverlap(providerState, path))) throw new Error(invalidPath);
+  for (const path of [gemini, providerState, helper]) {
+    // A missing component is safe to create, but even a dangling symlink is an alias.
+    if (await runtime.isSymbolicLinkNative(path)) throw new Error(invalidPath);
   }
-  // bubblewrap cannot create a mount point in the read-only root. Only the empty mount point
-  // lives on the host. The generated executable and subsequent writes live in private tmpfs.
-  await runtime.mkdirNative([helper]);
-  if (await runtime.realpathNative(helper) !== helper) {
-    throw new Error("Antigravity terminal helper mount point must not be a symlink");
-  }
+  // bubblewrap cannot create a mount point in the read-only root. Create missing host directories
+  // with private permissions. The generated executable and subsequent writes live in tmpfs.
+  await runtime.mkdirNative([helper], 0o700);
+  if (await runtime.realpathNative(helper) !== helper) throw new Error(invalidPath);
   return helper;
 }
 
