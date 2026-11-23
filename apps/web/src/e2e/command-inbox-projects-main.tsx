@@ -5,6 +5,7 @@ import {
   PROTOCOL_VERSION,
   buildConversationHandoff,
   inPlaceHandoffTurns,
+  launchModelChoice,
   removePendingRequest,
   type AccessScopeChangePreview,
   type AgentCapabilities,
@@ -784,6 +785,7 @@ function initialModel(): FixtureModel {
       // A deliberate non-default tier that the destination model below does not advertise, so the
       // dialog must say so rather than substitute a default.
       serviceTier: FIXTURE_QUERY.has("inPlace") ? "priority" : "flex",
+      ...(FIXTURE_QUERY.has("managedLatest") ? { agentId: "claude", driver: "claude-code", serviceTier: undefined } : {}),
     });
   }
   if (SCENARIO === "edit-in-fork") {
@@ -1593,6 +1595,18 @@ const runner: RunnerView = {
     ...(LIST_NOTICES.has("failed") ? [login("sign-in-failed", { status: "failed", error: "The provider refused the sign-in." })] : []),
   ];
   if (logins.length > 0) runner.providerLogins = logins;
+}
+if (SCENARIO === "conversation-handoff" && FIXTURE_QUERY.has("managedLatest")) {
+  const codex = runner.agents[0]!;
+  codex.authStatus = "authenticated";
+  Object.assign(codex.capabilities!, {
+    modelSource: "live",
+    models: [
+      { id: "gpt-6.1-sol", displayName: "GPT-6.1 Sol", efforts: ["low"] },
+      { id: "gpt-6.2-sol", displayName: "GPT-6.2 Sol", efforts: ["high"] },
+    ],
+    effortLevels: ["low", "high"],
+  });
 }
 if (SCENARIO === "conversation-handoff") runner.agents.push({
   id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code",
@@ -2885,8 +2899,10 @@ const client = {
     const point = source.worktreePath ? undefined
       : inPlaceHandoffTurns(history, { status: source.status, throughSeq: history.at(-1)?.seq ?? 0 }).turns.find((point) => point.turn === turn);
     if (!source.worktreePath && !point?.eventSeq) throw new Error(point?.reason ?? "This turn didn't finish, so it can't be handed off yet.");
-    const handoffDraft = buildConversationHandoff(history, point?.eventSeq ?? 3, agent, config, { inPlace: !source.worktreePath });
-    const child = { ...source, id: "handoff-child", agentId, driver: agent.driver!, title: "Checkpoint Handoff", ...config,
+    const concrete = launchModelChoice(agent.driver, agent.capabilities, config.model);
+    const pinnedConfig = concrete ? { ...config, model: concrete.id } : config;
+    const handoffDraft = buildConversationHandoff(history, point?.eventSeq ?? 3, agent, pinnedConfig, { inPlace: !source.worktreePath });
+    const child = { ...source, id: "handoff-child", agentId, driver: agent.driver!, title: "Checkpoint Handoff", ...pinnedConfig,
       useWorktree: true, worktreePath: "/repos/alpha/handoff-child", status: "idle" as const };
     model.sessions.push(child);
     sessionEvents.set(child.id, [{ id: 1, sessionId: child.id, seq: 1, ts: 4, payload: { kind: "conversation_forked", sourceSessionId: id, turn,

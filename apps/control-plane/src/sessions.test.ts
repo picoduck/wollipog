@@ -11986,7 +11986,7 @@ test("a managed Codex model default resolves at each launch and stores only the 
     db.updateRunnerAgents(RUNNER_ID, runnerMeta().agents.map(agent => agent.id === CODEX_APP_AGENT_ID ? {
       ...agent,
       capabilities: {
-        models, modelSource: "live" as const, effortLevels: ["high"], permissionModes: ["default"],
+        models, modelSource: "live" as const, effortLevels: ["high"], permissionModes: ["default", "orchestrator"],
         slashCommands: [], supportsImages: true, supportsApprovals: true,
       },
     } : agent), Date.now());
@@ -12013,6 +12013,42 @@ test("a managed Codex model default resolves at each launch and stores only the 
     undefined, undefined, false, false, false, { defaultOwnerUserId: userId });
   assert.ok(explicit.ok, explicit.error);
   assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config?.model, "gpt-6.10-astra");
+
+  db.setAgentHarnessDefault(userId, identity, { model: "gpt-6.10-astra", permissionMode: "orchestrator" });
+  const starts = hub.sentOfType("start_session").length;
+  const inferredOrchestrator = svc.createSession({ ...request, config: { model: "wollipog:latest:astra" } },
+    undefined, undefined, false, false, false, { defaultOwnerUserId: userId, allowManagedModelChoice: true });
+  assert.equal(inferredOrchestrator.status, 409);
+  assert.match(inferredOrchestrator.error ?? "", /specific model/i);
+  assert.equal(hub.sentOfType("start_session").length, starts);
+});
+
+test("an ordinary Pi launch pins managed Latest before validation and refuses unresolved or protected choices", () => {
+  const { db, hub, svc } = makeHarness();
+  const agentId = "pi";
+  const id = "wollipog:latest:opus";
+  const older = "anthropic/claude-opus-5";
+  const latest = "anthropic/claude-opus-5-5";
+  db.updateRunnerAgents(RUNNER_ID, [...runnerMeta().agents, {
+    id: agentId, name: "Pi", driver: "pi", available: true, command: "pi", args: [], env: {},
+    capabilities: {
+      models: [{ id: older, efforts: ["low"] }, { id: latest, efforts: ["high"] }],
+      modelSource: "live", effortLevels: ["low", "high"], permissionModes: [],
+      slashCommands: [], supportsImages: true, supportsApprovals: false,
+    },
+  }], Date.now());
+  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId, config: { model: id } };
+  const launch = (config: typeof request.config & { effort?: string }, allowed = true) => svc.createSession(
+    { ...request, config }, undefined, undefined, false, false, false, { allowManagedModelChoice: allowed },
+  );
+  assert.match(launch({ model: id }, false).error ?? "", /specific model/i);
+  assert.match(launch({ model: "wollipog:latest:sonnet" }).error ?? "", /unavailable/i);
+  assert.match(launch({ model: id, effort: "low" }).error ?? "", /effort/i);
+  const result = launch({ model: id, effort: "high" });
+  assert.ok(result.ok && result.data, result.error);
+  assert.equal(result.data.model, latest);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config?.model, latest);
+  assert.equal(hub.sentOfType("start_session").length, 1);
 });
 
 test("createSession online → 201 and sends start_session with the right launch spec", () => {

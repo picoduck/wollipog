@@ -4875,6 +4875,7 @@ app.post("/api/sessions", async (req, reply) => {
       defaultOwnerUserId: principal?.userId,
       parentSessionId,
       ...(principal ? {
+        allowManagedModelChoice: !initialNativeTui,
         orchestratorDefaults: orchestratorSettings.view(principal),
         validateOrchestratorDefaults: (defaults: import("@wollipog/protocol").OrchestratorCampaignPolicy) =>
           orchestratorSettings.compatibilityError(principal, defaults),

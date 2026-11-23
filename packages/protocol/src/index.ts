@@ -7370,7 +7370,7 @@ export interface AgentHarnessDefaultInstallation {
   runnerId: string;
   machineName: string;
   online: boolean;
-  models: AgentModel[];
+  models: Array<AgentModel & { resolvedModelId?: string }>;
   effortLevels: string[];
   permissionModes: string[];
 }
@@ -13497,4 +13497,5 @@ export type { MediaActiveStopIdentity, MediaActiveStopRequest, MediaActiveStopAc
 export { mediaActiveStopIdentityBody, mediaActiveStopRequestBody, mediaActiveStopAcknowledgementBody } from "./media-active-stop.js";
 export { validMediaDispatchFenceIdentity, mediaDispatchFenceBody, validMediaNeverDispatchedFence } from "./media-dispatch-fence.js";
 
-export { isManagedModelChoice, managedModelChoiceId, managedModelChoices, resolveManagedModelChoice } from "./managed-model-choice.js";
+export { compareManagedModelVersions, isManagedModelChoice, launchModelChoice, managedModelChoiceId, managedModelChoiceLabel, managedModelChoices,
+  managedModelFamilyLabel, resolveManagedModelChoice } from "./managed-model-choice.js";

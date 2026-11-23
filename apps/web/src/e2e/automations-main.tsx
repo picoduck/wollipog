@@ -65,6 +65,20 @@ if (params.has("capabilities")) runner.agents[0]!.capabilities = {
   supportsImages: false,
   supportsApprovals: true,
 };
+if (params.has("managedLatest")) {
+  Object.assign(runner.agents[0]!, {
+    driver: "pi",
+    capabilities: {
+      modelSource: "live",
+      models: [
+        { id: "anthropic/claude-opus-5", displayName: "Opus 5", efforts: ["low"] },
+        { id: "anthropic/claude-opus-5-5", displayName: "Opus 5.5", efforts: ["high"] },
+      ],
+      effortLevels: ["low", "high"], permissionModes: [], slashCommands: [],
+      supportsImages: true, supportsApprovals: false,
+    },
+  });
+}
 
 // `?accounts=priority|default|none` gives the machine two Claude accounts and answers the account
 // preview (#4512) as its Priority Order, its Default Account, or a Priority Order nothing can start.
@@ -141,6 +155,17 @@ const items: AutomationSchedule[] = [
     updatedAt: 1,
   },
 ];
+
+if (params.has("managedLatest")) {
+  const target = {
+    id: "host-worktree", runnerId: runner.runnerId, name: "Runner Host Worktree",
+    kind: "local", workspaceStrategy: "worktree", adapter: "host", available: true,
+    boundaries: { filesystem: "worktree", network: "inherit", secrets: "runner_local", billing: "agent_account" },
+  } as const;
+  runner.executionTargets = [target];
+  const action = items[0]?.action;
+  if (action?.kind === "create_session") action.request.executionTargetId = target.id;
+}
 
 // `waiting-target=installation` shows the control plane's other waiting reason.
 const targetReason = params.get("waiting-target") === "installation"
@@ -643,7 +668,7 @@ const client = {
       ] },
   }),
   ...(accountPreview ? { providerAccountSelection: async () => structuredClone(accountPreview) } : {}),
-  ...(params.has("campaign") ? {
+  ...(params.has("campaign") || params.has("managedLatest") ? {
     updateAutomation: async (id: string, spec: AutomationSpec) => {
       const index = items.findIndex(item => item.automationId === id);
       items[index] = { ...items[index]!, ...spec };

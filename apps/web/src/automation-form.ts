@@ -1,5 +1,6 @@
 import type {
   AgentCapabilities,
+  AgentDriverKind,
   AutomationAction,
   AutomationCampaign,
   OrchestratorCampaignOverrides,
@@ -10,6 +11,7 @@ import type {
   RunnerView,
   SessionConfig,
 } from "@wollipog/protocol";
+import { isManagedModelChoice, launchModelChoice } from "@wollipog/protocol";
 import { nextCronFire, parseCron, validateTimeZone } from "@wollipog/protocol/cron-schedule";
 import { agentDisplayName } from "./agent-presentation.js";
 import { resolvedInstallationAgentId } from "./automation-installations.js";
@@ -175,8 +177,8 @@ export function withAgent(form: FormState, agentId: string): FormState {
  * does not advertise the selected effort clears it for the same reason as above; permission mode is
  * agent-scoped and survives a model change.
  */
-export function withModel(form: FormState, model: string, capabilities: AgentCapabilities | undefined): FormState {
-  const selected = model ? capabilities?.models.find((candidate) => candidate.id === model) : undefined;
+export function withModel(form: FormState, model: string, capabilities: AgentCapabilities | undefined, driver?: AgentDriverKind): FormState {
+  const selected = launchModelChoice(driver, capabilities, model);
   const efforts = (selected?.efforts?.length ? selected.efforts : capabilities?.effortLevels) ?? [];
   return { ...form, model, effort: form.effort && efforts.includes(form.effort) ? form.effort : "" };
 }
@@ -209,14 +211,17 @@ export function withModel(form: FormState, model: string, capabilities: AgentCap
 export function alternateConfigError(
   config: SessionConfig | undefined,
   capabilities: AgentCapabilities | undefined,
+  driver?: AgentDriverKind,
 ): string | null {
-  if (!config || !capabilities) return null;
+  if (!config) return null;
+  const selected = launchModelChoice(driver, capabilities, config.model);
+  if (isManagedModelChoice(config.model) && !selected) return "The alternate agent cannot resolve the selected Latest family.";
+  if (!capabilities) return null;
   const models = capabilities.models ?? [];
-  if (config.model && models.length && !models.some((model) => model.id === config.model)) {
+  if (config.model && models.length && !selected) {
     return `The alternate agent does not support the model ${config.model}.`;
   }
   if (config.effort) {
-    const selected = config.model ? models.find((model) => model.id === config.model) : undefined;
     const efforts = (selected?.efforts?.length ? selected.efforts : capabilities.effortLevels) ?? [];
     if (!efforts.includes(config.effort)) {
       return `The alternate agent does not support ${config.effort} effort for this model.`;
@@ -243,6 +248,7 @@ export interface BuildSpecContext {
   base?: AutomationSpec;
   /** Capabilities of the explicit alternate's agent, when one is configured. */
   alternateCapabilities?: AgentCapabilities;
+  alternateDriver?: AgentDriverKind;
 }
 
 export function buildSpec(form: FormState, context: BuildSpecContext): AutomationSpec {
@@ -320,7 +326,7 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
   if (form.runnerPolicy === "alternate") {
     validateAutomationAlternatePlacement(context.projectsSupported, primaryPlacement, alternatePlacement);
     if (action.kind === "create_session") {
-      const configError = alternateConfigError(action.request.config, context.alternateCapabilities);
+      const configError = alternateConfigError(action.request.config, context.alternateCapabilities, context.alternateDriver);
       if (configError) throw new Error(configError);
     }
   }

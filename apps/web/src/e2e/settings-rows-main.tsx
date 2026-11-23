@@ -524,15 +524,28 @@ const harnessDefaultsTransport: ApiTransport = {
     const body = mode === "agent-repair" && window.location.hash === "#repair"
       ? harnessDefaultsRepairedView
       : harnessDefaultsState;
-    if (mode === "agent-managed") {
+    if (mode === "agent-managed" || mode === "agent-managed-skew") {
       const view = structuredClone(body);
-      const installation = view.defaults[0]?.installations[0];
+      const option = view.defaults[0];
+      const installation = option?.installations[0];
       if (installation) {
         const models = [
           { id: "gpt-6.2-sol", displayName: "GPT-6.2 Sol", efforts: ["high"] },
           { id: "gpt-6.1-sol", displayName: "GPT-6.1 Sol", efforts: ["high"] },
         ];
         installation.models.push(...models, ...managedModelChoices("codex-app-server", { models, modelSource: "live" }));
+        if (option && mode === "agent-managed-skew") {
+          const older = models.slice(1);
+          const machineNames = ["Laptop", "Design Workstation", "Mobile Testing Machine", "Backend Build Machine",
+            "Integration Test Workstation", "Remote Development Machine", "Release Validation Machine"];
+          option.installations.push(...machineNames.map((machineName, index) => ({
+            ...installation,
+            runnerId: `fixture-machine-${index}`,
+            machineName,
+            models: [...older, ...managedModelChoices("codex-app-server", { models: older, modelSource: "live" })],
+          })));
+          if (option.preference?.model === "wollipog:latest:sol") option.compatibleInstallations = option.installations.length;
+        }
       }
       return Response.json(view);
     }
@@ -574,7 +587,7 @@ function Harness() {
   const askedFor = params.get("topology") as Topology | null;
   const topology: Topology = askedFor && TOPOLOGIES.includes(askedFor) ? askedFor : "full";
   const requestedSection = params.get("section") as SettingsSection | null;
-  const showAgentDefaults = ["agent", "agent-missing", "agent-repair", "agent-loading", "agent-empty", "agent-save-fails", "agent-managed"]
+  const showAgentDefaults = ["agent", "agent-missing", "agent-repair", "agent-loading", "agent-empty", "agent-save-fails", "agent-managed", "agent-managed-skew"]
     .includes(params.get("defaults") ?? "");
   // #1646's and #3028's desktop update states; absent, the About panel renders as it does in a browser.
   const requestedUpdates = params.get("updates");

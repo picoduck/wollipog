@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentHarnessDefaultOption } from "@wollipog/protocol";
-import { agentDefaultsDescription, isConfigurable, repairDraft } from "./agent-defaults-options.js";
+import { agentDefaultsDescription, isConfigurable, repairDraft, uniqueModels } from "./agent-defaults-options.js";
 
 function installation(machineName: string, models: AgentHarnessDefaultOption["installations"][number]["models"]) {
   return {
@@ -78,4 +78,21 @@ test("a saved model that resolves differently on two machines says what it is on
   assert.equal(agentDefaultsDescription(option), "Opus 5.5. “opus” is Opus 5 on Desktop and Opus 5.5 on Laptop.");
   option.installations[1] = installation("Desktop", "Opus 5.5");
   assert.equal(agentDefaultsDescription(option), "Opus 5.5", "one resolution adds nothing");
+});
+
+test("managed Latest describes each machine even when release display names are identical", () => {
+  const id = "wollipog:latest:sol";
+  const installed = (machine: string, pin: string) => installation(machine, [
+    { id: pin, displayName: "Sol" },
+    { id, displayName: "Sol Latest", resolvedModelId: pin, description: "Currently Sol." },
+  ]);
+  const defaults = option({
+    installations: [installed("Laptop", "gpt-6.2-sol"), installed("Studio", "gpt-6.1-sol")],
+    preference: { model: id },
+    compatibleInstallations: 2,
+  });
+  const resolution = "“Sol Latest” is Sol (gpt-6.2-sol) on Laptop and Sol (gpt-6.1-sol) on Studio.";
+  assert.equal(agentDefaultsDescription(defaults), `Sol Latest. ${resolution}`);
+  assert.equal(uniqueModels(defaults).find(model => model.id === id)?.description,
+    `Wollipog chooses the latest available release when a new session starts. ${resolution}`);
 });
