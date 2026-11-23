@@ -2,6 +2,8 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import {
   ANTIGRAVITY_AGENT_ID,
+  ANTIGRAVITY_AUTO_MODE,
+  ANTIGRAVITY_FULL_PERMISSIONS_MODE,
   PROTOCOL_VERSION,
   type AgentCapabilities,
   type ControlPlaneToUi,
@@ -44,7 +46,7 @@ import { SessionDetail } from "../components/SessionDetail.js";
  * agy's account is the runner's redaction placeholder `[account]`.
  */
 const params = new URLSearchParams(window.location.search);
-type AntigravityState = "pickers" | "pickers-stress40" | "modes" | "modes-stress" | "attach-menu" | "resume-failed" | "streaming" | "approval" | "denied" | "stopped" | "install-failed" | "signin-failed" | "turn-failed";
+type AntigravityState = "pickers" | "pickers-stress40" | "modes" | "modes-stress" | "attach-menu" | "resume-failed" | "streaming" | "approval" | "denied" | "stopped" | "install-failed" | "signin-failed" | "turn-failed" | "auto-fallback" | "full-permissions";
 const state = (params.get("agState") ?? "pickers") as AntigravityState;
 
 const SESSION_ID = "antigravity-session-e2e";
@@ -68,7 +70,7 @@ const currentModel = models[0]![0];
 const AGY_MODES = [
   { id: "default", name: "Default", description: "Ask before edits and commands, per your permission settings." },
   { id: "accept-edits", name: "Accept edits", description: "Approve file edits in the workspace without asking." },
-  { id: "auto", name: "Auto", description: "Approve edits and safe commands; ask before irreversible actions." },
+  { ...ANTIGRAVITY_AUTO_MODE, description: "Approve edits and safe commands; ask before irreversible actions." },
   { id: "plan", name: "Plan", description: "Plan carefully before executing a task." },
 ];
 /** `modes-stress` (fixture only, not agy's): ten long-named modes, every odd one with a description
@@ -84,8 +86,10 @@ const STRESS_MODES = NUMBER_WORDS.map((word, index) => ({
   }),
 }));
 const modesStress = state === "modes-stress";
-const agentModes = modesStress ? STRESS_MODES : AGY_MODES;
-const currentMode = modesStress ? "mode-5" : "default";
+const fullPermissions = state === "full-permissions";
+const agentModes = fullPermissions ? [ANTIGRAVITY_FULL_PERMISSIONS_MODE] : modesStress ? STRESS_MODES :
+  state === "auto-fallback" ? AGY_MODES.filter(({ id }) => id !== ANTIGRAVITY_AUTO_MODE.id) : AGY_MODES;
+const currentMode = fullPermissions ? ANTIGRAVITY_FULL_PERMISSIONS_MODE.id : modesStress ? "mode-5" : "default";
 
 /** What acpSessionPresentation (apps/runner/src/acp-session-state.ts) makes of agy's session: its
  * `model` and `thought_level` options and its four modes, each approving through ACP permission. */
@@ -98,7 +102,7 @@ const capabilities: AgentCapabilities = {
   supportsApprovals: true,
   permissionModes,
   agentPermissionModes: agentModes,
-  elicitation: Object.fromEntries(permissionModes.map((mode) => [mode, ["acp-permission" as const]])),
+  elicitation: Object.fromEntries(permissionModes.map((mode) => [mode, [fullPermissions ? "none" : "acp-permission"]])),
 };
 
 const launchFailed = state === "install-failed" || state === "signin-failed" || state === "resume-failed";
@@ -160,6 +164,13 @@ const payloads: SessionEvent["payload"][] = [];
 const prompt = (text = PROMPT) => payloads.push({ kind: "user_message", text, images: [] });
 const touch = (status: string) => payloads.push({ kind: "tool_call", toolCallId: "call_touch", title: "touch notes.txt", toolKind: "execute", status });
 switch (state) {
+  case "auto-fallback":
+    payloads.push({
+      kind: "error", nonFatal: true, source: "antigravity_auto_mode_fallback",
+      message: "Google Antigravity could not enable Auto Mode. This session uses the provider’s current approval settings.",
+    });
+    break;
+  case "full-permissions":
   case "pickers":
   case "pickers-stress40":
   case "modes":
@@ -228,6 +239,7 @@ const events: SessionEvent[] = payloads.map((payload, index) => ({
 const statusByState: Record<AntigravityState, SessionStatus> = {
   pickers: "idle", "pickers-stress40": "idle", modes: "idle", "modes-stress": "idle", "attach-menu": "idle", "resume-failed": "failed", streaming: "running", approval: "input_required", denied: "idle", stopped: "idle",
   "install-failed": "failed", "signin-failed": "failed", "turn-failed": "idle",
+  "auto-fallback": "idle", "full-permissions": "idle",
 };
 
 const session = {

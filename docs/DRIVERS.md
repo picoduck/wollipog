@@ -1668,9 +1668,12 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   conversation state is a follow-up. `session/load` is never used: agy answers a load of an id it
   cannot read with an empty session, which would pass for a resumed conversation.
 - **Approvals.** Commands ask through `session/request_permission` (string request ids, `allow` and
-  `deny` options) and the card's title is the command line; Deny prevents the command. Modes are the
-  four agy advertises (`default`, `accept-edits`, `auto`, `plan`), offered as the session's approval
-  modes; Wollipog never passes `--dangerously-skip-permissions`. agy's own file edits are agent-owned
+  `deny` options) and the card's title is the command line. Deny prevents the command. New sessions
+  default to Auto Mode. Wollipog selects ACP's `auto` before the first prompt or after resume if agy
+  supports it. If agy cannot enable it, the session shows a warning and uses the provider's current
+  approval settings. Explicitly choosing Full Permissions Mode at creation adds agy's
+  `--dangerously-skip-permissions` flag on each launch of that session under the same runner isolation.
+  Full Permissions Mode is fixed for the session. agy's own file edits are agent-owned
   tools: in `default` mode real agy wrote a file without asking, so edits are not approval-gated by
   Wollipog, which does not claim otherwise. No ACP approval context is synthesized from agy's tool
   input, because governance policies match on that context.

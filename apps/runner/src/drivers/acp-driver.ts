@@ -1,4 +1,4 @@
-/** AcpDriver — adapts the existing AcpClient to the Driver interface (no behavior change). */
+/** AcpDriver — adapts the AcpClient to the Driver interface. */
 
 import type { PromptImage, SessionConfig } from "@wollipog/protocol";
 import { AcpClient } from "../acp.js";
@@ -47,6 +47,7 @@ export class AcpDriver implements Driver {
         env: opts.env,
         ...(opts.scrubInheritedEnv?.length ? { scrubInheritedEnv: opts.scrubInheritedEnv } : {}),
         ...(opts.acpCompatibility ? { compatibility: opts.acpCompatibility } : {}),
+        initialPermissionMode: opts.config.permissionMode,
         context: opts.context,
         initialCommands: opts.resumeId ? opts.capabilities?.slashCommands : undefined,
         sessionContext: opts.acpSessionContext,

@@ -1,4 +1,5 @@
 import { isManagedModelChoice, resolveManagedModelChoice } from "@wollipog/protocol";
+import { ANTIGRAVITY_AGENT_ID, ANTIGRAVITY_AUTO_MODE, ANTIGRAVITY_FULL_PERMISSIONS_MODE } from "@wollipog/protocol";
 import type { WollipogPromptOrigin } from "@wollipog/protocol";
 import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
 import { personalRuleDelegation } from "./personal-rule-delegation.js";
@@ -2282,11 +2283,21 @@ export function defaultPermissionModeForNewSession(
 ): string | undefined {
   const modes = capabilities?.permissionModes;
   if (!modes?.length) return undefined;
+  if (driver === "acp" && modes.includes(ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) &&
+      modes.includes(ANTIGRAVITY_AUTO_MODE.id)) return ANTIGRAVITY_AUTO_MODE.id;
   if (driver === "pi") return piAgentControlAvailable && modes.includes("default") ? "default" : undefined;
   if (driver !== "claude-code") return undefined;
   if (modes.includes("auto")) return "auto";
   return modes.includes("acceptEdits") ? "acceptEdits" : undefined;
 }
+
+function changesAntigravityFullPermissions(session: Pick<SessionView, "agentId" | "permissionMode" | "driver">, mode?: string): boolean {
+  const full = ANTIGRAVITY_FULL_PERMISSIONS_MODE.id;
+  return session.driver === "acp" && session.agentId === ANTIGRAVITY_AGENT_ID && mode !== undefined &&
+    (mode === full) !== (session.permissionMode === full);
+}
+
+const ANTIGRAVITY_FULL_PERMISSIONS_FIXED = "Full Permissions Mode is fixed at session creation. Start a new session to change it.";
 
 /** Whether the runner's catalog names this agent as the retired Codex exec driver (#3259). A current
  * runner marks a configured exec agent unavailable, and `getAgentLaunch` returns only available
@@ -4931,6 +4942,9 @@ export class SessionsService {
     if (threadLaunch && role === "orchestrator") return fail(ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL, 409);
     const orchestrator = role === "orchestrator";
     const presetPermissions = usesOrchestratorPresetPermissions(requestedConfig);
+    if (orchestrator && requestedConfig.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) {
+      return fail("Full Permissions Mode is available only for normal Antigravity sessions.", 409);
+    }
     // A saved permission mode can supply the Orchestrator preset after explicit model resolution.
     if (explicitManagedModel && (orchestrator || presetPermissions)) {
       return fail("Choose a specific model for this launch.", 409);
@@ -6829,6 +6843,9 @@ export class SessionsService {
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before sending a message", 409);
     const configInputError = sessionGuardrailConfigError(requestedConfig);
     if (configInputError) return fail(configInputError, 400);
+    if (changesAntigravityFullPermissions(session, requestedConfig?.permissionMode)) {
+      return fail(ANTIGRAVITY_FULL_PERMISSIONS_FIXED, 409);
+    }
     if (session.assistantThreadBudget && requestedConfig?.costBudgetUsd !== undefined) {
       // Older dashboards repeat the last Guardrails edit with the next prompt. That budget has
       // already been applied, and must never overwrite the backing session's derived cap.
@@ -7946,6 +7963,7 @@ export class SessionsService {
     if (config.permissionMode !== undefined && (config.permissionMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
       return fail("the Orchestrator preset permission mode is fixed at session creation; start a new session to change it", 409);
     }
+    if (changesAntigravityFullPermissions(session, config.permissionMode)) return fail(ANTIGRAVITY_FULL_PERMISSIONS_FIXED, 409);
     const agentCapabilities = mergeSessionCapabilities(
       this.db.getRunner(session.runnerId)?.agents.find((agent) => agent.id === session.agentId)?.capabilities,
       session.driver === "acp"

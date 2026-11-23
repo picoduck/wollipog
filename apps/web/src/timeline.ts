@@ -182,7 +182,7 @@ export type TimelineItem =
       parentToolUseId?: string;
     }
   | { kind: "file_edit"; id: number; path: string; diff?: string; diffRefs?: EventPayloadReference[]; parentToolUseId?: string }
-  | { kind: "error"; id: number; message: string; nonFatal?: true; source?: "worktree_base_fallback"; assistantThreadErrorId?: string }
+  | { kind: "error"; id: number; message: string; nonFatal?: true; source?: Extract<SessionEvent["payload"], { kind: "error" }>["source"]; assistantThreadErrorId?: string }
   | {
       kind: "turn_interrupted";
       id: number;

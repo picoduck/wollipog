@@ -64,6 +64,24 @@ function localHuman(db: ControlPlaneDb, role: HumanPrincipal["role"] = "viewer")
   };
 }
 
+test("Antigravity Full Permissions Mode is never offered or saved as a harness default", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const metadata = runner("runner-a", ["gemini"], ["auto", "antigravity-full-permissions"]);
+    metadata.agents[0] = { ...metadata.agents[0]!, id: "google-antigravity", name: "Google Antigravity", driver: "acp" };
+    db.registerRunner(metadata, 1, PROTOCOL_VERSION);
+    const settings = new AgentHarnessDefaultsSettings(db);
+    const principal = localHuman(db);
+    assert.deepEqual(settings.view(principal).defaults[0]?.installations[0]?.permissionModes, ["auto"]);
+    assert.throws(() => settings.update(principal, {
+      agentId: "google-antigravity", driver: "acp", context: { kind: "native" },
+      config: { permissionMode: "antigravity-full-permissions" },
+    }), /not supported/u);
+  } finally {
+    db.close();
+  }
+});
+
 test("Agent Harness defaults aggregate installations, preserve drift, and remain per user", () => {
   const db = ControlPlaneDb.open(":memory:");
   const firstRunner = runner("runner-a", ["sol", "luna"], ["auto-review", "full-access"]);

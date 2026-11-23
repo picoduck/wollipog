@@ -65,6 +65,7 @@ export * from "./pull-request-watch.js";
 export * from "./session-waits.js";
 export * from "./workspace-removal.js";
 export * from "./antigravity-setup.js";
+import { ANTIGRAVITY_FULL_PERMISSIONS_MODE } from "./antigravity-setup.js";
 export * from "./forge-decision-action.js";
 export * from "./release-decision.js";
 export * from "./merge-closure-watch.js";
@@ -6612,8 +6613,8 @@ export type SessionEventPayload =
       /** A problem the driver reported while the turn kept running (#3806), not a failed turn: a
        * dashboard shows it without Retry Turn. Older peers ignore the flag and show a failed turn. */
       nonFatal?: true;
-      /** A non-fatal warning from automatic worktree creation, before the first turn. */
-      source?: "worktree_base_fallback";
+      /** A non-fatal warning that can be shown before the first turn. */
+      source?: "worktree_base_fallback" | "antigravity_auto_mode_fallback";
       /** Correlates a promoted notice with this authorized transcript entry. */
       assistantThreadErrorId?: string;
     }
@@ -7403,6 +7404,7 @@ export function installationSupportsDefault(
   installation: Pick<AgentHarnessDefaultInstallation, "models" | "effortLevels" | "permissionModes">,
   config: AgentHarnessDefaultConfig,
 ): boolean {
+  if (config.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) return false;
   const model = config.model ? installation.models.find((candidate) => candidate.id === config.model) : undefined;
   if (config.model && !model) return false;
   const efforts = model?.efforts?.length ? model.efforts : installation.effortLevels;
