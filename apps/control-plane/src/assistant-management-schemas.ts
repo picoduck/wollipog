@@ -52,11 +52,18 @@ const orchestrator = strict({
     decisions: {type: "object", propertyNames: {enum: WORKFLOW_DECISION_CATEGORIES}, additionalProperties: {enum: ["human", "orchestrator"]}}}),
   execution: strict({strictProjectIsolation: boolean, integrationIsolation: boolean}),
 });
+// campaignRepositoryLocation, lowercased: a GitHub owner/name, or a GitLab host that is not
+// github.com, with alphanumeric-bounded labels, an optional port from 1 to 65535 and 2 to 22 path
+// segments, none ending in .git or .atom.
+const hostLabel = "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?";
+const port = ":(?=[0-9]{1,5}/)0*([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])";
+const gitlabSegment = "/(?![^/]*\\.(git|atom)(/|$))[a-z0-9_][a-z0-9_.-]*";
+const repositoryPattern = `^([a-z0-9_.-]+/[a-z0-9_.-]+|(?!(www\\.)?github\\.com(:|/))${hostLabel}(\\.${hostLabel})+(${port})?(${gitlabSegment}){2,22})$`;
 /** Mirrors automationCampaignError and the Full Control launch overrides it accepts. */
 const campaign = {...strict({
   controlMode: {enum: ["custom", "full_control"]},
-  repository: {type: "string", maxLength: 256, description: "Lowercase owner/name, or GitLab host/group/project.",
-    pattern: "^([a-z0-9_.-]+/[a-z0-9_.-]+|[a-z0-9-]+(\\.[a-z0-9-]+)+(:[0-9]{1,5})?(/[a-z0-9_][a-z0-9_.-]*){2,22})$"},
+  repository: {type: "string", maxLength: 256, pattern: repositoryPattern,
+    description: "Lowercase GitHub owner/name, or GitLab host/group/project (not on github.com)."},
   tasks: {type: "array", maxItems: 100, items: strict({key: {type: "string", pattern: "^[a-zA-Z0-9_-]{1,128}$"},
     title: prose(120), prompt: prose(16_384)}, ["key", "title", "prompt"])},
   fullControl: strict({objective: prose(4000), operations: {type: "array", minItems: 1, uniqueItems: true, items: {enum: FULL_CONTROL_LAUNCH_OPERATIONS}},

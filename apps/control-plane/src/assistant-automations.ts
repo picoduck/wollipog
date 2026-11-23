@@ -39,9 +39,16 @@ export function registerAssistantAutomations(operations: AssistantOperations, db
     const target = (value: unknown): AssistantTarget => {
       if (name === "auto_list") return {kind: "automation", id: "list"};
       // An update targets the stored schedule. Its replacement is validated against the stored
-      // values only after access checks (in impact and execute), so a refusal never depends on
-      // a schedule the caller may not read.
-      const a = object(value), targets = automationManagementTargets(db, name === "auto_update" ? load(a) : proposed(a));
+      // values only after access checks (in impact and execute), and a stored target that no
+      // longer resolves is reported there too, so no refusal before the grant and access checks
+      // depends on the state of a schedule the caller may not read.
+      const a = object(value);
+      let targets: AssistantTarget[] = [];
+      if (name === "auto_update") {
+        const stored = load(a);
+        try { targets = automationManagementTargets(db, stored); }
+        catch (error) { if (!(error instanceof AssistantRefusal)) throw error; }
+      } else targets = automationManagementTargets(db, proposed(a));
       return {kind: "automation", id: name === "auto_create" ? "new" : load(a, name === "auto_delete").automationId, projectId: targets[0]?.projectId};
     };
     operations.register({name, description: ({auto_list: "List accessible automations and latest execution status.", auto_get: "Inspect configuration, revision, execution status and affected targets.",

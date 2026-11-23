@@ -8,7 +8,8 @@ import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { OrchestratorSettings } from "./orchestrator-settings.js";
 import { AutomationsService } from "./automations.js";
-import { ScheduledCampaignRuntime } from "./scheduled-campaigns.js";
+import { ScheduledCampaignRuntime, automationCampaignError } from "./scheduled-campaigns.js";
+import { automationPayloadSchema } from "./assistant-management-schemas.js";
 import { createAssistantOperations, registerAssistantRoutes } from "./assistant-routes.js";
 import { assistantRequestDigest } from "./assistant-command-receipts.js";
 import { registerAssistantSessionOperations } from "./assistant-session-operations.js";
@@ -292,6 +293,9 @@ test("the discovered schema and the save validator accept and refuse the same ca
     ["uppercase repository", variant(r => { r.campaign.repository = "Owner/Repo"; }), /campaign\.repository:/, /repository must be the lowercase/],
     ["repository without an owner", variant(r => { r.campaign.repository = "repo"; }), /campaign\.repository:/, /repository must be the lowercase/],
     ["repository with a space", variant(r => { r.campaign.repository = "owner/repo name"; }), /campaign\.repository:/, /repository must be the lowercase/],
+    ["host-qualified GitHub repository", variant(r => { r.campaign.repository = "github.com/owner/repo"; }), /campaign\.repository:/, /repository must be the lowercase/],
+    ["GitLab host label starting with a hyphen", variant(r => { r.campaign.repository = "-gitlab.example.com/group/project"; }),
+      /campaign\.repository:/, /repository must be the lowercase/],
     ["Full Control overrides on a Custom campaign", variant(r => { (r.campaign as Record<string, unknown>).controlMode = "custom"; }),
       /request\.campaign: must not match/, /fullControl applies only to controlMode full_control/],
     ["empty budget key", variant(r => { (r.campaign.fullControl.budget as Record<string, unknown>)[""] = 1; }),
@@ -419,15 +423,20 @@ test("a schedule stored before the save-time limit checks can still be paused un
 test("the effective readback reports stored checkpoints that the next occurrence would refuse", async t => {
   const f = fixture();
   t.after(async () => { await f.app.close(); f.db.close(); });
-  // Stored JSON is not revalidated on read, so a wrong type must not break the read either.
-  for (const [automationId, checkpointsUsd] of [["auto_legacy_checkpoints", [16]], ["auto_legacy_checkpoint_type", "16"]] as const) {
+  // Stored JSON is not revalidated on read, so a wrong type must not break the read either. The
+  // readback forwards checkpoints as launch does: null and [] are omitted, anything else with a
+  // length must be increasing positive amounts within the effective ceiling.
+  const cases: Array<[string, unknown, boolean]> = [["auto_legacy_checkpoints", [16], false], ["auto_legacy_checkpoint_type", "16", false],
+    ["auto_legacy_checkpoint_order", [2, 1], false], ["auto_legacy_checkpoint_null", null, true], ["auto_legacy_checkpoint_empty", [], true]];
+  for (const [automationId, checkpointsUsd, launches] of cases) {
     const stored = payload();
     (stored.action.request.campaign.fullControl.budget as Record<string, unknown>).checkpointsUsd = checkpointsUsd;
     f.db.createAutomation({ automationId, spec: stored as unknown as AutomationSpec,
       nextFireAt: Date.now() + 60_000, actor: { kind: "human", id: f.owner.userId }, now: Date.now() });
     const read = await f.call("auto_get", { automationId });
     assert.equal(read.automation.automationId, automationId);
-    assert.match(read.effectiveCampaign.error, /checkpointsUsd must be positive amounts within the effective cost limit of 15/);
+    if (launches) assert.equal(read.effectiveCampaign.error, undefined, `${automationId}: ${read.effectiveCampaign.error}`);
+    else assert.match(read.effectiveCampaign.error, /checkpointsUsd must be at most 100 increasing positive amounts within the effective cost limit of 15/, automationId);
   }
   assert.deepEqual(f.sent.map(message => message.type), []);
 });
@@ -452,6 +461,27 @@ test("an Assistant update outside the connection's grant gets the same refusal w
   assert.doesNotMatch(matching!, /toolCalls/);
 });
 
+test("an Assistant without auto_update gets the operation refusal whatever state the stored target is in", async t => {
+  const f = fixture();
+  t.after(async () => { await f.app.close(); f.db.close(); });
+  f.db.createSession({ id: "present", runnerId: "r", workspaceId: "w", agentId: "parent", title: "Present", useWorktree: false,
+    driver: "claude-code", config: {}, now: 1 });
+  const promptSchedule = (automationId: string, sessionId: string) => f.db.createAutomation({ automationId, nextFireAt: null,
+    spec: { name: automationId, cron: "0 9 * * *", timezone: "UTC", enabled: false, action: { kind: "prompt_session", sessionId, request: { text: "Run" } },
+      misfirePolicy: { kind: "skip" }, runnerPolicy: { kind: "wait" }, concurrencyPolicy: "skip", limits: { maxCostUsd: 1, maxToolCalls: 10 },
+      notifications: { pushEvents: [] } } as AutomationSpec, actor: { kind: "human", id: f.owner.userId }, now: 1 });
+  const resolvable = promptSchedule("auto_resolvable", "present"), unavailable = promptSchedule("auto_unavailable", "missing");
+  f.db.assistantConnections.configure(f.issued.connection.id, { operations: ["auto_get"], projects: "all" });
+  const refusal = async (automationId: string) => {
+    try { await f.call("auto_update", { operationId: `update-${automationId}`, automationId, expectedRevision: 1, payload: payload() }); }
+    catch (error) { return (error as Error).message; }
+    assert.fail("an excluded operation must be refused");
+  };
+  const first = await refusal(resolvable.automationId), second = await refusal(unavailable.automationId);
+  assert.match(first!, /Operation auto_update is excluded/);
+  assert.equal(second, first, "the refusal cannot reveal the stored target's state");
+});
+
 test("the effective readback pins a legacy plain agent id the way dispatch does, without saving the pin", async t => {
   const f = fixture();
   t.after(async () => { await f.app.close(); f.db.close(); });
@@ -470,4 +500,27 @@ test("the effective readback pins a legacy plain agent id the way dispatch does,
   assert.equal(read.automation.revision, before.automation.revision, "the preview saves nothing");
   assert.equal(read.automation.action.installationBindings, undefined);
   assert.deepEqual(f.sent.map(message => message.type), []);
+});
+
+test("the advertised repository pattern accepts exactly the repositories the save validator accepts", () => {
+  const request = (automationPayloadSchema.properties as any).action.oneOf[0].properties.request.properties;
+  const pattern = new RegExp(request.campaign.properties.repository.pattern as string, "u");
+  const saves = (repository: string) => automationCampaignError({ runnerId: "r", workspaceId: "w", role: "orchestrator",
+    campaign: { controlMode: "custom", repository, tasks: [] } }) === null;
+  const named = ["owner/repo", "o.w-n_er/re.po", "github.com/repo", "repo", "owner/repo name", "Owner/Repo", "owner/repo/extra",
+    "github.com/owner/repo", "www.github.com/owner/repo", "github.com:443/owner/repo", "gitlab.example.com/group/project",
+    "-gitlab.example.com/group/project", "gitlab-.example.com/group/project", "gitlab.example.com:8443/group/project",
+    "gitlab.example.com:0/group/project", "gitlab.example.com:65536/group/project", "gitlab.example.com:080/group/project",
+    "gitlab.example.com/group/project.git", "gitlab.example.com/group/x.atom/project", "gitlab.example.com/.group/project",
+    "gitlab.example.com/group", "localhost/group/project", "gitlab.example.com/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u/v",
+    "gitlab.example.com/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u/v/w", `${"a".repeat(64)}.example.com/group/project`];
+  // A seeded generator over the characters these rules care about, so the comparison is repeatable.
+  let seed = 4869;
+  const random = () => (seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648) / 2_147_483_648;
+  const alphabet = "ab0-_./:Ag9";
+  const generated = Array.from({ length: 4000 }, () => Array.from({ length: 1 + Math.floor(random() * 24) },
+    () => alphabet[Math.floor(random() * alphabet.length)]).join(""));
+  for (const repository of [...named, ...generated]) {
+    assert.equal(pattern.test(repository), saves(repository), `pattern and save agree on ${JSON.stringify(repository)}`);
+  }
 });

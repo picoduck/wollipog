@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import {
-  campaignLaunchDisclosure, campaignRepositoryLocation, humanRequiredRulesExist, supportsPacedVideoReviewPeer, runnerSupportsProtocol,
+  campaignLaunchDisclosure, campaignRepositoryLocation, validCampaignBudgetAuthority, humanRequiredRulesExist, supportsPacedVideoReviewPeer, runnerSupportsProtocol,
   type AutomationCampaign, type AutomationExecution, type AutomationRunnerTarget, type AutomationSchedule,
   type AutomationSessionRequest, type AutomationSpec, type CreateSessionRequest, type FullControlLaunchRequest, type GovernanceActor,
   type PreparedCampaignLaunch, type SessionView,
@@ -266,12 +266,14 @@ export class ScheduledCampaignRuntime {
     if (childError) return { error: childError };
     const budget = scheduledCampaignBudget({ limits: automation.limits, action }, launch);
     // A schedule stored before save checked them can hold checkpoints launch refuses, including
-    // values of the wrong type: stored JSON is not revalidated on read.
+    // values of the wrong type: stored JSON is not revalidated on read. Forward them exactly as
+    // launch does (only a value with a length) and judge them with launch's own validator.
     const checkpoints: unknown = campaign.fullControl?.budget?.checkpointsUsd;
-    if (checkpoints !== undefined && (!Array.isArray(checkpoints) ||
-        checkpoints.some(amount => typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0 || amount > budget.costUsd))) {
-      return { error: "request.campaign.fullControl.budget.checkpointsUsd must be positive amounts within the effective cost limit of " +
-        `${budget.costUsd}; the next occurrence would be refused` };
+    const authority = { version: 1, ...budget, accounting: "managed_workers_only", unpriced: "stop" };
+    if ((checkpoints as { length?: unknown } | null | undefined)?.length && validCampaignBudgetAuthority(authority) &&
+        !validCampaignBudgetAuthority({ ...authority, checkpointsUsd: checkpoints })) {
+      return { error: "request.campaign.fullControl.budget.checkpointsUsd must be at most 100 increasing positive amounts within " +
+        `the effective cost limit of ${budget.costUsd}; the next occurrence would be refused` };
     }
     const { behavior, delegation, execution } = structuredClone(launch.policy);
     return { controlMode: campaign.controlMode, repository: campaign.repository,
