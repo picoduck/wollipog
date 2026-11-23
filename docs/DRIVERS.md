@@ -1641,6 +1641,10 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   as the shared restore already does for a refused one). The transcript shows the start, sign-in
   and resume failures as their own notices ("Google Antigravity Couldn't Start", "Sign-In
   Required" with Open Connections, "Conversation Can't Resume"), never as a failed turn.
+- **MCP servers.** When opening or resuming an Antigravity session, Wollipog skips configured HTTP
+  and SSE servers whose transport the agent did not advertise and lists them by name and transport
+  in the session's Agent Log. agy 1.5.14 advertises neither. Stdio servers and any advertised remote
+  transports are still passed to the agent. Other ACP agents still refuse unsupported transports.
 - **Client file writes.** The profile does not offer the client's `fs/write_text_file` service and
   refuses the request if agy sends it anyway: the runner would perform that write outside agy's
   sandbox, where a managed worktree's runner-owned registration files are not read-only. agy

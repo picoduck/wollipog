@@ -200,7 +200,9 @@ if (args[0] === "acp" && args[1] === "--login") {
     if (request.id === undefined) return;
     record({ method: request.method, ...(request.method === "initialize" ? { clientInfo: request.params?.clientInfo ?? null,
       clientCapabilities: request.params?.clientCapabilities ?? null } : {}),
-      ...(request.params?.sessionId ? { sessionId: request.params.sessionId } : {}) });
+      ...(request.params?.sessionId ? { sessionId: request.params.sessionId } : {}),
+      ...(Array.isArray(request.params?.mcpServers)
+        ? { mcpServerNames: request.params.mcpServers.map((server) => server.name) } : {}) });
     if (request.method === "initialize") {
       // Valid JSON that is not a JSON-RPC message.
       if (modes.has("acp_null")) process.stdout.write("null\n5\n[]\n");

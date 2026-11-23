@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 import type { AcpRuntimeCapabilities, AgentCapabilities, AgentDefinition, AntigravitySetupView, SessionConfig, SessionEventPayload } from "@wollipog/protocol";
 import { negotiateAcpInitialize } from "./acp-contract.js";
+import { resolveAcpSessionContext } from "./acp-session-context.js";
 import {
   AcpLaunchRefusedError,
   acpCompatibilityFailure,
@@ -71,7 +72,7 @@ function setup(overrides: Partial<AntigravitySetupView>): AntigravitySetupView {
 const PROVIDER = { mode: "provider", network: "inherit" } as const;
 const BWRAP = { mode: "bwrap", network: "inherit" } as const;
 
-function calls(): Array<{ method: string; clientInfo?: { name?: string } | null; outcome?: unknown }> {
+function calls(): Array<{ method: string; clientInfo?: { name?: string } | null; outcome?: unknown; mcpServerNames?: string[] }> {
   const path = join(state, "calls.jsonl");
   return existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
 }
@@ -91,7 +92,7 @@ function launchDriver(
   cwd: string,
   resumeId?: string,
   overrides: { layeredEnv?: Record<string, string>; deadlines?: { handshakeMs: number; sessionMs: number }; config?: SessionConfig;
-    resolveLaunch?: AcpCompatibility["resolveLaunch"] } = {},
+    resolveLaunch?: AcpCompatibility["resolveLaunch"]; sessionContext?: DriverOptions["acpSessionContext"] } = {},
 ): { driver: AcpDriver; seen: Observed } {
   const context = antigravityCredentialContext();
   const launch = antigravitySessionLaunch(view, context, isolation);
@@ -106,6 +107,7 @@ function launchDriver(
       ...(overrides.resolveLaunch ? { resolveLaunch: overrides.resolveLaunch } : {}) },
     cwd,
     config: overrides.config ?? {},
+    acpSessionContext: overrides.sessionContext,
     context: { kind: "native" },
     ...(resumeId ? { resumeId } : {}),
   };
@@ -266,6 +268,37 @@ test("setup, readiness check and session share one executable and credential con
   } finally {
     delete process.env.GEMINI_API_KEY;
     delete process.env.GOOGLE_CLOUD_PROJECT;
+  }
+});
+
+test("Antigravity starts and resumes with stdio MCP when configured remote transports are unsupported", async () => {
+  signIn();
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const view = setup({ executable: { path: agy } });
+  const sessionContext = resolveAcpSessionContext({
+    runner: [
+      { type: "http", name: "remote-docs", url: "https://docs.example/mcp",
+        headers: { Authorization: { fromEnv: "UNSET_ANTIGRAVITY_TEST_MCP_TOKEN" } } },
+      { type: "stdio", name: "local-tools", command: process.execPath },
+    ],
+    workspace: [{ type: "sse", name: "activity", url: "https://activity.example/events" }],
+  });
+  const first = launchDriver(view, PROVIDER, cwd, undefined, { sessionContext });
+  await first.driver.initialize();
+  const sessionId = await first.driver.newSession(cwd);
+  assert.match(sessionId, /^fixture-session-/);
+  assert.equal(await first.driver.prompt("Say hello."), "end_turn");
+  first.driver.dispose();
+
+  const resumed = launchDriver(view, PROVIDER, cwd, sessionId, { sessionContext });
+  await resumed.driver.initialize();
+  assert.equal(await resumed.driver.newSession(cwd), sessionId);
+  const sessionCalls = calls().filter((call) => call.method === "session/new" || call.method === "session/resume");
+  assert.deepEqual(sessionCalls.map((call) => call.mcpServerNames), [["local-tools"], ["local-tools"]]);
+  for (const seen of [first.seen, resumed.seen]) {
+    const notice = seen.stderr.find((line) => line.includes("MCP"));
+    assert.match(notice ?? "", /remote-docs \(HTTP\).*activity \(SSE\)/);
+    assert.doesNotMatch(notice ?? "", /https:|UNSET_ANTIGRAVITY_TEST_MCP_TOKEN/);
   }
 });
 

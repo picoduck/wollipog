@@ -399,7 +399,18 @@ export class AcpClient {
     if (additionalDirectories?.length && !this.negotiation.stable.sessionAdditionalDirectories) {
       throw new Error("ACP agent does not advertise additional-directory support");
     }
-    const mcpServers: McpServer[] = materializeAcpMcpServers(this.sessionContext?.mcpServers, this.negotiation, this.mcpEnvironment);
+    const omitted: string[] = [];
+    const mcpServers: McpServer[] = materializeAcpMcpServers(
+      this.sessionContext?.mcpServers,
+      this.negotiation,
+      this.mcpEnvironment,
+      this.compatibility?.profile === "antigravity"
+        ? (name, transport) => omitted.push(`${name} (${transport})`)
+        : undefined,
+    );
+    if (omitted.length) {
+      this.ev.onStderr(`Google Antigravity skipped ${omitted.join(", ")} because it does not advertise support for their MCP transports.`);
+    }
     return {
       cwd,
       mcpServers,

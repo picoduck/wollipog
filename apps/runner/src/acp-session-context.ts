@@ -58,34 +58,43 @@ export function resolveAcpSessionContext(scopes: AcpContextScopes): AcpSessionCo
   };
 }
 
-/** Convert secret references to ACP wire values at the last responsible moment. */
+/** Convert secret references to ACP wire values at the last responsible moment. A caller that
+ * explicitly accepts missing integrations can report each omission via onUnsupported. */
 export function materializeAcpMcpServers(
   configured: AcpMcpServerConfig[] | undefined,
   negotiation: AcpNegotiation,
   env: NodeJS.ProcessEnv = process.env,
+  onUnsupported?: (name: string, transport: "HTTP" | "SSE") => void,
 ): McpServer[] {
-  return (configured ?? []).map((server): McpServer => {
-    if (server.type === "http" && !negotiation.stable.mcpHttp) {
-      throw new Error(`ACP agent does not advertise HTTP MCP support required by '${server.name}'`);
-    }
-    if (server.type === "sse" && !negotiation.stable.mcpSse) {
-      throw new Error(`ACP agent does not advertise SSE MCP support required by '${server.name}'`);
+  const servers: McpServer[] = [];
+  for (const server of configured ?? []) {
+    const unsupportedTransport = server.type === "http" && !negotiation.stable.mcpHttp ? "HTTP"
+      : server.type === "sse" && !negotiation.stable.mcpSse ? "SSE"
+      : undefined;
+    if (unsupportedTransport) {
+      if (!onUnsupported) {
+        throw new Error(`ACP agent does not advertise ${unsupportedTransport} MCP support required by '${server.name}'`);
+      }
+      onUnsupported(server.name, unsupportedTransport);
+      continue;
     }
     if (server.type === "stdio") {
-      return {
+      servers.push({
         name: server.name,
         command: server.command,
         args: [...(server.args ?? [])],
         env: Object.entries(server.env ?? {}).map(([name, ref]) => ({ name, value: secret(ref.fromEnv, server.name, env) })),
-      };
+      });
+      continue;
     }
-    return {
+    servers.push({
       type: server.type,
       name: server.name,
       url: server.url,
       headers: Object.entries(server.headers ?? {}).map(([name, ref]) => ({ name, value: secret(ref.fromEnv, server.name, env) })),
-    };
-  });
+    });
+  }
+  return servers;
 }
 
 function validateServer(server: AcpMcpServerConfig, context?: AgentContext): void {
