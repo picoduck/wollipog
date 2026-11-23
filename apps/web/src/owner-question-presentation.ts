@@ -11,7 +11,7 @@ export function withPresentedOwnerQuestions<T extends Pick<SessionView, "pending
   const requests = pendingRequests(session.pendingApproval);
   if (!requests.some((request) => isOwnerQuestionRequest(request))) return session;
   const presented = requests.map((request) => ({ request, shown: presentOwnerQuestionRequest(request) }));
-  const question = (entry: { request: PendingApproval; shown: PendingApproval }) => entry.shown !== entry.request;
+  const question = (entry: { request: PendingApproval; shown: PendingApproval }) => entry.shown !== entry.request && entry.shown.kind === "question";
   const ordered = [
     ...presented.filter((entry) => !entry.request.async),
     ...presented.filter((entry) => entry.request.async && question(entry)),

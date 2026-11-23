@@ -1,5 +1,5 @@
 import React from "react";
-import { isOwnerQuestionRequest, type PendingApproval, type PermissionOption } from "@wollipog/protocol";
+import { isCampaignHandoffQuestion, isOwnerQuestionRequest, type PendingApproval, type PermissionOption } from "@wollipog/protocol";
 import {
   CostIcon,
   ImageIcon,
@@ -22,7 +22,8 @@ export type RequestKind =
   | "workflow_decision"
   | "ui_evidence"
   | "sign_in"
-  | "question";
+  | "question"
+  | "campaign_handoff";
 
 export interface RequestKindMeta {
   kind: RequestKind;
@@ -38,9 +39,11 @@ const META: Record<RequestKind, RequestKindMeta> = {
   ui_evidence: { kind: "ui_evidence", label: "UI Evidence" },
   sign_in: { kind: "sign_in", label: "Sign-In" },
   question: { kind: "question", label: "Question" },
+  campaign_handoff: { kind: "campaign_handoff", label: "Status Update" },
 };
 
 export function requestKindMeta(request: Pick<PendingApproval, "kind" | "workflowDecision">): RequestKindMeta {
+  if (isCampaignHandoffQuestion(request.workflowDecision)) return META.campaign_handoff;
   switch (request.kind) {
     case "runner_recovery":
       return { kind: "permission", label: "Runner Recovery" };
@@ -70,6 +73,7 @@ export function RequestKindIcon({ request }: { request: Pick<PendingApproval, "k
   switch (requestKindMeta(request).kind) {
     case "budget": return <CostIcon />;
     case "tool_calls": return <ToolIcon />;
+    case "campaign_handoff":
     case "workflow_decision": return <WorkflowDecisionsIcon />;
     case "ui_evidence": return <ImageIcon />;
     case "sign_in": return <SignInIcon />;

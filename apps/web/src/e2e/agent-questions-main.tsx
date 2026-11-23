@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ownerQuestionAgentQuestions, presentOwnerQuestionRequest, scopeProposalAgentQuestions, summarizeQuestionAnswers, type AgentQuestion,
+import { CAMPAIGN_HANDOFF_QUESTION_KEY, ownerQuestionAgentQuestions, presentOwnerQuestionRequest, scopeProposalAgentQuestions, summarizeQuestionAnswers, type AgentQuestion,
   type CampaignIssueScopeSnapshot, type CampaignScopeProposal, type OwnerDecisionSnapshot,
   type PendingApproval, type SessionView, type WorkflowDecisionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
@@ -230,12 +230,19 @@ const ownerDecision: OwnerDecisionSnapshot = {
     { optionId: "stop", label: "Stop and Report", description: "Fail the child's step at once." },
   ],
 };
-const ownerQuestionSnapshot = params.get("handoffs") === "true" ? {
+const campaignHandoff = params.get("handoffs") === "true";
+const handoffItems = params.has("handoffStress") ? Array.from({ length: 8 }, (_, index) =>
+  `- Review Work Item ${index + 1} (human)\n` +
+    "  Reason: A prerequisite needs the owner to review the remaining work against the existing design.\n" +
+    "  Next action: Confirm the delivery plan and record the next step in Campaign Status."
+) : [
+  "- picoduck/wollipog#4541: Owner Handoff (human)\n  Reason: A design decision is outside campaign authority.\n  Next action: Choose the supported delivery path.",
+  "- picoduck/wollipog#4540: External Review (external)\n  Reason: Awaiting the maintainer's review.\n  Next action: Review the proposed change.",
+];
+const ownerQuestionSnapshot = campaignHandoff ? {
   category: "owner_decision" as const, kind: "question" as const,
   question: "This campaign handed work to you. What should happen next?", options: [],
-  material: "- picoduck/wollipog#4541: Owner Handoff (human)\n  Reason: A design decision is outside campaign authority.\n  Next action: Choose the supported delivery path.\n\n" +
-    "- picoduck/wollipog#4540: External Review (external)\n  Reason: Awaiting the maintainer's review.\n  Next action: Review the proposed change.\n\n" +
-    "This question authorizes nothing. Your answer grants no action authority.",
+  material: [...handoffItems, "This question authorizes nothing. Your answer grants no action authority."].join("\n\n"),
 } : { ...ownerDecision, kind: "question" as const };
 const ownerQuestionSet = ownerQuestionAgentQuestions(ownerQuestionSnapshot);
 const ownerRaw = params.get("set") === "owner-raw";
@@ -300,7 +307,7 @@ function ownerRawCard(requestId: string, snapshot: OwnerDecisionSnapshot = owner
     ],
     context: { toolName: "Typed Workflow Decision", input: JSON.stringify(snapshot, null, 2) },
     workflowDecision: { occurrenceId, requestId, sessionId: "agent-question-session", controllingSessionId: "agent-question-session",
-      resourceKey: "bridge-retry", category: "owner_decision", status: "pending", authority: "human", policyRevision: 1,
+      resourceKey: campaignHandoff ? CAMPAIGN_HANDOFF_QUESTION_KEY : "bridge-retry", category: "owner_decision", status: "pending", authority: "human", policyRevision: 1,
       resourceDigest: "digest", createdAt: askedAt, authorityEvaluation: { owner: "human", reason: "owner_kept" },
       resourceSnapshot: snapshot } as unknown as WorkflowDecisionView,
   };
@@ -512,7 +519,7 @@ function Fixture() {
   const dismissed = lastCall?.action === "dismiss";
   const items = useMemo<TimelineItem[]>(() => [
     ...Array.from({ length: rowsBefore }, (_, index) => transcriptRow(index + 1, index, "Earlier")),
-    ...(questionUnloaded ? [] : [{
+    ...(questionUnloaded || campaignHandoff ? [] : [{
       kind: "question" as const,
       id: QUESTION_EVENT_ID,
       requestId,
@@ -527,6 +534,7 @@ function Fixture() {
     ...Array.from({ length: rowsAfter }, (_, index) => transcriptRow(QUESTION_EVENT_ID + 1 + index, index, "Later")),
   ], [dismissed, lastCall, questions, requestId, resolved]);
   const request = useMemo<PendingApproval | null>(() => resolved ? null : ownerRaw ? ownerRawCard(requestId)
+    : campaignHandoff ? presentOwnerQuestionRequest(ownerRawCard(requestId, ownerQuestionSnapshot))
     : childRaw ? childQuestionCard(requestId) : childQuestion ? presentOwnerQuestionRequest(childQuestionCard(requestId))
     : scopeProposalRaw ? scopeProposalCard(requestId) : scopeProposalSet ? presentOwnerQuestionRequest(scopeProposalCard(requestId)) : {
     kind: "question",
@@ -678,7 +686,7 @@ function Fixture() {
                         onRevealHandled={handleRevealed}
                         questionContext={questionContext}
                       />
-                      {resolved && <p role="status">Question Answered</p>}
+                      {resolved && <p role="status">{campaignHandoff ? "Handoffs Acknowledged" : "Question Answered"}</p>}
                     </div>
                   </div>
                 </div>

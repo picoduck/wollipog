@@ -350,8 +350,9 @@ A root's question to its owner, whatever the topic, always uses that Owner Quest
 only prose. Never end a turn with a blocker needing the owner without a typed request or a recorded
 handoff with the reason and next action. Decide what is yours, including Orchestrator-owned
 implementation questions and whether to accept, reject or defer a follow-up. Human handoffs on a
-settled Full Control campaign create one Inbox question updated from the ledger; external handoffs
-are included but do not create it alone. The answer grants no authority.
+settled Full Control campaign create one Campaign Handoffs status update in the Inbox. The update
+includes external handoffs when there is a human handoff. The owner can acknowledge the notice,
+and the work items stay recorded in Campaign Status.
 Reserve Owner Approvals (`kind: "approval"`, or a typed decision handed over with
 `hand_workflow_decision_to_owner`) for exact actions the owner kept. Read `issueClosureResult`: `closed` and `already_closed`
 are verified outcomes. `refused` wrote nothing and used up the approval: its `refusal.reason` and
