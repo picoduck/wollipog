@@ -750,6 +750,12 @@ test("the effective sandbox, not the configured mode, decides whether resume is 
   assert.deepEqual(effectiveAcpCompatibility(profile, undefined), { acpCompatibility: profile });
   assert.deepEqual(effectiveAcpCompatibility(profile, { backend: "bwrap" } as never), { acpCompatibility: { ...profile, resumable: false } });
   assert.deepEqual(effectiveAcpCompatibility(undefined, { backend: "bwrap" } as never), {});
+  // A managed worktree on a provider-isolation runner preserves agy's state directory, so the
+  // conversation it started in place resumes there (#4779's follow-up).
+  assert.deepEqual(effectiveAcpCompatibility(profile, { backend: "bwrap", preservesProviderHome: true } as never),
+    { acpCompatibility: profile });
+  assert.deepEqual(effectiveAcpCompatibility({ ...profile, resumable: false }, { backend: "bwrap", preservesProviderHome: true } as never),
+    { acpCompatibility: { ...profile, resumable: false } }, "a runner configured for bwrap never offers it");
 });
 
 test("account identifiers are redacted from agent text", () => {

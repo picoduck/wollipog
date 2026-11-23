@@ -1014,7 +1014,9 @@ export function effectiveAcpCompatibility(
   isolation: SpawnIsolation | undefined,
 ): Pick<DriverOptions, "acpCompatibility"> {
   if (!compatibility) return {};
-  return { acpCompatibility: isolation ? { ...compatibility, resumable: false } : compatibility };
+  // A sandbox makes agy's state directory read-only unless it preserves the provider home.
+  const stateReadOnly = isolation && !(isolation.backend === "bwrap" && isolation.preservesProviderHome);
+  return { acpCompatibility: stateReadOnly ? { ...compatibility, resumable: false } : compatibility };
 }
 
 function canResumeSession(meta: SessionMeta): boolean {
@@ -11437,10 +11439,10 @@ export class SessionManager {
         path: protectedWorktree, gitWritableRoots, requiredReadOnlyPaths,
         ...(ownedWorktrees.length ? { ownedWorktrees } : {}),
       } } : {}),
-      // An ACP agent's home has no known preservable state; one whose compatibility profile accepts
-      // read-only state (Antigravity, #4779) runs in the protected worktree without it.
-      ...(protectedWorktree && this.executionIsolation.mode === "provider" &&
-        !(meta.driver === "acp" && this.launchAcpCompatibility.has(meta)) ? { preserveProviderHome: true } : {}),
+      // A generic ACP agent has no known state directory, so isolation refuses to preserve one.
+      // Antigravity's profile names agy's (~/.gemini/antigravity-cli): preserved, a relaunch in the
+      // worktree resumes its conversation, as one in place does.
+      ...(protectedWorktree && this.executionIsolation.mode === "provider" ? { preserveProviderHome: true } : {}),
       ...(protectedWorktree && this.launchAcpCompatibility.get(meta)?.profile === "antigravity"
         ? { antigravityTerminalHelper: true } : {}),
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),

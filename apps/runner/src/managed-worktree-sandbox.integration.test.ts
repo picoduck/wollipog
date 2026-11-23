@@ -128,6 +128,79 @@ test("an Antigravity provider can write and run its shell helper inside a real m
   assert.equal(exec("/usr/bin/test", ["!", "-e", helper]).status, 0, "a subsequent launch gets a fresh mount");
 });
 
+/** A managed-worktree Antigravity launch on a provider-isolation runner, as the session manager
+ * requests it: its own state directory preserved, its shell helper still private. */
+function antigravityPreservedIsolation(
+  fixture: ReturnType<typeof managedWorktreeFixture>, deps: Parameters<typeof resolveExecutionIsolation>[2] = {},
+) {
+  const { root, repoPath, worktreePath, home } = fixture;
+  const readOnlyPaths = managedWorktreeReadOnlyPaths([{ worktreePath, repoPath }], true);
+  return resolveExecutionIsolation({ mode: "bwrap", network: "deny" }, { kind: "native" }, deps, {
+    driver: "acp", dataDir: join(root, "state"), env: { HOME: home }, sessionId: "s_managed", cwd: worktreePath,
+    antigravityTerminalHelper: true, preserveProviderHome: true, readOnlyPaths,
+    protectedWorktree: { path: worktreePath,
+      gitWritableRoots: managedWorktreeGitWritableRoots(worktreePath, [{ worktreePath, repoPath }]),
+      requiredReadOnlyPaths: readOnlyPaths },
+  });
+}
+
+test("a preserved Antigravity home binds only agy's state directory, with the private helper mounted over it", async () => {
+  const fixture = managedWorktreeFixture();
+  const providerState = join(fixture.home, ".gemini", "antigravity-cli");
+  mkdirSync(providerState, { recursive: true });
+  const isolation = await antigravityPreservedIsolation(fixture, {
+    platform: "linux", uid: () => 1000,
+    resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
+  });
+  assert.ok(isolation?.backend === "bwrap");
+  assert.equal(isolation.preservesProviderHome, true);
+  const binds = (isolation.writableBinds ?? []).map((bind) => bind.target);
+  assert.ok(binds.includes(providerState), "agy's conversations, settings and sign-in persist");
+  assert.ok(!binds.includes(fixture.home) && !binds.includes(join(fixture.home, ".gemini")), "never HOME or ~/.gemini");
+  assert.equal(isolation.antigravityTerminalHelper, join(providerState, "bin"));
+  const args = buildBwrapArgs({ command: "/bin/true", args: [], cwd: fixture.worktreePath }, isolation);
+  const stateBind = args.findIndex((arg, index) => arg === "--bind" && args[index + 2] === providerState);
+  const helperMount = args.findIndex((arg, index) => arg === "--tmpfs" && args[index + 1] === join(providerState, "bin"));
+  assert.ok(stateBind >= 0 && helperMount > stateBind,
+    "the session-private helper tmpfs shadows the shared bin directory inside the writable state");
+});
+
+test("a preserved Antigravity home aliased into shared Git state is refused before anything is created there", async () => {
+  const fixture = managedWorktreeFixture();
+  const commonGit = join(fixture.repoPath, ".git");
+  symlinkSync(commonGit, join(fixture.home, ".gemini"));
+  await assert.rejects(antigravityPreservedIsolation(fixture, {
+    platform: "linux", uid: () => 1000,
+    resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
+  }), /overlaps protected worktree roots or Git administration/);
+  assert.equal(existsSync(join(commonGit, "antigravity-cli")), false, "no directory is created through the alias");
+});
+
+test("a real preserved Antigravity home keeps conversations across launches while its helper stays private", {
+  skip: bubblewrapUsable() ? false : "bubblewrap cannot create a user namespace on this host",
+}, async () => {
+  const fixture = managedWorktreeFixture(process.cwd());
+  const providerState = join(fixture.home, ".gemini", "antigravity-cli");
+  const conversation = join(providerState, "conversations", "c1.pb");
+  const helper = join(providerState, "bin", "agentapi");
+  mkdirSync(providerState, { recursive: true });
+  const isolation = await antigravityPreservedIsolation(fixture);
+  assert.ok(isolation?.backend === "bwrap");
+  const exec = (script: string) => run(isolation.command,
+    buildBwrapArgs({ command: "/bin/sh", args: ["-ec", script, "sh", conversation, helper], cwd: fixture.worktreePath }, isolation),
+    fixture.worktreePath);
+  const first = exec(`
+    mkdir -p "$(dirname "$1")" && printf saved > "$1"
+    printf '#!/bin/sh\\n' > "$2" && chmod +x "$2"
+    if (printf changed > .git) 2>/dev/null; then exit 12; fi
+  `);
+  assert.equal(first.status, 0, first.output);
+  assert.equal(readFileSync(conversation, "utf8"), "saved", "a relaunch can resume the conversation");
+  assert.equal(existsSync(helper), false, "the generated helper never reaches the shared host directory");
+  const second = exec('test "$(cat "$1")" = saved && test ! -e "$2"');
+  assert.equal(second.status, 0, second.output);
+});
+
 test("the Antigravity helper mount refuses aliases into shared Git state before creating a mount point", async () => {
   const { root, repoPath, worktreePath, home } = managedWorktreeFixture();
   const providerState = join(home, ".gemini", "antigravity-cli");

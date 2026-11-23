@@ -1659,15 +1659,28 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
 - **Stop.** For every ACP agent, `cancel()` now answers each pending `session/request_permission`
   with `cancelled`, as ACP requires, so a stopped turn's approval never stays open in the agent. The
   card itself settles with the turn, as for the native drivers.
-- **Resume.** Only a launch with no runner-owned sandbox (`provider` isolation and no managed Linux
-  worktree) lets agy persist its conversation, so only then does the session advertise
-  `session/resume`, and a restart resumes by id without replaying history. Under any runner sandbox
-  (bwrap, including a managed worktree's, or Seatbelt) agy's state directory
-  (`~/.gemini/antigravity-cli`, which also holds its OAuth token and settings) cannot persist
-  conversations, so no resume is advertised and a restart shows the existing "read-only
-  history" refusal instead of starting a fresh conversation. A writable grant for agy's
-  conversation state is a follow-up. `session/load` is never used: agy answers a load of an id it
-  cannot read with an empty session, which would pass for a resumed conversation.
+- **Resume.** agy keeps its conversations in its state directory, `~/.gemini/antigravity-cli`, which
+  also holds its OAuth token and settings. It resumes only where that directory is writable. Where
+  it is, the session advertises `session/resume`, and a restart or a switch to another worktree
+  resumes by id without replaying history.
+  - On a `provider` isolation runner, both in place and in a managed Linux worktree. A managed
+    worktree forces bwrap there, and the launch preserves the provider home as it does for Claude,
+    Codex and Pi. Antigravity's compatibility profile names the directory, since the generic ACP
+    driver has none, and only that directory is bound writable (plus the shared build caches every
+    preserved home gets). The rest of HOME stays read-only.
+  - The generated shell helper stays on its session-private tmpfs at `bin`. The launcher renders
+    it after the writable binds, so it shadows the shared directory's `bin`. A sandboxed session
+    therefore cannot plant a helper that another session's agy would run.
+  - A directory the launch creates is mode 0700.
+  - Before this (#4779 to #4898), the directory was read-only in managed worktrees. A session that
+    started in place and then created its own worktree failed on the relaunch with "ACP agent does
+    not advertise session resume or load support".
+
+  Under a runner configured for bwrap or Seatbelt, the directory stays read-only, so no resume is
+  advertised there. A restart shows the existing "read-only history" refusal instead of starting a
+  fresh conversation, and a worktree switch is refused before the provider is retired.
+  `session/load` is never used: agy answers a load of an id it cannot read with an empty session,
+  which would pass for a resumed conversation.
 - **Approvals.** Commands ask through `session/request_permission` (string request ids, `allow` and
   `deny` options) and the card's title is the command line. Deny prevents the command. New sessions
   default to Auto Mode. Wollipog selects ACP's `auto` before the first prompt or after resume if agy

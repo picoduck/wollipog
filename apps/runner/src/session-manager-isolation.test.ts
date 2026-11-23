@@ -243,19 +243,27 @@ test("Antigravity gets a temporary terminal helper directory even when provider 
 
     assert.equal(await internals.acquireAdmission("s1"), true);
     assert.equal(await internals.launch(store.readMeta("s1")), true);
-    assert.equal(preservedProviderHome, false, "no provider home is preserved for it");
+    assert.equal(preservedProviderHome, true, "agy's own state directory is preserved, as Claude's and Codex's are");
     const isolation = options?.isolation;
     assert.equal(isolation?.backend, "bwrap", "the managed worktree's forced bwrap still applies");
-    assert.equal(isolation?.backend === "bwrap" && isolation.writableBinds?.some((bind) =>
-      bind.target === home || bind.target.startsWith(`${home}/`)), false, "its HOME stays read-only");
     assert.ok(isolation?.backend === "bwrap");
+    const homeBinds = (isolation.writableBinds ?? []).map((bind) => bind.target)
+      .filter((target) => target === home || target.startsWith(`${home}/`));
+    assert.ok(homeBinds.includes(providerState));
+    assert.deepEqual(homeBinds.filter((target) => target !== providerState && !target.startsWith(`${providerState}/`))
+      .filter((target) => !/\/(\.cache|\.npm|\.cargo\/(registry|git)|\.local\/share\/pnpm\/store|go\/pkg\/mod)$/u.test(target)), [],
+      "nothing else in HOME but the build caches every preserved provider home shares");
     assert.ok(lstatSync(helperDir).isDirectory());
     assert.equal(lstatSync(providerState).mode & 0o077, 0, "new provider state is private to the runner user");
     const args = buildBwrapArgs({ command: "agy", args: ["acp"], cwd: worktreePath }, isolation);
-    assert.ok(args.some((arg, i) => arg === "--tmpfs" && args[i + 1] === helperDir));
-    assert.equal(bwrapPathWritable(args, join(providerState, "credentials.json")), false);
-    assert.deepEqual(options?.acpCompatibility, { profile: "antigravity", resumable: false },
-      "resume follows the effective sandbox, not the configured provider mode");
+    assert.ok(args.some((arg, i) => arg === "--tmpfs" && args[i + 1] === helperDir), "the helper stays session-private");
+    assert.equal(bwrapPathWritable(args, join(providerState, "conversations", "c.pb")), true,
+      "conversations persist, so a relaunch in the worktree resumes");
+    assert.equal(bwrapPathWritable(args, join(home, ".bashrc")), false, "the rest of HOME stays read-only");
+    assert.ok(args.lastIndexOf(providerState) < args.lastIndexOf(helperDir),
+      "the private helper tmpfs is rendered after, and so shadows, the shared state directory's bin");
+    assert.deepEqual(options?.acpCompatibility, { profile: "antigravity", resumable: true },
+      "resume follows the effective sandbox, which now keeps agy's state");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
