@@ -181,6 +181,14 @@ if (process.argv.includes("--verify-discovery-size")) {
       const result = await discover({operations: pending.slice(0, 64)});
       schemaPages.push(result.bytes);
       received.push(...result.body.operations.map((operation: {name: string}) => operation.name));
+      // A schema that fits only on its own is named in `requestSeparately`; follow the documented
+      // contract and request it by itself, as a client does, before the rest of the batch.
+      if (result.body.requestSeparately) {
+        const alone = await discover({operations: [result.body.requestSeparately]});
+        assert.equal(alone.body.operations[0]?.name, result.body.requestSeparately, "A separately requested schema must be returned");
+        schemaPages.push(alone.bytes);
+        received.push(result.body.requestSeparately);
+      }
       pending = [...(result.body.remaining ?? []), ...pending.slice(64)];
     }
     assert.deepEqual(received, names, "Schema requests must return every granted operation");

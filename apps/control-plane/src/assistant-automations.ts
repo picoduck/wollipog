@@ -11,8 +11,8 @@ function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new AssistantRefusal("An argument object is required.");
   return value as Record<string, unknown>;
 }
-function spec(value: unknown): AutomationSpec {
-  const parsed = validateAutomationSpec(value);
+function spec(value: unknown, previous?: AutomationSchedule, deferStoredLimits = false): AutomationSpec {
+  const parsed = validateAutomationSpec(value, previous, {deferCampaignLimits: deferStoredLimits});
   if (!parsed.ok) throw new AssistantRefusal(parsed.error ?? "Automation configuration is invalid.");
   return parsed.data!;
 }
@@ -35,10 +35,16 @@ export function registerAssistantAutomations(operations: AssistantOperations, db
   for (const name of ["auto_list", "auto_get", "auto_create", "auto_update", "auto_enable", "auto_pause", "auto_delete"] as const) {
     const mutation = name !== "auto_list" && name !== "auto_get";
     const proposed = (a: Record<string, unknown>): AutomationSpec => name === "auto_create" || name === "auto_update"
-      ? spec(a.payload) : specOf(load(a, name === "auto_delete"));
+      ? spec(a.payload, name === "auto_update" ? load(a) : undefined) : specOf(load(a, name === "auto_delete"));
     const target = (value: unknown): AssistantTarget => {
       if (name === "auto_list") return {kind: "automation", id: "list"};
-      const a = object(value), targets = automationManagementTargets(db, proposed(a));
+      // Target resolution runs before the grant and access checks, and a refused call records its
+      // target in connection activity. So it reads only the submitted configuration: an update's
+      // Full Control limit values are compared with the stored schedule (and the stored targets
+      // authorized) after those checks, in impact and execute.
+      const a = object(value);
+      const submitted = name === "auto_update" ? spec(a.payload, undefined, true) : proposed(a);
+      const targets = automationManagementTargets(db, submitted);
       return {kind: "automation", id: name === "auto_create" ? "new" : load(a, name === "auto_delete").automationId, projectId: targets[0]?.projectId};
     };
     operations.register({name, description: ({auto_list: "List accessible automations and latest execution status.", auto_get: "Inspect configuration, revision, execution status and affected targets.",
@@ -67,7 +73,9 @@ export function registerAssistantAutomations(operations: AssistantOperations, db
         if (name === "auto_get") {
           const schedule = load(a), targets = authorize(schedule);
           const result = service.get(schedule.automationId);
-          return {...result.data, impact: {targets}};
+          // A scheduled campaign also reports the settings its next occurrence would use now.
+          const effectiveCampaign = service.campaignPreview(schedule, context.owner);
+          return {...result.data, impact: {targets}, ...(effectiveCampaign ? {effectiveCampaign} : {})};
         }
         let resultId: string | undefined;
         return mutations.run({connection: db.assistantConnections.get(context.connection.id)!, operation: name, args: a,
