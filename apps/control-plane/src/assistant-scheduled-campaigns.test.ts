@@ -30,6 +30,11 @@ function violation(schema: Schema, value: unknown, path = "payload"): string | n
   }
   if ("const" in schema && schema.const !== value) return `${path}: expected ${JSON.stringify(schema.const)}`;
   if (Array.isArray(schema.enum) && !schema.enum.includes(value)) return `${path}: not one of ${JSON.stringify(schema.enum)}`;
+  if (schema.not && violation(schema.not as Schema, value, path) === null) return `${path}: must not match ${JSON.stringify(schema.not)}`;
+  if (schema.if && schema.then && violation(schema.if as Schema, value, path) === null) {
+    const conditional = violation(schema.then as Schema, value, path);
+    if (conditional) return conditional;
+  }
   if (Array.isArray(schema.oneOf)) {
     const errors = (schema.oneOf as Schema[]).map(option => violation(option, value, path));
     const matches = errors.filter(error => error === null).length;
@@ -286,6 +291,11 @@ test("the discovered schema and the save validator accept and refuse the same ca
     /childHarness\.context\.distro:/, /behavior\.childHarness\.context\.distro is not/],
     ["uppercase repository", variant(r => { r.campaign.repository = "Owner/Repo"; }), /campaign\.repository:/, /repository must be the lowercase/],
     ["repository without an owner", variant(r => { r.campaign.repository = "repo"; }), /campaign\.repository:/, /repository must be the lowercase/],
+    ["repository with a space", variant(r => { r.campaign.repository = "owner/repo name"; }), /campaign\.repository:/, /repository must be the lowercase/],
+    ["Full Control overrides on a Custom campaign", variant(r => { (r.campaign as Record<string, unknown>).controlMode = "custom"; }),
+      /request\.campaign: must not match/, /fullControl applies only to controlMode full_control/],
+    ["empty budget key", variant(r => { (r.campaign.fullControl.budget as Record<string, unknown>)[""] = 1; }),
+      /fullControl\.budget\.: not allowed/, /fullControl\.budget\."" is not accepted/],
     ["unsafe tool calls", variant(r => { (r.campaign.fullControl.budget as Record<string, unknown>).toolCalls = 2 ** 53; }),
       /budget\.toolCalls: above/, /budget\.toolCalls must be an integer/],
     ["blank task title", variant(r => { r.campaign.tasks[0]!.title = "   "; }), /tasks\[0\]\.title:/, /tasks\[0\] must have/],
@@ -409,13 +419,37 @@ test("a schedule stored before the save-time limit checks can still be paused un
 test("the effective readback reports stored checkpoints that the next occurrence would refuse", async t => {
   const f = fixture();
   t.after(async () => { await f.app.close(); f.db.close(); });
-  const stored = payload();
-  (stored.action.request.campaign.fullControl.budget as Record<string, unknown>).checkpointsUsd = [16];
-  const schedule = f.db.createAutomation({ automationId: "auto_legacy_checkpoints", spec: stored as unknown as AutomationSpec,
-    nextFireAt: Date.now() + 60_000, actor: { kind: "human", id: f.owner.userId }, now: Date.now() });
-  const read = await f.call("auto_get", { automationId: schedule.automationId });
-  assert.match(read.effectiveCampaign.error, /checkpointsUsd exceed the effective cost limit of 15/);
+  // Stored JSON is not revalidated on read, so a wrong type must not break the read either.
+  for (const [automationId, checkpointsUsd] of [["auto_legacy_checkpoints", [16]], ["auto_legacy_checkpoint_type", "16"]] as const) {
+    const stored = payload();
+    (stored.action.request.campaign.fullControl.budget as Record<string, unknown>).checkpointsUsd = checkpointsUsd;
+    f.db.createAutomation({ automationId, spec: stored as unknown as AutomationSpec,
+      nextFireAt: Date.now() + 60_000, actor: { kind: "human", id: f.owner.userId }, now: Date.now() });
+    const read = await f.call("auto_get", { automationId });
+    assert.equal(read.automation.automationId, automationId);
+    assert.match(read.effectiveCampaign.error, /checkpointsUsd must be positive amounts within the effective cost limit of 15/);
+  }
   assert.deepEqual(f.sent.map(message => message.type), []);
+});
+
+test("an Assistant update outside the connection's grant gets the same refusal whatever the stored values", async t => {
+  const f = fixture();
+  t.after(async () => { await f.app.close(); f.db.close(); });
+  const stored = payload();
+  (stored.action.request.campaign.fullControl.budget as Record<string, unknown>).toolCalls = 2 ** 53;
+  const schedule = f.db.createAutomation({ automationId: "auto_outside_grant", spec: stored as unknown as AutomationSpec,
+    nextFireAt: Date.now() + 60_000, actor: { kind: "human", id: f.owner.userId }, now: Date.now() });
+  f.db.assistantConnections.configure(f.issued.connection.id, { operations: "all", projects: [] });
+  const changed = payload();
+  (changed.action.request.campaign.fullControl.budget as Record<string, unknown>).toolCalls = 2 ** 53 + 2;
+  const refusal = async (value: unknown, operationId: string) => {
+    try { await f.call("auto_update", { operationId, automationId: schedule.automationId, expectedRevision: schedule.revision, payload: value }); }
+    catch (error) { return (error as Error).message; }
+    assert.fail("an update outside the grant must be refused");
+  };
+  const matching = await refusal(stored, "matching"), differing = await refusal(changed, "differing");
+  assert.equal(matching, differing, "the refusal cannot reveal whether the submission matches the stored schedule");
+  assert.doesNotMatch(matching!, /toolCalls/);
 });
 
 test("the effective readback pins a legacy plain agent id the way dispatch does, without saving the pin", async t => {

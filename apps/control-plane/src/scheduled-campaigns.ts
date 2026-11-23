@@ -108,8 +108,8 @@ export function automationCampaignError(request: Record<string, unknown>,
       issues: ["relatedFollowUps", "maxIssues", "closureReasons"] }[key as "budget" | "issues"];
     const part = (fullControl as Record<string, unknown>)[key];
     const inner = nested && object(part) ? Object.keys(part).find(name => !nested.includes(name)) : undefined;
-    return inner
-      ? `request.campaign.fullControl.${key}.${inner} is not accepted: use only ${nested!.join(", ")}`
+    return inner !== undefined
+      ? `request.campaign.fullControl.${key}.${inner === "" ? "\"\"" : inner} is not accepted: use only ${nested!.join(", ")}`
       : `request.campaign.fullControl.${key} is not an accepted launch override value`;
   }
   // A stored schedule keeps the values it was admitted with, so an unchanged schedule can still be
@@ -265,9 +265,13 @@ export class ScheduledCampaignRuntime {
     const childError = this.customChildError(campaign, launch, human, target.runnerId);
     if (childError) return { error: childError };
     const budget = scheduledCampaignBudget({ limits: automation.limits, action }, launch);
-    // A schedule stored before save checked them can hold checkpoints launch refuses.
-    if (campaign.fullControl?.budget?.checkpointsUsd?.some(amount => amount > budget.costUsd)) {
-      return { error: `request.campaign.fullControl.budget.checkpointsUsd exceed the effective cost limit of ${budget.costUsd}; the next occurrence would be refused` };
+    // A schedule stored before save checked them can hold checkpoints launch refuses, including
+    // values of the wrong type: stored JSON is not revalidated on read.
+    const checkpoints: unknown = campaign.fullControl?.budget?.checkpointsUsd;
+    if (checkpoints !== undefined && (!Array.isArray(checkpoints) ||
+        checkpoints.some(amount => typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0 || amount > budget.costUsd))) {
+      return { error: "request.campaign.fullControl.budget.checkpointsUsd must be positive amounts within the effective cost limit of " +
+        `${budget.costUsd}; the next occurrence would be refused` };
     }
     const { behavior, delegation, execution } = structuredClone(launch.policy);
     return { controlMode: campaign.controlMode, repository: campaign.repository,

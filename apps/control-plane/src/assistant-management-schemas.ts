@@ -53,16 +53,19 @@ const orchestrator = strict({
   execution: strict({strictProjectIsolation: boolean, integrationIsolation: boolean}),
 });
 /** Mirrors automationCampaignError and the Full Control launch overrides it accepts. */
-const campaign = strict({
+const campaign = {...strict({
   controlMode: {enum: ["custom", "full_control"]},
-  repository: {type: "string", pattern: "^[^A-Z/]+(/[^A-Z/]+)+$", maxLength: 256, description: "Lowercase owner/name, or GitLab host/group/project."},
+  repository: {type: "string", maxLength: 256, description: "Lowercase owner/name, or GitLab host/group/project.",
+    pattern: "^([a-z0-9_.-]+/[a-z0-9_.-]+|[a-z0-9-]+(\\.[a-z0-9-]+)+(:[0-9]{1,5})?(/[a-z0-9_][a-z0-9_.-]*){2,22})$"},
   tasks: {type: "array", maxItems: 100, items: strict({key: {type: "string", pattern: "^[a-zA-Z0-9_-]{1,128}$"},
     title: prose(120), prompt: prose(16_384)}, ["key", "title", "prompt"])},
   fullControl: strict({objective: prose(4000), operations: {type: "array", minItems: 1, uniqueItems: true, items: {enum: FULL_CONTROL_LAUNCH_OPERATIONS}},
     delegatablePolicyIds: {type: "array", maxItems: 100, items: prose(256)},
     budget: strict({costUsd: positive, toolCalls: integer(1, safe), concurrency: integer(1, safe), acceptedFollowUps: integer(0, safe), checkpointsUsd: {type: "array", maxItems: 100, items: positive, description: "Increasing, within the smaller of limits.maxCostUsd and costUsd."}}),
     issues: strict({relatedFollowUps: boolean, maxIssues: integer(1, 100), closureReasons: {type: "array", uniqueItems: true, items: {enum: ["completed", "not_planned"]}}})}),
-}, ["controlMode", "repository", "tasks"]);
+}, ["controlMode", "repository", "tasks"]),
+  // fullControl applies only to full_control.
+  if: {properties: {controlMode: {const: "custom"}}, required: ["controlMode"]}, then: {not: {required: ["fullControl"]}}};
 export const automationPayloadSchema = object({
   name: text, cron: {...text, description: "Five-field cron."},
   timezone: {...text, description: "IANA timezone."}, enabled: boolean,
