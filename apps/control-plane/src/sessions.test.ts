@@ -11837,6 +11837,9 @@ test("createSession launches Antigravity in Auto Mode by default and persists an
   };
   const legacy = { ...agent, id: "legacy-acp", capabilities: { ...agent.capabilities, permissionModes: ["default", "auto"] } };
   db.updateRunnerAgents(RUNNER_ID, [agent, legacy], Date.now());
+  const localUser = db.localIdentityContext().userId;
+  db.setAgentHarnessDefault(localUser, { agentId: agent.id, driver: "acp", context: { kind: "native" } },
+    { permissionMode: "antigravity-full-permissions" });
   for (const { agentId, explicit, expected } of [
     { agentId: agent.id, explicit: undefined, expected: "auto" },
     { agentId: agent.id, explicit: "antigravity-full-permissions", expected: "antigravity-full-permissions" },
@@ -11845,7 +11848,7 @@ test("createSession launches Antigravity in Auto Mode by default and persists an
     const result = svc.createSession({
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId,
       ...(explicit ? { config: { permissionMode: explicit } } : {}),
-    });
+    }, undefined, undefined, false, false, false, { defaultOwnerUserId: localUser });
     assert.ok(result.ok && result.data, JSON.stringify(result));
     assert.equal(db.getSession(result.data.id)!.permissionMode, expected ?? null);
     assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, expected);
@@ -11856,6 +11859,12 @@ test("createSession launches Antigravity in Auto Mode by default and persists an
       assert.equal(db.getSession(result.data.id)!.permissionMode, expected);
     }
   }
+  const orchestrator = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: agent.id, role: "orchestrator",
+    config: { permissionMode: "antigravity-full-permissions" },
+  });
+  assert.equal(orchestrator.status, 409);
+  assert.match(orchestrator.error ?? "", /only for normal Antigravity sessions/u);
 });
 
 test("createSession persists and launches the resolved concrete model and effort", () => {

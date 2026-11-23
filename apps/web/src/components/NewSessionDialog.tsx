@@ -604,7 +604,7 @@ export function NewSessionDialog({
     runnerSupportsProtocol(runner?.protocolVersion, "wslSafeLauncher") &&
     runner?.runtime?.executionIsolation?.mode === "bwrap";
   const hostExecutionTarget = !executionTarget || executionTarget.adapter === "host";
-  const antigravityPermissionMode = hostExecutionTarget && agent?.id === ANTIGRAVITY_AGENT_ID &&
+  const antigravityPermissionMode = !orchestrator && hostExecutionTarget && agent?.id === ANTIGRAVITY_AGENT_ID &&
     agent.capabilities?.permissionModes?.includes(ANTIGRAVITY_FULL_PERMISSIONS_MODE.id)
     ? (antigravityFullPermissionsRunner === runnerId ? ANTIGRAVITY_FULL_PERMISSIONS_MODE.id : ANTIGRAVITY_AUTO_MODE.id)
     : undefined;

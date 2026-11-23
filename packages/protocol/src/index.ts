@@ -65,6 +65,7 @@ export * from "./pull-request-watch.js";
 export * from "./session-waits.js";
 export * from "./workspace-removal.js";
 export * from "./antigravity-setup.js";
+import { ANTIGRAVITY_FULL_PERMISSIONS_MODE } from "./antigravity-setup.js";
 export * from "./forge-decision-action.js";
 export * from "./release-decision.js";
 export * from "./merge-closure-watch.js";
@@ -7392,6 +7393,7 @@ export function installationSupportsDefault(
   installation: Pick<AgentHarnessDefaultInstallation, "models" | "effortLevels" | "permissionModes">,
   config: AgentHarnessDefaultConfig,
 ): boolean {
+  if (config.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) return false;
   const model = config.model ? installation.models.find((candidate) => candidate.id === config.model) : undefined;
   if (config.model && !model) return false;
   const efforts = model?.efforts?.length ? model.efforts : installation.effortLevels;

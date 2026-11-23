@@ -4942,6 +4942,9 @@ export class SessionsService {
     if (threadLaunch && role === "orchestrator") return fail(ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL, 409);
     const orchestrator = role === "orchestrator";
     const presetPermissions = usesOrchestratorPresetPermissions(requestedConfig);
+    if (orchestrator && requestedConfig.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) {
+      return fail("Full Permissions Mode is available only for normal Antigravity sessions.", 409);
+    }
     // A saved permission mode can supply the Orchestrator preset after explicit model resolution.
     if (explicitManagedModel && (orchestrator || presetPermissions)) {
       return fail("Choose a specific model for this launch.", 409);
