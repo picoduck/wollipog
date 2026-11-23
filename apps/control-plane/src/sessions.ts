@@ -30,6 +30,7 @@ import { FORGE_DECISION_ACTION_REFUSAL_REASONS, FORGE_DECISION_ACTION_STALE_REFU
 import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 import type { CampaignCleanupItem, CampaignStuckItem } from "@wollipog/protocol";
 import { inspectionResource, invalidInspectionReason } from "./campaign-worktree-inspection.js";
+import { workspacePathsEqual } from "./workspace-match.js";
 import { worktreeDirtyPaths } from "@wollipog/protocol";
 import { formatCampaignAssignment } from "./campaign-assignment.js";
 import { campaignFollowUpAdmissionKey } from "./campaign-budget.js";
@@ -17701,9 +17702,13 @@ export class SessionsService {
 
   private requesterForgeDecisionLocation(session: SessionView): ProjectLocationView | null {
     const location = session.projectLocationId ? this.db.getProjectLocation(session.projectLocationId) : null;
-    return location && location.projectId === session.projectId && location.runnerId === session.runnerId &&
-      location.workspaceId === session.workspaceId && location.availability === "available" &&
-      !this.db.getAdHocWorkspacePath(session.id) ? location : null;
+    if (!location || location.projectId !== session.projectId || location.runnerId !== session.runnerId ||
+        location.workspaceId !== session.workspaceId || location.availability !== "available") return null;
+    // Runner snapshots persist the launch directory for registered workspaces too.
+    const launchPath = this.db.getAdHocWorkspacePath(session.id);
+    if (!launchPath) return location;
+    const registeredPath = this.db.getWorkspacePath(location.runnerId, location.workspaceId);
+    return registeredPath && workspacePathsEqual(launchPath, registeredPath) ? location : null;
   }
 
   /** A Custom campaign root publishing a draft it wrote itself (#3919). It controls that gate, which

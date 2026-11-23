@@ -28,6 +28,7 @@ import {
 } from "@wollipog/protocol";
 import { AssistantProxies } from "../../runner/src/assistant-proxy.js";
 import { runAssistantMcp } from "../../runner/src/assistant-mcp.js";
+import { metaToSnapshot } from "../../runner/src/session-store.js";
 import { ControlPlaneDb, type NewSessionInput } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
@@ -646,6 +647,59 @@ test("older runners refuse typed release requests before contacting GitHub", asy
       assert.match(result.error ?? "", /typed release decisions/u);
     }
     assert.deepEqual(h.db.pendingWorkflowDecisionsForSession("child"), []);
+  } finally { await h.close(); }
+});
+
+test("typed CI reruns accept snapshots from the registered workspace and refuse other launch locations", async () => {
+  const h = await harness();
+  try {
+    const resourceSnapshot = { category: "ci_rerun" as const, repository: "picoduck/wollipog",
+      runId: 123, attempt: 1, jobId: 456, headSha: "a".repeat(40) };
+    const inspections: string[] = [];
+    h.hub.requestFromRunner = async (_runnerId, requestId, frame) => {
+      inspections.push(frame.type);
+      if (frame.type === "campaign_launch_inspect") {
+        return { type: "campaign_launch_inspection_result", requestId, workspaceId: frame.workspaceId,
+          ok: true, repository: resourceSnapshot.repository, issueNumbers: [], digest: "0".repeat(64) };
+      }
+      assert.equal(frame.type, "forge_decision_action");
+      assert.equal(frame.action.kind, "ci_rerun_inspect_job");
+      return { type: "forge_decision_action_result", requestId, sessionId: frame.sessionId, occurrenceId: frame.occurrenceId,
+        outcome: "ci_job_inspected", jobName: "Unit Tests (4)" };
+    };
+
+    const requestFromSnapshot = async (id: string, workspaceId: string | null, repoPath: string) => {
+      h.db.createSession({ id, runnerId: "r", workspaceId, agentId: claude.id, title: id,
+        driver: "claude-code", config: {}, now: 1, useWorktree: workspaceId !== null,
+        ...(workspaceId ? { projectId: h.project.id, projectLocationId: h.location.id } : { workspacePath: repoPath }),
+      });
+      h.db.updateSessionFromSnapshot(id, metaToSnapshot({
+        sessionId: id, workspaceId, repoPath, worktreePath: workspaceId ? "/fixture/worktrees/" + id : null,
+        agentId: claude.id, driver: "claude-code", command: "claude", args: [], env: {}, context: { kind: "native" },
+        agentSessionId: null, title: id, status: "running", config: {}, preview: null, pendingApproval: null,
+        tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: 1, updatedAt: 2,
+      }), 2);
+      return h.svc.createWorkflowDecisionWithVideo(id, {
+        requestId: "rerun-" + id, resourceKey: ciRerunResourceKey(resourceSnapshot), resourceSnapshot,
+      }, () => true);
+    };
+
+    for (const [id, workspaceId, repoPath] of [
+      ["ad-hoc", null, h.location.path],
+      ["mismatched", "w", h.location.path + "/subdirectory"],
+    ] as const) {
+      const refused = await requestFromSnapshot(id, workspaceId, repoPath);
+      assert.equal(refused.status, 409);
+      assert.equal(refused.error, "This action requires a registered Project Location");
+      assert.deepEqual(h.db.pendingWorkflowDecisionsForSession(id), []);
+    }
+    assert.deepEqual(inspections, []);
+
+    const asked = await requestFromSnapshot("registered", "w", h.location.path);
+    assert.ok(asked.ok && asked.data, asked.error ?? "Expected a pending CI rerun decision");
+    assert.equal(asked.data.authority, "human");
+    assert.equal(asked.data.status, "pending");
+    assert.deepEqual(inspections, ["campaign_launch_inspect", "forge_decision_action"]);
   } finally { await h.close(); }
 });
 
