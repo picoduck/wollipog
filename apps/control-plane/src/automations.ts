@@ -1641,6 +1641,8 @@ export class AutomationsService {
         },
       }, this.deliveryOptions(automation, execution, { sessionId: `s_auto_${execution.executionId}` }, now, target, commandSnapshots),
       undefined, false, false, false, {
+        // Attribution only. A saved schedule uses its own launch configuration and does not
+        // inherit its author's personal Agent Defaults.
         ...automationLauncher(this.db, automation, execution.executionId),
         allowManagedModelChoice: true,
       });

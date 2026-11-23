@@ -9,6 +9,7 @@ import type {
   DurableSessionCommand,
   RunnerMetadata,
 } from "@wollipog/protocol";
+import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import type { PreStagedDeliveryOptions, SessionsService } from "./sessions.js";
@@ -75,6 +76,34 @@ test("ordinary automation validates a Latest choice against each target's exact 
       request: { ...request, role: "orchestrator" } } }) ?? "", /specific model/);
     db.updateRunnerAgents("runner-2", runner("runner-2", live("gpt-6.1-astra"), "codex-app-server").agents, Date.now());
     assert.match(automationCapabilityError(db, spec) ?? "", /Latest family is unavailable/);
+  } finally {
+    db.close();
+  }
+});
+
+test("a Latest automation launches normally even when its author uses the Orchestrator preset", () => {
+  const model = "gpt-6.2-sol";
+  const capabilities = { ...modelCapabilities(model), modelSource: "live" as const,
+    permissionModes: ["default", "orchestrator"] };
+  const { db, hub } = harness(PROTOCOL_VERSION, [runner("runner-1", capabilities, "codex-app-server")]);
+  try {
+    const userId = db.localIdentityContext().userId;
+    db.setAgentHarnessDefault(userId, { agentId: "agent-1", driver: "codex-app-server", context: { kind: "native" } },
+      { model, permissionMode: "orchestrator" });
+    const log = { info() {}, warn() {} };
+    const service = new AutomationsService(db, hub, new RealSessionsService(db, hub, log), log);
+    const saved = service.create(baseSpec({ action: { kind: "create_session", request: {
+      runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1", config: { model: "wollipog:latest:sol" },
+    } } }), { kind: "human", id: userId }, 0);
+    assert.ok(saved.ok && saved.data, saved.error);
+    assert.equal(service.tick(60_000), 1);
+    const execution = db.listAutomationExecutions(saved.data.automationId)[0]!;
+    assert.equal(execution.status, "dispatching", execution.error);
+    const session = db.getSession(execution.sessionId!)!;
+    assert.equal(session.model, model);
+    assert.equal(session.role, "normal");
+    assert.equal(session.permissionMode, null);
+    assert.equal(db.sessionLauncherUserId(session.id), userId);
   } finally {
     db.close();
   }

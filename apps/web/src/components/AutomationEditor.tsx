@@ -338,8 +338,9 @@ function AutomationEditorForm({
   const alternateAgent = form.actionKind === "create_session" && form.runnerPolicy === "alternate"
     ? selectedFallback?.agents.find((agent) => agent.id === form.fallbackAgentId)
     : undefined;
+  const explicitTarget = selectedRunner?.executionTargets?.find(target => target.id === form.executionTargetId);
   const allowLatest = !form.campaign && form.sessionRole !== "orchestrator" &&
-    form.permissionMode !== "orchestrator" && !form.executionTargetId;
+    form.permissionMode !== "orchestrator" && (!form.executionTargetId || explicitTarget?.adapter === "host");
   const modelOptions = useMemo(() => {
     const advertised = [...(agentCapabilities?.models ?? []).filter((model) => !model.hidden),
       ...(allowLatest ? managedModelChoices(agent?.driver, agentCapabilities) : [])];

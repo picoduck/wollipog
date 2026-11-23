@@ -32,7 +32,7 @@ async function capture(page: Page, name: string) {
 }
 
 for (const [width, theme] of [[1440, "light"], [390, "dark"]] as const) {
-  test(`an ordinary automation can choose Pi's managed Latest at ${width}px`, async ({ page }, testInfo) => {
+  test(`an explicit host automation can choose Pi's managed Latest at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
     const path = `${automationRoute("automation-nightly-sweep")}/edit`;
     await page.goto(`/automations-e2e.html?theme=${theme}&managedLatest=1&route=${encodeURIComponent(path)}`);
@@ -52,7 +52,7 @@ for (const [width, theme] of [[1440, "light"], [390, "dark"]] as const) {
     await expect(page.getByText("Changes saved.", { exact: true })).toBeVisible();
     const saved = await page.evaluate(() => (window as Window & { savedCampaignAutomation?: unknown }).savedCampaignAutomation);
     expect(saved).toMatchObject({ action: { kind: "create_session",
-      request: { config: { model: "wollipog:latest:opus", effort: "high" } } } });
+      request: { executionTargetId: "host-worktree", config: { model: "wollipog:latest:opus", effort: "high" } } } });
     await expect(page.getByRole("button", { name: "Model: Opus Latest", exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Reasoning Effort: High", exact: true })).toBeVisible();
   });

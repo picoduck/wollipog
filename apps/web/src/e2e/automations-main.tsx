@@ -156,6 +156,17 @@ const items: AutomationSchedule[] = [
   },
 ];
 
+if (params.has("managedLatest")) {
+  const target = {
+    id: "host-worktree", runnerId: runner.runnerId, name: "Runner Host Worktree",
+    kind: "local", workspaceStrategy: "worktree", adapter: "host", available: true,
+    boundaries: { filesystem: "worktree", network: "inherit", secrets: "runner_local", billing: "agent_account" },
+  } as const;
+  runner.executionTargets = [target];
+  const action = items[0]?.action;
+  if (action?.kind === "create_session") action.request.executionTargetId = target.id;
+}
+
 // `waiting-target=installation` shows the control plane's other waiting reason.
 const targetReason = params.get("waiting-target") === "installation"
   ? AUTOMATION_TARGET_INSTALLATION_UNAVAILABLE : AUTOMATION_TARGET_UNAVAILABLE;
