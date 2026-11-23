@@ -457,6 +457,8 @@ async function canonicalManagedWritableRoot(
   commonGitDir: string,
   runtime: IsolationDeps,
   requestedWorktree = false,
+  /** Mode for directories this creates, applied only after the planned path is validated. */
+  mode?: number,
 ): Promise<string> {
   if (!posix.isAbsolute(requested)) throw new Error(`managed worktree ${role} writable mount is not absolute`);
   let ancestor = requested;
@@ -472,7 +474,7 @@ async function canonicalManagedWritableRoot(
     }
   };
   validate(planned);
-  await runtime.mkdirNative([requested]);
+  await runtime.mkdirNative([requested], mode);
   const canonical = await runtime.realpathNative(requested);
   validate(canonical);
   return canonical;
@@ -1155,10 +1157,11 @@ export async function resolveExecutionIsolation(
       ? state.antigravityTerminalHelper ? antigravityProviderStateRoot(state, inherited, runtime) : null
       : providerCredentialRoot(state, inherited, runtime.nativeHome());
     if (!root) throw new Error("managed worktree provider state cannot be preserved for this driver");
-    // agy's sign-in lives here: a directory this launch creates is private to the runner user.
-    if (state.driver === "acp") await runtime.mkdirNative([root], 0o700);
+    // agy's sign-in lives here: a directory this launch creates is private to the runner user, and
+    // is created only after its planned real path is validated, never through an alias first.
     const canonical = await canonicalManagedWritableRoot(root, "provider credential directory",
-      protectedWorktree.parent, protectedWorktree.path, commonGitDir, runtime);
+      protectedWorktree.parent, protectedWorktree.path, commonGitDir, runtime, false,
+      state.driver === "acp" ? 0o700 : undefined);
     // Credentials are replaced via temp-file rename, so their exact containing directory must
     // remain writable. Mount only that provider directory, never HOME or the worktree parent.
     writableBinds = [{ source: canonical, target: canonical }];

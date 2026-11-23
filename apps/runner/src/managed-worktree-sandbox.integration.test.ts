@@ -165,6 +165,17 @@ test("a preserved Antigravity home binds only agy's state directory, with the pr
     "the session-private helper tmpfs shadows the shared bin directory inside the writable state");
 });
 
+test("a preserved Antigravity home aliased into shared Git state is refused before anything is created there", async () => {
+  const fixture = managedWorktreeFixture();
+  const commonGit = join(fixture.repoPath, ".git");
+  symlinkSync(commonGit, join(fixture.home, ".gemini"));
+  await assert.rejects(antigravityPreservedIsolation(fixture, {
+    platform: "linux", uid: () => 1000,
+    resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
+  }), /overlaps protected worktree roots or Git administration/);
+  assert.equal(existsSync(join(commonGit, "antigravity-cli")), false, "no directory is created through the alias");
+});
+
 test("a real preserved Antigravity home keeps conversations across launches while its helper stays private", {
   skip: bubblewrapUsable() ? false : "bubblewrap cannot create a user namespace on this host",
 }, async () => {
