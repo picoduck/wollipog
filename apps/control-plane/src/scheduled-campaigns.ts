@@ -168,6 +168,30 @@ function scheduledCampaignBudget(automation: Pick<AutomationSpec, "limits" | "ac
     acceptedFollowUps: override?.acceptedFollowUps ?? (launch.policy.behavior.followUps === "execute_approved" ? 1 : 0) };
 }
 
+/** A stored value for a message. Only primitives are printed: converting an arbitrary stored
+ * object (for example {"toString": null}) to a string can throw. */
+function describeStoredValue(value: unknown): string {
+  if (typeof value === "string") return JSON.stringify(value);
+  if (value === null || typeof value === "number" || typeof value === "boolean" || value === undefined) return String(value);
+  return Array.isArray(value) ? "an array" : "an object";
+}
+
+/** The effective allowance, computed exactly as launch computes it, or the stored override whose
+ * numeric conversion throws (for example {"toString": null}), which launch could not use either. */
+function previewBudget(automation: Pick<AutomationSpec, "limits" | "action">, launch: PreparedCampaignLaunch):
+  ReturnType<typeof scheduledCampaignBudget> | { error: string } {
+  try { return scheduledCampaignBudget(automation, launch); }
+  catch (error) {
+    if (!(error instanceof TypeError)) throw error;
+    const overrides = automation.action.kind === "create_session" ? automation.action.request.campaign?.fullControl?.budget : undefined;
+    const key = (["costUsd", "toolCalls", "concurrency"] as const).find(name => {
+      try { Number(overrides?.[name]); return false; } catch { return true; }
+    });
+    return { error: `request.campaign.fullControl.budget${key ? `.${key}` : ""} must be a number, not ` +
+      `${key ? describeStoredValue(overrides?.[key]) : "a value that converts to one"}; the next occurrence would be refused` };
+  }
+}
+
 /** Why a Full Control occurrence would refuse its effective allowance, or null. A schedule stored
  * before save checked these values can hold any of them, and stored JSON is not revalidated on
  * read. Checkpoints are forwarded exactly as launch does (only a value with a length), and the
@@ -179,12 +203,12 @@ function effectiveBudgetError(budget: ReturnType<typeof scheduledCampaignBudget>
   const at = "request.campaign.fullControl.budget";
   const values = budget as Record<string, unknown>;
   if (!(typeof values.costUsd === "number" && Number.isFinite(values.costUsd) && values.costUsd > 0)) {
-    return `${at}.costUsd gives an effective cost limit of ${String(values.costUsd)}, which must be a positive number${refused}`;
+    return `${at}.costUsd gives an effective cost limit of ${describeStoredValue(values.costUsd)}, which must be a positive number${refused}`;
   }
   for (const key of ["toolCalls", "concurrency", "acceptedFollowUps"] as const) {
     const minimum = key === "acceptedFollowUps" ? 0 : 1;
     if (!(Number.isSafeInteger(values[key]) && (values[key] as number) >= minimum)) {
-      return `The effective ${key} of ${String(values[key])} must be an integer of at least ${minimum}; check ${at}.${key}` +
+      return `The effective ${key} of ${describeStoredValue(values[key])} must be an integer of at least ${minimum}; check ${at}.${key}` +
         `${key === "concurrency" ? " and the Orchestrator's maximumConcurrentChildren" : ""}${refused}`;
     }
   }
@@ -289,7 +313,8 @@ export class ScheduledCampaignRuntime {
     if (typeof launch === "string") return { error: launch };
     const childError = this.customChildError(campaign, launch, human, target.runnerId);
     if (childError) return { error: childError };
-    const budget = scheduledCampaignBudget({ limits: automation.limits, action }, launch);
+    const budget = previewBudget({ limits: automation.limits, action }, launch);
+    if ("error" in budget) return budget;
     const budgetError = campaign.fullControl ? effectiveBudgetError(budget, campaign.fullControl.budget?.checkpointsUsd) : null;
     if (budgetError) return { error: budgetError };
     const { behavior, delegation, execution } = structuredClone(launch.policy);

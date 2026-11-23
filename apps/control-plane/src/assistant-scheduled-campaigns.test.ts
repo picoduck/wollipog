@@ -446,6 +446,24 @@ test("the effective readback reports stored checkpoints that the next occurrence
   const read = await f.call("auto_get", { automationId: "auto_legacy_combined" });
   assert.match(read.effectiveCampaign.error, /effective acceptedFollowUps of -1 must be an integer of at least 0/);
   assert.equal(read.effectiveCampaign.behavior, undefined);
+  // Stored values that cannot be printed or converted still read back with the field named, and
+  // a value launch coerces to a valid number keeps launch's verdict.
+  const unconvertible = JSON.parse("{\"toString\":null}");
+  const stored: Array<[string, Record<string, unknown>, RegExp | null]> = [
+    ["auto_legacy_follow_ups_object", { acceptedFollowUps: unconvertible }, /effective acceptedFollowUps of an object must be an integer/],
+    ["auto_legacy_cost_object", { costUsd: unconvertible }, /budget\.costUsd must be a number, not an object/],
+    ["auto_legacy_tool_calls_array", { toolCalls: [5] }, null],
+  ];
+  for (const [automationId, budget, expected] of stored) {
+    const value = payload();
+    Object.assign(value.action.request.campaign.fullControl.budget, budget);
+    f.db.createAutomation({ automationId, spec: value as unknown as AutomationSpec,
+      nextFireAt: Date.now() + 60_000, actor: { kind: "human", id: f.owner.userId }, now: Date.now() });
+    const readback = await f.call("auto_get", { automationId });
+    assert.equal(readback.automation.automationId, automationId);
+    if (expected) assert.match(readback.effectiveCampaign.error, expected, automationId);
+    else assert.equal(readback.effectiveCampaign.budget.toolCalls, 5, readback.effectiveCampaign.error);
+  }
   assert.deepEqual(f.sent.map(message => message.type), []);
 });
 
