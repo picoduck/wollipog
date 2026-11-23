@@ -275,9 +275,9 @@ test("the discovered schema and the save validator accept and refuse the same ca
   // the server must name it, so a regression in either side cannot hide behind another case.
   const refused: Array<[string, ReturnType<typeof payload>, RegExp, RegExp]> = [
     ["undeclared budget key", variant(r => { (r.campaign.fullControl.budget as Record<string, unknown>).maxToolCalls = 5; }),
-      /fullControl\.budget\.maxToolCalls: not allowed/, /fullControl\.budget is not an accepted/],
+      /fullControl\.budget\.maxToolCalls: not allowed/, /fullControl\.budget\.maxToolCalls is not accepted/],
     ["undeclared issues key", variant(r => { (r.campaign.fullControl.issues as Record<string, unknown>).epics = [1]; }),
-      /fullControl\.issues\.epics: not allowed/, /fullControl\.issues is not an accepted/],
+      /fullControl\.issues\.epics: not allowed/, /fullControl\.issues\.epics is not accepted/],
     ["empty child model", variant(r => { r.orchestrator.behavior.childModel = ""; }), /behavior\.childModel:/, /behavior\.childModel is not/],
     ["untrimmed child effort", variant(r => { r.orchestrator.behavior.childEffort = " medium "; }), /behavior\.childEffort:/, /behavior\.childEffort is not/],
     ["overlong child effort", variant(r => { r.orchestrator.behavior.childEffort = "e".repeat(65); }), /behavior\.childEffort: too long/, /behavior\.childEffort is not/],
@@ -285,6 +285,9 @@ test("the discovered schema and the save validator accept and refuse the same ca
       { agentId: "codex-app-server", driver: "codex-app-server", context: { kind: "wsl", distro: " " } }; }),
     /childHarness\.context\.distro:/, /behavior\.childHarness\.context\.distro is not/],
     ["uppercase repository", variant(r => { r.campaign.repository = "Owner/Repo"; }), /campaign\.repository:/, /repository must be the lowercase/],
+    ["repository without an owner", variant(r => { r.campaign.repository = "repo"; }), /campaign\.repository:/, /repository must be the lowercase/],
+    ["unsafe tool calls", variant(r => { (r.campaign.fullControl.budget as Record<string, unknown>).toolCalls = 2 ** 53; }),
+      /budget\.toolCalls: above/, /budget\.toolCalls must be an integer/],
     ["blank task title", variant(r => { r.campaign.tasks[0]!.title = "   "; }), /tasks\[0\]\.title:/, /tasks\[0\] must have/],
     ["empty task prompt", variant(r => { r.campaign.tasks[1]!.prompt = ""; }), /tasks\[1\]\.prompt:/, /tasks\[1\] must have/],
     ["blank objective", variant(r => { (r.campaign.fullControl as Record<string, unknown>).objective = "  "; }),
@@ -310,8 +313,17 @@ test("the discovered schema and the save validator accept and refuse the same ca
   assert.match(String(checkpoints.description), /Increasing/);
   const descending = variant(r => { (r.campaign.fullControl.budget as Record<string, unknown>).checkpointsUsd = [2, 1]; });
   await assert.rejects(f.call("auto_create", { operationId: "refused-descending", payload: descending }), /checkpointsUsd must be at most 100 increasing/);
+  // Launch admits checkpoints within the smaller of the automation's limit and the override, whichever is tighter.
+  const aboveOverride = variant(r => { (r.campaign.fullControl.budget as Record<string, unknown>).checkpointsUsd = [16]; });
+  await assert.rejects(f.call("auto_create", { operationId: "refused-above-override", payload: aboveOverride }),
+    /checkpointsUsd must stay within the effective cost limit of 15/);
+  const aboveLimit = variant(r => { Object.assign(r.campaign.fullControl.budget, { costUsd: 30, checkpointsUsd: [25] }); });
+  await assert.rejects(f.call("auto_create", { operationId: "refused-above-limit", payload: aboveLimit }),
+    /checkpointsUsd must stay within the effective cost limit of 20/);
   assert.equal(f.automations.list().automations.length, 0);
   const accepted: Array<[string, ReturnType<typeof payload>]> = [
+    ["checkpoints within both limits", variant(r => { (r.campaign.fullControl.budget as Record<string, unknown>).checkpointsUsd = [5, 15]; })],
+    ["GitLab project", variant(r => { r.campaign.repository = "gitlab.example.com/group/project"; })],
     ["inherited parent control", variant(r => { (r.orchestrator.delegation as Record<string, unknown>).parentControl = null; })],
     ["automatic child harness", variant(r => { Object.assign(r.orchestrator.behavior, { childHarness: null, childModel: null, childEffort: null }); })],
     ["automatic reviewer", variant(r => { Object.assign(r.orchestrator.behavior, { reviewHarness: null, reviewModel: null, reviewEffort: null }); })],
@@ -379,11 +391,31 @@ test("a schedule stored before the save-time limit checks can still be paused un
   const read = await f.call("auto_get", { automationId: schedule.automationId });
   assert.equal(read.automation.enabled, false);
   assert.equal(read.automation.nextFireAt, undefined);
-  // Changing the stored overrides is a new configuration and gets the save-time check.
+  // A replacement through the Assistant that keeps the stored overrides, such as a rename, saves.
+  const renamed = await f.call("auto_update", { operationId: "rename-legacy", automationId: schedule.automationId,
+    expectedRevision: read.automation.revision, payload: { ...stored, name: "Renamed Campaign", enabled: false } });
+  assert.equal(renamed.result.name, "Renamed Campaign");
+  // Changing the stored overrides, or the cost limit they are checked against, is a new
+  // configuration and gets the save-time check.
   const changed = payload();
   (changed.action.request.campaign.fullControl.budget as Record<string, unknown>).toolCalls = 2 ** 53 + 2;
   await assert.rejects(f.call("auto_update", { operationId: "edit-legacy", automationId: schedule.automationId,
-    expectedRevision: read.automation.revision, payload: { ...changed, enabled: false } }), /budget\.toolCalls must be an integer/);
+    expectedRevision: renamed.result.revision, payload: { ...changed, enabled: false } }), /budget\.toolCalls must be an integer/);
+  await assert.rejects(f.call("auto_update", { operationId: "limit-legacy", automationId: schedule.automationId,
+    expectedRevision: renamed.result.revision, payload: { ...stored, enabled: false, limits: { maxCostUsd: 10, maxToolCalls: 200 } } }),
+  /budget\.toolCalls must be an integer/);
+});
+
+test("the effective readback reports stored checkpoints that the next occurrence would refuse", async t => {
+  const f = fixture();
+  t.after(async () => { await f.app.close(); f.db.close(); });
+  const stored = payload();
+  (stored.action.request.campaign.fullControl.budget as Record<string, unknown>).checkpointsUsd = [16];
+  const schedule = f.db.createAutomation({ automationId: "auto_legacy_checkpoints", spec: stored as unknown as AutomationSpec,
+    nextFireAt: Date.now() + 60_000, actor: { kind: "human", id: f.owner.userId }, now: Date.now() });
+  const read = await f.call("auto_get", { automationId: schedule.automationId });
+  assert.match(read.effectiveCampaign.error, /checkpointsUsd exceed the effective cost limit of 15/);
+  assert.deepEqual(f.sent.map(message => message.type), []);
 });
 
 test("the effective readback pins a legacy plain agent id the way dispatch does, without saving the pin", async t => {

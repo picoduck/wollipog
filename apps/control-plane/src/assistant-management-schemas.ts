@@ -10,6 +10,7 @@ const object = (properties: Record<string, unknown>, required: string[] = []) =>
   ({type: "object", properties, ...(required.length ? {required} : {})});
 const strict = (properties: Record<string, unknown>, required: string[] = []) => ({...object(properties, required), additionalProperties: false});
 const integer = (minimum: number, maximum?: number) => ({type: "integer", minimum, ...(maximum === undefined ? {} : {maximum})});
+const safe = Number.MAX_SAFE_INTEGER;
 const files = {type: "array", minItems: 1, items: object({path: text, content: text, encoding: {enum: ["utf8", "base64"]}}, ["path", "content", "encoding"])};
 const nullableText = {type: ["string", "null"]};
 const selector = {oneOf: [object({kind: {const: "all"}}, ["kind"]),
@@ -54,12 +55,12 @@ const orchestrator = strict({
 /** Mirrors automationCampaignError and the Full Control launch overrides it accepts. */
 const campaign = strict({
   controlMode: {enum: ["custom", "full_control"]},
-  repository: {type: "string", pattern: "^[^A-Z]+$", maxLength: 256, description: "Origin owner/name."},
+  repository: {type: "string", pattern: "^[^A-Z/]+(/[^A-Z/]+)+$", maxLength: 256, description: "Lowercase owner/name, or GitLab host/group/project."},
   tasks: {type: "array", maxItems: 100, items: strict({key: {type: "string", pattern: "^[a-zA-Z0-9_-]{1,128}$"},
     title: prose(120), prompt: prose(16_384)}, ["key", "title", "prompt"])},
   fullControl: strict({objective: prose(4000), operations: {type: "array", minItems: 1, uniqueItems: true, items: {enum: FULL_CONTROL_LAUNCH_OPERATIONS}},
     delegatablePolicyIds: {type: "array", maxItems: 100, items: prose(256)},
-    budget: strict({costUsd: positive, toolCalls: integer(1), concurrency: integer(1), acceptedFollowUps: integer(0), checkpointsUsd: {type: "array", maxItems: 100, items: positive, description: "Increasing, within costUsd."}}),
+    budget: strict({costUsd: positive, toolCalls: integer(1, safe), concurrency: integer(1, safe), acceptedFollowUps: integer(0, safe), checkpointsUsd: {type: "array", maxItems: 100, items: positive, description: "Increasing, within the smaller of limits.maxCostUsd and costUsd."}}),
     issues: strict({relatedFollowUps: boolean, maxIssues: integer(1, 100), closureReasons: {type: "array", uniqueItems: true, items: {enum: ["completed", "not_planned"]}}})}),
 }, ["controlMode", "repository", "tasks"]);
 export const automationPayloadSchema = object({

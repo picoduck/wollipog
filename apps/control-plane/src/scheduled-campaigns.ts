@@ -63,7 +63,8 @@ function refusedHarnessField(value: unknown, path: string): string {
 /** Strict public input. In particular no authority provenance or admission result can be stored
  * in a schedule. The ordinary campaign parsers remain authoritative for all policy fields. Each
  * refusal names the field so a caller following the advertised schema can correct it (#4869). */
-export function automationCampaignError(request: Record<string, unknown>, storedFullControl?: unknown): string | null {
+export function automationCampaignError(request: Record<string, unknown>,
+  context: { maxCostUsd?: unknown; stored?: { fullControl?: unknown; maxCostUsd?: number } } = {}): string | null {
   if (request.orchestrator !== undefined && !parseOrchestratorOverrides(request.orchestrator)) {
     const field = refusedOrchestratorField(request.orchestrator);
     return field === "request.orchestrator"
@@ -99,19 +100,33 @@ export function automationCampaignError(request: Record<string, unknown>, stored
     parseFullControlLaunchRequest({ runnerId: request.runnerId, workspaceId: request.workspaceId, overrides }, false) !== null;
   if (!accepts(fullControl)) {
     const key = object(fullControl) ? Object.keys(fullControl).find(name => !accepts({ [name]: fullControl[name] })) : undefined;
-    return key === undefined || !["objective", "operations", "delegatablePolicyIds", "budget", "issues"].includes(key)
-      ? `request.campaign.fullControl${key === undefined ? "" : `.${key}`} is not accepted: use only objective, operations, ` +
-        "delegatablePolicyIds, budget and issues launch overrides; the root's settings belong in the session request"
+    if (key === undefined || !["objective", "operations", "delegatablePolicyIds", "budget", "issues"].includes(key)) {
+      return `request.campaign.fullControl${key === undefined ? "" : `.${key}`} is not accepted: use only objective, operations, ` +
+        "delegatablePolicyIds, budget and issues launch overrides; the root's settings belong in the session request";
+    }
+    const nested = { budget: ["costUsd", "toolCalls", "concurrency", "acceptedFollowUps", "checkpointsUsd"],
+      issues: ["relatedFollowUps", "maxIssues", "closureReasons"] }[key as "budget" | "issues"];
+    const part = (fullControl as Record<string, unknown>)[key];
+    const inner = nested && object(part) ? Object.keys(part).find(name => !nested.includes(name)) : undefined;
+    return inner
+      ? `request.campaign.fullControl.${key}.${inner} is not accepted: use only ${nested!.join(", ")}`
       : `request.campaign.fullControl.${key} is not an accepted launch override value`;
   }
   // A stored schedule keeps the values it was admitted with, so an unchanged schedule can still be
   // saved, for example to pause it; launch still validates its effective boundary each time.
-  return isDeepStrictEqual(fullControl, storedFullControl) ? null : fullControlLimitError(fullControl as Record<string, unknown>);
+  const unchanged = context.stored !== undefined && isDeepStrictEqual(fullControl, context.stored.fullControl) &&
+    context.maxCostUsd === context.stored.maxCostUsd;
+  return unchanged ? null : fullControlLimitError(fullControl as Record<string, unknown>, context.maxCostUsd);
+}
+
+/** An occurrence's cost ceiling: overrides only narrow the automation's own finite limit. */
+function effectiveCostCeiling(maxCostUsd: unknown, override: unknown): number {
+  return Math.min(typeof maxCostUsd === "number" ? maxCostUsd : Infinity, typeof override === "number" ? override : Infinity);
 }
 
 /** The launch parser checks these overrides' keys only; their values reach the boundary validators
  * at each occurrence. Refuse the values those validators would refuse at save instead (#4869). */
-function fullControlLimitError(overrides: Record<string, unknown>): string | null {
+function fullControlLimitError(overrides: Record<string, unknown>, maxCostUsd: unknown): string | null {
   const integer = (v: unknown, min: number, max = Number.MAX_SAFE_INTEGER) => v === undefined || (Number.isSafeInteger(v) && (v as number) >= min && (v as number) <= max);
   const positive = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v > 0;
   const budget = overrides.budget as Record<string, unknown> | undefined, issues = overrides.issues as Record<string, unknown> | undefined;
@@ -124,6 +139,12 @@ function fullControlLimitError(overrides: Record<string, unknown>): string | nul
   if (checkpoints !== undefined && (!Array.isArray(checkpoints) || checkpoints.length > 100 ||
       checkpoints.some((v, i) => !positive(v) || (i > 0 && v <= checkpoints[i - 1])))) {
     return `${at}.budget.checkpointsUsd must be at most 100 increasing positive amounts within the cost limit`;
+  }
+  // Launch admits checkpoints within the effective ceiling: the smaller of the two cost limits.
+  const ceiling = effectiveCostCeiling(maxCostUsd, budget?.costUsd);
+  if (Array.isArray(checkpoints) && checkpoints.some(v => v > ceiling)) {
+    return `${at}.budget.checkpointsUsd must stay within the effective cost limit of ${ceiling} ` +
+      "(the smaller of limits.maxCostUsd and fullControl.budget.costUsd)";
   }
   if (issues?.relatedFollowUps !== undefined && typeof issues.relatedFollowUps !== "boolean") return `${at}.issues.relatedFollowUps must be a boolean`;
   if (!integer(issues?.maxIssues, 1, 100)) return `${at}.issues.maxIssues must be an integer from 1 to 100`;
@@ -243,12 +264,17 @@ export class ScheduledCampaignRuntime {
     if (typeof launch === "string") return { error: launch };
     const childError = this.customChildError(campaign, launch, human, target.runnerId);
     if (childError) return { error: childError };
+    const budget = scheduledCampaignBudget({ limits: automation.limits, action }, launch);
+    // A schedule stored before save checked them can hold checkpoints launch refuses.
+    if (campaign.fullControl?.budget?.checkpointsUsd?.some(amount => amount > budget.costUsd)) {
+      return { error: `request.campaign.fullControl.budget.checkpointsUsd exceed the effective cost limit of ${budget.costUsd}; the next occurrence would be refused` };
+    }
     const { behavior, delegation, execution } = structuredClone(launch.policy);
     return { controlMode: campaign.controlMode, repository: campaign.repository,
       tasks: campaign.tasks.map(({ key, title }) => ({ key, title })),
       root: { runnerId: launch.runnerId, workspaceId: launch.workspaceId, agentId: launch.agentId,
         model: launch.config.model ?? null, effort: launch.config.effort ?? null },
-      behavior, delegation, execution, budget: scheduledCampaignBudget({ limits: automation.limits, action }, launch) };
+      behavior, delegation, execution, budget };
   }
 
   private scope(human: HumanPrincipal) {

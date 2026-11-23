@@ -87,9 +87,11 @@ follow-ups, completion and review policy), `delegation` and `execution` override
 overrides. Omitted overrides use the owner's Orchestrator defaults; a null `parentControl`
 inherits the saved one. The schema and the save validator accept the same values (the schema
 describes the ordering and repository rules it cannot express), and an invalid field is refused at
-save with a message naming it. Full Control budget and issue values are checked when they change,
-so a schedule saved before these checks can still be paused or saved unchanged; each occurrence
-still validates its effective limits. For a scheduled campaign,
+save with a message naming it. Cost checkpoints must stay within the smaller of `limits.maxCostUsd`
+and `fullControl.budget.costUsd`. Full Control budget and issue values are checked when they or the
+automation's cost limit change, so a schedule saved before these checks can still be paused,
+renamed or saved unchanged; each occurrence still validates its effective limits, and the
+readback reports a stored value the next occurrence would refuse. For a scheduled campaign,
 `auto_get.effectiveCampaign` reports what the next occurrence would launch with now: the root
 Machine, installation, model and effort, the resolved behavior, delegation and execution, the tasks
 and the aggregate allowance. It uses the target the scheduler would choose now, including an

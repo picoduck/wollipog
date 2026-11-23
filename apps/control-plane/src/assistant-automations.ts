@@ -11,8 +11,8 @@ function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new AssistantRefusal("An argument object is required.");
   return value as Record<string, unknown>;
 }
-function spec(value: unknown): AutomationSpec {
-  const parsed = validateAutomationSpec(value);
+function spec(value: unknown, previous?: AutomationSchedule): AutomationSpec {
+  const parsed = validateAutomationSpec(value, previous);
   if (!parsed.ok) throw new AssistantRefusal(parsed.error ?? "Automation configuration is invalid.");
   return parsed.data!;
 }
@@ -35,7 +35,7 @@ export function registerAssistantAutomations(operations: AssistantOperations, db
   for (const name of ["auto_list", "auto_get", "auto_create", "auto_update", "auto_enable", "auto_pause", "auto_delete"] as const) {
     const mutation = name !== "auto_list" && name !== "auto_get";
     const proposed = (a: Record<string, unknown>): AutomationSpec => name === "auto_create" || name === "auto_update"
-      ? spec(a.payload) : specOf(load(a, name === "auto_delete"));
+      ? spec(a.payload, name === "auto_update" ? load(a) : undefined) : specOf(load(a, name === "auto_delete"));
     const target = (value: unknown): AssistantTarget => {
       if (name === "auto_list") return {kind: "automation", id: "list"};
       const a = object(value), targets = automationManagementTargets(db, proposed(a));
