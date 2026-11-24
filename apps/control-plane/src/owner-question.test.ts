@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import Fastify from "fastify";
+import { registerQuestionAnswerRoute } from "./question-answer-route.js";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, OWNER_QUESTION_ANSWER_ID, OWNER_QUESTION_NOTE_ID,
   PROTOCOL_VERSION, pendingRequests, presentOwnerQuestionRequest, sessionAttentionStatus,
   type ControlPlaneToRunner, type RunnerMetadata, type WorkflowDecisionView } from "@wollipog/protocol";
@@ -78,6 +80,59 @@ function harness(options: { runnerProtocol?: number; issueScope?: boolean } = {}
     svc.answerQuestion("root", decision.occurrenceId, answers, actor, "submit", undefined, decision.occurrenceId);
   return { db, hub, svc, principal, owner, control, material, askQuestion, askApproval, card, prompts, answer, toRunner, uncertain };
 }
+
+test("the answer HTTP route refuses an implicit Owner Question dismissal and preserves explicit intent (#4917)", async () => {
+  const h = harness();
+  const app = Fastify();
+  registerQuestionAnswerRoute(app, { service: h.svc, requestHuman: () => h.principal,
+    humanActorId: () => h.owner.id, canAccessSession: () => true });
+  try {
+    for (const [index, payload] of [
+      { answers: {} },
+      { action: "submit", answers: {} },
+      { action: "submit", answers: { wrong_key: "Keep this answer" } },
+      { action: "submit", answers: { [OWNER_QUESTION_ANSWER_ID]: "   " } },
+      { action: "dismiss", answers: {} },
+      { action: "submit", answers: { [OWNER_QUESTION_ANSWER_ID]: "Broker Process" } },
+      { action: "submit", answers: { [OWNER_QUESTION_ANSWER_ID]: "Use a bounded retry." } },
+      { action: "submit", answers: { [OWNER_QUESTION_ANSWER_ID]: "Broker Process", [OWNER_QUESTION_NOTE_ID]: "Keep logs." } },
+    ].entries()) {
+      const asked = await h.askQuestion(`http-${index}`);
+      assert.ok(asked.ok && asked.data);
+      const response = await app.inject({ method: "POST", url: "/api/sessions/root/answer",
+        payload: { requestId: asked.data.occurrenceId, occurrenceId: asked.data.occurrenceId, ...payload } });
+      const decision = h.db.workflowDecisionByOccurrence(asked.data.occurrenceId)!;
+      assert.equal(response.statusCode, index < 4 ? 400 : 200, JSON.stringify(payload));
+      assert.equal(decision.status, index < 4 ? "pending" : index === 4 ? "denied" : "approved");
+      if (index < 4) assert.ok(response.json().error, "the client receives a visible validation error");
+      if (index >= 5) {
+        assert.equal(decision.selectedOptionId, index === 6 ? undefined : "broker");
+        assert.equal(decision.childMessage, index === 5 ? undefined : index === 6 ? "Use a bounded retry." : "Keep logs.");
+        const prompt = h.prompts("root").find((text) => text.includes(asked.data!.occurrenceId))!;
+        assert.ok(prompt);
+        if (decision.childMessage) assert.ok(prompt.includes(decision.childMessage));
+        if (decision.selectedOptionId) assert.ok(prompt.includes('"broker"'));
+      }
+    }
+    const stale = await h.askQuestion("http-stale");
+    assert.ok(stale.ok && stale.data);
+    const response = await app.inject({ method: "POST", url: "/api/sessions/root/answer",
+      payload: { requestId: stale.data.occurrenceId, occurrenceId: "old-occurrence", action: "submit",
+        answers: { [OWNER_QUESTION_ANSWER_ID]: "Keep my stale answer." } } });
+    assert.equal(response.statusCode, 409);
+    assert.equal(h.db.workflowDecisionByOccurrence(stale.data.occurrenceId)!.status, "pending");
+  } finally { await app.close(); h.db.close(); }
+});
+
+test("legacy provider questions retain implicit empty-map dismissal (#4917)", async () => {
+  const h = harness();
+  try {
+    h.db.setPendingApproval("child", { requestId: "legacy", kind: "question", title: "Question", options: [],
+      questions: [{ id: "choice", question: "Continue?", options: [{ label: "Continue" }] }] });
+    assert.ok(h.svc.answerQuestion("child", "legacy", {}, h.owner).ok);
+    assert.ok(h.toRunner.some((message) => message.type === "answer_question" && message.action === "dismiss"));
+  } finally { h.db.close(); }
+});
 
 test("a child clarification reaches the owner as a question and returns free text without action authority (#4359)", async () => {
   const h = harness();

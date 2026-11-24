@@ -1085,7 +1085,7 @@ export function createApiClient(transport: ApiTransport) {
   answerQuestion: (id: string, body: { requestId: string; occurrenceId?: string; answers: Record<string, string | string[]>; action?: "submit" | "dismiss" }) =>
     req<SessionView>(`/api/sessions/${id}/answer`, {
       method: "POST",
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, action: body.action ?? "submit" }),
     }),
 
   rewind: (id: string, turn: number) =>

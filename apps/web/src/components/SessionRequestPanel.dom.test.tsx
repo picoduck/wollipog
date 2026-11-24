@@ -5,7 +5,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { pendingRequests, type DescendantRequestView, type SessionView } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, createApiClient, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { viewPath } from "../navigation.js";
@@ -626,6 +626,50 @@ test("the replacement keeps the request's place in its own group when the other 
     await view.cleanUp();
   }
 });
+
+for (const answer of ["option", "text", "both", "dismiss"] as const) {
+  test(`Campaign Requests panel preserves Owner Question ${answer} in its HTTP body (#4917)`, async () => {
+    domWindow.localStorage.clear();
+    const child = asDescendant(evidenceSession());
+    child.request = { ...child.request, title: "Owner Question", kind: "workflow_decision", options: [],
+      workflowDecision: { category: "owner_decision", authority: "human",
+        resourceSnapshot: { category: "owner_decision", kind: "question", question: "Which approach?",
+          options: [{ optionId: "stop", label: "Stop and Report" }] } } as never };
+    const bodies: unknown[] = [];
+    const client = createApiClient({ instanceId: "test", publicOrigin: "http://localhost", close() {},
+      async request(_path, init) {
+        bodies.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({ id: child.sessionId }), { headers: { "content-type": "application/json" } });
+      } });
+    const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+    domWindow.document.body.append(container as never);
+    const root = createRoot(container);
+    const button = (name: string) => [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((node) => node.textContent?.trim() === name)!;
+    const type = async (value: string) => {
+      const field = container.querySelector<HTMLInputElement>(".question-input")!;
+      assert.ok(field);
+      await act(async () => { fireDomEvent.change(field, { target: { value } }); });
+    };
+    try {
+      await act(async () => root.render(<ChildPanel child={child} client={client} />));
+      if (answer === "dismiss") await act(async () => button("Dismiss").click());
+      else {
+        const row = [...container.querySelectorAll<HTMLElement>(".choice-row")]
+          .find((node) => node.textContent?.includes(answer === "text" ? "Something Else" : "Stop and Report"))!;
+        await act(async () => row.querySelector<HTMLInputElement>("input")!.click());
+        if (answer === "text") await type("Use bounded retries.");
+        await act(async () => button("Next").click());
+        if (answer === "both") await type("Keep logs.");
+        await act(async () => button("Submit Answers").click());
+      }
+      assert.deepEqual(bodies, [{ requestId: child.request.requestId, occurrenceId: child.request.occurrenceId,
+        action: answer === "dismiss" ? "dismiss" : "submit",
+        answers: answer === "dismiss" ? {} : { owner_question_answer: answer === "text" ? "Use bounded retries." : "Stop and Report",
+          ...(answer === "both" ? { owner_question_note: "Keep logs." } : {}) } }]);
+    } finally { await act(async () => root.unmount()); container.remove(); }
+  });
+}
 
 test("a typed child clarification opens as a normal free-text question in the parent's Requests panel (#4359)", async () => {
   const child = asDescendant(evidenceSession());

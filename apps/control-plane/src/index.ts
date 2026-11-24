@@ -1,4 +1,5 @@
 import { createSessionGitManagement } from "./session-git-management.js";
+import { registerQuestionAnswerRoute } from "./question-answer-route.js";
 import { withoutProviderAccountNames } from "./agent-account-view.js";
 import { AssistantPromptImages } from "./assistant-prompt-images.js";
 import { createCampaignReviewManagement } from "./campaign-review-management.js";
@@ -5427,26 +5428,9 @@ app.post("/api/sessions/:id/fork", async (req, reply) => sessionLifecycleManagem
 
 // Structured agent questions (AskUserQuestion): a sibling of /approve because the shapes
 // differ — N answers keyed by question id vs one optionId decision.
-app.post("/api/sessions/:id/answer", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const body = req.body as { requestId?: string; occurrenceId?: string; answers?: Record<string, string | string[]>; action?: "submit" | "dismiss" };
-  if (
-    typeof body?.requestId !== "string" ||
-    (body.occurrenceId != null && typeof body.occurrenceId !== "string") ||
-    body.answers == null ||
-    typeof body.answers !== "object" ||
-    Array.isArray(body.answers) ||
-    (body.action != null && body.action !== "submit" && body.action !== "dismiss")
-  ) {
-    return reply.code(400).send({ error: "requestId and answers are required; action must be submit or dismiss" });
-  }
-  const action = body.action ?? (Object.keys(body.answers).length > 0 ? "submit" : "dismiss");
-  const human = requestHuman(req);
-  return respond(reply, svc.answerQuestion(id, body.requestId, body.answers, {
-    kind: "human",
-    id: humanActorId(req),
-  }, action, undefined, body.occurrenceId, undefined,
-  (sessionId) => human ? db.canAccessSession(human, sessionId) : false));
+registerQuestionAnswerRoute(app, {
+  service: svc, requestHuman, humanActorId,
+  canAccessSession: (human, sessionId) => db.canAccessSession(human, sessionId),
 });
 
 // Host actions: open the session's working directory in a local editor on the runner host,
