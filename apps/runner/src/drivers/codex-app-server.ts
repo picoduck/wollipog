@@ -73,7 +73,7 @@ import {
   type CodexPermissionProfileBase,
 } from "../codex-permission-profile.js";
 import { readCodexRolloutCompletedCommand } from "./codex-rollout-proof.js";
-import { codexCliAdmission, codexCliAdmissionScript } from "./codex-cli-admission.js";
+import { codexCliAdmission, codexCliAdmissionInput, codexCliAdmissionScript } from "./codex-cli-admission.js";
 import {
   commandTargetsManagedWorktree,
   type ManagedWorktreeProtection,
@@ -980,6 +980,27 @@ export class CodexAppServerDriver implements Driver {
       ? proof : null;
   }
 
+  private readonly pendingAdmissionItems = new Map<string, Json>();
+
+  workflowActionAdmissionRefusal(occurrenceId: string, commandDigest: string): string | null {
+    const refusal = 'Use the consume_workflow_decision MCP tool or one standalone literal "$WOLLIPOG_CLI" decision consume <id> --snapshot \'<json>\' [--action \'<json>\'] --json command; the snapshot must be inline literal JSON.';
+    const items = [...this.pendingAdmissionItems.values()];
+    if (!this.turnId || items.length !== 1) return refusal;
+    const item = items[0]!;
+    if (!boundedProviderCorrelationId(item.id)) return refusal;
+    const input = item.type === "commandExecution"
+      ? typeof item.command === "string" ? codexCliAdmissionInput(codexCliAdmissionScript(item.command)) : null
+      : item.arguments;
+    if (input?.occurrenceId !== occurrenceId) return refusal;
+    // MCP proof requires the explicit action; only CLI proof derives an omitted --action
+    // from its completed provider response.
+    if (item.type === "mcpToolCall" && input.action === undefined) return refusal;
+    if (input.action !== undefined && (input.action?.kind !== "pr_merge_enqueue" ||
+        typeof input.action.command !== "string" ||
+        createHash("sha256").update(input.action.command, "utf8").digest("hex") !== commandDigest)) return refusal;
+    return null;
+  }
+
   agentTurnId(): string | null {
     return this.turnId ?? this.lastTurnId;
   }
@@ -1431,6 +1452,7 @@ export class CodexAppServerDriver implements Driver {
 
   private setSteeringTurn(id: string | null): void {
     if (this.turnId === id) return;
+    this.pendingAdmissionItems.clear();
     this.turnId = id;
     this.cb.onSteeringTurnChanged?.();
   }
@@ -2468,8 +2490,8 @@ export class CodexAppServerDriver implements Driver {
     peer.onNotification("item/reasoning/summaryTextDelta", onReasoningDelta);
     peer.onNotification("item/reasoning/textDelta", onReasoningDelta);
     peer.onNotification("item/reasoning/delta", onReasoningDelta);
-    peer.onNotification("item/started", (p: Json) => this.onItem(p?.item, false, p?.threadId));
-    peer.onNotification("item/completed", (p: Json) => this.onItem(p?.item, true, p?.threadId));
+    peer.onNotification("item/started", (p: Json) => this.onItem(p?.item, false, p?.threadId, p?.turnId));
+    peer.onNotification("item/completed", (p: Json) => this.onItem(p?.item, true, p?.threadId, p?.turnId));
     // Guardian auto-review (approvalsReviewer=auto_review): surface the model's verdict so
     // the user can see that a boundary-crossing action was AI-reviewed rather than silently
     // auto-approved. One thought per review; genuine escalations arrive as requestApproval
@@ -2821,12 +2843,21 @@ export class CodexAppServerDriver implements Driver {
   }
 
   /** Map an item.started/completed payload to our normalized events. */
-  private onItem(item: Json, completed: boolean, threadId?: unknown): void {
+  private onItem(item: Json, completed: boolean, threadId?: unknown, turnId?: unknown): void {
     if (!item || this.disposed) return;
     const context = this.eventContext(threadId);
     if (!context.accepted) return;
     const parentToolUseId = context.parentToolUseId;
     const id = scopedCodexItemId(item.id, threadId, this.threadId) ?? "item";
+    // Keep full provider-owned input only while the root item is running. Display titles are
+    // truncated and cannot prove the CLI grammar. Other threads cannot authorize this session.
+    if (!parentToolUseId && threadId === this.threadId && this.turnId && turnId === this.turnId) {
+      if (completed) this.pendingAdmissionItems.delete(id);
+      else if (item.type === "commandExecution" || (item.type === "mcpToolCall" &&
+          item.server === "wollipog" && item.tool === "consume_workflow_decision")) {
+        this.pendingAdmissionItems.set(id, item);
+      }
+    }
     switch (item.type) {
       case "userMessage": {
         // A steered user message can arrive before the turn/steer response. Suppress both item

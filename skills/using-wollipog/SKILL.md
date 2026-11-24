@@ -193,6 +193,8 @@ earlier approval of it, and request again what you still need.
 A Codex App Server child must arm a `pr_merge` with the `consume_workflow_decision` tool or a
 standalone literal `"$WOLLIPOG_CLI" decision consume` command, never inside a script, heredoc,
 pipe, or other wrapper: only those two forms can be proven during reconciliation.
+The `--snapshot` value must be inline literal JSON in single quotes, not command substitution,
+a file, a variable, or a heredoc.
 If an exact armed PR merge command already succeeded but its approved occurrence remained
 unconsumed, use `reconcile_workflow_decision` (or `wollipog decision reconcile`) with that
 occurrence's unchanged resource snapshot.

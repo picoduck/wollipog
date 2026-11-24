@@ -300,6 +300,8 @@ export interface Driver {
 
   /** Provider-native id of the most recently started turn, when the driver exposes one. */
   agentTurnId?(): string | null;
+  /** Output-independent provider admission check before the runner appends its arming fence. */
+  workflowActionAdmissionRefusal?(occurrenceId: string, commandDigest: string): string | null;
 
   /** Why the turn that just settled produced no output, in the provider's own words. Only set for
    * a turn the provider itself ended in error; the session manager attaches it to the durable
