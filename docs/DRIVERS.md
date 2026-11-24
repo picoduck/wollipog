@@ -1706,16 +1706,25 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
     conversation in that folder, whatever `cwd` a `session/resume` names, whatever folder the
     process starts in, and with the new folder in `additionalDirectories` or `--add-dir` (measured
     with real agy outside Wollipog). The runner therefore records the folder a fresh ACP
-    conversation was created in (`providerConversationCwd`). An Antigravity launch in any other
-    folder, a worktree switch or a restart after one, starts a fresh conversation there instead
-    of resuming.
-  - **The handoff.** The fresh conversation's first prompt is preceded, once, by a handoff: the old
-    and new folders and the conversation so far, meaning the person's messages and the agent's
-    top-level replies, the newest kept within 24,000 characters. Tool calls are not replayed. This
-    follows T3 Code's `create_with_handoff` and Omnigent's Antigravity harness, which seeds a fresh
-    agy conversation the same way. A session that never recorded its folder (created before this)
-    keeps resuming. Codex and Claude Code need none of this: Codex takes `cwd` on every resume and
-    turn, and Claude Code starts a process per turn in the session's folder.
+    conversation was created in (`providerConversationCwd`). An Antigravity launch that would
+    resume it in any other folder starts a fresh conversation there instead. That covers a worktree
+    switch, and any relaunch after one: parking, a runner restart, a retry.
+  - **The handoff.** The fresh conversation's first ordinary prompt is preceded, once, by a
+    handoff: the old and new folders and the conversation so far, meaning the person's messages and
+    the agent's top-level replies, the newest kept within 24,000 characters. Tool calls are not
+    replayed. This follows T3 Code's `create_with_handoff` and Omnigent's Antigravity harness, which
+    seeds a fresh agy conversation the same way.
+  - **Durability.** The new conversation's id, its folder and a pending-handoff marker
+    (`pendingConversationHandoffFrom`) are written in one patch, whichever path captures the id
+    first, and nothing is written before the conversation exists. Until the agent has accepted the
+    prompt carrying the handoff, every relaunch rebuilds it from the event log, so parking or a
+    runner restart cannot lose it. A replacement that fails before it exists leaves the old
+    conversation as it was, so returning to its folder resumes it without its own history.
+  - **Exemptions.** An explicit Restart never resumes an ACP conversation (`restartResumeId`): it is
+    a new conversation by design ("Restarting starts a new conversation"), unseeded, recording its
+    own folder. A session that never recorded its folder (created before this) keeps resuming.
+    Codex and Claude Code need none of this: Codex takes `cwd` on every resume and turn, and Claude
+    Code starts a process per turn in the session's folder.
 
   Under a runner configured for bwrap or Seatbelt, the directory stays read-only, so no resume is
   advertised there. A restart shows the existing "read-only history" refusal instead of starting a

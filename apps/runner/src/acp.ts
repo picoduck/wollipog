@@ -786,14 +786,21 @@ export class AcpClient {
           sessionId: this.sessionId,
           prompt: content,
         })) as PromptResponse;
-        // The agent answered this prompt, so it has the conversation so far.
-        if (handoff) this.ev.onConversationHandoffDelivered?.();
       } catch (error) {
         // Not accepted: the next ordinary prompt carries the handoff again.
         if (handoff) this.conversationHandoff = handoff;
         if (!this.compatibility || this.transportClosed) throw error;
         throw isAgentAuthRequiredError(error) ? this.signInRequired()
           : this.compatibilityError("turn", errorMessage(error)) ?? error;
+      }
+      // The agent answered this prompt, so it has the conversation so far. Recording that is the
+      // runner's bookkeeping: a failure there never fails the accepted turn or re-sends the seed.
+      if (handoff) {
+        try {
+          this.ev.onConversationHandoffDelivered?.();
+        } catch (error) {
+          this.ev.onStderr(`could not record the delivered conversation handoff: ${errorMessage(error)}`);
+        }
       }
       const stopReason = res.stopReason as StopReason;
       // ACP publishes response text only as chunks. Mirror the native streaming drivers' durable,

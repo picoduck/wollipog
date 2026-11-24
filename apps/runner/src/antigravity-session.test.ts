@@ -97,7 +97,8 @@ function launchDriver(
   overrides: { layeredEnv?: Record<string, string>; deadlines?: { handshakeMs: number; sessionMs: number }; config?: SessionConfig;
     resolveLaunch?: AcpCompatibility["resolveLaunch"]; sessionContext?: DriverOptions["acpSessionContext"];
     fixtureIsolation?: DriverOptions["isolation"];
-    appArmorFix?: (executable: string | undefined) => string | undefined; handoff?: string } = {},
+    appArmorFix?: (executable: string | undefined) => string | undefined; handoff?: string;
+    handoffRecordFails?: boolean } = {},
 ): { driver: AcpDriver; seen: Observed } {
   const context = antigravityCredentialContext();
   const launch = antigravitySessionLaunch(view, context, isolation);
@@ -125,7 +126,10 @@ function launchDriver(
     onAuthStatus: (status: string) => seen.auth.push(status),
     onAcpCapabilities: (capabilities: AcpRuntimeCapabilities) => seen.acp.push(capabilities),
     onAcpSessionState: (update: { capabilities: AgentCapabilities; config: SessionConfig }) => seen.state.push(update),
-    onConversationHandoffDelivered: () => { seen.handoffDelivered += 1; },
+    onConversationHandoffDelivered: () => {
+      seen.handoffDelivered += 1;
+      if (overrides.handoffRecordFails) throw new Error("EIO: metadata write failed");
+    },
   } as never, {
     // Tests never read the real host's AppArmor setting.
     antigravityAppArmorFix: overrides.appArmorFix ?? (() => undefined),
@@ -541,6 +545,23 @@ test("a fresh conversation's handoff rides once, ahead of its first prompt", asy
   assert.equal(prompts[0]?.[0], handoff, "the conversation so far comes first, before the message it answers");
   assert.equal(prompts[0]?.[1], "What was the code word?");
   assert.ok(!prompts[1]?.some((text) => text.includes("Conversation so far")), "never repeated");
+  assert.equal(seen.handoffDelivered, 1);
+});
+
+test("a failure recording the delivered handoff never fails the accepted turn or re-sends the seed", async () => {
+  signIn();
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const handoff = "[Wollipog] Conversation so far:\nuser: remember HERON-42";
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined,
+    { handoff, handoffRecordFails: true });
+  await driver.initialize();
+  await driver.newSession(cwd);
+  assert.equal(await driver.prompt("What was the code word?"), "end_turn", "the agent accepted it");
+  assert.ok(seen.stderr.some((text) => text.includes("could not record the delivered conversation handoff")));
+  await driver.prompt("Say hello.");
+  const prompts = calls().filter((call) => call.method === "session/prompt").map((call) => call.promptTexts ?? []);
+  assert.equal(prompts[0]?.[0], handoff);
+  assert.ok(!prompts[1]?.some((text) => text === handoff), "the accepted seed is never sent again");
   assert.equal(seen.handoffDelivered, 1);
 });
 

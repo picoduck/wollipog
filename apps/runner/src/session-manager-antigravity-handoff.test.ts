@@ -4,14 +4,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 
-async function launchWith(conversationCwd: "elsewhere" | "here" | "unknown", profile: "antigravity" | "none" = "antigravity") {
+async function launchWith(conversationCwd: "elsewhere" | "here" | "unknown", profile: "antigravity" | "none" = "antigravity",
+  behavior: { failFresh?: boolean; captureDuringNewSession?: boolean } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-antigravity-handoff-")));
   const repoPath = join(root, "repo");
   execFileSync("git", ["init", "-q", repoPath]);
@@ -19,6 +20,7 @@ async function launchWith(conversationCwd: "elsewhere" | "here" | "unknown", pro
   execFileSync("git", ["-C", repoPath, "config", "user.name", "Test"]);
   execFileSync("git", ["-C", repoPath, "commit", "-q", "--allow-empty", "-m", "base"]);
   const elsewhere = join(root, "primary-checkout");
+  mkdirSync(elsewhere);
   const store = new SessionStore(join(root, "sessions"));
   const meta: SessionMeta = {
     sessionId: "s1", agentId: "google-antigravity", workspaceId: "repo", repoPath, worktreePath: null,
@@ -43,11 +45,26 @@ async function launchWith(conversationCwd: "elsewhere" | "here" | "unknown", pro
     patches.push(patch);
     return patchMeta(id, patch);
   }) as typeof store.patchMeta;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let internals: any;
+  const captured: Array<SessionMeta | null> = [];
   const factory = (_driver: unknown, options: DriverOptions, cb: DriverCallbacks) => {
     launched.push(options);
     callbacks.push(cb);
     return {
-      pid: 1, initialize: async () => {}, newSession: async () => options.resumeId ?? "conv-b",
+      pid: 1,
+      initialize: async () => {
+        // A failure before the fresh conversation exists, so before its id is captured.
+        if (behavior.failFresh && !options.resumeId) throw new Error("agy did not start");
+      },
+      newSession: async () => {
+        // Another path (a worktree selection) captures the id while agy still restores its config.
+        if (behavior.captureDuringNewSession && !options.resumeId) {
+          internals.captureAgentSessionId("s1", internals.active.get("s1").client);
+          captured.push(store.readMeta("s1"));
+        }
+        return options.resumeId ?? "conv-b";
+      },
       prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
       setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => options.resumeId ?? "conv-b",
     };
@@ -59,14 +76,13 @@ async function launchWith(conversationCwd: "elsewhere" | "here" | "unknown", pro
     async () => {}, async () => {}, async () => {}, undefined, [],
     () => profile === "antigravity" ? { acpCompatibility: { profile: "antigravity" as const, resumable: true } } : undefined,
   );
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const internals = manager as any;
+  internals = manager;
   assert.equal(await internals.acquireAdmission("s1"), true);
   const ok = await internals.launch(store.readMeta("s1"), "conv-a");
   const stderr = store.readEvents("s1").filter((event) => event.payload.kind === "stderr")
     .map((event) => (event.payload as { text: string }).text);
   return {
-    ok, options: launched[0], meta: store.readMeta("s1"), stderr, repoPath, elsewhere, launched, callbacks, patches, store,
+    ok, options: launched[0], meta: store.readMeta("s1"), stderr, repoPath, elsewhere, launched, callbacks, patches, store, captured,
     /** The replacement retired before its first ordinary prompt (parked, or the runner restarted),
      * then launched again by the next prompt with whatever the session records now. */
     relaunch: async () => {
@@ -96,9 +112,43 @@ test("a conversation created in another folder continues fresh in this one, seed
     assert.ok(f.stderr.some((text) => text.includes("continues in a new conversation")), f.stderr.join("\n"));
     // One write names the new conversation and where it was created: a crash can never leave the
     // new id beside a missing or earlier folder.
-    assert.ok(f.patches.some((patch) => patch.agentSessionId === "conv-b" && patch.providerConversationCwd === f.repoPath),
+    assert.ok(f.patches.some((patch) => patch.agentSessionId === "conv-b" && patch.providerConversationCwd === f.repoPath &&
+      patch.pendingConversationHandoffFrom === f.elsewhere),
       JSON.stringify(f.patches.filter((patch) => "agentSessionId" in patch || "providerConversationCwd" in patch)));
-    assert.ok(!f.patches.some((patch) => patch.providerConversationCwd !== undefined && patch.agentSessionId === undefined));
+    assert.ok(!f.patches.some((patch) => (patch.providerConversationCwd !== undefined ||
+      patch.pendingConversationHandoffFrom !== undefined) && patch.agentSessionId === undefined),
+      "nothing about the new conversation is written before, or apart from, its id");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("another path capturing the fresh id mid-launch still records it with its own folder and handoff", async () => {
+  const f = await launchWith("elsewhere", "antigravity", { captureDuringNewSession: true });
+  try {
+    assert.equal(f.ok, true);
+    const early = f.captured[0];
+    assert.equal(early?.agentSessionId, "conv-b");
+    assert.equal(early?.providerConversationCwd, f.repoPath, "never conv-b beside the replaced folder");
+    assert.equal(early?.pendingConversationHandoffFrom, f.elsewhere);
+    assert.ok(!f.patches.some((patch) => patch.agentSessionId === "conv-b" && patch.providerConversationCwd !== f.repoPath));
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a replacement that fails before it exists leaves the old conversation to resume untouched in its folder", async () => {
+  const f = await launchWith("elsewhere", "antigravity", { failFresh: true });
+  try {
+    assert.equal(f.ok, false);
+    assert.equal(f.meta?.agentSessionId, "conv-a");
+    assert.equal(f.meta?.providerConversationCwd, f.elsewhere);
+    assert.equal(f.meta?.pendingConversationHandoffFrom, undefined, "no seed for a conversation that holds its history");
+    // Back in the old folder: conv-a resumes there, and is never sent its own history again.
+    f.store.patchMeta("s1", { repoPath: f.elsewhere });
+    const back = await f.relaunch();
+    assert.equal(back.resumeId, "conv-a");
+    assert.equal(back.acpConversationHandoff, undefined);
   } finally {
     f.cleanup();
   }
