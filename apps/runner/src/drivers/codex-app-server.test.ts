@@ -81,6 +81,14 @@ test("action arming accepts only current provider-owned MCP or literal CLI admis
   }
   start({ type: "mcpToolCall", server: "wollipog", tool: "consume_workflow_decision", arguments: { occurrenceId: "workflow-arm", action } });
   assert.equal(refuse(), null);
+  notifications.get("item/started")!({ threadId: "thread-arm", turnId: "turn-arm", item: {
+    id: "other-command", type: "commandExecution", command: "npm run dev",
+  } });
+  assert.match(refuse()!, /ambiguous.*wait for the other tools to finish/);
+  notifications.get("item/completed")!({ threadId: "thread-arm", turnId: "turn-arm", item: {
+    id: "other-command", type: "commandExecution", exitCode: 0,
+  } });
+  assert.equal(refuse(), null, "completion of the concurrent tool permits retry in the same turn");
   assert.match(h.driver.workflowActionAdmissionRefusal("other", digest)!, /consume_workflow_decision/);
   assert.match(h.driver.workflowActionAdmissionRefusal("workflow-arm", "b".repeat(64))!, /consume_workflow_decision/);
   finish();

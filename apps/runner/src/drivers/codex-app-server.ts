@@ -985,6 +985,9 @@ export class CodexAppServerDriver implements Driver {
   workflowActionAdmissionRefusal(occurrenceId: string, commandDigest: string): string | null {
     const refusal = 'Use the consume_workflow_decision MCP tool or one standalone literal "$WOLLIPOG_CLI" decision consume <id> --snapshot \'<json>\' [--action \'<json>\'] --json command; the snapshot must be inline literal JSON.';
     const items = [...this.pendingAdmissionItems.values()];
+    // The arming request has no provider item id. With multiple running root commands we
+    // cannot tell whether the request came from the supported item or an opaque wrapper.
+    if (items.length > 1) return `Admission input is ambiguous while multiple root tools are running; wait for the other tools to finish and retry. ${refusal}`;
     if (!this.turnId || items.length !== 1) return refusal;
     const item = items[0]!;
     if (!boundedProviderCorrelationId(item.id)) return refusal;
