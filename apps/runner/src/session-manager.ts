@@ -22722,6 +22722,9 @@ export class SessionManager {
     if (typeof providerTurnId !== "string" || !bounded(providerTurnId, 512)) {
       return fail(occurrenceId, "Codex has not confirmed a provider turn for the current turn");
     }
+    const admissionRefusal = active.client.workflowActionAdmissionRefusal?.(occurrenceId, raw.commandDigest)
+      ?? (active.client.workflowActionAdmissionRefusal ? null : "the provider admission input is unavailable");
+    if (admissionRefusal) return fail(occurrenceId, admissionRefusal);
     const payload: WorkflowActionAdmissionArmedEvent = {
       kind: "workflow_action_admission_armed",
       occurrenceId,
