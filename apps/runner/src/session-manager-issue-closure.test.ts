@@ -1325,4 +1325,67 @@ test("forgeDecisionAction refuses old-repository merge and deletion after runner
   assert.equal(movedOriginRes.outcome, "refused");
   assert.equal(movedOriginRes.refusal?.reason, "repository_mismatch");
   assert.equal(ghCalls.length, 0, "no gh mutation may run when live origin changed");
+
+  // Round 3 Finding 1: if a live Location switch commits while the runner's GitHub preflight read is
+  // in flight, both branch_deletion and pr_merge_enqueue recheck live identity right before the write
+  // and refuse with repository_mismatch without executing any forge write.
+  f.setOrigin("example/project");
+  const runMidflightSwitch = async (kind: "branch_deletion" | "pr_merge_enqueue") => {
+    f.store().patchMeta(soloId, { workspaceId: "w1", repoPath: f.root });
+    f.store().flush(soloId);
+    const seen: string[][] = [];
+    let releaseRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    let allowReturn!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      allowReturn = resolve;
+    });
+    const stagedGh: GhRunner = async (args) => {
+      seen.push(args);
+      if (seen.length === 1) {
+        releaseRead();
+        await gate;
+        const payload = kind === "branch_deletion"
+          ? {
+            data: {
+              repository: {
+                id: "R_123", nameWithOwner: "example/project",
+                pullRequest: { number: 12, state: "MERGED", headRefName: "feat/old", headRefOid: headSha, isCrossRepository: false, mergeCommit: { oid: headSha } },
+                ref: { target: { oid: headSha } },
+                pullRequests: { totalCount: 0 },
+              },
+            },
+          }
+          : {
+            data: {
+              repository: {
+                nameWithOwner: "example/project",
+                pullRequest: { number: 12, state: "OPEN", headRefOid: headSha, mergeQueueEntry: null },
+              },
+            },
+          };
+        return { stdout: JSON.stringify(payload), stderr: "", code: null, timedOut: false };
+      }
+      throw new Error(`unexpected write call after Location switch: ${args.join(" ")}`);
+    };
+    const pending = f.manager().forgeDecisionAction({
+      type: "forge_decision_action", requestId: `req-mid-${kind}`, sessionId: soloId, occurrenceId: `occ-mid-${kind}`,
+      location: oldLocation,
+      action: kind === "branch_deletion"
+        ? { kind: "branch_deletion", repository: "example/project", branch: "feat/old", pullRequest: 12, headSha, mergeCommitSha: headSha }
+        : { kind: "pr_merge_enqueue", repository: "example/project", pullRequest: 12, headSha },
+    }, { gh: stagedGh });
+    await readStarted;
+    f.store().patchMeta(soloId, { workspaceId: "w2", repoPath: otherRepo });
+    f.store().flush(soloId);
+    allowReturn();
+    const result = await pending;
+    assert.equal(result.outcome, "refused", `${kind} refuses after mid-flight Location switch`);
+    assert.equal(result.refusal?.reason, "repository_mismatch");
+    assert.equal(seen.length, 1, `${kind} issued only the preflight read and zero forge writes`);
+  };
+  await runMidflightSwitch("branch_deletion");
+  await runMidflightSwitch("pr_merge_enqueue");
 });

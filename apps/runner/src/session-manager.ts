@@ -22748,58 +22748,81 @@ export class SessionManager {
       const agentEnv = options.agentEnv?.(meta) ?? {};
       const neutral = meta.context?.kind === "wsl" ? "/" : parsePath(tmpdir()).root;
       const gh = options.gh ?? contextGhRunner(meta.context, neutral, agentEnv);
-      if (message.location) {
-        const expectedWorkspaceId = typeof message.location.workspaceId === "string" ? message.location.workspaceId : "";
-        const expectedWorkspacePath = typeof message.location.workspacePath === "string" ? message.location.workspacePath : "";
-        const expectedRepository = typeof message.location.repository === "string" ? message.location.repository.toLowerCase() : "";
-        const actionRepository = "repository" in message.action && typeof message.action.repository === "string"
-          ? message.action.repository.toLowerCase() : "";
-        const stripTrailing = (p: string) => p.length > 1 ? p.replace(/[\\/]+$/u, "") : p;
-        let pathMatches = Boolean(meta.repoPath && expectedWorkspacePath &&
-          stripTrailing(meta.repoPath) === stripTrailing(expectedWorkspacePath));
-        if (!pathMatches && meta.repoPath && expectedWorkspacePath && meta.context?.kind !== "wsl") {
-          try {
-            pathMatches = (await realpath(meta.repoPath)) === (await realpath(expectedWorkspacePath));
-          } catch {
-            pathMatches = false;
+      const verifyBoundLocation = message.location
+        ? async (): Promise<{ outcome: ForgeDecisionActionOutcome; refusal?: { reason: ForgeDecisionActionRefusalReason; summary: string } } | null> => {
+          const currentMeta = this.store.readMeta(message.sessionId);
+          if (!currentMeta) {
+            return {
+              outcome: "refused",
+              refusal: { reason: "runner_unavailable", summary: "The session is not known to this runner." },
+            };
           }
+          const expectedWorkspaceId = typeof message.location?.workspaceId === "string" ? message.location.workspaceId : "";
+          const expectedWorkspacePath = typeof message.location?.workspacePath === "string" ? message.location.workspacePath : "";
+          const expectedRepository = typeof message.location?.repository === "string" ? message.location.repository.toLowerCase() : "";
+          const actionRepository = "repository" in message.action && typeof message.action.repository === "string"
+            ? message.action.repository.toLowerCase() : "";
+          const stripTrailing = (p: string) => p.length > 1 ? p.replace(/[\\/]+$/u, "") : p;
+          let pathMatches = Boolean(currentMeta.repoPath && expectedWorkspacePath &&
+            stripTrailing(currentMeta.repoPath) === stripTrailing(expectedWorkspacePath));
+          if (!pathMatches && currentMeta.repoPath && expectedWorkspacePath && currentMeta.context?.kind !== "wsl") {
+            try {
+              pathMatches = (await realpath(currentMeta.repoPath)) === (await realpath(expectedWorkspacePath));
+            } catch {
+              pathMatches = false;
+            }
+          }
+          if (!expectedWorkspaceId || !expectedWorkspacePath || !expectedRepository ||
+              (actionRepository && actionRepository !== expectedRepository) ||
+              currentMeta.workspaceId !== expectedWorkspaceId || !pathMatches) {
+            return {
+              outcome: "refused",
+              refusal: {
+                reason: "repository_mismatch",
+                summary: "The session's workspace no longer matches the approved GitHub repository; nothing was performed.",
+              },
+            };
+          }
+          let origin: string | undefined | null;
+          try {
+            const run = issueClosureRun(currentMeta.context, currentMeta.repoPath, options.agentEnv?.(currentMeta) ?? {});
+            origin = githubSlug((await run("git", ["remote", "get-url", "origin"])).trim());
+          } catch {
+            return {
+              outcome: "refused",
+              refusal: {
+                reason: "forge_unavailable",
+                summary: "The session's repository origin could not be read; nothing was performed.",
+              },
+            };
+          }
+          if (!origin || origin.toLowerCase() !== expectedRepository) {
+            return {
+              outcome: "refused",
+              refusal: {
+                reason: "repository_mismatch",
+                summary: "The session's repository no longer matches the approved GitHub repository; nothing was performed.",
+              },
+            };
+          }
+          // Re-check live metadata synchronously after awaiting git so a Location switch committed
+          // while reading origin cannot proceed into a forge write.
+          const latestMeta = this.store.readMeta(message.sessionId);
+          if (!latestMeta || latestMeta.workspaceId !== expectedWorkspaceId || latestMeta.repoPath !== currentMeta.repoPath) {
+            return {
+              outcome: "refused",
+              refusal: {
+                reason: "repository_mismatch",
+                summary: "The session's workspace changed while verifying the repository; nothing was performed.",
+              },
+            };
+          }
+          return null;
         }
-        if (!expectedWorkspaceId || !expectedWorkspacePath || !expectedRepository ||
-            (actionRepository && actionRepository !== expectedRepository) ||
-            meta.workspaceId !== expectedWorkspaceId || !pathMatches) {
-          return {
-            ...base,
-            outcome: "refused",
-            refusal: {
-              reason: "repository_mismatch",
-              summary: "The session's workspace no longer matches the approved GitHub repository; nothing was performed.",
-            },
-          };
-        }
-        let origin: string | undefined | null;
-        try {
-          const run = issueClosureRun(meta.context, meta.repoPath, agentEnv);
-          origin = githubSlug((await run("git", ["remote", "get-url", "origin"])).trim());
-        } catch {
-          return {
-            ...base,
-            outcome: "refused",
-            refusal: {
-              reason: "forge_unavailable",
-              summary: "The session's repository origin could not be read; nothing was performed.",
-            },
-          };
-        }
-        if (!origin || origin.toLowerCase() !== expectedRepository) {
-          return {
-            ...base,
-            outcome: "refused",
-            refusal: {
-              reason: "repository_mismatch",
-              summary: "The session's repository no longer matches the approved GitHub repository; nothing was performed.",
-            },
-          };
-        }
+        : undefined;
+      if (verifyBoundLocation) {
+        const locationRefusal = await verifyBoundLocation();
+        if (locationRefusal) return { ...base, ...locationRefusal };
       }
       if (message.action?.kind === "ci_rerun" || message.action?.kind === "ci_rerun_inspect_job" ||
           message.action?.kind === "release_tag" || message.action?.kind === "release_publish") {
@@ -22837,9 +22860,9 @@ export class SessionManager {
       const result = message.action?.kind === "temporary_branch_create" || message.action?.kind === "temporary_branch_deletion"
         ? await executeTemporaryBranch(message.action, gh)
         : message.action?.kind === "branch_deletion"
-        ? await executeBranchDeletion(message.action, gh)
+        ? await executeBranchDeletion(message.action, gh, verifyBoundLocation)
         : message.action?.kind === "pr_merge_enqueue"
-          ? await executePullRequestEnqueue(message.action, gh)
+          ? await executePullRequestEnqueue(message.action, gh, verifyBoundLocation)
           : message.action?.kind === "pr_merge_retirement_observe"
             ? await observePullRequestRetirement(message.action, gh)
           : message.action?.kind === "pr_merge_observe"

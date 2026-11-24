@@ -1229,6 +1229,21 @@ test("review round 2 regressions: runner-bound Location dispatch, unscoped Custo
     assert.equal(consumedMoved.ok, false);
     assert.equal(consumedMoved.status, 409);
     assert.equal(h2.db.workflowDecisionByOccurrence(pubMoved.data!.occurrenceId)!.status, "revoked");
+
+    // Round 3 Finding 2: if the owner removes the verified Project Location after approval and before
+    // consumption, manual consumption refuses with 409 and revokes the occurrence instead of dropping the guard.
+    h2.setRepo("team/repo");
+    const pubRemoved = await h2.svc.createWorkflowDecisionWithVideo("custom-unscoped", {
+      requestId: "cu-pub-removed-loc", resourceKey: "cu-pub-removed-loc", resourceSnapshot: pubSameSnap,
+    });
+    assert.equal(pubRemoved.status, 201);
+    assert.equal(pubRemoved.data!.authorityEvaluation?.verifiedLocationId, h2.location!.id);
+    assert.equal(h2.svc.approve("custom-unscoped", pubRemoved.data!.occurrenceId, "approve", h2.owner).ok, true);
+    assert.ok(h2.db.removeProjectLocation(h2.location!.id), "Project Location removed");
+    const consumedAfterRemoval = await h2.svc.consumeWorkflowDecision("custom-unscoped", pubRemoved.data!.occurrenceId, { resourceSnapshot: pubSameSnap });
+    assert.equal(consumedAfterRemoval.ok, false);
+    assert.equal(consumedAfterRemoval.status, 409);
+    assert.equal(h2.db.workflowDecisionByOccurrence(pubRemoved.data!.occurrenceId)!.status, "revoked");
   } finally {
     h2.db.close();
   }

@@ -12533,6 +12533,7 @@ export class SessionsService {
         if (unsupported) return unsupported;
       }
     }
+    let verifiedCustomPublicationLocationId: string | undefined;
     if (normalized.ok && normalized.data && requesting && this.customRootOwnWorkSession(requesting, normalized.data.category)) {
       if (normalized.data.category === "pr_merge" || normalized.data.category === "merged_branch_deletion") {
         if (!canAccess(requesting.id)) return fail("session not found", 404);
@@ -12566,11 +12567,15 @@ export class SessionsService {
           if (isTerminal(requesting.status)) return fail("a terminal session cannot request a workflow decision", 409);
           const verified = await this.verifyStandaloneRepositoryLocation(requesting, repo, null);
           if (!verified.ok || !verified.data) return failAs(verified);
+          verifiedCustomPublicationLocationId = verified.data.id;
         }
       }
     }
     if (normalized.ok && normalized.data?.category === "follow_up_issue_publication" && normalized.data.recommendationId) {
-      if (normalized.data.issueAdmission) return this.createWorkflowDecision(sessionId, request, canAccess);
+      if (normalized.data.issueAdmission) {
+        return this.createWorkflowDecision(sessionId, request, canAccess,
+          verifiedCustomPublicationLocationId ? { trustedForgeLocationId: verifiedCustomPublicationLocationId } : undefined);
+      }
       const initialCaller = this.db.getSession(sessionId);
       const initialController = initialCaller && this.workflowDecisionController(initialCaller, "follow_up_issue_publication");
       const admitted = await this.admitCampaignPublication(sessionId, request, normalized.data, canAccess);
@@ -12592,9 +12597,14 @@ export class SessionsService {
       // The snapshot keeps the name exactly as requested, so the card shows what the person
       // approves and the requester consumes what it sent (#3918). Only the server's own
       // issueAdmission makes a publication bounded; a named recommendation never does.
-      return this.createWorkflowDecision(sessionId, request, canAccess,
-        "failure" in admitted ? { publicationAdmissionFailure: admitted.failure,
-          ...(admitted.failure === "origin_outside_scope" ? { publicationAdmissionReason: admitted.reason } : {}) } : undefined);
+      return this.createWorkflowDecision(sessionId, request, canAccess, {
+        ...("failure" in admitted ? { publicationAdmissionFailure: admitted.failure,
+          ...(admitted.failure === "origin_outside_scope" ? { publicationAdmissionReason: admitted.reason } : {}) } : {}),
+        ...(verifiedCustomPublicationLocationId ? { trustedForgeLocationId: verifiedCustomPublicationLocationId } : {}),
+      });
+    }
+    if (verifiedCustomPublicationLocationId) {
+      return this.createWorkflowDecision(sessionId, request, canAccess, { trustedForgeLocationId: verifiedCustomPublicationLocationId });
     }
     if (normalized.ok && normalized.data?.category === "pr_merge") {
       return this.createMergeDecision(sessionId, request, normalized.data, canAccess);
@@ -15337,6 +15347,11 @@ export class SessionsService {
         return fail("This action requires the session's verified Project Location", 409);
       }
     }
+    if (normalized.data.category === "follow_up_issue_publication" && internal?.trustedForgeLocationId &&
+        this.customRootOwnWorkSession(child, "follow_up_issue_publication") &&
+        this.requesterForgeDecisionLocation(child)?.id !== internal.trustedForgeLocationId) {
+      return fail("This action requires the session's verified Project Location", 409);
+    }
     if (normalized.data.category === "ui_evidence_approval" && this.directOwnerSelfControlled(child, "ui_evidence_approval")) {
       const standaloneUnsupported = this.capabilityFailure(child.runnerId, "standaloneOwnerDecisions", "direct owner approvals");
       if (standaloneUnsupported) return standaloneUnsupported;
@@ -15509,6 +15524,9 @@ export class SessionsService {
         : undefined);
       if (failure) authorityEvaluation.admissionFailure = failure;
       if (failure && issueBounded) authorityEvaluation.admissionMessage = internal?.publicationAdmissionReason ?? CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[failure];
+    }
+    if (internal?.trustedForgeLocationId && this.directOwnerSelfControlled(child, category)) {
+      authorityEvaluation.verifiedLocationId = internal.trustedForgeLocationId;
     }
     if (authority === "orchestrator") {
       const parentUnsupported = this.capabilityFailure(
@@ -16834,7 +16852,7 @@ export class SessionsService {
     // Re-verify the session's current Project Location repository before arming or consuming
     // direct-owner repo-bound approvals so a live Location switch never acts on the old repo (#4894).
     let verifiedDirectLocationId: string | null = null;
-    if (directOwner && this.requiresDirectLocationVerification(child, normalized.data.category) &&
+    if (directOwner && this.requiresDirectLocationVerification(child, normalized.data.category, decision) &&
         (normalized.data.category === "pr_merge" || normalized.data.category === "merged_branch_deletion" ||
           normalized.data.category === "follow_up_issue_publication")) {
       const requireProtocol = this.standaloneDirectOwnerSession(child) || normalized.data.category !== "follow_up_issue_publication"
@@ -17243,7 +17261,7 @@ export class SessionsService {
     try {
       let verifiedDirectLocation: { id: string; workspaceId: string; workspacePath: string; repository: string } | null = null;
       if (!lookOnly && this.directOwnerSelfDecision(child, parent, decision) &&
-          this.requiresDirectLocationVerification(child, snapshot.category) &&
+          this.requiresDirectLocationVerification(child, snapshot.category, decision) &&
           (snapshot.category === "pr_merge" || snapshot.category === "merged_branch_deletion" ||
             snapshot.category === "follow_up_issue_publication")) {
         const requireProtocol = this.standaloneDirectOwnerSession(child) || snapshot.category !== "follow_up_issue_publication"
@@ -18171,6 +18189,7 @@ export class SessionsService {
   private requiresDirectLocationVerification(
     session: SessionView,
     category: WorkflowDecisionCategory,
+    decision?: Pick<WorkflowDecisionView, "authorityEvaluation">,
   ): boolean {
     if (this.standaloneDirectOwnerSession(session)) {
       return category === "pr_merge" || category === "merged_branch_deletion" ||
@@ -18178,8 +18197,9 @@ export class SessionsService {
     }
     if (!this.customRootOwnWorkSession(session, category)) return false;
     if (category === "pr_merge" || category === "merged_branch_deletion") return true;
-    return category === "follow_up_issue_publication" &&
-      campaignScopeRepositories(session).length === 0 &&
+    if (category !== "follow_up_issue_publication") return false;
+    if (decision?.authorityEvaluation?.verifiedLocationId) return true;
+    return campaignScopeRepositories(session).length === 0 &&
       Boolean(this.requesterForgeDecisionLocation(session));
   }
 
@@ -18482,6 +18502,12 @@ export class SessionsService {
         runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, requesterForgeCapability(decision.category)));
     }
     if (requester && this.directOwnerSelfDecision(requester, controller, decision)) {
+      if (decision.authorityEvaluation?.verifiedLocationId) {
+        const currentLocation = this.requesterForgeDecisionLocation(requester);
+        if (!currentLocation || currentLocation.id !== decision.authorityEvaluation.verifiedLocationId) {
+          return false;
+        }
+      }
       if (this.standaloneDirectOwnerSession(requester)) {
         if (!runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, "standaloneOwnerDecisions")) {
           return false;

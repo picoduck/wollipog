@@ -170,6 +170,9 @@ export interface CampaignAuthorityEvaluation {
   unscopedClosures?: string[];
   /** #4104: the Decision Model screen this evaluation used, content-safe (no reason text). */
   credentialScreen?: CredentialScreenFact;
+  /** #4894: the registered Project Location verified at creation for a direct-owner repository-bound
+   * approval, persisted so removing or switching that Location cannot bypass re-verification. */
+  verifiedLocationId?: string;
 }
 
 const operations: CampaignAuthorityOperation[] = ["implementation_question", "pr_merge", "merged_branch_deletion",
