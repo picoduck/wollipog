@@ -12538,7 +12538,7 @@ export class SessionsService {
       if (normalized.data.category === "pr_merge" || normalized.data.category === "merged_branch_deletion") {
         if (!canAccess(requesting.id)) return fail("session not found", 404);
         if (isTerminal(requesting.status)) return fail("a terminal session cannot request a workflow decision", 409);
-        const unsupported = this.capabilityFailure(requesting.runnerId, "standaloneOwnerDecisions", "Custom campaign root own-work approvals");
+        const unsupported = this.capabilityFailure(requesting.runnerId, "standaloneOwnerDecisions", "custom campaign root own-work approvals");
         if (unsupported) return unsupported;
         const repo = normalized.data.repository;
         const scopeRepos = campaignScopeRepositories(requesting);
@@ -12553,7 +12553,7 @@ export class SessionsService {
         return this.createWorkflowDecision(sessionId, request, canAccess, { trustedForgeLocationId: verified.data.id });
       }
       if (normalized.data.category === "ui_evidence_approval") {
-        const unsupported = this.capabilityFailure(requesting.runnerId, "standaloneOwnerDecisions", "Custom campaign root own-work approvals");
+        const unsupported = this.capabilityFailure(requesting.runnerId, "standaloneOwnerDecisions", "custom campaign root own-work approvals");
         if (unsupported) return unsupported;
       }
       if (normalized.data.category === "follow_up_issue_publication") {
