@@ -18018,11 +18018,11 @@ export class SessionsService {
 
   /** A Custom campaign root performing its own work routes approvals directly to its owner (#4894).
    * Implementation actions (pr_merge, merged_branch_deletion, ui_evidence_approval) require Strict
-   * Project Isolation to be disabled; follow-up publication, issue closure, and owner decisions are
-   * always available to the Custom root. */
+   * Project Isolation to be disabled; follow-up publication and owner decisions are always available
+   * to the Custom root (while issue_closure keeps its dedicated root Orchestrator path). */
   private customRootOwnWorkSession(session: SessionView, category: WorkflowDecisionCategory): boolean {
     if (!this.customRootOwnPublication(session)) return false;
-    if (category === "follow_up_issue_publication" || category === "issue_closure" || category === "owner_decision") {
+    if (category === "follow_up_issue_publication" || category === "owner_decision") {
       return true;
     }
     if (category === "pr_merge" || category === "merged_branch_deletion" || category === "ui_evidence_approval") {
