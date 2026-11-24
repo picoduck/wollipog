@@ -1688,8 +1688,11 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   card itself settles with the turn, as for the native drivers.
 - **Resume.** agy keeps its conversations in its state directory, `~/.gemini/antigravity-cli`, which
   also holds its OAuth token and settings. It resumes only where that directory is writable. Where
-  it is, the session advertises `session/resume`, and a restart or a switch to another worktree
-  resumes by id without replaying history.
+  it is, the session advertises `session/resume`, and a relaunch in the conversation's own folder
+  (parking, a runner restart) resumes by id without replaying history. A relaunch in another
+  folder, such as after a worktree switch, starts a fresh conversation instead (see "A
+  conversation stays in the folder it was created in" below). An explicit Restart is always a new
+  conversation.
   - On a `provider` isolation runner, both in place and in a managed Linux worktree. A managed
     worktree forces bwrap there, and the launch preserves the provider home as it does for Claude,
     Codex and Pi. Antigravity's compatibility profile names the directory, since the generic ACP
@@ -1702,6 +1705,33 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   - Before this (#4779 to #4898), the directory was read-only in managed worktrees. A session that
     started in place and then created its own worktree failed on the relaunch with "ACP agent does
     not advertise session resume or load support".
+  - **A conversation stays in the folder it was created in.** agy 1.5.14 runs every command of a
+    conversation in that folder, whatever `cwd` a `session/resume` names, whatever folder the
+    process starts in, and with the new folder in `additionalDirectories` or `--add-dir` (measured
+    with real agy outside Wollipog). The runner therefore records the folder a fresh ACP
+    conversation was created in (`providerConversationCwd`). An Antigravity launch that would
+    resume it in any other folder starts a fresh conversation there instead. That covers a worktree
+    switch, and any relaunch after one: parking, a runner restart, a retry.
+  - **The handoff.** The fresh conversation's first ordinary prompt is preceded, once, by a
+    handoff: the old and new folders and the conversation so far, meaning the person's messages and
+    the agent's top-level replies, the newest kept within 24,000 characters. Tool calls are not
+    replayed. This follows T3 Code's `create_with_handoff` and Omnigent's Antigravity harness, which
+    seeds a fresh agy conversation the same way.
+  - **Durability.** The new conversation's id, its folder and a pending-handoff marker
+    (`pendingConversationHandoffFrom`) are written in one patch, whichever path captures the id
+    first, and nothing is written before the conversation exists. Until the agent has accepted the
+    prompt carrying the handoff, every relaunch rebuilds it from the event log, so parking or a
+    runner restart cannot lose it. A replacement that fails before it exists leaves the old
+    conversation as it was, so returning to its folder resumes it without its own history.
+    Clearing the marker is delivery's bookkeeping only: a failure there never fails the accepted
+    turn, and a relaunch in the same runner process retries the clear instead of re-sending the
+    history. Across a runner crash in that window the handoff is sent again: it is delivered at
+    least once.
+  - **Exemptions.** An explicit Restart never resumes an ACP conversation (`restartResumeId`): it is
+    a new conversation by design ("Restarting starts a new conversation"), unseeded, recording its
+    own folder. A session that never recorded its folder (created before this) keeps resuming.
+    Codex and Claude Code need none of this: Codex takes `cwd` on every resume and turn, and Claude
+    Code starts a process per turn in the session's folder.
 
   Under a runner configured for bwrap or Seatbelt, the directory stays read-only, so no resume is
   advertised there. A restart shows the existing "read-only history" refusal instead of starting a

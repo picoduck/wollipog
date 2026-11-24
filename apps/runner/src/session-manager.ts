@@ -795,6 +795,10 @@ interface SteeringOperation {
 }
 
 interface ActiveSession {
+  /** A fresh ACP conversation this launch creates: the folder it is created in and, when it replaces
+   * a conversation in another folder, that folder until its handoff is delivered. Written with the
+   * conversation's id by `captureAgentSessionId`, never before. */
+  freshConversation?: { cwd: string; handoffFrom?: string };
   /** Set while a worktree-switch relaunch is still starting (#4902): a provider that exits then
    * leaves the session idle with the error, as a rejected start does, rather than Failed. */
   recoverableLaunch?: true;
@@ -1021,6 +1025,10 @@ export function effectiveAcpCompatibility(
   const stateReadOnly = isolation && !(isolation.backend === "bwrap" && isolation.preservesProviderHome);
   return { acpCompatibility: stateReadOnly ? { ...compatibility, resumable: false } : compatibility };
 }
+
+/** Bound on the conversation carried into a fresh Antigravity conversation (`conversationHandoff`):
+ * the newest turns that fit, so the seed stays a modest share of one prompt. */
+const CONVERSATION_HANDOFF_MAX_CHARS = 24_000;
 
 function canResumeSession(meta: SessionMeta): boolean {
   if (meta.driver === "acp") {
@@ -2186,6 +2194,11 @@ export class SessionManager {
   setConfiguredProjectPaths(paths: readonly string[]): void {
     this.configuredProjectPaths = [...paths];
   }
+
+  /** Conversations (by session) that accepted their handoff while clearing its marker failed. A
+   * relaunch in this process retries the clear instead of re-sending the history; across a runner
+   * crash in that window the handoff is delivered again (at least once). */
+  private readonly deliveredHandoffs = new Map<string, string>();
 
   /** Agent ids the operator configured, set by the host bootstrap. A configured agent that reuses
    * Antigravity's id launches without Antigravity's profile (#4901). */
@@ -10608,6 +10621,10 @@ export class SessionManager {
     this.emitStatus(sessionId, "starting");
     this.clearProviderHomeRefusal(sessionId);
     let cwd = meta.worktreePath ?? meta.repoPath;
+    /** The conversation so far, for a fresh Antigravity conversation that replaces a resume. */
+    let conversationHandoff: string | undefined;
+    /** The folder of the conversation a fresh Antigravity conversation replaces. */
+    let replacedConversationCwd: string | undefined;
     const worktree: WorktreeHandle | null = meta.worktreePath
       ? { path: meta.worktreePath, branch: meta.worktreeBranch ?? `agent/${sessionId}` }
       : null;
@@ -10681,6 +10698,45 @@ export class SessionManager {
         this.emitEvent(sessionId, { kind: "error", message: `agent init failed: ${launchPreparation.launchRefusal}` });
         failLaunch(launchPreparation.launchRefusal);
         return false;
+      }
+      // agy fixes a conversation's working directory when it creates it: a resume in another folder
+      // still runs every command in the original one, whatever cwd the resume names or the process
+      // starts in. A launch that would resume across folders (a worktree switch, or any relaunch
+      // after one: parking, a runner restart, a retry) therefore starts a fresh conversation in this
+      // launch's folder, seeded once with the session's conversation so far, as T3 Code's
+      // create_with_handoff and Omnigent's Antigravity harness do. An explicit Restart never resumes
+      // an ACP conversation (`restartResumeId`), so it is a new conversation by design, unseeded.
+      // Unknown (an older session) keeps resuming.
+      const antigravityProfile = launchPreparation?.acpCompatibility?.profile === "antigravity";
+      if (resumeId && antigravityProfile &&
+          meta.providerConversationCwd && !sameWorktreePath(meta.context, meta.providerConversationCwd, cwd)) {
+        // Nothing is recorded until the fresh conversation's id is captured (`freshConversation`):
+        // a launch that fails first leaves the old conversation, its folder and no pending handoff,
+        // so a retry here seeds again and a return to the old folder resumes it untouched.
+        replacedConversationCwd = meta.providerConversationCwd;
+        conversationHandoff = this.conversationHandoff(sessionId, replacedConversationCwd, cwd);
+        resumeId = undefined;
+        this.emitEvent(sessionId, {
+          kind: "stderr",
+          text: "Google Antigravity keeps a conversation in the folder it started in, so this session continues " +
+            `in a new conversation in ${cwd}, given the conversation so far.`,
+        });
+      } else if (resumeId && antigravityProfile && meta.pendingConversationHandoffFrom &&
+          resumeId === meta.agentSessionId) {
+        if (this.deliveredHandoffs.get(sessionId) === resumeId) {
+          // Already accepted; only the marker's clear failed. Retry it, never re-send the history.
+          try {
+            this.store.patchMeta(sessionId, { pendingConversationHandoffFrom: undefined });
+            this.deliveredHandoffs.delete(sessionId);
+          } catch (error) {
+            this.log(`session ${sessionId} could not clear a delivered conversation handoff: ${errText(error)}`);
+          }
+        } else {
+          // The replacement was created but has not yet taken its handoff (it was parked, or the
+          // runner restarted, before its first ordinary prompt). The marker is written with this
+          // conversation's id, so it belongs to the conversation being resumed.
+          conversationHandoff = this.conversationHandoff(sessionId, meta.pendingConversationHandoffFrom, cwd);
+        }
       }
       // Repository setup values are resolved runner-side from the immutable base-commit config.
       // Apply them after agent-config refresh so they reach hooks and the provider without ever
@@ -10889,6 +10945,7 @@ export class SessionManager {
           ...effectiveAcpCompatibility(launchPreparation?.acpCompatibility, isolation),
           config: meta.config,
           artifactGuidance: meta.review ? "" : [artifactGuidance(meta, this.controlPlaneProtocolVersion()), shellGuidance(meta)].filter(Boolean).join(" "),
+          ...(conversationHandoff ? { acpConversationHandoff: conversationHandoff } : {}),
           ...(meta.review ? { review: true } : {}),
           ...(preparedProjectMemoryDirectory ? { projectMemoryDirectory: preparedProjectMemoryDirectory } : {}),
           orchestrator: meta.orchestrator,
@@ -10962,6 +11019,17 @@ export class SessionManager {
         },
         onStderr: (t) => this.onDriverStderr(sessionId, t),
         onExit: (code) => this.onDriverExit(sessionId, code, client),
+        onConversationHandoffDelivered: () => {
+          const live = this.active.get(sessionId);
+          if (live?.client === client && live.freshConversation) delete live.freshConversation.handoffFrom;
+          // Remembered before the durable clear: if that write fails, a relaunch in this runner
+          // process still knows the conversation has its handoff, and retries the clear instead of
+          // sending it again.
+          const accepted = client?.agentSessionId();
+          if (accepted) this.deliveredHandoffs.set(sessionId, accepted);
+          this.store.patchMeta(sessionId, { pendingConversationHandoffFrom: undefined });
+          this.deliveredHandoffs.delete(sessionId);
+        },
         onBackgroundWork: (update) => {
           // A retiring driver may emit an exit/null callback after a replacement owns the session.
           if (this.active.get(sessionId)?.client !== client) return;
@@ -11170,6 +11238,9 @@ export class SessionManager {
       : [];
     const entry: ActiveSession = {
       ...(recoverableFailure ? { recoverableLaunch: true as const } : {}),
+      ...(meta.driver === "acp" && !resumeId
+        ? { freshConversation: { cwd, ...(replacedConversationCwd ? { handoffFrom: replacedConversationCwd } : {}) } }
+        : {}),
       orchestratorLaunchPolicy: meta.orchestrator,
       projectMemoryKey: effectiveProjectMemoryKey(meta),
       sessionId,
@@ -11531,6 +11602,48 @@ export class SessionManager {
   private rememberAcpCompatibility(meta: SessionMeta, preparation: SessionLaunchPreparation | void | undefined): void {
     if (preparation?.acpCompatibility) this.launchAcpCompatibility.set(meta, preparation.acpCompatibility);
     else this.launchAcpCompatibility.delete(meta);
+  }
+
+  /** The conversation so far, to seed a fresh Antigravity conversation that replaces a resume in
+   * another folder. Only the person's messages and the agent's top-level replies are carried, the
+   * newest first kept within a bound: agy has no API to inject history, so this rides once ahead of
+   * the next prompt, and tool calls are not replayed (as in Omnigent's Antigravity harness). */
+  private conversationHandoff(sessionId: string, fromCwd: string, toCwd: string): string {
+    const turns: Array<{ role: "user" | "assistant"; text: string; open: boolean }> = [];
+    for (const { payload } of this.store.readEvents(sessionId)) {
+      if (payload.kind === "user_message" && payload.text.trim()) {
+        turns.push({ role: "user", text: payload.text.trim(), open: false });
+      } else if (payload.kind === "agent_message" && !payload.parentToolUseId) {
+        const last = turns.at(-1);
+        if (last?.role === "assistant" && last.open) {
+          last.text = payload.final && payload.text.trim() ? payload.text : last.text + payload.text;
+        } else if (payload.text.trim()) {
+          turns.push({ role: "assistant", text: payload.text, open: true });
+        }
+        if (payload.final) turns.at(-1)!.open = false;
+      } else if (payload.kind === "agent_response_completed") {
+        const last = turns.at(-1);
+        if (last) last.open = false;
+      }
+    }
+    const lines: string[] = [];
+    let size = 0;
+    for (const turn of [...turns].reverse()) {
+      const line = `${turn.role}: ${turn.text.trim()}`;
+      if (lines.length && size + line.length > CONVERSATION_HANDOFF_MAX_CHARS) {
+        lines.push("[earlier conversation omitted]");
+        break;
+      }
+      lines.push(line.length > CONVERSATION_HANDOFF_MAX_CHARS ? `${line.slice(0, CONVERSATION_HANDOFF_MAX_CHARS)}…` : line);
+      size += line.length;
+    }
+    return [
+      `[Wollipog] This session moved from ${fromCwd} to ${toCwd}. Google Antigravity cannot move a ` +
+        "conversation to another folder, so this is a new conversation that continues the earlier one. " +
+        `Work only in ${toCwd}. Tool calls and their results from before the move are not included.`,
+      ...(lines.length ? ["Conversation so far:", ...lines.reverse()] : []),
+      "Continue from here with the message below.",
+    ].join("\n");
   }
 
   /** Why this session's agent cannot launch in a managed worktree on this runner (#4901), or null.
@@ -21409,10 +21522,24 @@ export class SessionManager {
   }
 
   /** Persist the agent-native resumable id once it's known (claude immediately, codex after turn 1). */
+  /** A fresh ACP conversation's facts (where it was created, and the handoff it still needs) are
+   * written in the same patch as its id, whichever caller captures it first: they must never be
+   * observed beside another conversation's id, after a crash or a concurrent worktree selection. */
   private captureAgentSessionId(sessionId: string, client: Driver): void {
     const aid = client.agentSessionId();
-    if (aid && this.store.readMeta(sessionId)?.agentSessionId !== aid) {
-      const updated = this.store.patchMeta(sessionId, { agentSessionId: aid, handoffPending: undefined });
+    const entry = this.active.get(sessionId);
+    const fresh = entry?.client === client ? entry.freshConversation : undefined;
+    const current = this.store.readMeta(sessionId);
+    // Capture only ever adds these facts. Clearing a delivered handoff's marker belongs to delivery
+    // alone (`onConversationHandoffDelivered`), so a failed clear never turns into another write here
+    // that could fail a turn the agent already completed.
+    const with_: Partial<SessionMeta> = fresh
+      ? { providerConversationCwd: fresh.cwd, ...(fresh.handoffFrom ? { pendingConversationHandoffFrom: fresh.handoffFrom } : {}) }
+      : {};
+    const stale = fresh && (current?.providerConversationCwd !== fresh.cwd ||
+      (fresh.handoffFrom !== undefined && current?.pendingConversationHandoffFrom !== fresh.handoffFrom));
+    if (aid && (current?.agentSessionId !== aid || stale)) {
+      const updated = this.store.patchMeta(sessionId, { agentSessionId: aid, handoffPending: undefined, ...with_ });
       if (updated && runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "sessionRestartResume")) {
         this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       }
