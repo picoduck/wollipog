@@ -65,6 +65,7 @@ export * from "./pull-request-watch.js";
 export * from "./session-waits.js";
 export * from "./workspace-removal.js";
 export * from "./antigravity-setup.js";
+export * from "./managed-worktree-agents.js";
 import { ANTIGRAVITY_FULL_PERMISSIONS_MODE } from "./antigravity-setup.js";
 export * from "./forge-decision-action.js";
 export * from "./release-decision.js";

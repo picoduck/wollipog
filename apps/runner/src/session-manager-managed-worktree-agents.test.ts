@@ -1,0 +1,174 @@
+/** Agents a managed worktree's sandbox cannot run are refused before anything is lost (#4901), and a
+ * worktree switch whose relaunch fails anyway leaves the session usable (#4902). */
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { execFileSync } from "@wollipog/test-support/bounded-child-process";
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { DriverCallbacks } from "./drivers/driver.js";
+import { resolveExecutionIsolation } from "./execution-isolation.js";
+import { SessionManager } from "./session-manager.js";
+import { SessionStore, type SessionMeta } from "./session-store.js";
+
+const REFUSAL = /can't run in a managed worktree on this machine: .* Start the session In Place instead\./u;
+
+function worktreeCount(repoPath: string): number {
+  return execFileSync("git", ["-C", repoPath, "worktree", "list", "--porcelain"], { encoding: "utf8" })
+    .split("\n").filter((line) => line.startsWith("worktree ")).length;
+}
+
+/** A provider-isolation Linux runner with one session running in place in a Git repository, which
+ * also owns a runner-created worktree (`created`) it has not moved into. */
+async function fixture(agent: { driver: SessionMeta["driver"]; agentId: string },
+  options: { failRelaunch?: boolean } = {}) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-managed-worktree-agents-")));
+  const home = mkdtempSync(join(tmpdir(), "wollipog-managed-worktree-agents-home-"));
+  const repoPath = join(root, "repo");
+  const created = join(root, "created");
+  execFileSync("git", ["init", "-q", repoPath]);
+  execFileSync("git", ["-C", repoPath, "config", "user.email", "test@example.com"]);
+  execFileSync("git", ["-C", repoPath, "config", "user.name", "Test"]);
+  execFileSync("git", ["-C", repoPath, "commit", "-q", "--allow-empty", "-m", "base"]);
+  execFileSync("git", ["-C", repoPath, "worktree", "add", "-q", "-b", "agent/s1", created]);
+  const store = new SessionStore(join(root, "sessions"));
+  store.create({
+    sessionId: "s1", agentId: agent.agentId, workspaceId: "repo", repoPath, worktreePath: null,
+    driver: agent.driver, command: "agent", args: [], env: { HOME: home }, context: { kind: "native" },
+    agentSessionId: null, status: "starting", title: "s1", config: {}, tokensIn: 0, tokensOut: 0,
+    costUsd: 0, preview: null, pendingApproval: null, seq: 0, createdAt: 1, updatedAt: 1,
+    worktrees: [{ id: "created", path: created, branch: "agent/s1", source: "created" }],
+  });
+  const drivers: Array<{ disposed: boolean; cb: DriverCallbacks }> = [];
+  const factory = (_driver: unknown, _launch: unknown, cb: DriverCallbacks) => {
+    const driver = { disposed: false, cb };
+    drivers.push(driver);
+    const relaunch = drivers.length > 1;
+    return {
+      pid: drivers.length,
+      initialize: async () => {
+        // A failure nobody could predict before retiring the first process (#4902).
+        if (relaunch && options.failRelaunch) throw new Error("provider rejected the resume");
+      },
+      newSession: async () => "provider-1",
+      prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => { driver.disposed = true; },
+      setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-1",
+    };
+  };
+  const manager = new SessionManager(
+    () => {}, () => {}, store, "runner", undefined, factory as never, join(root, "state"), 2,
+    undefined, undefined, { agentLimits: {}, agentWeights: {} },
+    { mode: "provider", network: "inherit" }, async (policy, context, _deps, state) =>
+      resolveExecutionIsolation(policy, context, {
+        platform: "linux", uid: () => 1000, nativeEnvironment: () => ({ HOME: home }),
+        resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
+      }, state),
+    async () => {}, async () => {}, async () => {},
+  );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const internals = manager as any;
+  internals.verifySelectedWorktreeBeforeLaunch = async () => true;
+  return {
+    root, repoPath, created, store, manager, internals, drivers,
+    errors: () => store.readEvents("s1").filter((event) => event.payload.kind === "error")
+      .map((event) => (event.payload as { message: string }).message),
+    /** Launch in place, as a session that has not moved into a worktree yet runs. */
+    launchInPlace: async () => {
+      assert.equal(await internals.acquireAdmission("s1"), true);
+      assert.equal(await internals.launch(store.readMeta("s1")), true);
+    },
+    cleanup: () => {
+      manager.shutdownAll();
+      rmSync(root, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    },
+  };
+}
+
+test("a generic ACP agent is refused a new or selected managed worktree before one is made or moved to (#4901)", async () => {
+  if (process.platform !== "linux") return;
+  const f = await fixture({ driver: "acp", agentId: "gemini-cli" });
+  try {
+    const before = worktreeCount(f.repoPath);
+    await assert.rejects(f.manager.requestWorktree("s1", { baseRef: "HEAD", branch: "agent/second" }), REFUSAL);
+    assert.equal(worktreeCount(f.repoPath), before, "no worktree is created for a launch that would be refused");
+    await assert.rejects(f.manager.selectWorktree("s1", f.created), REFUSAL);
+    assert.equal(f.store.readMeta("s1")?.worktreePath, null, "the session keeps working where it is");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("Antigravity and drivers with a known state directory still get managed worktrees", async () => {
+  if (process.platform !== "linux") return;
+  for (const agent of [{ driver: "acp" as const, agentId: "google-antigravity" }, { driver: "claude-code" as const, agentId: "claude" }]) {
+    const f = await fixture(agent);
+    try {
+      const made = await f.manager.requestWorktree("s1", { baseRef: "HEAD", branch: "agent/second" });
+      assert.ok(existsSync(made.worktree.path), agent.agentId);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test("starting a generic ACP session in a managed worktree is refused without creating one (#4901)", async () => {
+  if (process.platform !== "linux") return;
+  const f = await fixture({ driver: "acp", agentId: "gemini-cli" });
+  try {
+    const before = worktreeCount(f.repoPath);
+    const started = await f.manager.start({
+      sessionId: "s_new", workspaceId: "repo", workspacePath: f.repoPath, agentId: "gemini-cli",
+      driver: "acp", command: "gemini", args: ["--acp"], env: {}, useWorktree: true,
+      title: "", titleSource: "generated", config: {},
+    });
+    assert.equal(started, false);
+    assert.equal(worktreeCount(f.repoPath), before, "nothing is left behind");
+    assert.equal(f.drivers.length, 0, "no provider is constructed");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a switch the new launch cannot run is refused before the running provider is retired (#4902)", async () => {
+  if (process.platform !== "linux") return;
+  const f = await fixture({ driver: "acp", agentId: "gemini-cli" });
+  try {
+    await f.launchInPlace();
+    // What the in-place launch recorded: resume works there, which the switch must not trust.
+    f.store.patchMeta("s1", { acpCapabilities: { sessionResume: true, loadSession: false } as never });
+    // A selection recorded by a path that predates the refusal at selection time.
+    f.store.patchMeta("s1", { worktreePath: f.created, worktreeBranch: "agent/s1" });
+    const entry = f.internals.active.get("s1");
+    entry.pendingWorktreeRebind = f.created;
+    await f.internals.rebindSelectedWorktree("s1", entry);
+
+    assert.equal(f.drivers.length, 1, "no replacement provider is launched");
+    assert.equal(f.drivers[0]!.disposed, false, "the running provider keeps the conversation");
+    assert.equal(f.internals.active.get("s1"), entry);
+    assert.notEqual(f.store.readMeta("s1")?.status, "failed");
+    assert.ok(f.errors().some((message) => message.startsWith("The session stays where it is.") && REFUSAL.test(message)),
+      f.errors().join("\n"));
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a relaunch that fails after a worktree switch leaves the session idle with the error, not Failed (#4902)", async () => {
+  if (process.platform !== "linux") return;
+  const f = await fixture({ driver: "claude-code", agentId: "claude" }, { failRelaunch: true });
+  try {
+    await f.launchInPlace();
+    f.internals.captureAgentSessionId("s1", f.internals.active.get("s1").client);
+    await f.manager.selectWorktree("s1", f.created);
+    const deadline = Date.now() + 5_000;
+    while (f.drivers.length < 2 || f.internals.worktreeRebindings.has("s1")) {
+      if (Date.now() > deadline) throw new Error("the relaunch did not finish");
+      await new Promise((done) => setTimeout(done, 20));
+    }
+    assert.equal(f.store.readMeta("s1")?.status, "idle", "the next message or Restart can retry");
+    assert.ok(f.errors().some((message) => message.includes("provider rejected the resume")), f.errors().join("\n"));
+  } finally {
+    f.cleanup();
+  }
+});

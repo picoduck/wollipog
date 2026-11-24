@@ -1,6 +1,6 @@
 import { OWNER_CONFIRMATION_NOTICE_PREFIX, type PromptSessionMessage, type WollipogPromptOrigin } from "@wollipog/protocol";
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
-import { ANTIGRAVITY_AGENT_ID, ANTIGRAVITY_AUTO_MODE } from "@wollipog/protocol";
+import { ANTIGRAVITY_AGENT_ID, ANTIGRAVITY_AUTO_MODE, managedWorktreeUnsupportedReason } from "@wollipog/protocol";
 import { isProviderCapacityFailure, PROVIDER_RETRY_CONTINUATION } from "./provider-turn-retry.js";
 import { artifactGuidance } from "./artifact-guidance.js";
 import { providerCommandHomeWriteSeparationDiagnostic } from "./provider-command-home-write-separation.js";
@@ -3808,6 +3808,8 @@ export class SessionManager {
       if (meta.executionTarget && meta.executionTarget.adapter !== "host") {
         throw new Error("session worktrees are available only on host execution targets");
       }
+      const managedWorktreeRefusal = this.managedWorktreeRefusal(meta);
+      if (managedWorktreeRefusal) throw new Error(managedWorktreeRefusal);
       const options = {
         context: meta.context,
         dataDir: this.dataDir,
@@ -4254,6 +4256,12 @@ export class SessionManager {
         );
       }
       const selected = { ...worktree, path: verified.path };
+      // The same boundary `requiresManagedWorktreeBwrap` applies at launch: refuse while the
+      // provider still runs where it is, rather than after it is retired (#4901, #4902).
+      const managedWorktreeRefusal = selected.source !== "attached" || selected.reusedInPlace === true
+        ? this.managedWorktreeRefusal(meta)
+        : null;
+      if (managedWorktreeRefusal) throw new Error(managedWorktreeRefusal);
       if (selected.setup?.status === "failed") {
         throw new Error("required worktree setup must be retried before selection");
       }
@@ -8393,6 +8401,19 @@ export class SessionManager {
     const priorWorktreePath = priorMatchesWorkspace ? prior?.worktreePath ?? null : null;
     let shouldUseWorktree = spec.useWorktree || !!priorWorktreePath &&
       !!prior?.worktrees?.some((item) => sameWorktreePath(context, item.path, priorWorktreePath));
+    // Before any worktree, lock or record exists (#4901). A current control plane refuses this at
+    // session creation; this keeps an older one, or a restart of an existing session, from making a
+    // worktree the launch would then refuse and leave behind.
+    const priorManagedWorktree = !!priorWorktreePath && !!prior?.worktrees?.some((item) =>
+      sameWorktreePath(context, item.path, priorWorktreePath) && (item.source !== "attached" || item.reusedInPlace === true));
+    const managedWorktreeRefusal = spec.useWorktree || priorManagedWorktree
+      ? this.managedWorktreeRefusal({ driver, agentId: spec.agentId, context, executionTarget })
+      : null;
+    if (managedWorktreeRefusal) {
+      if (prior) this.emitEvent(spec.sessionId, { kind: "error", message: managedWorktreeRefusal });
+      durable?.failed(managedWorktreeRefusal, "INVALID_COMMAND");
+      return false;
+    }
     const carrySlashCommandCatalog = !shouldUseWorktree && canCarrySlashCommandCatalog(prior ?? undefined, {
       driver,
       context,
@@ -10447,6 +10468,10 @@ export class SessionManager {
     resumeId: string | undefined,
     launchGeneration: number,
     approvedAuthentication?: ApprovedProviderAuthentication,
+    /** The relaunch after a worktree switch (#4902). Its conversation and history are intact, so a
+     * failure leaves the session idle with the error, where the next message or Restart retries,
+     * rather than Failed. Setup failures keep their own Retry Setup state either way. */
+    options: { recoverableFailure?: boolean } = {},
   ): Promise<boolean> {
     // A cache hit can expose the store's own object. Prepare only a launch-local copy.
     const meta = structuredClone(storedMeta);
@@ -10458,7 +10483,8 @@ export class SessionManager {
       ? this.providerHomeWaiter(meta, launchGeneration)
       : undefined;
     try {
-      return await this.launchPrepared(meta, resumeId, launchGeneration, approvedAuthentication, preparationHome, providerHomeWait);
+      return await this.launchPrepared(meta, resumeId, launchGeneration, approvedAuthentication, preparationHome,
+        providerHomeWait, options.recoverableFailure === true);
     } finally {
       if (providerHomeWait) this.endProviderHomeWait(meta.sessionId, launchGeneration);
       await preparationHome.settle();
@@ -10543,9 +10569,15 @@ export class SessionManager {
     approvedAuthentication: ApprovedProviderAuthentication | undefined,
     preparationHome: LaunchProviderHomeScope,
     providerHomeWait?: ProviderHomeWaiter,
+    recoverableFailure = false,
   ): Promise<boolean> {
     const launchStarted = Date.now();
     const sessionId = meta.sessionId;
+    // See `launch`'s `recoverableFailure`: the generic failure exits below report through this.
+    const failLaunch = (message: string, launchFailure?: SessionLaunchFailureCode): void => {
+      if (recoverableFailure) this.emitStatus(sessionId, "idle", message);
+      else this.emitStatus(sessionId, "failed", message, undefined, undefined, false, launchFailure);
+    };
     if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
     if (meta.review && (meta.review.update || meta.review.launchOwner !== this.lockOwner || resumeId)) {
       this.emitStatus(sessionId, "stopped", "A review session runs once and cannot be relaunched.");
@@ -10627,7 +10659,7 @@ export class SessionManager {
         // Nothing may be spawned (#4779): fail the launch with the runner's sentence, as a failed
         // provider start would, before any isolation or provider process is set up.
         this.emitEvent(sessionId, { kind: "error", message: `agent init failed: ${launchPreparation.launchRefusal}` });
-        this.emitStatus(sessionId, "failed", launchPreparation.launchRefusal);
+        failLaunch(launchPreparation.launchRefusal);
         return false;
       }
       // Repository setup values are resolved runner-side from the immutable base-commit config.
@@ -10745,7 +10777,7 @@ export class SessionManager {
         return false;
       }
       this.emitEvent(sessionId, { kind: "error", message: `execution isolation unavailable: ${errText(error)}` });
-      this.emitStatus(sessionId, "failed", "Runner-owned execution isolation could not be established");
+      failLaunch("Runner-owned execution isolation could not be established");
       return false;
     }
 
@@ -11095,7 +11127,8 @@ export class SessionManager {
       const prefix = refusal ? "provider account unavailable"
         : error instanceof AcpLaunchRefusedError ? "agent init failed" : "agent process could not be created";
       this.emitEvent(sessionId, { kind: "error", message: `${prefix}: ${errText(error)}` });
-      this.emitStatus(sessionId, "failed", errText(error));
+      if (refusal) this.emitStatus(sessionId, "failed", errText(error));
+      else failLaunch(errText(error));
       if (refusal) this.recordProviderHomeRefusal(sessionId, refusal);
       return false;
     }
@@ -11322,8 +11355,7 @@ export class SessionManager {
       if (err instanceof CodexAppServerResumeError && err.retryable) {
         this.emitStatus(sessionId, "idle", `${errText(err)} — retry when the other app-server releases the thread`);
       } else {
-        this.emitStatus(sessionId, "failed", errText(err), undefined, undefined, false,
-          err instanceof CodexCommandSandboxUnavailableError ? err.launchFailure : undefined);
+        failLaunch(errText(err), err instanceof CodexCommandSandboxUnavailableError ? err.launchFailure : undefined);
       }
       retireUnlaunched();
       await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "driver initialization failed", launchGeneration);
@@ -11476,6 +11508,21 @@ export class SessionManager {
   private rememberAcpCompatibility(meta: SessionMeta, preparation: SessionLaunchPreparation | void | undefined): void {
     if (preparation?.acpCompatibility) this.launchAcpCompatibility.set(meta, preparation.acpCompatibility);
     else this.launchAcpCompatibility.delete(meta);
+  }
+
+  /** Why this session's agent cannot launch in a managed worktree on this runner (#4901), or null.
+   * Checked before a worktree is created or selected and before a running provider is retired for
+   * a worktree switch, so the refusal never costs the session its worktree or its conversation. */
+  private managedWorktreeRefusal(meta: Pick<SessionMeta, "driver" | "agentId" | "context" | "executionTarget">): string | null {
+    return managedWorktreeUnsupportedReason({
+      os: process.platform === "linux" ? "linux" : process.platform === "darwin" ? "macos"
+        : process.platform === "win32" ? "windows" : undefined,
+      isolationMode: this.executionIsolation.mode,
+      driver: meta.driver,
+      agentId: meta.agentId,
+      contextKind: meta.context.kind,
+      targetAdapter: meta.executionTarget?.adapter,
+    });
   }
 
   private requiresManagedWorktreeBwrap(meta: SessionMeta): boolean {
@@ -16834,13 +16881,22 @@ export class SessionManager {
     // provider-visible events. Event sequence is the established resume predicate used by the
     // normal stopped-session path and prevents a failed first conversation from becoming fresh.
     const hasConversation = (resumable?.seq ?? 0) > 0;
-    if (!resumable || (!resumeId && hasConversation) || (resumeId && !canResumeSession(resumable))) {
+    // `canResumeSession` reads what the launch being retired recorded. Judge the launch this switch
+    // will make as well (#4902): a managed worktree's sandbox can refuse an agent that ran in place.
+    const selectedRow = resumable ? this.attributedWorktreeForPath(resumable, selectedPath) : undefined;
+    const launchRefusal = resumable && selectedRow &&
+        (selectedRow.source !== "attached" || selectedRow.reusedInPlace === true)
+      ? this.managedWorktreeRefusal(resumable)
+      : null;
+    if (!resumable || launchRefusal || (!resumeId && hasConversation) || (resumeId && !canResumeSession(resumable))) {
       const retirement = this.retirementRebindPending(entry);
       this.failRetirementRebind(entry);
       entry.pendingWorktreeRebind = undefined;
       this.emitEvent(sessionId, {
         kind: "error",
-        message: retirement
+        message: launchRefusal
+          ? `The session stays where it is. ${launchRefusal}`
+          : retirement
           ? "this provider conversation cannot resume, so the provider keeps its launch sandbox after one of " +
             "its worktrees was retired; restart the session to drop it"
           : "the selected worktree cannot resume this provider conversation",
@@ -16979,7 +17035,8 @@ export class SessionManager {
       }
       try {
         launched = await this.launch(
-          { ...fresh, worktreePath: verifiedWorktreePath }, resumeId, launchGeneration,
+          { ...fresh, worktreePath: verifiedWorktreePath }, resumeId, launchGeneration, undefined,
+          { recoverableFailure: true },
         );
       } catch (error) {
         // launch() contains expected preparation/driver failures. This final boundary keeps an
