@@ -379,6 +379,7 @@ export function RequestCard({
     // Facts only: what is being decided, never a control that would act on it.
     workflowDecision ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot} authority={workflowDecision.authority}
       authorityReason={workflowDecision.authorityEvaluation?.reason} scopeDecisionDetails={request.scopeDecisionDetails}
+      nonBlocking={request.async === true}
       {...(request.scopeMaxIssuesIncrease ? { scopeMaxIssuesIncrease: request.scopeMaxIssuesIncrease } : {})}
       {...(workflowDecision.closingReferenceCheck ? { closingReferenceCheck: workflowDecision.closingReferenceCheck } : {})} /> : null,
     workflowDecision?.ownerRule ? <OwnerRuleSummary key="owner-rule" rule={workflowDecision.ownerRule} /> : null,
@@ -447,6 +448,7 @@ export function RequestCard({
       onChoose={setChosenLocation} /> : null,
     workflowDecision && !evidence && !locationSwitch ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot} authority={workflowDecision.authority}
       authorityReason={workflowDecision.authorityEvaluation?.reason} scopeDecisionDetails={request.scopeDecisionDetails}
+      nonBlocking={request.async === true}
       {...(request.scopeMaxIssuesIncrease ? { scopeMaxIssuesIncrease: request.scopeMaxIssuesIncrease } : {})}
       {...(workflowDecision.closingReferenceCheck ? { closingReferenceCheck: workflowDecision.closingReferenceCheck } : {})} /> : null,
     workflowDecision?.ownerRule ? <OwnerRuleSummary key="owner-rule" rule={workflowDecision.ownerRule} /> : null,

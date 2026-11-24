@@ -105,3 +105,15 @@ test("an Owner Question is listed as a question and never takes a one-key choice
   assert.equal(approvalOptionForIntent(question, "approve"), null);
   assert.equal(requestKindMeta(ownerCard("approval", APPROVAL)).label, "Workflow Decision");
 });
+
+test("a blocking standalone Owner Question preserves blocking semantics while rendering as a question card (#4894)", () => {
+  const standaloneQuestion = ownerCard("standalone-q", QUESTION);
+  delete standaloneQuestion.async;
+  const shown = withPresentedOwnerQuestions({ status: "input_required" as const, pendingApproval: standaloneQuestion });
+  assert.equal(shown.pendingApproval.kind, "question");
+  assert.equal(shown.pendingApproval.async, undefined, "standalone Owner Question remains blocking");
+  assert.equal(shown.pendingApproval.questions![0]!.allowOther, true);
+  assert.equal(sessionAttentionStatus(shown)?.label, "Needs Your Input");
+  assert.equal(requestKindMeta(standaloneQuestion).label, "Question");
+  assert.equal(approvalOptionForIntent(standaloneQuestion, "approve"), null);
+});

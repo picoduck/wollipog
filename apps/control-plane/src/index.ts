@@ -4353,14 +4353,14 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/retire", async (req
   ));
 });
 
-// #4064: a Full Control root's question for its campaign's owner. `:id` is the caller's own
-// credential session; the service checks that it is the campaign's root and that only a person
-// can answer.
+// #4064, #4894: a standalone session's or root Orchestrator's Owner Question or Owner Approval.
+// `:id` is the caller's own credential session; the service verifies requester eligibility and
+// ensures only the authenticated owner can answer or decide.
 app.post("/api/sessions/:id/owner-decisions", async (req, reply) => {
   const { id } = req.params as { id: string };
   const principal = requestPrincipal(req);
-  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || principal.orchestrator !== true) {
-    return reply.code(403).send({ error: "a matching root Orchestrator credential is required" });
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching session credential is required" });
   }
   if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
   return respond(reply, await svc.createOwnerDecision(id, req.body as CreateOwnerDecisionRequest,

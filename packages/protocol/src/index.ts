@@ -506,6 +506,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * the control plane by the runner, because an older control plane would ignore the field and ask
    * the question as an approval, and against the root's runner by the control plane. */
   ownerQuestions: 303,
+  /** v412 (#4894): Standalone sessions and Custom campaign roots request human-owned structured
+   * approvals (PR merge, merged-branch deletion, issue publication, UI evidence, issue closure),
+   * generic Owner Approvals, and free-text Owner Questions. */
+  standaloneOwnerDecisions: 412,
   issueClosureReconciliation: 355,
   /** v332 (#4359): explicit child clarifications, with free text and no consumable action grant. */
   childQuestions: 332,
@@ -9792,16 +9796,22 @@ export type GithubIssueClosureMessage = {
   requestId: string;
   sessionId: string;
   location?: GithubIssueClosureLocation;
+  /** v412 (#4894): human-owned closure for a standalone Normal session (never an Orchestrator). */
+  standalone?: true;
 } & (
   | { operation: "inspect"; issue: number; scopeRevision?: number; deliveryPullRequests?: Array<{ number: number; headSha: string }>;
       campaignPullRequests?: number[] | null;
       /** v278 (#4060): also read the issue's epic members into the inspection and its digest. */
-      epicMembers?: true }
+      epicMembers?: true;
+      /** v412 (#4894): verified Project Location repository for a standalone session. */
+      expectedRepository?: string }
   | { operation: "execute"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot;
       /** v360: fresh server-derived campaign context. Null relates every open PR. */
       campaignPullRequests?: number[] | null;
       /** v360: root execution also stops at the forge fence for a final control-plane recheck. */
-      prepare?: true }
+      prepare?: true;
+      /** v412 (#4894): verified Project Location repository for a standalone session. */
+      expectedRepository?: string }
   | { operation: "reconcile"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot; consumedAt: number }
   /** v323 (#4119): only with `location`. A Location's runner holds no copy of the campaign's scope,
    * so its `execute` stops at the mutation fence and answers `prepared`. The control plane rechecks

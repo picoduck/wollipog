@@ -1572,6 +1572,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 411: UI session upserts can reuse the background inventory already sent on the same socket (Refs #4860).
   411,
   // v412 slot
+  // 412: Standalone session and Custom campaign root structured owner approvals, issue closures, and owner questions (#4894).
+  412,
   // v413 slot
   // v414 slot
   // v415 slot

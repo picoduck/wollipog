@@ -1782,6 +1782,23 @@ test("CLI issue closure preserves the exact proposal and refuses other sessions 
   version = 193;
   assert.equal(await invoke(["issue-closure", "request", "--proposal", JSON.stringify(proposal), "--json"]), 1);
   assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
+
+  // Standalone Normal sessions require control plane protocol v412 for issue closure and ask-owner (#4894).
+  const standaloneEnv = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token",
+    WOLLIPOG_SESSION_ID: "solo" };
+  const invokeStandalone = (args: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", ...args], standaloneEnv, io, fetch);
+  calls.length = 0;
+  version = RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions - 1;
+  assert.equal(await invokeStandalone(["issue-closure", "request", "--proposal", JSON.stringify(proposal), "--json"]), 1);
+  assert.equal(await invokeStandalone(["decision", "ask-owner", "--request-id", "q1", "--resource-key", "k1",
+    "--kind", "question", "--question", "Which format?", "--options", "[]", "--json"]), 1);
+  assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")), "older peer never receives standalone calls");
+  version = PROTOCOL_VERSION;
+  assert.equal(await invokeStandalone(["issue-closure", "request", "--proposal", JSON.stringify(proposal), "--json"]), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/solo/github-issue-closures");
+  assert.equal(await invokeStandalone(["decision", "ask-owner", "--request-id", "q1", "--resource-key", "k1",
+    "--kind", "question", "--question", "Which format?", "--options", "[]", "--json"]), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/solo/owner-decisions");
 });
 
 test("CLI Location switch requests act only on the injected session and expose no approval command", async () => {

@@ -1184,3 +1184,88 @@ test("a grant to a Full Control session is refused", async (t) => {
     } finally { g.active.delete(sessionId); }
   }
 });
+
+test("standalone Normal session issue closure inspects, enforces expectedRepository, executes once across restart, and refuses Orchestrator/issueAdmission (#4894)", async (t) => {
+  const f = fixture(t);
+  const soloId = "s_standalone_closure";
+  f.store().create({
+    sessionId: soloId, agentId: "claude", workspaceId: "repo", repoPath: f.root, worktreePath: null,
+    driver: "claude-code", command: "claude", args: [], env: {}, context: { kind: "native" },
+    agentSessionId: null, status: "idle", title: "Standalone closure", config: {},
+    tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+    seq: 0, createdAt: 1000, updatedAt: 1000,
+  });
+  const mgr = f.manager();
+  // Orchestrator cannot use standalone mode.
+  const orchAsStandalone = await mgr.githubIssueClosure({
+    type: "github_issue_closure", operation: "inspect", requestId: "r-orch", sessionId, issue, standalone: true,
+    expectedRepository: "example/project",
+  });
+  assert.equal(orchAsStandalone.ok, false);
+  assert.match(orchAsStandalone.error ?? "", /non-Orchestrator registered workspace/u);
+
+  // Standalone session without standalone flag is still refused.
+  const withoutFlag = await mgr.githubIssueClosure({
+    type: "github_issue_closure", operation: "inspect", requestId: "r-noflag", sessionId: soloId, issue,
+  });
+  assert.equal(withoutFlag.ok, false);
+
+  // Mismatched expectedRepository is refused before returning inspection.
+  const wrongRepo = await mgr.githubIssueClosure({
+    type: "github_issue_closure", operation: "inspect", requestId: "r-wrong", sessionId: soloId, issue,
+    standalone: true, expectedRepository: "other/repo",
+  });
+  assert.equal(wrongRepo.ok, false);
+  assert.match(wrongRepo.error ?? "", /Repository differs from the verified Project Location/u);
+
+  // Valid standalone inspect succeeds.
+  const inspected = await mgr.githubIssueClosure({
+    type: "github_issue_closure", operation: "inspect", requestId: "r-ok", sessionId: soloId, issue,
+    standalone: true, expectedRepository: "example/project",
+  });
+  assert.equal(inspected.ok, true, inspected.error ?? "expected inspect ok");
+  assert.ok(inspected.inspection);
+  const { state: _state, ...evidence } = inspected.inspection;
+  const snap: GithubIssueClosureSnapshot = {
+    ...evidence, category: "issue_closure", reason: "completed",
+    explanation: "Fixed on standalone branch.", evidence: ["Merged PR #42."],
+    comment: "Closing after standalone delivery.", activeChildren: [],
+  };
+
+  // issueAdmission is refused for standalone closures.
+  const withAdmission = await mgr.githubIssueClosure({
+    type: "github_issue_closure", operation: "execute", requestId: "r-adm", sessionId: soloId,
+    occurrenceId: "occ-adm",
+    snapshot: {
+      ...snap,
+      issueAdmission: {
+        boundaryRevision: 1,
+        evidenceDigest: "a".repeat(64),
+      },
+    },
+    standalone: true, expectedRepository: "example/project",
+  });
+  assert.equal(withAdmission.ok, false);
+  assert.match(withAdmission.error ?? "", /unsynchronized/u);
+
+  // Execute closes once and persists attempt fence across restart.
+  const executed = await mgr.githubIssueClosure({
+    type: "github_issue_closure", operation: "execute", requestId: "r-exec-1", sessionId: soloId,
+    occurrenceId: "occ-solo-1", snapshot: snap, standalone: true, expectedRepository: "example/project",
+  });
+  assert.equal(executed.ok, true, executed.error ?? "expected execute ok");
+  assert.equal(executed.result?.outcome, "closed");
+
+  // Replay of same occurrence after restart is refused without running gh issue close again, even if issue reads OPEN.
+  const closeCountBefore = f.commands.filter((c) => c.file === "gh" && c.args[0] === "issue" && c.args[1] === "close").length;
+  assert.equal(closeCountBefore, 1);
+  f.repository.issue.state = "OPEN";
+  f.restart();
+  const replayed = await f.manager().githubIssueClosure({
+    type: "github_issue_closure", operation: "execute", requestId: "r-exec-2", sessionId: soloId,
+    occurrenceId: "occ-solo-1", snapshot: snap, standalone: true, expectedRepository: "example/project",
+  });
+  assert.equal(replayed.ok, true);
+  assert.equal(replayed.result?.outcome, "refused");
+  assert.equal(f.commands.filter((c) => c.file === "gh" && c.args[0] === "issue" && c.args[1] === "close").length, 1);
+});

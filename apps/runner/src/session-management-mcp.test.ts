@@ -413,9 +413,17 @@ test("owner-decision tools are the root Orchestrator's, post to its own paths an
   assert.equal((await callTool(deps, "hand_workflow_decision_to_owner", { occurrenceId: "workflow_2", reason: "Kept." })).isError, true);
   deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions;
   deps.orchestrator = false;
-  assert.equal((await callTool(deps, "request_owner_decision", ask)).isError, true, "a child never has the tool");
+  const standaloneOld = await callTool(deps, "request_owner_decision", ask);
+  assert.equal(standaloneOld.isError, true, "standalone sessions require v412 control plane");
+  assert.match(resultText(standaloneOld), /"requiredControlPlaneProtocolVersion":412/u);
   assert.equal((await callTool(deps, "hand_workflow_decision_to_owner", { occurrenceId: "workflow_2", reason: "Kept." })).isError, true);
   assert.equal(calls.length, count, "nothing reaches the control plane");
+  deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  const standaloneAsked = await callTool(deps, "request_owner_decision", ask);
+  assert.equal(standaloneAsked.isError, undefined, resultText(standaloneAsked));
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/owner-decisions`);
+  assert.equal((await callTool(deps, "hand_workflow_decision_to_owner", { occurrenceId: "workflow_2", reason: "Kept." })).isError, true,
+    "hand_workflow_decision_to_owner stays Orchestrator-only");
 });
 
 test("an Owner Question posts its kind with 0 to 12 suggestions and needs a v303 control plane (#4270)", async () => {
@@ -982,6 +990,8 @@ test("tools/list returns the curated session and typed decision tools with schem
       "request_automation_creation",
       "get_automation_creation",
       "execute_automation_creation",
+      "request_github_issue_closure",
+      "close_github_issue",
       "list_runners",
       "get_provider_account_selection",
       "get_agent_capabilities",
@@ -995,6 +1005,7 @@ test("tools/list returns the curated session and typed decision tools with schem
       "reconcile_workflow_decision",
       "withdraw_workflow_decision",
       "retire_workflow_decision",
+      "request_owner_decision",
       "get_session_events",
       "wait_session",
       "wait_pull_request",
@@ -3485,13 +3496,24 @@ test("a held child reports its hold and recovery action through get_session and 
   assert.equal(plain.worktreeRecovery, null);
 });
 
-test("issue closure tools require an Orchestrator, current protocol, and injected identity", async () => {
+test("issue closure tools require current protocol and injected identity, supporting Orchestrators and v412 standalone sessions (#4894)", async () => {
   const proposal = { requestId: "closure-1", issue: 123, reason: "not_planned",
     explanation: "Obsolete design.", evidence: ["Superseded by #124."], comment: "Exact proposed comment." };
-  const ordinary = makeDeps();
-  assert.equal((await callTool(ordinary.deps, "request_github_issue_closure", proposal)).isError, true);
-  assert.equal((await callTool(ordinary.deps, "close_github_issue", { occurrenceId: "closure-1", resourceDigest: "a".repeat(64) })).isError, true);
-  assert.equal(ordinary.calls.length, 0);
+  const ordinaryOld = makeDeps();
+  ordinaryOld.deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions - 1;
+  const oldReq = await callTool(ordinaryOld.deps, "request_github_issue_closure", proposal);
+  assert.equal(oldReq.isError, true);
+  assert.match(resultText(oldReq), /"requiredControlPlaneProtocolVersion":412/u);
+  const oldExec = await callTool(ordinaryOld.deps, "close_github_issue", { occurrenceId: "closure-1", resourceDigest: "a".repeat(64) });
+  assert.equal(oldExec.isError, true);
+  assert.match(resultText(oldExec), /"requiredControlPlaneProtocolVersion":412/u);
+  assert.equal(ordinaryOld.calls.length, 0);
+  const ordinaryCurrent = makeDeps();
+  ordinaryCurrent.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  assert.equal((await callTool(ordinaryCurrent.deps, "request_github_issue_closure", proposal)).isError, undefined);
+  assert.equal(ordinaryCurrent.calls[0]?.url, `${CP_URL}/api/sessions/${SELF_ID}/github-issue-closures`);
+  assert.equal((await callTool(ordinaryCurrent.deps, "close_github_issue", { occurrenceId: "closure-1", resourceDigest: "a".repeat(64) })).isError, undefined);
+  assert.equal(ordinaryCurrent.calls[1]?.url, `${CP_URL}/api/sessions/${SELF_ID}/github-issue-closures/closure-1/execute`);
   const older = makeDeps();
   older.deps.orchestrator = true;
   older.deps.controlPlaneProtocolVersion = 193;
