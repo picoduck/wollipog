@@ -161,7 +161,16 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     await expect(card).toContainText("Choose an option or type an answer before submitting.");
     await expect(card.getByRole("textbox")).toHaveValue("Keep the logs.");
     await expect(card.getByRole("button", { name: "Submit Answers", exact: true })).toBeInViewport({ ratio: 1 });
-    if (process.env.WOLLIPOG_CAPTURE_OWNER_ANSWER) await page.screenshot({ path: testInfo.outputPath(`owner-answer-error-${viewport.width}.png`) });
+  });
+  test(`an empty Owner Question stays unanswered at ${viewport.width}`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/agent-questions-e2e.html?set=owner-question&style=composer&before=2&after=0");
+    const card = page.locator(".composer-answer");
+    await card.getByRole("button", { name: "Next", exact: true }).click();
+    await expect(card).toContainText("Choose an option.");
+    await expect(card.getByRole("textbox")).toHaveValue("");
+    expect(await page.evaluate(() => window.agentQuestionCalls)).toEqual([]);
+    if (process.env.WOLLIPOG_CAPTURE_OWNER_ANSWER) await page.screenshot({ path: testInfo.outputPath(`owner-answer-empty-${viewport.width}.png`) });
   });
 }
 
