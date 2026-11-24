@@ -768,7 +768,7 @@ const ownerSnapshot = params.get("closureRecovery") === "owner" ? {
   material: 'Source: ~/.claude/CLAUDE.md\n\nExact rule: "Ask before merging a pull request."\n\nCategories: PR Merge\n\nConfirm only your own general user-level instruction. Repository rules, installed skills and Human Required rules remain unchanged. This applies only to this campaign and boundary revision 3.',
   ruleDelegation: { rule: { source: "~/.claude/CLAUDE.md", quote: "Ask before merging a pull request." }, categories: ["pr_merge" as const], boundaryRevision: 3 },
   options: [{ optionId: "delegate", label: "Delegate for This Campaign", description: undefined }, { optionId: "keep", label: "Keep My Approval", description: undefined }],
-} : { category: "owner_decision" as const, question: "Which credential design should the provider bridge use?",
+} : { category: "owner_decision" as const, ...(params.has("ownerQuestion") ? { kind: "question" as const } : {}), question: "Which credential design should the provider bridge use?",
   material: "PR picoduck/wollipog#4141 at head 3f9c2e1. Both designs pass CI; the broker adds a helper process the owner would run.",
   recommendedOptionId: "lease", options: [
     { optionId: "lease", label: "Short-Lived Lease", description: "Credentials expire with the session." },
@@ -1525,7 +1525,7 @@ function Fixture() {
                   ))}
                 </div>
               </div>
-              {(ownerScopeCards.length > 0 || params.get("closureRecovery") === "owner") && session.pendingApproval && (
+              {(ownerScopeCards.length > 0 || params.has("ownerQuestion") || params.get("closureRecovery") === "owner") && session.pendingApproval && (
                 <RequestDock session={session} requests={dockRequests(pendingRequests(withPresentedOwnerQuestions(session).pendingApproval))} runnerOnline />
               )}
             </div>

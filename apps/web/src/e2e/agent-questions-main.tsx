@@ -34,6 +34,7 @@ declare global {
   interface Window {
     agentQuestionCalls: AnswerCall[];
     replaceAgentQuestion(): void;
+    rerenderAgentQuestion(): void;
     clearAgentQuestion(): void;
     releaseAgentQuestion(): void;
     setAgentQuestionOnline(online: boolean): void;
@@ -486,6 +487,8 @@ function Fixture() {
     setQuestions(replacementQuestions);
     setResolved(false);
   };
+  window.rerenderAgentQuestion = () => setQuestions((current) => current.map((question) => ({ ...question,
+    options: question.options.map((option) => ({ ...option })) })));
   window.releaseAgentQuestion = () => releasePending?.();
   window.clearAgentQuestion = () => setResolved(true);
   window.setAgentQuestionOnline = (online) => setRunnerOnline(online);
@@ -505,6 +508,7 @@ function Fixture() {
         answers: body.answers,
         action: (body as { action?: "submit" | "dismiss" }).action,
       });
+      if (params.has("wire")) return api.answerQuestion(sessionId, body);
       if (shouldHold) {
         shouldHold = false;
         await new Promise<void>((resolve) => { releasePending = resolve; });

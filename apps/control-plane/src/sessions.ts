@@ -15764,6 +15764,9 @@ export class SessionsService {
     }
     const root = this.db.getSession(sessionId);
     if (!root || isTerminal(root.status)) return fail("the Orchestrator that asked this question has ended", 409);
+    if (action === "submit" && Object.keys(answers).length === 0) {
+      return fail("Choose an option or type an answer before submitting.", 400);
+    }
     const invalid = validateQuestionAnswers(ownerQuestionAgentQuestions(snapshot), answers, action);
     if (invalid) return fail(`invalid answers: ${invalid}`, 400);
     const answer = action === "submit" ? ownerQuestionAnswer(snapshot, answers) : null;
@@ -20755,7 +20758,7 @@ export class SessionsService {
     requestId: string,
     answers: Record<string, string | string[]>,
     actor: GovernanceActor = { kind: "human", id: "local" },
-    action: "submit" | "dismiss" = Object.keys(answers).length > 0 ? "submit" : "dismiss",
+    action?: "submit" | "dismiss",
     resolvedByParentSessionId?: string,
     occurrenceId?: string,
     /** Only the server's own Full Control dismissal passes this (#4063). */
@@ -20771,6 +20774,9 @@ export class SessionsService {
     // control plane resolves it, and no runner is asked.
     const ownerQuestionCard = pendingRequests(session.pendingApproval)
       .find((request) => request.requestId === requestId && isOwnerQuestionRequest(request));
+    // An omitted action must never erase an Owner Question's answer as a dismissal. Older
+    // provider question clients retain their empty-map dismissal convention.
+    action ??= ownerQuestionCard ? "submit" : Object.keys(answers).length > 0 ? "submit" : "dismiss";
     if (ownerQuestionCard) {
       if (occurrenceId !== undefined && occurrenceId !== ownerQuestionCard.occurrenceId) return fail("question occurrence is stale or missing", 409);
       if (scopeProposalOfRequest(ownerQuestionCard)) return this.answerScopeProposal(sessionId, ownerQuestionCard, answers, action, actor);
