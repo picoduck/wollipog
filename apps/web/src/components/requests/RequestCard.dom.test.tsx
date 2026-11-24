@@ -566,7 +566,7 @@ for (const scenario of [
     request.workflowDecision = {
       ...request.workflowDecision!, occurrenceId: request.occurrenceId, category: "owner_decision", resourceKey: "campaign_handoffs:owner",
       authorityEvaluation: { ...request.workflowDecision!.authorityEvaluation!,
-        reason: scenario.held ? "credential_screen_review" : "authorized_operation" },
+        reason: scenario.held ? "credential_screen_review" : "owner_kept" },
       resourceSnapshot: { category: "owner_decision", kind: "question", options: [],
         question: "This campaign handed work to you. What should happen next?" },
     };
@@ -576,6 +576,8 @@ for (const scenario of [
     const opened: string[] = [];
     const view = await render(<RequestDock session={session} requests={[request]} runnerOnline
       onAnswerInSession={(requestId) => opened.push(requestId)} />, {
+      campaignDecisions: async () => ({ campaignSessionId: session.id, canClassify: false, decisions: [],
+        usage: { calls: 0, unpricedCalls: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0 } }),
       answerQuestion: async (...args) => { answers.push(args); return sessionWith(null); },
       approve: async (...args) => { approvals.push(args); return sessionWith(null); },
     });
