@@ -2195,6 +2195,11 @@ export class SessionManager {
     this.configuredProjectPaths = [...paths];
   }
 
+  /** Conversations (by session) that accepted their handoff while clearing its marker failed. A
+   * relaunch in this process retries the clear instead of re-sending the history; across a runner
+   * crash in that window the handoff is delivered again (at least once). */
+  private readonly deliveredHandoffs = new Map<string, string>();
+
   /** Agent ids the operator configured, set by the host bootstrap. A configured agent that reuses
    * Antigravity's id launches without Antigravity's profile (#4901). */
   private configuredAgentIds: ReadonlySet<string> = new Set();
@@ -10718,10 +10723,20 @@ export class SessionManager {
         });
       } else if (resumeId && antigravityProfile && meta.pendingConversationHandoffFrom &&
           resumeId === meta.agentSessionId) {
-        // The replacement was created but has not yet taken its handoff (it was parked, or the
-        // runner restarted, before its first ordinary prompt). The marker is written with this
-        // conversation's id, so it belongs to the conversation being resumed.
-        conversationHandoff = this.conversationHandoff(sessionId, meta.pendingConversationHandoffFrom, cwd);
+        if (this.deliveredHandoffs.get(sessionId) === resumeId) {
+          // Already accepted; only the marker's clear failed. Retry it, never re-send the history.
+          try {
+            this.store.patchMeta(sessionId, { pendingConversationHandoffFrom: undefined });
+            this.deliveredHandoffs.delete(sessionId);
+          } catch (error) {
+            this.log(`session ${sessionId} could not clear a delivered conversation handoff: ${errText(error)}`);
+          }
+        } else {
+          // The replacement was created but has not yet taken its handoff (it was parked, or the
+          // runner restarted, before its first ordinary prompt). The marker is written with this
+          // conversation's id, so it belongs to the conversation being resumed.
+          conversationHandoff = this.conversationHandoff(sessionId, meta.pendingConversationHandoffFrom, cwd);
+        }
       }
       // Repository setup values are resolved runner-side from the immutable base-commit config.
       // Apply them after agent-config refresh so they reach hooks and the provider without ever
@@ -11007,7 +11022,13 @@ export class SessionManager {
         onConversationHandoffDelivered: () => {
           const live = this.active.get(sessionId);
           if (live?.client === client && live.freshConversation) delete live.freshConversation.handoffFrom;
+          // Remembered before the durable clear: if that write fails, a relaunch in this runner
+          // process still knows the conversation has its handoff, and retries the clear instead of
+          // sending it again.
+          const accepted = client?.agentSessionId();
+          if (accepted) this.deliveredHandoffs.set(sessionId, accepted);
           this.store.patchMeta(sessionId, { pendingConversationHandoffFrom: undefined });
+          this.deliveredHandoffs.delete(sessionId);
         },
         onBackgroundWork: (update) => {
           // A retiring driver may emit an exit/null callback after a replacement owns the session.
@@ -21509,11 +21530,14 @@ export class SessionManager {
     const entry = this.active.get(sessionId);
     const fresh = entry?.client === client ? entry.freshConversation : undefined;
     const current = this.store.readMeta(sessionId);
+    // Capture only ever adds these facts. Clearing a delivered handoff's marker belongs to delivery
+    // alone (`onConversationHandoffDelivered`), so a failed clear never turns into another write here
+    // that could fail a turn the agent already completed.
     const with_: Partial<SessionMeta> = fresh
-      ? { providerConversationCwd: fresh.cwd, pendingConversationHandoffFrom: fresh.handoffFrom }
+      ? { providerConversationCwd: fresh.cwd, ...(fresh.handoffFrom ? { pendingConversationHandoffFrom: fresh.handoffFrom } : {}) }
       : {};
     const stale = fresh && (current?.providerConversationCwd !== fresh.cwd ||
-      current?.pendingConversationHandoffFrom !== fresh.handoffFrom);
+      (fresh.handoffFrom !== undefined && current?.pendingConversationHandoffFrom !== fresh.handoffFrom));
     if (aid && (current?.agentSessionId !== aid || stale)) {
       const updated = this.store.patchMeta(sessionId, { agentSessionId: aid, handoffPending: undefined, ...with_ });
       if (updated && runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "sessionRestartResume")) {

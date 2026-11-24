@@ -1,6 +1,8 @@
 /** Google Antigravity keeps a conversation in the folder it was created in, whatever folder a resume
- * names. A launch in another folder (after a worktree switch, or a restart after one) therefore
- * starts a fresh conversation there, seeded once with the conversation so far. */
+ * names. A launch that would resume it in another folder (a worktree switch, or a relaunch after
+ * one: parking, a runner restart, a retry) therefore starts a fresh conversation there, seeded once
+ * with the conversation so far. An explicit Restart never resumes an ACP conversation, so it is a
+ * new conversation by design and is not covered here. */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
@@ -12,7 +14,7 @@ import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 
 async function launchWith(conversationCwd: "elsewhere" | "here" | "unknown", profile: "antigravity" | "none" = "antigravity",
-  behavior: { failFresh?: boolean; captureDuringNewSession?: boolean } = {}) {
+  behavior: { failFresh?: boolean; captureDuringNewSession?: boolean; failMarkerClear?: "always" | "once" } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-antigravity-handoff-")));
   const repoPath = join(root, "repo");
   execFileSync("git", ["init", "-q", repoPath]);
@@ -41,8 +43,16 @@ async function launchWith(conversationCwd: "elsewhere" | "here" | "unknown", pro
   const callbacks: DriverCallbacks[] = [];
   const patches: Array<Partial<SessionMeta>> = [];
   const patchMeta = store.patchMeta.bind(store);
+  let clearFailures = 0;
   store.patchMeta = ((id: string, patch: Partial<SessionMeta>) => {
     patches.push(patch);
+    // A store that rejects clearing an existing handoff marker while other writes still work.
+    const clearing = Object.prototype.hasOwnProperty.call(patch, "pendingConversationHandoffFrom") &&
+      patch.pendingConversationHandoffFrom === undefined && store.readMeta(id)?.pendingConversationHandoffFrom !== undefined;
+    if (clearing && (behavior.failMarkerClear === "always" || (behavior.failMarkerClear === "once" && clearFailures === 0))) {
+      clearFailures += 1;
+      throw new Error("EIO: metadata write failed");
+    }
     return patchMeta(id, patch);
   }) as typeof store.patchMeta;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -65,7 +75,15 @@ async function launchWith(conversationCwd: "elsewhere" | "here" | "unknown", pro
         }
         return options.resumeId ?? "conv-b";
       },
-      prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
+      // As AcpClient does once the agent answered the prompt carrying the handoff: report it, and
+      // never let that bookkeeping fail the accepted turn.
+      prompt: async () => {
+        if (options.acpConversationHandoff) {
+          try { cb.onConversationHandoffDelivered?.(); } catch { /* AcpClient logs it to stderr */ }
+        }
+        return "end_turn" as const;
+      },
+      cancel: () => {}, dispose: () => {},
       setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => options.resumeId ?? "conv-b",
     };
   };
@@ -83,6 +101,17 @@ async function launchWith(conversationCwd: "elsewhere" | "here" | "unknown", pro
     .map((event) => (event.payload as { text: string }).text);
   return {
     ok, options: launched[0], meta: store.readMeta("s1"), stderr, repoPath, elsewhere, launched, callbacks, patches, store, captured,
+    /** An ordinary prompt through the manager, settled. */
+    promptAndSettle: async (text: string) => {
+      assert.equal(manager.prompt("s1", text), true);
+      const deadline = Date.now() + 5_000;
+      while (internals.active.get("s1")?.running || store.readMeta("s1")?.status === "running") {
+        if (Date.now() > deadline) throw new Error("the turn did not settle");
+        await new Promise((done) => setTimeout(done, 10));
+      }
+      await new Promise((done) => setTimeout(done, 20));
+      return store.readMeta("s1");
+    },
     /** The replacement retired before its first ordinary prompt (parked, or the runner restarted),
      * then launched again by the next prompt with whatever the session records now. */
     relaunch: async () => {
@@ -149,6 +178,37 @@ test("a replacement that fails before it exists leaves the old conversation to r
     const back = await f.relaunch();
     assert.equal(back.resumeId, "conv-a");
     assert.equal(back.acpConversationHandoff, undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a failure clearing a delivered handoff's marker never fails the turn the agent completed", async () => {
+  const f = await launchWith("elsewhere", "antigravity", { failMarkerClear: "always" });
+  try {
+    const after = await f.promptAndSettle("What was the code word?");
+    assert.notEqual(after?.status, "failed", f.store.readEvents("s1").map((event) => JSON.stringify(event.payload)).join("\n"));
+    assert.ok(!f.store.readEvents("s1").some((event) => event.payload.kind === "error"),
+      "no prompt failure for bookkeeping the agent never saw");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a resumed replacement whose marker clear failed once is not sent its handoff again", async () => {
+  const f = await launchWith("elsewhere", "antigravity", { failMarkerClear: "once" });
+  try {
+    // Parked before its first ordinary prompt, then resumed: this entry is not the fresh launch.
+    const resumed = await f.relaunch();
+    assert.equal(resumed.resumeId, "conv-b");
+    assert.ok(resumed.acpConversationHandoff, "the replacement still needs its history");
+    // The agent accepts it; clearing the durable marker fails once.
+    assert.throws(() => f.callbacks.at(-1)!.onConversationHandoffDelivered?.(), /EIO/u);
+    assert.equal(f.store.readMeta("s1")?.pendingConversationHandoffFrom, f.elsewhere, "the clear did not land");
+    // Storage recovers and the session is parked and resumed again.
+    const again = await f.relaunch();
+    assert.equal(again.acpConversationHandoff, undefined, "history the agent already holds is never re-sent");
+    assert.equal(f.store.readMeta("s1")?.pendingConversationHandoffFrom, undefined, "the clear is retried");
   } finally {
     f.cleanup();
   }

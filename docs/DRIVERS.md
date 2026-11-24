@@ -1688,8 +1688,11 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   card itself settles with the turn, as for the native drivers.
 - **Resume.** agy keeps its conversations in its state directory, `~/.gemini/antigravity-cli`, which
   also holds its OAuth token and settings. It resumes only where that directory is writable. Where
-  it is, the session advertises `session/resume`, and a restart or a switch to another worktree
-  resumes by id without replaying history.
+  it is, the session advertises `session/resume`, and a relaunch in the conversation's own folder
+  (parking, a runner restart) resumes by id without replaying history. A relaunch in another
+  folder, such as after a worktree switch, starts a fresh conversation instead (see "A
+  conversation stays in the folder it was created in" below). An explicit Restart is always a new
+  conversation.
   - On a `provider` isolation runner, both in place and in a managed Linux worktree. A managed
     worktree forces bwrap there, and the launch preserves the provider home as it does for Claude,
     Codex and Pi. Antigravity's compatibility profile names the directory, since the generic ACP
@@ -1720,6 +1723,10 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
     prompt carrying the handoff, every relaunch rebuilds it from the event log, so parking or a
     runner restart cannot lose it. A replacement that fails before it exists leaves the old
     conversation as it was, so returning to its folder resumes it without its own history.
+    Clearing the marker is delivery's bookkeeping only: a failure there never fails the accepted
+    turn, and a relaunch in the same runner process retries the clear instead of re-sending the
+    history. Across a runner crash in that window the handoff is sent again: it is delivered at
+    least once.
   - **Exemptions.** An explicit Restart never resumes an ACP conversation (`restartResumeId`): it is
     a new conversation by design ("Restarting starts a new conversation"), unseeded, recording its
     own folder. A session that never recorded its folder (created before this) keeps resuming.
