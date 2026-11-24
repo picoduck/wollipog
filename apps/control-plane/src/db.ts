@@ -23323,6 +23323,25 @@ export class ControlPlaneDb {
     return rows.map((row) => row.id);
   }
 
+  /** Live sessions (including standalone Normal sessions) holding an unacknowledged uncertain
+   * issue closure that needs scheduled read-only reconciliation (#4894). */
+  listUncertainIssueClosureSessionIds(runnerId?: string): string[] {
+    const rows = this.stmt(
+      `SELECT DISTINCT wd.controlling_session_id AS id
+       FROM workflow_decisions wd
+       JOIN sessions s ON s.id = wd.controlling_session_id
+       WHERE wd.category = 'issue_closure'
+         AND wd.status = 'consumed'
+         AND json_extract(wd.issue_closure_result, '$.outcome') = 'uncertain'
+         AND json_extract(wd.issue_closure_result, '$.reconciliation.acknowledgedAt') IS NULL
+         AND s.archived = 0
+         AND s.status NOT IN ('completed','failed','stopped')
+         ${runnerId ? "AND s.runner_id=?" : ""}
+       ORDER BY wd.controlling_session_id`,
+    ).all(...(runnerId ? [runnerId] : [])) as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  }
+
   campaignContinuationLifecycle(campaignSessionId: string): {
     runnerId: string;
     status: SessionStatus;

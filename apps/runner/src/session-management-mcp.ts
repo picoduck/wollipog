@@ -895,13 +895,26 @@ async function ownerDecisionCompatibilityError(deps: McpDeps, question = false, 
     }
     actual = result.data?.protocolVersion;
   }
-  return Number.isInteger(actual) && actual! >= required
-    ? null
-    : controlPlaneUpdateRequired(needsNewerWollipog(
+  if (!Number.isInteger(actual) || actual! < required) {
+    return controlPlaneUpdateRequired(needsNewerWollipog(
       standalone
         ? (question ? "Standalone owner questions need" : "Standalone owner decisions need")
         : (question ? "Owner questions need" : "Owner decisions need"),
       "Update Wollipog; nothing reached the owner."), required, actual);
+  }
+  if (allowStandalone && deps.orchestrator && deps.selfSessionId &&
+      actual! < RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions) {
+    const self = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}`);
+    const session = self.ok ? (self.data?.session ?? self.data) : null;
+    const mode = session?.orchestratorPolicy?.control?.mode ?? session?.orchestratorCampaign?.control?.mode;
+    if ((session?.orchestratorPolicy && mode !== "full_control") || mode === "custom") {
+      return controlPlaneUpdateRequired(needsNewerWollipog(
+        question ? "Custom campaign owner questions need" : "Custom campaign owner decisions need",
+        "Update Wollipog; nothing reached the owner.",
+      ), RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions, actual);
+    }
+  }
+  return null;
 }
 
 /** A pre-v296 control plane ignores `ownerRule` (#4137), so the decision would keep the owner its

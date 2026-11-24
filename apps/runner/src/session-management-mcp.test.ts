@@ -447,6 +447,20 @@ test("an Owner Question posts its kind with 0 to 12 suggestions and needs a v303
   assert.equal(old.isError, true);
   assert.match(resultText(old), /"requiredControlPlaneProtocolVersion":303/u);
   assert.equal(calls.length, count, "nothing reaches the control plane");
+
+  // A Custom root against a v411 control plane gets v412 upgrade guidance before posting (#4894).
+  const custom = makeDeps((call) => {
+    if (call.url.endsWith(`/api/sessions/${SELF_ID}`)) {
+      return { status: 200, body: { session: { id: SELF_ID, orchestratorPolicy: { control: { mode: "custom" } } } } };
+    }
+    return { status: 201, body: { occurrenceId: "workflow_1", status: "pending", authority: "human" } };
+  });
+  custom.deps.orchestrator = true;
+  custom.deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions - 1;
+  const customOld = await callTool(custom.deps, "request_owner_decision", ask);
+  assert.equal(customOld.isError, true);
+  assert.match(resultText(customOld), /"requiredControlPlaneProtocolVersion":412/u);
+  assert.equal(custom.calls.some((c) => c.url.endsWith("/owner-decisions")), false, "Custom root never posts to v411 owner-decisions");
 });
 
 test("typed workflow decision tools preserve exact request, resolution, and consume snapshots", async () => {

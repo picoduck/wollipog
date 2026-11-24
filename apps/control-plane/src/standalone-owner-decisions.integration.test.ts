@@ -886,3 +886,259 @@ test("Custom campaign root own-work approvals respect strictProjectIsolation and
     h.db.close();
   }
 });
+
+test("review round 1 regressions: Location switch revokes merge/deletion, Custom root verifies Location and v412 and stays async, standalone closure reconciles and refuses issueAdmission (#4894)", async () => {
+  // Finding 1: standalone merge & deletion approvals cannot dispatch after a live Location switch to another repository.
+  const h1 = makeHarness({ driver: "acp" });
+  try {
+    const mergeSnap: WorkflowDecisionResourceSnapshot = {
+      category: "pr_merge", repository: "team/repo", pullRequest: 21, headSha: HEAD_SHA, reviewResult: "merge",
+      requiredChecks: { headSha: HEAD_SHA, status: "passed", checkedAt: 10, checks: [{ name: "CI", state: "passed" }] },
+      intendedClosures: ["team/repo#42"],
+    };
+    const delSnap: WorkflowDecisionResourceSnapshot = {
+      category: "merged_branch_deletion", merged: true, repository: "team/repo", branch: "feat/old-repo",
+      pullRequest: 21, headSha: HEAD_SHA, mergeCommitSha: HEAD_SHA,
+      dependentPullRequests: { checkedAt: 10, open: [] },
+    };
+    const m = await h1.svc.createWorkflowDecisionWithVideo("solo", { requestId: "sw-m", resourceKey: "team/repo#21", resourceSnapshot: mergeSnap });
+    const d = await h1.svc.createWorkflowDecisionWithVideo("solo", { requestId: "sw-d", resourceKey: "team/repo:feat/old-repo", resourceSnapshot: delSnap });
+    assert.equal(m.status, 201);
+    assert.equal(d.status, 201);
+    assert.equal(h1.svc.approve("solo", m.data!.occurrenceId, "approve", h1.owner).ok, true);
+    assert.equal(h1.svc.approve("solo", d.data!.occurrenceId, "approve", h1.owner).ok, true);
+
+    // Apply live Location switch to a second registered Project Location in repository B (preserving sessionId "solo").
+    h1.db.registerRunner({
+      runnerId: "r", hostname: "test-host", os: "linux", version: "test",
+      workspaces: [{ id: "w", name: "Repo A", path: "/repos/project" }, { id: "w2", name: "Repo B", path: "/repos/other" }],
+      agents: [{ id: "agent-acp", name: "Antigravity", command: "agy", args: [], env: {}, driver: "acp", context: { kind: "native" }, available: true }],
+      runtime: { dataDir: "/tmp/wollipog-test", worktreeRoot: "/tmp/wollipog-test/worktrees", maxConcurrentSessions: 4, campaignLaunchInspection: { version: 4 } },
+    }, 2, PROTOCOL_VERSION);
+    const locB = h1.db.addProjectLocation(h1.project.id, { runnerId: "r", workspaceId: "w2", addedByUserId: h1.principal.userId }, 2);
+    h1.db.raw().prepare("UPDATE sessions SET workspace_id = ?, project_location_id = ? WHERE id = ?").run("w2", locB.id, "solo");
+    h1.setRepo("team/other-repo");
+
+    const actionsBefore = h1.forgeActions.length;
+    const mExec = await h1.svc.executeWorkflowDecision("solo", m.data!.occurrenceId, { resourceDigest: m.data!.resourceDigest });
+    assert.equal(mExec.ok, true);
+    assert.equal(mExec.data!.forgeAction?.outcome, "refused");
+    assert.equal(h1.db.workflowDecisionByOccurrence(m.data!.occurrenceId)!.status, "revoked");
+
+    const dExec = await h1.svc.executeWorkflowDecision("solo", d.data!.occurrenceId, { resourceDigest: d.data!.resourceDigest });
+    assert.equal(dExec.ok, true);
+    assert.equal(dExec.data!.forgeAction?.outcome, "refused");
+    assert.equal(h1.db.workflowDecisionByOccurrence(d.data!.occurrenceId)!.status, "revoked");
+    assert.equal(h1.forgeActions.length, actionsBefore, "no forge action may dispatch after Location switch");
+  } finally {
+    h1.db.close();
+  }
+
+  // Finding 2 & Finding 5: Custom root implementation approvals require matching verified checkout Location and stay async (non-parking).
+  const h2 = makeHarness({ driver: "acp" });
+  try {
+    h2.db.registerRunner({
+      runnerId: "r", hostname: "test-host", os: "linux", version: "test",
+      workspaces: [{ id: "w", name: "Repo A", path: "/repos/project" }, { id: "w2", name: "Repo B", path: "/repos/second" }],
+      agents: [{ id: "agent-acp", name: "Antigravity", command: "agy", args: [], env: {}, driver: "acp", context: { kind: "native" }, available: true }],
+      runtime: { dataDir: "/tmp/wollipog-test", worktreeRoot: "/tmp/wollipog-test/worktrees", maxConcurrentSessions: 4, campaignLaunchInspection: { version: 4 } },
+    }, 2, PROTOCOL_VERSION);
+    const locSecond = h2.db.addProjectLocation(h2.project.id, { runnerId: "r", workspaceId: "w2", addedByUserId: h2.principal.userId }, 2);
+    const policyMulti = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+    policyMulti.execution = { ...policyMulti.execution, strictProjectIsolation: false };
+    policyMulti.issueNumbers = [42];
+    policyMulti.issueScope = { repository: "team/repo", issueNumbers: [42], revision: 1, authorizedByUserId: h2.principal.userId, authorizedAt: 1 };
+    policyMulti.repositories = [
+      { repository: "team/repo", locationIds: [h2.location!.id] },
+      { repository: "team/second-repo", locationIds: [locSecond.id] },
+    ];
+    h2.db.createSession({
+      id: "custom-multi", runnerId: "r", workspaceId: "w", agentId: "agent-acp", title: "Custom Multi",
+      useWorktree: false, driver: "acp", role: "orchestrator",
+      projectId: h2.project.id, projectLocationId: h2.location!.id,
+      orchestratorPolicy: policyMulti, parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
+      now: 1, config: {},
+    });
+    h2.db.updateSessionStatus("custom-multi", "running", 2);
+
+    // Campaign lists team/second-repo, but Custom root's checkout Location is team/repo -> refused!
+    const crossRepoDel = await h2.svc.createWorkflowDecisionWithVideo("custom-multi", {
+      requestId: "cm-cross-del", resourceKey: "team/second-repo:feat/x",
+      resourceSnapshot: {
+        category: "merged_branch_deletion", merged: true, repository: "team/second-repo", branch: "feat/x",
+        pullRequest: 5, headSha: HEAD_SHA, mergeCommitSha: HEAD_SHA, dependentPullRequests: { checkedAt: 10, open: [] },
+      },
+    });
+    assert.equal(crossRepoDel.status, 403, `Custom root cannot delete branch in another campaign repository: ${crossRepoDel.error}`);
+
+    // Custom root with no scope and no registered Project Location -> refused!
+    const policyUnscoped = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+    policyUnscoped.execution = { ...policyUnscoped.execution, strictProjectIsolation: false };
+    h2.db.createSession({
+      id: "custom-unlocated", runnerId: "r", workspaceId: "w", agentId: "agent-acp", title: "Custom Unlocated",
+      useWorktree: false, driver: "acp", role: "orchestrator",
+      orchestratorPolicy: policyUnscoped, parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
+      now: 1, config: {},
+    });
+    h2.db.updateSessionStatus("custom-unlocated", "running", 2);
+    const unlocatedDel = await h2.svc.createWorkflowDecisionWithVideo("custom-unlocated", {
+      requestId: "cu-del", resourceKey: "team/second-repo:feat/y",
+      resourceSnapshot: {
+        category: "merged_branch_deletion", merged: true, repository: "team/second-repo", branch: "feat/y",
+        pullRequest: 6, headSha: HEAD_SHA, mergeCommitSha: HEAD_SHA, dependentPullRequests: { checkedAt: 10, open: [] },
+      },
+    });
+    assert.equal(unlocatedDel.status, 409, "Custom root without a registered Location is refused");
+
+    // Finding 5: Non-isolated Custom root implementation approvals stay async and never park the Orchestrator (including after reconnect).
+    const cMerge = await h2.svc.createWorkflowDecisionWithVideo("custom-multi", {
+      requestId: "cm-async-m", resourceKey: "team/repo#31",
+      resourceSnapshot: {
+        category: "pr_merge", repository: "team/repo", pullRequest: 31, headSha: HEAD_SHA, reviewResult: "merge",
+        requiredChecks: { headSha: HEAD_SHA, status: "passed", checkedAt: 10, checks: [{ name: "CI", state: "passed" }] },
+        intendedClosures: ["team/repo#42"],
+      },
+    });
+    const cDel = await h2.svc.createWorkflowDecisionWithVideo("custom-multi", {
+      requestId: "cm-async-d", resourceKey: "team/repo:feat/async",
+      resourceSnapshot: {
+        category: "merged_branch_deletion", merged: true, repository: "team/repo", branch: "feat/async",
+        pullRequest: 31, headSha: HEAD_SHA, mergeCommitSha: HEAD_SHA, dependentPullRequests: { checkedAt: 10, open: [] },
+      },
+    });
+    const cDigest = h2.attachPng("art_cm_async", "custom-multi");
+    const cUi = await h2.svc.createWorkflowDecisionWithVideo("custom-multi", {
+      requestId: "cm-async-u", resourceKey: "cm-async-ui",
+      resourceSnapshot: {
+        category: "ui_evidence_approval",
+        evidence: [{ evidenceId: "shot-1", artifactId: "art_cm_async", mediaType: "image/png", sha256: cDigest }],
+      },
+    });
+    assert.equal(cMerge.status, 201);
+    assert.equal(cDel.status, 201);
+    assert.equal(cUi.status, 201);
+    const rootBefore = h2.db.getSession("custom-multi")!;
+    assert.equal(rootBefore.status, "running", "Custom root stays running while its implementation approvals wait");
+    const cardsBefore = pendingRequests(rootBefore.pendingApproval);
+    assert.equal(cardsBefore.length, 3);
+    assert.ok(cardsBefore.every((c) => c.async === true), "every Custom root implementation card is async");
+
+    h2.svc.failRunnerSessions("r");
+    h2.svc.reconcileRunnerSessions("r", ["custom-multi"]);
+    const rootAfter = h2.db.getSession("custom-multi")!;
+    assert.notEqual(rootAfter.status, "input_required", "reconnect keeps Custom root unparked");
+    const cardsAfter = pendingRequests(rootAfter.pendingApproval);
+    assert.equal(cardsAfter.length, 3);
+    assert.ok(cardsAfter.every((c) => c.async === true), "restored Custom root implementation cards stay async");
+  } finally {
+    h2.db.close();
+  }
+
+  // Finding 3 (control plane): v411 scoped Custom root is refused on pr_merge, merged_branch_deletion, and ui_evidence_approval.
+  const h3 = makeHarness({ runnerProtocol: 411 });
+  try {
+    const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+    policy.execution = { ...policy.execution, strictProjectIsolation: false };
+    policy.issueNumbers = [42];
+    policy.issueScope = { repository: "team/repo", issueNumbers: [42], revision: 1, authorizedByUserId: h3.principal.userId, authorizedAt: 1 };
+    h3.db.createSession({
+      id: "custom-old", runnerId: "r", workspaceId: "w", agentId: "agent-acp", title: "Custom Old",
+      useWorktree: false, driver: "acp", role: "orchestrator",
+      projectId: h3.project.id, projectLocationId: h3.location!.id,
+      orchestratorPolicy: policy, parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
+      now: 1, config: {},
+    });
+    h3.db.updateSessionStatus("custom-old", "running", 2);
+    const oldM = await h3.svc.createWorkflowDecisionWithVideo("custom-old", {
+      requestId: "co-m", resourceKey: "team/repo#41",
+      resourceSnapshot: {
+        category: "pr_merge", repository: "team/repo", pullRequest: 41, headSha: HEAD_SHA, reviewResult: "merge",
+        requiredChecks: { headSha: HEAD_SHA, status: "passed", checkedAt: 10, checks: [{ name: "CI", state: "passed" }] },
+      },
+    });
+    assert.equal(oldM.status, 409);
+    assert.match(oldM.error ?? "", /runner|upgrade|compatible/iu);
+    const oldD = await h3.svc.createWorkflowDecisionWithVideo("custom-old", {
+      requestId: "co-d", resourceKey: "team/repo:b",
+      resourceSnapshot: {
+        category: "merged_branch_deletion", merged: true, repository: "team/repo", branch: "b",
+        pullRequest: 41, headSha: HEAD_SHA, mergeCommitSha: HEAD_SHA, dependentPullRequests: { checkedAt: 10, open: [] },
+      },
+    });
+    assert.equal(oldD.status, 409);
+    assert.match(oldD.error ?? "", /runner|upgrade|compatible/iu);
+    const oldDigest = h3.attachPng("art_co", "custom-old");
+    const oldU = await h3.svc.createWorkflowDecisionWithVideo("custom-old", {
+      requestId: "co-u", resourceKey: "co-u",
+      resourceSnapshot: {
+        category: "ui_evidence_approval",
+        evidence: [{ evidenceId: "shot-1", artifactId: "art_co", mediaType: "image/png", sha256: oldDigest }],
+      },
+    });
+    assert.equal(oldU.status, 409);
+    assert.match(oldU.error ?? "", /runner|upgrade|compatible/iu);
+  } finally {
+    h3.db.close();
+  }
+
+  // Finding 4 & Finding 6: standalone closure refuses extra issueAdmission (400, 0 runner calls), and uncertain closure enters scheduled retryDuePrompts reconciliation.
+  const h4 = makeHarness();
+  try {
+    const reqsBefore = h4.runnerRequests.length;
+    const withAdmission = await h4.svc.requestGithubIssueClosure("solo", {
+      requestId: "cl-adm",
+      issue: 42,
+      repository: "team/repo",
+      reason: "completed",
+      explanation: "Done.",
+      evidence: ["PR #7."],
+      issueAdmission: { boundaryRevision: 1, evidenceDigest: "a".repeat(64) },
+    } as unknown as Parameters<typeof h4.svc.requestGithubIssueClosure>[1]);
+    assert.equal(withAdmission.status, 400, "extra issueAdmission is refused with 400");
+    assert.equal(h4.runnerRequests.length, reqsBefore, "refused before any Location or issue inspection");
+
+    // Create and approve a valid standalone closure, then fail the execute reply to leave it uncertain.
+    const cl = await h4.svc.requestGithubIssueClosure("solo", {
+      requestId: "cl-unc", issue: 42, repository: "team/repo",
+      reason: "completed", explanation: "Delivered.", evidence: ["PR #7."],
+    });
+    assert.equal(cl.ok, true);
+    const occId = cl.data!.decision!.occurrenceId;
+    assert.equal(h4.svc.approve("solo", occId, "approve", h4.owner).ok, true);
+
+    const origRequest = h4.hub.requestFromRunner;
+    let executeCalls = 0;
+    let reconcileCalls = 0;
+    h4.hub.requestFromRunner = (async (runnerId: string, requestId: string, message: ControlPlaneToRunner, timeoutMs?: number) => {
+      if (message.type === "github_issue_closure" && message.operation === "execute") {
+        executeCalls++;
+        throw new Error("runner disconnected mid-close");
+      }
+      if (message.type === "github_issue_closure" && message.operation === "reconcile") {
+        reconcileCalls++;
+        assert.equal(message.standalone, true, "reconcile carries standalone: true");
+        return {
+          type: "github_issue_closure_result", requestId: message.requestId, sessionId: message.sessionId,
+          ok: true, reconciled: true,
+        };
+      }
+      return origRequest(runnerId, requestId, message, timeoutMs);
+    }) as Hub["requestFromRunner"];
+
+    const unc = await h4.svc.executeGithubIssueClosure("solo", occId, cl.data!.decision!.resourceDigest);
+    assert.equal(unc.ok, true);
+    assert.equal(unc.data!.issueClosureResult?.outcome, "uncertain");
+    assert.equal(executeCalls, 1);
+
+    // Scheduled retryDuePrompts picks up the standalone uncertain closure and settles it read-only without re-executing.
+    h4.svc.retryDuePrompts(Date.now(), "r");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(reconcileCalls, 1, "retryDuePrompts reconciled standalone uncertain closure");
+    assert.equal(executeCalls, 1, "no second execute was ever dispatched");
+    const settled = h4.db.workflowDecisionByOccurrence(occId)!;
+    assert.equal(settled.issueClosureResult?.outcome, "closed");
+    assert.equal(settled.issueClosureResult?.reconciliation?.verified, true);
+  } finally {
+    h4.db.close();
+  }
+});
