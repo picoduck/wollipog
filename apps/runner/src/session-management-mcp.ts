@@ -512,6 +512,13 @@ async function issueClosureCompatibilityError(deps: McpDeps, repository?: unknow
     if (!compatibility.ok) return errorResult("Issue closure compatibility could not be verified");
     actual = compatibility.data?.protocolVersion;
   }
+  if (!deps.orchestrator) {
+    const standalone = RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions;
+    return Number.isInteger(actual) && actual! >= standalone
+      ? null
+      : controlPlaneUpdateRequired(needsNewerWollipog("Standalone issue closure needs",
+        "Update Wollipog; nothing was inspected or requested."), standalone, actual);
+  }
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure;
   if (!Number.isInteger(actual) || actual! < required) return controlPlaneUpdateRequired(needsNewerWollipog("Human-approved issue closure needs"), required, actual);
   // #4119: an older control plane would ignore `repository` and inspect the launch repository's
@@ -870,10 +877,16 @@ async function controlPlaneSupports(deps: McpDeps, required: number): Promise<bo
 
 /** A pre-v281 control plane has no owner-decision routes (#4064). Refuse by name: nothing reached
  * the owner, and the decision keeps the owner it had. A pre-v303 control plane would ignore an Owner
- * Question's `kind` (#4270) and ask it as an approval, so a question needs v303. */
-async function ownerDecisionCompatibilityError(deps: McpDeps, question = false): Promise<ToolResult | null> {
-  const required = question ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerQuestions : RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions;
-  const noun = question ? "owner questions" : "owner decisions";
+ * Question's `kind` (#4270) and ask it as an approval, so a question needs v303. A standalone
+ * session's owner decision or question needs v412 (#4894). */
+async function ownerDecisionCompatibilityError(deps: McpDeps, question = false, allowStandalone = false): Promise<ToolResult | null> {
+  const standalone = allowStandalone && !deps.orchestrator;
+  const required = standalone
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions
+    : question ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerQuestions : RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions;
+  const noun = standalone
+    ? (question ? "standalone owner questions" : "standalone owner decisions")
+    : (question ? "owner questions" : "owner decisions");
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
@@ -882,10 +895,45 @@ async function ownerDecisionCompatibilityError(deps: McpDeps, question = false):
     }
     actual = result.data?.protocolVersion;
   }
-  return Number.isInteger(actual) && actual! >= required
-    ? null
-    : controlPlaneUpdateRequired(needsNewerWollipog(question ? "Owner questions need" : "Owner decisions need",
+  if (!Number.isInteger(actual) || actual! < required) {
+    return controlPlaneUpdateRequired(needsNewerWollipog(
+      standalone
+        ? (question ? "Standalone owner questions need" : "Standalone owner decisions need")
+        : (question ? "Owner questions need" : "Owner decisions need"),
       "Update Wollipog; nothing reached the owner."), required, actual);
+  }
+  if (allowStandalone && deps.orchestrator && deps.selfSessionId &&
+      actual! < RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions) {
+    const self = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}`);
+    if (!self.ok) {
+      return controlPlaneUpdateRequired(
+        wollipogSupportUnverified(
+          question ? "owner questions" : "owner decisions",
+          self.message,
+        ),
+        RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions,
+        actual,
+      );
+    }
+    const session = self.data?.session ?? self.data;
+    const mode = session?.orchestratorPolicy?.control?.mode ?? session?.orchestratorCampaign?.control?.mode;
+    if (mode === "full_control") return null;
+    if ((session?.orchestratorPolicy && mode !== "full_control") || mode === "custom") {
+      return controlPlaneUpdateRequired(needsNewerWollipog(
+        question ? "Custom campaign owner questions need" : "Custom campaign owner decisions need",
+        "Update Wollipog; nothing reached the owner.",
+      ), RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions, actual);
+    }
+    return controlPlaneUpdateRequired(
+      wollipogSupportUnverified(
+        question ? "owner questions" : "owner decisions",
+        "could not verify whether this Orchestrator uses Full Control or Custom mode",
+      ),
+      RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions,
+      actual,
+    );
+  }
+  return null;
 }
 
 /** A pre-v296 control plane ignores `ownerRule` (#4137), so the decision would keep the owner its
@@ -1492,8 +1540,8 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "g
   "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
   "stop_session", "stop_background_job", "release_queue_hold", "restart_session", "archive_session", "unarchive_session", "set_guardrails", "create_worktree",
   "attach_worktree", "select_worktree", "discard_worktree", "delete_worktree_refs", "create_temporary_branch"]);
-const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change", "request_github_issue_closure", "close_github_issue",
-  "request_owner_decision", "hand_workflow_decision_to_owner",
+const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change",
+  "hand_workflow_decision_to_owner",
   "request_campaign_repository_addition", "get_campaign_repository_addition", "execute_campaign_repository_addition",
   "allocate_campaign_budget",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
@@ -1743,7 +1791,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_github_issue_closure",
-    description: "Propose closing one authorized campaign issue with fresh forge/conflict evidence. Custom requires a human; bounded Full Control additionally requires verified delivery and actual default-branch merges, or a recorded supported not-planned disposition. An in-scope Full Control closure that fails that proof stays a person's, with reason closure_proof_incomplete and proofGaps naming each gap, its work item and pull requests, and the action that would let a new request become Orchestrator-owned and supersede it while pending. An approved, unconsumed closure is preserved: a re-request refuses with its occurrenceId and resourceDigest so it can be executed. Execution checks the original snapshot; a stale approval is retired explicitly before requesting again. An already-closed issue is reported without posting a comment. GitLab issues are supported from runner protocol v249 through the session's glab login: not_planned closes the issue after a note stating 'Closed as not planned: <explanation>' (then the comment), and completed posts the comment as a note only when one is supplied. repository names the campaign repository the issue belongs to and defaults to the launch repository; the issue is then inspected and closed through a Location of that repository, with that runner's own forge login. A repository that is not one of the campaign's is refused, and an owner's approved addition is the way in.",
+    description: "Propose closing one authorized issue with fresh forge/conflict evidence. Available to campaign root Orchestrators and standalone Normal sessions (standalone requires control plane and runner v412 and verifies the session's Project Location repository). Custom roots and standalone sessions require human owner approval; bounded Full Control additionally requires verified delivery and actual default-branch merges, or a recorded supported not-planned disposition. An in-scope Full Control closure that fails that proof stays a person's, with reason closure_proof_incomplete and proofGaps naming each gap, its work item and pull requests, and the action that would let a new request become Orchestrator-owned and supersede it while pending. An approved, unconsumed closure is preserved: a re-request refuses with its occurrenceId and resourceDigest so it can be executed. Execution checks the original snapshot; a stale approval is retired explicitly before requesting again. An already-closed issue is reported without posting a comment. GitLab issues are supported from runner protocol v249 through the session's glab login: not_planned closes the issue after a note stating 'Closed as not planned: <explanation>' (then the comment), and completed posts the comment as a note only when one is supplied. repository names the authorized repository the issue belongs to and defaults to the launch/Location repository; outside that authorized repository the request is refused.",
     inputSchema: { type: "object", properties: {
       requestId: { type: "string" }, issue: { type: "integer", minimum: 1 },
       repository: { type: "string", minLength: 1, maxLength: 256 },
@@ -3115,10 +3163,10 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_owner_decision",
-    description: "Full Control root Orchestrator only: ask your campaign's owner something only they can decide. " +
-      "Use kind \"question\" (an Owner Question) for a design choice, clarification or preference: the owner sees it as a normal question, with your 0 to 12 suggested options (mark one with recommendedOptionId) plus a free-text answer, and can answer in their own words. It grants nothing, and scope, boundary or policy changes never revoke it. " +
-      "Use kind \"approval\" (the default, an Owner Approval) only for an exact action the owner kept that has no typed category, with 2 to 12 explicit options; for a gate that has one (a child's pr_merge, an issue closure, a publication) use the typed decision or hand_workflow_decision_to_owner instead. " +
-      "Put everything the owner needs in material, as Markdown: links, the exact head SHA, check state and what each option does. It waits in the owner's Inbox and Campaign Status without stopping your turn or any other work; only the owner can answer it, never you or a child. A question's answer (the option chosen, their own words, or both) comes back as a Wollipog Owner Answer prompt; an approval's chosen option (or Do Not Proceed) as a Wollipog Workflow Decision prompt; get_workflow_decision reads either at any time. A newer request under the same resourceKey replaces an unanswered one; withdraw_workflow_decision withdraws it. Full Control never asks anyone for credentials or sign-in, so a request for a value is refused. Requires control plane v281, and v303 for kind \"question\".",
+    description: "Ask the session's human owner something only they can decide (available to root Orchestrators and standalone Normal sessions; campaign children remain routed through their Orchestrator). " +
+      "Use kind \"question\" (an Owner Question) for a design choice, clarification or preference: the owner sees it as a normal question, with your 0 to 12 suggested options (mark one with recommendedOptionId) plus a free-text answer, and can answer in their own words. It grants no action authority, cannot be consumed as an approval, and scope, boundary or policy changes never revoke it. " +
+      "Use kind \"approval\" (the default, an Owner Approval) only for an exact action that has no dedicated typed category, with 2 to 12 explicit options; for a gate that has one (pr_merge, merged_branch_deletion, follow_up_issue_publication, ui_evidence_approval, or issue_closure) use the dedicated typed decision instead. " +
+      "Put everything the owner needs in material, as Markdown: links, exact identifiers, and what each option does. Only the owner can answer it, never an agent. A question's answer (the option chosen, their own words, or both) comes back as a Wollipog Owner Answer prompt; an approval's chosen option (or Do Not Proceed) as a Wollipog Workflow Decision prompt; get_workflow_decision reads either at any time. A newer request under the same resourceKey replaces an unanswered one; withdraw_workflow_decision withdraws it. ruleDelegation is valid only for Full Control campaign roots. Requires control plane v281 (v303 for kind \"question\") for Full Control roots, and v412 for standalone Normal sessions and Custom roots.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3166,7 +3214,7 @@ export const TOOLS: McpTool[] = [
         return errorResult(`an Owner Approval needs ${OWNER_DECISION_LIMITS.minOptions} to ${OWNER_DECISION_LIMITS.maxOptions} options; ` +
           "ask a design or clarification question with kind \"question\" instead");
       }
-      const compatibilityError = await ownerDecisionCompatibilityError(deps, kind === "question");
+      const compatibilityError = await ownerDecisionCompatibilityError(deps, kind === "question", true);
       if (compatibilityError) return compatibilityError;
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/owner-decisions`, {
         requestId, resourceKey, question, options,

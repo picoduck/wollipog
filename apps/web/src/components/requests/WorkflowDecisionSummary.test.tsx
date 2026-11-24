@@ -127,3 +127,20 @@ test("an owner rule shows its source and quote as plain text, whoever reads the 
     "An installed or user-authored rule keeps this decision for a person, so no agent can make it. " +
     "Rule Source ~/.claude/skills/issue-workflow/SKILL.md Rule Ask &lt;script&gt;alert(1)&lt;/script&gt; &amp; wait for &quot;yes&quot;.");
 });
+
+test("a blocking standalone Owner Question or Owner Approval omits non-blocking Orchestrator copy (#4894)", () => {
+  const questionHtml = renderToStaticMarkup(<WorkflowDecisionSummary nonBlocking={false} snapshot={{
+    category: "owner_decision", kind: "question", question: "Which format should exports use?", options: [],
+  }} />);
+  const questionText = questionHtml.replace(/<[^>]+>/gu, " ").replace(/\s+/gu, " ").trim();
+  assert.match(questionText, /This session asked you this question\. Only you can answer it, in your own words\./u);
+  assert.doesNotMatch(questionText, /Orchestrator/u);
+
+  const approvalHtml = renderToStaticMarkup(<WorkflowDecisionSummary nonBlocking={false} snapshot={{
+    category: "owner_decision", question: "Proceed with schema migration?",
+    options: [{ optionId: "yes", label: "Proceed" }, { optionId: "no", label: "Hold" }],
+  }} />);
+  const approvalText = approvalHtml.replace(/<[^>]+>/gu, " ").replace(/\s+/gu, " ").trim();
+  assert.match(approvalText, /Only you can make this decision\./u);
+  assert.doesNotMatch(approvalText, /Orchestrator keeps working/u);
+});

@@ -3391,10 +3391,10 @@ test("#3919 a root's own publication leaves child, nested and non-campaign reque
     const nested = await h.svc.createWorkflowDecisionWithVideo("nested", { requestId: "nested", resourceKey: "nested", resourceSnapshot: snapshot("Nested repair") });
     assert.ok(nested.ok, nested.error ?? "nested");
     assert.equal(nested.data!.controllingSessionId, "root"); assert.equal(nested.data!.authority, "orchestrator");
-    // A session outside any campaign still has nobody to control its publication.
+    // A standalone session without a verified Project Location cannot publish (#4894).
     const solo = await h.svc.createWorkflowDecisionWithVideo("solo", { requestId: "solo", resourceKey: "solo", resourceSnapshot: snapshot("Solo repair") });
     assert.equal(solo.ok, false); assert.equal(solo.status, 409);
-    assert.match(solo.error!, /no controlling Orchestrator ancestor/);
+    assert.match(solo.error!, /Project Location|too old to verify/u);
   } finally { h.db.close(); }
 });
 

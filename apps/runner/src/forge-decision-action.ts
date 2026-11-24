@@ -397,6 +397,7 @@ async function branchTip(gh: GhRunner, action: Extract<ForgeDecisionAction, { ki
 export async function executeBranchDeletion(
   action: Extract<ForgeDecisionAction, { kind: "branch_deletion" }>,
   gh: GhRunner,
+  beforeWrite?: () => Promise<ForgeDecisionActionResult | null>,
 ): Promise<ForgeDecisionActionResult> {
   if (!REPOSITORY.test(action.repository) || !forgeActionBranchName(action.branch) || !Number.isSafeInteger(action.pullRequest) ||
       action.pullRequest < 1 || !SHA.test(action.headSha) || !SHA.test(action.mergeCommitSha)) {
@@ -425,6 +426,10 @@ export async function executeBranchDeletion(
   if (current === null) return { outcome: "already_deleted" };
   if (tip !== action.headSha) {
     return refused("tip_moved", "The branch tip is no longer the approved merged head, so it was left alone.");
+  }
+  if (beforeWrite) {
+    const refusal = await beforeWrite();
+    if (refusal) return refusal;
   }
   // GitHub applies `beforeOid` atomically: the deletion happens only while the tip is the head.
   const deleted = await gh(["api", "graphql", "--hostname", "github.com", "-f", `query=${DELETION_MUTATION}`,
@@ -459,8 +464,9 @@ const ENQUEUE_QUERY = `query($owner:String!,$name:String!,$number:Int!){
 export async function executePullRequestEnqueue(
   action: Extract<ForgeDecisionAction, { kind: "pr_merge_enqueue" }>,
   gh: GhRunner,
+  beforeWrite?: () => Promise<ForgeDecisionActionResult | null>,
 ): Promise<ForgeDecisionActionResult> {
-  return pullRequestEnqueue(action, gh, true);
+  return pullRequestEnqueue(action, gh, true, false, beforeWrite);
 }
 
 /** A reconciliation read (#4067): the same read as an enqueue, then stop. `already_merged` only for
@@ -483,6 +489,7 @@ async function pullRequestEnqueue(
   gh: GhRunner,
   write: boolean,
   retirement = false,
+  beforeWrite?: () => Promise<ForgeDecisionActionResult | null>,
 ): Promise<ForgeDecisionActionResult> {
   if (!REPOSITORY.test(action.repository) || !Number.isSafeInteger(action.pullRequest) || action.pullRequest < 1 || !SHA.test(action.headSha)) {
     return refused("pull_request_mismatch", "The decision does not name a GitHub pull request this runner can enqueue.");
@@ -504,6 +511,10 @@ async function pullRequestEnqueue(
   if (!write) return refused("pull_request_mismatch", "The pull request has not merged; nothing was enqueued.");
   if (pr.state !== "OPEN") return refused("pull_request_mismatch", "The pull request is closed.");
   if (record(pr.mergeQueueEntry)) return { outcome: "already_queued" };
+  if (beforeWrite) {
+    const refusal = await beforeWrite();
+    if (refusal) return refusal;
+  }
   const url = `https://github.com/${action.repository}/pull/${action.pullRequest}`;
   // The canonical approved command: pinned to the head, never --delete-branch.
   const merged = await gh(["pr", "merge", url, "--squash", "--match-head-commit", action.headSha]);

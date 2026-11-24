@@ -145,5 +145,5 @@ export function presentOwnerQuestionRequest(request: PendingApproval): PendingAp
   // Composer Answer Mode from taking over, while request metadata still labels them Question.
   if (isChildQuestionSnapshot(snapshot) && request.workflowDecision?.authority !== "human") return request;
   return { ...request, kind: "question", title: isChildQuestionSnapshot(snapshot) ? "Question" : "Owner Question",
-    ...(isOwnerQuestionSnapshot(snapshot) ? { async: true } : {}), questions: ownerQuestionAgentQuestions(snapshot) };
+    ...(request.async ? { async: true } : {}), questions: ownerQuestionAgentQuestions(snapshot) };
 }

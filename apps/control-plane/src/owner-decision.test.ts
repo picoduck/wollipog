@@ -295,10 +295,16 @@ test("a root's own handed decision stops holding the root (#4064)", async () => 
   } finally { h.db.close(); }
 });
 
-test("owner decisions exist only for a Full Control root on a current runner (#4064)", async () => {
+test("owner decisions enforce role, mode, runner protocol, and credential boundaries (#4064, #4894)", async () => {
+  const customOld = harness({ full: false, runnerProtocol: 411 });
+  try {
+    assert.equal((await customOld.ask()).status, 409, "a Custom root on an older runner is refused");
+  } finally { customOld.db.close(); }
   const custom = harness({ full: false });
   try {
-    assert.equal((await custom.ask()).status, 409, "a Custom campaign is unchanged");
+    const asked = await custom.ask();
+    assert.equal(asked.status, 201, "a Custom root on a current runner can ask its owner (#4894)");
+    assert.equal(asked.data?.authority, "human");
     const merge = custom.merge("merge-7");
     assert.ok(merge.ok && merge.data);
     assert.equal(custom.svc.handWorkflowDecisionToOwner("root", merge.data.occurrenceId, { reason: "x", sessionId: "child" }).status, 409);

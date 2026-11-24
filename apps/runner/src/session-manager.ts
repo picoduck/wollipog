@@ -22875,6 +22875,82 @@ export class SessionManager {
       const agentEnv = options.agentEnv?.(meta) ?? {};
       const neutral = meta.context?.kind === "wsl" ? "/" : parsePath(tmpdir()).root;
       const gh = options.gh ?? contextGhRunner(meta.context, neutral, agentEnv);
+      const verifyBoundLocation = message.location
+        ? async (): Promise<{ outcome: ForgeDecisionActionOutcome; refusal?: { reason: ForgeDecisionActionRefusalReason; summary: string } } | null> => {
+          const currentMeta = this.store.readMeta(message.sessionId);
+          if (!currentMeta) {
+            return {
+              outcome: "refused",
+              refusal: { reason: "runner_unavailable", summary: "The session is not known to this runner." },
+            };
+          }
+          const expectedWorkspaceId = typeof message.location?.workspaceId === "string" ? message.location.workspaceId : "";
+          const expectedWorkspacePath = typeof message.location?.workspacePath === "string" ? message.location.workspacePath : "";
+          const expectedRepository = typeof message.location?.repository === "string" ? message.location.repository.toLowerCase() : "";
+          const actionRepository = "repository" in message.action && typeof message.action.repository === "string"
+            ? message.action.repository.toLowerCase() : "";
+          const stripTrailing = (p: string) => p.length > 1 ? p.replace(/[\\/]+$/u, "") : p;
+          let pathMatches = Boolean(currentMeta.repoPath && expectedWorkspacePath &&
+            stripTrailing(currentMeta.repoPath) === stripTrailing(expectedWorkspacePath));
+          if (!pathMatches && currentMeta.repoPath && expectedWorkspacePath && currentMeta.context?.kind !== "wsl") {
+            try {
+              pathMatches = (await realpath(currentMeta.repoPath)) === (await realpath(expectedWorkspacePath));
+            } catch {
+              pathMatches = false;
+            }
+          }
+          if (!expectedWorkspaceId || !expectedWorkspacePath || !expectedRepository ||
+              (actionRepository && actionRepository !== expectedRepository) ||
+              currentMeta.workspaceId !== expectedWorkspaceId || !pathMatches) {
+            return {
+              outcome: "refused",
+              refusal: {
+                reason: "repository_mismatch",
+                summary: "The session's workspace no longer matches the approved GitHub repository; nothing was performed.",
+              },
+            };
+          }
+          let origin: string | undefined | null;
+          try {
+            const run = issueClosureRun(currentMeta.context, currentMeta.repoPath, options.agentEnv?.(currentMeta) ?? {});
+            origin = githubSlug((await run("git", ["remote", "get-url", "origin"])).trim());
+          } catch {
+            return {
+              outcome: "refused",
+              refusal: {
+                reason: "forge_unavailable",
+                summary: "The session's repository origin could not be read; nothing was performed.",
+              },
+            };
+          }
+          if (!origin || origin.toLowerCase() !== expectedRepository) {
+            return {
+              outcome: "refused",
+              refusal: {
+                reason: "repository_mismatch",
+                summary: "The session's repository no longer matches the approved GitHub repository; nothing was performed.",
+              },
+            };
+          }
+          // Re-check live metadata synchronously after awaiting git so a Location switch committed
+          // while reading origin cannot proceed into a forge write.
+          const latestMeta = this.store.readMeta(message.sessionId);
+          if (!latestMeta || latestMeta.workspaceId !== expectedWorkspaceId || latestMeta.repoPath !== currentMeta.repoPath) {
+            return {
+              outcome: "refused",
+              refusal: {
+                reason: "repository_mismatch",
+                summary: "The session's workspace changed while verifying the repository; nothing was performed.",
+              },
+            };
+          }
+          return null;
+        }
+        : undefined;
+      if (verifyBoundLocation) {
+        const locationRefusal = await verifyBoundLocation();
+        if (locationRefusal) return { ...base, ...locationRefusal };
+      }
       if (message.action?.kind === "ci_rerun" || message.action?.kind === "ci_rerun_inspect_job" ||
           message.action?.kind === "release_tag" || message.action?.kind === "release_publish") {
         const action = message.action;
@@ -22911,9 +22987,9 @@ export class SessionManager {
       const result = message.action?.kind === "temporary_branch_create" || message.action?.kind === "temporary_branch_deletion"
         ? await executeTemporaryBranch(message.action, gh)
         : message.action?.kind === "branch_deletion"
-        ? await executeBranchDeletion(message.action, gh)
+        ? await executeBranchDeletion(message.action, gh, verifyBoundLocation)
         : message.action?.kind === "pr_merge_enqueue"
-          ? await executePullRequestEnqueue(message.action, gh)
+          ? await executePullRequestEnqueue(message.action, gh, verifyBoundLocation)
           : message.action?.kind === "pr_merge_retirement_observe"
             ? await observePullRequestRetirement(message.action, gh)
           : message.action?.kind === "pr_merge_observe"
@@ -23167,7 +23243,12 @@ export class SessionManager {
       prepared.commit();
       return { ...await prepared.finished, ...base };
     }
-    if (!meta?.orchestrator || !meta.repoPath) {
+    const standalone = message.standalone === true;
+    if (standalone) {
+      if (!meta || meta.orchestrator || !meta.repoPath || !meta.workspaceId) {
+        return { ...base, ok: false, failure: "runner_failed", error: "Standalone issue closure requires a runner-local non-Orchestrator registered workspace" };
+      }
+    } else if (!meta?.orchestrator || !meta.repoPath) {
       return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires a runner-local Orchestrator repository" };
     }
     if (this.campaignHostTargetRefusal(meta)) {
@@ -23181,13 +23262,14 @@ export class SessionManager {
       } catch (error) { return issueClosureFailure(base, error); }
     }
     const issue = message.operation === "inspect" ? message.issue : message.snapshot.issue;
-    if (!meta.orchestrator.issueNumbers?.includes(issue)) {
+    if (!standalone && !meta.orchestrator?.issueNumbers?.includes(issue)) {
       return { ...base, ok: false, failure: "campaign_authority_changed", error: "Issue is outside the human-authorized campaign scope" };
     }
     const revision = message.operation === "inspect" ? message.scopeRevision : message.snapshot.scopeRevision;
-    if (meta.orchestrator.issueScope && revision !== meta.orchestrator.issueScope.revision) return { ...base, ok: false, failure: "campaign_authority_changed", error: "Campaign scope revision is stale; synchronize and request renewed review" };
+    if (!standalone && meta.orchestrator?.issueScope && revision !== meta.orchestrator.issueScope.revision) return { ...base, ok: false, failure: "campaign_authority_changed", error: "Campaign scope revision is stale; synchronize and request renewed review" };
     const boundedAuthorityCurrent = (current: SessionMeta): boolean => {
       if (message.operation !== "execute" || !message.snapshot.issueAdmission) return true;
+      if (standalone) return false;
       const control = current.orchestrator?.control;
       return control?.mode === "full_control" && validCampaignControl(control) &&
         control.boundary.issueScopeRevision === revision &&
@@ -23201,10 +23283,22 @@ export class SessionManager {
     try {
       if (message.operation === "inspect") {
         const inspection = await inspectGithubIssueClosure(issue, run, message.deliveryPullRequests, message.epicMembers === true, message.campaignPullRequests);
-        if (meta.orchestrator.issueScope && inspection.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, failure: "repository_changed", error: "Repository differs from the authorized scope" };
+        if (standalone) {
+          if (message.expectedRepository && inspection.repository.toLowerCase() !== message.expectedRepository.toLowerCase()) {
+            return { ...base, ok: false, failure: "repository_changed", error: "Repository differs from the verified Project Location" };
+          }
+        } else if (meta.orchestrator?.issueScope && inspection.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) {
+          return { ...base, ok: false, failure: "repository_changed", error: "Repository differs from the authorized scope" };
+        }
         return { ...base, ok: true, inspection };
       }
-      if (meta.orchestrator.issueScope && message.snapshot.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the authorized scope" };
+      if (standalone) {
+        if (message.expectedRepository && message.snapshot.repository.toLowerCase() !== message.expectedRepository.toLowerCase()) {
+          return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the verified Project Location" };
+        }
+      } else if (meta.orchestrator?.issueScope && message.snapshot.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) {
+        return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the authorized scope" };
+      }
       const digest = createHash("sha256").update(JSON.stringify(message.snapshot)).digest("hex");
       if (message.snapshot.campaignPullRequests !== undefined && (message.prepare !== true || message.campaignPullRequests === undefined)) {
         return { ...base, ok: false, failure: "campaign_authority_changed", error: "Filtered closure requires fresh campaign PR context and a separate commit" };
@@ -23213,15 +23307,20 @@ export class SessionManager {
         const fresh = this.store.readMeta(message.sessionId);
         const attempts = fresh?.githubIssueClosureAttempts ?? {};
         if (!fresh || attempts[message.occurrenceId] || Object.keys(attempts).length >= 1000 ||
-            isTerminal(fresh.status) || !fresh.orchestrator?.issueNumbers?.includes(issue) ||
-            (fresh.orchestrator.issueScope && revision !== fresh.orchestrator.issueScope.revision)) return false;
-        if (message.snapshot.issueAdmission && (!boundedAuthorityCurrent(fresh) ||
-            fresh.controlPlaneLaunchId !== meta.controlPlaneLaunchId ||
-            JSON.stringify(fresh.orchestrator.control) !== JSON.stringify(meta.orchestrator?.control))) {
-          this.log(JSON.stringify({ event: "campaign_issue_closure_authority_changed", entryPoint: "closure_mutation_fence",
-            requestId: message.requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId,
-            boundaryRevision: message.snapshot.issueAdmission.boundaryRevision, scopeRevision: revision, outcome: "refused" }));
-          return false;
+            isTerminal(fresh.status)) return false;
+        if (standalone) {
+          if (fresh.orchestrator || !fresh.workspaceId || !fresh.repoPath) return false;
+        } else {
+          if (!fresh.orchestrator?.issueNumbers?.includes(issue) ||
+              (fresh.orchestrator.issueScope && revision !== fresh.orchestrator.issueScope.revision)) return false;
+          if (message.snapshot.issueAdmission && (!boundedAuthorityCurrent(fresh) ||
+              fresh.controlPlaneLaunchId !== meta.controlPlaneLaunchId ||
+              JSON.stringify(fresh.orchestrator.control) !== JSON.stringify(meta.orchestrator?.control))) {
+            this.log(JSON.stringify({ event: "campaign_issue_closure_authority_changed", entryPoint: "closure_mutation_fence",
+              requestId: message.requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId,
+              boundaryRevision: message.snapshot.issueAdmission.boundaryRevision, scopeRevision: revision, outcome: "refused" }));
+            return false;
+          }
         }
         return this.store.patchMeta(message.sessionId, {
           githubIssueClosureAttempts: { ...attempts, [message.occurrenceId]: digest },
