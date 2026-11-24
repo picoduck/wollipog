@@ -1702,6 +1702,20 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   - Before this (#4779 to #4898), the directory was read-only in managed worktrees. A session that
     started in place and then created its own worktree failed on the relaunch with "ACP agent does
     not advertise session resume or load support".
+  - **A conversation stays in the folder it was created in.** agy 1.5.14 runs every command of a
+    conversation in that folder, whatever `cwd` a `session/resume` names, whatever folder the
+    process starts in, and with the new folder in `additionalDirectories` or `--add-dir` (measured
+    with real agy outside Wollipog). The runner therefore records the folder a fresh ACP
+    conversation was created in (`providerConversationCwd`). An Antigravity launch in any other
+    folder, a worktree switch or a restart after one, starts a fresh conversation there instead
+    of resuming.
+  - **The handoff.** The fresh conversation's first prompt is preceded, once, by a handoff: the old
+    and new folders and the conversation so far, meaning the person's messages and the agent's
+    top-level replies, the newest kept within 24,000 characters. Tool calls are not replayed. This
+    follows T3 Code's `create_with_handoff` and Omnigent's Antigravity harness, which seeds a fresh
+    agy conversation the same way. A session that never recorded its folder (created before this)
+    keeps resuming. Codex and Claude Code need none of this: Codex takes `cwd` on every resume and
+    turn, and Claude Code starts a process per turn in the session's folder.
 
   Under a runner configured for bwrap or Seatbelt, the directory stays read-only, so no resume is
   advertised there. A restart shows the existing "read-only history" refusal instead of starting a

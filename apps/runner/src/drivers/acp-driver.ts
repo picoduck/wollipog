@@ -53,6 +53,7 @@ export class AcpDriver implements Driver {
         initialCommands: opts.resumeId ? opts.capabilities?.slashCommands : undefined,
         sessionContext: opts.acpSessionContext,
         artifactGuidance: opts.artifactGuidance,
+        ...(opts.acpConversationHandoff ? { conversationHandoff: opts.acpConversationHandoff } : {}),
         isolation: opts.isolation,
         reviewWriterCgroup: opts.reviewWriterCgroup,
         containerAgentLaunch: true,

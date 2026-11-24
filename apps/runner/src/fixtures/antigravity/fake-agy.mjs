@@ -211,7 +211,8 @@ if (args[0] === "acp" && args[1] === "--login") {
     if (request.id === undefined) return;
     record({ method: request.method, ...(request.method === "initialize" ? { clientInfo: request.params?.clientInfo ?? null,
       clientCapabilities: request.params?.clientCapabilities ?? null, fullPermissions } : {}),
-      ...(request.method === "session/prompt" ? { activeMode: config.mode } : {}),
+      ...(request.method === "session/prompt" ? { activeMode: config.mode,
+        promptTexts: (request.params?.prompt ?? []).filter((block) => block.type === "text").map((block) => block.text) } : {}),
       ...(request.params?.sessionId ? { sessionId: request.params.sessionId } : {}),
       ...(Array.isArray(request.params?.mcpServers)
         ? { mcpServerNames: request.params.mcpServers.map((server) => server.name) } : {}) });

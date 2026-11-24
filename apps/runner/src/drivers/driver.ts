@@ -259,6 +259,9 @@ export interface DriverOptions {
    * transport never treats them as pending again, whatever Claude reports for them afterwards. */
   endedBackgroundTaskIds?: string[];
   acpSessionContext?: AcpSessionContextConfig;
+  /** Sent once, ahead of the first prompt of a fresh ACP conversation that replaces a resume the
+   * agent cannot make in this folder (Google Antigravity): the conversation so far. */
+  acpConversationHandoff?: string;
   isolation?: SpawnIsolation;
   /** Runner-private durable descendant marker for one managed worktree. */
   descendantMarker?: string;

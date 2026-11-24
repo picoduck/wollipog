@@ -132,6 +132,8 @@ export class AcpClient {
   private transportClosed = false;
   private supportsImages = false;
   private readonly artifactGuidance?: string;
+  /** Pending until the first ordinary prompt carries it, then cleared. */
+  private conversationHandoff?: string;
   private suppressUpdates = false;
   private negotiation: AcpNegotiation | null = null;
   private modes: SafeAcpModeState | null = null;
@@ -167,6 +169,8 @@ export class AcpClient {
       context?: AgentContext;
       initialCommands?: AgentSlashCommand[];
       artifactGuidance?: string;
+      /** See `DriverOptions.acpConversationHandoff`: sent once, ahead of the first prompt. */
+      conversationHandoff?: string;
       sessionContext?: AcpSessionContextConfig;
       isolation?: SpawnIsolation;
       reviewWriterCgroup?: import("./linux-cgroup.js").LinuxCgroupGroup;
@@ -193,6 +197,7 @@ export class AcpClient {
     deps: Partial<AcpClientDeps> = {},
   ) {
     this.artifactGuidance = opts.artifactGuidance;
+    this.conversationHandoff = opts.conversationHandoff;
     // Resolved at the spawn below, with no await between: what the launch runs is decided now, not
     // when it was prepared. A refusal throws before anything is spawned.
     const launch = resolveAcpLaunch(opts.command, opts.compatibility);
@@ -745,6 +750,13 @@ export class AcpClient {
       throw new Error("ACP command is not available in this session");
     }
     const promptText = slashCommand ? `/${slashCommand}${text ? ` ${text}` : ""}` : text;
+    // The conversation so far, ahead of the first ordinary prompt only: a slash command keeps its
+    // native parse, so the handoff waits for the next prompt.
+    const handoff = !slashCommand && !promptText.trimStart().startsWith("/") ? this.conversationHandoff : undefined;
+    if (handoff) {
+      content.push({ type: "text", text: handoff });
+      this.conversationHandoff = undefined;
+    }
     if (promptText) content.push({ type: "text", text: promptText });
     // ACP providers differ in native slash parsing; command turns are not instruction updates.
     if (this.artifactGuidance && !slashCommand && !promptText.trimStart().startsWith("/")) {

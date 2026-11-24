@@ -1022,6 +1022,10 @@ export function effectiveAcpCompatibility(
   return { acpCompatibility: stateReadOnly ? { ...compatibility, resumable: false } : compatibility };
 }
 
+/** Bound on the conversation carried into a fresh Antigravity conversation (`conversationHandoff`):
+ * the newest turns that fit, so the seed stays a modest share of one prompt. */
+const CONVERSATION_HANDOFF_MAX_CHARS = 24_000;
+
 function canResumeSession(meta: SessionMeta): boolean {
   if (meta.driver === "acp") {
     return meta.acpCapabilities?.sessionResume === true || meta.acpCapabilities?.loadSession === true;
@@ -10608,6 +10612,8 @@ export class SessionManager {
     this.emitStatus(sessionId, "starting");
     this.clearProviderHomeRefusal(sessionId);
     let cwd = meta.worktreePath ?? meta.repoPath;
+    /** The conversation so far, for a fresh Antigravity conversation that replaces a resume. */
+    let conversationHandoff: string | undefined;
     const worktree: WorktreeHandle | null = meta.worktreePath
       ? { path: meta.worktreePath, branch: meta.worktreeBranch ?? `agent/${sessionId}` }
       : null;
@@ -10681,6 +10687,24 @@ export class SessionManager {
         this.emitEvent(sessionId, { kind: "error", message: `agent init failed: ${launchPreparation.launchRefusal}` });
         failLaunch(launchPreparation.launchRefusal);
         return false;
+      }
+      // agy fixes a conversation's working directory when it creates it: a resume in another folder
+      // still runs every command in the original one, whatever cwd the resume names or the process
+      // starts in. A worktree switch, or a restart after one, therefore starts a fresh conversation
+      // in this launch's folder, seeded once with the session's conversation so far, as T3 Code's
+      // create_with_handoff and Omnigent's Antigravity harness do. Unknown (an older session) keeps
+      // resuming.
+      if (resumeId && launchPreparation?.acpCompatibility?.profile === "antigravity" &&
+          meta.providerConversationCwd && !sameWorktreePath(meta.context, meta.providerConversationCwd, cwd)) {
+        conversationHandoff = this.conversationHandoff(sessionId, meta.providerConversationCwd, cwd);
+        // The old id stays until the fresh conversation's own is captured, so a launch that fails
+        // here retries this same handoff rather than starting a conversation with no context.
+        resumeId = undefined;
+        this.emitEvent(sessionId, {
+          kind: "stderr",
+          text: "Google Antigravity keeps a conversation in the folder it started in, so this session continues " +
+            `in a new conversation in ${cwd}, given the conversation so far.`,
+        });
       }
       // Repository setup values are resolved runner-side from the immutable base-commit config.
       // Apply them after agent-config refresh so they reach hooks and the provider without ever
@@ -10889,6 +10913,7 @@ export class SessionManager {
           ...effectiveAcpCompatibility(launchPreparation?.acpCompatibility, isolation),
           config: meta.config,
           artifactGuidance: meta.review ? "" : [artifactGuidance(meta, this.controlPlaneProtocolVersion()), shellGuidance(meta)].filter(Boolean).join(" "),
+          ...(conversationHandoff ? { acpConversationHandoff: conversationHandoff } : {}),
           ...(meta.review ? { review: true } : {}),
           ...(preparedProjectMemoryDirectory ? { projectMemoryDirectory: preparedProjectMemoryDirectory } : {}),
           orchestrator: meta.orchestrator,
@@ -11279,6 +11304,11 @@ export class SessionManager {
         this.store.patchMeta(sessionId, { providerUnstartedThreadId: client.agentSessionId()! });
         this.store.flush(sessionId);
       }
+      // Where this ACP conversation was created: Antigravity keeps it as its working directory for
+      // good, so a later launch elsewhere starts a fresh conversation instead of resuming (above).
+      if (meta.driver === "acp" && !resumeId && client.agentSessionId()) {
+        this.store.patchMeta(sessionId, { providerConversationCwd: cwd });
+      }
       if (meta.driver === "acp" && client.prepareCommand && client.invokeCommand) {
         const current = this.store.readMeta(sessionId);
         if (current) {
@@ -11531,6 +11561,48 @@ export class SessionManager {
   private rememberAcpCompatibility(meta: SessionMeta, preparation: SessionLaunchPreparation | void | undefined): void {
     if (preparation?.acpCompatibility) this.launchAcpCompatibility.set(meta, preparation.acpCompatibility);
     else this.launchAcpCompatibility.delete(meta);
+  }
+
+  /** The conversation so far, to seed a fresh Antigravity conversation that replaces a resume in
+   * another folder. Only the person's messages and the agent's top-level replies are carried, the
+   * newest first kept within a bound: agy has no API to inject history, so this rides once ahead of
+   * the next prompt, and tool calls are not replayed (as in Omnigent's Antigravity harness). */
+  private conversationHandoff(sessionId: string, fromCwd: string, toCwd: string): string {
+    const turns: Array<{ role: "user" | "assistant"; text: string; open: boolean }> = [];
+    for (const { payload } of this.store.readEvents(sessionId)) {
+      if (payload.kind === "user_message" && payload.text.trim()) {
+        turns.push({ role: "user", text: payload.text.trim(), open: false });
+      } else if (payload.kind === "agent_message" && !payload.parentToolUseId) {
+        const last = turns.at(-1);
+        if (last?.role === "assistant" && last.open) {
+          last.text = payload.final && payload.text.trim() ? payload.text : last.text + payload.text;
+        } else if (payload.text.trim()) {
+          turns.push({ role: "assistant", text: payload.text, open: true });
+        }
+        if (payload.final) turns.at(-1)!.open = false;
+      } else if (payload.kind === "agent_response_completed") {
+        const last = turns.at(-1);
+        if (last) last.open = false;
+      }
+    }
+    const lines: string[] = [];
+    let size = 0;
+    for (const turn of [...turns].reverse()) {
+      const line = `${turn.role}: ${turn.text.trim()}`;
+      if (lines.length && size + line.length > CONVERSATION_HANDOFF_MAX_CHARS) {
+        lines.push("[earlier conversation omitted]");
+        break;
+      }
+      lines.push(line.length > CONVERSATION_HANDOFF_MAX_CHARS ? `${line.slice(0, CONVERSATION_HANDOFF_MAX_CHARS)}…` : line);
+      size += line.length;
+    }
+    return [
+      `[Wollipog] This session moved from ${fromCwd} to ${toCwd}. Google Antigravity cannot move a ` +
+        "conversation to another folder, so this is a new conversation that continues the earlier one. " +
+        `Work only in ${toCwd}. Tool calls and their results from before the move are not included.`,
+      ...(lines.length ? ["Conversation so far:", ...lines.reverse()] : []),
+      "Continue from here with the message below.",
+    ].join("\n");
   }
 
   /** Why this session's agent cannot launch in a managed worktree on this runner (#4901), or null.

@@ -74,7 +74,7 @@ const PROVIDER = { mode: "provider", network: "inherit" } as const;
 const BWRAP = { mode: "bwrap", network: "inherit" } as const;
 
 function calls(): Array<{ method: string; clientInfo?: { name?: string } | null; outcome?: unknown;
-  mcpServerNames?: string[]; fullPermissions?: boolean; activeMode?: string }> {
+  mcpServerNames?: string[]; fullPermissions?: boolean; activeMode?: string; promptTexts?: string[] }> {
   const path = join(state, "calls.jsonl");
   return existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
 }
@@ -96,7 +96,7 @@ function launchDriver(
   overrides: { layeredEnv?: Record<string, string>; deadlines?: { handshakeMs: number; sessionMs: number }; config?: SessionConfig;
     resolveLaunch?: AcpCompatibility["resolveLaunch"]; sessionContext?: DriverOptions["acpSessionContext"];
     fixtureIsolation?: DriverOptions["isolation"];
-    appArmorFix?: (executable: string | undefined) => string | undefined } = {},
+    appArmorFix?: (executable: string | undefined) => string | undefined; handoff?: string } = {},
 ): { driver: AcpDriver; seen: Observed } {
   const context = antigravityCredentialContext();
   const launch = antigravitySessionLaunch(view, context, isolation);
@@ -112,6 +112,7 @@ function launchDriver(
     cwd,
     config: overrides.config ?? {},
     acpSessionContext: overrides.sessionContext,
+    ...(overrides.handoff ? { acpConversationHandoff: overrides.handoff } : {}),
     context: { kind: "native" },
     isolation: overrides.fixtureIsolation,
     ...(resumeId ? { resumeId } : {}),
@@ -522,6 +523,21 @@ test("Full Permissions Mode is a live mode: agy stays in Default and Wollipog ap
   assert.equal(existsSync(marker), true);
   assert.equal(resumed.seen.events.some((event) => event.kind === "permission_request"), false);
   assert.ok(calls().filter((call) => call.method === "initialize").every((call) => call.fullPermissions === false));
+});
+
+test("a fresh conversation's handoff rides once, ahead of its first prompt", async () => {
+  signIn();
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const handoff = "[Wollipog] This session moved. Conversation so far:\nuser: remember HERON-42";
+  const { driver } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined, { handoff });
+  await driver.initialize();
+  await driver.newSession(cwd);
+  await driver.prompt("What was the code word?");
+  await driver.prompt("Say hello.");
+  const prompts = calls().filter((call) => call.method === "session/prompt").map((call) => call.promptTexts ?? []);
+  assert.equal(prompts[0]?.[0], handoff, "the conversation so far comes first, before the message it answers");
+  assert.equal(prompts[0]?.[1], "What was the code word?");
+  assert.ok(!prompts[1]?.some((text) => text.includes("Conversation so far")), "never repeated");
 });
 
 test("resume reuses the provider conversation under provider isolation and never falls back to session/load", async () => {

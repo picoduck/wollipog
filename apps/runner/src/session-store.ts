@@ -172,6 +172,10 @@ export interface SessionMeta {
   providerProfileId?: string;
   /** Runner-private source of provider history until a credential-home transfer completes. */
   providerConversationHome?: string;
+  /** The folder an ACP provider conversation was created in. Google Antigravity runs every command
+   * of a conversation there, whatever folder a resume names, so a launch elsewhere starts a fresh
+   * conversation with a handoff instead (`conversationHandoff`). Absent for older sessions. */
+  providerConversationCwd?: string;
   /** A freshly allocated Codex app-server id that has never accepted provider-visible activity.
    * Imported/forked history is never marked unused merely because its local event log is empty. */
   providerUnstartedThreadId?: string;
