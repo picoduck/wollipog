@@ -10694,17 +10694,25 @@ export class SessionManager {
       // in this launch's folder, seeded once with the session's conversation so far, as T3 Code's
       // create_with_handoff and Omnigent's Antigravity harness do. Unknown (an older session) keeps
       // resuming.
-      if (resumeId && launchPreparation?.acpCompatibility?.profile === "antigravity" &&
+      const antigravityProfile = launchPreparation?.acpCompatibility?.profile === "antigravity";
+      if (resumeId && antigravityProfile &&
           meta.providerConversationCwd && !sameWorktreePath(meta.context, meta.providerConversationCwd, cwd)) {
-        conversationHandoff = this.conversationHandoff(sessionId, meta.providerConversationCwd, cwd);
-        // The old id stays until the fresh conversation's own is captured, so a launch that fails
-        // here retries this same handoff rather than starting a conversation with no context.
+        // Durable until agy has the handoff (`onConversationHandoffDelivered`): a replacement that is
+        // parked, or a runner that restarts, before its first ordinary prompt rebuilds it below. The
+        // old id stays until the fresh conversation's own is captured, so a launch that fails here
+        // retries this same handoff rather than starting a conversation with no context.
+        const from = meta.pendingConversationHandoffFrom ?? meta.providerConversationCwd;
+        meta.pendingConversationHandoffFrom = from;
+        this.store.patchMeta(sessionId, { pendingConversationHandoffFrom: from });
         resumeId = undefined;
         this.emitEvent(sessionId, {
           kind: "stderr",
           text: "Google Antigravity keeps a conversation in the folder it started in, so this session continues " +
             `in a new conversation in ${cwd}, given the conversation so far.`,
         });
+      }
+      if (antigravityProfile && meta.pendingConversationHandoffFrom) {
+        conversationHandoff = this.conversationHandoff(sessionId, meta.pendingConversationHandoffFrom, cwd);
       }
       // Repository setup values are resolved runner-side from the immutable base-commit config.
       // Apply them after agent-config refresh so they reach hooks and the provider without ever
@@ -10987,6 +10995,9 @@ export class SessionManager {
         },
         onStderr: (t) => this.onDriverStderr(sessionId, t),
         onExit: (code) => this.onDriverExit(sessionId, code, client),
+        onConversationHandoffDelivered: () => {
+          this.store.patchMeta(sessionId, { pendingConversationHandoffFrom: undefined });
+        },
         onBackgroundWork: (update) => {
           // A retiring driver may emit an exit/null callback after a replacement owns the session.
           if (this.active.get(sessionId)?.client !== client) return;
@@ -11298,16 +11309,14 @@ export class SessionManager {
       // immediately so a crash before the first completed turn does not lose the coordinate. ACP
       // resumability remains capability-derived from the handshake stored above.
       if (meta.driver === "codex-app-server" || meta.driver === "pi" || meta.driver === "acp") {
-        this.captureAgentSessionId(sessionId, client);
+        // Where this ACP conversation was created, in the same write as its id: Antigravity keeps it
+        // as its working directory for good, so a later launch elsewhere starts afresh (above).
+        this.captureAgentSessionId(sessionId, client,
+          meta.driver === "acp" && !resumeId ? { providerConversationCwd: cwd } : undefined);
       }
       if (meta.driver === "codex-app-server" && !resumeId && client.agentSessionId()) {
         this.store.patchMeta(sessionId, { providerUnstartedThreadId: client.agentSessionId()! });
         this.store.flush(sessionId);
-      }
-      // Where this ACP conversation was created: Antigravity keeps it as its working directory for
-      // good, so a later launch elsewhere starts a fresh conversation instead of resuming (above).
-      if (meta.driver === "acp" && !resumeId && client.agentSessionId()) {
-        this.store.patchMeta(sessionId, { providerConversationCwd: cwd });
       }
       if (meta.driver === "acp" && client.prepareCommand && client.invokeCommand) {
         const current = this.store.readMeta(sessionId);
@@ -21481,10 +21490,12 @@ export class SessionManager {
   }
 
   /** Persist the agent-native resumable id once it's known (claude immediately, codex after turn 1). */
-  private captureAgentSessionId(sessionId: string, client: Driver): void {
+  /** `with` is written in the same patch as the id: facts about this exact conversation (where it
+   * was created) must never be observed beside another conversation's id after a crash. */
+  private captureAgentSessionId(sessionId: string, client: Driver, with_?: Pick<SessionMeta, "providerConversationCwd">): void {
     const aid = client.agentSessionId();
     if (aid && this.store.readMeta(sessionId)?.agentSessionId !== aid) {
-      const updated = this.store.patchMeta(sessionId, { agentSessionId: aid, handoffPending: undefined });
+      const updated = this.store.patchMeta(sessionId, { agentSessionId: aid, handoffPending: undefined, ...with_ });
       if (updated && runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "sessionRestartResume")) {
         this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       }

@@ -85,6 +85,7 @@ interface Observed {
   auth: string[];
   acp: AcpRuntimeCapabilities[];
   state: Array<{ capabilities: AgentCapabilities; config: SessionConfig }>;
+  handoffDelivered: number;
 }
 
 /** An Antigravity session driver launched exactly as the runner launches one. */
@@ -100,7 +101,7 @@ function launchDriver(
 ): { driver: AcpDriver; seen: Observed } {
   const context = antigravityCredentialContext();
   const launch = antigravitySessionLaunch(view, context, isolation);
-  const seen: Observed = { events: [], stderr: [], auth: [], acp: [], state: [] };
+  const seen: Observed = { events: [], stderr: [], auth: [], acp: [], state: [], handoffDelivered: 0 };
   const options: DriverOptions = {
     command: launch.command!,
     args: launch.args,
@@ -124,6 +125,7 @@ function launchDriver(
     onAuthStatus: (status: string) => seen.auth.push(status),
     onAcpCapabilities: (capabilities: AcpRuntimeCapabilities) => seen.acp.push(capabilities),
     onAcpSessionState: (update: { capabilities: AgentCapabilities; config: SessionConfig }) => seen.state.push(update),
+    onConversationHandoffDelivered: () => { seen.handoffDelivered += 1; },
   } as never, {
     // Tests never read the real host's AppArmor setting.
     antigravityAppArmorFix: overrides.appArmorFix ?? (() => undefined),
@@ -529,15 +531,17 @@ test("a fresh conversation's handoff rides once, ahead of its first prompt", asy
   signIn();
   const cwd = mkdtempSync(join(root, "worktree-"));
   const handoff = "[Wollipog] This session moved. Conversation so far:\nuser: remember HERON-42";
-  const { driver } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined, { handoff });
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined, { handoff });
   await driver.initialize();
   await driver.newSession(cwd);
   await driver.prompt("What was the code word?");
+  assert.equal(seen.handoffDelivered, 1, "reported once the agent accepted the prompt carrying it");
   await driver.prompt("Say hello.");
   const prompts = calls().filter((call) => call.method === "session/prompt").map((call) => call.promptTexts ?? []);
   assert.equal(prompts[0]?.[0], handoff, "the conversation so far comes first, before the message it answers");
   assert.equal(prompts[0]?.[1], "What was the code word?");
   assert.ok(!prompts[1]?.some((text) => text.includes("Conversation so far")), "never repeated");
+  assert.equal(seen.handoffDelivered, 1);
 });
 
 test("resume reuses the provider conversation under provider isolation and never falls back to session/load", async () => {

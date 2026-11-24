@@ -36,8 +36,16 @@ async function launchWith(conversationCwd: "elsewhere" | "here" | "unknown", pro
   store.appendEvent("s1", { kind: "agent_response_completed" });
   store.appendEvent("s1", { kind: "agent_message", text: "a subagent's note", parentToolUseId: "tool-1" });
   const launched: DriverOptions[] = [];
-  const factory = (_driver: unknown, options: DriverOptions, _cb: DriverCallbacks) => {
+  const callbacks: DriverCallbacks[] = [];
+  const patches: Array<Partial<SessionMeta>> = [];
+  const patchMeta = store.patchMeta.bind(store);
+  store.patchMeta = ((id: string, patch: Partial<SessionMeta>) => {
+    patches.push(patch);
+    return patchMeta(id, patch);
+  }) as typeof store.patchMeta;
+  const factory = (_driver: unknown, options: DriverOptions, cb: DriverCallbacks) => {
     launched.push(options);
+    callbacks.push(cb);
     return {
       pid: 1, initialize: async () => {}, newSession: async () => options.resumeId ?? "conv-b",
       prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
@@ -58,7 +66,18 @@ async function launchWith(conversationCwd: "elsewhere" | "here" | "unknown", pro
   const stderr = store.readEvents("s1").filter((event) => event.payload.kind === "stderr")
     .map((event) => (event.payload as { text: string }).text);
   return {
-    ok, options: launched[0], meta: store.readMeta("s1"), stderr, repoPath, elsewhere,
+    ok, options: launched[0], meta: store.readMeta("s1"), stderr, repoPath, elsewhere, launched, callbacks, patches, store,
+    /** The replacement retired before its first ordinary prompt (parked, or the runner restarted),
+     * then launched again by the next prompt with whatever the session records now. */
+    relaunch: async () => {
+      const entry = internals.active.get("s1");
+      if (entry) internals.deleteActiveSession("s1", entry, false);
+      internals.releaseAdmission("s1");
+      assert.equal(await internals.acquireAdmission("s1"), true);
+      const current = store.readMeta("s1")!;
+      assert.equal(await internals.launch(current, current.agentSessionId ?? undefined), true);
+      return launched.at(-1)!;
+    },
     cleanup: () => { manager.shutdownAll(); rmSync(root, { recursive: true, force: true }); },
   };
 }
@@ -75,6 +94,30 @@ test("a conversation created in another folder continues fresh in this one, seed
     assert.equal(f.meta?.providerConversationCwd, f.repoPath, "the new conversation belongs to this folder");
     assert.equal(f.meta?.agentSessionId, "conv-b");
     assert.ok(f.stderr.some((text) => text.includes("continues in a new conversation")), f.stderr.join("\n"));
+    // One write names the new conversation and where it was created: a crash can never leave the
+    // new id beside a missing or earlier folder.
+    assert.ok(f.patches.some((patch) => patch.agentSessionId === "conv-b" && patch.providerConversationCwd === f.repoPath),
+      JSON.stringify(f.patches.filter((patch) => "agentSessionId" in patch || "providerConversationCwd" in patch)));
+    assert.ok(!f.patches.some((patch) => patch.providerConversationCwd !== undefined && patch.agentSessionId === undefined));
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a handoff not yet delivered survives the replacement's parking or a runner restart, once", async () => {
+  const f = await launchWith("elsewhere");
+  try {
+    assert.equal(f.meta?.pendingConversationHandoffFrom, f.elsewhere, "durable until agy has it");
+    // Parked before any ordinary prompt: the next launch resumes the replacement in its own folder,
+    // and the conversation so far must still reach it.
+    const again = await f.relaunch();
+    assert.equal(again.resumeId, "conv-b", "the replacement conversation is resumed, not replaced again");
+    assert.match(again.acpConversationHandoff ?? "", /user: Remember the code word HERON-42\./u);
+    // Delivered: the agent accepted the prompt that carried it.
+    f.callbacks.at(-1)!.onConversationHandoffDelivered?.();
+    assert.equal(f.store.readMeta("s1")?.pendingConversationHandoffFrom, undefined);
+    const after = await f.relaunch();
+    assert.equal(after.acpConversationHandoff, undefined, "never sent twice");
   } finally {
     f.cleanup();
   }

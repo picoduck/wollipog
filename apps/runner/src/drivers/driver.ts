@@ -193,6 +193,8 @@ export interface DriverCallbacks {
   /** Session-scoped ACP controls/config; never merge these onto the agent row because two live
    * sessions may advertise different modes or commands. */
   onAcpSessionState?: (state: { capabilities: AgentCapabilities; config: SessionConfig }) => void;
+  /** The agent accepted the prompt that carried `acpConversationHandoff`. */
+  onConversationHandoffDelivered?: () => void;
   /** The driver's complete invocable session command catalog changed. */
   onSessionCommands?: (commands: AgentSlashCommand[]) => void;
   /** Claude Code reported its session command catalog in a `system/init` message (#1224). The

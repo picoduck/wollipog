@@ -104,6 +104,8 @@ export interface AcpEvents {
   onAuthStatus?: (status: "authenticated" | "unauthenticated") => void;
   onAcpCapabilities?: (capabilities: AcpRuntimeCapabilities) => void;
   onAcpSessionState?: (state: { capabilities: AgentCapabilities; config: SessionConfig }) => void;
+  /** The agent accepted the prompt that carried `conversationHandoff`. */
+  onConversationHandoffDelivered?: () => void;
   onAcpUsage?: (usage: { contextTokensUsed: number; contextWindow: number; costUsd?: number }) => void;
   onAcpSessionInfo?: (info: { title?: string | null; providerUpdatedAt?: string }) => void;
 }
@@ -784,7 +786,11 @@ export class AcpClient {
           sessionId: this.sessionId,
           prompt: content,
         })) as PromptResponse;
+        // The agent answered this prompt, so it has the conversation so far.
+        if (handoff) this.ev.onConversationHandoffDelivered?.();
       } catch (error) {
+        // Not accepted: the next ordinary prompt carries the handoff again.
+        if (handoff) this.conversationHandoff = handoff;
         if (!this.compatibility || this.transportClosed) throw error;
         throw isAgentAuthRequiredError(error) ? this.signInRequired()
           : this.compatibilityError("turn", errorMessage(error)) ?? error;
