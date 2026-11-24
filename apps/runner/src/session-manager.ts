@@ -795,6 +795,9 @@ interface SteeringOperation {
 }
 
 interface ActiveSession {
+  /** Set while a worktree-switch relaunch is still starting (#4902): a provider that exits then
+   * leaves the session idle with the error, as a rejected start does, rather than Failed. */
+  recoverableLaunch?: true;
   /** False only when this exact launch has no host package filesystem sandbox. */
   codexPackageSandboxed?: boolean;
   /** Immutable package-denial snapshot from this exact native provider launch. */
@@ -2182,6 +2185,13 @@ export class SessionManager {
   /** Called by the host bootstrap, and again after a configured Workspace is removed (#4123). */
   setConfiguredProjectPaths(paths: readonly string[]): void {
     this.configuredProjectPaths = [...paths];
+  }
+
+  /** Agent ids the operator configured, set by the host bootstrap. A configured agent that reuses
+   * Antigravity's id launches without Antigravity's profile (#4901). */
+  private configuredAgentIds: ReadonlySet<string> = new Set();
+  setConfiguredAgentIds(ids: Iterable<string>): void {
+    this.configuredAgentIds = new Set(ids);
   }
 
   /** Called by the host bootstrap, and again after a configured Workspace is removed (#4123);
@@ -8401,19 +8411,6 @@ export class SessionManager {
     const priorWorktreePath = priorMatchesWorkspace ? prior?.worktreePath ?? null : null;
     let shouldUseWorktree = spec.useWorktree || !!priorWorktreePath &&
       !!prior?.worktrees?.some((item) => sameWorktreePath(context, item.path, priorWorktreePath));
-    // Before any worktree, lock or record exists (#4901). A current control plane refuses this at
-    // session creation; this keeps an older one, or a restart of an existing session, from making a
-    // worktree the launch would then refuse and leave behind.
-    const priorManagedWorktree = !!priorWorktreePath && !!prior?.worktrees?.some((item) =>
-      sameWorktreePath(context, item.path, priorWorktreePath) && (item.source !== "attached" || item.reusedInPlace === true));
-    const managedWorktreeRefusal = spec.useWorktree || priorManagedWorktree
-      ? this.managedWorktreeRefusal({ driver, agentId: spec.agentId, context, executionTarget })
-      : null;
-    if (managedWorktreeRefusal) {
-      if (prior) this.emitEvent(spec.sessionId, { kind: "error", message: managedWorktreeRefusal });
-      durable?.failed(managedWorktreeRefusal, "INVALID_COMMAND");
-      return false;
-    }
     const carrySlashCommandCatalog = !shouldUseWorktree && canCarrySlashCommandCatalog(prior ?? undefined, {
       driver,
       context,
@@ -8741,7 +8738,20 @@ export class SessionManager {
     }
     durable?.queued();
     // A session persisted on the retired exec driver stays readable but never starts again (#3259).
-    const launchRefusal = launchAssertionError ?? (isRetiredCodexExec(meta) ? CODEX_EXEC_RETIRED_REASON : undefined);
+    // Nor does one whose agent a managed worktree's sandbox cannot run (#4901). Judged by the checkout
+    // this launch will use: a selected attached worktree is reattached, and only a runner-created one
+    // (or a new one) is sandboxed. Refused here, after the session record exists so the refusal is
+    // published as its status, and before any worktree is made.
+    const selectedRow = priorWorktreePath
+      ? prior?.worktrees?.find((item) => sameWorktreePath(context, item.path, priorWorktreePath))
+      : undefined;
+    const targetsManagedWorktree = selectedRow
+      ? selectedRow.source !== "attached" || selectedRow.reusedInPlace === true
+      : shouldUseWorktree;
+    const managedWorktreeRefusal = targetsManagedWorktree ? this.managedWorktreeRefusal(meta) : null;
+    if (managedWorktreeRefusal) this.store.patchMeta(spec.sessionId, { worktreePending: false });
+    const launchRefusal = launchAssertionError ??
+      (isRetiredCodexExec(meta) ? CODEX_EXEC_RETIRED_REASON : managedWorktreeRefusal ?? undefined);
     if (launchRefusal) {
       this.emitEvent(spec.sessionId, { kind: "error", message: launchRefusal });
       this.emitStatus(spec.sessionId, "failed", launchRefusal);
@@ -11149,6 +11159,7 @@ export class SessionManager {
         .filter((path) => path !== cwd && !!isolation.writableBinds?.some((bind) => bind.target === path))
       : [];
     const entry: ActiveSession = {
+      ...(recoverableFailure ? { recoverableLaunch: true as const } : {}),
       orchestratorLaunchPolicy: meta.orchestrator,
       projectMemoryKey: effectiveProjectMemoryKey(meta),
       sessionId,
@@ -11365,6 +11376,8 @@ export class SessionManager {
       provider: meta.driver, sharing: meta.projectMemory.sharing,
       effective: preparedProjectMemoryDirectory ? meta.projectMemory.sharing : "account_native" }));
     this.log(`session ${sessionId} ready (cwd=${cwd}${resumeId ? ", resumed" : ""})`);
+    // Started: from here an exit is the running provider's, with the ordinary terminal statuses.
+    delete entry.recoverableLaunch;
     // Release prompts admitted while the provider was starting. Deferred so the caller first
     // activates the pre-launch FIFO, whose ordinals precede anything admitted during startup.
     setImmediate(() => {
@@ -11520,6 +11533,7 @@ export class SessionManager {
       isolationMode: this.executionIsolation.mode,
       driver: meta.driver,
       agentId: meta.agentId,
+      ...(meta.agentId && this.configuredAgentIds.has(meta.agentId) ? { agentSource: "config" as const } : {}),
       contextKind: meta.context.kind,
       targetAdapter: meta.executionTarget?.adapter,
     });
@@ -21521,7 +21535,11 @@ export class SessionManager {
         // between turns completed it; one that cut a turn short, a non-zero code, or a signal failed it.
         this.fenceExitedProvider(sessionId, expectedClient);
         const turnCut = entry.running || entry.providerInitiatedTurnActive;
-        if (code === 0 && !turnCut) this.emitStatus(sessionId, "completed", "agent exited (code 0)");
+        // A worktree-switch relaunch that exits while starting keeps the session usable (#4902).
+        if (entry.recoverableLaunch) {
+          this.emitStatus(sessionId, "idle", `agent exited while starting in the selected worktree (${
+            code === null ? "signal" : `code ${code}`}); send a message to retry`);
+        } else if (code === 0 && !turnCut) this.emitStatus(sessionId, "completed", "agent exited (code 0)");
         else if (code === 0) this.emitStatus(sessionId, "failed", "agent exited (code 0) during a turn");
         else if (code === null) this.emitStatus(sessionId, "failed", "agent exited by a signal");
         else this.emitStatus(sessionId, "failed", `agent exited ${code}`);

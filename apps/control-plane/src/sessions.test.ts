@@ -11830,7 +11830,9 @@ test("a generic ACP agent is refused a managed worktree on a Linux provider runn
     const meta = runnerMeta();
     const acp = { id: "gemini-cli", name: "Gemini CLI", command: "gemini", args: ["--acp"], env: {},
       driver: "acp" as const, available: true, context: { kind: "native" as const } };
-    meta.agents.push(acp, { ...acp, id: "google-antigravity", name: "Google Antigravity", command: "agy", args: ["acp"] });
+    // The runner's setup-derived Antigravity row says where it came from (`antigravityAgentDefinition`).
+    meta.agents.push(acp, { ...acp, id: "google-antigravity", name: "Google Antigravity", command: "agy", args: ["acp"],
+      source: "discovered" as const });
     meta.runtime = { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
       admission: { agentLimits: {}, agentWeights: {} }, executionIsolation: { mode: "provider", network: "inherit" } };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
@@ -11847,6 +11849,11 @@ test("a generic ACP agent is refused a managed worktree on a Linux provider runn
     assert.ok(create("gemini-cli", false).ok, "In Place stays available");
     assert.ok(create("google-antigravity", true).ok, "Antigravity's state is preserved in managed worktrees (#4899)");
     assert.ok(create(AGENT_ID, true).ok, "a driver with a known state directory is unaffected");
+    // An operator's own agent under Antigravity's id launches without Antigravity's profile.
+    meta.agents.find((agent) => agent.id === "google-antigravity")!.source = "config";
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    assert.equal(create("google-antigravity", true).status, 409);
+    meta.agents.find((agent) => agent.id === "google-antigravity")!.source = "discovered";
     meta.runtime.executionIsolation = { mode: "bwrap", network: "inherit" };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
     assert.ok(create("gemini-cli", true).ok, "a runner configured for bwrap already runs every agent with HOME read-only");

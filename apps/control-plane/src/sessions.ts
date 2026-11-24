@@ -4696,6 +4696,7 @@ export class SessionsService {
       driver: launch.driver,
       agentId: snapshotSpec?.agentId ?? req.agentId,
       agentName: runner.agents.find((agent) => agent.id === req.agentId)?.name,
+      agentSource: runner.agents.find((agent) => agent.id === req.agentId)?.source,
       contextKind: launch.context?.kind,
       targetAdapter: executionTarget.adapter,
     }) : null;

@@ -21,7 +21,7 @@ function worktreeCount(repoPath: string): number {
 /** A provider-isolation Linux runner with one session running in place in a Git repository, which
  * also owns a runner-created worktree (`created`) it has not moved into. */
 async function fixture(agent: { driver: SessionMeta["driver"]; agentId: string },
-  options: { failRelaunch?: boolean } = {}) {
+  options: { failRelaunch?: boolean; exitDuringRelaunch?: boolean; attached?: boolean } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-managed-worktree-agents-")));
   const home = mkdtempSync(join(tmpdir(), "wollipog-managed-worktree-agents-home-"));
   const repoPath = join(root, "repo");
@@ -37,17 +37,24 @@ async function fixture(agent: { driver: SessionMeta["driver"]; agentId: string }
     driver: agent.driver, command: "agent", args: [], env: { HOME: home }, context: { kind: "native" },
     agentSessionId: null, status: "starting", title: "s1", config: {}, tokensIn: 0, tokensOut: 0,
     costUsd: 0, preview: null, pendingApproval: null, seq: 0, createdAt: 1, updatedAt: 1,
-    worktrees: [{ id: "created", path: created, branch: "agent/s1", source: "created" }],
+    // An attached worktree is the operator's checkout, reattached as it is and never sandboxed.
+    worktrees: [{ id: "created", path: created, branch: "agent/s1", source: options.attached ? "attached" : "created" }],
   });
-  const drivers: Array<{ disposed: boolean; cb: DriverCallbacks }> = [];
-  const factory = (_driver: unknown, _launch: unknown, cb: DriverCallbacks) => {
-    const driver = { disposed: false, cb };
+  const drivers: Array<{ disposed: boolean; cb: DriverCallbacks; cwd?: string }> = [];
+  const statuses: string[] = [];
+  const factory = (_driver: unknown, launch: { cwd?: string }, cb: DriverCallbacks) => {
+    const driver = { disposed: false, cb, cwd: launch?.cwd };
     drivers.push(driver);
     const relaunch = drivers.length > 1;
     return {
       pid: drivers.length,
       initialize: async () => {
-        // A failure nobody could predict before retiring the first process (#4902).
+        // Failures nobody could predict before retiring the first process (#4902): a rejected
+        // start, or the replacement process exiting during its handshake.
+        if (relaunch && options.exitDuringRelaunch) {
+          cb.onExit(1);
+          throw new Error("agent process exited");
+        }
         if (relaunch && options.failRelaunch) throw new Error("provider rejected the resume");
       },
       newSession: async () => "provider-1",
@@ -56,7 +63,8 @@ async function fixture(agent: { driver: SessionMeta["driver"]; agentId: string }
     };
   };
   const manager = new SessionManager(
-    () => {}, () => {}, store, "runner", undefined, factory as never, join(root, "state"), 2,
+    (message) => { if (message.type === "session_status" && message.sessionId === "s1") statuses.push(message.status); },
+    () => {}, store, "runner", undefined, factory as never, join(root, "state"), 2,
     undefined, undefined, { agentLimits: {}, agentWeights: {} },
     { mode: "provider", network: "inherit" }, async (policy, context, _deps, state) =>
       resolveExecutionIsolation(policy, context, {
@@ -69,7 +77,7 @@ async function fixture(agent: { driver: SessionMeta["driver"]; agentId: string }
   const internals = manager as any;
   internals.verifySelectedWorktreeBeforeLaunch = async () => true;
   return {
-    root, repoPath, created, store, manager, internals, drivers,
+    root, repoPath, created, store, manager, internals, drivers, statuses,
     errors: () => store.readEvents("s1").filter((event) => event.payload.kind === "error")
       .map((event) => (event.payload as { message: string }).message),
     /** Launch in place, as a session that has not moved into a worktree yet runs. */
@@ -112,19 +120,57 @@ test("Antigravity and drivers with a known state directory still get managed wor
   }
 });
 
-test("starting a generic ACP session in a managed worktree is refused without creating one (#4901)", async () => {
+test("starting a generic ACP session in a managed worktree is refused, published, and creates none (#4901)", async () => {
   if (process.platform !== "linux") return;
   const f = await fixture({ driver: "acp", agentId: "gemini-cli" });
   try {
     const before = worktreeCount(f.repoPath);
+    // A plain start_session frame carries no durable lifecycle: the refusal must reach the
+    // dashboard as the session's own status, or it would stay Starting.
     const started = await f.manager.start({
-      sessionId: "s_new", workspaceId: "repo", workspacePath: f.repoPath, agentId: "gemini-cli",
+      sessionId: "s1", workspaceId: "repo", workspacePath: f.repoPath, agentId: "gemini-cli",
       driver: "acp", command: "gemini", args: ["--acp"], env: {}, useWorktree: true,
       title: "", titleSource: "generated", config: {},
     });
     assert.equal(started, false);
     assert.equal(worktreeCount(f.repoPath), before, "nothing is left behind");
     assert.equal(f.drivers.length, 0, "no provider is constructed");
+    assert.equal(f.statuses.at(-1), "failed");
+    assert.equal(f.store.readMeta("s1")?.worktreePending, false);
+    assert.ok(f.errors().some((message) => REFUSAL.test(message)), f.errors().join("\n"));
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("restarting an ACP session whose selected worktree is attached starts there, unsandboxed", async () => {
+  if (process.platform !== "linux") return;
+  const f = await fixture({ driver: "acp", agentId: "gemini-cli" }, { attached: true });
+  try {
+    f.store.patchMeta("s1", { worktreePath: f.created, worktreeBranch: "agent/s1" });
+    // The control plane's restart asks for a worktree whenever one is selected.
+    const started = await f.manager.start({
+      sessionId: "s1", workspaceId: "repo", workspacePath: f.repoPath, agentId: "gemini-cli",
+      driver: "acp", command: "gemini", args: ["--acp"], env: {}, useWorktree: true,
+      title: "", titleSource: "generated", config: {},
+    });
+    assert.equal(started, true, f.errors().join("\n"));
+    assert.equal(f.drivers.length, 1);
+    assert.equal(f.store.readMeta("s1")?.worktreePath, f.created);
+    assert.ok(!f.errors().some((message) => REFUSAL.test(message)));
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("an operator-configured agent that reuses Antigravity's id is refused like any other ACP agent", async () => {
+  if (process.platform !== "linux") return;
+  const f = await fixture({ driver: "acp", agentId: "google-antigravity" });
+  try {
+    f.manager.setConfiguredAgentIds(["google-antigravity"]);
+    const before = worktreeCount(f.repoPath);
+    await assert.rejects(f.manager.requestWorktree("s1", { baseRef: "HEAD", branch: "agent/second" }), REFUSAL);
+    assert.equal(worktreeCount(f.repoPath), before);
   } finally {
     f.cleanup();
   }
@@ -154,21 +200,27 @@ test("a switch the new launch cannot run is refused before the running provider 
   }
 });
 
-test("a relaunch that fails after a worktree switch leaves the session idle with the error, not Failed (#4902)", async () => {
-  if (process.platform !== "linux") return;
-  const f = await fixture({ driver: "claude-code", agentId: "claude" }, { failRelaunch: true });
-  try {
-    await f.launchInPlace();
-    f.internals.captureAgentSessionId("s1", f.internals.active.get("s1").client);
-    await f.manager.selectWorktree("s1", f.created);
-    const deadline = Date.now() + 5_000;
-    while (f.drivers.length < 2 || f.internals.worktreeRebindings.has("s1")) {
-      if (Date.now() > deadline) throw new Error("the relaunch did not finish");
-      await new Promise((done) => setTimeout(done, 20));
+for (const [failure, option, evidence] of [
+  ["rejects its start", { failRelaunch: true }, "provider rejected the resume"],
+  ["exits during its handshake", { exitDuringRelaunch: true }, "agent process exited"],
+] as const) {
+  test(`a relaunch that ${failure} after a worktree switch leaves the session idle with the error, never Failed (#4902)`, async () => {
+    if (process.platform !== "linux") return;
+    const f = await fixture({ driver: "claude-code", agentId: "claude" }, option);
+    try {
+      await f.launchInPlace();
+      f.internals.captureAgentSessionId("s1", f.internals.active.get("s1").client);
+      await f.manager.selectWorktree("s1", f.created);
+      const deadline = Date.now() + 5_000;
+      while (f.drivers.length < 2 || f.internals.worktreeRebindings.has("s1")) {
+        if (Date.now() > deadline) throw new Error("the relaunch did not finish");
+        await new Promise((done) => setTimeout(done, 20));
+      }
+      assert.equal(f.store.readMeta("s1")?.status, "idle", "the next message or Restart can retry");
+      assert.ok(!f.statuses.includes("failed"), `a terminal Failed was published: ${f.statuses.join(", ")}`);
+      assert.ok(f.errors().some((message) => message.includes(evidence)), f.errors().join("\n"));
+    } finally {
+      f.cleanup();
     }
-    assert.equal(f.store.readMeta("s1")?.status, "idle", "the next message or Restart can retry");
-    assert.ok(f.errors().some((message) => message.includes("provider rejected the resume")), f.errors().join("\n"));
-  } finally {
-    f.cleanup();
-  }
-});
+  });
+}

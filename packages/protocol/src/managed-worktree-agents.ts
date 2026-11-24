@@ -21,6 +21,9 @@ export interface ManagedWorktreeAgentInput {
   isolationMode: "provider" | "bwrap" | "seatbelt" | "windows-job" | undefined;
   driver: string;
   agentId: string | null | undefined;
+  /** Where the agent's definition came from. An operator-configured agent that reuses Antigravity's
+   * id (`config`) runs without Antigravity's profile, so its state directory is unknown too. */
+  agentSource?: "config" | "discovered" | "registry";
   /** The agent's display name for the refusal; "This agent" when unknown (the runner has none). */
   agentName?: string;
   /** The launch context kind; only native launches are sandboxed this way. */
@@ -35,7 +38,8 @@ export function managedWorktreeUnsupportedReason(input: ManagedWorktreeAgentInpu
   if (input.os !== "linux" || input.isolationMode !== "provider") return null;
   if ((input.contextKind ?? "native") !== "native") return null;
   if (input.targetAdapter !== undefined && input.targetAdapter !== "host") return null;
-  if (input.driver !== "acp" || input.agentId === ANTIGRAVITY_AGENT_ID) return null;
+  if (input.driver !== "acp") return null;
+  if (input.agentId === ANTIGRAVITY_AGENT_ID && input.agentSource !== "config") return null;
   const name = input.agentName?.trim() || "This agent";
   return `${name} can't run in a managed worktree on this machine: its sandbox would make the agent's ` +
     "own settings and conversations read-only. Start the session In Place instead.";

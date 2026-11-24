@@ -14,6 +14,14 @@ test("a generic ACP agent cannot use a managed worktree on a Linux provider-isol
     /^This agent can't run/u, "without a display name the sentence still reads as one");
 });
 
+test("an operator-configured agent that reuses Antigravity's id has no Antigravity profile and is refused", () => {
+  assert.notEqual(managedWorktreeUnsupportedReason({ ...codexAcp, agentId: "google-antigravity", agentSource: "config" }), null);
+  for (const agentSource of ["discovered", "registry", undefined] as const) {
+    assert.equal(managedWorktreeUnsupportedReason({ ...codexAcp, agentId: "google-antigravity", agentSource }), null,
+      `${agentSource}: the setup-derived row, or an older runner that does not say`);
+  }
+});
+
 test("every launch whose state the runner can preserve, or that is not sandboxed this way, is allowed", () => {
   for (const allowed of [
     { ...codexAcp, agentId: "google-antigravity" },
