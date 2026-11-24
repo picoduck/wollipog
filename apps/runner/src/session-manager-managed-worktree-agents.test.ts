@@ -31,6 +31,8 @@ async function fixture(agent: { driver: SessionMeta["driver"]; agentId: string }
   execFileSync("git", ["-C", repoPath, "config", "user.name", "Test"]);
   execFileSync("git", ["-C", repoPath, "commit", "-q", "--allow-empty", "-m", "base"]);
   execFileSync("git", ["-C", repoPath, "worktree", "add", "-q", "-b", "agent/s1", created]);
+  const operatorCheckout = join(root, "operator");
+  execFileSync("git", ["-C", repoPath, "worktree", "add", "-q", "-b", "operator", operatorCheckout]);
   const store = new SessionStore(join(root, "sessions"));
   store.create({
     sessionId: "s1", agentId: agent.agentId, workspaceId: "repo", repoPath, worktreePath: null,
@@ -38,7 +40,10 @@ async function fixture(agent: { driver: SessionMeta["driver"]; agentId: string }
     agentSessionId: null, status: "starting", title: "s1", config: {}, tokensIn: 0, tokensOut: 0,
     costUsd: 0, preview: null, pendingApproval: null, seq: 0, createdAt: 1, updatedAt: 1,
     // An attached worktree is the operator's checkout, reattached as it is and never sandboxed.
-    worktrees: [{ id: "created", path: created, branch: "agent/s1", source: options.attached ? "attached" : "created" }],
+    worktrees: [
+      { id: "created", path: created, branch: "agent/s1", source: options.attached ? "attached" : "created" },
+      { id: "operator", path: operatorCheckout, branch: "operator", source: "attached" },
+    ],
   });
   const drivers: Array<{ disposed: boolean; cb: DriverCallbacks; cwd?: string }> = [];
   const statuses: string[] = [];
@@ -77,7 +82,7 @@ async function fixture(agent: { driver: SessionMeta["driver"]; agentId: string }
   const internals = manager as any;
   internals.verifySelectedWorktreeBeforeLaunch = async () => true;
   return {
-    root, repoPath, created, store, manager, internals, drivers, statuses,
+    root, repoPath, created, operatorCheckout, store, manager, internals, drivers, statuses,
     errors: () => store.readEvents("s1").filter((event) => event.payload.kind === "error")
       .map((event) => (event.payload as { message: string }).message),
     /** Launch in place, as a session that has not moved into a worktree yet runs. */
@@ -158,6 +163,59 @@ test("restarting an ACP session whose selected worktree is attached starts there
     assert.equal(f.drivers.length, 1);
     assert.equal(f.store.readMeta("s1")?.worktreePath, f.created);
     assert.ok(!f.errors().some((message) => REFUSAL.test(message)));
+  } finally {
+    f.cleanup();
+  }
+});
+
+const restartSpec = (repoPath: string) => ({
+  sessionId: "s1", workspaceId: "repo", workspacePath: repoPath, agentId: "gemini-cli",
+  driver: "acp" as const, command: "gemini", args: ["--acp"], env: {}, useWorktree: true,
+  title: "", titleSource: "generated" as const, config: {},
+});
+
+test("a refused restart keeps the session's selected runner-created worktree", async () => {
+  if (process.platform !== "linux") return;
+  const f = await fixture({ driver: "acp", agentId: "gemini-cli" });
+  try {
+    f.store.patchMeta("s1", { worktreePath: f.created, worktreeBranch: "agent/s1" });
+    const before = worktreeCount(f.repoPath);
+    assert.equal(await f.manager.start(restartSpec(f.repoPath)), false);
+    assert.equal(f.statuses.at(-1), "failed");
+    assert.equal(worktreeCount(f.repoPath), before);
+    const meta = f.store.readMeta("s1");
+    assert.equal(meta?.worktreePath, f.created, "Files and shells still open in its worktree, never the shared base");
+    assert.equal(meta?.worktreeBranch, "agent/s1");
+    assert.equal(meta?.worktreePending, false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a restart follows a selection that moved to an attached checkout before its serialized write", async () => {
+  if (process.platform !== "linux") return;
+  const f = await fixture({ driver: "acp", agentId: "gemini-cli" });
+  try {
+    f.store.patchMeta("s1", { worktreePath: f.created, worktreeBranch: "agent/s1" });
+    // An attach queued ahead of the restart's serialized write commits first: after the restart
+    // read the session (and its runner-created selection), before its write refreshes that read.
+    // For an existing session start() runs two worktree operations: the remap check, then (after
+    // reading the session) the serialized write. The attach lands just ahead of the second.
+    const runWorktreeOperation = f.internals.runWorktreeOperation.bind(f.internals);
+    let calls = 0;
+    let attached = false;
+    f.internals.runWorktreeOperation = (sessionId: string, operation: () => Promise<unknown>) => {
+      if (++calls === 2) {
+        attached = true;
+        f.store.patchMeta("s1", { worktreePath: f.operatorCheckout, worktreeBranch: "operator" });
+      }
+      return runWorktreeOperation(sessionId, operation);
+    };
+    const starting = f.manager.start(restartSpec(f.repoPath));
+    assert.equal(await starting, true, f.errors().join("\n"));
+    assert.equal(attached, true, "the attach landed inside the restart's window");
+    assert.equal(f.store.readMeta("s1")?.worktreePath, f.operatorCheckout);
+    assert.equal(f.drivers.length, 1);
   } finally {
     f.cleanup();
   }

@@ -8739,17 +8739,27 @@ export class SessionManager {
     durable?.queued();
     // A session persisted on the retired exec driver stays readable but never starts again (#3259).
     // Nor does one whose agent a managed worktree's sandbox cannot run (#4901). Judged by the checkout
-    // this launch will use: a selected attached worktree is reattached, and only a runner-created one
-    // (or a new one) is sandboxed. Refused here, after the session record exists so the refusal is
-    // published as its status, and before any worktree is made.
-    const selectedRow = priorWorktreePath
-      ? prior?.worktrees?.find((item) => sameWorktreePath(context, item.path, priorWorktreePath))
+    // this launch will use, read from the row the serialized write above refreshed (`prior`), as the
+    // materialization below reads it: a selected attached worktree is reattached unsandboxed, and only
+    // a runner-created one (or a new one) is sandboxed. Refused here, after the session record exists
+    // so the refusal is published as its status, and before any worktree is made.
+    const restartSelection = shouldUseWorktree && prior?.repoPath === repoPath &&
+        agentContextKey(prior.context) === agentContextKey(context) && prior.worktreePath
+      ? { path: prior.worktreePath, branch: prior.worktreeBranch,
+          row: prior.worktrees?.find((item) => sameWorktreePath(prior!.context, item.path, prior!.worktreePath!)) }
       : undefined;
-    const targetsManagedWorktree = selectedRow
-      ? selectedRow.source !== "attached" || selectedRow.reusedInPlace === true
+    const targetsManagedWorktree = restartSelection?.row
+      ? restartSelection.row.source !== "attached" || restartSelection.row.reusedInPlace === true
       : shouldUseWorktree;
     const managedWorktreeRefusal = targetsManagedWorktree ? this.managedWorktreeRefusal(meta) : null;
-    if (managedWorktreeRefusal) this.store.patchMeta(spec.sessionId, { worktreePending: false });
+    if (managedWorktreeRefusal) {
+      // The replacement record starts without a selection, which materialization would restore. The
+      // session keeps the worktree it had, so its Files and shells still open there, not the base.
+      this.store.patchMeta(spec.sessionId, {
+        worktreePending: false,
+        ...(restartSelection ? { worktreePath: restartSelection.path, worktreeBranch: restartSelection.branch } : {}),
+      });
+    }
     const launchRefusal = launchAssertionError ??
       (isRetiredCodexExec(meta) ? CODEX_EXEC_RETIRED_REASON : managedWorktreeRefusal ?? undefined);
     if (launchRefusal) {
