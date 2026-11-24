@@ -52,8 +52,9 @@ test("action arming accepts only current provider-owned MCP or literal CLI admis
   (h.driver as any).threadId = "thread-arm";
   (h.driver as any).setSteeringTurn("turn-arm");
   const command = "gh pr merge https://github.com/o/r/pull/1 --squash --match-head-commit " + "a".repeat(40);
-  const digest = createHash("sha256").update(command).digest("hex");
   const action = { kind: "pr_merge_enqueue", command };
+  // The control plane's auditDigest binds the normalized action object, not command text.
+  const digest = createHash("sha256").update(JSON.stringify(action)).digest("hex");
   const literal = `"$WOLLIPOG_CLI" decision consume workflow-arm --snapshot '{"category":"pr_merge"}' --action '${JSON.stringify(action)}' --json`;
   const refuse = () => h.driver.workflowActionAdmissionRefusal("workflow-arm", digest);
   const start = (item: any, turnId = "turn-arm", threadId = "thread-arm") =>

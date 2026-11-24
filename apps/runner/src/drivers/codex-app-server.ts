@@ -997,7 +997,7 @@ export class CodexAppServerDriver implements Driver {
     if (item.type === "mcpToolCall" && input.action === undefined) return refusal;
     if (input.action !== undefined && (input.action?.kind !== "pr_merge_enqueue" ||
         typeof input.action.command !== "string" ||
-        createHash("sha256").update(input.action.command, "utf8").digest("hex") !== commandDigest)) return refusal;
+        createHash("sha256").update(JSON.stringify({ kind: "pr_merge_enqueue", command: input.action.command }), "utf8").digest("hex") !== commandDigest)) return refusal;
     return null;
   }
 
