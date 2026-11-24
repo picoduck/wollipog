@@ -1334,6 +1334,33 @@ retained without `_meta` or other arbitrary agent data. Stable agent-managed aut
 are retained as bounded render-only choices; draft environment-variable and terminal methods are
 ignored.
 
+**Managed worktrees (#4901, #4902).**
+
+- **Why some agents are refused.** On Linux, a native host launch in a runner-created worktree always
+  runs under bubblewrap. On a runner configured for `provider` isolation, that sandbox keeps only the
+  provider's own state directory writable (`preserveProviderHome`). The generic ACP driver has no
+  state directory, so it cannot keep one. Every ACP agent except Google Antigravity, whose profile
+  names `~/.gemini/antigravity-cli` (§4.3), would lose its settings and conversations there. Its
+  launch is therefore refused. This covers Claude Code (ACP), Codex (ACP), Gemini CLI, Hermes,
+  OpenClaw and operator-configured agents. That includes an operator's own agent under
+  Antigravity's id (`source: "config"`), which launches without Antigravity's profile.
+- **Where it is refused.** One rule, `managedWorktreeUnsupportedReason` in `@wollipog/protocol`,
+  refuses these agents before anything is created or lost:
+  - session creation, with a 409 that names the agent and the In Place alternative;
+  - `create_worktree` and `select_worktree`, so no worktree is made or moved to;
+  - `start`, which keeps an older control plane from making a worktree the launch would leave
+    behind. It is judged by the checkout that launch will use, so a restart into a selected attached
+    worktree proceeds. It runs at the launch-refusal step: after the session record exists, so the
+    refusal is published as the session's status, and before any worktree is made;
+  - the relaunch after a worktree switch, before the running provider is retired. The check that
+    used to guard that relaunch read the capabilities of the launch being retired.
+- **Unaffected.** In-place sessions, attached worktrees, and runners configured for bwrap or Seatbelt,
+  where every agent already runs with HOME read-only.
+- **A relaunch that fails anyway.** After a switch, a relaunch can still fail for a reason no check
+  could foresee, such as a provider rejecting the resume or its process exiting during the
+  handshake. The session then goes idle with the error instead of Failed. Its prompts queued for that relaunch are rejected, not retried, and the next
+  message or Restart retries. Setup and provider-account failures keep their own recovery states.
+
 The current client advertises its canonical-root filesystem service and the complete stable
 terminal lifecycle. Filesystem calls are active-session/root-bound with canonical and symlink
 escape checks plus 8 MiB text limits. ACP terminals are separate from dashboard shells, retain a

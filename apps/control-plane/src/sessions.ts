@@ -1,5 +1,5 @@
 import { isManagedModelChoice, resolveManagedModelChoice } from "@wollipog/protocol";
-import { ANTIGRAVITY_AUTO_MODE, ANTIGRAVITY_FULL_PERMISSIONS_MODE } from "@wollipog/protocol";
+import { ANTIGRAVITY_AUTO_MODE, ANTIGRAVITY_FULL_PERMISSIONS_MODE, managedWorktreeUnsupportedReason } from "@wollipog/protocol";
 import type { WollipogPromptOrigin } from "@wollipog/protocol";
 import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
 import { personalRuleDelegation } from "./personal-rule-delegation.js";
@@ -4688,6 +4688,19 @@ export class SessionsService {
       launch = { ...launch, version: targetCandidate?.version, capabilities: undefined };
     }
     const useWorktree = resolvedTarget.useWorktree;
+    // Refused before anything is created (#4901): the runner would make the worktree, then fail
+    // the launch and leave it behind.
+    const managedWorktreeRefusal = useWorktree ? managedWorktreeUnsupportedReason({
+      os: runner.os,
+      isolationMode: runner.runtime?.executionIsolation?.mode,
+      driver: launch.driver,
+      agentId: snapshotSpec?.agentId ?? req.agentId,
+      agentName: runner.agents.find((agent) => agent.id === req.agentId)?.name,
+      agentSource: runner.agents.find((agent) => agent.id === req.agentId)?.source,
+      contextKind: launch.context?.kind,
+      targetAdapter: executionTarget.adapter,
+    }) : null;
+    if (managedWorktreeRefusal) return fail(managedWorktreeRefusal, 409);
     if (req.providerAccountId !== undefined &&
         (typeof req.providerAccountId !== "string" ||
           !(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(req.providerAccountId) || isProviderAccountRef(req.providerAccountId)))) {
