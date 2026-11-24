@@ -1616,6 +1616,57 @@ test("review round 6 regressions: overlapping prerequisite merge execute never r
     assert.equal(after.status, "approved");
     assert.equal(after.forgeAction?.outcome, "uncertain");
     assert.equal(h2.db.mergeClosureWatchTargets().some((d) => d.occurrenceId === occId), true, "expired enqueue now enters mergeClosureWatchTargets()");
+
+    // Round 7 Finding 1: while this process still actively owns forgeActionsInFlight (e.g., paused in
+    // github_merge_preflight after recording in_progress), a wall-clock jump + duplicate execute must
+    // NOT expire the live lease to `uncertain` or expose it to mergeClosureWatchTargets().
+    const mergeSnap2: WorkflowDecisionResourceSnapshot = {
+      category: "pr_merge", repository: "team/repo", pullRequest: 83, headSha: HEAD_SHA, reviewResult: "merge",
+      requiredChecks: { headSha: HEAD_SHA, status: "passed", checkedAt: 10, checks: [{ name: "CI", state: "passed" }] },
+      intendedClosures: ["team/repo#42"],
+    };
+    const created2 = await h2.svc.createWorkflowDecisionWithVideo("solo", {
+      requestId: "r7-live-lease", resourceKey: "team/repo#83", resourceSnapshot: mergeSnap2,
+    });
+    assert.equal(created2.status, 201);
+    const occId2 = created2.data!.occurrenceId;
+    assert.equal(h2.svc.approve("solo", occId2, "approve", h2.owner).ok, true);
+
+    const origRequest2 = h2.hub.requestFromRunner;
+    let preflightPaused!: () => void;
+    const preflightEntered = new Promise<void>((resolve) => { preflightPaused = resolve; });
+    let releasePreflight!: () => void;
+    const preflightGate = new Promise<void>((resolve) => { releasePreflight = resolve; });
+    h2.hub.requestFromRunner = (async (runnerId: string, requestId: string, message: ControlPlaneToRunner, timeoutMs?: number) => {
+      if (message.type === "github_merge_preflight" && message.pullRequest === 83) {
+        preflightPaused();
+        await preflightGate;
+      }
+      return origRequest2(runnerId, requestId, message, timeoutMs);
+    }) as Hub["requestFromRunner"];
+
+    const liveExec = h2.svc.executeWorkflowDecision("solo", occId2, { resourceDigest: created2.data!.resourceDigest });
+    await preflightEntered;
+    assert.equal(h2.db.workflowDecisionByOccurrence(occId2)!.forgeAction?.outcome, "in_progress");
+
+    // Advance wall-clock Date.now past the 4-minute lease threshold while liveExec still owns forgeActionsInFlight.
+    const realNow = Date.now;
+    const jumpedNow = realNow() + 10 * 60_000;
+    Date.now = () => jumpedNow;
+    try {
+      const dupLive = await h2.svc.executeWorkflowDecision("solo", occId2, { resourceDigest: created2.data!.resourceDigest });
+      assert.equal(dupLive.ok, false);
+      assert.equal(dupLive.status, 409);
+      assert.match(dupLive.error ?? "", /already performing/u);
+      assert.equal(h2.db.workflowDecisionByOccurrence(occId2)!.forgeAction?.outcome, "in_progress", "live lease stays in_progress");
+      assert.equal(h2.db.mergeClosureWatchTargets().some((d) => d.occurrenceId === occId2), false, "live in_progress merge stays outside watch targets");
+    } finally {
+      Date.now = realNow;
+      releasePreflight();
+    }
+    const finishedLive = await liveExec;
+    assert.equal(finishedLive.ok, true, finishedLive.error ?? "original execute completes cleanly");
+    assert.equal(finishedLive.data!.status, "consumed");
   } finally {
     h2.db.close();
   }

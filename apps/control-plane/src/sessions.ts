@@ -17162,11 +17162,14 @@ export class SessionsService {
     // can revoke the approval so a duplicate or overlapping execute call never destroys a
     // reconcileable merge, while letting beginWorkflowDecisionForgeAction expire a stale
     // `in_progress` lease to `uncertain` so mergeClosureWatchTargets() monitors it (#4894).
-    const mergeEnqueueAlreadyAttempted = (current: WorkflowDecisionView | null | undefined): ServiceResult<WorkflowDecisionView> | null => {
+    const mergeEnqueueAlreadyAttempted = (
+      current: WorkflowDecisionView | null | undefined,
+      allowLeaseExpiry: boolean,
+    ): ServiceResult<WorkflowDecisionView> | null => {
       if (kind !== "pr_merge_enqueue") return null;
       const outcome = current?.forgeAction?.outcome;
       if (outcome !== "uncertain" && outcome !== "in_progress") return null;
-      if (outcome === "in_progress") {
+      if (outcome === "in_progress" && allowLeaseExpiry) {
         this.db.beginWorkflowDecisionForgeAction(occurrenceId, kind, Date.now(), FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS * 2);
       }
       const refreshed = this.db.workflowDecisionByOccurrence(occurrenceId);
@@ -17174,7 +17177,7 @@ export class SessionsService {
         ? "the earlier enqueue may have run, so it is not replayed: reconcile_workflow_decision once the pull request reads MERGED"
         : "Wollipog is already performing this decision", 409);
     };
-    const alreadyAttempted = mergeEnqueueAlreadyAttempted(decision);
+    const alreadyAttempted = mergeEnqueueAlreadyAttempted(decision, !this.forgeActionsInFlight.has(occurrenceId));
     if (alreadyAttempted) return alreadyAttempted;
     // A publication whose earlier attempt may have run only looks for its issue from then on. A
     // dispatch still `in_progress` here is one the begin below will read as stale, so uncertain too.
@@ -17281,7 +17284,7 @@ export class SessionsService {
     if (this.forgeActionsInFlight.has(occurrenceId)) return fail("Wollipog is already performing this decision", 409);
     this.forgeActionsInFlight.add(occurrenceId);
     try {
-      const racedAttempt = mergeEnqueueAlreadyAttempted(this.db.workflowDecisionByOccurrence(occurrenceId));
+      const racedAttempt = mergeEnqueueAlreadyAttempted(this.db.workflowDecisionByOccurrence(occurrenceId), true);
       if (racedAttempt) return racedAttempt;
       let verifiedDirectLocation: { id: string; workspaceId: string; workspacePath: string; repository: string } | null = null;
       if (!lookOnly && this.directOwnerSelfDecision(child, parent, decision) &&
