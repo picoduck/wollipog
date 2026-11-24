@@ -22748,6 +22748,59 @@ export class SessionManager {
       const agentEnv = options.agentEnv?.(meta) ?? {};
       const neutral = meta.context?.kind === "wsl" ? "/" : parsePath(tmpdir()).root;
       const gh = options.gh ?? contextGhRunner(meta.context, neutral, agentEnv);
+      if (message.location) {
+        const expectedWorkspaceId = typeof message.location.workspaceId === "string" ? message.location.workspaceId : "";
+        const expectedWorkspacePath = typeof message.location.workspacePath === "string" ? message.location.workspacePath : "";
+        const expectedRepository = typeof message.location.repository === "string" ? message.location.repository.toLowerCase() : "";
+        const actionRepository = "repository" in message.action && typeof message.action.repository === "string"
+          ? message.action.repository.toLowerCase() : "";
+        const stripTrailing = (p: string) => p.length > 1 ? p.replace(/[\\/]+$/u, "") : p;
+        let pathMatches = Boolean(meta.repoPath && expectedWorkspacePath &&
+          stripTrailing(meta.repoPath) === stripTrailing(expectedWorkspacePath));
+        if (!pathMatches && meta.repoPath && expectedWorkspacePath && meta.context?.kind !== "wsl") {
+          try {
+            pathMatches = (await realpath(meta.repoPath)) === (await realpath(expectedWorkspacePath));
+          } catch {
+            pathMatches = false;
+          }
+        }
+        if (!expectedWorkspaceId || !expectedWorkspacePath || !expectedRepository ||
+            (actionRepository && actionRepository !== expectedRepository) ||
+            meta.workspaceId !== expectedWorkspaceId || !pathMatches) {
+          return {
+            ...base,
+            outcome: "refused",
+            refusal: {
+              reason: "repository_mismatch",
+              summary: "The session's workspace no longer matches the approved GitHub repository; nothing was performed.",
+            },
+          };
+        }
+        let origin: string | undefined | null;
+        try {
+          const run = issueClosureRun(meta.context, meta.repoPath, agentEnv);
+          origin = githubSlug((await run("git", ["remote", "get-url", "origin"])).trim());
+        } catch {
+          return {
+            ...base,
+            outcome: "refused",
+            refusal: {
+              reason: "forge_unavailable",
+              summary: "The session's repository origin could not be read; nothing was performed.",
+            },
+          };
+        }
+        if (!origin || origin.toLowerCase() !== expectedRepository) {
+          return {
+            ...base,
+            outcome: "refused",
+            refusal: {
+              reason: "repository_mismatch",
+              summary: "The session's repository no longer matches the approved GitHub repository; nothing was performed.",
+            },
+          };
+        }
+      }
       if (message.action?.kind === "ci_rerun" || message.action?.kind === "ci_rerun_inspect_job" ||
           message.action?.kind === "release_tag" || message.action?.kind === "release_publish") {
         const action = message.action;

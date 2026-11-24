@@ -12561,6 +12561,12 @@ export class SessionsService {
         if (scopeRepos.length > 0 && !scopeRepos.some((entry) => entry.repository === repo.toLowerCase())) {
           return fail("The requested repository is outside this campaign's authorized repositories", 403);
         }
+        if (scopeRepos.length === 0 && this.requesterForgeDecisionLocation(requesting)) {
+          if (!canAccess(requesting.id)) return fail("session not found", 404);
+          if (isTerminal(requesting.status)) return fail("a terminal session cannot request a workflow decision", 409);
+          const verified = await this.verifyStandaloneRepositoryLocation(requesting, repo, null);
+          if (!verified.ok || !verified.data) return failAs(verified);
+        }
       }
     }
     if (normalized.ok && normalized.data?.category === "follow_up_issue_publication" && normalized.data.recommendationId) {
@@ -16828,9 +16834,12 @@ export class SessionsService {
     // Re-verify the session's current Project Location repository before arming or consuming
     // direct-owner repo-bound approvals so a live Location switch never acts on the old repo (#4894).
     let verifiedDirectLocationId: string | null = null;
-    if (directOwner && (normalized.data.category === "pr_merge" || normalized.data.category === "merged_branch_deletion" ||
-        (normalized.data.category === "follow_up_issue_publication" && this.standaloneDirectOwnerSession(child)))) {
-      const verified = await this.verifyStandaloneRepositoryLocation(child, normalized.data.repository);
+    if (directOwner && this.requiresDirectLocationVerification(child, normalized.data.category) &&
+        (normalized.data.category === "pr_merge" || normalized.data.category === "merged_branch_deletion" ||
+          normalized.data.category === "follow_up_issue_publication")) {
+      const requireProtocol = this.standaloneDirectOwnerSession(child) || normalized.data.category !== "follow_up_issue_publication"
+        ? "standaloneOwnerDecisions" : null;
+      const verified = await this.verifyStandaloneRepositoryLocation(child, normalized.data.repository, requireProtocol);
       if (!verified.ok || !verified.data) {
         if (verified.status === 403 || !this.requesterForgeDecisionLocation(this.db.getSession(sessionId)!)) {
           this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
@@ -17232,6 +17241,43 @@ export class SessionsService {
     if (this.forgeActionsInFlight.has(occurrenceId)) return fail("Wollipog is already performing this decision", 409);
     this.forgeActionsInFlight.add(occurrenceId);
     try {
+      let verifiedDirectLocation: { id: string; workspaceId: string; workspacePath: string; repository: string } | null = null;
+      if (!lookOnly && this.directOwnerSelfDecision(child, parent, decision) &&
+          this.requiresDirectLocationVerification(child, snapshot.category) &&
+          (snapshot.category === "pr_merge" || snapshot.category === "merged_branch_deletion" ||
+            snapshot.category === "follow_up_issue_publication")) {
+        const requireProtocol = this.standaloneDirectOwnerSession(child) || snapshot.category !== "follow_up_issue_publication"
+          ? "standaloneOwnerDecisions" : null;
+        const verified = await this.verifyStandaloneRepositoryLocation(child, snapshot.repository, requireProtocol);
+        if (!verified.ok || !verified.data) {
+          const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+          if ((verified.status === 403 || !this.requesterForgeDecisionLocation(this.db.getSession(sessionId)!)) && latest?.status === "approved") {
+            this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+          }
+          return fail(verified.error ?? "The session's Project Location could not be verified; nothing was performed.", 409);
+        }
+        const workspacePath = this.db.getWorkspacePath(verified.data.runnerId, verified.data.workspaceId);
+        if (!workspacePath) {
+          return fail("The session's Project Location path is unavailable; nothing was performed.", 409);
+        }
+        if (!authorityCurrent()) {
+          const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+          if (latest?.status === "approved") this.revokeWorkflowDecision(latest, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
+          return fail("Authority changed while the action was being prepared; nothing was performed.", 409);
+        }
+        const currentLocation = this.requesterForgeDecisionLocation(this.db.getSession(sessionId)!);
+        if (!currentLocation || currentLocation.id !== verified.data.id) {
+          const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+          if (latest?.status === "approved") this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+          return fail("The session's Project Location changed while the action was being prepared; nothing was performed.", 409);
+        }
+        verifiedDirectLocation = {
+          id: verified.data.id,
+          workspaceId: verified.data.workspaceId,
+          workspacePath,
+          repository: snapshot.repository.toLowerCase(),
+        };
+      }
       const begun = this.db.beginWorkflowDecisionForgeAction(occurrenceId, kind, Date.now(), FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS * 2);
       if (!begun) {
         const current = this.db.workflowDecisionByOccurrence(occurrenceId);
@@ -17247,24 +17293,6 @@ export class SessionsService {
           ...(createdIssue === undefined ? {} : { publicationCreatedIssue: createdIssue }),
           ...(publishedIssue === undefined ? {} : { publishedIssue, publicationVerified: true, performedByRunnerId: publicationPlace!.runnerId }), updatedAt: Date.now() });
       };
-      let verifiedDirectLocationId: string | null = null;
-      if (!lookOnly && this.directOwnerSelfDecision(child, parent, decision) &&
-          (snapshot.category === "pr_merge" || snapshot.category === "merged_branch_deletion" ||
-            (snapshot.category === "follow_up_issue_publication" && this.standaloneDirectOwnerSession(child)))) {
-        const verified = await this.verifyStandaloneRepositoryLocation(child, snapshot.repository);
-        if (!verified.ok || !verified.data) {
-          finish("refused", {
-            reason: "runner_unavailable",
-            summary: boundedForgeSummary(verified.error ?? "The session's Project Location could not be verified; nothing was performed."),
-          });
-          const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
-          if ((verified.status === 403 || !this.requesterForgeDecisionLocation(this.db.getSession(sessionId)!)) && latest?.status === "approved") {
-            this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
-          }
-          return this.forgeActionResult(sessionId, parent.id, occurrenceId);
-        }
-        verifiedDirectLocationId = verified.data.id;
-      }
       if (snapshot.category === "follow_up_issue_publication" && !lookOnly) {
         const publicationPolicy = this.directOwnerSelfDecision(child, parent, decision)
           ? this.directOwnerPolicy(parent) : parent.parentControlPolicy!;
@@ -17321,9 +17349,9 @@ export class SessionsService {
           return this.forgeActionResult(sessionId, parent.id, occurrenceId);
         }
       }
-      if (verifiedDirectLocationId) {
+      if (verifiedDirectLocation) {
         const currentLocation = this.requesterForgeDecisionLocation(this.db.getSession(sessionId)!);
-        if (!currentLocation || currentLocation.id !== verifiedDirectLocationId) {
+        if (!currentLocation || currentLocation.id !== verifiedDirectLocation.id) {
           finish("refused", { reason: "runner_unavailable", summary: "The session's Project Location changed while the action was being prepared; nothing was performed." });
           const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
           if (latest?.status === "approved") this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
@@ -17338,11 +17366,16 @@ export class SessionsService {
         return this.forgeActionResult(sessionId, parent.id, occurrenceId);
       }
       const requestId = `forge_decision_action_${randomUUID()}`;
+      const dispatchLocation = publicationPlace
+        ? { workspaceId: publicationPlace.workspaceId, workspacePath: publicationPlace.workspacePath, repository: publicationPlace.repository }
+        : verifiedDirectLocation
+          ? { workspaceId: verifiedDirectLocation.workspaceId, workspacePath: verifiedDirectLocation.workspacePath, repository: verifiedDirectLocation.repository }
+          : undefined;
       let answer: Partial<ForgeDecisionActionResultMessage> | null = null;
       try {
         answer = await this.hub.requestFromRunner(publicationPlace?.runnerId ?? child.runnerId, requestId, {
           type: "forge_decision_action", requestId, sessionId, occurrenceId, action,
-          ...(publicationPlace ? { location: { workspaceId: publicationPlace.workspaceId, workspacePath: publicationPlace.workspacePath, repository: publicationPlace.repository } } : {}),
+          ...(dispatchLocation ? { location: dispatchLocation } : {}),
         }, FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS) as unknown as Partial<ForgeDecisionActionResultMessage>;
       } catch (error) {
         if (isRunnerRequestNotSentError(error)) {
@@ -17373,7 +17406,8 @@ export class SessionsService {
           ? answer!.refusal!.reason : "forge_refused";
         finish("refused", { reason, summary: boundedForgeSummary(answer!.refusal?.summary) });
         const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
-        if (FORGE_DECISION_ACTION_STALE_REFUSALS.has(reason) && latest?.status === "approved") {
+        if ((FORGE_DECISION_ACTION_STALE_REFUSALS.has(reason) ||
+            (reason === "repository_mismatch" && Boolean(verifiedDirectLocation))) && latest?.status === "approved") {
           this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
         }
         return this.forgeActionResult(sessionId, parent.id, occurrenceId);
@@ -18134,6 +18168,21 @@ export class SessionsService {
       this.directOwnerSelfControlled(child, decision.category);
   }
 
+  private requiresDirectLocationVerification(
+    session: SessionView,
+    category: WorkflowDecisionCategory,
+  ): boolean {
+    if (this.standaloneDirectOwnerSession(session)) {
+      return category === "pr_merge" || category === "merged_branch_deletion" ||
+        category === "follow_up_issue_publication" || category === "issue_closure";
+    }
+    if (!this.customRootOwnWorkSession(session, category)) return false;
+    if (category === "pr_merge" || category === "merged_branch_deletion") return true;
+    return category === "follow_up_issue_publication" &&
+      campaignScopeRepositories(session).length === 0 &&
+      Boolean(this.requesterForgeDecisionLocation(session));
+  }
+
   private directOwnerPolicy(session: SessionView): ParentControlPolicy {
     return session.parentControlPolicy ?? { revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } };
   }
@@ -18141,12 +18190,12 @@ export class SessionsService {
   private async verifyStandaloneRepositoryLocation(
     session: SessionView,
     repository: string,
-    requireProtocol: RunnerProtocolCapability = "standaloneOwnerDecisions",
+    requireProtocol: RunnerProtocolCapability | null = "standaloneOwnerDecisions",
   ): Promise<ServiceResult<ProjectLocationView>> {
     const location = this.requesterForgeDecisionLocation(session);
     if (!location) return fail("This action requires a registered Project Location", 409);
     const inspected = await inspectProjectLocation({ db: this.db, hub: this.hub }, location.id, {
-      projectId: location.projectId, requireProtocol, timeoutMs: 10_000,
+      projectId: location.projectId, ...(requireProtocol ? { requireProtocol } : {}), timeoutMs: 10_000,
     });
     if (!inspected.ok) {
       return fail(inspected.reason || "The requested repository could not be verified at this session's Location", 409);

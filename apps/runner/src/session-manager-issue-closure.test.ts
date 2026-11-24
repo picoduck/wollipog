@@ -1269,3 +1269,60 @@ test("standalone Normal session issue closure inspects, enforces expectedReposit
   assert.equal(replayed.result?.outcome, "refused");
   assert.equal(f.commands.filter((c) => c.file === "gh" && c.args[0] === "issue" && c.args[1] === "close").length, 1);
 });
+
+test("forgeDecisionAction refuses old-repository merge and deletion after runner commits a Location switch before snapshot delivery (#4894)", async (t) => {
+  const f = fixture(t);
+  const soloId = "s_standalone_moved";
+  f.store().create({
+    sessionId: soloId, agentId: "claude", workspaceId: "w1", repoPath: f.root, worktreePath: null,
+    driver: "acp", command: "agy", args: [], env: {}, context: { kind: "native" },
+    agentSessionId: null, status: "running", title: "Standalone moved", config: {},
+    tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+    seq: 0, createdAt: 1000, updatedAt: 1000,
+  });
+
+  // Simulate the runner committing a live Location switch to a second workspace/repo before the
+  // control plane has applied the runner's session snapshot.
+  const otherRepo = mkdtempSync(join(tmpdir(), "wollipog-other-repo-"));
+  t.after(() => rmSync(otherRepo, { recursive: true, force: true }));
+  f.store().patchMeta(soloId, { workspaceId: "w2", repoPath: otherRepo });
+  f.store().flush(soloId);
+
+  const ghCalls: string[][] = [];
+  const gh: GhRunner = async (args) => {
+    ghCalls.push(args);
+    return { stdout: "", stderr: "", code: 0, timedOut: false };
+  };
+  const oldLocation = { workspaceId: "w1", workspacePath: f.root, repository: "example/project" };
+  const headSha = "a".repeat(40);
+
+  const mergeRes = await f.manager().forgeDecisionAction({
+    type: "forge_decision_action", requestId: "req-m", sessionId: soloId, occurrenceId: "occ-m",
+    location: oldLocation,
+    action: { kind: "pr_merge_enqueue", repository: "example/project", pullRequest: 12, headSha },
+  }, { gh });
+  assert.equal(mergeRes.outcome, "refused");
+  assert.equal(mergeRes.refusal?.reason, "repository_mismatch");
+
+  const delRes = await f.manager().forgeDecisionAction({
+    type: "forge_decision_action", requestId: "req-d", sessionId: soloId, occurrenceId: "occ-d",
+    location: oldLocation,
+    action: { kind: "branch_deletion", repository: "example/project", branch: "feat/old", pullRequest: 12, headSha, mergeCommitSha: headSha },
+  }, { gh });
+  assert.equal(delRes.outcome, "refused");
+  assert.equal(delRes.refusal?.reason, "repository_mismatch");
+  assert.equal(ghCalls.length, 0, "no gh mutation may run after Location switch");
+
+  // Even if workspaceId/repoPath still match w1, a changed checkout origin is also refused before gh runs.
+  f.store().patchMeta(soloId, { workspaceId: "w1", repoPath: f.root });
+  f.store().flush(soloId);
+  f.setOrigin("example/other");
+  const movedOriginRes = await f.manager().forgeDecisionAction({
+    type: "forge_decision_action", requestId: "req-o", sessionId: soloId, occurrenceId: "occ-o",
+    location: oldLocation,
+    action: { kind: "branch_deletion", repository: "example/project", branch: "feat/old", pullRequest: 12, headSha, mergeCommitSha: headSha },
+  }, { gh });
+  assert.equal(movedOriginRes.outcome, "refused");
+  assert.equal(movedOriginRes.refusal?.reason, "repository_mismatch");
+  assert.equal(ghCalls.length, 0, "no gh mutation may run when live origin changed");
+});

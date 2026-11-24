@@ -382,7 +382,12 @@ test("repository-addition tools are the campaign root's, post to its own paths a
 });
 
 test("owner-decision tools are the root Orchestrator's, post to its own paths and refuse an older peer (#4064)", async () => {
-  const { deps, calls } = makeDeps(() => ({ status: 201, body: { occurrenceId: "workflow_1", status: "pending", authority: "human" } }));
+  const { deps, calls } = makeDeps((call) => {
+    if (call.url.endsWith(`/api/sessions/${SELF_ID}`)) {
+      return { status: 200, body: { session: { id: SELF_ID, orchestratorPolicy: { control: { mode: "full_control" } } } } };
+    }
+    return { status: 201, body: { occurrenceId: "workflow_1", status: "pending", authority: "human" } };
+  });
   deps.orchestrator = true;
   deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions;
   const ask = { requestId: "kept-1", resourceKey: "credential-design", question: "Which credential design should the bridge use?",
@@ -427,7 +432,12 @@ test("owner-decision tools are the root Orchestrator's, post to its own paths an
 });
 
 test("an Owner Question posts its kind with 0 to 12 suggestions and needs a v303 control plane (#4270)", async () => {
-  const { deps, calls } = makeDeps(() => ({ status: 201, body: { occurrenceId: "workflow_1", status: "pending", authority: "human" } }));
+  const { deps, calls } = makeDeps((call) => {
+    if (call.url.endsWith(`/api/sessions/${SELF_ID}`)) {
+      return { status: 200, body: { session: { id: SELF_ID, orchestratorPolicy: { control: { mode: "full_control" } } } } };
+    }
+    return { status: 201, body: { occurrenceId: "workflow_1", status: "pending", authority: "human" } };
+  });
   deps.orchestrator = true;
   deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.ownerQuestions;
   const ask = { requestId: "q-1", resourceKey: "naming", kind: "question", question: "What should the bridge be called?",
@@ -461,6 +471,23 @@ test("an Owner Question posts its kind with 0 to 12 suggestions and needs a v303
   assert.equal(customOld.isError, true);
   assert.match(resultText(customOld), /"requiredControlPlaneProtocolVersion":412/u);
   assert.equal(custom.calls.some((c) => c.url.endsWith("/owner-decisions")), false, "Custom root never posts to v411 owner-decisions");
+
+  // Unreadable or failing session probe on v411 fails closed before posting to /owner-decisions (#4894).
+  for (const probeResponse of [
+    { status: 503, body: { error: "temporarily unavailable" } },
+    { status: 200, body: {} },
+  ]) {
+    const failedProbe = makeDeps((call) => {
+      if (call.url.endsWith(`/api/sessions/${SELF_ID}`)) return probeResponse;
+      return { status: 201, body: { occurrenceId: "workflow_1", status: "pending", authority: "human" } };
+    });
+    failedProbe.deps.orchestrator = true;
+    failedProbe.deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions - 1;
+    const refused = await callTool(failedProbe.deps, "request_owner_decision", ask);
+    assert.equal(refused.isError, true);
+    assert.match(resultText(refused), /"requiredControlPlaneProtocolVersion":412/u);
+    assert.equal(failedProbe.calls.some((c) => c.url.endsWith("/owner-decisions")), false, "failed mode probe never posts to v411 owner-decisions");
+  }
 });
 
 test("typed workflow decision tools preserve exact request, resolution, and consume snapshots", async () => {

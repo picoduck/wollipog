@@ -905,14 +905,33 @@ async function ownerDecisionCompatibilityError(deps: McpDeps, question = false, 
   if (allowStandalone && deps.orchestrator && deps.selfSessionId &&
       actual! < RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions) {
     const self = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}`);
-    const session = self.ok ? (self.data?.session ?? self.data) : null;
+    if (!self.ok) {
+      return controlPlaneUpdateRequired(
+        wollipogSupportUnverified(
+          question ? "owner questions" : "owner decisions",
+          self.message,
+        ),
+        RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions,
+        actual,
+      );
+    }
+    const session = self.data?.session ?? self.data;
     const mode = session?.orchestratorPolicy?.control?.mode ?? session?.orchestratorCampaign?.control?.mode;
+    if (mode === "full_control") return null;
     if ((session?.orchestratorPolicy && mode !== "full_control") || mode === "custom") {
       return controlPlaneUpdateRequired(needsNewerWollipog(
         question ? "Custom campaign owner questions need" : "Custom campaign owner decisions need",
         "Update Wollipog; nothing reached the owner.",
       ), RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions, actual);
     }
+    return controlPlaneUpdateRequired(
+      wollipogSupportUnverified(
+        question ? "owner questions" : "owner decisions",
+        "could not verify whether this Orchestrator uses Full Control or Custom mode",
+      ),
+      RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions,
+      actual,
+    );
   }
   return null;
 }

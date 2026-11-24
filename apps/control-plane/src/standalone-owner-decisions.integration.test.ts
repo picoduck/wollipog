@@ -921,13 +921,13 @@ test("review round 1 regressions: Location switch revokes merge/deletion, Custom
 
     const actionsBefore = h1.forgeActions.length;
     const mExec = await h1.svc.executeWorkflowDecision("solo", m.data!.occurrenceId, { resourceDigest: m.data!.resourceDigest });
-    assert.equal(mExec.ok, true);
-    assert.equal(mExec.data!.forgeAction?.outcome, "refused");
+    assert.equal(mExec.ok, false);
+    assert.equal(mExec.status, 409);
     assert.equal(h1.db.workflowDecisionByOccurrence(m.data!.occurrenceId)!.status, "revoked");
 
     const dExec = await h1.svc.executeWorkflowDecision("solo", d.data!.occurrenceId, { resourceDigest: d.data!.resourceDigest });
-    assert.equal(dExec.ok, true);
-    assert.equal(dExec.data!.forgeAction?.outcome, "refused");
+    assert.equal(dExec.ok, false);
+    assert.equal(dExec.status, 409);
     assert.equal(h1.db.workflowDecisionByOccurrence(d.data!.occurrenceId)!.status, "revoked");
     assert.equal(h1.forgeActions.length, actionsBefore, "no forge action may dispatch after Location switch");
   } finally {
@@ -1140,5 +1140,141 @@ test("review round 1 regressions: Location switch revokes merge/deletion, Custom
     assert.equal(settled.issueClosureResult?.reconciliation?.verified, true);
   } finally {
     h4.db.close();
+  }
+});
+
+test("review round 2 regressions: runner-bound Location dispatch, unscoped Custom root publication verification, and non-exhausting transient Location inspection (#4894)", async () => {
+  // Finding 1 (control plane): executeWorkflowDecision binds Location on forge_decision_action and revokes on runner repository_mismatch.
+  const h1 = makeHarness({ driver: "acp" });
+  try {
+    const delSnap: WorkflowDecisionResourceSnapshot = {
+      category: "merged_branch_deletion", merged: true, repository: "team/repo", branch: "feat/moved-on-runner",
+      pullRequest: 55, headSha: HEAD_SHA, mergeCommitSha: HEAD_SHA,
+      dependentPullRequests: { checkedAt: 10, open: [] },
+    };
+    const created = await h1.svc.createWorkflowDecisionWithVideo("solo", {
+      requestId: "r2-mism", resourceKey: "team/repo:feat/moved-on-runner", resourceSnapshot: delSnap,
+    });
+    assert.equal(created.status, 201);
+    assert.equal(h1.svc.approve("solo", created.data!.occurrenceId, "approve", h1.owner).ok, true);
+
+    // Control plane still thinks session is in w (/repos/project, team/repo), while runner already moved to another Location.
+    const origRequest = h1.hub.requestFromRunner;
+    let dispatchedLocation: unknown = null;
+    h1.hub.requestFromRunner = (async (runnerId: string, requestId: string, message: ControlPlaneToRunner, timeoutMs?: number) => {
+      if (message.type === "forge_decision_action") {
+        dispatchedLocation = message.location;
+        return {
+          type: "forge_decision_action_result", requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId,
+          outcome: "refused", refusal: { reason: "repository_mismatch", summary: "Session moved to another workspace." },
+        };
+      }
+      return origRequest(runnerId, requestId, message, timeoutMs);
+    }) as Hub["requestFromRunner"];
+
+    const res = await h1.svc.executeWorkflowDecision("solo", created.data!.occurrenceId, { resourceDigest: created.data!.resourceDigest });
+    assert.equal(res.ok, true);
+    assert.deepEqual(dispatchedLocation, { workspaceId: "w", workspacePath: "/repos/project", repository: "team/repo" });
+    assert.equal(res.data!.forgeAction?.outcome, "refused");
+    assert.equal(res.data!.forgeAction?.refusal?.reason, "repository_mismatch");
+    assert.equal(h1.db.workflowDecisionByOccurrence(created.data!.occurrenceId)!.status, "revoked");
+  } finally {
+    h1.db.close();
+  }
+
+  // Finding 2: unscoped Custom root with a registered checkout Location refuses publication for another repository at create and consume.
+  const h2 = makeHarness({ driver: "acp" });
+  try {
+    const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+    policy.execution = { ...policy.execution, strictProjectIsolation: false };
+    h2.db.createSession({
+      id: "custom-unscoped", runnerId: "r", workspaceId: "w", agentId: "agent-acp", title: "Custom Unscoped",
+      useWorktree: false, driver: "acp", role: "orchestrator",
+      projectId: h2.project.id, projectLocationId: h2.location!.id,
+      orchestratorPolicy: policy, parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
+      now: 1, config: {},
+    });
+    h2.db.updateSessionStatus("custom-unscoped", "running", 2);
+
+    const pubOther = await h2.svc.createWorkflowDecisionWithVideo("custom-unscoped", {
+      requestId: "cu-pub-b", resourceKey: "cu-pub-b",
+      resourceSnapshot: {
+        category: "follow_up_issue_publication", repository: "team/other-repo",
+        sanitizedTitle: "Wrong repo issue", sanitizedBody: "Details", labels: [],
+      },
+    });
+    assert.equal(pubOther.status, 403, `unscoped Custom root cannot publish to another repository: ${pubOther.error}`);
+
+    const pubSameSnap: WorkflowDecisionResourceSnapshot = {
+      category: "follow_up_issue_publication", repository: "team/repo",
+      sanitizedTitle: "Verified checkout issue", sanitizedBody: "Details", labels: ["bug"],
+    };
+    const pubSame = await h2.svc.createWorkflowDecisionWithVideo("custom-unscoped", {
+      requestId: "cu-pub-a", resourceKey: "cu-pub-a", resourceSnapshot: pubSameSnap,
+    });
+    assert.equal(pubSame.status, 201, pubSame.error ?? "unscoped Custom root can publish to its verified checkout");
+    assert.equal(pubSame.data!.authority, "human");
+    assert.equal(h2.svc.approve("custom-unscoped", pubSame.data!.occurrenceId, "approve", h2.owner).ok, true);
+    const consumedSame = await h2.svc.consumeWorkflowDecision("custom-unscoped", pubSame.data!.occurrenceId, { resourceSnapshot: pubSameSnap });
+    assert.equal(consumedSame.ok, true, consumedSame.error ?? "verified checkout publication consumes");
+
+    // If the checkout switches to another repository after approval, consume refuses and revokes.
+    const pubMoved = await h2.svc.createWorkflowDecisionWithVideo("custom-unscoped", {
+      requestId: "cu-pub-moved", resourceKey: "cu-pub-moved", resourceSnapshot: pubSameSnap,
+    });
+    assert.equal(pubMoved.status, 201);
+    assert.equal(h2.svc.approve("custom-unscoped", pubMoved.data!.occurrenceId, "approve", h2.owner).ok, true);
+    h2.setRepo("team/other-repo");
+    const consumedMoved = await h2.svc.consumeWorkflowDecision("custom-unscoped", pubMoved.data!.occurrenceId, { resourceSnapshot: pubSameSnap });
+    assert.equal(consumedMoved.ok, false);
+    assert.equal(consumedMoved.status, 409);
+    assert.equal(h2.db.workflowDecisionByOccurrence(pubMoved.data!.occurrenceId)!.status, "revoked");
+  } finally {
+    h2.db.close();
+  }
+
+  // Finding 3: 5 transient Location inspection failures do not spend durable attempts; once inspection recovers, the same approval executes once.
+  const h3 = makeHarness({ driver: "acp" });
+  try {
+    const delSnap: WorkflowDecisionResourceSnapshot = {
+      category: "merged_branch_deletion", merged: true, repository: "team/repo", branch: "feat/transient-retry",
+      pullRequest: 56, headSha: HEAD_SHA, mergeCommitSha: HEAD_SHA,
+      dependentPullRequests: { checkedAt: 10, open: [] },
+    };
+    const created = await h3.svc.createWorkflowDecisionWithVideo("solo", {
+      requestId: "r2-trans", resourceKey: "team/repo:feat/transient-retry", resourceSnapshot: delSnap,
+    });
+    assert.equal(created.status, 201);
+    const occId = created.data!.occurrenceId;
+    assert.equal(h3.svc.approve("solo", occId, "approve", h3.owner).ok, true);
+
+    const origRequest = h3.hub.requestFromRunner;
+    let failInspect = true;
+    h3.hub.requestFromRunner = (async (runnerId: string, requestId: string, message: ControlPlaneToRunner, timeoutMs?: number) => {
+      if (message.type === "campaign_launch_inspect" && failInspect) {
+        return { type: "campaign_launch_inspection_result", requestId, ok: false, failure: "read_failed" };
+      }
+      return origRequest(runnerId, requestId, message, timeoutMs);
+    }) as Hub["requestFromRunner"];
+
+    for (let i = 0; i < 5; i++) {
+      const failed = await h3.svc.executeWorkflowDecision("solo", occId, { resourceDigest: created.data!.resourceDigest });
+      assert.equal(failed.ok, false, `transient inspection failure ${i + 1} returns error`);
+      assert.equal(failed.status, 409);
+      const mid = h3.db.workflowDecisionByOccurrence(occId)!;
+      assert.equal(mid.status, "approved", "approval stays active across transient inspection failures");
+      assert.equal(mid.forgeAction, undefined, "no durable attempt is spent before Location inspection succeeds");
+    }
+    assert.equal(h3.forgeActions.length, 0, "nothing dispatched while inspection failed");
+
+    failInspect = false;
+    const executed = await h3.svc.executeWorkflowDecision("solo", occId, { resourceDigest: created.data!.resourceDigest });
+    assert.equal(executed.ok, true, executed.error ?? "deletion succeeds once inspection recovers");
+    assert.equal(executed.data!.status, "consumed");
+    assert.equal(executed.data!.forgeAction?.outcome, "deleted");
+    assert.equal(executed.data!.forgeAction?.attempts, 1);
+    assert.equal(h3.forgeActions.length, 1);
+  } finally {
+    h3.db.close();
   }
 });
