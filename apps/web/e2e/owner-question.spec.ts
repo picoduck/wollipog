@@ -76,7 +76,14 @@ async function openInboxHandoff(page: Page) {
 
 test("D acknowledges the selected Inbox handoff without opening a preview", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
+  // Exercise the list's direct triage path before a preview registers its request handler,
+  // as inbox-triage-detail.spec.ts does. Otherwise the lazy desktop reader can mount a
+  // handoff card before the no-card precondition, depending on module-load timing.
+  await page.route("**/src/components/SessionDetail.tsx*", (route) => route.fulfill({
+    contentType: "application/javascript", body: "export function SessionDetail() { return null; }",
+  }));
   const { decision, row } = await openInboxHandoff(page);
+  await expect(row).toHaveAttribute("aria-selected", "true");
   const sessionPath = "/api/sessions/synthetic-1";
   const session = await page.evaluate(async (path) => {
     const response = await fetch(path);
