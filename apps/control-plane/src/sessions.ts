@@ -17159,18 +17159,32 @@ export class SessionsService {
       if (unsupported) return unsupported;
     }
     // An uncertain or in-progress merge enqueue cannot be replayed; refuse before authority checks
-    // can revoke the approval so a duplicate execute call never destroys a reconcileable merge (#4894).
-    if (kind === "pr_merge_enqueue" &&
-        (decision.forgeAction?.outcome === "uncertain" || decision.forgeAction?.outcome === "in_progress")) {
-      return fail(decision.forgeAction.outcome === "uncertain"
+    // can revoke the approval so a duplicate or overlapping execute call never destroys a
+    // reconcileable merge, while letting beginWorkflowDecisionForgeAction expire a stale
+    // `in_progress` lease to `uncertain` so mergeClosureWatchTargets() monitors it (#4894).
+    const mergeEnqueueAlreadyAttempted = (current: WorkflowDecisionView | null | undefined): ServiceResult<WorkflowDecisionView> | null => {
+      if (kind !== "pr_merge_enqueue") return null;
+      const outcome = current?.forgeAction?.outcome;
+      if (outcome !== "uncertain" && outcome !== "in_progress") return null;
+      if (outcome === "in_progress") {
+        this.db.beginWorkflowDecisionForgeAction(occurrenceId, kind, Date.now(), FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS * 2);
+      }
+      const refreshed = this.db.workflowDecisionByOccurrence(occurrenceId);
+      return fail(refreshed?.forgeAction?.outcome === "uncertain"
         ? "the earlier enqueue may have run, so it is not replayed: reconcile_workflow_decision once the pull request reads MERGED"
         : "Wollipog is already performing this decision", 409);
-    }
+    };
+    const alreadyAttempted = mergeEnqueueAlreadyAttempted(decision);
+    if (alreadyAttempted) return alreadyAttempted;
     // A publication whose earlier attempt may have run only looks for its issue from then on. A
     // dispatch still `in_progress` here is one the begin below will read as stale, so uncertain too.
     let createdIssue = decision.forgeAction?.publicationCreatedIssue;
     const lookOnly = snapshot.category === "follow_up_issue_publication" &&
       (createdIssue !== undefined || decision.forgeAction?.outcome === "uncertain" || decision.forgeAction?.outcome === "in_progress");
+    const canRevokeApproved = (current: WorkflowDecisionView | null | undefined): current is WorkflowDecisionView => Boolean(
+      current?.status === "approved" && !lookOnly &&
+      !(kind === "pr_merge_enqueue" && (current.forgeAction?.outcome === "uncertain" || current.forgeAction?.outcome === "in_progress")),
+    );
     const authorityCurrent = (): boolean => {
       const currentChild = this.db.getSession(sessionId);
       const currentParent = this.db.getSession(decision.controllingSessionId);
@@ -17267,6 +17281,8 @@ export class SessionsService {
     if (this.forgeActionsInFlight.has(occurrenceId)) return fail("Wollipog is already performing this decision", 409);
     this.forgeActionsInFlight.add(occurrenceId);
     try {
+      const racedAttempt = mergeEnqueueAlreadyAttempted(this.db.workflowDecisionByOccurrence(occurrenceId));
+      if (racedAttempt) return racedAttempt;
       let verifiedDirectLocation: { id: string; workspaceId: string; workspacePath: string; repository: string } | null = null;
       if (!lookOnly && this.directOwnerSelfDecision(child, parent, decision) &&
           this.requiresDirectLocationVerification(child, snapshot.category, decision) &&
@@ -17277,7 +17293,7 @@ export class SessionsService {
         const verified = await this.verifyStandaloneRepositoryLocation(child, snapshot.repository, requireProtocol);
         if (!verified.ok || !verified.data) {
           const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
-          if ((verified.status === 403 || !this.requesterForgeDecisionLocation(this.db.getSession(sessionId)!)) && latest?.status === "approved") {
+          if ((verified.status === 403 || !this.requesterForgeDecisionLocation(this.db.getSession(sessionId)!)) && canRevokeApproved(latest)) {
             this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
           }
           return fail(verified.error ?? "The session's Project Location could not be verified; nothing was performed.", 409);
@@ -17288,13 +17304,13 @@ export class SessionsService {
         }
         if (!authorityCurrent()) {
           const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
-          if (latest?.status === "approved") this.revokeWorkflowDecision(latest, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
+          if (canRevokeApproved(latest)) this.revokeWorkflowDecision(latest, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
           return fail("Authority changed while the action was being prepared; nothing was performed.", 409);
         }
         const currentLocation = this.requesterForgeDecisionLocation(this.db.getSession(sessionId)!);
         if (!currentLocation || currentLocation.id !== verified.data.id) {
           const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
-          if (latest?.status === "approved") this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+          if (canRevokeApproved(latest)) this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
           return fail("The session's Project Location changed while the action was being prepared; nothing was performed.", 409);
         }
         verifiedDirectLocation = {
@@ -17341,7 +17357,7 @@ export class SessionsService {
       if (!authorityCurrent()) {
         finish("refused", { reason: "runner_unavailable", summary: "Authority changed while the action was being prepared; nothing was performed." });
         const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
-        if (latest?.status === "approved" && !lookOnly) this.revokeWorkflowDecision(latest, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
+        if (canRevokeApproved(latest)) this.revokeWorkflowDecision(latest, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
         return this.forgeActionResult(sessionId, parent.id, occurrenceId);
       }
       // The review run may have moved during the forge read too: an uncited merge is only as good as

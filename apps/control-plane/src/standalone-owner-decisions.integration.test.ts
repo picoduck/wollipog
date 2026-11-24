@@ -1450,3 +1450,173 @@ test("review round 4 regressions: reassigned Location ID preserves read-only mer
     h2.db.close();
   }
 });
+
+test("review round 6 regressions: overlapping prerequisite merge execute never revokes uncertain merge, and expired in_progress retry enters closure monitoring (#4894)", async () => {
+  // Finding 1: two overlapping Custom root merge executes race across campaignMergeHold; the faster
+  // records an uncertain enqueue, the Location ID is replaced, then the slower resumes — assert
+  // zero second enqueue, approval remains approved, and read-only reconciliation consumes it.
+  const h1 = makeHarness({ driver: "acp" });
+  try {
+    h1.db.registerRunner({
+      runnerId: "r", hostname: "test-host", os: "linux", version: "test",
+      workspaces: [{ id: "w", name: "Repo A", path: "/repos/project" }, { id: "w2", name: "Dep Repo", path: "/repos/dep" }],
+      agents: [{ id: "agent-acp", name: "Antigravity", command: "agy", args: [], env: {}, driver: "acp", context: { kind: "native" }, available: true }],
+      runtime: { dataDir: "/tmp/wollipog-test", worktreeRoot: "/tmp/wollipog-test/worktrees", maxConcurrentSessions: 4, campaignLaunchInspection: { version: 4 } },
+    }, 2, PROTOCOL_VERSION);
+    const depLoc = h1.db.addProjectLocation(h1.project.id, { runnerId: "r", workspaceId: "w2", addedByUserId: h1.principal.userId }, 2);
+    const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+    policy.execution = { ...policy.execution, strictProjectIsolation: false };
+    policy.issueNumbers = [42];
+    policy.issueScope = { repository: "team/repo", issueNumbers: [42], revision: 1, authorizedByUserId: h1.principal.userId, authorizedAt: 1 };
+    policy.repositories = [
+      { repository: "team/repo", locationIds: [h1.location!.id] },
+      { repository: "team/dep", locationIds: [depLoc.id] },
+    ];
+    h1.db.createSession({
+      id: "custom-overlap", runnerId: "r", workspaceId: "w", agentId: "agent-acp", title: "Custom Overlap",
+      useWorktree: false, driver: "acp", role: "orchestrator",
+      projectId: h1.project.id, projectLocationId: h1.location!.id,
+      orchestratorPolicy: policy, parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
+      now: 1, config: {},
+    });
+    h1.db.updateSessionStatus("custom-overlap", "running", 2);
+
+    const plan = h1.svc.recordCampaignPlan("custom-overlap", {
+      planComplete: true,
+      items: [
+        { key: "dep", title: "Prerequisite", issue: { repository: "team/dep", number: 2 } },
+        { key: "main", title: "Dependent", issue: { repository: "team/repo", number: 42 }, dependsOnKeys: ["dep"] },
+      ],
+    });
+    assert.ok(plan.ok, plan.error ?? "plan recorded");
+    const depId = plan.data!.items.find((i) => i.key === "dep")!.workItemId;
+    const mainId = plan.data!.items.find((i) => i.key === "main")!.workItemId;
+    assert.ok(h1.svc.updateCampaignWorkItem("custom-overlap", {
+      workItemId: depId, stage: { stage: "merge_queued", pullRequests: [{ repository: "team/dep", number: 7 }] },
+    }).ok);
+    assert.ok(h1.svc.updateCampaignWorkItem("custom-overlap", {
+      workItemId: mainId, stage: { stage: "in_review", pullRequests: [{ repository: "team/repo", number: 81 }] },
+    }).ok);
+
+    const depRef = { repository: "team/dep", number: 7 };
+    const mergedObs = {
+      state: "merged" as const, draft: false, headSha: "e".repeat(40), baseRef: "main",
+      reviewDecision: "approved" as const,
+      checks: { state: "passing" as const, passing: 1, failing: 0, pending: 0 },
+      requiredChecks: { state: "passing" as const, passing: 1, failing: 0, pending: 0 },
+      mergeQueue: null, mergeCommitSha: "f".repeat(40),
+    };
+    h1.db.campaignForgeObservations.record("custom-overlap", "r", [{ ref: depRef, observation: mergedObs }], Date.now());
+
+    let readCount = 0;
+    let firstReadReached!: () => void;
+    const firstReadEntered = new Promise<void>((resolve) => { firstReadReached = resolve; });
+    let releaseFirstRead!: () => void;
+    const firstReadGate = new Promise<void>((resolve) => { releaseFirstRead = resolve; });
+    h1.svc.campaignForgeReadNow = async (_campaignId, refs) => {
+      const idx = ++readCount;
+      if (idx === 1) {
+        firstReadReached();
+        await firstReadGate;
+      }
+      const results = refs.map((ref) => ({ ref, observation: mergedObs }));
+      h1.db.campaignForgeObservations.record("custom-overlap", "r", results, Date.now());
+      return results;
+    };
+
+    const mergeSnap: WorkflowDecisionResourceSnapshot = {
+      category: "pr_merge", repository: "team/repo", pullRequest: 81, headSha: HEAD_SHA, reviewResult: "merge",
+      requiredChecks: { headSha: HEAD_SHA, status: "passed", checkedAt: 10, checks: [{ name: "CI", state: "passed" }] },
+      intendedClosures: ["team/repo#42"],
+    };
+    const created = await h1.svc.createWorkflowDecisionWithVideo("custom-overlap", {
+      requestId: "r6-overlap", resourceKey: "team/repo#81", resourceSnapshot: mergeSnap,
+    });
+    assert.equal(created.status, 201, created.error ?? "Custom root merge created");
+    const occId = created.data!.occurrenceId;
+    assert.equal(h1.svc.approve("custom-overlap", occId, "approve", h1.owner).ok, true);
+
+    const origRequest = h1.hub.requestFromRunner;
+    const dispatchedKinds: string[] = [];
+    h1.hub.requestFromRunner = (async (runnerId: string, requestId: string, message: ControlPlaneToRunner, timeoutMs?: number) => {
+      if (message.type === "forge_decision_action") {
+        dispatchedKinds.push(message.action.kind);
+        if (message.action.kind === "pr_merge_enqueue") {
+          return {
+            type: "forge_decision_action_result", requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId,
+            outcome: "uncertain",
+          };
+        }
+        if (message.action.kind === "pr_merge_observe") {
+          return {
+            type: "forge_decision_action_result", requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId,
+            outcome: "already_merged",
+          };
+        }
+      }
+      return origRequest(runnerId, requestId, message, timeoutMs);
+    }) as Hub["requestFromRunner"];
+
+    // Start slow execute (paused in prerequisite read), run fast execute to uncertain enqueue,
+    // replace Location ID, then release slow execute.
+    const slowExec = h1.svc.executeWorkflowDecision("custom-overlap", occId, { resourceDigest: created.data!.resourceDigest });
+    await firstReadEntered;
+    const fastExec = await h1.svc.executeWorkflowDecision("custom-overlap", occId, { resourceDigest: created.data!.resourceDigest });
+    assert.equal(fastExec.ok, true);
+    assert.equal(fastExec.data!.forgeAction?.outcome, "uncertain");
+    assert.deepEqual(dispatchedKinds, ["pr_merge_enqueue"]);
+
+    const project2 = h1.db.createProject({ name: "Rehomed Custom Project", now: 3 });
+    const locReplacement = h1.db.addProjectLocation(project2.id, { runnerId: "r", workspaceId: "w", addedByUserId: h1.principal.userId }, 3);
+    h1.db.raw().prepare("UPDATE sessions SET project_id = ?, project_location_id = ? WHERE id = ?").run(project2.id, locReplacement.id, "custom-overlap");
+
+    releaseFirstRead();
+    const slowRes = await slowExec;
+    assert.equal(slowRes.ok, false);
+    assert.equal(slowRes.status, 409);
+    assert.equal(h1.db.workflowDecisionByOccurrence(occId)!.status, "approved", "overlapping execute never revokes uncertain merge");
+    assert.deepEqual(dispatchedKinds, ["pr_merge_enqueue"], "only one enqueue was dispatched");
+
+    const reconciled = await h1.svc.reconcileWorkflowDecision("custom-overlap", occId, { resourceSnapshot: mergeSnap });
+    assert.equal(reconciled.ok, true, reconciled.error ?? "read-only reconciliation succeeds after overlapping execute");
+    assert.equal(reconciled.data!.status, "consumed");
+    assert.deepEqual(dispatchedKinds, ["pr_merge_enqueue", "pr_merge_observe"]);
+  } finally {
+    h1.db.close();
+  }
+
+  // Finding 2: retrying an approved merge with an expired `in_progress` enqueue converts it to
+  // `uncertain` without dispatching a second enqueue and brings it into mergeClosureWatchTargets().
+  const h2 = makeHarness({ driver: "acp" });
+  try {
+    const mergeSnap: WorkflowDecisionResourceSnapshot = {
+      category: "pr_merge", repository: "team/repo", pullRequest: 82, headSha: HEAD_SHA, reviewResult: "merge",
+      requiredChecks: { headSha: HEAD_SHA, status: "passed", checkedAt: 10, checks: [{ name: "CI", state: "passed" }] },
+      intendedClosures: ["team/repo#42"],
+    };
+    const created = await h2.svc.createWorkflowDecisionWithVideo("solo", {
+      requestId: "r6-stale-in-progress", resourceKey: "team/repo#82", resourceSnapshot: mergeSnap,
+    });
+    assert.equal(created.status, 201);
+    const occId = created.data!.occurrenceId;
+    assert.equal(h2.svc.approve("solo", occId, "approve", h2.owner).ok, true);
+
+    // Seed an expired `in_progress` enqueue (older than 2 * FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS).
+    const staleTimestamp = Date.now() - 10 * 60_000;
+    assert.ok(h2.db.beginWorkflowDecisionForgeAction(occId, "pr_merge_enqueue", staleTimestamp, 60_000));
+    assert.equal(h2.db.workflowDecisionByOccurrence(occId)!.forgeAction?.outcome, "in_progress");
+    assert.equal(h2.db.mergeClosureWatchTargets().some((d) => d.occurrenceId === occId), false, "in_progress merge is outside watch targets before expiry");
+
+    const retry = await h2.svc.executeWorkflowDecision("solo", occId, { resourceDigest: created.data!.resourceDigest });
+    assert.equal(retry.ok, false);
+    assert.equal(retry.status, 409);
+    assert.match(retry.error ?? "", /reconcile_workflow_decision/u);
+    assert.equal(h2.forgeActions.length, 0, "expired in_progress retry never dispatches a second enqueue");
+    const after = h2.db.workflowDecisionByOccurrence(occId)!;
+    assert.equal(after.status, "approved");
+    assert.equal(after.forgeAction?.outcome, "uncertain");
+    assert.equal(h2.db.mergeClosureWatchTargets().some((d) => d.occurrenceId === occId), true, "expired enqueue now enters mergeClosureWatchTargets()");
+  } finally {
+    h2.db.close();
+  }
+});
