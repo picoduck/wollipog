@@ -17158,6 +17158,14 @@ export class SessionsService {
         "Wollipog-performed forge actions");
       if (unsupported) return unsupported;
     }
+    // An uncertain or in-progress merge enqueue cannot be replayed; refuse before authority checks
+    // can revoke the approval so a duplicate execute call never destroys a reconcileable merge (#4894).
+    if (kind === "pr_merge_enqueue" &&
+        (decision.forgeAction?.outcome === "uncertain" || decision.forgeAction?.outcome === "in_progress")) {
+      return fail(decision.forgeAction.outcome === "uncertain"
+        ? "the earlier enqueue may have run, so it is not replayed: reconcile_workflow_decision once the pull request reads MERGED"
+        : "Wollipog is already performing this decision", 409);
+    }
     // A publication whose earlier attempt may have run only looks for its issue from then on. A
     // dispatch still `in_progress` here is one the begin below will read as stale, so uncertain too.
     let createdIssue = decision.forgeAction?.publicationCreatedIssue;

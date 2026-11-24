@@ -1342,6 +1342,14 @@ test("review round 4 regressions: reassigned Location ID preserves read-only mer
     const loc2 = h1.db.addProjectLocation(project2.id, { runnerId: "r", workspaceId: "w", addedByUserId: h1.principal.userId }, 3);
     h1.db.raw().prepare("UPDATE sessions SET project_id = ?, project_location_id = ? WHERE id = ?").run(project2.id, loc2.id, "solo");
 
+    // Round 5 Finding 1: repeating executeWorkflowDecision after Location replacement dispatches
+    // nothing and leaves the occurrence approved so reconcileWorkflowDecision can still settle it.
+    const duplicate = await h1.svc.executeWorkflowDecision("solo", occId, { resourceDigest: created.data!.resourceDigest });
+    assert.equal(duplicate.ok, false);
+    assert.equal(duplicate.status, 409);
+    assert.equal(h1.db.workflowDecisionByOccurrence(occId)!.status, "approved", "duplicate execute never revokes uncertain merge");
+    assert.deepEqual(dispatchedKinds, ["pr_merge_enqueue"], "duplicate execute dispatches nothing");
+
     const reconciled = await h1.svc.reconcileWorkflowDecision("solo", occId, { resourceSnapshot: mergeSnap });
     assert.equal(reconciled.ok, true, reconciled.error ?? "read-only reconciliation succeeds after Project Location ID change");
     assert.equal(reconciled.data!.status, "consumed");
