@@ -1293,3 +1293,152 @@ test("review round 2 regressions: runner-bound Location dispatch, unscoped Custo
     h3.db.close();
   }
 });
+
+test("review round 4 regressions: reassigned Location ID preserves read-only merge reconciliation and uncertain publication observation (#4894)", async () => {
+  // Finding 1: uncertain standalone pr_merge_enqueue still reconciles read-only after reassigning
+  // the session to another Project Location ID for the same runner and checkout.
+  const h1 = makeHarness({ driver: "acp" });
+  try {
+    const mergeSnap: WorkflowDecisionResourceSnapshot = {
+      category: "pr_merge", repository: "team/repo", pullRequest: 71, headSha: HEAD_SHA, reviewResult: "merge",
+      requiredChecks: { headSha: HEAD_SHA, status: "passed", checkedAt: 10, checks: [{ name: "CI", state: "passed" }] },
+      intendedClosures: ["team/repo#42"],
+    };
+    const created = await h1.svc.createWorkflowDecisionWithVideo("solo", {
+      requestId: "r4-merge", resourceKey: "team/repo#71", resourceSnapshot: mergeSnap,
+    });
+    assert.equal(created.status, 201);
+    const occId = created.data!.occurrenceId;
+    assert.equal(h1.svc.approve("solo", occId, "approve", h1.owner).ok, true);
+
+    const origRequest = h1.hub.requestFromRunner;
+    const dispatchedKinds: string[] = [];
+    h1.hub.requestFromRunner = (async (runnerId: string, requestId: string, message: ControlPlaneToRunner, timeoutMs?: number) => {
+      if (message.type === "forge_decision_action") {
+        dispatchedKinds.push(message.action.kind);
+        if (message.action.kind === "pr_merge_enqueue") {
+          return {
+            type: "forge_decision_action_result", requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId,
+            outcome: "uncertain",
+          };
+        }
+        if (message.action.kind === "pr_merge_observe") {
+          return {
+            type: "forge_decision_action_result", requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId,
+            outcome: "already_merged",
+          };
+        }
+      }
+      return origRequest(runnerId, requestId, message, timeoutMs);
+    }) as Hub["requestFromRunner"];
+
+    const unc = await h1.svc.executeWorkflowDecision("solo", occId, { resourceDigest: created.data!.resourceDigest });
+    assert.equal(unc.ok, true);
+    assert.equal(unc.data!.forgeAction?.outcome, "uncertain");
+    assert.deepEqual(dispatchedKinds, ["pr_merge_enqueue"]);
+
+    // File the session into a second Project with a new Location ID for the same runner and workspace.
+    const project2 = h1.db.createProject({ name: "Rehomed Project", now: 3 });
+    const loc2 = h1.db.addProjectLocation(project2.id, { runnerId: "r", workspaceId: "w", addedByUserId: h1.principal.userId }, 3);
+    h1.db.raw().prepare("UPDATE sessions SET project_id = ?, project_location_id = ? WHERE id = ?").run(project2.id, loc2.id, "solo");
+
+    const reconciled = await h1.svc.reconcileWorkflowDecision("solo", occId, { resourceSnapshot: mergeSnap });
+    assert.equal(reconciled.ok, true, reconciled.error ?? "read-only reconciliation succeeds after Project Location ID change");
+    assert.equal(reconciled.data!.status, "consumed");
+    assert.deepEqual(dispatchedKinds, ["pr_merge_enqueue", "pr_merge_observe"], "no second enqueue was ever dispatched");
+  } finally {
+    h1.db.close();
+  }
+
+  // Finding 2: unscoped Custom root publication with uncertain readback preserves the approval when
+  // no route exists and recovers via issue_publication_observe (never re-creating) under a new Location ID.
+  const h2 = makeHarness({ driver: "acp" });
+  try {
+    const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+    policy.execution = { ...policy.execution, strictProjectIsolation: false };
+    h2.db.createSession({
+      id: "custom-pub-rec", runnerId: "r", workspaceId: "w", agentId: "agent-acp", title: "Custom Pub Rec",
+      useWorktree: false, driver: "acp", role: "orchestrator",
+      projectId: h2.project.id, projectLocationId: h2.location!.id,
+      orchestratorPolicy: policy, parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
+      now: 1, config: {},
+    });
+    h2.db.updateSessionStatus("custom-pub-rec", "running", 2);
+
+    const pubSnap: WorkflowDecisionResourceSnapshot = {
+      category: "follow_up_issue_publication", repository: "team/repo",
+      sanitizedTitle: "Recovered publication", sanitizedBody: "Exact body.", labels: ["bug"],
+    };
+    const created = await h2.svc.createWorkflowDecisionWithVideo("custom-pub-rec", {
+      requestId: "r4-pub", resourceKey: "r4-pub", resourceSnapshot: pubSnap,
+    });
+    assert.equal(created.status, 201);
+    const occId = created.data!.occurrenceId;
+    assert.equal(h2.svc.approve("custom-pub-rec", occId, "approve", h2.owner).ok, true);
+
+    const origRequest = h2.hub.requestFromRunner;
+    const pubKinds: string[] = [];
+    let failReadback = true;
+    h2.hub.requestFromRunner = (async (runnerId: string, requestId: string, message: ControlPlaneToRunner, timeoutMs?: number) => {
+      if (message.type === "forge_decision_action") {
+        pubKinds.push(message.action.kind);
+        if (message.action.kind === "issue_publication") {
+          return {
+            type: "forge_decision_action_result", requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId,
+            outcome: "published", issue: 91,
+          };
+        }
+        if (message.action.kind === "issue_publication_observe") {
+          assert.equal(message.action.issue, 91, "observe pins the saved creation receipt");
+          return {
+            type: "forge_decision_action_result", requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId,
+            outcome: "already_published", issue: 91,
+          };
+        }
+      }
+      if (message.type === "campaign_launch_inspect" && message.publication) {
+        if (failReadback) {
+          return { type: "campaign_launch_inspection_result", requestId, ok: false, failure: "read_failed" };
+        }
+        return {
+          type: "campaign_launch_inspection_result", requestId, ok: true, workspaceId: message.workspaceId,
+          repository: "team/repo", issueNumbers: message.issueNumbers, digest: "a".repeat(64),
+          candidates: [{ issue: { repository: "team/repo", number: 91 }, title: pubSnap.sanitizedTitle, source: "sub_issue" }],
+        };
+      }
+      return origRequest(runnerId, requestId, message, timeoutMs);
+    }) as Hub["requestFromRunner"];
+
+    // Initial execute creates issue #91, then readback fails -> stays approved + uncertain with publicationCreatedIssue: 91.
+    const first = await h2.svc.executeWorkflowDecision("custom-pub-rec", occId, { resourceDigest: created.data!.resourceDigest });
+    assert.equal(first.ok, true);
+    assert.equal(first.data!.status, "approved");
+    assert.equal(first.data!.forgeAction?.outcome, "uncertain");
+    assert.equal(first.data!.forgeAction?.publicationCreatedIssue, 91);
+    assert.deepEqual(pubKinds, ["issue_publication"]);
+
+    // Remove the Location so no usable route exists: retry refuses WITHOUT revoking the uncertain occurrence.
+    assert.ok(h2.db.removeProjectLocation(h2.location!.id));
+    const withoutRoute = await h2.svc.executeWorkflowDecision("custom-pub-rec", occId, { resourceDigest: created.data!.resourceDigest });
+    assert.equal(withoutRoute.ok, false);
+    const preserved = h2.db.workflowDecisionByOccurrence(occId)!;
+    assert.equal(preserved.status, "approved", "missing route preserves uncertain publication instead of revoking");
+    assert.equal(preserved.forgeAction?.outcome, "uncertain");
+    assert.equal(preserved.forgeAction?.publicationCreatedIssue, 91);
+    assert.deepEqual(pubKinds, ["issue_publication"]);
+
+    // Re-register the same checkout under a replacement Location ID and restore readback: retry dispatches ONLY observe and settles.
+    const locReplacement = h2.db.addProjectLocation(h2.project.id, { runnerId: "r", workspaceId: "w", addedByUserId: h2.principal.userId }, 4);
+    h2.db.raw().prepare("UPDATE sessions SET project_location_id = ? WHERE id = ?").run(locReplacement.id, "custom-pub-rec");
+    failReadback = false;
+    const recovered = await h2.svc.executeWorkflowDecision("custom-pub-rec", occId, { resourceDigest: created.data!.resourceDigest });
+    assert.equal(recovered.ok, true, recovered.error ?? "publication recovery observes and settles under replacement Location ID");
+    assert.equal(recovered.data!.status, "consumed");
+    assert.equal(recovered.data!.forgeAction?.outcome, "already_published");
+    assert.equal(recovered.data!.forgeAction?.publishedIssue, 91);
+    assert.equal(recovered.data!.forgeAction?.publicationVerified, true);
+    assert.deepEqual(pubKinds, ["issue_publication", "issue_publication_observe"], "retry never dispatches a second issue_publication");
+  } finally {
+    h2.db.close();
+  }
+});

@@ -17158,6 +17158,11 @@ export class SessionsService {
         "Wollipog-performed forge actions");
       if (unsupported) return unsupported;
     }
+    // A publication whose earlier attempt may have run only looks for its issue from then on. A
+    // dispatch still `in_progress` here is one the begin below will read as stale, so uncertain too.
+    let createdIssue = decision.forgeAction?.publicationCreatedIssue;
+    const lookOnly = snapshot.category === "follow_up_issue_publication" &&
+      (createdIssue !== undefined || decision.forgeAction?.outcome === "uncertain" || decision.forgeAction?.outcome === "in_progress");
     const authorityCurrent = (): boolean => {
       const currentChild = this.db.getSession(sessionId);
       const currentParent = this.db.getSession(decision.controllingSessionId);
@@ -17176,10 +17181,10 @@ export class SessionsService {
         canAccess(currentChild.id) && canAccess(currentParent.id) &&
         (directForge || directOwner || this.workflowDecisionRelationship(currentParent.id, currentChild.id)) &&
         policy.revision === decision.policyRevision &&
-        this.workflowDecisionAuthorityCurrent(currentParent, policy, latest));
+        this.workflowDecisionAuthorityCurrent(currentParent, policy, latest, { observingPublication: lookOnly }));
     };
     if (!child || !parent || !authorityCurrent()) {
-      if (decision.status === "approved") {
+      if (decision.status === "approved" && !lookOnly) {
         this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
       }
       return fail("workflow decision authority was revoked or ancestry changed before the action", 409);
@@ -17187,11 +17192,6 @@ export class SessionsService {
     const excludedRepository = this.excludedRepositoryRefusal(child, parent, snapshot);
     if (excludedRepository) return fail(excludedRepository, 409);
     let action: ForgeDecisionAction;
-    // A publication whose earlier attempt may have run only looks for its issue from then on. A
-    // dispatch still `in_progress` here is one the begin below will read as stale, so uncertain too.
-    let createdIssue = decision.forgeAction?.publicationCreatedIssue;
-    const lookOnly = snapshot.category === "follow_up_issue_publication" &&
-      (createdIssue !== undefined || decision.forgeAction?.outcome === "uncertain" || decision.forgeAction?.outcome === "in_progress");
     let publicationPlace: ReturnType<SessionsService["publicationPlace"]> = null;
     if (snapshot.category === "ci_rerun") {
       const { category: _category, jobName: _jobName, ...target } = snapshot;
@@ -17333,7 +17333,7 @@ export class SessionsService {
       if (!authorityCurrent()) {
         finish("refused", { reason: "runner_unavailable", summary: "Authority changed while the action was being prepared; nothing was performed." });
         const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
-        if (latest?.status === "approved") this.revokeWorkflowDecision(latest, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
+        if (latest?.status === "approved" && !lookOnly) this.revokeWorkflowDecision(latest, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
         return this.forgeActionResult(sessionId, parent.id, occurrenceId);
       }
       // The review run may have moved during the forge read too: an uncited merge is only as good as
@@ -18464,7 +18464,7 @@ export class SessionsService {
     controller: SessionView,
     policy: ParentControlPolicy,
     decision: WorkflowDecisionView,
-    options: { recordingCompletedMerge?: boolean } = {},
+    options: { recordingCompletedMerge?: boolean; observingPublication?: boolean } = {},
   ): boolean {
     const superseded = decision.authorityEvaluation?.supersededOwnerRule;
     // Keep removes authority to start new work. Recording an exact, already-armed merge after
@@ -18502,7 +18502,11 @@ export class SessionsService {
         runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, requesterForgeCapability(decision.category)));
     }
     if (requester && this.directOwnerSelfDecision(requester, controller, decision)) {
-      if (decision.authorityEvaluation?.verifiedLocationId) {
+      // Exact verifiedLocationId equality gates arming, manual consumption, and new writes; read-only
+      // settlement of a completed merge or observation of an already-attempted publication still settles
+      // when the same checkout is filed under a replacement Project Location ID (#4894).
+      if (decision.authorityEvaluation?.verifiedLocationId &&
+          !options.recordingCompletedMerge && !options.observingPublication) {
         const currentLocation = this.requesterForgeDecisionLocation(requester);
         if (!currentLocation || currentLocation.id !== decision.authorityEvaluation.verifiedLocationId) {
           return false;
