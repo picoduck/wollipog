@@ -71,6 +71,8 @@ test("redaction removes credentials and private paths while retaining repository
   assert.doesNotMatch(output, /abc|hidden|Users|private|opaque-secret/u);
   assert.match(output, /\[redacted\]/u);
   assert.equal(sanitizeStartupOutput("at f (file:///home/private/file.ts:12:3)", []), "at f ([path]");
+  assert.equal(sanitizeStartupOutput("file:/home/private/x.js cwd:/tmp/private/y cwd:C:\\Users\\private\\z", []),
+    "file:[path] cwd:[path] cwd:[path]");
   assert.equal(sanitizeStartupOutput("at f (file:///home/u/repo/apps/control-plane/src/db.ts:12:3) GET http://127.0.0.1:9/healthz HTTP/1.1", [], "/home/u/repo"),
     "at f (file://[repo]apps/control-plane/src/db.ts:12:3) GET http://127.0.0.1:9/healthz HTTP/1.1");
 });

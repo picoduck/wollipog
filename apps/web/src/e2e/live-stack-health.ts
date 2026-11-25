@@ -14,6 +14,7 @@ export function sanitizeStartupOutput(value: string, secrets: readonly string[],
     .replace(/\x1b\[[0-9;]*[A-Za-z]/gu, "")
     .replace(/\bBearer\s+\S+/giu, "Bearer [redacted]")
     .replace(/(?<![\w-])((?:[\w-]*(?:token|secret|password|authorization|api[_-]?key)[\w-]*)["']?\s*[:=]\s*)[^\r\n]+/giu, "$1[redacted]")
+    .replace(/(?<=:)(?:[A-Za-z]:[\\/]|\/(?!\/))[^\s"'<>]+/gu, "[path]")
     .replace(/(?<![\w:/\]])(?:file:\/\/)?(?:[A-Za-z]:[\\/]|\/)[^\s"'<>]+/gu, "[path]");
 }
 
