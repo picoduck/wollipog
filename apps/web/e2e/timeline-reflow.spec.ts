@@ -42,6 +42,7 @@ const test = base.extend<{ consoleErrorGuard: void; resizeObserverLoopGuard: boo
         });
       });
     });
+    await installPaintedTailSampler(page);
     await use();
     expect(errors, "the timeline logged unexpected browser console errors").toEqual([]);
     const loopErrors = await page.evaluate(() => (window as LoopErrorHost).__resizeObserverLoopErrors ?? []);
@@ -404,25 +405,20 @@ async function startStreamedGrowthRecorder(page: Page) {
       finished: new Promise<void>((resolve) => { finish = resolve; }),
     };
     host.__streamedGrowthRecorder = recorder;
-    const scheduleSample = () => requestAnimationFrame(() => setTimeout(sample, 0));
+    // Record the final pre-paint geometry through the same observer as the tail checks.
+    // A timer may run after React has repaired offsets that were stale at paint.
+    const sampler = (window as PaintedTailHost).__paintedTailSampler!;
+    const scheduleSample = () => requestAnimationFrame(() => {
+      if (recorder.active) scheduleSample();
+      else finish();
+    });
     const sample = () => {
       // Estimate-backed geometry is deliberately unpainted (opacity 0) until its first seed; the
       // dedicated session-return test asserts that invariant. This recorder samples only frames a
       // reader could actually see.
-      const root = document.querySelector<HTMLElement>("[data-virtual-measurements]");
-      if (!root || root.dataset.virtualMeasurements !== "ready" || getComputedStyle(root).opacity === "0") {
-        if (recorder.active) scheduleSample();
-        else finish();
-        return;
-      }
+      if (!sampler.latestRows) return;
       recorder.frames += 1;
-      const rows = [...document.querySelectorAll<HTMLElement>("[data-virtual-row]")]
-        .map((row) => ({
-          index: Number(row.dataset.index),
-          key: row.dataset.virtualKey,
-          rect: row.getBoundingClientRect(),
-        }))
-        .sort((left, right) => left.index - right.index);
+      const rows = sampler.latestRows;
       const overlapIndex = rows.findIndex((row, index) =>
         index > 0 && row.rect.top + 0.5 < rows[index - 1]!.rect.bottom);
       if (overlapIndex > 0) {
@@ -447,9 +443,9 @@ async function startStreamedGrowthRecorder(page: Page) {
         recorder.alternationFrames += 1;
       }
       if (signatures.length > 8) signatures.shift();
-      if (recorder.active) scheduleSample();
-      else finish();
     };
+    sampler.latestRows = undefined;
+    sampler.recordRows = sample;
     scheduleSample();
   });
 }
@@ -461,6 +457,7 @@ async function stopStreamedGrowthRecorder(page: Page) {
       .__streamedGrowthRecorder;
     if (!recorder) throw new Error("Streamed growth recorder is missing.");
     recorder.active = false;
+    (window as PaintedTailHost).__paintedTailSampler!.recordRows = undefined;
     await recorder.finished;
     return {
       frames: recorder.frames,
@@ -479,6 +476,8 @@ interface PaintedTailFrame {
 }
 
 interface PaintedTailSampler {
+  recordRows?: () => void;
+  latestRows?: Array<{ index: number; key: string | undefined; rect: DOMRect }>;
   active: boolean;
   frameTime: number | null;
   latest: PaintedTailFrame | null;
@@ -506,6 +505,14 @@ async function installPaintedTailSampler(page: Page) {
     const sampler: PaintedTailSampler = { active: false, frameTime: null, latest: null, frames: [] };
     (window as PaintedTailHost).__paintedTailSampler = sampler;
     const record = () => {
+      if (sampler.recordRows) {
+        const root = document.querySelector<HTMLElement>("[data-virtual-measurements]");
+        sampler.latestRows = root?.dataset.virtualMeasurements === "ready" && getComputedStyle(root).opacity !== "0"
+          ? [...root.querySelectorAll<HTMLElement>("[data-virtual-row]")]
+            .map((row) => ({ index: Number(row.dataset.index), key: row.dataset.virtualKey, rect: row.getBoundingClientRect() }))
+            .sort((left, right) => left.index - right.index)
+          : undefined;
+      }
       if (!sampler.active) return;
       const reader = document.querySelector<HTMLElement>("[data-testid='reader']");
       if (!reader) return;
@@ -516,6 +523,7 @@ async function installPaintedTailSampler(page: Page) {
     };
     const microtaskHops = 16;
     const recordAfterCallback = () => {
+      if (!sampler.active && !sampler.recordRows) return;
       record();
       let hops = microtaskHops;
       const hop = () => {
@@ -528,6 +536,7 @@ async function installPaintedTailSampler(page: Page) {
     const nativeRequestAnimationFrame = window.requestAnimationFrame.bind(window);
     window.requestAnimationFrame = (callback) => nativeRequestAnimationFrame((time) => {
       if (sampler.frameTime !== time) {
+        sampler.recordRows?.();
         if (sampler.active && sampler.latest) sampler.frames.push(sampler.latest);
         sampler.frameTime = time;
       }
@@ -1550,7 +1559,6 @@ test("a reader-driven return to a streaming tail resumes following", async ({ pa
 });
 
 async function openFollowedTail(page: Page) {
-  await installPaintedTailSampler(page);
   await page.goto("/timeline-reflow-e2e.html?follow=1");
   const reader = page.getByTestId("reader");
   await expect(page.locator("[data-virtual-row]").first()).toBeVisible();
@@ -1719,6 +1727,9 @@ test.describe("the painted-frame checks can fail", () => {
 });
 
 test("streamed growth above later rows keeps every painted frame disjoint", async ({ page }) => {
+  // Expose observer-to-paint scheduling gaps without relaxing the overlap assertion.
+  const client = await page.context().newCDPSession(page);
+  await client.send("Emulation.setCPUThrottlingRate", { rate: 6 });
   await page.goto("/timeline-reflow-e2e.html");
   await expect(page.locator("[data-virtual-row]").first()).toBeVisible();
   await settleLayout(page);
