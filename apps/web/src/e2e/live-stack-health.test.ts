@@ -1,0 +1,70 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { createServer } from "node:http";
+import { test } from "node:test";
+import { sanitizeStartupOutput, waitForLiveStackHealth } from "./live-stack-health.js";
+
+test("a never-answering listener has a finite deadline and useful sanitized diagnostics", async () => {
+  const server = createServer(() => {});
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert(address && typeof address === "object");
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);
+  try {
+    const started = performance.now();
+    await assert.rejects(waitForLiveStackHealth(`http://127.0.0.1:${address.port}`, child,
+      () => "booting\ntoken=private-token\n/home/private/worktree/index.ts\n", {
+        phase: "initial startup", secrets: ["private-token"], timeoutMs: 150,
+      }), (error: Error) => {
+      assert.match(error.message, /startup=initial startup; phase=process spawned; elapsedMs=\d+/u);
+      assert.match(error.message, /process=running; exitCode=null; signal=null/u);
+      assert.match(error.message, /lastHealthProbe=probe timed out/u);
+      assert.match(error.message, /booting/u);
+      assert.doesNotMatch(error.message, /private-token|\/home\/private/u);
+      return true;
+    });
+    assert(performance.now() - started < 2_000, "hung probe must not defeat the deadline");
+  } finally {
+    child.kill("SIGKILL");
+    await once(child, "exit");
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+});
+
+test("early process exit reports exit status without waiting for the readiness deadline", async () => {
+  const child = spawn(process.execPath, ["-e", "process.exit(23)"]);
+  await once(child, "exit");
+  await assert.rejects(waitForLiveStackHealth("http://127.0.0.1:1", child, () => "startup failed", {
+    phase: "restart", secrets: [],
+  }), (error: Error) => {
+    assert.match(error.message, /startup=restart; phase=process spawned; elapsedMs=\d+/u);
+    assert.match(error.message, /process=exited; exitCode=23; signal=null/u);
+    assert.match(error.message, /lastHealthProbe=not attempted/u);
+    assert.match(error.message, /startup failed/u);
+    return true;
+  });
+});
+
+test("non-healthy listener reports its last HTTP status", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => new Response(null, { status: 503 }));
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);
+  try {
+    await assert.rejects(waitForLiveStackHealth("http://fixture", child, () => "", {
+      phase: "initial startup", secrets: [], timeoutMs: 200,
+    }), /phase=health listener responded;[\s\S]*lastHealthProbe=HTTP 503/u);
+  } finally {
+    child.kill("SIGKILL");
+    await once(child, "exit");
+  }
+});
+
+test("output is bounded and removes credentials and Unix and Windows paths", () => {
+  const output = sanitizeStartupOutput("x".repeat(10_000) +
+    '\nBearer abc\n{"api_key":"hidden"}\nC:\\Users\\private\\file\n/tmp/private/file\nopaque-secret', ["opaque-secret"]);
+  assert(output.length <= 8_192);
+  assert.doesNotMatch(output, /abc|hidden|Users|private|opaque-secret/u);
+  assert.match(output, /\[redacted\]/u);
+});

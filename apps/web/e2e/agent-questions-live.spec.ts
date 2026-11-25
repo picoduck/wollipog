@@ -1,4 +1,5 @@
 import { ControlPlaneDb } from "../../control-plane/src/db.js";
+import { sanitizeStartupOutput, waitForLiveStackHealth } from "../src/e2e/live-stack-health.js";
 import { openMobileQuestion } from "./open-mobile-question.js";
 import { expect, test, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -80,20 +81,6 @@ async function stopChild(child: ChildProcess | null): Promise<void> {
     new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise())),
     delay(3_000),
   ]);
-}
-
-async function waitForHealth(baseUrl: string, child: ChildProcess, logs: () => string): Promise<void> {
-  for (let attempt = 0; attempt < 400; attempt += 1) {
-    if (child.exitCode !== null) throw new Error(`control plane exited early (${child.exitCode})\n${logs()}`);
-    try {
-      const response = await fetch(`${baseUrl}/healthz`);
-      if (response.ok) return;
-    } catch {
-      // The listener is not ready yet.
-    }
-    await delay(50);
-  }
-  throw new Error(`control plane did not become healthy\n${logs()}`);
 }
 
 async function fetchSession(stack: Pick<LiveStack, "httpBase" | "ownerToken" | "sessionId">): Promise<SessionView> {
@@ -210,6 +197,7 @@ async function startLiveStack(
 
   const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
 
+  const startupSecrets = [ownerToken, CONTROL_PLANE_TOKEN];
   let controlPlaneOutput = "";
   let runnerOutput = "";
   let controlPlane: ChildProcess | null = null;
@@ -262,7 +250,7 @@ async function startLiveStack(
     runner = child;
     return child;
   };
-  const logs = () => `=== CONTROL PLANE ===\n${controlPlaneOutput}\n=== RUNNER ===\n${runnerOutput}`;
+  const logs = () => `=== CONTROL PLANE ===\n${sanitizeStartupOutput(controlPlaneOutput, startupSecrets)}\n=== RUNNER ===\n${sanitizeStartupOutput(runnerOutput, startupSecrets)}`;
   const stop = async () => {
     await stopChild(runner);
     await stopChild(controlPlane);
@@ -271,7 +259,7 @@ async function startLiveStack(
 
   try {
     const initialControlPlane = spawnControlPlane();
-    await waitForHealth(httpBase, initialControlPlane, logs);
+    await waitForLiveStackHealth(httpBase, initialControlPlane, logs, { phase: "initial startup", secrets: startupSecrets });
     const credentialResponse = await fetch(`${httpBase}/api/runner-credentials`, {
       method: "POST",
       headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
@@ -281,6 +269,7 @@ async function startLiveStack(
       throw new Error(`runner credential creation failed: ${credentialResponse.status}\n${logs()}`);
     }
     const runnerToken = ((await credentialResponse.json()) as { token: string }).token;
+    startupSecrets.push(runnerToken);
 
     const agent = provider === "codex"
       ? {
@@ -356,7 +345,7 @@ async function startLiveStack(
       await stopChild(controlPlane);
       controlPlane = null;
       const restartedControlPlane = spawnControlPlane();
-      await waitForHealth(httpBase, restartedControlPlane, logs);
+      await waitForLiveStackHealth(httpBase, restartedControlPlane, logs, { phase: "restart", secrets: startupSecrets });
       const restartedRunner = restartRunner ? spawnRunner() : runner!;
       let lastSession: SessionView | null = null;
       for (let attempt = 0; attempt < 100; attempt += 1) {
