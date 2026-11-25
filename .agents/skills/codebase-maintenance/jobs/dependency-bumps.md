@@ -43,8 +43,10 @@ request merges, the next weekly run opens a fresh one covering every member.
   retry date. A gate can be supplied by the updater even when no repository cooldown is set:
   the October 19 npm log passed `--config.minimum-release-age=4320` (three days).
 - `pnpm audit --json` for known advisories. Do not run `pnpm audit --fix`; it changes the tree.
-- For every Rust lockfile, `cargo update --dry-run` for the version gap and `cargo audit` for
-  advisories, each run from the lockfile's directory. Enumerate them with
+- For every Rust lockfile, `cargo update --dry-run` for the version gap and
+  `cargo audit --db <run scratch dir>/<lockfile-name>-advisory-db` for advisories, each run from
+  the lockfile's directory, using a distinct name per lockfile. The shared default DB lock may be
+  read-only in isolated sessions. Enumerate them with
   `find . -name Cargo.lock -not -path '*/target/*' -not -path '*/node_modules/*'` rather than
   assuming `apps/desktop/src-tauri` is the only one: `apps/runner/native-media-core` arrived on
   2026-10-16 with 18 advisories, and the 2026-10-28 run found it only through a Dependabot run
