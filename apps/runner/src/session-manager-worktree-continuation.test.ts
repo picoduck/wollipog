@@ -836,6 +836,7 @@ test("stopping a session while a stale continuation discards its prepared checkp
     const internals = manager as unknown as {
       persistedWorktreeFailure: (meta: unknown, path: string, branch: string) => Promise<string | null>;
       worktreeIsolationNotice: (meta: unknown, path: string) => Promise<SessionWorktreeIsolationNotice>;
+      active: Map<string, { running: boolean }>;
     };
     const origProof = internals.persistedWorktreeFailure.bind(manager);
     let proofCalls = 0;
@@ -864,6 +865,11 @@ test("stopping a session while a stale continuation discards its prepared checkp
     const selectB = manager.selectWorktree(sessionId, wtB!.worktree.path);
     await selectBActivationGate.arrived;
 
+    // Retain the live entry so we can deterministically wait for the old drain (and its awaited
+    // discardPreparedCheckpoint / post-cleanup status guard) to finish after stop().
+    const oldEntry = internals.active.get(sessionId)!;
+    assert.equal(oldEntry.running, true);
+
     // When A unwinds into discardPreparedCheckpoint(), stop the session immediately on the next
     // microtask while async Git ref deletion (deleteTurnRef) is still in flight.
     const origReadMeta = store.readMeta.bind(store);
@@ -879,10 +885,8 @@ test("stopping a session while a stale continuation discards its prepared checkp
     };
 
     proofGate.open();
-    await waitFor(() => stoppedDuringCheckpointCleanup && store.readMeta(sessionId)?.status === "stopped",
-      "stop did not run during stale-continuation checkpoint cleanup");
-    // Wait long enough for deleteTurnRef and runPrompt's post-cleanup return to complete.
-    await settle();
+    await waitFor(() => stoppedDuringCheckpointCleanup && oldEntry.running === false,
+      "old drain did not finish checkpoint cleanup after stop");
 
     assert.equal(store.readMeta(sessionId)?.status, "stopped",
       "stale-continuation checkpoint cleanup must not overwrite persisted stopped status with idle");

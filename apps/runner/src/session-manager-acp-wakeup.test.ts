@@ -57,7 +57,7 @@ function fakeAcpFactory(options: {
       pid: 10_000 + launchIndex,
       posixBoundary: { owner: undefined, terminate: async () => true },
     }) as unknown as AgentProcess;
-    const sessionId = `acp-session-${launchIndex}`;
+    let sessionId = `acp-session-${launchIndex}`;
     let pendingPromptId: number | null = null;
     const proc: FakeAcpProcess = {
       child,
@@ -103,6 +103,9 @@ function fakeAcpFactory(options: {
             },
           }) + "\n");
         } else if ((msg.method === "session/new" || msg.method === "session/resume") && msg.id !== undefined) {
+          if (msg.method === "session/resume" && typeof msg.params?.sessionId === "string") {
+            sessionId = msg.params.sessionId;
+          }
           stdout.write(JSON.stringify({
             jsonrpc: "2.0",
             id: msg.id,
@@ -813,6 +816,113 @@ test("wakeup that starts and settles during diff capture does not restore the pr
     await new Promise((resolve) => setTimeout(resolve, 150));
     assert.equal(fake.processes[1]!.prompts.length, 0,
       "superseded turn must never submit an automatic continuation prompt");
+
+    manager.stop(sessionId);
+    await manager.delete(sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ACP wakeup during prompt preparation does not suppress the upcoming turn's worktree continuation (#4905)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-acp-wakeup-pre-submit-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = join(root, "repo");
+    const initialWorktree = join(root, "wt-initial");
+    const externalWorktree = join(root, "wt-pre-submit");
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "acp-pre-submit-initial", initialWorktree, "HEAD"]);
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "acp-pre-submit-wt", externalWorktree, "HEAD"]);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const fake = fakeAcpFactory({
+      autoRespond: (launch, text) => !(launch === 2 && text.startsWith("turn 2")),
+      providerTurnSettleMs: 50,
+      providerTurnResponseSettleMs: 50,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+      fake.factory as never, dataDir, 1);
+
+    const sessionId = "s_acp_wakeup_pre_submit";
+    await manager.start(acpSpec(sessionId, repo));
+    const internals = manager as unknown as {
+      persistedWorktreeFailure: (meta: unknown, path: string, branch: string) => Promise<string | null>;
+      configuredProjectPaths: string[];
+      active: Map<string, {
+        running: boolean;
+        managedGitBoundary?: true;
+        providerInitiatedTurnActive?: boolean;
+      }>;
+    };
+    internals.configuredProjectPaths = [repo];
+    // Attach an initial worktree so runPrompt runs pre-submission persistedWorktreeFailure checks.
+    await manager.attachWorktree(sessionId, initialWorktree);
+    await waitFor(() => fake.processes.length === 2 && store.readMeta(sessionId)?.status === "idle",
+      "initial worktree relaunch did not settle");
+    internals.active.get(sessionId)!.managedGitBoundary = true;
+
+    // Establish the ACP session with an ordinary first turn.
+    manager.prompt(sessionId, "turn 1");
+    await waitFor(() => fake.processes[1]!.prompts.length === 1 && store.readMeta(sessionId)?.status === "idle",
+      "turn 1 did not finish");
+
+    // Gate pre-submission worktree verification for turn 2 before it reaches ACP.
+    let enteredProof!: () => void;
+    let releaseProof!: () => void;
+    const proofEntered = new Promise<void>((resolve) => { enteredProof = resolve; });
+    const proofGate = new Promise<void>((resolve) => { releaseProof = resolve; });
+    const origProof = internals.persistedWorktreeFailure.bind(manager);
+    let gatedProof = false;
+    internals.persistedWorktreeFailure = async (meta, path, branch) => {
+      if (!gatedProof) {
+        gatedProof = true;
+        enteredProof();
+        await proofGate;
+      }
+      return origProof(meta, path, branch);
+    };
+
+    manager.prompt(sessionId, "turn 2");
+    await proofEntered;
+    assert.equal(fake.processes[1]!.prompts.length, 1, "turn 2 must still be paused before ACP submission");
+
+    // Start and settle an unsolicited ACP wakeup while turn 2 is waiting in pre-submission verification.
+    fake.processes[1]!.sendUpdate({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "background ping before turn 2" },
+    });
+    await waitFor(() => internals.active.get(sessionId)?.providerInitiatedTurnActive === true,
+      "unsolicited wakeup did not activate during prompt preparation");
+    await waitFor(() => internals.active.get(sessionId)?.providerInitiatedTurnActive !== true,
+      "unsolicited wakeup did not settle before turn 2 submitted");
+
+    // Release turn 2 so it reaches ACP, then let turn 2 request its own worktree switch.
+    releaseProof();
+    await waitFor(() => fake.processes[1]!.hasPendingPrompt() && fake.processes[1]!.prompts.length === 2,
+      "turn 2 did not reach ACP");
+    const switched = await manager.attachWorktree(sessionId, externalWorktree, { requestedBySession: true });
+    assert.equal(switched.isolation.continuesAfterRelaunch, true,
+      "turn 2 must advertise automatic continuation despite the earlier pre-submission wakeup");
+
+    fake.processes[1]!.respondPrompt("end_turn");
+    await waitFor(() => fake.processes.length === 3 &&
+      fake.processes[2]!.prompts.length === 1 &&
+      store.readMeta(sessionId)?.status === "idle",
+    "relaunched ACP session did not receive automatic continuation for turn 2");
+    assert.equal(fake.processes[2]!.prompts.length, 1);
+    assert.ok(
+      fake.processes[2]!.prompts[0]!.startsWith(
+        worktreeContinuationPrompt({ path: switched.worktree.path, branch: "acp-pre-submit-wt" }),
+      ),
+      `expected continuation prompt, got: ${fake.processes[2]!.prompts[0]}`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(fake.processes[2]!.prompts.length, 1, "continuation must run exactly once");
 
     manager.stop(sessionId);
     await manager.delete(sessionId);

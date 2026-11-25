@@ -17989,6 +17989,8 @@ export class SessionManager {
         entry.providerCapacityFailure = false;
         let caughtCapacityError = false;
         try {
+          // Only a wakeup that starts after this prompt reaches the provider supersedes it (#4905).
+          entry.activeTurnSupersededByProviderWakeup = false;
           entry.providerPromptSubmitted = true;
           stop = await entry.client.prompt(
             retryOriginalInput ? `${text}${workspaceReferenceText}` : PROVIDER_RETRY_CONTINUATION,
@@ -18495,6 +18497,8 @@ export class SessionManager {
 
     let providerPromise: Promise<StopReason>;
     try {
+      // Only a wakeup that starts after this command reaches the provider supersedes it (#4905).
+      entry.activeTurnSupersededByProviderWakeup = false;
       providerPromise = entry.client.invokeCommand(prepared).finally(() => this.flushTextDeltas(sessionId));
     } catch (error) {
       await this.rollbackPreparedCommandCheckpoint(sessionId, entry, checkpoint);
