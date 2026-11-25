@@ -523,6 +523,7 @@ async function installPaintedTailSampler(page: Page) {
     };
     const microtaskHops = 16;
     const recordAfterCallback = () => {
+      if (!sampler.active && !sampler.recordRows) return;
       record();
       let hops = microtaskHops;
       const hop = () => {
@@ -1726,6 +1727,7 @@ test.describe("the painted-frame checks can fail", () => {
 });
 
 test("streamed growth above later rows keeps every painted frame disjoint", async ({ page }) => {
+  // Expose observer-to-paint scheduling gaps without relaxing the overlap assertion.
   const client = await page.context().newCDPSession(page);
   await client.send("Emulation.setCPUThrottlingRate", { rate: 6 });
   await page.goto("/timeline-reflow-e2e.html");
