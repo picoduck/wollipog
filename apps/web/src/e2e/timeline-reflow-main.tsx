@@ -231,6 +231,7 @@ const ledgerItems: TimelineItem[] = [
 const historyStart = Date.now() - 900_000;
 const historyItems: TimelineItem[] = [
   { kind: "user_message", id: 701, text: "Start the release check.", createdAt: historyStart },
+  { kind: "checkpoint", id: 7001, turn: 1 },
   { kind: "stderr", id: 702, text: "codex-cli 0.48.0 starting (model gpt-5.5, sandbox workspace-write)\n" },
   { kind: "agent_message", id: 703, text: "Started the release check; it runs in the background.", createdAt: historyStart + 4_000 },
   { kind: "conversation_checkpoint", id: 704, turn: 1 },
@@ -252,7 +253,16 @@ const historyItems: TimelineItem[] = [
   ledgerTool(714, "Bash: npm run lint", "execute", "completed", 68, 3, "No problems found"),
   { kind: "agent_message", id: 715, text: "All tests and lint pass.", createdAt: historyStart + 72_000 },
   { kind: "conversation_checkpoint", id: 716, turn: 2 },
+  { kind: "context_compacted", id: 717, trigger: "manual", preTokens: 48213 },
+  { kind: "context_compacted", id: 718, trigger: "auto" },
 ];
+if (new URLSearchParams(window.location.search).get("history-stress") === "1") {
+  historyItems.splice(0, historyItems.length, ...Array.from({ length: 8 }, (_, index): TimelineItem =>
+    index % 2 === 0
+      ? { kind: "context_compacted", id: 800 + index, trigger: "auto" }
+      : { kind: "provider_account_switched", id: 800 + index, providerAccountId: "work",
+        providerAccountLabel: "Work Account for the Release Readiness and Compatibility Investigation", automatic: true }));
+}
 type TranscriptItem = Extract<TimelineItem, { kind: "agent_message" | "user_message" }>;
 const baseItems: TranscriptItem[] = Array.from({ length: 30 }, (_, index) => index % 2 === 0
   ? { kind: "agent_message" as const, id: index + 1, text: `${index + 1}. ${sentence.repeat(30)}`, createdAt: Date.now() - index * 1_000 }
@@ -493,6 +503,7 @@ function Fixture() {
               items={items}
               workspaceRoot={ledgerFixtureEnabled ? "/workspace/app" : undefined}
               onOpenSession={historyFixtureEnabled ? openFixtureSession : undefined}
+              onRewind={historyFixtureEnabled ? () => {} : undefined}
               ariaLabel={timelineAriaLabel}
               revealRequest={revealRequest}
               onRevealHandled={handleReveal}

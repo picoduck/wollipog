@@ -513,7 +513,7 @@ test("every history divider is one neutral label with a faint 14px icon and no g
   ]);
   for (const [, svg] of labels) assert.match(svg!, /width="14"/);
   assert.deepEqual(labels.map(([, svg]) => svg!.match(/lucide-([a-z-]+)/)?.[1]),
-    ["file-clock", "git-fork", "arrow-right-left", "circle-user-round", "fold-vertical", "fold-vertical"]);
+    ["file-clock", "git-fork", "arrow-right-left", "circle-user-round", "arrows-to-axis-dashed-horizontal", "arrows-to-axis-dashed-horizontal"]);
   assert.doesNotMatch(html, /⤺|class="[^"]*(checkpoint|restored)/, "no retired glyph or teal checkpoint class remains");
 });
 

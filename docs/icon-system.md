@@ -159,7 +159,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ServerIcon` | Lucide | `Server` | A machine reached over SSH: a project location row's leading icon (#2961). |
 | `BranchIcon` | Lucide | `GitBranch` | Git branch. |
 | `ThreadForkIcon` | Lucide | `GitFork` | Conversation fork. |
-| `CompactedIcon` | Lucide | `FoldVertical` | The provider compacted the conversation into a summary. |
+| `CompactedIcon` | Lucide | `ArrowsToAxisDashedHorizontal` | The provider compacted the conversation into a summary: inward arrows toward a dashed horizontal axis. |
 | `EditInForkIcon` | Lucide | `GitBranchPlus` | Edit a message in a new conversation fork; `GitBranch` already means a Git branch. |
 | `RewindFilesIcon` | Lucide | `FileClock` | Rewind files to a turn's checkpoint. |
 | `HandOffIcon` | Lucide | `ArrowRightLeft` | Hand a conversation off to another provider. |

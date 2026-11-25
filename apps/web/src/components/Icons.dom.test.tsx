@@ -7,6 +7,7 @@ import {
   AutomationsIcon,
   CheckIcon,
   CommandLineIcon,
+  CompactedIcon,
   CursorEditorIcon,
   DevinDesktopIcon,
   GridIcon,
@@ -27,6 +28,15 @@ function renderedSvg(markup: string): SVGSVGElement {
   assert.ok(svg, "the icon must render an SVG element");
   return svg as unknown as SVGSVGElement;
 }
+
+test("compaction draws inward vertical arrows toward a dashed horizontal axis", () => {
+  const svg = renderedSvg(renderToStaticMarkup(<CompactedIcon size={14} />));
+  assert.equal(svg.getAttribute("width"), "14");
+  assert.deepEqual([...svg.querySelectorAll("path")].map((path) => path.getAttribute("d")).sort(), [
+    "M10 12H8", "M12 22v-6", "M12 8V2", "M16 12h-2", "M22 12h-2", "M4 12H2",
+    "m15 19-3-3-3 3", "m15 5-3 3-3-3",
+  ].sort());
+});
 
 test("a rendered Lucide icon preserves the complete shared SVG contract", () => {
   const svg = renderedSvg(renderToStaticMarkup(<GridIcon size={20} className="sample" />));
