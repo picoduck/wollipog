@@ -425,3 +425,201 @@ test("legacy cancel() during an ACP wakeup suppresses automatic continuation whe
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("prompt cleanup failure or cancelled stopReason never publishes terminal status over a live ACP wakeup (#4905)", { skip: !haveGit() }, async () => {
+  for (const variant of ["diff-throw", "cancelled-stop"] as const) {
+    const root = mkdtempSync(join(tmpdir(), `wollipog-acp-wakeup-${variant}-`));
+    let manager: SessionManager | undefined;
+    try {
+      const repo = join(root, "repo");
+      execFileSync("git", ["init", repo]);
+      execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+      execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+      execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+      const dataDir = join(root, "data");
+      const store = new SessionStore(join(dataDir, "sessions"));
+      const sent: RunnerToControlPlane[] = [];
+      const fake = fakeAcpFactory({
+        autoRespond: variant === "cancelled-stop" ? () => false : undefined,
+        providerTurnSettleMs: 80,
+        providerTurnResponseSettleMs: 40,
+      });
+      manager = new SessionManager((msg) => { sent.push(msg); }, () => {}, store, "runner", undefined,
+        fake.factory as never, dataDir, 1);
+
+      const sessionId = `s_acp_wakeup_${variant.replaceAll("-", "_")}`;
+      await manager.start(acpSpec(sessionId, repo));
+
+      let enteredDiff!: () => void;
+      let releaseDiff!: () => void;
+      const diffEntered = new Promise<void>((resolve) => { enteredDiff = resolve; });
+      const diffGate = new Promise<void>((resolve) => { releaseDiff = resolve; });
+      const internals = manager as unknown as {
+        captureDiff: (sid: string) => Promise<unknown>;
+        active: Map<string, { running: boolean; providerInitiatedTurnActive?: boolean }>;
+      };
+      const origCaptureDiff = internals.captureDiff.bind(manager);
+      let gatedOnce = false;
+      internals.captureDiff = async (sid) => {
+        if (!gatedOnce) {
+          gatedOnce = true;
+          enteredDiff();
+          await diffGate;
+          if (variant === "diff-throw") throw new Error("git diff exploded");
+        }
+        return origCaptureDiff(sid);
+      };
+
+      manager.prompt(sessionId, "turn 1");
+      if (variant === "cancelled-stop") {
+        await waitFor(() => fake.processes[0]!.hasPendingPrompt(), "prompt did not arrive");
+        fake.processes[0]!.respondPrompt("cancelled");
+      }
+      await diffEntered;
+
+      const first = fake.processes[0]!;
+      first.sendUpdate({
+        sessionUpdate: "tool_call",
+        toolCallId: `tc_${variant}`,
+        title: "wakeup tool",
+        status: "in_progress",
+      });
+      await waitFor(() => internals.active.get(sessionId)?.providerInitiatedTurnActive === true,
+        `${variant}: wakeup did not activate during post-turn diff capture`);
+
+      releaseDiff();
+      await waitFor(() => internals.active.get(sessionId)?.running === false, `${variant}: prompt drain did not finish`);
+      await new Promise((resolve) => setTimeout(resolve, 120));
+
+      assert.equal(store.readMeta(sessionId)?.status, "running",
+        `${variant}: prompt cleanup must keep session running while ACP wakeup is active`);
+      const statuses = sent
+        .filter((msg): msg is Extract<RunnerToControlPlane, { type: "session_status" }> =>
+          msg.type === "session_status" && msg.sessionId === sessionId)
+        .map((msg) => msg.status);
+      assert.equal(statuses.includes("failed"), false, `${variant}: must never publish terminal failed`);
+      assert.equal(statuses.includes("stopped"), false, `${variant}: must never publish terminal stopped`);
+      if (variant === "diff-throw") {
+        assert.ok(
+          store.readEvents(sessionId).some((e) => e.payload.kind === "error" && e.payload.message.includes("git diff exploded")),
+          "prompt failure event is still recorded",
+        );
+      }
+
+      first.sendUpdate({ sessionUpdate: "tool_call_update", toolCallId: `tc_${variant}`, status: "completed" });
+      await waitFor(() => store.readMeta(sessionId)?.status === "idle",
+        `${variant}: session did not return idle after wakeup settled`);
+
+      manager.stop(sessionId);
+      await manager.delete(sessionId);
+    } finally {
+      manager?.shutdownAll();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("old prompt cleanup does not consume a wakeup interrupt or restore its worktree continuation (#4904, #4905)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-acp-wakeup-interrupt-race-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = join(root, "repo");
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const externalWorktree = join(root, "wt-interrupted-wakeup");
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "fix/interrupted-wakeup", externalWorktree, "HEAD"]);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const fake = fakeAcpFactory({ providerTurnSettleMs: 5_000, providerTurnResponseSettleMs: 5_000 });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+      fake.factory as never, dataDir, 1);
+
+    const sessionId = "s_acp_wakeup_interrupt_race";
+    await manager.start(acpSpec(sessionId, repo));
+    const internals = manager as unknown as {
+      captureDiff: (sid: string) => Promise<unknown>;
+      worktreeIsolationNotice: (meta: unknown, path: string) => Promise<unknown>;
+      configuredProjectPaths: string[];
+      active: Map<string, {
+        running: boolean;
+        managedGitBoundary?: true;
+        providerInitiatedTurnActive?: boolean;
+        providerInitiatedTurnId?: string;
+      }>;
+    };
+    internals.configuredProjectPaths = [repo];
+    internals.active.get(sessionId)!.managedGitBoundary = true;
+
+    let enteredDiff!: () => void;
+    let releaseDiff!: () => void;
+    const diffEntered = new Promise<void>((resolve) => { enteredDiff = resolve; });
+    const diffGate = new Promise<void>((resolve) => { releaseDiff = resolve; });
+    const origCaptureDiff = internals.captureDiff.bind(manager);
+    let gatedDiff = false;
+    internals.captureDiff = async (sid) => {
+      if (!gatedDiff) {
+        gatedDiff = true;
+        enteredDiff();
+        await diffGate;
+      }
+      return origCaptureDiff(sid);
+    };
+
+    let activationReached!: () => void;
+    let openActivation!: () => void;
+    const activationArrived = new Promise<void>((resolve) => { activationReached = resolve; });
+    const activationGate = new Promise<void>((resolve) => { openActivation = resolve; });
+    const origNotice = internals.worktreeIsolationNotice.bind(manager);
+    internals.worktreeIsolationNotice = async (meta, path) => {
+      activationReached();
+      await activationGate;
+      return origNotice(meta, path);
+    };
+
+    manager.prompt(sessionId, "turn 1");
+    await diffEntered;
+
+    // Wakeup begins while turn 1 is still awaiting captureDiff, and initiates a worktree switch.
+    fake.processes[0]!.sendUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "tc_race_wt",
+      title: "switch worktree",
+      status: "in_progress",
+    });
+    await waitFor(() => internals.active.get(sessionId)?.providerInitiatedTurnActive === true,
+      "wakeup did not activate during diff capture");
+    const providerTurnId = internals.active.get(sessionId)!.providerInitiatedTurnId!;
+    const switched = manager.attachWorktree(sessionId, externalWorktree, { requestedBySession: true });
+    await activationArrived;
+
+    // Interrupt the wakeup by its exact providerTurnId AND immediately release diff capture before
+    // yielding to setImmediate so turn 1's cleanup races ahead of ACP's deferred cancellation settle.
+    assert.equal(manager.interruptTurn(sessionId, providerTurnId), "applied");
+    releaseDiff();
+
+    await waitFor(() => internals.active.get(sessionId)?.running === false &&
+      internals.active.get(sessionId)?.providerInitiatedTurnActive !== true &&
+      store.readMeta(sessionId)?.status === "idle",
+    "old prompt and interrupted wakeup did not both settle");
+    assert.ok(store.readEvents(sessionId).some((e) => e.payload.kind === "turn_interrupted"),
+      "wakeup interrupt must still emit turn_interrupted rather than being consumed by old prompt cleanup");
+
+    openActivation();
+    const result = await switched;
+    assert.equal(result.isolation.continuesAfterRelaunch, undefined,
+      "interrupted wakeup must not advertise continuation");
+    await waitFor(() => fake.processes.length === 2 && store.readMeta(sessionId)?.status === "idle",
+      "relaunch did not settle");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(fake.processes[1]!.prompts.length, 0,
+      "interrupted wakeup must never submit an automatic continuation prompt");
+
+    manager.stop(sessionId);
+    await manager.delete(sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

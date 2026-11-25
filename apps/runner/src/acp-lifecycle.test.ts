@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { ANTIGRAVITY_FULL_PERMISSIONS_MODE } from "@wollipog/protocol";
 import { AcpClient } from "./acp.js";
 import { AcpDriver } from "./drivers/acp-driver.js";
 import type { DriverOptions } from "./drivers/driver.js";
@@ -365,7 +366,10 @@ test("ACP synchronous capacity cancel on opening permission_request cancels its 
       cwd: process.cwd(),
       env: {},
       ...(mode === "antigravity-full"
-        ? { compatibility: { profile: "antigravity", resumable: false }, initialPermissionMode: "full_permissions" }
+        ? {
+          compatibility: { profile: "antigravity", resumable: false },
+          initialPermissionMode: ANTIGRAVITY_FULL_PERMISSIONS_MODE.id,
+        }
         : {}),
     }, {
       onEvent: (event) => events.push(event.kind),
@@ -382,6 +386,13 @@ test("ACP synchronous capacity cancel on opening permission_request cancels its 
       providerTurnResponseSettleMs: 25,
     });
     try {
+      if (mode === "antigravity-full") {
+        assert.equal(
+          (client as unknown as { antigravityFullPermissions: boolean }).antigravityFullPermissions,
+          true,
+          "antigravity-full fixture must actually enable Full Permissions Mode",
+        );
+      }
       (client as unknown as { sessionId: string }).sessionId = "s_cap_perm";
       child.stdout.write(JSON.stringify({
         jsonrpc: "2.0",

@@ -631,3 +631,126 @@ test("interrupt, queued user prompt, superseding selection, or stop while an end
     });
   }
 });
+
+test("selecting a newer worktree while an earlier continuation waits in the queue drops the stale continuation and preserves ordinary prompts (#4904)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-worktree-continuation-drop-queued-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = join(root, "repo");
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+
+    const blockerTurn = gate();
+    let wtA: Switched | undefined;
+    let wtB: Switched | undefined;
+    const promptsBySession = new Map<string, Array<{ cwd: string; text: string }>>();
+    const launchesBySession = new Map<string, number>();
+
+    const factory = (_driver: unknown, launch: Pick<DriverOptions, "cwd" | "env">, cb: DriverCallbacks) => {
+      // Tag each created provider by prompt text/cwd.
+      return {
+        pid: 1,
+        initialize: async () => {},
+        newSession: async () => {},
+        close: async () => {},
+        prompt: async (text: string) => {
+          const sid = text === "hold capacity" ? "s_blocker" : "s_target";
+          const list = promptsBySession.get(sid) ?? [];
+          list.push({ cwd: launch.cwd, text });
+          promptsBySession.set(sid, list);
+          cb.onPromptAccepted?.();
+          if (text === "hold capacity") {
+            await blockerTurn.wait();
+          } else if (text === "switch to A") {
+            wtB = await manager!.requestWorktree("s_target", { baseRef: "HEAD", branch: "fix/worktree-b" });
+            wtA = await manager!.requestWorktree("s_target", { baseRef: "HEAD", branch: "fix/worktree-a" },
+              undefined, { requestedBySession: true });
+          }
+          cb.onEvent({ kind: "agent_message", text: "ok", final: true });
+          return "end_turn" as const;
+        },
+        cancel: () => {},
+        dispose: () => {},
+        setConfig: () => {},
+        resolvePermission: () => false,
+        agentSessionId: () => "provider-session-id",
+      };
+    };
+
+    // maxConcurrentSessions = 2 with activeTurnLimit = 1 so s_blocker can hold active-turn capacity
+    // while s_target stays live and its continuation sits queued.
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+      factory as never, dataDir, 2, undefined, undefined, { activeTurnLimit: 1, agentLimits: {}, agentWeights: {} });
+
+    const relaunchGate = gate();
+    const origLaunch = (manager as unknown as { launch: (...args: unknown[]) => Promise<unknown> }).launch.bind(manager);
+    (manager as unknown as { launch: (...args: unknown[]) => Promise<unknown> }).launch = async (...args: unknown[]) => {
+      const spec = args[0] as SessionLaunchSpec;
+      const count = (launchesBySession.get(spec.sessionId) ?? 0) + 1;
+      launchesBySession.set(spec.sessionId, count);
+      if (spec.sessionId === "s_target" && count === 2) await relaunchGate.wait();
+      return origLaunch(...args);
+    };
+
+    await manager.start(claudeSpec("s_target", repo));
+    await manager.start(claudeSpec("s_blocker", repo));
+    const internals = manager as unknown as {
+      active: Map<string, { managedGitBoundary?: true; queue: Array<{ id: string; text: string }> }>;
+    };
+    internals.active.get("s_target")!.managedGitBoundary = true;
+
+    // 1. s_target creates B and A (requestedBySession) and enters relaunch into A.
+    manager.prompt("s_target", "switch to A");
+    await relaunchGate.arrived;
+
+    // 2. While s_target is relaunching into A, s_blocker takes the single active-turn slot.
+    manager.prompt("s_blocker", "hold capacity");
+    await blockerTurn.arrived;
+
+    // 3. Let s_target finish relaunching into A -> continuation for A is queued behind capacity.
+    relaunchGate.open();
+    await waitFor(() => Boolean(internals.active.get("s_target")?.queue.some((item) => item.id.startsWith("worktreecont_"))),
+      "continuation for A was not queued while capacity was held");
+
+    // 4. Queue an ordinary user prompt too, then select worktree B while capacity is still held.
+    manager.prompt("s_target", "ordinary follow-up");
+    await manager.selectWorktree("s_target", wtB!.worktree.path);
+    assert.equal(
+      internals.active.get("s_target")?.queue.some((item) => item.id.startsWith("worktreecont_")),
+      false,
+      "selecting B must drop the queued continuation for A",
+    );
+    assert.equal(
+      internals.active.get("s_target")?.queue.some((item) => item.text === "ordinary follow-up"),
+      true,
+      "selecting B must preserve ordinary queued prompts",
+    );
+
+    // Wait for the rebind into B to complete, then release capacity on s_blocker.
+    await waitFor(() => (launchesBySession.get("s_target") ?? 0) >= 3, "s_target did not relaunch into B");
+    blockerTurn.open();
+    await waitFor(() => store.readMeta("s_blocker")?.status === "idle" &&
+      store.readMeta("s_target")?.status === "idle" &&
+      (promptsBySession.get("s_target")?.length ?? 0) === 2,
+    "ordinary follow-up did not run after releasing capacity");
+    await settle();
+
+    const targetPrompts = promptsBySession.get("s_target")!;
+    assert.deepEqual(targetPrompts.map((p) => p.text), ["switch to A", "ordinary follow-up"],
+      "provider must never receive the stale continuation for A");
+    assert.equal(targetPrompts[1]!.cwd, wtB!.worktree.path,
+      "ordinary queued prompt runs in worktree B");
+
+    manager.stop("s_target");
+    manager.stop("s_blocker");
+    await manager.delete("s_target");
+    await manager.delete("s_blocker");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
