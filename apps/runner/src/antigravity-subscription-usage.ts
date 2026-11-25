@@ -56,6 +56,9 @@ export interface AntigravityUsageProbeOptions {
   isolation?: SpawnIsolation;
   timeoutMs: number;
   now?: () => number;
+  /** Re-checked immediately before each CLI spawn (`/usage` and `/credits`) to detect in-place
+   * executable replacement before passing print-mode arguments to an unverified binary. */
+  verifyExecutable?: () => boolean;
   deps?: AntigravityUsageProbeDeps;
 }
 
@@ -63,7 +66,8 @@ export type AntigravityUsageProbeResult =
   | { state: "available"; buckets: SubscriptionUsageBucket[]; credits?: SubscriptionUsageCredits }
   | { state: "unauthenticated"; detail: string }
   | { state: "not_applicable"; detail: string }
-  | { state: "unsupported"; detail: string };
+  | { state: "unsupported"; detail: string }
+  | { state: "target_changed"; detail: string };
 
 type PrintCommandOutcome =
   | { kind: "ok"; data: unknown }
@@ -179,9 +183,9 @@ export function normalizeAntigravityUsageData(
     const groupBuckets: SubscriptionUsageBucket[] = [];
 
     for (const rawBucket of group.buckets) {
+      sawAnyBucket = true;
       const entry = record(rawBucket);
       if (!entry) continue;
-      sawAnyBucket = true;
       const window = stringValue(entry.window, 40);
       const rawName = stringValue(entry.name, 100);
       const rawId = stringValue(entry.id, 96) ??
@@ -327,7 +331,10 @@ function probeAntigravityPrintCommand(
         return;
       }
       const envelope = event === "result" ? record(parsed.result) : parsed;
-      if (!envelope) return;
+      if (!envelope) {
+        if (event === "result") verifiedZeroTurnSuccess = false;
+        return;
+      }
       const numTurns = finite(envelope.num_turns);
       if (numTurns !== undefined && numTurns > 0) {
         finish(() => resolve({ kind: "unsupported" }));
@@ -426,6 +433,12 @@ export async function probeAntigravitySubscriptionUsage(
   options: AntigravityUsageProbeOptions,
 ): Promise<AntigravityUsageProbeResult> {
   const now = options.now ?? Date.now;
+  if (options.verifyExecutable && !options.verifyExecutable()) {
+    return {
+      state: "target_changed",
+      detail: "The Google Antigravity executable changed; retry after setup re-checks it.",
+    };
+  }
   const usageOutcome = await probeAntigravityPrintCommand("usage", ANTIGRAVITY_USAGE_PROBE_ARGS, options);
   if (usageOutcome.kind === "unauthenticated") {
     return { state: "unauthenticated", detail: "Google Antigravity is not signed in." };
@@ -450,6 +463,13 @@ export async function probeAntigravitySubscriptionUsage(
     return {
       state: "not_applicable",
       detail: "This Google Antigravity sign-in does not report personal subscription quotas.",
+    };
+  }
+
+  if (options.verifyExecutable && !options.verifyExecutable()) {
+    return {
+      state: "target_changed",
+      detail: "The Google Antigravity executable changed; retry after setup re-checks it.",
     };
   }
 

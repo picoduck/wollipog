@@ -170,6 +170,7 @@ test("normalizeAntigravityUsageData preserves unknown future groups/windows and 
   assert.deepEqual(normalizeAntigravityUsageData({ groups: [] }, NOW), { state: "not_applicable" });
   assert.deepEqual(normalizeAntigravityUsageData({ groups: [{ name: "Enterprise", buckets: [] }] }, NOW), { state: "not_applicable" });
   assert.equal(normalizeAntigravityUsageData({ groups: [{}] }, NOW), null, "unrecognized nonempty groups must fail rather than erase quotas as not_applicable");
+  assert.equal(normalizeAntigravityUsageData({ groups: [{ name: "Gemini", buckets: [null] }] }, NOW), null, "malformed nonempty bucket lists must fail rather than erase quotas as not_applicable");
   assert.equal(normalizeAntigravityUsageData("not an object", NOW), null);
 });
 
@@ -307,6 +308,26 @@ test("probeAntigravitySubscriptionUsage requires a successful zero-turn terminal
         stdout.write(`${JSON.stringify({ event: "command_result", command: { name: "usage", data: sampleUsageData() } })}\n`);
         stdout.write(`${JSON.stringify({ event: "result", result: { status: "SUCCESS", num_turns: 0 } })}\n`);
         stdout.write(`${JSON.stringify({ event: "result", result: { status: "SUCCESS" } })}\n`);
+        stdout.end();
+        child.emit("close", 0);
+      },
+    },
+    {
+      name: "successive result frames ending with null result",
+      emit: (child, stdout) => {
+        stdout.write(`${JSON.stringify({ event: "command_result", command: { name: "usage", data: sampleUsageData() } })}\n`);
+        stdout.write(`${JSON.stringify({ event: "result", result: { status: "SUCCESS", num_turns: 0 } })}\n`);
+        stdout.write(`${JSON.stringify({ event: "result", result: null })}\n`);
+        stdout.end();
+        child.emit("close", 0);
+      },
+    },
+    {
+      name: "successive result frames ending with missing result",
+      emit: (child, stdout) => {
+        stdout.write(`${JSON.stringify({ event: "command_result", command: { name: "usage", data: sampleUsageData() } })}\n`);
+        stdout.write(`${JSON.stringify({ event: "result", result: { status: "SUCCESS", num_turns: 0 } })}\n`);
+        stdout.write(`${JSON.stringify({ event: "result" })}\n`);
         stdout.end();
         child.emit("close", 0);
       },
@@ -813,10 +834,123 @@ if (args[0] === "acp") {
   }
 });
 
+test("PATH replacement between /usage and /credits never spawns /credits on the replacement and preserves cached windows", { skip: process.platform === "win32" }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wollipog-agy-mid-swap-"));
+  const agyPath = join(dir, "agy");
+  const markerPath = join(dir, "invoked-old-credits");
+  const swapTriggerPath = join(dir, "swap-on-usage");
+  const dataDir = join(dir, "data");
+  const usageData = sampleUsageData();
+  const oldScript = `#!${process.execPath}
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args.includes("/usage") || args.includes("/credits")) {
+  fs.writeFileSync(${JSON.stringify(markerPath)}, args.join(" "));
+}
+process.exit(0);
+`;
+  const supportedScript = `#!${process.execPath}
+const fs = require("node:fs");
+const readline = require("node:readline");
+const args = process.argv.slice(2);
+if (args.includes("--version")) {
+  console.log("antigravity 1.5.14");
+  process.exit(0);
+}
+if (args.includes("/usage")) {
+  if (fs.existsSync(${JSON.stringify(swapTriggerPath)})) {
+    // Simulate an installer replacing the PATH executable while /usage is running.
+    fs.unlinkSync(${JSON.stringify(agyPath)});
+    fs.writeFileSync(${JSON.stringify(agyPath)}, ${JSON.stringify(oldScript)}, { mode: 0o755 });
+  }
+  console.log(JSON.stringify({ event: "command_result", command: { name: "usage", data: ${JSON.stringify(usageData)} } }));
+  console.log(JSON.stringify({ event: "result", result: { status: "SUCCESS", num_turns: 0 } }));
+  process.exit(0);
+}
+if (args.includes("/credits")) {
+  console.log(JSON.stringify({ event: "command_result", command: { name: "credits", data: { remaining_credits: 500 } } }));
+  console.log(JSON.stringify({ event: "result", result: { status: "SUCCESS", num_turns: 0 } }));
+  process.exit(0);
+}
+if (args[0] === "acp") {
+  const rl = readline.createInterface({ input: process.stdin });
+  rl.on("line", (line) => {
+    const msg = JSON.parse(line);
+    if (msg.method === "initialize") {
+      console.log(JSON.stringify({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: { protocolVersion: 1, agentCapabilities: {}, agentInfo: { name: "Antigravity ACP Server", version: "fixture" } },
+      }));
+    } else if (msg.method === "session/new") {
+      console.log(JSON.stringify({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: { sessionId: "s1", models: { availableModels: [{ modelId: "gemini-3", name: "Gemini 3" }] } },
+      }));
+    }
+  });
+}
+`;
+  try {
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(agyPath, supportedScript, "utf8");
+    await chmod(agyPath, 0o755);
+
+    const setup = new AntigravitySetupSupervisor({
+      dataDir,
+      platform: "linux",
+      arch: "x64",
+      resolveExecutables: async () => [agyPath],
+      onUpdate: () => {},
+    });
+    const checked = await setup.check();
+    assert.equal(checked.status, "ready");
+
+    let clock = NOW;
+    let targetChanged = 0;
+    const agent = antigravityAgent({ command: agyPath, version: "1.5.14" });
+    const sourceId = subscriptionUsageSourceId("runner-1", ANTIGRAVITY_AGENT_ID, "antigravity", { kind: "native" });
+    const manager = new SubscriptionUsageManager({
+      runnerId: "runner-1",
+      agents: () => [agent],
+      resolveEnv: () => ({}),
+      authorizeProbe: async () => ({ cwd: dir }),
+      publish: () => {},
+      now: () => clock,
+      antigravityEnabled: () => true,
+      antigravityLaunchTarget: () => setup.launchableTarget(),
+      acquireAntigravityLaunch: () => setup.acquireLaunchTarget(),
+      onAntigravityTargetChanged: () => { targetChanged += 1; },
+    });
+    manager.syncSources();
+
+    // First refresh succeeds and caches windows.
+    const first = await manager.refreshSourceById(sourceId);
+    assert.equal(first[0]?.state, "available");
+    assert.equal(first[0]?.buckets.length, 4);
+    assert.equal(first[0]?.credits?.balance, "500");
+
+    // Second refresh swaps the PATH executable during /usage before /credits can spawn.
+    await writeFile(swapTriggerPath, "1", "utf8");
+    clock += SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS + 1;
+    const afterSwap = await manager.refreshSourceById(sourceId);
+    assert.equal(existsSync(markerPath), false, "replacement executable must never receive /credits");
+    assert.equal(targetChanged, 1);
+    assert.equal(afterSwap[0]?.state, "unavailable");
+    assert.equal(afterSwap[0]?.buckets.length, 4, "cached windows remain preserved after mid-probe swap");
+    assert.equal(afterSwap[0]?.fetchedAt, NOW);
+    assert.match(afterSwap[0]?.detail ?? "", /executable changed/);
+    setup.shutdown();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("unrecognized nonempty quota payloads and failed setup checks preserve last-known windows and surface failure", async () => {
   let clock = NOW;
   let agent = antigravityAgent();
-  let mode: "valid" | "malformed" = "valid";
+  let mode: "valid" | "malformedGroup" | "malformedBucket" = "valid";
   const sourceId = subscriptionUsageSourceId("runner-1", ANTIGRAVITY_AGENT_ID, "antigravity", { kind: "native" });
 
   const manager = new SubscriptionUsageManager({
@@ -838,7 +972,11 @@ test("unrecognized nonempty quota payloads and failed setup checks preserve last
       deps: {
         spawn: (spawnOpts) => fakeProcess((child, stdout) => {
           if (spawnOpts.args.includes("/usage")) {
-            const payload = mode === "valid" ? sampleUsageData() : { groups: [{}] };
+            const payload = mode === "valid"
+              ? sampleUsageData()
+              : mode === "malformedGroup"
+                ? { groups: [{}] }
+                : { groups: [{ name: "Gemini", buckets: [null] }] };
             stdout.write(`${JSON.stringify({ event: "command_result", command: { name: "usage", data: payload } })}\n`);
             stdout.write(`${JSON.stringify({ event: "result", result: { status: "SUCCESS", num_turns: 0 } })}\n`);
           } else {
@@ -862,12 +1000,21 @@ test("unrecognized nonempty quota payloads and failed setup checks preserve last
 
   // Refresh with an unrecognized nonempty group list: preserves prior windows and timestamp with failure detail.
   clock += SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS + 1;
-  mode = "malformed";
-  const afterMalformed = await manager.refreshSourceById(sourceId);
-  assert.equal(afterMalformed[0]?.state, "available");
-  assert.equal(afterMalformed[0]?.buckets.length, 4);
-  assert.equal(afterMalformed[0]?.buckets[0]?.observedAt, savedObservedAt);
-  assert.match(afterMalformed[0]?.detail ?? "", /last provider snapshot/);
+  mode = "malformedGroup";
+  const afterMalformedGroup = await manager.refreshSourceById(sourceId);
+  assert.equal(afterMalformedGroup[0]?.state, "available");
+  assert.equal(afterMalformedGroup[0]?.buckets.length, 4);
+  assert.equal(afterMalformedGroup[0]?.buckets[0]?.observedAt, savedObservedAt);
+  assert.match(afterMalformedGroup[0]?.detail ?? "", /last provider snapshot/);
+
+  // Refresh with a malformed nonempty bucket list ([null]): also preserves prior windows and timestamp.
+  clock += SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS + 1;
+  mode = "malformedBucket";
+  const afterMalformedBucket = await manager.refreshSourceById(sourceId);
+  assert.equal(afterMalformedBucket[0]?.state, "available");
+  assert.equal(afterMalformedBucket[0]?.buckets.length, 4);
+  assert.equal(afterMalformedBucket[0]?.buckets[0]?.observedAt, savedObservedAt);
+  assert.match(afterMalformedBucket[0]?.detail ?? "", /last provider snapshot/);
 
   // Subsequent setup check fails transiently (verification_failed): surfaces unavailable + failure reason while preserving windows.
   clock += 1_000;

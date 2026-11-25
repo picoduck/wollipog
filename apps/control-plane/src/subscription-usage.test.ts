@@ -830,3 +830,60 @@ test("existing SQLite databases migrate subscription_usage_snapshots to allow an
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a failed Antigravity setup check after runner restart surfaces unavailable while preserving persisted windows, plan, and credits", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  db.registerRunner(meta("agy-box", [antigravityAgent()]), now, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  const seeded = {
+    sourceId: antigravitySourceId("agy-box"),
+    runnerId: "agy-box",
+    agentId: ANTIGRAVITY_AGENT_ID,
+    provider: "antigravity" as const,
+    state: "available" as const,
+    fetchedAt: now,
+    plan: "Google AI Ultra",
+    buckets: [{
+      id: "gemini-5h",
+      label: "Gemini Models — Five-Hour Window",
+      usedPercent: 12,
+      remainingPercent: 88,
+      windowDurationMinutes: 300,
+      resetsAt: now + 3_600_000,
+      observedAt: now,
+      status: "available" as const,
+    }],
+    credits: { hasCredits: true, balance: "3000" },
+  };
+  db.upsertSubscriptionUsageSnapshot(seeded, now);
+
+  // Runner restarts and its initial Antigravity setup check fails transiently.
+  const restartAt = now + 5_000;
+  const reason = "Google Antigravity couldn't verify its access on this machine.";
+  db.registerRunner(
+    meta("agy-box", [antigravityAgent({ available: false, unavailableReason: reason })]),
+    restartAt,
+    PROTOCOL_VERSION,
+    OWNED_BY_ALICE,
+  );
+  // Fresh runner manager has no local prior, so its first inventory sends state: unavailable with empty buckets.
+  db.replaceSubscriptionUsageSnapshots("agy-box", [{
+    sourceId: seeded.sourceId,
+    runnerId: "agy-box",
+    agentId: ANTIGRAVITY_AGENT_ID,
+    provider: "antigravity",
+    state: "unavailable",
+    detail: reason,
+    fetchedAt: restartAt,
+    buckets: [],
+  }], restartAt);
+
+  const projected = db.subscriptionUsageForPrincipal(human(), restartAt).sources[0]!;
+  assert.equal(projected.state, "unavailable");
+  assert.equal(projected.detail, reason);
+  assert.equal(projected.fetchedAt, now);
+  assert.equal(projected.plan, "Google AI Ultra");
+  assert.deepEqual(projected.credits, { hasCredits: true, balance: "3000" });
+  assert.deepEqual(projected.buckets, seeded.buckets);
+  db.close();
+});

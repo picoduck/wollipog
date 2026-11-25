@@ -1755,6 +1755,7 @@ export class SubscriptionUsageManager {
             isolation: authorization.isolation,
             timeoutMs: SUBSCRIPTION_USAGE_PROBE_TIMEOUT_MS,
             now: () => this.now(),
+            verifyExecutable: antigravityExecutableMatches,
             deps: {
               kill,
               onSpawn: (child) => {
@@ -1766,6 +1767,10 @@ export class SubscriptionUsageManager {
             },
           });
           if (!isCurrent()) return;
+          if (result.state === "target_changed" || !antigravityExecutableMatches()) {
+            reportAntigravityTargetChanged();
+            return;
+          }
           const fetchedAt = this.now();
           this.lastProbeAt.set(source.sourceId, fetchedAt);
           const plan = this.options.antigravityPlanTier?.();

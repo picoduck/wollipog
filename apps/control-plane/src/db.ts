@@ -17847,7 +17847,20 @@ export class ControlPlaneDb {
         };
         // Viewers get a key scoped to their organization, never the runner's fingerprint, so a key
         // groups sources on this screen and correlates nothing beyond it.
-        const { subscriptionIdentity, ...projected } = snapshot;
+        const { subscriptionIdentity, ...projectedBase } = snapshot;
+        const antigravitySetupUnavailable = provider === "antigravity" &&
+          runner.status === "online" &&
+          displayAgent.available !== true &&
+          !unauthenticatedSource &&
+          !unsupportedAntigravityCli &&
+          projectedBase.state === "available";
+        const projected = antigravitySetupUnavailable
+          ? {
+              ...projectedBase,
+              state: "unavailable" as const,
+              detail: projectedBase.detail ?? displayAgent.unavailableReason ?? `${displayAgent.name} is not available on this runner.`,
+            }
+          : projectedBase;
         sources.push({
           ...projected,
           ...(subscriptionIdentity === undefined ? {} : {
