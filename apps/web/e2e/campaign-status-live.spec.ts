@@ -1,3 +1,4 @@
+import { sanitizeStartupOutput, waitForLiveStackHealth } from "../src/e2e/live-stack-health.js";
 import { expect, test, type Page } from "@playwright/test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
@@ -105,7 +106,7 @@ class LiveStack {
   }
 
   /** Start the control plane, wait for health, and put back what startup settlement stopped. */
-  async launch(): Promise<void> {
+  async launch(phase: "initial startup" | "restart" = "initial startup"): Promise<void> {
     const env = isolatedEnv();
     const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
       cwd: REPO_ROOT,
@@ -117,13 +118,9 @@ class LiveStack {
     const capture = (chunk: unknown) => { this.output = (this.output + String(chunk)).slice(-8_192); };
     child.stdout?.on("data", capture);
     child.stderr?.on("data", capture);
-    let ready = false;
-    for (let attempt = 0; attempt < 400 && !ready; attempt += 1) {
-      if (child.exitCode !== null) throw new Error(`control plane exited early\n${this.output}`);
-      try { ready = (await fetch(`${this.base}/healthz`)).ok; } catch { /* still starting */ }
-      if (!ready) await delay(50);
-    }
-    if (!ready) throw new Error(`control plane did not become healthy\n${this.output}`);
+    await waitForLiveStackHealth(this.base, child, () => ({ controlPlane: this.output, runner: "" }), {
+      phase, secrets: [this.ownerToken, ORCHESTRATOR_TOKEN], repoRoot: REPO_ROOT,
+    });
     restoreCampaignStatuses(this.databasePath, this.seeded);
     await withLiveDb(this.databasePath, (db) =>
       db.setAgentControlCredential(this.seeded.rootId, "campaign-status-e2e", hashToken(ORCHESTRATOR_TOKEN), Date.now()));
@@ -183,7 +180,7 @@ test.afterAll(async () => {
 });
 
 test.afterEach(async ({}, testInfo) => {
-  if (testInfo.status !== testInfo.expectedStatus) testInfo.annotations.push({ type: "control-plane", description: stack.output });
+  if (testInfo.status !== testInfo.expectedStatus) testInfo.annotations.push({ type: "control-plane", description: sanitizeStartupOutput(stack.output, [stack.ownerToken, ORCHESTRATOR_TOKEN], REPO_ROOT).slice(-8_192) });
 });
 
 async function signIn(page: Page) {
@@ -548,7 +545,7 @@ test("a reconnecting browser catches up on ledger changes made while the control
   await expect(summaryBox(page)).toContainText(`${delivered} of ${committed} Delivered`);
   recordPlanOffline(stack.databasePath, stack.seeded.rootId, [{ key: "offline", title: "Recorded While Offline", queuePosition: 0 }]);
 
-  await stack.launch();
+  await stack.launch("restart");
   await expect(page.locator(".campaign-status-offline")).toHaveCount(0, { timeout: 60_000 });
   await expect(summaryBox(page)).toContainText(`${delivered} of ${committed + 1} Delivered`);
   await expect(workRows(page).filter({ hasText: "Recorded While Offline" })).toHaveCount(1);

@@ -1,3 +1,4 @@
+import { sanitizeStartupOutput, waitForLiveStackHealth } from "../src/e2e/live-stack-health.js";
 import { expect, test } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -78,6 +79,7 @@ test("an Orchestrator's video evidence is reviewed by a separate media reviewer 
   test.setTimeout(150_000);
   let temp: string | null = null;
   let output = "";
+  const startupSecrets: string[] = [];
   let frameLogged = false;
   let controlPlane: ChildProcess | null = null;
   let runner: Awaited<ReturnType<typeof connectRunner>> | null = null;
@@ -89,6 +91,7 @@ test("an Orchestrator's video evidence is reviewed by a separate media reviewer 
     mkdirSync(workspacePath);
     const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
     const seeded = await seedDelegatedVideoEvidence(databasePath, workspacePath);
+    startupSecrets.push(ownerToken, seeded.parentToken, seeded.runnerToken, "delegated-video-reviewer-token");
     const built = spawnSync("pnpm", ["--dir", "apps/web", "exec", "vite", "build", "--outDir", webDist], {
       cwd: REPO_ROOT, encoding: "utf8", timeout: 60_000, shell: process.platform === "win32",
     });
@@ -116,13 +119,9 @@ test("an Orchestrator's video evidence is reviewed by a separate media reviewer 
     };
     controlPlane.stdout?.on("data", capture);
     controlPlane.stderr?.on("data", capture);
-    let ready = false;
-    for (let attempt = 0; attempt < 400 && !ready; attempt += 1) {
-      if (controlPlane.exitCode !== null) throw new Error("control plane exited early");
-      try { ready = (await fetch(`${base}/healthz`)).ok; } catch { /* still starting */ }
-      if (!ready) await delay(50);
-    }
-    if (!ready) throw new Error("control plane did not become healthy");
+    await waitForLiveStackHealth(base, controlPlane, () => ({ controlPlane: output, runner: "" }), {
+      phase: "initial startup", secrets: startupSecrets, repoRoot: REPO_ROOT,
+    });
     // The runner hosts the controller and child, so registration keeps them, and their decision, live.
     runner = await connectRunner(base, seeded.runnerToken, workspacePath, [seeded.parentId, seeded.childId]);
     // Startup stopped every seeded Session while no runner was connected. Restore the fixture's
@@ -225,7 +224,7 @@ test("an Orchestrator's video evidence is reviewed by a separate media reviewer 
     await expect(page.getByText("Video Evidence Review", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
     expect(frameLogged, "control-plane logs must not contain delivered frames").toBe(false);
   } catch (error) {
-    const safeOutput = output.replace(/[A-Za-z0-9+/]{120,}={0,2}/gu, "[redacted media]");
+    const safeOutput = sanitizeStartupOutput(output, startupSecrets, REPO_ROOT).slice(-8_192).replace(/[A-Za-z0-9+/]{120,}={0,2}/gu, "[redacted media]");
     throw new Error(`${error instanceof Error ? error.stack : String(error)}\n${safeOutput}`);
   } finally {
     runner?.socket.close();

@@ -1,3 +1,4 @@
+import { sanitizeStartupOutput, waitForLiveStackHealth } from "../src/e2e/live-stack-health.js";
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -85,13 +86,9 @@ class WalkthroughStack {
     const capture = (chunk: unknown) => { this.output = (this.output + String(chunk)).slice(-8_192); };
     child.stdout?.on("data", capture);
     child.stderr?.on("data", capture);
-    let ready = false;
-    for (let attempt = 0; attempt < 400 && !ready; attempt += 1) {
-      if (child.exitCode !== null) throw new Error(`control plane exited early\n${this.output}`);
-      try { ready = (await fetch(`${this.base}/healthz`)).ok; } catch { /* still starting */ }
-      if (!ready) await delay(50);
-    }
-    if (!ready) throw new Error(`control plane did not become healthy\n${this.output}`);
+    await waitForLiveStackHealth(this.base, child, () => ({ controlPlane: this.output, runner: "" }), {
+      phase: "initial startup", secrets: [this.ownerToken, REVIEWER_TOKEN], repoRoot: REPO_ROOT,
+    });
     // Startup settlement stops every session it finds live. Put them back as they were.
     restoreCampaignStatuses(this.databasePath, this.seeded);
     const db = ControlPlaneDb.attach(this.databasePath);
@@ -139,7 +136,7 @@ test.afterAll(async () => {
 });
 
 test.afterEach(async ({}, testInfo) => {
-  if (testInfo.status !== testInfo.expectedStatus) testInfo.annotations.push({ type: "control-plane", description: stack.output });
+  if (testInfo.status !== testInfo.expectedStatus) testInfo.annotations.push({ type: "control-plane", description: sanitizeStartupOutput(stack.output, [stack.ownerToken, REVIEWER_TOKEN], REPO_ROOT).slice(-8_192) });
 });
 
 const panel = (page: Page) => page.locator(".campaign-status");
