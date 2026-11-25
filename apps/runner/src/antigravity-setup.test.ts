@@ -339,3 +339,17 @@ test("parsers accept only safe, complete links, versions and bounded models", ()
   assert.deepEqual(advertisedAntigravityModels({ sessionId: "s" }), []);
   assert.deepEqual(advertisedAntigravityModels(null), []);
 });
+
+test("a ready check records _meta.antigravity.tier as planTier and clears it when signed out", async () => {
+  writeFileSync(join(state, "signed-in"), "fixture");
+  mode("session_tier");
+  const { setup } = supervisor();
+  const ready = await setup.check();
+  assert.equal(ready.status, "ready");
+  assert.equal(setup.planTier(), "Google AI Pro");
+
+  mode("session_auth_required");
+  const signedOut = await setup.check();
+  assert.equal(signedOut.status, "sign_in_required");
+  assert.equal(setup.planTier(), undefined);
+});

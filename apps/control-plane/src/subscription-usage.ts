@@ -1,8 +1,13 @@
 import { createHash } from "node:crypto";
-import { agentContextKey } from "@wollipog/protocol";
+import {
+  ANTIGRAVITY_AGENT_ID,
+  agentContextKey,
+  antigravityCliVersionSupportsUsage,
+} from "@wollipog/protocol";
 import type {
   AgentDefinition,
   SubscriptionUsageBucket,
+  SubscriptionUsageProvider,
   SubscriptionUsageSnapshot,
   SubscriptionUsageSpendControl,
 } from "@wollipog/protocol";
@@ -22,6 +27,14 @@ const MAX_SPEND_CONTROLS = 64;
 export function claudeUsageProbeable(agent: AgentDefinition): boolean {
   const claude = agent.driver === "claude-code" ? agent.claudeCode : undefined;
   return claude?.streamJsonInput === true && claude.controlProtocol === true && claude.sessionNaming === true;
+}
+
+/** A Google Antigravity agent its runner can probe on request via `agy -p /usage`. */
+export function antigravityUsageProbeable(agent: AgentDefinition): boolean {
+  return agent.id === ANTIGRAVITY_AGENT_ID &&
+    (agent.driver ?? "acp") === "acp" &&
+    agent.available === true &&
+    antigravityCliVersionSupportsUsage(agent.version);
 }
 
 export function subscriptionUsageRefreshTimeoutMs(codexSourceCount: number): number {
@@ -66,7 +79,7 @@ function boolean(value: unknown, field: string): boolean | undefined {
 function expectedSourceId(
   runnerId: string,
   agent: AgentDefinition,
-  provider: "codex" | "claude",
+  provider: SubscriptionUsageProvider,
   providerAccountId?: string,
 ): string {
   const context = agent.context?.kind === "wsl" ? `wsl:${agent.context.distro}` : "native";
@@ -132,7 +145,9 @@ export function validateSubscriptionUsageSnapshot(
   if (!/^[a-f0-9]{32}$/.test(sourceId)) throw new Error("subscription usage sourceId is invalid");
   const agentId = text(input.agentId, "agentId", 128)!;
   const provider = input.provider;
-  if (provider !== "codex" && provider !== "claude") throw new Error("subscription usage provider is invalid");
+  if (provider !== "codex" && provider !== "claude" && provider !== "antigravity") {
+    throw new Error("subscription usage provider is invalid");
+  }
   const state = input.state;
   if (state !== "available" && state !== "unavailable" && state !== "unsupported" &&
       state !== "unauthenticated" && state !== "not_applicable") {
@@ -140,7 +155,11 @@ export function validateSubscriptionUsageSnapshot(
   }
   const runner = db.getRunner(runnerId);
   const agent = runner?.agents.find((candidate) => candidate.id === agentId);
-  const expectedDriver = provider === "codex" ? "codex-app-server" : "claude-code";
+  const expectedDriver = provider === "codex"
+    ? "codex-app-server"
+    : provider === "claude"
+      ? "claude-code"
+      : "acp";
   const providerAccountId = text(input.providerAccountId, "providerAccountId", 128, true);
   if (providerAccountId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(providerAccountId)) {
     throw new Error("subscription usage providerAccountId is invalid");
@@ -149,17 +168,22 @@ export function validateSubscriptionUsageSnapshot(
     ? runner?.providerAccounts?.find((candidate) => candidate.id === providerAccountId)
     : undefined;
   const agentMapsToProviderAccount = providerAccountId === undefined && !!agent &&
+    (provider === "codex" || provider === "claude") &&
     (runner?.providerAccounts?.some((candidate) => candidate.provider === provider &&
       ((agent.context?.kind ?? "native") === "native" ||
         agent.defaultProviderAccountId === candidate.id)) ?? false);
-  if (!agent || agent.driver !== expectedDriver ||
+  const agentDriver = agent ? (agent.driver ?? "acp") : undefined;
+  if (!agent || agentDriver !== expectedDriver ||
+      (provider === "antigravity" && (agent.id !== ANTIGRAVITY_AGENT_ID || providerAccountId !== undefined)) ||
       (providerAccountId !== undefined && providerAccount?.provider !== provider) ||
       agentMapsToProviderAccount ||
       sourceId !== expectedSourceId(runnerId, agent, provider, providerAccountId)) {
     throw new Error("subscription usage source is not advertised by this runner");
   }
-  const selection = runner?.harnessSelections?.find((choice) => choice.family === provider &&
-    agentContextKey(choice.context) === agentContextKey(agent.context));
+  const selection = provider === "codex" || provider === "claude"
+    ? runner?.harnessSelections?.find((choice) => choice.family === provider &&
+        agentContextKey(choice.context) === agentContextKey(agent.context))
+    : undefined;
   if (selection && agent.installation?.id !== selection.installationId && state !== "unsupported") {
     throw new Error("subscription usage source does not use the selected harness installation");
   }

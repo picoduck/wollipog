@@ -518,7 +518,7 @@ test("with no sources the tab is No Subscriptions Connected with Open Connection
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     const panel = container.querySelector("#usage-subscriptions-panel")!;
     assert.match(panel.textContent ?? "", /No Subscriptions Connected/);
-    assert.match(panel.textContent ?? "", /Sign in to Codex or Claude on a connected machine, and each plan's remaining allowance shows here\./);
+    assert.match(panel.textContent ?? "", /Sign in to Codex, Claude, or Google Antigravity on a connected machine, and each plan's remaining allowance shows here\./);
     assert.equal([...container.querySelectorAll("button")].some((button) => /Refresh/.test(button.textContent ?? "") ||
       /Refresh/.test(button.getAttribute("aria-label") ?? "")), false, "nothing to refresh");
     const link = panel.querySelector<HTMLAnchorElement>("a.btn")!;
@@ -661,6 +661,143 @@ test("loading is three skeleton rows in one surface, and a failed load is an err
     await act(async () => { view.button("Retry")!.click(); await Promise.resolve(); });
     await act(async () => { resolveFirst(); await Promise.resolve(); await Promise.resolve(); });
     assert.equal(view.panel()!.querySelectorAll(".subscription-plan").length, 1);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Google Antigravity renders its plan tier, model-group windows, credits, and sourceId-targeted Refresh Account", async () => {
+  const requests: unknown[] = [];
+  const agySource = source({
+    sourceId: "e".repeat(32),
+    runnerId: "agy-box",
+    runnerName: "dev-box",
+    agentId: "google-antigravity",
+    agentName: "Google Antigravity",
+    provider: "antigravity",
+    providerAccountId: undefined,
+    accountLabel: undefined,
+    plan: "Google AI Ultra",
+    refreshable: true,
+    credits: { hasCredits: true, balance: "3000" },
+    buckets: [
+      window_("gemini-5h", "Gemini Models — Five-Hour Window", 96, { resetsAt: NOW + 4 * HOUR }),
+      window_("gemini-weekly", "Gemini Models — Weekly", 93),
+      window_("3p-5h", "Claude and GPT Models — Five-Hour Window", 100, { resetsAt: NOW + 5 * HOUR }),
+    ],
+  });
+  const view = await renderTab({
+    subscriptionUsage: async () => response([agySource]),
+    refreshSubscriptionUsage: async (target: unknown) => {
+      requests.push(target);
+      return response([agySource], { attempted: 1, failed: 0 });
+    },
+  });
+  try {
+    const card = view.panel()!.querySelector(".subscription-plan")!;
+    assert.equal(card.querySelector(".subscription-plan-title")?.textContent, "Google Antigravity — Google AI Ultra");
+    assert.match(card.querySelector(".subscription-plan-meta")?.textContent ?? "", /Google Antigravity on dev-box/);
+    assert.deepEqual(
+      [...card.querySelectorAll(".subscription-window-label")].map((node) => node.textContent),
+      [
+        "Gemini Models — Five-Hour Window",
+        "Gemini Models — Weekly",
+        "Claude and GPT Models — Five-Hour Window",
+      ],
+    );
+    assert.match(card.textContent ?? "", /Credits: 3000/);
+    const refreshBtn = view.button("Refresh Account")!;
+    assert.ok(refreshBtn, "Google Antigravity exposes Refresh Account via sourceId");
+    await act(async () => { refreshBtn.click(); await Promise.resolve(); await Promise.resolve(); });
+    assert.deepEqual(requests, [{ runnerId: "agy-box", sourceId: "e".repeat(32) }]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an online refreshable Google Antigravity source without quota windows offers Refresh Account in Sources Unavailable", async () => {
+  const requests: unknown[] = [];
+  const unavailableAgy = source({
+    sourceId: "f".repeat(32),
+    runnerId: "agy-box",
+    runnerName: "dev-box",
+    runnerStatus: "online",
+    agentId: "google-antigravity",
+    agentName: "Google Antigravity",
+    provider: "antigravity",
+    providerAccountId: undefined,
+    accountLabel: undefined,
+    state: "unavailable",
+    detail: "Google Antigravity subscription usage could not be refreshed. Try again.",
+    refreshable: true,
+    buckets: [],
+  });
+  const offlineAgy = source({
+    sourceId: "1".repeat(32),
+    runnerId: "agy-offline",
+    runnerName: "sleepy-box",
+    runnerStatus: "offline",
+    agentId: "google-antigravity",
+    agentName: "Google Antigravity",
+    provider: "antigravity",
+    providerAccountId: undefined,
+    accountLabel: undefined,
+    state: "unavailable",
+    refreshable: true,
+    buckets: [],
+  });
+  const view = await renderTab({
+    subscriptionUsage: async () => response([unavailableAgy, offlineAgy]),
+    refreshSubscriptionUsage: async (target: unknown) => {
+      requests.push(target);
+      return response([{
+        ...unavailableAgy,
+        state: "available",
+        detail: undefined,
+        buckets: [window_("gemini-5h", "Gemini Models — Five-Hour Window", 90)],
+      }, offlineAgy], { attempted: 1, failed: 0 });
+    },
+  });
+  try {
+    const details = view.panel()!.querySelector("details.disclosure") as unknown as HTMLDetailsElement;
+    assert.ok(details);
+    details.open = true;
+    const rows = [...details.querySelectorAll(".subscription-unavailable-row")];
+    assert.equal(rows.length, 2);
+    const retryBtn = rows[0]!.querySelector<HTMLButtonElement>('button[aria-label="Refresh Account"]');
+    assert.ok(retryBtn, "online refreshable unavailable source offers Refresh Account");
+    assertNoDomNode(rows[1]!.querySelector('button[aria-label="Refresh Account"]'), "offline source does not offer Refresh Account");
+    await act(async () => { retryBtn.click(); await Promise.resolve(); await Promise.resolve(); });
+    assert.deepEqual(requests, [{ runnerId: "agy-box", sourceId: "f".repeat(32) }]);
+    assert.equal(view.panel()!.querySelectorAll(".subscription-plan").length, 1);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an offline Google Antigravity plan keeps its cached windows visible and hides Refresh Account", async () => {
+  const offlineAgy = source({
+    sourceId: "2".repeat(32),
+    runnerId: "agy-offline",
+    runnerName: "sleepy-box",
+    runnerStatus: "offline",
+    freshness: "stale",
+    agentId: "google-antigravity",
+    agentName: "Google Antigravity",
+    provider: "antigravity",
+    providerAccountId: undefined,
+    accountLabel: undefined,
+    plan: "Google AI Pro",
+    refreshable: true,
+    buckets: [window_("gemini-5h", "Gemini Models — Five-Hour Window", 72)],
+  });
+  const view = await renderTab({ subscriptionUsage: async () => response([offlineAgy]) });
+  try {
+    const card = view.panel()!.querySelector(".subscription-plan")!;
+    assert.equal(card.querySelector(".subscription-plan-title")?.textContent, "Google Antigravity — Google AI Pro");
+    assert.equal(card.querySelector(".subscription-window-left")?.textContent, "72% left");
+    assert.equal(card.querySelector(".subscription-plan-head .status")?.textContent, "Last Known — Stale");
+    assert.equal(view.button("Refresh Account"), undefined, "offline Antigravity card must not offer Refresh Account");
   } finally {
     await view.unmount();
   }

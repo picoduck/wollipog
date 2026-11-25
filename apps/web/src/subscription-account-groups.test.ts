@@ -206,3 +206,25 @@ test("a single source passes through untouched", () => {
   const [group] = subscriptionAccountGroups([only]);
   assert.ok(group!.account === only);
 });
+
+test("a refreshable source without a providerAccountId (Google Antigravity) targets its sourceId", () => {
+  const agy = source({
+    provider: "antigravity",
+    agentId: "google-antigravity",
+    agentName: "Google Antigravity",
+    runnerId: "agy-box",
+    refreshable: true,
+    buckets: [bucket("gemini-5h", 90)],
+  });
+  const unrefreshable = source({
+    provider: "antigravity",
+    agentId: "google-antigravity",
+    agentName: "Google Antigravity",
+    runnerId: "old-box",
+    refreshable: false,
+    buckets: [bucket("gemini-5h", 90)],
+  });
+  const [first, second] = subscriptionAccountGroups([agy, unrefreshable]);
+  assert.deepEqual(first!.refreshTargets, [{ runnerId: "agy-box", sourceId: agy.sourceId }]);
+  assert.deepEqual(second!.refreshTargets, []);
+});

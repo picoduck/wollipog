@@ -19,6 +19,12 @@ export interface VerifiedAntigravityLaunch {
   /** The PATH copy's path, or the managed copy's resolved generation executable. */
   command: string;
   managed: boolean;
+  /** The CLI version reported by this exact verified executable, when observed. */
+  version?: string;
+  /** File-level launch identity captured when `version` was verified, to detect in-place swaps. */
+  targetIdentity?: string;
+  /** The subscription tier reported during this executable's access check, when observed. */
+  tier?: string;
   /** When the check's access probe saw the sign-in working: its `session/new` succeeding, before
    * the probe's process and folder were cleaned up. */
   accessObservedAt: number;

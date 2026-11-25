@@ -144,3 +144,22 @@ test("a PATH copy verified while an update is pending is launchable; an unreadab
   assert.equal(ledger.launchable(), null);
   assert.equal(ledger.accessObservedAt(), undefined);
 });
+
+test("committed launch metadata keeps the committed executable version and tier until a pending candidate commits", () => {
+  const ledger = new AntigravityLaunchLedger();
+  ledger.settle({ command: executable(G1), managed: true, version: "1.1.10", tier: "Google AI Pro", accessObservedAt: 1 }, null);
+  assert.equal(ledger.launchable()?.version, "1.1.10");
+  assert.equal(ledger.launchable()?.tier, "Google AI Pro");
+
+  // Pending candidate passes access check while activation confirmation is still open.
+  ledger.settle({ command: executable(G2), managed: true, version: "1.5.14", tier: "Google AI Ultra", accessObservedAt: 2 }, G2);
+  assert.equal(ledger.launchable()?.command, executable(G1));
+  assert.equal(ledger.launchable()?.version, "1.1.10");
+  assert.equal(ledger.launchable()?.tier, "Google AI Pro");
+
+  // Once committed, the candidate's version and tier become launchable together.
+  ledger.commit();
+  assert.equal(ledger.launchable()?.command, executable(G2));
+  assert.equal(ledger.launchable()?.version, "1.5.14");
+  assert.equal(ledger.launchable()?.tier, "Google AI Ultra");
+});

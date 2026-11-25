@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate as turn } from "node:timers/promises";
-import type { RunnerToControlPlane } from "@wollipog/protocol";
+import {
+  projectSubscriptionUsageMessageForProtocol,
+  type RunnerToControlPlane,
+  type SubscriptionUsageSnapshot,
+} from "@wollipog/protocol";
 import { projectReconnectOutboxMessage, republishReconnectState } from "./reconnect-republish.js";
 import { Outbox, flushProjectedOutbox } from "./outbox.js";
 
@@ -105,4 +109,67 @@ test("pending and in-flight reconnect queue projections never overwrite newer li
     assert.deepEqual([...sent].reverse().find((frame) => frame.type === "session_queue" && frame.sessionId === id), current.get(id));
   }
   assert.ok(!sent.some((frame) => frame.type === "session_queue" && frame.sessionId === "258"));
+});
+
+test("queued subscription usage frames strip Antigravity snapshots when replayed to a v412 peer and keep them for v413", () => {
+  const codex: SubscriptionUsageSnapshot = {
+    sourceId: "a".repeat(32),
+    runnerId: "runner-1",
+    agentId: "codex",
+    provider: "codex",
+    state: "available",
+    fetchedAt: 1_000,
+    buckets: [],
+  };
+  const antigravity: SubscriptionUsageSnapshot = {
+    sourceId: "b".repeat(32),
+    runnerId: "runner-1",
+    agentId: "google-antigravity",
+    provider: "antigravity",
+    state: "available",
+    fetchedAt: 1_000,
+    plan: "Google AI Ultra",
+    buckets: [],
+  };
+  const replay = (protocolVersion: number) => {
+    const outbox = new Outbox<RunnerToControlPlane>();
+    outbox.enqueue({ type: "subscription_usage_updated", snapshot: antigravity });
+    outbox.enqueue({ type: "subscription_usage_updated", snapshot: codex });
+    outbox.enqueue({ type: "subscription_usage_inventory", runnerId: "runner-1", snapshots: [codex, antigravity] });
+    outbox.enqueue({
+      type: "subscription_usage_refresh_result",
+      requestId: "req-1",
+      ok: true,
+      snapshots: [codex, antigravity],
+    });
+    const sent: RunnerToControlPlane[] = [];
+    flushProjectedOutbox(
+      outbox,
+      (message) => projectReconnectOutboxMessage(
+        message,
+        true,
+        (value) => projectSubscriptionUsageMessageForProtocol(value, protocolVersion),
+      ),
+      (message) => sent.push(message),
+      () => assert.fail("unexpected projection error"),
+      () => assert.fail("unexpected send error"),
+    );
+    return sent;
+  };
+
+  const v412 = replay(412);
+  assert.equal(v412.length, 3, "antigravity subscription_usage_updated is dropped for v412 peers");
+  for (const frame of v412) {
+    if (frame.type === "subscription_usage_updated") {
+      assert.equal(frame.snapshot.provider, "codex");
+    } else if (frame.type === "subscription_usage_inventory" || frame.type === "subscription_usage_refresh_result") {
+      assert.deepEqual(frame.snapshots?.map((snapshot) => snapshot.provider), ["codex"]);
+    }
+  }
+
+  const v413 = replay(413);
+  assert.equal(v413.length, 4);
+  const refresh413 = v413.find((frame) => frame.type === "subscription_usage_refresh_result");
+  assert.ok(refresh413?.type === "subscription_usage_refresh_result");
+  assert.deepEqual(refresh413.snapshots?.map((snapshot) => snapshot.provider), ["codex", "antigravity"]);
 });

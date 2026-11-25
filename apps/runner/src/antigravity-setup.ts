@@ -49,7 +49,7 @@ import {
 import { acpInitializeRequest, negotiateAcpInitialize } from "./acp-contract.js";
 import { isAgentAuthRequiredError } from "./acp.js";
 import { normalizeAcpConfigOptions, optionForCategory } from "./acp-session-state.js";
-import { resolveNativeCandidates } from "./discovery/resolve.js";
+import { executableTargetIdentity, resolveNativeCandidates } from "./discovery/resolve.js";
 import { JsonRpcPeer } from "./jsonrpc.js";
 import { killTreeAndWait, spawnAgent, type AgentProcess } from "./spawn.js";
 import { AntigravityLaunchLedger, type VerifiedAntigravityLaunch } from "./antigravity-launch-ledger.js";
@@ -162,7 +162,7 @@ const CONTROL = /[\u0000-\u001f\u007f]/u;
 
 /** Outcome of the access check. `models` is set only for `ready`. */
 export type AntigravityAccessResult =
-  | { status: "ready"; models: Array<{ id: string; name: string }>; observedAt: number }
+  | { status: "ready"; models: Array<{ id: string; name: string }>; observedAt: number; tier?: string }
   | { status: "sign_in_required" }
   | { status: "verification_failed"; failure: AntigravitySetupFailure };
 
@@ -243,6 +243,21 @@ export function advertisedAntigravityModels(response: unknown): Array<{ id: stri
     }
   }
   return models;
+}
+
+/** The Google AI subscription tier an ACP `session/new` response reports in `_meta.antigravity.tier`
+ * (observed on agy 1.5.14 as `{ name, id, upgradeUri }`). Bounded and stripped of control chars. */
+export function advertisedAntigravityTier(response: unknown): string | undefined {
+  const root = response && typeof response === "object" ? response as Record<string, unknown> : undefined;
+  const meta = root?._meta && typeof root._meta === "object" ? root._meta as Record<string, unknown> : undefined;
+  const agy = meta?.antigravity && typeof meta.antigravity === "object" ? meta.antigravity as Record<string, unknown> : undefined;
+  const tier = agy?.tier;
+  if (typeof tier === "string") return boundedText(tier.trim(), 80);
+  if (tier && typeof tier === "object") {
+    const name = (tier as Record<string, unknown>).name;
+    if (typeof name === "string") return boundedText(name.trim(), 80);
+  }
+  return undefined;
 }
 
 /** Run `agy --version`. Undefined `version` with `ok` means it exited successfully but printed no
@@ -388,8 +403,9 @@ export async function checkAntigravityAccess(
     if (!boundedText(sessionId, 1_024) || models.length === 0) {
       return { status: "verification_failed", failure: "session_check_failed" };
     }
+    const tier = advertisedAntigravityTier(response);
     // Stamped when access was seen working, before the cleanup below awaits the process's exit.
-    return { status: "ready", models, observedAt };
+    return { status: "ready", models, observedAt, ...(tier ? { tier } : {}) };
   } finally {
     peer.dispose("Antigravity access check finished");
     await options.kill(child).catch(() => false);
@@ -541,24 +557,45 @@ export class AntigravitySetupSupervisor {
    * generation path, never by the movable `current/agy`; the store keeps that generation through
    * the next update's commit. Null when nothing is verified (a failed check, or a rejected release
    * a rollback could not undo). Synchronous, so a launch resolves it at the moment it spawns. */
-  launchableTarget(): { command: string; context: AntigravityCredentialContext; accessObservedAt: number } | null {
+  launchableTarget(): {
+    command: string;
+    version?: string;
+    targetIdentity?: string;
+    context: AntigravityCredentialContext;
+    accessObservedAt: number;
+  } | null {
     const verified = this.launches.launchable();
     return verified
-      ? { command: verified.command, context: this.credentialContext(verified.managed), accessObservedAt: verified.accessObservedAt }
+      ? {
+          command: verified.command,
+          ...(verified.version ? { version: verified.version } : {}),
+          ...(verified.targetIdentity ? { targetIdentity: verified.targetIdentity } : {}),
+          context: this.credentialContext(verified.managed),
+          accessObservedAt: verified.accessObservedAt,
+        }
       : null;
   }
 
   /** `launchableTarget` for a launch about to spawn, held until `release`: no update removes its
    * generation meanwhile, so a launcher that opens the executable after the spawn (bwrap, the cgroup
    * helper) still finds it. Release once the agent answered its handshake, failed or exited. */
-  acquireLaunchTarget(): { command: string; context: AntigravityCredentialContext; release: () => void } | null {
+  acquireLaunchTarget(): {
+    command: string;
+    version?: string;
+    targetIdentity?: string;
+    context: AntigravityCredentialContext;
+    release: () => void;
+  } | null {
     const target = this.launchableTarget();
     if (!target) return null;
-    const { command } = target;
+    const { command, version, targetIdentity } = target;
     this.launchesInUse.set(command, (this.launchesInUse.get(command) ?? 0) + 1);
     let released = false;
     return {
-      command, context: target.context,
+      command,
+      ...(version ? { version } : {}),
+      ...(targetIdentity ? { targetIdentity } : {}),
+      context: target.context,
       release: () => {
         if (released) return;
         released = true;
@@ -572,7 +609,13 @@ export class AntigravitySetupSupervisor {
   /** `launchableTarget` once no install, update or check is running, for a launch's preparation:
    * a launch that begins during an update or check takes its outcome into account. The launch
    * still resolves its executable again when it spawns. */
-  async verifiedLaunchTarget(): Promise<{ command: string; context: AntigravityCredentialContext; accessObservedAt: number } | null> {
+  async verifiedLaunchTarget(): Promise<{
+    command: string;
+    version?: string;
+    targetIdentity?: string;
+    context: AntigravityCredentialContext;
+    accessObservedAt: number;
+  } | null> {
     while (this.installing || this.checking) {
       await this.installing?.catch(() => {});
       await this.checking?.catch(() => {});
@@ -585,6 +628,11 @@ export class AntigravitySetupSupervisor {
    * than what it observed. */
   accessObservedAt(): number | undefined {
     return this.launches.accessObservedAt();
+  }
+
+  /** Subscription tier name observed on the committed launchable check, if `agy acp` advertised one. */
+  planTier(): string | undefined {
+    return this.view.status === "ready" ? this.launches.launchable()?.tier : undefined;
   }
 
   /** Check the runtime and its sign-in. Concurrent calls share one check. While a sign-in or an
@@ -843,19 +891,26 @@ export class AntigravitySetupSupervisor {
     let executable: { path: string; version?: string; source: "managed" | "path" } | undefined;
     // The managed copy's generation, resolved before it is checked: what a ready result verified.
     let managedGeneration: string | undefined;
+    // File-level identity captured before the version check and re-checked after it, so an in-place
+    // replacement of a PATH executable is detected before any usage probe runs.
+    let targetIdentity: string | null = null;
     if (managed) {
       const path = this.store.executablePath();
       try { managedGeneration = realpathSync(path); } catch { managedGeneration = undefined; }
+      const checkedPath = managedGeneration ?? path;
+      const beforeIdentity = executableTargetIdentity(checkedPath);
       const versioned = await version(path, true);
-      if (versioned.ok) {
+      const afterIdentity = beforeIdentity ? executableTargetIdentity(checkedPath) : null;
+      if (versioned.ok && (!beforeIdentity || afterIdentity === beforeIdentity)) {
         executable = { path, ...(versioned.version ? { version: versioned.version } : {}), source: "managed" };
+        targetIdentity = beforeIdentity;
       } else if (!pathCopy || options.managedOnly) {
         await latestRead;
-        return this.settleCheck({ ...base, status: "verification_failed", failure: versioned.failure,
+        return this.settleCheck({ ...base, status: "verification_failed", failure: versioned.ok ? "version_check_failed" : versioned.failure,
           executable: { path, source: "managed" }, checkedAt: this.now() });
       } else {
         this.managed.activeCheckFailed = true;
-        this.managedVersionFailure = versioned.failure;
+        this.managedVersionFailure = versioned.ok ? "version_check_failed" : versioned.failure;
       }
     }
     if (!executable) {
@@ -863,21 +918,36 @@ export class AntigravitySetupSupervisor {
         await latestRead;
         return this.settleCheck({ ...base, status: "missing_runtime", checkedAt: this.now() });
       }
+      const beforeIdentity = executableTargetIdentity(pathCopy);
       const versioned = await version(pathCopy, false);
-      if (!versioned.ok) {
+      const afterIdentity = beforeIdentity ? executableTargetIdentity(pathCopy) : null;
+      if (!versioned.ok || (beforeIdentity && afterIdentity !== beforeIdentity)) {
         await latestRead;
-        return this.settleCheck({ ...base, status: "verification_failed", failure: versioned.failure,
+        return this.settleCheck({ ...base, status: "verification_failed", failure: versioned.ok ? "version_check_failed" : versioned.failure,
           executable: { path: pathCopy, source: "path" }, checkedAt: this.now() });
       }
       executable = { path: pathCopy, ...(versioned.version ? { version: versioned.version } : {}), source: "path" };
+      targetIdentity = beforeIdentity;
     }
     const access = await this.checkAccess(executable.path, executable.source === "managed");
     await latestRead;
     if (access.status === "ready") {
       const isManaged = executable.source === "managed";
+      const launchCommand = isManaged ? managedGeneration ?? executable.path : executable.path;
+      const finalIdentity = targetIdentity ? executableTargetIdentity(launchCommand) : null;
+      if (targetIdentity && finalIdentity !== targetIdentity) {
+        return this.settleCheck({ ...base, status: "verification_failed", failure: "version_check_failed",
+          executable, checkedAt: this.now() });
+      }
       return this.settleCheck({ ...base, status: "ready", executable, models: access.models, checkedAt: this.now() },
-        { command: isManaged ? managedGeneration ?? executable.path : executable.path, managed: isManaged,
-          accessObservedAt: access.observedAt });
+        {
+          command: launchCommand,
+          managed: isManaged,
+          ...(executable.version ? { version: executable.version } : {}),
+          ...(targetIdentity ? { targetIdentity } : {}),
+          ...(access.tier ? { tier: access.tier } : {}),
+          accessObservedAt: access.observedAt,
+        });
     }
     return this.settleCheck({ ...base, status: access.status, executable,
       ...(access.status === "verification_failed" ? { failure: access.failure } : {}), checkedAt: this.now() });

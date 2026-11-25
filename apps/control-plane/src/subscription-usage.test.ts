@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { PROTOCOL_VERSION, type AgentDefinition, type RunnerMetadata } from "@wollipog/protocol";
+import { ANTIGRAVITY_AGENT_ID, PROTOCOL_VERSION, type AgentDefinition, type RunnerMetadata } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
 import {
@@ -696,5 +700,274 @@ test("authoritative inventories replace removed sources atomically", () => {
   db.replaceSubscriptionUsageSnapshots("runner-1", [first], now + 1);
   const stored = db.raw().prepare("SELECT source_id FROM subscription_usage_snapshots ORDER BY source_id").all();
   assert.deepEqual(stored.map((row) => ({ ...row })), [{ source_id: first.sourceId }]);
+  db.close();
+});
+
+function antigravityAgent(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
+  return {
+    id: ANTIGRAVITY_AGENT_ID,
+    name: "Google Antigravity",
+    command: "/usr/local/bin/agy",
+    args: ["acp"],
+    env: {},
+    driver: "acp",
+    context: { kind: "native" },
+    source: "discovered",
+    version: "1.5.14",
+    available: true,
+    authStatus: "authenticated",
+    ...overrides,
+  };
+}
+
+function antigravitySourceId(runnerId: string): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ runnerId, agentId: ANTIGRAVITY_AGENT_ID, provider: "antigravity", context: "native" }))
+    .digest("hex")
+    .slice(0, 32);
+}
+
+test("Google Antigravity snapshots validate, project refreshable state by runner and CLI version, and reject bad bindings", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  db.registerRunner(meta("agy-ready", [antigravityAgent()]), now, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  db.registerRunner(meta("agy-old-runner", [antigravityAgent()]), now, 412, OWNED_BY_ALICE);
+  db.registerRunner(meta("agy-old-cli", [antigravityAgent({ version: "1.1.10" })]), now, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  db.registerRunner(meta("agy-signed-out", [antigravityAgent({ available: false, authStatus: "unauthenticated" })]), now, PROTOCOL_VERSION, OWNED_BY_ALICE);
+
+  const valid = {
+    sourceId: antigravitySourceId("agy-ready"),
+    runnerId: "agy-ready",
+    agentId: ANTIGRAVITY_AGENT_ID,
+    provider: "antigravity" as const,
+    state: "available" as const,
+    fetchedAt: now,
+    plan: "Google AI Ultra",
+    buckets: [{
+      id: "gemini-5h",
+      label: "Gemini Models — Five-Hour Window",
+      usedPercent: 10,
+      remainingPercent: 90,
+      windowDurationMinutes: 300,
+      resetsAt: now + 3_600_000,
+      status: "available" as const,
+    }],
+    credits: { hasCredits: true, balance: "3000" },
+  };
+  const checked = validateSubscriptionUsageSnapshot(valid, "agy-ready", db, now);
+  assert.deepEqual(checked, valid);
+  assert.throws(
+    () => validateSubscriptionUsageSnapshot({ ...valid, providerAccountId: "personal" }, "agy-ready", db, now),
+    /not advertised/,
+  );
+
+  db.upsertSubscriptionUsageSnapshot(checked, now);
+  const byRunner = new Map(db.subscriptionUsageForPrincipal(human(), now).sources.map((s) => [s.runnerId, s]));
+  assert.equal(byRunner.get("agy-ready")?.state, "available");
+  assert.equal(byRunner.get("agy-ready")?.plan, "Google AI Ultra");
+  assert.equal(byRunner.get("agy-ready")?.refreshable, true);
+  assert.deepEqual(byRunner.get("agy-ready")?.credits, { hasCredits: true, balance: "3000" });
+
+  assert.equal(byRunner.get("agy-old-runner")?.state, "unsupported");
+  assert.equal(byRunner.get("agy-old-runner")?.refreshable, false);
+  assert.equal(byRunner.get("agy-old-cli")?.state, "unsupported");
+  assert.equal(byRunner.get("agy-old-cli")?.refreshable, false);
+  assert.equal(byRunner.get("agy-signed-out")?.state, "unauthenticated");
+  assert.equal(byRunner.get("agy-signed-out")?.refreshable, false);
+  db.close();
+});
+
+test("existing SQLite databases migrate subscription_usage_snapshots to allow antigravity without losing rows", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-agy-sub-mig-"));
+  const dbPath = join(dir, "control-plane.db");
+  try {
+    const now = 1_000_000;
+    const initial = ControlPlaneDb.open(dbPath);
+    initial.registerRunner(meta("runner-1", [codexAgent(), antigravityAgent()]), now, PROTOCOL_VERSION, OWNED_BY_ALICE);
+    initial.upsertSubscriptionUsageSnapshot(snapshot("runner-1", now), now);
+    initial.close();
+
+    // Simulate a pre-#4922 database whose CHECK constraint only allows ('codex', 'claude').
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA foreign_keys = OFF");
+    raw.exec(`
+      CREATE TABLE subscription_usage_snapshots_legacy (
+        runner_id           TEXT NOT NULL,
+        source_id           TEXT NOT NULL,
+        agent_id            TEXT NOT NULL,
+        provider            TEXT NOT NULL CHECK (provider IN ('codex', 'claude')),
+        provider_account_id TEXT,
+        snapshot             TEXT NOT NULL,
+        fetched_at           INTEGER NOT NULL,
+        updated_at           INTEGER NOT NULL,
+        PRIMARY KEY (runner_id, source_id),
+        FOREIGN KEY (runner_id) REFERENCES runners(runner_id) ON DELETE CASCADE
+      );
+      INSERT INTO subscription_usage_snapshots_legacy SELECT * FROM subscription_usage_snapshots;
+      DROP TABLE subscription_usage_snapshots;
+      ALTER TABLE subscription_usage_snapshots_legacy RENAME TO subscription_usage_snapshots;
+    `);
+    raw.close();
+
+    const migrated = ControlPlaneDb.open(dbPath);
+    const agySnap = {
+      sourceId: antigravitySourceId("runner-1"),
+      runnerId: "runner-1",
+      agentId: ANTIGRAVITY_AGENT_ID,
+      provider: "antigravity" as const,
+      state: "available" as const,
+      fetchedAt: now,
+      buckets: [{ id: "gemini-5h", label: "Gemini Models — Five-Hour Window", remainingPercent: 90, usedPercent: 10 }],
+    };
+    migrated.upsertSubscriptionUsageSnapshot(agySnap, now);
+    const sources = migrated.subscriptionUsageForPrincipal(human(), now).sources;
+    assert.deepEqual(sources.map((s) => [s.provider, s.state]), [
+      ["antigravity", "available"],
+      ["codex", "available"],
+    ]);
+    migrated.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failed Antigravity setup check after runner restart surfaces unavailable while preserving persisted windows, plan, and credits", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  db.registerRunner(meta("agy-box", [antigravityAgent()]), now, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  const seeded = {
+    sourceId: antigravitySourceId("agy-box"),
+    runnerId: "agy-box",
+    agentId: ANTIGRAVITY_AGENT_ID,
+    provider: "antigravity" as const,
+    state: "available" as const,
+    fetchedAt: now,
+    plan: "Google AI Ultra",
+    buckets: [{
+      id: "gemini-5h",
+      label: "Gemini Models — Five-Hour Window",
+      usedPercent: 12,
+      remainingPercent: 88,
+      windowDurationMinutes: 300,
+      resetsAt: now + 3_600_000,
+      observedAt: now,
+      status: "available" as const,
+    }],
+    credits: { hasCredits: true, balance: "3000" },
+  };
+  db.upsertSubscriptionUsageSnapshot(seeded, now);
+
+  // Runner restarts: general discovery registers and publishes an inventory omitting Antigravity
+  // while the initial Antigravity setup check is still in `checking` state.
+  const checkingAt = now + 2_000;
+  db.registerRunner({
+    ...meta("agy-box", [codexAgent()]),
+    antigravitySetup: { version: 1, status: "checking", checkedAt: checkingAt, credentialStore: "shared_os_keyring" },
+  }, checkingAt, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  db.replaceSubscriptionUsageSnapshots("agy-box", [], checkingAt);
+
+  // Initial Antigravity setup check then fails transiently and advertises Antigravity unavailable.
+  const restartAt = now + 5_000;
+  const reason = "Google Antigravity couldn't verify its access on this machine.";
+  db.registerRunner({
+    ...meta("agy-box", [codexAgent(), antigravityAgent({ available: false, unavailableReason: reason })]),
+    antigravitySetup: {
+      version: 1,
+      status: "verification_failed",
+      failure: "session_check_failed",
+      checkedAt: restartAt,
+      credentialStore: "shared_os_keyring",
+    },
+  }, restartAt, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  // Fresh runner manager has no local prior, so its first inventory sends state: unavailable with empty buckets.
+  db.replaceSubscriptionUsageSnapshots("agy-box", [{
+    sourceId: seeded.sourceId,
+    runnerId: "agy-box",
+    agentId: ANTIGRAVITY_AGENT_ID,
+    provider: "antigravity",
+    state: "unavailable",
+    detail: reason,
+    fetchedAt: restartAt,
+    buckets: [],
+  }], restartAt);
+
+  const projected = db.subscriptionUsageForPrincipal(human(), restartAt).sources
+    .find((source) => source.provider === "antigravity")!;
+  assert.equal(projected.state, "unavailable");
+  assert.equal(projected.detail, reason);
+  assert.equal(projected.fetchedAt, now);
+  assert.equal(projected.plan, "Google AI Ultra");
+  assert.deepEqual(projected.credits, { hasCredits: true, balance: "3000" });
+  assert.deepEqual(projected.buckets, seeded.buckets);
+
+  // Once setup later settles without Antigravity (e.g., missing_runtime), omitting it removes the persisted row.
+  const removedAt = now + 10_000;
+  db.registerRunner({
+    ...meta("agy-box", [codexAgent()]),
+    antigravitySetup: { version: 1, status: "missing_runtime", checkedAt: removedAt, credentialStore: "shared_os_keyring" },
+  }, removedAt, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  db.replaceSubscriptionUsageSnapshots("agy-box", [], removedAt);
+  // Re-advertising Antigravity without a new usage snapshot must show no leftover buckets, plan, or credits.
+  const readdedAt = now + 11_000;
+  db.registerRunner({
+    ...meta("agy-box", [codexAgent(), antigravityAgent()]),
+    antigravitySetup: { version: 1, status: "ready", checkedAt: readdedAt, credentialStore: "shared_os_keyring" },
+  }, readdedAt, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  const afterReadd = db.subscriptionUsageForPrincipal(human(), readdedAt).sources
+    .find((source) => source.provider === "antigravity")!;
+  assert.equal(afterReadd.state, "unavailable");
+  assert.deepEqual(afterReadd.buckets, []);
+  assert.equal(afterReadd.plan, undefined);
+  assert.equal(afterReadd.credits, undefined);
+  db.close();
+});
+
+test("downgrading a runner from v413 to v412 clears cached Antigravity quotas and reports unsupported", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  db.registerRunner(meta("agy-box", [antigravityAgent()]), now, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  db.upsertSubscriptionUsageSnapshot({
+    sourceId: antigravitySourceId("agy-box"),
+    runnerId: "agy-box",
+    agentId: ANTIGRAVITY_AGENT_ID,
+    provider: "antigravity",
+    state: "available",
+    fetchedAt: now,
+    plan: "Google AI Ultra",
+    buckets: [{
+      id: "gemini-5h",
+      label: "Gemini Models — Five-Hour Window",
+      usedPercent: 12,
+      remainingPercent: 88,
+      windowDurationMinutes: 300,
+      resetsAt: now + 3_600_000,
+      observedAt: now,
+      status: "available",
+    }],
+    credits: { hasCredits: true, balance: "3000" },
+  }, now);
+
+  // Runner downgrades to v412 and publishes an inventory omitting Antigravity while setup is checking.
+  const downgradeAt = now + 2_000;
+  db.registerRunner({
+    ...meta("agy-box", [codexAgent()]),
+    antigravitySetup: { version: 1, status: "checking", checkedAt: downgradeAt, credentialStore: "shared_os_keyring" },
+  }, downgradeAt, 412, OWNED_BY_ALICE);
+  db.replaceSubscriptionUsageSnapshots("agy-box", [], downgradeAt);
+
+  // Setup then finishes ready and advertises Antigravity on v412 without sending another usage inventory.
+  const readyAt = now + 4_000;
+  db.registerRunner({
+    ...meta("agy-box", [codexAgent(), antigravityAgent()]),
+    antigravitySetup: { version: 1, status: "ready", checkedAt: readyAt, credentialStore: "shared_os_keyring" },
+  }, readyAt, 412, OWNED_BY_ALICE);
+
+  const projected = db.subscriptionUsageForPrincipal(human(), readyAt).sources
+    .find((source) => source.provider === "antigravity")!;
+  assert.equal(projected.state, "unsupported");
+  assert.equal(projected.refreshable, false);
+  assert.deepEqual(projected.buckets, []);
+  assert.equal(projected.plan, undefined);
+  assert.equal(projected.credits, undefined);
   db.close();
 });

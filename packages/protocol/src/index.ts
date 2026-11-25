@@ -466,6 +466,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   subscriptionUsage: 80,
   /** A refresh reads Claude usage too, for a control plane whose deadline counts those sources. */
   claudeSubscriptionUsageRefresh: 342,
+  /** v413 (Refs #4922): Google Antigravity subscription usage snapshots and source-targeted refresh. */
+  antigravitySubscriptionUsage: 413,
   managedBackgroundDelivery: 82,
   backgroundFollowUp: 240,
   managedBackgroundInventory: 82,
@@ -1019,7 +1021,59 @@ export function projectRunnerMessageForProtocol(
   ) {
     return { ...message, code: worktreeRecoveryReceiptCode(protocolVersion) };
   }
+  if (
+    message.type === "subscription_usage_inventory" &&
+    !runnerSupportsProtocol(protocolVersion, "antigravitySubscriptionUsage")
+  ) {
+    return {
+      ...message,
+      snapshots: message.snapshots.filter((snapshot) => snapshot.provider !== "antigravity"),
+    };
+  }
+  if (
+    message.type === "subscription_usage_refresh_result" &&
+    message.snapshots &&
+    !runnerSupportsProtocol(protocolVersion, "antigravitySubscriptionUsage")
+  ) {
+    return {
+      ...message,
+      snapshots: message.snapshots.filter((snapshot) => snapshot.provider !== "antigravity"),
+    };
+  }
   return message;
+}
+
+/** Project subscription-usage runner frames for the negotiated peer protocol. Drops frames the
+ * peer predates (including queued Antigravity updates replayed after reconnecting to a v412 peer)
+ * and strips Antigravity entries from inventory and refresh-result frames. */
+export function projectSubscriptionUsageMessageForProtocol(
+  message: RunnerToControlPlane,
+  protocolVersion: number | null | undefined,
+): RunnerToControlPlane | null {
+  if (
+    message.type !== "subscription_usage_updated" &&
+    message.type !== "subscription_usage_inventory" &&
+    message.type !== "subscription_usage_refresh_result"
+  ) {
+    return message;
+  }
+  if (!runnerSupportsProtocol(protocolVersion, "subscriptionUsage")) return null;
+  if (runnerSupportsProtocol(protocolVersion, "antigravitySubscriptionUsage")) return message;
+  if (message.type === "subscription_usage_updated") {
+    return message.snapshot.provider === "antigravity" ? null : message;
+  }
+  if (message.type === "subscription_usage_inventory") {
+    return {
+      ...message,
+      snapshots: message.snapshots.filter((snapshot) => snapshot.provider !== "antigravity"),
+    };
+  }
+  return message.snapshots
+    ? {
+        ...message,
+        snapshots: message.snapshots.filter((snapshot) => snapshot.provider !== "antigravity"),
+      }
+    : message;
 }
 
 export interface MachineSkillAdoptionRequirement {
@@ -7430,7 +7484,7 @@ export interface DeleteAgentHarnessDefaultRequest extends AgentHarnessIdentity {
 
 /* ---------------- Provider subscription usage (account-level) ---------- */
 
-export type SubscriptionUsageProvider = "codex" | "claude";
+export type SubscriptionUsageProvider = "codex" | "claude" | "antigravity";
 export type SubscriptionUsageState =
   | "available"
   | "unavailable"
@@ -11374,6 +11428,8 @@ export interface RefreshSubscriptionUsageMessage {
   requestId: string;
   /** Opaque account coordinate; omission refreshes every source for legacy clients. */
   providerAccountId?: string;
+  /** Protocol v413: opaque source coordinate for providers without multi-account providerAccountId. */
+  sourceId?: string;
 }
 
 export interface SessionNamingPromptMessage {

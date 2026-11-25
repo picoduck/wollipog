@@ -40,6 +40,7 @@ import {
   PROTOCOL_VERSION,
   projectRunnerMessageForProtocol,
   projectSessionEventPayloadForProtocol,
+  projectSubscriptionUsageMessageForProtocol,
   runnerSupportsProtocol,
   validatePromptImageInputs,
   type AdoptSessionMessage,
@@ -877,6 +878,15 @@ const subscriptionUsage = new SubscriptionUsageManager({
   },
   resolveSubscriptionIdentity: readSubscriptionIdentity,
   claudeRefreshEnabled: () => runnerSupportsProtocol(controlPlaneProtocolVersion, "claudeSubscriptionUsageRefresh"),
+  antigravityEnabled: () => runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySubscriptionUsage"),
+  antigravityPlanTier: () => antigravitySetup.planTier(),
+  antigravityLaunchTarget: () => antigravitySetup.launchableTarget(),
+  acquireAntigravityLaunch: () => antigravitySetup.acquireLaunchTarget(),
+  onAntigravityTargetChanged: () => {
+    void antigravitySetup.check().catch((error) =>
+      log(`Google Antigravity setup re-check after executable change failed: ${errText(error)}`));
+  },
+  onAntigravityUnauthenticated: () => updateAgentAuthStatus(ANTIGRAVITY_AGENT_ID, { status: "unauthenticated" }),
   onTargetChanged: () => {
     void runDiscovery(false, false).catch((error) =>
       log(`harness rediscovery after usage target change failed: ${errText(error)}`));
@@ -1036,14 +1046,18 @@ function antigravityLaunchContext(): ReturnType<AntigravitySetupSupervisor["cred
 /** Antigravity's New Session row from the last settled setup. A check in progress keeps the row
  * it replaces, so New Session does not flicker while a person checks again. */
 let antigravityAgentRow: AgentDefinition | null = null;
+/** Key of the last committed launchable Antigravity generation published to subscription usage. */
+let antigravityLaunchableKey: string | null = null;
 /** When a session last reported the shared Antigravity sign-in gone. */
 let antigravitySignedOutAt: number | undefined;
 const configuredAgentIds = new Set(config.agents.map((agent) => agent.id));
 function publishAntigravityAgent(setup: AntigravitySetupView): void {
   // An operator's configured agent owns the id, its row and its auth status; the setup touches none.
   if (setup.status === "checking" || configuredAgentIds.has(ANTIGRAVITY_AGENT_ID)) return;
+  const launchable = antigravitySetup.launchableTarget();
+  const launchableKey = launchable ? `${launchable.command}\0${launchable.version ?? ""}` : null;
   const row = antigravityAgentDefinition(setup, antigravityLaunchContext(), config.executionIsolation,
-    antigravitySetup.launchableTarget() !== null);
+    launchable !== null);
   // A sign-in confirmed by a check that finished after a session's sign-out report replaces it.
   const runtime = acpAuthStatus.get(ANTIGRAVITY_AGENT_ID);
   const staleSignOut = runtime?.status !== undefined &&
@@ -1052,13 +1066,25 @@ function publishAntigravityAgent(setup: AntigravitySetupView): void {
     if (runtime?.capabilities) acpAuthStatus.set(ANTIGRAVITY_AGENT_ID, { capabilities: runtime.capabilities });
     else acpAuthStatus.delete(ANTIGRAVITY_AGENT_ID);
   }
-  if (!staleSignOut && JSON.stringify(row) === JSON.stringify(antigravityAgentRow)) return;
+  const rowChanged = staleSignOut || JSON.stringify(row) !== JSON.stringify(antigravityAgentRow);
+  const launchableChanged = launchableKey !== antigravityLaunchableKey;
+  if (!rowChanged && !launchableChanged) return;
   antigravityAgentRow = row;
+  antigravityLaunchableKey = launchableKey;
   // Discovery rebuilds the list and adds this row itself; until it first completes, publishing
   // would send only the configured agents.
   if (!discoveryDone) return;
-  metadata.agents = overlayAcpAuthStatus(withAntigravityAgent(metadata.agents, row, configuredAgentIds), acpAuthStatus);
-  sendUp({ type: "agents_updated", runnerId: config.runnerId, agents: agentsForControlPlane(), editors: metadata.editors });
+  if (rowChanged) {
+    metadata.agents = overlayAcpAuthStatus(withAntigravityAgent(metadata.agents, row, configuredAgentIds), acpAuthStatus);
+    sendUp({ type: "agents_updated", runnerId: config.runnerId, agents: agentsForControlPlane(), editors: metadata.editors });
+  }
+  if (runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySubscriptionUsage")) {
+    publishSubscriptionUsageInventory(false);
+    if (setup.status === "ready") {
+      void subscriptionUsage.refreshAntigravitySources()
+        .catch((error) => log(`Google Antigravity subscription usage refresh failed: ${errText(error)}`));
+    }
+  }
 }
 /** An Antigravity session launch (after the shared preparation): the setup's current executable,
  * `agy acp`, and the setup's credential context, whose ambient credentials are dropped both from
@@ -1736,6 +1762,13 @@ function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToCo
   }
   if (msg.type === "policy_hook_decision_recorded" &&
       !runnerSupportsProtocol(controlPlaneProtocolVersion, "nativePolicyHookEvents")) return null;
+  if (
+    msg.type === "subscription_usage_updated" ||
+    msg.type === "subscription_usage_inventory" ||
+    msg.type === "subscription_usage_refresh_result"
+  ) {
+    return projectSubscriptionUsageMessageForProtocol(msg, controlPlaneProtocolVersion);
+  }
   return projectRunnerMessageForProtocol(msg, controlPlaneProtocolVersion);
 }
 
@@ -3496,7 +3529,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }
       void (msg.providerAccountId
         ? subscriptionUsage.refreshAccount(msg.providerAccountId)
-        : subscriptionUsage.refreshAll())
+        : msg.sourceId
+          ? subscriptionUsage.refreshSourceById(msg.sourceId)
+          : subscriptionUsage.refreshAll())
         .then((snapshots) => sendUp({
           type: "subscription_usage_refresh_result",
           requestId: msg.requestId,

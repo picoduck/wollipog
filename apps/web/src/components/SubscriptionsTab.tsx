@@ -11,7 +11,11 @@ import { subscriptionResetLabel } from "../account-unavailable-reasons.js";
 import { viewPath } from "../navigation.js";
 import { isPersonalIdentifier, redactPersonalIdentifiers } from "../personal-identifiers.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
-import { subscriptionAccountGroups, type SubscriptionAccountGroup } from "../subscription-account-groups.js";
+import {
+  subscriptionAccountGroups,
+  type SubscriptionAccountGroup,
+  type SubscriptionAccountRefreshTarget,
+} from "../subscription-account-groups.js";
 import { subscriptionPlanLabel } from "../usage-view-model.js";
 import { usageLeftPercent, usageMeterClass, usageWindowAttention, usageWindowAttentionDetail } from "./AccountChoice.js";
 import { useFeedback } from "./FeedbackProvider.js";
@@ -24,10 +28,7 @@ import { BusyButton } from "./ui/BusyButton.js";
 /** What Refresh All refreshes, as the in-flight key; an account's key is its group's. */
 const ALL = "*";
 
-export interface SubscriptionRefreshTarget {
-  runnerId: string;
-  providerAccountId: string;
-}
+export type SubscriptionRefreshTarget = SubscriptionAccountRefreshTarget;
 
 export interface SubscriptionRefreshAccount {
   key: string;
@@ -155,7 +156,16 @@ function lowerFirst(text: string): string {
 }
 
 function providerName(source: SubscriptionUsageSourceView): string {
-  return source.provider === "codex" ? "Codex" : "Claude";
+  if (source.provider === "codex") return "Codex";
+  if (source.provider === "antigravity") return "Google Antigravity";
+  return "Claude";
+}
+
+function subscriptionCardTitle(source: SubscriptionUsageSourceView): string {
+  const provider = providerName(source);
+  if (!source.plan) return provider;
+  const plan = subscriptionPlanLabel(source.plan);
+  return source.provider === "antigravity" ? `${provider} — ${plan}` : `${provider} ${plan}`;
 }
 
 /** The account's one badge, only when something is wrong (§11.1): no "Available" on a healthy one. */
@@ -317,7 +327,7 @@ function SubscriptionAccount({ group, now, refreshing, onRefresh }: {
       <header className="subscription-plan-head">
         <div className="subscription-plan-heading">
           <h3 className="subscription-plan-title" id={titleId}>
-            {providerName(source)}{source.plan ? ` ${subscriptionPlanLabel(source.plan)}` : ""}
+            {subscriptionCardTitle(source)}
           </h3>
           {badge && (
             <StatusBadge
@@ -381,7 +391,31 @@ function SubscriptionAccount({ group, now, refreshing, onRefresh }: {
   );
 }
 
-function UnavailableSources({ sources }: { sources: readonly SubscriptionUsageSourceView[] }) {
+function unavailableRefreshTarget(
+  source: SubscriptionUsageSourceView,
+): SubscriptionAccountGroup["refreshTargets"][number] | null {
+  if (
+    source.runnerStatus === "offline" ||
+    source.state === "unauthenticated" ||
+    source.state === "not_applicable" ||
+    source.state === "unsupported"
+  ) {
+    return null;
+  }
+  if (source.providerAccountId && (source.refreshable ?? source.provider === "codex")) {
+    return { runnerId: source.runnerId, providerAccountId: source.providerAccountId };
+  }
+  if (!source.providerAccountId && source.refreshable === true) {
+    return { runnerId: source.runnerId, sourceId: source.sourceId };
+  }
+  return null;
+}
+
+function UnavailableSources({ sources, refreshing, onRefresh }: {
+  sources: readonly SubscriptionUsageSourceView[];
+  refreshing: string | null;
+  onRefresh: (account: SubscriptionRefreshAccount) => void;
+}) {
   const privacy = useAccountEmailPrivacy();
   return (
     <details className="disclosure">
@@ -391,15 +425,34 @@ function UnavailableSources({ sources }: { sources: readonly SubscriptionUsageSo
       </summary>
       <div className="disclosure-body">
         <ul className="surface subscription-unavailable-list">
-          {sources.map((source) => (
-            <li className="subscription-unavailable-row" key={`${source.runnerId}:${source.sourceId}`}>
-              <span className="subscription-unavailable-text">
-                <span className="subscription-unavailable-name">{source.agentName} on {source.runnerName}</span>
-                <span className="subscription-unavailable-reason">{unavailableReason(source, privacy.hide)}</span>
-              </span>
-              <StatusBadge tone="neutral" label={unavailableLabel(source)} />
-            </li>
-          ))}
+          {sources.map((source) => {
+            const rowKey = `${source.runnerId}:${source.sourceId}`;
+            const target = unavailableRefreshTarget(source);
+            const busy = target !== null && (refreshing === ALL || refreshing === rowKey);
+            return (
+              <li className="subscription-unavailable-row" key={rowKey}>
+                <span className="subscription-unavailable-text">
+                  <span className="subscription-unavailable-name">{source.agentName} on {source.runnerName}</span>
+                  <span className="subscription-unavailable-reason">{unavailableReason(source, privacy.hide)}</span>
+                </span>
+                <StatusBadge tone="neutral" label={unavailableLabel(source)} />
+                {target && (
+                  <BusyButton
+                    className="icon-btn sm"
+                    busy={busy}
+                    progress="Refreshing the account…"
+                    aria-label="Refresh Account"
+                    title="Refresh Account"
+                    aria-disabled={refreshing !== null && !busy ? true : undefined}
+                    icon={<RefreshIcon size={14} />}
+                    onClick={() => onRefresh({ key: rowKey, targets: [target] })}
+                  >
+                    {null}
+                  </BusyButton>
+                )}
+              </li>
+            );
+          })}
         </ul>
       </div>
     </details>
@@ -474,7 +527,7 @@ export function SubscriptionsTab({ usage, phone, onOpenConnections }: {
           </a>
         )}
       >
-        Sign in to Codex or Claude on a connected machine, and each plan's remaining allowance shows here.
+        Sign in to Codex, Claude, or Google Antigravity on a connected machine, and each plan's remaining allowance shows here.
       </State>
     );
   }
@@ -515,7 +568,13 @@ export function SubscriptionsTab({ usage, phone, onOpenConnections }: {
           ))}
         </div>
       )}
-      {unavailable.length > 0 && <UnavailableSources sources={unavailable} />}
+      {unavailable.length > 0 && (
+        <UnavailableSources
+          sources={unavailable}
+          refreshing={refreshing}
+          onRefresh={(account) => void refresh(account)}
+        />
+      )}
     </>
   );
 }

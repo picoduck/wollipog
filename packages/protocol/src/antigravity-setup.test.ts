@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { antigravityVersionNewer, safeAntigravitySignInUrl, validAntigravityOperationId, validAntigravitySetupView } from "./antigravity-setup.js";
+import {
+  antigravityCliVersionSupportsUsage,
+  antigravityVersionNewer,
+  safeAntigravitySignInUrl,
+  validAntigravityOperationId,
+  validAntigravitySetupView,
+} from "./antigravity-setup.js";
 
 const ready = {
   version: 1,
@@ -119,4 +125,13 @@ test("release versions compare numerically, and anything else offers no update",
   assert.equal(antigravityVersionNewer("1.5", "1.5.0"), false);
   assert.equal(antigravityVersionNewer("1.4.99", "1.5.0"), false);
   assert.equal(antigravityVersionNewer("1.6.0-beta", "1.5.0"), undefined);
+});
+
+test("antigravityCliVersionSupportsUsage enforces the v1.1.11 floor and fails closed on unknown versions", () => {
+  for (const unsupported of [undefined, "", "garbled", "1.0.99", "1.1.10", "1.1.11-rc.1"]) {
+    assert.equal(antigravityCliVersionSupportsUsage(unsupported), false, String(unsupported));
+  }
+  for (const supported of ["1.1.11", "v1.1.11", "1.1.12", "1.5.14", "1.5.14-rc.1", "2.0.0"]) {
+    assert.equal(antigravityCliVersionSupportsUsage(supported), true, supported);
+  }
 });

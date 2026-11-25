@@ -64,8 +64,11 @@ export function driverLabel(driver: string): string {
 }
 
 const SUBSCRIPTION_PLAN_LABELS: Readonly<Record<string, string>> = {
+  free: "Free",
   max: "Max",
+  plus: "Plus",
   pro: "Pro",
+  ultra: "Ultra",
 };
 
 /** Provider plan values are open strings. Correct only tier names whose branding is known and

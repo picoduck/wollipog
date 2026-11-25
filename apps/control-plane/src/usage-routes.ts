@@ -2,13 +2,18 @@ import { acknowledgementRepairFrame, exportClaudeRepairCheckpoint, previewClaude
 import { randomUUID } from "node:crypto";
 import { applyClaudeReconciliation, previewClaudeReconciliation, correctionFrame, reconciliationRevision, exportClaudeReconciliations, previewClaudeReconciliationRecovery, applyClaudeReconciliationRecovery } from "./claude-cost-reconciliation.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { runnerSupportsProtocol, type AgentDefinition } from "@wollipog/protocol";
+import {
+  ANTIGRAVITY_AGENT_ID,
+  runnerSupportsProtocol,
+  type AgentDefinition,
+} from "@wollipog/protocol";
 import { HourlyUsageUnavailableError, type ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import type { AuthPrincipal } from "./identity.js";
 import { canAdministerIdentity } from "./identity.js";
 import {
   SUBSCRIPTION_USAGE_STALE_AFTER_MS,
+  antigravityUsageProbeable,
   claudeUsageProbeable,
   subscriptionUsageRefreshTimeoutMs,
 } from "./subscription-usage.js";
@@ -195,14 +200,24 @@ export function registerUsageRoutes(
       return reply.code(403).send({ error: "subscription usage is available to organization members only" });
     }
     if (!hub) return reply.code(503).send({ error: "subscription usage refresh is unavailable" });
-    const body = request.body as { runnerId?: unknown; providerAccountId?: unknown } | undefined;
-    const targeted = body?.runnerId !== undefined || body?.providerAccountId !== undefined;
-    if (targeted && (typeof body?.runnerId !== "string" || typeof body.providerAccountId !== "string" ||
-        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(body.providerAccountId))) {
-      return reply.code(400).send({ error: "runnerId and providerAccountId are required for an account refresh" });
+    const body = request.body as { runnerId?: unknown; providerAccountId?: unknown; sourceId?: unknown } | undefined;
+    const targeted = body?.runnerId !== undefined || body?.providerAccountId !== undefined || body?.sourceId !== undefined;
+    const targetedAccount = body?.providerAccountId !== undefined;
+    const targetedSource = body?.sourceId !== undefined;
+    if (targeted && (
+      typeof body?.runnerId !== "string" ||
+      (targetedAccount && targetedSource) ||
+      (!targetedAccount && !targetedSource) ||
+      (targetedAccount && (typeof body.providerAccountId !== "string" ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(body.providerAccountId))) ||
+      (targetedSource && (typeof body.sourceId !== "string" || !/^[a-f0-9]{32}$/.test(body.sourceId)))
+    )) {
+      return reply.code(400).send({ error: "runnerId and either providerAccountId or sourceId are required for an account refresh" });
     }
-    // A Claude source reads its identity and then its usage, each bounded like one Codex probe.
+    // A Claude source reads its identity and then its usage, and an Antigravity source reads
+    // `/usage` and then `/credits`, each bounded like one Codex probe.
     const CLAUDE_PROBE_BUDGETS = 2;
+    const ANTIGRAVITY_PROBE_BUDGETS = 2;
     let targetBudgets = 1;
     if (targeted) {
       const visibleSources = db.subscriptionUsageForPrincipal(
@@ -210,18 +225,27 @@ export function registerUsageRoutes(
         Date.now(),
         SUBSCRIPTION_USAGE_STALE_AFTER_MS,
       ).sources;
-      const target = visibleSources.find((source) => source.runnerId === body!.runnerId &&
-          source.providerAccountId === body!.providerAccountId);
+      const target = targetedAccount
+        ? visibleSources.find((source) => source.runnerId === body!.runnerId &&
+            source.providerAccountId === body!.providerAccountId)
+        : visibleSources.find((source) => source.runnerId === body!.runnerId &&
+            source.sourceId === body!.sourceId);
       if (!target) return reply.code(404).send({ error: "subscription account source not found" });
       if (target.provider === "claude" && target.refreshable) targetBudgets = CLAUDE_PROBE_BUDGETS;
+      else if (target.provider === "antigravity" && target.refreshable) targetBudgets = ANTIGRAVITY_PROBE_BUDGETS;
     }
     const runners = db.listRunnersForPrincipal(principal).filter((runner) =>
       runner.status === "online" &&
       (!targeted || runner.runnerId === body!.runnerId) &&
       runnerSupportsProtocol(runner.protocolVersion, "subscriptionUsage") &&
+      (!targetedSource || runnerSupportsProtocol(runner.protocolVersion, "antigravitySubscriptionUsage")) &&
       (!runner.harnessSelections?.length ||
         runnerSupportsProtocol(runner.protocolVersion, "harnessSelectionBackgroundConsumers")) &&
-      runner.agents.some((agent) => agent.driver === "codex-app-server" || agent.driver === "claude-code"));
+      runner.agents.some((agent) =>
+        agent.driver === "codex-app-server" ||
+        agent.driver === "claude-code" ||
+        (runnerSupportsProtocol(runner.protocolVersion, "antigravitySubscriptionUsage") &&
+          agent.id === ANTIGRAVITY_AGENT_ID && (agent.driver ?? "acp") === "acp")));
     const results = await Promise.allSettled(runners.map(async (runner) => {
       // The runner reads its sources one after another: each gets its probe budgets.
       const probedSources = (provider: "codex" | "claude", readable: (agent: AgentDefinition) => boolean) => {
@@ -236,16 +260,24 @@ export function registerUsageRoutes(
             agent.defaultProviderAccountId === account.id)).length;
         return accounts.length + unmappedLegacy;
       };
+      const antigravitySources = runnerSupportsProtocol(runner.protocolVersion, "antigravitySubscriptionUsage")
+        ? runner.agents.filter(antigravityUsageProbeable).length
+        : 0;
       const probeCount = probedSources("codex", () => true) +
         (runnerSupportsProtocol(runner.protocolVersion, "claudeSubscriptionUsageRefresh")
           ? CLAUDE_PROBE_BUDGETS * probedSources("claude", claudeUsageProbeable)
-          : 0);
+          : 0) +
+        ANTIGRAVITY_PROBE_BUDGETS * antigravitySources;
       const requestId = randomUUID();
       const result = await hub.requestFromRunner(
         runner.runnerId,
         requestId,
-        { type: "refresh_subscription_usage", requestId,
-          ...(targeted ? { providerAccountId: body!.providerAccountId as string } : {}) },
+        {
+          type: "refresh_subscription_usage",
+          requestId,
+          ...(targetedAccount ? { providerAccountId: body!.providerAccountId as string } : {}),
+          ...(targetedSource ? { sourceId: body!.sourceId as string } : {}),
+        },
         subscriptionUsageRefreshTimeoutMs(
           targeted
             ? targetBudgets

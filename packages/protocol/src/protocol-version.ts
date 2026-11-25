@@ -1575,6 +1575,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 412: Standalone session and Custom campaign root structured owner approvals, issue closures, and owner questions (#4894).
   412,
   // v413 slot
+  // 413: Google Antigravity subscription usage snapshots and source-targeted subscription refresh (Refs #4922).
+  413,
   // v414 slot
   // v415 slot
   // v416 slot
