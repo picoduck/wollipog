@@ -707,6 +707,121 @@ test("wakeup settlement while old prompt is still in diff capture emits turn_int
   }
 });
 
+test("wakeup that starts and settles during diff capture does not restore the previous turn's continuation eligibility (#4905)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-acp-wakeup-no-restore-cont-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = join(root, "repo");
+    const externalWorktree = join(root, "wt-external");
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "acp-wakeup-superseded-wt", externalWorktree, "HEAD"]);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const fake = fakeAcpFactory({ providerTurnSettleMs: 5_000, providerTurnResponseSettleMs: 5_000 });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+      fake.factory as never, dataDir, 1);
+
+    const sessionId = "s_acp_wakeup_no_restore_cont";
+    await manager.start(acpSpec(sessionId, repo));
+    const internals = manager as unknown as {
+      captureDiff: (sid: string) => Promise<unknown>;
+      worktreeIsolationNotice: (meta: unknown, path: string) => Promise<unknown>;
+      configuredProjectPaths: string[];
+      liveTurnId: (entry: unknown) => string | undefined;
+      active: Map<string, {
+        running: boolean;
+        managedGitBoundary?: true;
+        interruptRequested?: boolean;
+        lastNormallyCompletedTurnId?: string;
+        providerInitiatedTurnActive?: boolean;
+        providerInitiatedTurnId?: string;
+      }>;
+    };
+    internals.configuredProjectPaths = [repo];
+    internals.active.get(sessionId)!.managedGitBoundary = true;
+
+    let enteredDiff!: () => void;
+    let releaseDiff!: () => void;
+    const diffEntered = new Promise<void>((resolve) => { enteredDiff = resolve; });
+    const diffGate = new Promise<void>((resolve) => { releaseDiff = resolve; });
+    const origCaptureDiff = internals.captureDiff.bind(manager);
+    let gatedDiff = false;
+    internals.captureDiff = async (sid) => {
+      if (!gatedDiff) {
+        gatedDiff = true;
+        enteredDiff();
+        await diffGate;
+      }
+      return origCaptureDiff(sid);
+    };
+
+    let activationArrivedResolve!: () => void;
+    let openActivation!: () => void;
+    const activationArrived = new Promise<void>((resolve) => { activationArrivedResolve = resolve; });
+    const activationGate = new Promise<void>((resolve) => { openActivation = resolve; });
+    const origNotice = internals.worktreeIsolationNotice.bind(manager);
+    internals.worktreeIsolationNotice = async (meta, path) => {
+      activationArrivedResolve();
+      await activationGate;
+      return origNotice(meta, path);
+    };
+
+    manager.prompt(sessionId, "turn 1");
+    await diffEntered;
+
+    // The original turn initiates a worktree switch before the wakeup arrives; hold activation.
+    const switched = manager.attachWorktree(sessionId, externalWorktree, { requestedBySession: true });
+    await activationArrived;
+
+    // A wakeup starts during turn 1's diff capture, is interrupted, and settles BEFORE diff capture finishes.
+    fake.processes[0]!.sendUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "tc_superseded_cont",
+      title: "wakeup work",
+      status: "in_progress",
+    });
+    await waitFor(() => internals.active.get(sessionId)?.providerInitiatedTurnActive === true,
+      "wakeup did not become active");
+    const providerTurnId = internals.active.get(sessionId)!.providerInitiatedTurnId!;
+    assert.equal(manager.interruptTurn(sessionId, providerTurnId), "applied");
+    await waitFor(() => internals.active.get(sessionId)?.providerInitiatedTurnActive !== true,
+      "wakeup did not settle while captureDiff remained gated");
+
+    assert.equal(internals.active.get(sessionId)?.running, true, "turn 1 is still in diff capture");
+    assert.equal(internals.active.get(sessionId)?.interruptRequested, false);
+    assert.equal(internals.liveTurnId(internals.active.get(sessionId)!), undefined,
+      "turn 1 must no longer be treated as live after a wakeup superseded it");
+
+    // Let turn 1 finish diff capture and cleanup: it must NOT restore lastNormallyCompletedTurnId.
+    releaseDiff();
+    await waitFor(() => internals.active.get(sessionId)?.running === false &&
+      store.readMeta(sessionId)?.status === "idle",
+    "turn 1 did not finish cleanly after diff gate released");
+    assert.equal(internals.active.get(sessionId)?.lastNormallyCompletedTurnId, undefined,
+      "superseded turn 1 must not restore lastNormallyCompletedTurnId");
+
+    // Release worktree activation: neither notice nor relaunch may continue automatically.
+    openActivation();
+    const result = await switched;
+    assert.equal(result.isolation.continuesAfterRelaunch, undefined,
+      "superseded turn must not advertise continuation");
+    await waitFor(() => fake.processes.length === 2 && store.readMeta(sessionId)?.status === "idle",
+      "relaunch did not settle");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(fake.processes[1]!.prompts.length, 0,
+      "superseded turn must never submit an automatic continuation prompt");
+
+    manager.stop(sessionId);
+    await manager.delete(sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("governance-tripped ACP prompt cancels a post-prompt permission wakeup cleanly instead of stranding its RPC (#4905)", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-acp-wakeup-governance-"));
   let manager: SessionManager | undefined;

@@ -819,3 +819,80 @@ test("selecting a newer worktree while a dequeued continuation awaits pre-submis
     assert.equal(fake.prompts[1]!.cwd, wtB!.worktree.path);
   });
 });
+
+test("stopping a session while a stale continuation discards its prepared checkpoint does not overwrite stopped with idle (#4904)", { skip: !haveGit() }, async () => {
+  const proofGate = gate();
+  const selectBActivationGate = gate();
+  let wtA: Switched | undefined;
+  let wtB: Switched | undefined;
+  await withSession("stale-continuation-stop-during-checkpoint-cleanup", {
+    during: async ({ manager, sessionId }, text) => {
+      if (text !== "start the fix") return;
+      wtB = await manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/stop-cleanup-b" });
+      wtA = await manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/stop-cleanup-a" },
+        undefined, { requestedBySession: true });
+    },
+  }, async ({ manager, store, sessionId, fake, sent }) => {
+    const internals = manager as unknown as {
+      persistedWorktreeFailure: (meta: unknown, path: string, branch: string) => Promise<string | null>;
+      worktreeIsolationNotice: (meta: unknown, path: string) => Promise<SessionWorktreeIsolationNotice>;
+    };
+    const origProof = internals.persistedWorktreeFailure.bind(manager);
+    let proofCalls = 0;
+    internals.persistedWorktreeFailure = async (meta, path, branch) => {
+      if (wtA && path === wtA.worktree.path) {
+        proofCalls += 1;
+        if (proofCalls === 2) await proofGate.wait();
+      }
+      return origProof(meta, path, branch);
+    };
+
+    const origNotice = internals.worktreeIsolationNotice.bind(manager);
+    let gatedB = false;
+    internals.worktreeIsolationNotice = async (meta, path) => {
+      if (!gatedB && wtB && path === wtB.worktree.path && proofCalls >= 2) {
+        gatedB = true;
+        await selectBActivationGate.wait();
+      }
+      return origNotice(meta, path);
+    };
+
+    manager.prompt(sessionId, "start the fix");
+    await proofGate.arrived;
+
+    // Supersede A's dequeued continuation with B while A is paused in its final pre-submission proof.
+    const selectB = manager.selectWorktree(sessionId, wtB!.worktree.path);
+    await selectBActivationGate.arrived;
+
+    // When A unwinds into discardPreparedCheckpoint(), stop the session immediately on the next
+    // microtask while async Git ref deletion (deleteTurnRef) is still in flight.
+    const origReadMeta = store.readMeta.bind(store);
+    let stoppedDuringCheckpointCleanup = false;
+    store.readMeta = (sid: string) => {
+      const meta = origReadMeta(sid);
+      if (sid === sessionId && !stoppedDuringCheckpointCleanup) {
+        stoppedDuringCheckpointCleanup = true;
+        store.readMeta = origReadMeta;
+        queueMicrotask(() => manager.stop(sessionId));
+      }
+      return meta;
+    };
+
+    proofGate.open();
+    await waitFor(() => stoppedDuringCheckpointCleanup && store.readMeta(sessionId)?.status === "stopped",
+      "stop did not run during stale-continuation checkpoint cleanup");
+    // Wait long enough for deleteTurnRef and runPrompt's post-cleanup return to complete.
+    await settle();
+
+    assert.equal(store.readMeta(sessionId)?.status, "stopped",
+      "stale-continuation checkpoint cleanup must not overwrite persisted stopped status with idle");
+    const statusMessages = sent.filter((m): m is Extract<RunnerToControlPlane, { type: "session_status" }> =>
+      m.type === "session_status" && m.sessionId === sessionId);
+    assert.equal(statusMessages.at(-1)?.status, "stopped",
+      "stale-continuation checkpoint cleanup must not publish idle after stopped");
+    assert.equal(fake.prompts.length, 1, "stale continuation must never submit to the provider");
+
+    selectBActivationGate.open();
+    await selectB.catch(() => {});
+  });
+});

@@ -869,6 +869,11 @@ interface ActiveSession {
    * (#4904). Lets an in-flight session worktree switch still continue after relaunch when the
    * requesting turn finishes cleanly before creation/setup completes. */
   lastNormallyCompletedTurnId?: string;
+  /** True when a provider-initiated wakeup started while the current runner turn was still
+   * unwinding (for example, during post-turn diff capture). Even if that wakeup settles before the
+   * older turn finishes cleanup, the older turn must not be treated as live or restore
+   * `lastNormallyCompletedTurnId` (#4905). */
+  activeTurnSupersededByProviderWakeup?: boolean;
   /** Managed jobs owned by the currently dequeued runner continuation. */
   currentBackgroundJobIds?: string[];
   backgroundPromptAccepted?: boolean;
@@ -3737,7 +3742,7 @@ export class SessionManager {
     if (entry.providerInitiatedTurnActive) {
       return entry.providerInitiatedTurnCancelled ? undefined : entry.providerInitiatedTurnId;
     }
-    return entry.running ? entry.activeTurnId : undefined;
+    return entry.running && !entry.activeTurnSupersededByProviderWakeup ? entry.activeTurnId : undefined;
   }
 
   /** Whether the turn that initiated a session's own worktree switch may automatically continue
@@ -14962,7 +14967,9 @@ export class SessionManager {
         // selection intent has already been superseded (#4904).
         if (this.isStaleWorktreeContinuation(sessionId, entry, next)) {
           this.emitQueue(sessionId);
-          if (entry.queue.length === 0) this.emitStatus(sessionId, this.settledTurnStatus(sessionId, entry));
+          if (entry.queue.length === 0 && this.active.get(sessionId) === entry && !entry.historyIntegrityFailure) {
+            this.emitStatus(sessionId, this.settledTurnStatus(sessionId, entry));
+          }
           continue;
         }
         this.ensureQueueOrdinal(sessionId, next);
@@ -14984,6 +14991,7 @@ export class SessionManager {
         }
         entry.activeTurnId = next.id;
         entry.lastNormallyCompletedTurnId = undefined;
+        entry.activeTurnSupersededByProviderWakeup = false;
         this.emitQueue(sessionId); // it just left the queue and is about to run
         // This is the exact per-turn boundary. Reset before the first awaited configuration/image
         // step so an interrupt received anywhere in pre-provider preparation cannot be erased.
@@ -15074,6 +15082,7 @@ export class SessionManager {
           entry.backgroundAssistantMessagePersisted = undefined;
           entry.activeTurnId = undefined;
           entry.activeTurnConfig = undefined;
+          entry.activeTurnSupersededByProviderWakeup = false;
         }
         if (entry.pendingProviderAccountSwitch || this.requestRetiredWorktreeRebind(sessionId, entry) ||
             this.projectMemoryChanged(sessionId, entry)) break;
@@ -15090,6 +15099,7 @@ export class SessionManager {
     } finally {
       entry.running = false;
       entry.activeTurnId = undefined;
+      entry.activeTurnSupersededByProviderWakeup = false;
       this.emitQueue(sessionId);
       clearInterval(refresh);
       // Restart can install a replacement drain under the same process-wide lock owner before this
@@ -17877,7 +17887,9 @@ export class SessionManager {
     // check so a newer worktree selection intent arriving during Git checks still supersedes it (#4904).
     if (this.isStaleWorktreeContinuation(sessionId, entry, queued)) {
       await discardPreparedCheckpoint();
-      this.emitStatus(sessionId, this.settledTurnStatus(sessionId, entry));
+      if (this.active.get(sessionId) === entry && !entry.historyIntegrityFailure) {
+        this.emitStatus(sessionId, this.settledTurnStatus(sessionId, entry));
+      }
       return;
     }
     const userEvent = publishUserEvent();
@@ -18179,7 +18191,7 @@ export class SessionManager {
         // The provider completed before the interrupt took effect. Do not fabricate Interrupted
         // or strand the existing FIFO: this was a normal completed turn, not a cancelled one.
         if (!turnInterruptedOrCancelled && stop === "end_turn" && !entry.historyQuarantined &&
-            !entry.providerInitiatedTurnActive) {
+            !entry.providerInitiatedTurnActive && !entry.activeTurnSupersededByProviderWakeup) {
           entry.lastNormallyCompletedTurnId = entry.activeTurnId;
         }
         this.emitStatus(sessionId, this.settledTurnStatus(sessionId, entry));
@@ -18542,7 +18554,7 @@ export class SessionManager {
         this.emitStatus(sessionId, entry.providerInitiatedTurnActive ? this.settledTurnStatus(sessionId, entry) : "stopped");
       } else {
         if (!turnInterruptedOrCancelled && stop === "end_turn" && !entry.historyQuarantined &&
-            !entry.providerInitiatedTurnActive) {
+            !entry.providerInitiatedTurnActive && !entry.activeTurnSupersededByProviderWakeup) {
           entry.lastNormallyCompletedTurnId = entry.activeTurnId;
         }
         this.emitStatus(sessionId, this.settledTurnStatus(sessionId, entry));
@@ -25060,6 +25072,7 @@ export class SessionManager {
       live.providerInitiatedRequestIds = new Set();
       live.providerInitiatedTurnCancelled = rejectedOnStart;
       live.lastNormallyCompletedTurnId = undefined;
+      if (live.running) live.activeTurnSupersededByProviderWakeup = true;
     } else {
       if (live.providerInitiatedTurnId !== turnId) return;
       const providerCancelled = Boolean(live.providerInitiatedTurnCancelled);
