@@ -49,7 +49,7 @@ import {
 import { acpInitializeRequest, negotiateAcpInitialize } from "./acp-contract.js";
 import { isAgentAuthRequiredError } from "./acp.js";
 import { normalizeAcpConfigOptions, optionForCategory } from "./acp-session-state.js";
-import { resolveNativeCandidates } from "./discovery/resolve.js";
+import { executableTargetIdentity, resolveNativeCandidates } from "./discovery/resolve.js";
 import { JsonRpcPeer } from "./jsonrpc.js";
 import { killTreeAndWait, spawnAgent, type AgentProcess } from "./spawn.js";
 import { AntigravityLaunchLedger, type VerifiedAntigravityLaunch } from "./antigravity-launch-ledger.js";
@@ -557,12 +557,19 @@ export class AntigravitySetupSupervisor {
    * generation path, never by the movable `current/agy`; the store keeps that generation through
    * the next update's commit. Null when nothing is verified (a failed check, or a rejected release
    * a rollback could not undo). Synchronous, so a launch resolves it at the moment it spawns. */
-  launchableTarget(): { command: string; version?: string; context: AntigravityCredentialContext; accessObservedAt: number } | null {
+  launchableTarget(): {
+    command: string;
+    version?: string;
+    targetIdentity?: string;
+    context: AntigravityCredentialContext;
+    accessObservedAt: number;
+  } | null {
     const verified = this.launches.launchable();
     return verified
       ? {
           command: verified.command,
           ...(verified.version ? { version: verified.version } : {}),
+          ...(verified.targetIdentity ? { targetIdentity: verified.targetIdentity } : {}),
           context: this.credentialContext(verified.managed),
           accessObservedAt: verified.accessObservedAt,
         }
@@ -572,15 +579,22 @@ export class AntigravitySetupSupervisor {
   /** `launchableTarget` for a launch about to spawn, held until `release`: no update removes its
    * generation meanwhile, so a launcher that opens the executable after the spawn (bwrap, the cgroup
    * helper) still finds it. Release once the agent answered its handshake, failed or exited. */
-  acquireLaunchTarget(): { command: string; version?: string; context: AntigravityCredentialContext; release: () => void } | null {
+  acquireLaunchTarget(): {
+    command: string;
+    version?: string;
+    targetIdentity?: string;
+    context: AntigravityCredentialContext;
+    release: () => void;
+  } | null {
     const target = this.launchableTarget();
     if (!target) return null;
-    const { command, version } = target;
+    const { command, version, targetIdentity } = target;
     this.launchesInUse.set(command, (this.launchesInUse.get(command) ?? 0) + 1);
     let released = false;
     return {
       command,
       ...(version ? { version } : {}),
+      ...(targetIdentity ? { targetIdentity } : {}),
       context: target.context,
       release: () => {
         if (released) return;
@@ -595,7 +609,13 @@ export class AntigravitySetupSupervisor {
   /** `launchableTarget` once no install, update or check is running, for a launch's preparation:
    * a launch that begins during an update or check takes its outcome into account. The launch
    * still resolves its executable again when it spawns. */
-  async verifiedLaunchTarget(): Promise<{ command: string; version?: string; context: AntigravityCredentialContext; accessObservedAt: number } | null> {
+  async verifiedLaunchTarget(): Promise<{
+    command: string;
+    version?: string;
+    targetIdentity?: string;
+    context: AntigravityCredentialContext;
+    accessObservedAt: number;
+  } | null> {
     while (this.installing || this.checking) {
       await this.installing?.catch(() => {});
       await this.checking?.catch(() => {});
@@ -871,19 +891,26 @@ export class AntigravitySetupSupervisor {
     let executable: { path: string; version?: string; source: "managed" | "path" } | undefined;
     // The managed copy's generation, resolved before it is checked: what a ready result verified.
     let managedGeneration: string | undefined;
+    // File-level identity captured before the version check and re-checked after it, so an in-place
+    // replacement of a PATH executable is detected before any usage probe runs.
+    let targetIdentity: string | null = null;
     if (managed) {
       const path = this.store.executablePath();
       try { managedGeneration = realpathSync(path); } catch { managedGeneration = undefined; }
+      const checkedPath = managedGeneration ?? path;
+      const beforeIdentity = executableTargetIdentity(checkedPath);
       const versioned = await version(path, true);
-      if (versioned.ok) {
+      const afterIdentity = beforeIdentity ? executableTargetIdentity(checkedPath) : null;
+      if (versioned.ok && (!beforeIdentity || afterIdentity === beforeIdentity)) {
         executable = { path, ...(versioned.version ? { version: versioned.version } : {}), source: "managed" };
+        targetIdentity = beforeIdentity;
       } else if (!pathCopy || options.managedOnly) {
         await latestRead;
-        return this.settleCheck({ ...base, status: "verification_failed", failure: versioned.failure,
+        return this.settleCheck({ ...base, status: "verification_failed", failure: versioned.ok ? "version_check_failed" : versioned.failure,
           executable: { path, source: "managed" }, checkedAt: this.now() });
       } else {
         this.managed.activeCheckFailed = true;
-        this.managedVersionFailure = versioned.failure;
+        this.managedVersionFailure = versioned.ok ? "version_check_failed" : versioned.failure;
       }
     }
     if (!executable) {
@@ -891,23 +918,33 @@ export class AntigravitySetupSupervisor {
         await latestRead;
         return this.settleCheck({ ...base, status: "missing_runtime", checkedAt: this.now() });
       }
+      const beforeIdentity = executableTargetIdentity(pathCopy);
       const versioned = await version(pathCopy, false);
-      if (!versioned.ok) {
+      const afterIdentity = beforeIdentity ? executableTargetIdentity(pathCopy) : null;
+      if (!versioned.ok || (beforeIdentity && afterIdentity !== beforeIdentity)) {
         await latestRead;
-        return this.settleCheck({ ...base, status: "verification_failed", failure: versioned.failure,
+        return this.settleCheck({ ...base, status: "verification_failed", failure: versioned.ok ? "version_check_failed" : versioned.failure,
           executable: { path: pathCopy, source: "path" }, checkedAt: this.now() });
       }
       executable = { path: pathCopy, ...(versioned.version ? { version: versioned.version } : {}), source: "path" };
+      targetIdentity = beforeIdentity;
     }
     const access = await this.checkAccess(executable.path, executable.source === "managed");
     await latestRead;
     if (access.status === "ready") {
       const isManaged = executable.source === "managed";
+      const launchCommand = isManaged ? managedGeneration ?? executable.path : executable.path;
+      const finalIdentity = targetIdentity ? executableTargetIdentity(launchCommand) : null;
+      if (targetIdentity && finalIdentity !== targetIdentity) {
+        return this.settleCheck({ ...base, status: "verification_failed", failure: "version_check_failed",
+          executable, checkedAt: this.now() });
+      }
       return this.settleCheck({ ...base, status: "ready", executable, models: access.models, checkedAt: this.now() },
         {
-          command: isManaged ? managedGeneration ?? executable.path : executable.path,
+          command: launchCommand,
           managed: isManaged,
           ...(executable.version ? { version: executable.version } : {}),
+          ...(targetIdentity ? { targetIdentity } : {}),
           ...(access.tier ? { tier: access.tier } : {}),
           accessObservedAt: access.observedAt,
         });

@@ -300,6 +300,12 @@ function nativeLaunchIdentity(launch: ResolvedLaunch): string | null {
   return JSON.stringify([command, ...launch.args.map((arg) => file(arg, false))]);
 }
 
+/** Capture file-level identity (canonical path, device, inode, size, timestamps, mode) for a
+ * single native executable path, or null when the path is not an accessible regular file. */
+export function executableTargetIdentity(command: string): string | null {
+  return nativeLaunchIdentity({ command, args: [] });
+}
+
 /** An executable's canonical launch identity. Aliases collapse, while a node shim launched by
  * different version-manager runtimes remains distinct. */
 export function resolvedLaunchIdentity(binary: ResolvedBinary): string {

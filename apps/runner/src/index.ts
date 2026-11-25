@@ -882,6 +882,10 @@ const subscriptionUsage = new SubscriptionUsageManager({
   antigravityPlanTier: () => antigravitySetup.planTier(),
   antigravityLaunchTarget: () => antigravitySetup.launchableTarget(),
   acquireAntigravityLaunch: () => antigravitySetup.acquireLaunchTarget(),
+  onAntigravityTargetChanged: () => {
+    void antigravitySetup.check().catch((error) =>
+      log(`Google Antigravity setup re-check after executable change failed: ${errText(error)}`));
+  },
   onAntigravityUnauthenticated: () => updateAgentAuthStatus(ANTIGRAVITY_AGENT_ID, { status: "unauthenticated" }),
   onTargetChanged: () => {
     void runDiscovery(false, false).catch((error) =>

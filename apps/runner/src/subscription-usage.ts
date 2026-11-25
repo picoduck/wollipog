@@ -1015,10 +1015,18 @@ export interface SubscriptionUsageManagerOptions {
   antigravityPlanTier?: () => string | undefined;
   /** Non-pinning view of the currently committed Antigravity launch target (used to detect target
    * transitions and discard superseded probes). */
-  antigravityLaunchTarget?: () => { command: string; version?: string } | null;
+  antigravityLaunchTarget?: () => { command: string; version?: string; targetIdentity?: string } | null;
   /** Acquires the verified Antigravity launch target (managed generation or PATH copy + context),
    * pinned until the probe releases it. Falls back to the agent command + default context in tests. */
-  acquireAntigravityLaunch?: () => { command: string; version?: string; context: AntigravityCredentialContext; release: () => void } | null;
+  acquireAntigravityLaunch?: () => {
+    command: string;
+    version?: string;
+    targetIdentity?: string;
+    context: AntigravityCredentialContext;
+    release: () => void;
+  } | null;
+  /** Called when an Antigravity executable's on-disk identity changed since setup verified it. */
+  onAntigravityTargetChanged?: () => void;
   /** Called when an Antigravity usage probe observes that the shared Google sign-in expired. */
   onAntigravityUnauthenticated?: () => void;
   probeAntigravity?: typeof probeAntigravitySubscriptionUsage;
@@ -1411,7 +1419,14 @@ export class SubscriptionUsageManager {
 
   private antigravityTargetKey(source: SubscriptionSource): string {
     const launchable = this.options.antigravityLaunchTarget?.();
-    return `${source.agent.command}\0${source.agent.version ?? ""}\0${launchable?.command ?? ""}\0${launchable?.version ?? ""}`;
+    return [
+      source.agent.available === true ? "ready" : "unavailable",
+      source.agent.command,
+      source.agent.version ?? "",
+      launchable?.command ?? "",
+      launchable?.version ?? "",
+      launchable?.targetIdentity ?? "",
+    ].join("\0");
   }
 
   syncSources(): SubscriptionUsageSnapshot[] {
@@ -1456,10 +1471,25 @@ export class SubscriptionUsageManager {
         this.pendingDecreases.delete(source.sourceId);
         this.bumpSourceGeneration(source.sourceId);
       }
-      this.snapshots.set(source.sourceId, forced || !prior || accountChanged ? initial : {
-        ...prior,
-        agentId: source.agent.id,
-      });
+      if (forced || !prior || accountChanged) {
+        this.snapshots.set(source.sourceId, initial);
+      } else if (source.provider === "antigravity" && source.agent.available !== true && initial.state === "unavailable") {
+        // A failed setup check must surface its unavailable state and detail immediately while
+        // preserving last-known quota windows and their original reading timestamp.
+        this.snapshots.set(source.sourceId, prior.buckets.length > 0
+          ? {
+              ...prior,
+              agentId: source.agent.id,
+              state: "unavailable",
+              detail: initial.detail,
+            }
+          : initial);
+      } else {
+        this.snapshots.set(source.sourceId, {
+          ...prior,
+          agentId: source.agent.id,
+        });
+      }
     }
     return this.inventory();
   }
@@ -1658,6 +1688,30 @@ export class SubscriptionUsageManager {
         return;
       }
 
+      const antigravityExecutableMatches = () => {
+        if (!acquired.targetIdentity) return true;
+        return launchTargetStillMatches(
+          { command: acquired.command, args: [] },
+          source.agent.context ?? { kind: "native" },
+          acquired.targetIdentity,
+        );
+      };
+      const reportAntigravityTargetChanged = () => {
+        this.options.onAntigravityTargetChanged?.();
+        const prior = this.snapshots.get(source.sourceId);
+        const detail = "The Google Antigravity executable changed; retry after setup re-checks it.";
+        const next: SubscriptionUsageSnapshot = prior?.buckets.length
+          ? { ...prior, state: "unavailable", detail }
+          : { ...initial, state: "unavailable", detail, fetchedAt: this.now() };
+        this.snapshots.set(source.sourceId, next);
+        this.publish(next);
+      };
+      if (!antigravityExecutableMatches()) {
+        acquired.release();
+        reportAntigravityTargetChanged();
+        return;
+      }
+
       const isCurrent = () => {
         if (this.shuttingDown || selectionGeneration !== this.selectionGeneration) return false;
         if ((this.sourceGeneration.get(source.sourceId) ?? 0) !== sourceGen) return false;
@@ -1670,7 +1724,8 @@ export class SubscriptionUsageManager {
         if (!this.probed(live)) return false;
         if (this.options.antigravityLaunchTarget) {
           const currentLaunch = this.options.antigravityLaunchTarget();
-          if (!currentLaunch || currentLaunch.command !== acquired.command || currentLaunch.version !== acquired.version) {
+          if (!currentLaunch || currentLaunch.command !== acquired.command || currentLaunch.version !== acquired.version ||
+              currentLaunch.targetIdentity !== acquired.targetIdentity) {
             return false;
           }
         }
@@ -1689,6 +1744,10 @@ export class SubscriptionUsageManager {
           authorization = await this.options.authorizeProbe?.(source.agent, acquired.context.env, source.sourceId);
           if (!authorization) throw new Error("subscription usage probe authorization is unavailable");
           if (!isCurrent()) return;
+          if (!antigravityExecutableMatches()) {
+            reportAntigravityTargetChanged();
+            return;
+          }
           const result = await (this.options.probeAntigravity ?? probeAntigravitySubscriptionUsage)({
             command: acquired.command,
             cwd: authorization.cwd,

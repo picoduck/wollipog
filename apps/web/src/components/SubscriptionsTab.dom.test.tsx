@@ -766,10 +766,38 @@ test("an online refreshable Google Antigravity source without quota windows offe
     assert.equal(rows.length, 2);
     const retryBtn = rows[0]!.querySelector<HTMLButtonElement>('button[aria-label="Refresh Account"]');
     assert.ok(retryBtn, "online refreshable unavailable source offers Refresh Account");
-    assert.equal(rows[1]!.querySelector('button[aria-label="Refresh Account"]'), null, "offline source does not offer Refresh Account");
+    assertNoDomNode(rows[1]!.querySelector('button[aria-label="Refresh Account"]'), "offline source does not offer Refresh Account");
     await act(async () => { retryBtn.click(); await Promise.resolve(); await Promise.resolve(); });
     assert.deepEqual(requests, [{ runnerId: "agy-box", sourceId: "f".repeat(32) }]);
     assert.equal(view.panel()!.querySelectorAll(".subscription-plan").length, 1);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an offline Google Antigravity plan keeps its cached windows visible and hides Refresh Account", async () => {
+  const offlineAgy = source({
+    sourceId: "2".repeat(32),
+    runnerId: "agy-offline",
+    runnerName: "sleepy-box",
+    runnerStatus: "offline",
+    freshness: "stale",
+    agentId: "google-antigravity",
+    agentName: "Google Antigravity",
+    provider: "antigravity",
+    providerAccountId: undefined,
+    accountLabel: undefined,
+    plan: "Google AI Pro",
+    refreshable: true,
+    buckets: [window_("gemini-5h", "Gemini Models — Five-Hour Window", 72)],
+  });
+  const view = await renderTab({ subscriptionUsage: async () => response([offlineAgy]) });
+  try {
+    const card = view.panel()!.querySelector(".subscription-plan")!;
+    assert.equal(card.querySelector(".subscription-plan-title")?.textContent, "Google Antigravity — Google AI Pro");
+    assert.equal(card.querySelector(".subscription-window-left")?.textContent, "72% left");
+    assert.equal(card.querySelector(".subscription-plan-head .status")?.textContent, "Last Known — Stale");
+    assert.equal(view.button("Refresh Account"), undefined, "offline Antigravity card must not offer Refresh Account");
   } finally {
     await view.unmount();
   }

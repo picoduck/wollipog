@@ -167,11 +167,13 @@ export function normalizeAntigravityUsageData(
 
   const buckets: SubscriptionUsageBucket[] = [];
   const seenIds = new Set<string>();
+  let sawRecognizedGroup = false;
   let sawAnyBucket = false;
 
   for (const rawGroup of root.groups) {
     const group = record(rawGroup);
     if (!group || !Array.isArray(group.buckets)) continue;
+    sawRecognizedGroup = true;
     const rawGroupName = stringValue(group.name, 80);
     const groupLabel = rawGroupName ? titleCaseLabel(rawGroupName) : undefined;
     const groupBuckets: SubscriptionUsageBucket[] = [];
@@ -227,6 +229,7 @@ export function normalizeAntigravityUsageData(
     }
   }
 
+  if (!sawRecognizedGroup) return null;
   if (!sawAnyBucket) return { state: "not_applicable" };
   if (buckets.length === 0) return null;
   return { state: "available", buckets };
@@ -337,14 +340,16 @@ function probeAntigravityPrintCommand(
           commandData = command.data;
           hasCommandData = true;
         }
-        if (numTurns === 0) {
-          verifiedZeroTurnSuccess = true;
-        }
+        // Only the final terminal result may verify zero turns; a later SUCCESS lacking num_turns=0
+        // must not inherit an earlier frame's verification.
+        verifiedZeroTurnSuccess = numTurns === 0;
       } else if (status === "ERROR") {
         sawTerminalError = true;
         verifiedZeroTurnSuccess = false;
         const err = stringValue(envelope.error, 300);
         if (err) errorMessage = err;
+      } else if (event === "result") {
+        verifiedZeroTurnSuccess = false;
       }
     };
 

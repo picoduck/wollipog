@@ -110,7 +110,7 @@ export function subscriptionAccountGroups(sources: readonly SubscriptionUsageSou
       if (member.providerAccountId && (member.refreshable ?? member.provider === "codex")) {
         return [{ runnerId: member.runnerId, providerAccountId: member.providerAccountId }];
       }
-      if (!member.providerAccountId && member.refreshable === true) {
+      if (!member.providerAccountId && member.refreshable === true && member.runnerStatus !== "offline") {
         return [{ runnerId: member.runnerId, sourceId: member.sourceId }];
       }
       return [];
