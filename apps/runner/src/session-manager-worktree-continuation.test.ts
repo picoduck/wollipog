@@ -754,3 +754,68 @@ test("selecting a newer worktree while an earlier continuation waits in the queu
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("selecting a newer worktree while a dequeued continuation awaits pre-submission Git proof cancels the stale continuation (#4904)", { skip: !haveGit() }, async () => {
+  const proofGate = gate();
+  const selectBActivationGate = gate();
+  let wtA: Switched | undefined;
+  let wtB: Switched | undefined;
+  await withSession("dequeued-continuation-superseded", {
+    during: async ({ manager, sessionId }, text) => {
+      if (text !== "start the fix") return;
+      wtB = await manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/dequeued-target-b" });
+      wtA = await manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/dequeued-target-a" },
+        undefined, { requestedBySession: true });
+    },
+  }, async ({ manager, store, sessionId, fake }) => {
+    const internals = manager as unknown as {
+      persistedWorktreeFailure: (meta: unknown, path: string, branch: string) => Promise<string | null>;
+      worktreeIsolationNotice: (meta: unknown, path: string) => Promise<SessionWorktreeIsolationNotice>;
+    };
+    const origProof = internals.persistedWorktreeFailure.bind(manager);
+    let proofCalls = 0;
+    internals.persistedWorktreeFailure = async (meta, path, branch) => {
+      if (wtA && path === wtA.worktree.path) {
+        proofCalls += 1;
+        // Gate the final pre-submission proof (second call inside runPrompt) after the continuation
+        // has already left the queue.
+        if (proofCalls === 2) await proofGate.wait();
+      }
+      return origProof(meta, path, branch);
+    };
+
+    const origNotice = internals.worktreeIsolationNotice.bind(manager);
+    let gatedB = false;
+    internals.worktreeIsolationNotice = async (meta, path) => {
+      if (!gatedB && wtB && path === wtB.worktree.path && proofCalls >= 2) {
+        gatedB = true;
+        await selectBActivationGate.wait();
+      }
+      return origNotice(meta, path);
+    };
+
+    manager.prompt(sessionId, "start the fix");
+    // Wait until the automatic continuation for A has dequeued and reached its final pre-submission proof.
+    await proofGate.arrived;
+
+    // Select B while A's dequeued continuation is paused in its final pre-submission proof.
+    const selectB = manager.selectWorktree(sessionId, wtB!.worktree.path);
+    await selectBActivationGate.arrived;
+
+    // Release A's proof while B is still waiting before activation -> A's continuation MUST NOT submit!
+    proofGate.open();
+    await waitFor(() => store.readMeta(sessionId)?.status === "idle",
+      "superseded continuation did not unwind cleanly");
+    await settle();
+    assert.equal(fake.prompts.length, 1, "provider must receive no automatic continuation prompt for A");
+
+    // Release B's activation and verify an ordinary follow-up runs in B.
+    selectBActivationGate.open();
+    await selectB;
+    manager.prompt(sessionId, "ordinary prompt in B");
+    await waitFor(() => fake.prompts.length === 2 && store.readMeta(sessionId)?.status === "idle",
+      "ordinary prompt did not run in B");
+    assert.deepEqual(fake.prompts.map((p) => p.text), ["start the fix", "ordinary prompt in B"]);
+    assert.equal(fake.prompts[1]!.cwd, wtB!.worktree.path);
+  });
+});

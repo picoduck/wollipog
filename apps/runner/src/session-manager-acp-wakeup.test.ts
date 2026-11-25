@@ -623,3 +623,225 @@ test("old prompt cleanup does not consume a wakeup interrupt or restore its work
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("wakeup settlement while old prompt is still in diff capture emits turn_interrupted and clears interrupt hold immediately (#4905)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-acp-wakeup-settle-first-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = join(root, "repo");
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const fake = fakeAcpFactory({ providerTurnSettleMs: 5_000, providerTurnResponseSettleMs: 5_000 });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+      fake.factory as never, dataDir, 1);
+
+    const sessionId = "s_acp_wakeup_settle_first";
+    await manager.start(acpSpec(sessionId, repo));
+    const internals = manager as unknown as {
+      captureDiff: (sid: string) => Promise<unknown>;
+      active: Map<string, {
+        running: boolean;
+        interruptRequested?: boolean;
+        holdQueuedPromptsAfterInterrupt?: boolean;
+        providerInitiatedTurnActive?: boolean;
+        providerInitiatedTurnId?: string;
+      }>;
+    };
+
+    let enteredDiff!: () => void;
+    let releaseDiff!: () => void;
+    const diffEntered = new Promise<void>((resolve) => { enteredDiff = resolve; });
+    const diffGate = new Promise<void>((resolve) => { releaseDiff = resolve; });
+    const origCaptureDiff = internals.captureDiff.bind(manager);
+    let gatedDiff = false;
+    internals.captureDiff = async (sid) => {
+      if (!gatedDiff) {
+        gatedDiff = true;
+        enteredDiff();
+        await diffGate;
+      }
+      return origCaptureDiff(sid);
+    };
+
+    manager.prompt(sessionId, "turn 1");
+    await diffEntered;
+
+    fake.processes[0]!.sendUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "tc_settle_first",
+      title: "wakeup work",
+      status: "in_progress",
+    });
+    await waitFor(() => internals.active.get(sessionId)?.providerInitiatedTurnActive === true,
+      "wakeup did not become active");
+    const providerTurnId = internals.active.get(sessionId)!.providerInitiatedTurnId!;
+
+    // Keep captureDiff gated until ACP's deferred cancellation settles the wakeup first.
+    assert.equal(manager.interruptTurn(sessionId, providerTurnId), "applied");
+    await waitFor(() => internals.active.get(sessionId)?.providerInitiatedTurnActive !== true,
+      "wakeup did not settle while captureDiff remained gated");
+
+    assert.equal(internals.active.get(sessionId)?.running, true, "old prompt is still gated in captureDiff");
+    assert.equal(internals.active.get(sessionId)?.interruptRequested, false,
+      "wakeup settlement must clear interruptRequested before old prompt resumes");
+    assert.equal(internals.active.get(sessionId)?.holdQueuedPromptsAfterInterrupt, false,
+      "wakeup settlement must clear the interrupt queue hold");
+    assert.equal(store.readEvents(sessionId).filter((e) => e.payload.kind === "turn_interrupted").length, 1,
+      "exactly one turn_interrupted event must be emitted for the interrupted wakeup");
+
+    releaseDiff();
+    await waitFor(() => internals.active.get(sessionId)?.running === false &&
+      store.readMeta(sessionId)?.status === "idle",
+    "original prompt did not finish cleanly after diff gate released");
+    assert.equal(store.readEvents(sessionId).filter((e) => e.payload.kind === "turn_interrupted").length, 1);
+
+    manager.stop(sessionId);
+    await manager.delete(sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("governance-tripped ACP prompt cancels a post-prompt permission wakeup cleanly instead of stranding its RPC (#4905)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-acp-wakeup-governance-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = join(root, "repo");
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+
+    const responses: Array<{ id?: number; result?: unknown }> = [];
+    let procStdout!: PassThrough;
+    let promptReqId: number | null = null;
+    const factory = (_driver: unknown, opts: DriverOptions, cb: DriverCallbacks) => {
+      const stdin = new PassThrough();
+      const stdout = new PassThrough();
+      procStdout = stdout;
+      const child = Object.assign(new EventEmitter(), {
+        stdin,
+        stdout,
+        stderr: new PassThrough(),
+        pid: 12_345,
+        posixBoundary: { owner: undefined, terminate: async () => true },
+      }) as unknown as AgentProcess;
+      let buf = "";
+      stdin.setEncoding("utf8");
+      stdin.on("data", (chunk: string) => {
+        buf += chunk;
+        while (buf.includes("\n")) {
+          const line = buf.slice(0, buf.indexOf("\n")).trim();
+          buf = buf.slice(buf.indexOf("\n") + 1);
+          if (!line) continue;
+          const msg = JSON.parse(line) as { id?: number; method?: string; result?: unknown };
+          if (msg.id !== undefined && msg.result !== undefined) {
+            responses.push({ id: msg.id, result: msg.result });
+          } else if (msg.method === "initialize" && msg.id !== undefined) {
+            stdout.write(JSON.stringify({
+              jsonrpc: "2.0",
+              id: msg.id,
+              result: { protocolVersion: 1, agentCapabilities: {}, agentInfo: { name: "fake-acp", version: "1.0.0" } },
+            }) + "\n");
+          } else if (msg.method === "session/new" && msg.id !== undefined) {
+            stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { sessionId: "acp-gov-1" } }) + "\n");
+          } else if (msg.method === "session/prompt" && msg.id !== undefined) {
+            promptReqId = msg.id;
+            // Emit 2 tool calls to trip maxToolCalls: 1.
+            stdout.write(JSON.stringify({
+              jsonrpc: "2.0",
+              method: "session/update",
+              params: { sessionId: "acp-gov-1", update: { sessionUpdate: "tool_call", toolCallId: "tc_1", title: "t1", status: "completed" } },
+            }) + "\n");
+            stdout.write(JSON.stringify({
+              jsonrpc: "2.0",
+              method: "session/update",
+              params: { sessionId: "acp-gov-1", update: { sessionUpdate: "tool_call", toolCallId: "tc_2", title: "t2", status: "completed" } },
+            }) + "\n");
+          } else if (msg.method === "session/cancel" && promptReqId !== null) {
+            const id = promptReqId;
+            promptReqId = null;
+            stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result: { stopReason: "cancelled" } }) + "\n");
+          }
+        }
+      });
+      return new AcpDriver(opts, cb, {
+        spawn: () => child,
+        kill: () => child.emit("close", 0, null),
+        providerTurnSettleMs: 60,
+        providerTurnResponseSettleMs: 30,
+      });
+    };
+
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+      factory as never, dataDir, 1);
+
+    const sessionId = "s_acp_wakeup_governance";
+    await manager.start({
+      ...acpSpec(sessionId, repo),
+      config: { maxToolCalls: 1 },
+    });
+    const internals = manager as unknown as {
+      captureDiff: (sid: string) => Promise<unknown>;
+      active: Map<string, { running: boolean; governanceTripped?: string; providerInitiatedTurnActive?: boolean }>;
+    };
+
+    let enteredDiff!: () => void;
+    let releaseDiff!: () => void;
+    const diffEntered = new Promise<void>((resolve) => { enteredDiff = resolve; });
+    const diffGate = new Promise<void>((resolve) => { releaseDiff = resolve; });
+    const origCaptureDiff = internals.captureDiff.bind(manager);
+    let gatedDiff = false;
+    internals.captureDiff = async (sid) => {
+      if (!gatedDiff) {
+        gatedDiff = true;
+        enteredDiff();
+        await diffGate;
+      }
+      return origCaptureDiff(sid);
+    };
+
+    manager.prompt(sessionId, "trip maxToolCalls");
+    await diffEntered;
+    assert.equal(internals.active.get(sessionId)?.governanceTripped, "max_tool_calls");
+
+    // While diff capture is gated on the governance-tripped turn, ACP sends an unsolicited permission RPC.
+    procStdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 505,
+      method: "session/request_permission",
+      params: {
+        sessionId: "acp-gov-1",
+        toolCall: { toolCallId: "tc_gov_perm", title: "late command" },
+        options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+      },
+    }) + "\n");
+
+    await waitFor(() => responses.some((r) => r.id === 505), "permission RPC did not receive cancellation");
+    assert.deepEqual(
+      responses.find((r) => r.id === 505)!.result,
+      { outcome: { outcome: "cancelled" } },
+      "governance-tripped session must immediately cancel an unsolicited wakeup permission RPC",
+    );
+
+    releaseDiff();
+    await waitFor(() => internals.active.get(sessionId)?.running === false &&
+      internals.active.get(sessionId)?.providerInitiatedTurnActive !== true &&
+      store.readMeta(sessionId)?.status === "idle",
+    "governance-tripped session did not settle cleanly to idle");
+    assert.equal(store.readMeta(sessionId)?.pendingApproval ?? null, null);
+
+    manager.stop(sessionId);
+    await manager.delete(sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
