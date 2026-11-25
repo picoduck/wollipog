@@ -17985,12 +17985,12 @@ export class SessionManager {
       let retryOriginalInput = true;
       let inputMayHaveBeenDelivered = false;
       let capacityRetriesExhausted = false;
+      // Only a wakeup that starts after this prompt's first provider submission supersedes it (#4905).
+      entry.activeTurnSupersededByProviderWakeup = false;
       for (let attempt = 0; ; attempt++) {
         entry.providerCapacityFailure = false;
         let caughtCapacityError = false;
         try {
-          // Only a wakeup that starts after this prompt reaches the provider supersedes it (#4905).
-          entry.activeTurnSupersededByProviderWakeup = false;
           entry.providerPromptSubmitted = true;
           stop = await entry.client.prompt(
             retryOriginalInput ? `${text}${workspaceReferenceText}` : PROVIDER_RETRY_CONTINUATION,

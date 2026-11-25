@@ -37,6 +37,7 @@ interface FakeAcpProcess {
   disposed: boolean;
   sendUpdate: (update: Record<string, unknown>) => void;
   respondPrompt: (stopReason?: string) => void;
+  respondPromptError: (message: string, code?: number) => void;
   hasPendingPrompt: () => boolean;
 }
 
@@ -76,6 +77,12 @@ function fakeAcpFactory(options: {
         const id = pendingPromptId!;
         pendingPromptId = null;
         stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result: { stopReason } }) + "\n");
+      },
+      respondPromptError: (message: string, code = -32000) => {
+        assert.notEqual(pendingPromptId, null, "no prompt is waiting for a response");
+        const id = pendingPromptId!;
+        pendingPromptId = null;
+        stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }) + "\n");
       },
       hasPendingPrompt: () => pendingPromptId !== null,
     };
@@ -923,6 +930,102 @@ test("ACP wakeup during prompt preparation does not suppress the upcoming turn's
     );
     await new Promise((resolve) => setTimeout(resolve, 150));
     assert.equal(fake.processes[2]!.prompts.length, 1, "continuation must run exactly once");
+
+    manager.stop(sessionId);
+    await manager.delete(sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("capacity retry after a backoff ACP wakeup does not restore a superseded turn's worktree continuation (#4905)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-acp-wakeup-capacity-retry-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = join(root, "repo");
+    const externalWorktree = join(root, "wt-capacity-retry");
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "acp-capacity-retry-wt", externalWorktree, "HEAD"]);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const fake = fakeAcpFactory({
+      autoRespond: (launch, text) => launch === 1 && text.startsWith("turn 1"),
+      providerTurnSettleMs: 50,
+      providerTurnResponseSettleMs: 50,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+      fake.factory as never, dataDir, 1);
+
+    const sessionId = "s_acp_wakeup_capacity_retry";
+    await manager.start(acpSpec(sessionId, repo));
+    const internals = manager as unknown as {
+      worktreeIsolationNotice: (meta: unknown, path: string) => Promise<unknown>;
+      configuredProjectPaths: string[];
+      active: Map<string, {
+        running: boolean;
+        managedGitBoundary?: true;
+        providerInitiatedTurnActive?: boolean;
+      }>;
+    };
+    internals.configuredProjectPaths = [repo];
+    internals.active.get(sessionId)!.managedGitBoundary = true;
+
+    // Complete turn 1 so ACP enables post-end_turn wakeup detection.
+    manager.prompt(sessionId, "turn 1");
+    await waitFor(() => fake.processes[0]!.prompts.length === 1 && store.readMeta(sessionId)?.status === "idle",
+      "turn 1 did not finish");
+
+    let activationArrivedResolve!: () => void;
+    let openActivation!: () => void;
+    const activationArrived = new Promise<void>((resolve) => { activationArrivedResolve = resolve; });
+    const activationGate = new Promise<void>((resolve) => { openActivation = resolve; });
+    const origNotice = internals.worktreeIsolationNotice.bind(manager);
+    internals.worktreeIsolationNotice = async (meta, path) => {
+      activationArrivedResolve();
+      await activationGate;
+      return origNotice(meta, path);
+    };
+
+    // Start turn 2, capture its session-originated worktree request while activation is gated,
+    // then fail attempt 0 with a capacity error so runPrompt enters retry backoff.
+    manager.prompt(sessionId, "turn 2");
+    await waitFor(() => fake.processes[0]!.prompts.length === 2 && fake.processes[0]!.hasPendingPrompt(),
+      "turn 2 did not reach ACP");
+    const switched = manager.attachWorktree(sessionId, externalWorktree, { requestedBySession: true });
+    await activationArrived;
+
+    fake.processes[0]!.respondPromptError("model_capacity_exceeded: model at capacity");
+    await waitFor(() => !fake.processes[0]!.hasPendingPrompt(), "capacity error was not consumed");
+
+    // Start and settle an unsolicited ACP wakeup during the capacity retry backoff window.
+    fake.processes[0]!.sendUpdate({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "wakeup during backoff" },
+    });
+    await waitFor(() => internals.active.get(sessionId)?.providerInitiatedTurnActive === true,
+      "wakeup did not activate during capacity retry backoff");
+    await waitFor(() => internals.active.get(sessionId)?.providerInitiatedTurnActive !== true,
+      "wakeup did not settle during capacity retry backoff");
+
+    // Wait for the capacity retry (attempt 1) to reach ACP, then release worktree activation.
+    await waitFor(() => fake.processes[0]!.prompts.length === 3 && fake.processes[0]!.hasPendingPrompt(),
+      "capacity retry did not reach ACP");
+    openActivation();
+    const result = await switched;
+    assert.equal(result.isolation.continuesAfterRelaunch, undefined,
+      "capacity retry must not restore continuation eligibility after a backoff wakeup superseded the turn");
+
+    // Finish the retried turn normally; relaunch must happen without any automatic continuation.
+    fake.processes[0]!.respondPrompt("end_turn");
+    await waitFor(() => fake.processes.length === 2 && store.readMeta(sessionId)?.status === "idle",
+      "relaunched ACP session did not settle");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(fake.processes[1]!.prompts.length, 0,
+      "superseded turn must never submit an automatic continuation prompt after capacity retry");
 
     manager.stop(sessionId);
     await manager.delete(sessionId);
