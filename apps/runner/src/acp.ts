@@ -170,7 +170,7 @@ export class AcpClient {
   private providerTurnLastWasMessage = false;
   private providerTurnCancelling = false;
   private readonly providerTurnToolCalls = new Set<string>();
-  private providerTurnInFlightRequests = 0;
+  private readonly providerTurnInFlightRequests = new Set<symbol>();
   private providerTurnSettleTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly providerTurnSettleMs: number;
   private readonly providerTurnResponseSettleMs: number;
@@ -943,7 +943,7 @@ export class AcpClient {
 
   private hasActiveProviderTurnWork(): boolean {
     return this.providerTurnToolCalls.size > 0 ||
-      this.providerTurnInFlightRequests > 0 ||
+      this.providerTurnInFlightRequests.size > 0 ||
       this.hasPendingTurnPermission();
   }
 
@@ -983,7 +983,7 @@ export class AcpClient {
     this.providerTurnLastWasMessage = false;
     this.providerTurnCancelling = false;
     this.providerTurnToolCalls.clear();
-    this.providerTurnInFlightRequests = 0;
+    this.providerTurnInFlightRequests.clear();
     if (!turnId || !notify || this.disposed) return;
     if (emitResponseCompleted && streamed) {
       this.ev.onEvent({ kind: "agent_response_completed" });
@@ -1023,14 +1023,16 @@ export class AcpClient {
     }
     const tracked = this.ensureProviderInitiatedTurnStarted();
     if (!tracked) return await fn();
-    this.providerTurnInFlightRequests += 1;
+    const requestToken = Symbol("acp-client-request");
+    const ownerTurnId = this.providerTurnId;
+    this.providerTurnInFlightRequests.add(requestToken);
     this.providerTurnLastWasMessage = false;
     this.refreshProviderTurnSettleTimer();
     try {
       return await fn();
     } finally {
-      this.providerTurnInFlightRequests = Math.max(0, this.providerTurnInFlightRequests - 1);
-      if (this.providerTurnId !== null && !this.providerTurnCancelling) {
+      const removed = this.providerTurnInFlightRequests.delete(requestToken);
+      if (removed && this.providerTurnId === ownerTurnId && !this.providerTurnCancelling) {
         this.providerTurnLastWasMessage = false;
         this.refreshProviderTurnSettleTimer();
       }
@@ -1279,7 +1281,10 @@ export class AcpClient {
 
   private handlePermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
     if (this.disposed || this.orchestrator) return Promise.resolve({ outcome: { outcome: "cancelled" } });
-    const trackedProviderTurn = !this.promptInFlight && this.ensureProviderInitiatedTurnStarted();
+    const trackedProviderTurn = !this.promptInFlight;
+    if (trackedProviderTurn && !this.ensureProviderInitiatedTurnStarted()) {
+      return Promise.resolve({ outcome: { outcome: "cancelled" } });
+    }
     if (this.antigravityFullPermissions && this.offersAntigravityFullPermissions()) {
       const allow = params.options?.find((option) => option.kind === "allow_once") ??
         params.options?.find((option) => option.kind === "allow_always");
@@ -1367,12 +1372,14 @@ export class AcpClient {
     });
   }
 
-  private handleTerminalRelease(params: ReleaseTerminalRequest): Record<string, never> {
+  private handleTerminalRelease(params: ReleaseTerminalRequest): Promise<Record<string, never>> {
     this.assertActiveSession(params.sessionId);
     this.assertOrchestratorClientServiceRefused("terminal commands");
-    this.terminals.release(params.sessionId, params.terminalId);
-    this.terminalEventOutput.delete(params.terminalId);
-    return {};
+    return this.runProviderTurnClientRequest(() => {
+      this.terminals.release(params.sessionId, params.terminalId);
+      this.terminalEventOutput.delete(params.terminalId);
+      return {};
+    });
   }
 
   private assertActiveSession(sessionId: unknown): asserts sessionId is string {

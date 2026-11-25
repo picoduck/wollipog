@@ -729,6 +729,7 @@ interface RequestingTurn {
   entry: ActiveSession;
   turnId: string;
   selectionRevision: number;
+  selectionIntentRevision: number;
 }
 
 /** The runner's turn after the relaunch a session's own worktree switch needed (#3810). */
@@ -846,6 +847,10 @@ interface ActiveSession {
   /** Requests opened by the provider-owned turn. Settlement clears only these, preserving cards
    * owned by authentication recovery, governance, or a recovered structured question. */
   providerInitiatedRequestIds?: Set<string>;
+  /** Legacy cancel() or Active Turn Capacity rejection cancelled the active provider-owned turn.
+   * Kept separate from `cancelRequested` so a cancelled provider wakeup never discards a later
+   * runner prompt while still suppressing worktree continuation eligibility (#4904, #4905). */
+  providerInitiatedTurnCancelled?: boolean;
   /** A cancel arrived before the agent process existed (during the pre-prompt turn snapshot) —
    * the driver-level cancel has nothing to kill there, so the next turn start honors this flag. */
   cancelRequested?: boolean;
@@ -2174,6 +2179,10 @@ export class SessionManager {
 
   /** Bumped by every worktree activation; a relaunch's captured continuation needs it unchanged. */
   private readonly worktreeSelectionRevisions = new Map<string, number>();
+  /** Bumped immediately when any create/attach/select request arrives (before `runWorktreeOperation`
+   * queues it), so a newer selection waiting behind an in-flight create still supersedes that
+   * create's automatic continuation (#4904). */
+  private readonly worktreeSelectionIntentRevisions = new Map<string, number>();
 
   /** Exact duplicate create requests join one operation, including after a control-plane retry. */
   private readonly worktreeCreates = new Map<string, {
@@ -3645,21 +3654,38 @@ export class SessionManager {
     return "completed";
   }
 
+  /** Record arrival of a new worktree create/attach/select request before it queues in
+   * `runWorktreeOperation`, superseding any earlier pending continuation (#4904). */
+  private claimWorktreeSelectionIntent(sessionId: string): number {
+    const next = (this.worktreeSelectionIntentRevisions.get(sessionId) ?? 0) + 1;
+    this.worktreeSelectionIntentRevisions.set(sessionId, next);
+    const active = this.active.get(sessionId);
+    if (active) active.worktreeRebindContinuation = undefined;
+    return next;
+  }
+
   /** The live turn a session's own worktree request came from, captured when the request arrives.
    * Worktree Git work is awaited, so by activation that turn may have completed normally (#4904),
    * or been interrupted, stopped, or replaced by newer work (#3810). */
-  private requestingTurn(sessionId: string): RequestingTurn | undefined {
+  private requestingTurn(sessionId: string, selectionIntentRevision: number): RequestingTurn | undefined {
     const entry = this.active.get(sessionId);
     const turnId = entry && this.liveTurnId(entry);
     return entry && turnId
-      ? { entry, turnId, selectionRevision: this.worktreeSelectionRevisions.get(sessionId) ?? 0 }
+      ? {
+        entry,
+        turnId,
+        selectionRevision: this.worktreeSelectionRevisions.get(sessionId) ?? 0,
+        selectionIntentRevision,
+      }
       : undefined;
   }
 
   private liveTurnId(entry: ActiveSession): string | undefined {
     if (entry.cancelRequested || entry.interruptRequested) return undefined;
-    return entry.providerInitiatedTurnActive ? entry.providerInitiatedTurnId
-      : entry.running ? entry.activeTurnId : undefined;
+    if (entry.providerInitiatedTurnActive) {
+      return entry.providerInitiatedTurnCancelled ? undefined : entry.providerInitiatedTurnId;
+    }
+    return entry.running ? entry.activeTurnId : undefined;
   }
 
   /** Whether the turn that initiated a session's own worktree switch may automatically continue
@@ -3673,8 +3699,10 @@ export class SessionManager {
   ): boolean {
     if (requester.entry !== active) return false;
     if ((this.worktreeSelectionRevisions.get(sessionId) ?? 0) !== requester.selectionRevision) return false;
-    if (active.cancelRequested || active.interruptRequested || active.governanceTripped ||
-        active.authenticationBlocked || active.historyIntegrityFailure || active.historyQuarantined ||
+    if ((this.worktreeSelectionIntentRevisions.get(sessionId) ?? 0) !== requester.selectionIntentRevision) return false;
+    if (active.cancelRequested || active.interruptRequested || active.providerInitiatedTurnCancelled ||
+        active.governanceTripped || active.authenticationBlocked ||
+        active.historyIntegrityFailure || active.historyQuarantined ||
         this.queueHeld(active)) {
       return false;
     }
@@ -3857,7 +3885,8 @@ export class SessionManager {
         try { observer(phase); } catch { /* Progress must never fail the Git operation. */ }
       }
     };
-    const requester = activation.requestedBySession ? this.requestingTurn(sessionId) : undefined;
+    const selectionIntentRevision = this.claimWorktreeSelectionIntent(sessionId);
+    const requester = activation.requestedBySession ? this.requestingTurn(sessionId, selectionIntentRevision) : undefined;
     const operation = this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
       if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
@@ -4133,7 +4162,8 @@ export class SessionManager {
     snapshot: SessionSnapshot;
     isolation: SessionWorktreeIsolationNotice;
   }> {
-    const requester = options.requestedBySession ? this.requestingTurn(sessionId) : undefined;
+    const selectionIntentRevision = this.claimWorktreeSelectionIntent(sessionId);
+    const requester = options.requestedBySession ? this.requestingTurn(sessionId, selectionIntentRevision) : undefined;
     return this.runWorktreeOperation(sessionId, async () => {
       let meta = this.store.readMeta(sessionId);
       if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
@@ -4288,7 +4318,8 @@ export class SessionManager {
     options: { requestedBySession?: boolean } = {},
   ): Promise<{ snapshot: SessionSnapshot; isolation: SessionWorktreeIsolationNotice }> {
     if (this.roleConversionPending(sessionId)) throw new Error("wait for the session role change to finish before selecting a worktree");
-    const requester = options.requestedBySession ? this.requestingTurn(sessionId) : undefined;
+    const selectionIntentRevision = this.claimWorktreeSelectionIntent(sessionId);
+    const requester = options.requestedBySession ? this.requestingTurn(sessionId, selectionIntentRevision) : undefined;
     return this.runWorktreeOperation(sessionId, async () => {
       const initial = this.store.readMeta(sessionId);
       if (!initial || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
@@ -17120,6 +17151,7 @@ export class SessionManager {
       ? { path: selectedPath, branch: selectedBranch }
       : undefined;
     const continuationRevision = this.worktreeSelectionRevisions.get(sessionId) ?? 0;
+    const continuationIntentRevision = this.worktreeSelectionIntentRevisions.get(sessionId) ?? 0;
     entry.worktreeRebindContinuation = undefined;
     if (continuation) {
       this.emitEvent(sessionId, {
@@ -17271,9 +17303,10 @@ export class SessionManager {
         }
         const hasQueuedWork = (this.preLaunchQueues.get(sessionId)?.length ?? 0) > 0;
         this.activatePreLaunchQueue(sessionId);
-        // A selection made while the relaunch ran supersedes the switch, even one back to its path.
+        // A selection made (or queued) while the relaunch ran supersedes the switch, even one back to its path.
         const continued = !hasQueuedWork && !!continuation &&
           (this.worktreeSelectionRevisions.get(sessionId) ?? 0) === continuationRevision &&
+          (this.worktreeSelectionIntentRevisions.get(sessionId) ?? 0) === continuationIntentRevision &&
           this.queueWorktreeContinuation(sessionId, reboundEntry, continuation);
         preserveRebindLockForQueue = hasQueuedWork || continued;
         if (continuation && !hasQueuedWork && !continued) {
@@ -18053,7 +18086,7 @@ export class SessionManager {
       entry.usageWindowRejection = undefined;
       if (interrupted) {
         this.emitEvent(sessionId, { kind: "turn_interrupted" });
-        this.emitStatus(sessionId, "idle");
+        this.emitStatus(sessionId, this.settledTurnStatus(sessionId, entry));
       } else if (entry.governanceTripped) {
         this.emitStatus(sessionId, "idle");
       } else if (stop === "cancelled") {
@@ -18068,10 +18101,11 @@ export class SessionManager {
       } else {
         // The provider completed before the interrupt took effect. Do not fabricate Interrupted
         // or strand the existing FIFO: this was a normal completed turn, not a cancelled one.
-        if (!turnInterruptedOrCancelled && stop === "end_turn" && !entry.historyQuarantined) {
+        if (!turnInterruptedOrCancelled && stop === "end_turn" && !entry.historyQuarantined &&
+            !entry.providerInitiatedTurnActive) {
           entry.lastNormallyCompletedTurnId = entry.activeTurnId;
         }
-        this.emitStatus(sessionId, "idle");
+        this.emitStatus(sessionId, this.settledTurnStatus(sessionId, entry));
       }
       if (interrupted || stop === "cancelled" || stop === "refusal") {
         durable?.failed(providerStopError(stop, entry.client), "COMMAND_CANCELLED");
@@ -18421,16 +18455,17 @@ export class SessionManager {
 
       if (interrupted) {
         this.emitEvent(sessionId, { kind: "turn_interrupted" });
-        this.emitStatus(sessionId, "idle");
+        this.emitStatus(sessionId, this.settledTurnStatus(sessionId, entry));
       } else if (entry.governanceTripped) {
         this.emitStatus(sessionId, "idle");
       } else if (stop === "cancelled") {
         this.emitStatus(sessionId, "stopped");
       } else {
-        if (!turnInterruptedOrCancelled && stop === "end_turn" && !entry.historyQuarantined) {
+        if (!turnInterruptedOrCancelled && stop === "end_turn" && !entry.historyQuarantined &&
+            !entry.providerInitiatedTurnActive) {
           entry.lastNormallyCompletedTurnId = entry.activeTurnId;
         }
-        this.emitStatus(sessionId, "idle");
+        this.emitStatus(sessionId, this.settledTurnStatus(sessionId, entry));
       }
       if (interrupted || stop === "cancelled" || stop === "refusal") {
         lifecycle.failed(providerStopError(stop, entry.client), "COMMAND_CANCELLED");
@@ -19293,6 +19328,7 @@ export class SessionManager {
     // not own the runner queue drain. Do not leave a pre-launch fence that would discard the next
     // explicit prompt after that unsolicited turn is gone.
     entry.cancelRequested = entry.running;
+    if (entry.providerInitiatedTurnActive) entry.providerInitiatedTurnCancelled = true;
     // Someone stopped this turn on purpose; its worktree switch must not restart the work (#3810).
     entry.worktreeRebindContinuation = undefined;
     entry.lastNormallyCompletedTurnId = undefined;
@@ -19916,6 +19952,7 @@ export class SessionManager {
       if (!closing && !rebinding && !accountSwitching) this.releaseAdmissionIfInactive(sessionId);
       this.clearSteeringState(sessionId, "session was deleted before steering settled");
       this.worktreeSelectionRevisions.delete(sessionId);
+      this.worktreeSelectionIntentRevisions.delete(sessionId);
       this.publishedWorktreeSwitches.delete(sessionId);
       if (entry) {
         this.deleteActiveSession(sessionId, entry, false);
@@ -24887,6 +24924,15 @@ export class SessionManager {
     }
   }
 
+  /** Status to publish when a runner-owned prompt or command settles: if an ACP provider-initiated
+   * wakeup already started during post-turn cleanup (e.g. diff capture), keep the session active
+   * rather than overwriting it to `idle` (#4905). */
+  private settledTurnStatus(sessionId: string, entry: ActiveSession): SessionStatus {
+    if (!entry.providerInitiatedTurnActive) return "idle";
+    const pending = this.store.readMeta(sessionId)?.pendingApproval;
+    return pendingRequests(pending).some((request) => !request.async) ? "input_required" : "running";
+  }
+
   private onProviderInitiatedTurn(
     sessionId: string,
     client: Driver,
@@ -24895,9 +24941,11 @@ export class SessionManager {
   ): void {
     const live = this.active.get(sessionId);
     if (live?.client !== client) return;
+    let capacityCancelled = false;
     if (state === "started") {
       const sharedRunnerTurn = this.activeTurnAdmitted.has(sessionId) || this.isReviewSession(sessionId);
       if (!sharedRunnerTurn && !this.activeTurnAdmission.acquire(this.activeTurnRequest(sessionId))) {
+        capacityCancelled = true;
         this.emitEvent(sessionId, {
           kind: "error",
           message: "provider-initiated work exceeded Active Turn Capacity and was canceled",
@@ -24914,11 +24962,14 @@ export class SessionManager {
       live.providerInitiatedTurnActive = true;
       live.providerInitiatedTurnId = turnId;
       live.providerInitiatedRequestIds = new Set();
+      live.providerInitiatedTurnCancelled = capacityCancelled;
       live.lastNormallyCompletedTurnId = undefined;
     } else {
       if (live.providerInitiatedTurnId !== turnId) return;
+      const providerCancelled = Boolean(live.providerInitiatedTurnCancelled);
       live.providerInitiatedTurnActive = false;
       live.providerInitiatedTurnId = undefined;
+      live.providerInitiatedTurnCancelled = false;
       this.settleActiveWorkPermit(sessionId, live);
       let pendingApproval = this.store.readMeta(sessionId)?.pendingApproval;
       for (const requestId of live.providerInitiatedRequestIds ?? []) {
@@ -24926,46 +24977,52 @@ export class SessionManager {
       }
       live.providerInitiatedRequestIds = undefined;
       this.store.patchMeta(sessionId, { pendingApproval });
+      this.emitQueue(sessionId);
+      // A queued runner prompt emits running before its persistent driver waits behind this provider
+      // turn. If the provider then opens an ask, input_required supersedes that earlier status. Restore
+      // the runner-owned status when settlement removes the final ask; runPrompt will not emit it again.
+      const meta = this.store.readMeta(sessionId);
+      if (live.running && meta?.status === "input_required" && !meta.pendingApproval) {
+        this.emitStatus(sessionId, "running");
+      }
+      // A queued runner prompt owns status through its normal drain. When no drain exists, this
+      // callback is the only lifecycle boundary that can clear an answered provider-owned ask.
+      if (!live.running) {
+        const pending = this.store.readMeta(sessionId)?.pendingApproval;
+        const interrupted = live.interruptRequested;
+        const hasSyncPending = pendingRequests(pending).some((request) => !request.async);
+        if (interrupted) {
+          this.emitEvent(sessionId, { kind: "turn_interrupted" });
+          this.settleTurnInterruption(sessionId, live);
+        } else if (!providerCancelled && !hasSyncPending && !live.cancelRequested &&
+            !live.governanceTripped && !live.authenticationBlocked &&
+            !live.historyIntegrityFailure && !live.historyQuarantined) {
+          live.lastNormallyCompletedTurnId = turnId;
+        }
+        this.emitStatus(sessionId, hasSyncPending ? "input_required" : "idle");
+        if (interrupted &&
+            (live.queue.length || live.pendingProviderAccountSwitch || live.pendingWorktreeRebind || live.pendingLocationSwitch)) {
+          setImmediate(() => this.scheduleDrain(sessionId));
+        } else if (
+          this.requestRetiredWorktreeRebind(sessionId, live) ||
+          live.pendingLocationSwitch ||
+          live.pendingProviderAccountSwitch ||
+          live.queue.length
+        ) {
+          // Every idle-gated rebind, switch, or waiting prompt defers behind this turn
+          // (#3402, #3424, #4138, #4905); nothing else wakes it on normal settlement.
+          setImmediate(() => this.scheduleDrain(sessionId));
+        }
+      }
+      this.replayBoundWorktreeRetirements(sessionId, live);
+      return;
     }
     this.emitQueue(sessionId);
-    // A queued runner prompt emits running before its persistent driver waits behind this provider
-    // turn. If the provider then opens an ask, input_required supersedes that earlier status. Restore
-    // the runner-owned status when settlement removes the final ask; runPrompt will not emit it again.
-    const meta = this.store.readMeta(sessionId);
-    if (state === "settled" && live.running && meta?.status === "input_required" && !meta.pendingApproval) {
-      this.emitStatus(sessionId, "running");
-    }
-    // A queued runner prompt owns status through its normal drain. When no drain exists, this
-    // callback is the only lifecycle boundary that can clear an answered provider-owned ask.
     if (!live.running) {
       const pending = this.store.readMeta(sessionId)?.pendingApproval;
-      const interrupted = state === "settled" && live.interruptRequested;
       const hasSyncPending = pendingRequests(pending).some((request) => !request.async);
-      if (interrupted) {
-        this.emitEvent(sessionId, { kind: "turn_interrupted" });
-        this.settleTurnInterruption(sessionId, live);
-      } else if (state === "settled" && !hasSyncPending && !live.cancelRequested &&
-          !live.governanceTripped && !live.authenticationBlocked &&
-          !live.historyIntegrityFailure && !live.historyQuarantined) {
-        live.lastNormallyCompletedTurnId = turnId;
-      }
-      this.emitStatus(sessionId, hasSyncPending
-        ? "input_required" : state === "started" ? "running" : "idle");
-      if (interrupted &&
-          (live.queue.length || live.pendingProviderAccountSwitch || live.pendingWorktreeRebind || live.pendingLocationSwitch)) {
-        setImmediate(() => this.scheduleDrain(sessionId));
-      } else if (state === "settled" && (
-        this.requestRetiredWorktreeRebind(sessionId, live) ||
-        live.pendingLocationSwitch ||
-        live.pendingProviderAccountSwitch ||
-        live.queue.length
-      )) {
-        // Every idle-gated rebind, switch, or waiting prompt defers behind this turn
-        // (#3402, #3424, #4138, #4905); nothing else wakes it on normal settlement.
-        setImmediate(() => this.scheduleDrain(sessionId));
-      }
+      this.emitStatus(sessionId, hasSyncPending ? "input_required" : "running");
     }
-    if (state === "settled") this.replayBoundWorktreeRetirements(sessionId, live);
   }
 
   /** Persist/relay first, then enforce against the same normalized event stream every dashboard

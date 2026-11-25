@@ -581,9 +581,11 @@ test("interrupt, queued user prompt, superseding selection, or stop while an end
     });
   }
 
-  // 3. A superseding worktree selection during the create window suppresses continuation.
+  // 3. A queued superseding selectWorktree during the create window suppresses continuation even
+  //    while the newer selection is still waiting to activate (no manual revision mutation).
   {
-    const activation = gate();
+    const firstActivation = gate();
+    const secondActivation = gate();
     let other: Switched | undefined;
     let switched: Promise<Switched> | undefined;
     await withSession("ended-then-reselected", {
@@ -594,33 +596,35 @@ test("interrupt, queued user prompt, superseding selection, or stop while an end
           worktreeIsolationNotice: (meta: unknown, path: string) => Promise<SessionWorktreeIsolationNotice>;
         };
         const notice = internals.worktreeIsolationNotice.bind(manager);
-        let gated = false;
+        let calls = 0;
         internals.worktreeIsolationNotice = async (meta, path) => {
-          if (!gated) {
-            gated = true;
-            await activation.wait();
-          }
+          calls += 1;
+          if (calls === 1) await firstActivation.wait();
+          else if (calls === 2) await secondActivation.wait();
           return notice(meta, path);
         };
         switched = manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/superseded-by-select" },
           undefined, { requestedBySession: true });
-        await activation.arrived;
+        await firstActivation.arrived;
       },
     }, async ({ manager, store, sessionId, fake }) => {
       manager.prompt(sessionId, "start the fix");
       await waitFor(() => store.readMeta(sessionId)?.status === "idle" && fake.prompts.length === 1,
         "turn 1 did not finish");
-      // Select another worktree before the pending create finishes activating.
+      // Issue the public selectWorktree call while the first create is still blocked in activation.
       const selectionPromise = manager.selectWorktree(sessionId, other!.worktree.path);
-      // Note: runWorktreeOperation serializes operations on the session, so test an intervening
-      // selection revision bump directly as would happen from an already-queued/concurrent selection
-      // once the create's capture ran.
-      const revisions = (manager as unknown as { worktreeSelectionRevisions: Map<string, number> }).worktreeSelectionRevisions;
-      revisions.set(sessionId, (revisions.get(sessionId) ?? 0) + 1);
-      activation.open();
+      firstActivation.open();
       const result = await switched!;
-      await selectionPromise;
+      await secondActivation.arrived;
+      // Hold the newer selection before its own activation long enough for the first relaunch to
+      // finish; it still must not queue an automatic continuation.
+      await waitFor(() => fake.launches() >= 2 && store.readMeta(sessionId)?.status === "idle",
+        "first relaunch did not settle while newer selection waited");
+      await settle();
       assert.equal(result.isolation.continuesAfterRelaunch, undefined);
+      assert.equal(fake.prompts.length, 1, "a queued superseding selection must prevent continuation");
+      secondActivation.open();
+      await selectionPromise;
       await waitFor(() => store.readMeta(sessionId)?.status === "idle", "session did not settle");
       await settle();
       assert.equal(fake.prompts.length, 1, "a superseded selection must not trigger continuation");

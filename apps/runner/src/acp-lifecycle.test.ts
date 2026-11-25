@@ -349,3 +349,160 @@ test("ACP wakeup turn settles cleanly on synchronous cancel during started, prom
     client.dispose();
   }
 });
+
+test("ACP synchronous capacity cancel on opening permission_request cancels its RPC without emitting a card (#4905)", async () => {
+  for (const mode of ["default", "antigravity-full"] as const) {
+    const child = fakeAgentProcess();
+    const writes: string[] = [];
+    const events: string[] = [];
+    const lifecycle: string[] = [];
+    child.stdin.setEncoding("utf8");
+    child.stdin.on("data", (chunk: string) => writes.push(chunk));
+    let client!: AcpClient;
+    client = new AcpClient({
+      command: "agent",
+      args: [],
+      cwd: process.cwd(),
+      env: {},
+      ...(mode === "antigravity-full"
+        ? { compatibility: { profile: "antigravity", resumable: false }, initialPermissionMode: "full_permissions" }
+        : {}),
+    }, {
+      onEvent: (event) => events.push(event.kind),
+      onStderr: () => {},
+      onExit: () => {},
+      onProviderInitiatedTurn: (state, turnId) => {
+        lifecycle.push(`${state}:${turnId}`);
+        if (state === "started") client.cancel();
+      },
+    }, {
+      spawn: () => child,
+      kill: () => {},
+      providerTurnSettleMs: 50,
+      providerTurnResponseSettleMs: 25,
+    });
+    try {
+      (client as unknown as { sessionId: string }).sessionId = "s_cap_perm";
+      child.stdout.write(JSON.stringify({
+        jsonrpc: "2.0",
+        id: 91,
+        method: "session/request_permission",
+        params: {
+          sessionId: "s_cap_perm",
+          toolCall: { toolCallId: "tc_cap", title: "run command" },
+          options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+        },
+      }) + "\n");
+      await nextTask();
+      await nextTask();
+      const responses = writes
+        .join("")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { id?: number; result?: unknown })
+        .filter((msg) => msg.id === 91);
+      assert.equal(responses.length, 1, mode);
+      assert.deepEqual(responses[0]!.result, { outcome: { outcome: "cancelled" } }, mode);
+      assert.deepEqual(events, [], `${mode}: capacity-cancelled wakeup must emit no permission card`);
+      assert.equal((client as unknown as { permPending: Map<string, unknown> }).permPending.size, 0, mode);
+      assert.deepEqual(lifecycle, ["started:acp-provider:1", "settled:acp-provider:1"], mode);
+    } finally {
+      client.dispose();
+    }
+  }
+});
+
+test("ACP stale client request from a cancelled wakeup cannot settle a newer wakeup prematurely, and terminal/release tracks wakeups (#4905)", async () => {
+  const child = fakeAgentProcess();
+  const lifecycle: string[] = [];
+  const client = new AcpClient({
+    command: "agent",
+    args: [],
+    cwd: process.cwd(),
+    env: {},
+  }, {
+    onEvent: () => {},
+    onStderr: () => {},
+    onExit: () => {},
+    onProviderInitiatedTurn: (state, turnId) => lifecycle.push(`${state}:${turnId}`),
+  }, {
+    spawn: () => child,
+    kill: () => {},
+    providerTurnSettleMs: 60,
+    providerTurnResponseSettleMs: 30,
+  });
+  try {
+    (client as unknown as { sessionId: string }).sessionId = "s_term";
+    let resolveWaitA!: (value: { exitCode: number }) => void;
+    let resolveWaitB!: (value: { exitCode: number }) => void;
+    let releasedOrder: string[] = [];
+    const terminals = (client as unknown as {
+      terminals: {
+        wait: (sid: string, tid: string) => Promise<{ exitCode: number }>;
+        release: (sid: string, tid: string) => void;
+      };
+    }).terminals;
+    terminals.wait = (_sid, tid) => new Promise((resolve) => {
+      if (tid === "term_a") resolveWaitA = resolve;
+      else resolveWaitB = resolve;
+    });
+    terminals.release = (_sid, tid) => {
+      releasedOrder.push(`release:${tid}:${lifecycle.at(-1) ?? "none"}`);
+    };
+
+    // Wakeup A opens terminal/wait_for_exit, then is cancelled while wait A is still open.
+    child.stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 101,
+      method: "terminal/wait_for_exit",
+      params: { sessionId: "s_term", terminalId: "term_a" },
+    }) + "\n");
+    await nextTask();
+    assert.deepEqual(lifecycle, ["started:acp-provider:1"]);
+    client.cancel();
+    await nextTask();
+    await nextTask();
+    assert.deepEqual(lifecycle, ["started:acp-provider:1", "settled:acp-provider:1"]);
+
+    // Wakeup B opens its own terminal/wait_for_exit.
+    child.stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 102,
+      method: "terminal/wait_for_exit",
+      params: { sessionId: "s_term", terminalId: "term_b" },
+    }) + "\n");
+    await nextTask();
+    assert.deepEqual(lifecycle, ["started:acp-provider:1", "settled:acp-provider:1", "started:acp-provider:2"]);
+
+    // Resolving old wait A must NOT decrement B's in-flight request set or let B settle early.
+    resolveWaitA({ exitCode: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 110));
+    assert.deepEqual(lifecycle, ["started:acp-provider:1", "settled:acp-provider:1", "started:acp-provider:2"],
+      "old wakeup wait resolution must not settle wakeup B while wait B is still open");
+
+    // Once wait B resolves, wakeup B settles after its quiet window.
+    resolveWaitB({ exitCode: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 110));
+    assert.deepEqual(lifecycle, [
+      "started:acp-provider:1",
+      "settled:acp-provider:1",
+      "started:acp-provider:2",
+      "settled:acp-provider:2",
+    ]);
+
+    // terminal/release while idle starts a wakeup before running release() and settles after quiet window.
+    child.stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 103,
+      method: "terminal/release",
+      params: { sessionId: "s_term", terminalId: "term_b" },
+    }) + "\n");
+    await nextTask();
+    assert.deepEqual(releasedOrder, ["release:term_b:started:acp-provider:3"]);
+    await new Promise((resolve) => setTimeout(resolve, 110));
+    assert.equal(lifecycle.at(-1), "settled:acp-provider:3");
+  } finally {
+    client.dispose();
+  }
+});

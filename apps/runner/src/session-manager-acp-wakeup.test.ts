@@ -280,3 +280,148 @@ test("interruptTurn cancels an active ACP post-end_turn wakeup cleanly and unblo
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("ACP wakeup starting during post-turn diff capture stays running until the wakeup settles (#4905)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-acp-wakeup-diff-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = join(root, "repo");
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const fake = fakeAcpFactory({ providerTurnSettleMs: 80, providerTurnResponseSettleMs: 40 });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+      fake.factory as never, dataDir, 1);
+
+    const sessionId = "s_acp_wakeup_diff";
+    await manager.start(acpSpec(sessionId, repo));
+
+    let enteredDiff!: () => void;
+    let releaseDiff!: () => void;
+    const diffEntered = new Promise<void>((resolve) => { enteredDiff = resolve; });
+    const diffGate = new Promise<void>((resolve) => { releaseDiff = resolve; });
+    const internals = manager as unknown as {
+      captureDiff: (sid: string) => Promise<unknown>;
+      active: Map<string, { running: boolean; providerInitiatedTurnActive?: boolean }>;
+    };
+    const origCaptureDiff = internals.captureDiff.bind(manager);
+    let gatedOnce = false;
+    internals.captureDiff = async (sid) => {
+      if (!gatedOnce) {
+        gatedOnce = true;
+        enteredDiff();
+        await diffGate;
+      }
+      return origCaptureDiff(sid);
+    };
+
+    manager.prompt(sessionId, "turn 1");
+    await diffEntered;
+
+    // Prompt returned end_turn, AcpClient cleared promptInFlight, and a wakeup opens a tool call
+    // BEFORE SessionManager finishes captureDiff and exits runPrompt.
+    const first = fake.processes[0]!;
+    first.sendUpdate({ sessionUpdate: "tool_call", toolCallId: "tc_post_diff", title: "wakeup tool", status: "in_progress" });
+    await waitFor(() => internals.active.get(sessionId)?.providerInitiatedTurnActive === true,
+      "ACP wakeup did not activate during post-turn diff capture");
+
+    releaseDiff();
+    await waitFor(() => internals.active.get(sessionId)?.running === false, "runner prompt drain did not finish");
+    await new Promise((resolve) => setTimeout(resolve, 130));
+    assert.equal(store.readMeta(sessionId)?.status, "running",
+      "prompt cleanup must not mark an active ACP wakeup idle");
+
+    first.sendUpdate({ sessionUpdate: "tool_call_update", toolCallId: "tc_post_diff", status: "completed" });
+    await waitFor(() => store.readMeta(sessionId)?.status === "idle",
+      "session did not return to idle after wakeup settled");
+
+    manager.stop(sessionId);
+    await manager.delete(sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy cancel() during an ACP wakeup suppresses automatic continuation when a worktree switch activates after settlement (#4904, #4905)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-acp-wakeup-cancel-cont-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = join(root, "repo");
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const externalWorktree = join(root, "wt-cancelled-wakeup");
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "fix/cancelled-wakeup", externalWorktree, "HEAD"]);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const fake = fakeAcpFactory({ providerTurnSettleMs: 5_000, providerTurnResponseSettleMs: 5_000 });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+      fake.factory as never, dataDir, 1);
+
+    const sessionId = "s_acp_wakeup_cancel_cont";
+    await manager.start(acpSpec(sessionId, repo));
+    const internals = manager as unknown as {
+      active: Map<string, { managedGitBoundary?: true; providerInitiatedTurnActive?: boolean }>;
+      configuredProjectPaths: string[];
+      worktreeIsolationNotice: (meta: unknown, path: string) => Promise<unknown>;
+    };
+    internals.configuredProjectPaths = [repo];
+    internals.active.get(sessionId)!.managedGitBoundary = true;
+
+    manager.prompt(sessionId, "turn 1");
+    await waitFor(() => store.readMeta(sessionId)?.status === "idle" && fake.processes[0]!.prompts.length === 1,
+      "turn 1 did not finish");
+
+    // Start an ACP wakeup with an open tool call.
+    fake.processes[0]!.sendUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "tc_cancel_wt",
+      title: "create worktree",
+      status: "in_progress",
+    });
+    await waitFor(() => internals.active.get(sessionId)?.providerInitiatedTurnActive === true,
+      "wakeup did not become active");
+
+    // Hold activation of the wakeup's worktree switch while we issue legacy cancel().
+    let activationReached!: () => void;
+    let openActivation!: () => void;
+    const arrived = new Promise<void>((resolve) => { activationReached = resolve; });
+    const gate = new Promise<void>((resolve) => { openActivation = resolve; });
+    const origNotice = internals.worktreeIsolationNotice.bind(manager);
+    internals.worktreeIsolationNotice = async (meta, path) => {
+      activationReached();
+      await gate;
+      return origNotice(meta, path);
+    };
+
+    const switched = manager.attachWorktree(sessionId, externalWorktree, { requestedBySession: true });
+    await arrived;
+
+    // Legacy cancel() cancels the provider wakeup; wait for it to settle idle before activation finishes.
+    manager.cancel(sessionId);
+    await waitFor(() => internals.active.get(sessionId)?.providerInitiatedTurnActive !== true &&
+      store.readMeta(sessionId)?.status === "idle",
+    "cancelled ACP wakeup did not settle");
+
+    openActivation();
+    const result = await switched;
+    assert.equal(result.isolation.continuesAfterRelaunch, undefined,
+      "a cancelled provider wakeup must never regain automatic continuation eligibility");
+
+    await waitFor(() => fake.processes.length === 2 && store.readMeta(sessionId)?.status === "idle",
+      "relaunch after cancelled wakeup did not settle");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(fake.processes[1]!.prompts.length, 0, "no automatic continuation prompt may be queued");
+
+    manager.stop(sessionId);
+    await manager.delete(sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
