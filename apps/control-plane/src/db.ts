@@ -17676,14 +17676,19 @@ export class ControlPlaneDb {
           // A corrupt row is intentionally replaced, never retained as last-known state.
         }
       }
-      // Runner startup runs general discovery and Antigravity setup concurrently. While Antigravity
-      // setup is still `checking`, an inventory published before it settles omits Antigravity; keep
-      // persisted Antigravity rows until setup finishes so a subsequent failure retains cached data.
+      // Runner startup runs general discovery and Antigravity setup concurrently. While a v413+
+      // runner's Antigravity setup is still `checking`, an inventory published before it settles
+      // omits Antigravity; keep persisted Antigravity rows until setup finishes so a subsequent
+      // failure retains cached data. Pre-v413 runners cannot refresh Antigravity usage, so their
+      // inventories always clear stale Antigravity rows.
       let preserveCheckingAntigravity = false;
       if (!snapshots.some((snapshot) => snapshot.provider === "antigravity")) {
-        const runnerRow = this.stmt("SELECT antigravity_setup FROM runners WHERE runner_id=?")
-          .get(runnerId) as { antigravity_setup: string | null } | undefined;
-        if (runnerRow?.antigravity_setup) {
+        const runnerRow = this.stmt("SELECT antigravity_setup, protocol_version FROM runners WHERE runner_id=?")
+          .get(runnerId) as { antigravity_setup: string | null; protocol_version: number | null } | undefined;
+        if (
+          runnerRow?.antigravity_setup &&
+          runnerSupportsProtocol(runnerRow.protocol_version, "antigravitySubscriptionUsage")
+        ) {
           try {
             const setup = JSON.parse(runnerRow.antigravity_setup) as { status?: unknown };
             preserveCheckingAntigravity = setup.status === "checking";
@@ -17825,13 +17830,14 @@ export class ControlPlaneDb {
             displayAgent.installation?.id !== selection.installationId ||
             Boolean(account && displayAgent.defaultProviderAccountId &&
               displayAgent.defaultProviderAccountId !== account.id)));
-        const persisted = recorded?.agentId === displayAgent.id &&
-          (!unsupportedSelection || recorded.state === "unsupported")
-          ? recorded : undefined;
-        const fetchedAt = persisted?.fetchedAt ?? runner.lastSeen ?? now;
         const runnerSupportsProviderUsage = provider === "antigravity"
           ? runnerSupportsProtocol(runner.protocolVersion, "antigravitySubscriptionUsage")
           : runnerSupportsProtocol(runner.protocolVersion, "subscriptionUsage");
+        const persisted = recorded?.agentId === displayAgent.id &&
+          (!unsupportedSelection || recorded.state === "unsupported") &&
+          (provider !== "antigravity" || runnerSupportsProviderUsage)
+          ? recorded : undefined;
+        const fetchedAt = persisted?.fetchedAt ?? runner.lastSeen ?? now;
         const unsupportedAntigravityCli = provider === "antigravity" &&
           runnerSupportsProviderUsage &&
           displayAgent.available === true &&
