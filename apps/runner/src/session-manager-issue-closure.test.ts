@@ -1184,3 +1184,208 @@ test("a grant to a Full Control session is refused", async (t) => {
     } finally { g.active.delete(sessionId); }
   }
 });
+
+test("standalone Normal session issue closure inspects, enforces expectedRepository, executes once across restart, and refuses Orchestrator/issueAdmission (#4894)", async (t) => {
+  const f = fixture(t);
+  const soloId = "s_standalone_closure";
+  f.store().create({
+    sessionId: soloId, agentId: "claude", workspaceId: "repo", repoPath: f.root, worktreePath: null,
+    driver: "claude-code", command: "claude", args: [], env: {}, context: { kind: "native" },
+    agentSessionId: null, status: "idle", title: "Standalone closure", config: {},
+    tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+    seq: 0, createdAt: 1000, updatedAt: 1000,
+  });
+  const mgr = f.manager();
+  // Orchestrator cannot use standalone mode.
+  const orchAsStandalone = await mgr.githubIssueClosure({
+    type: "github_issue_closure", operation: "inspect", requestId: "r-orch", sessionId, issue, standalone: true,
+    expectedRepository: "example/project",
+  });
+  assert.equal(orchAsStandalone.ok, false);
+  assert.match(orchAsStandalone.error ?? "", /non-Orchestrator registered workspace/u);
+
+  // Standalone session without standalone flag is still refused.
+  const withoutFlag = await mgr.githubIssueClosure({
+    type: "github_issue_closure", operation: "inspect", requestId: "r-noflag", sessionId: soloId, issue,
+  });
+  assert.equal(withoutFlag.ok, false);
+
+  // Mismatched expectedRepository is refused before returning inspection.
+  const wrongRepo = await mgr.githubIssueClosure({
+    type: "github_issue_closure", operation: "inspect", requestId: "r-wrong", sessionId: soloId, issue,
+    standalone: true, expectedRepository: "other/repo",
+  });
+  assert.equal(wrongRepo.ok, false);
+  assert.match(wrongRepo.error ?? "", /Repository differs from the verified Project Location/u);
+
+  // Valid standalone inspect succeeds.
+  const inspected = await mgr.githubIssueClosure({
+    type: "github_issue_closure", operation: "inspect", requestId: "r-ok", sessionId: soloId, issue,
+    standalone: true, expectedRepository: "example/project",
+  });
+  assert.equal(inspected.ok, true, inspected.error ?? "expected inspect ok");
+  assert.ok(inspected.inspection);
+  const { state: _state, ...evidence } = inspected.inspection;
+  const snap: GithubIssueClosureSnapshot = {
+    ...evidence, category: "issue_closure", reason: "completed",
+    explanation: "Fixed on standalone branch.", evidence: ["Merged PR #42."],
+    comment: "Closing after standalone delivery.", activeChildren: [],
+  };
+
+  // issueAdmission is refused for standalone closures.
+  const withAdmission = await mgr.githubIssueClosure({
+    type: "github_issue_closure", operation: "execute", requestId: "r-adm", sessionId: soloId,
+    occurrenceId: "occ-adm",
+    snapshot: {
+      ...snap,
+      issueAdmission: {
+        boundaryRevision: 1,
+        evidenceDigest: "a".repeat(64),
+      },
+    },
+    standalone: true, expectedRepository: "example/project",
+  });
+  assert.equal(withAdmission.ok, false);
+  assert.match(withAdmission.error ?? "", /unsynchronized/u);
+
+  // Execute closes once and persists attempt fence across restart.
+  const executed = await mgr.githubIssueClosure({
+    type: "github_issue_closure", operation: "execute", requestId: "r-exec-1", sessionId: soloId,
+    occurrenceId: "occ-solo-1", snapshot: snap, standalone: true, expectedRepository: "example/project",
+  });
+  assert.equal(executed.ok, true, executed.error ?? "expected execute ok");
+  assert.equal(executed.result?.outcome, "closed");
+
+  // Replay of same occurrence after restart is refused without running gh issue close again, even if issue reads OPEN.
+  const closeCountBefore = f.commands.filter((c) => c.file === "gh" && c.args[0] === "issue" && c.args[1] === "close").length;
+  assert.equal(closeCountBefore, 1);
+  f.repository.issue.state = "OPEN";
+  f.restart();
+  const replayed = await f.manager().githubIssueClosure({
+    type: "github_issue_closure", operation: "execute", requestId: "r-exec-2", sessionId: soloId,
+    occurrenceId: "occ-solo-1", snapshot: snap, standalone: true, expectedRepository: "example/project",
+  });
+  assert.equal(replayed.ok, true);
+  assert.equal(replayed.result?.outcome, "refused");
+  assert.equal(f.commands.filter((c) => c.file === "gh" && c.args[0] === "issue" && c.args[1] === "close").length, 1);
+});
+
+test("forgeDecisionAction refuses old-repository merge and deletion after runner commits a Location switch before snapshot delivery (#4894)", async (t) => {
+  const f = fixture(t);
+  const soloId = "s_standalone_moved";
+  f.store().create({
+    sessionId: soloId, agentId: "claude", workspaceId: "w1", repoPath: f.root, worktreePath: null,
+    driver: "acp", command: "agy", args: [], env: {}, context: { kind: "native" },
+    agentSessionId: null, status: "running", title: "Standalone moved", config: {},
+    tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+    seq: 0, createdAt: 1000, updatedAt: 1000,
+  });
+
+  // Simulate the runner committing a live Location switch to a second workspace/repo before the
+  // control plane has applied the runner's session snapshot.
+  const otherRepo = mkdtempSync(join(tmpdir(), "wollipog-other-repo-"));
+  t.after(() => rmSync(otherRepo, { recursive: true, force: true }));
+  f.store().patchMeta(soloId, { workspaceId: "w2", repoPath: otherRepo });
+  f.store().flush(soloId);
+
+  const ghCalls: string[][] = [];
+  const gh: GhRunner = async (args) => {
+    ghCalls.push(args);
+    return { stdout: "", stderr: "", code: 0, timedOut: false };
+  };
+  const oldLocation = { workspaceId: "w1", workspacePath: f.root, repository: "example/project" };
+  const headSha = "a".repeat(40);
+
+  const mergeRes = await f.manager().forgeDecisionAction({
+    type: "forge_decision_action", requestId: "req-m", sessionId: soloId, occurrenceId: "occ-m",
+    location: oldLocation,
+    action: { kind: "pr_merge_enqueue", repository: "example/project", pullRequest: 12, headSha },
+  }, { gh });
+  assert.equal(mergeRes.outcome, "refused");
+  assert.equal(mergeRes.refusal?.reason, "repository_mismatch");
+
+  const delRes = await f.manager().forgeDecisionAction({
+    type: "forge_decision_action", requestId: "req-d", sessionId: soloId, occurrenceId: "occ-d",
+    location: oldLocation,
+    action: { kind: "branch_deletion", repository: "example/project", branch: "feat/old", pullRequest: 12, headSha, mergeCommitSha: headSha },
+  }, { gh });
+  assert.equal(delRes.outcome, "refused");
+  assert.equal(delRes.refusal?.reason, "repository_mismatch");
+  assert.equal(ghCalls.length, 0, "no gh mutation may run after Location switch");
+
+  // Even if workspaceId/repoPath still match w1, a changed checkout origin is also refused before gh runs.
+  f.store().patchMeta(soloId, { workspaceId: "w1", repoPath: f.root });
+  f.store().flush(soloId);
+  f.setOrigin("example/other");
+  const movedOriginRes = await f.manager().forgeDecisionAction({
+    type: "forge_decision_action", requestId: "req-o", sessionId: soloId, occurrenceId: "occ-o",
+    location: oldLocation,
+    action: { kind: "branch_deletion", repository: "example/project", branch: "feat/old", pullRequest: 12, headSha, mergeCommitSha: headSha },
+  }, { gh });
+  assert.equal(movedOriginRes.outcome, "refused");
+  assert.equal(movedOriginRes.refusal?.reason, "repository_mismatch");
+  assert.equal(ghCalls.length, 0, "no gh mutation may run when live origin changed");
+
+  // Round 3 Finding 1: if a live Location switch commits while the runner's GitHub preflight read is
+  // in flight, both branch_deletion and pr_merge_enqueue recheck live identity right before the write
+  // and refuse with repository_mismatch without executing any forge write.
+  f.setOrigin("example/project");
+  const runMidflightSwitch = async (kind: "branch_deletion" | "pr_merge_enqueue") => {
+    f.store().patchMeta(soloId, { workspaceId: "w1", repoPath: f.root });
+    f.store().flush(soloId);
+    const seen: string[][] = [];
+    let releaseRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    let allowReturn!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      allowReturn = resolve;
+    });
+    const stagedGh: GhRunner = async (args) => {
+      seen.push(args);
+      if (seen.length === 1) {
+        releaseRead();
+        await gate;
+        const payload = kind === "branch_deletion"
+          ? {
+            data: {
+              repository: {
+                id: "R_123", nameWithOwner: "example/project",
+                pullRequest: { number: 12, state: "MERGED", headRefName: "feat/old", headRefOid: headSha, isCrossRepository: false, mergeCommit: { oid: headSha } },
+                ref: { target: { oid: headSha } },
+                pullRequests: { totalCount: 0 },
+              },
+            },
+          }
+          : {
+            data: {
+              repository: {
+                nameWithOwner: "example/project",
+                pullRequest: { number: 12, state: "OPEN", headRefOid: headSha, mergeQueueEntry: null },
+              },
+            },
+          };
+        return { stdout: JSON.stringify(payload), stderr: "", code: null, timedOut: false };
+      }
+      throw new Error(`unexpected write call after Location switch: ${args.join(" ")}`);
+    };
+    const pending = f.manager().forgeDecisionAction({
+      type: "forge_decision_action", requestId: `req-mid-${kind}`, sessionId: soloId, occurrenceId: `occ-mid-${kind}`,
+      location: oldLocation,
+      action: kind === "branch_deletion"
+        ? { kind: "branch_deletion", repository: "example/project", branch: "feat/old", pullRequest: 12, headSha, mergeCommitSha: headSha }
+        : { kind: "pr_merge_enqueue", repository: "example/project", pullRequest: 12, headSha },
+    }, { gh: stagedGh });
+    await readStarted;
+    f.store().patchMeta(soloId, { workspaceId: "w2", repoPath: otherRepo });
+    f.store().flush(soloId);
+    allowReturn();
+    const result = await pending;
+    assert.equal(result.outcome, "refused", `${kind} refuses after mid-flight Location switch`);
+    assert.equal(result.refusal?.reason, "repository_mismatch");
+    assert.equal(seen.length, 1, `${kind} issued only the preflight read and zero forge writes`);
+  };
+  await runMidflightSwitch("branch_deletion");
+  await runMidflightSwitch("pr_merge_enqueue");
+});

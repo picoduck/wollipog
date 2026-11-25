@@ -2,6 +2,8 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import {
   ANTIGRAVITY_AGENT_ID,
+  ANTIGRAVITY_AUTO_MODE,
+  ANTIGRAVITY_FULL_PERMISSIONS_MODE,
   PROTOCOL_VERSION,
   type AgentCapabilities,
   type ControlPlaneToUi,
@@ -44,7 +46,7 @@ import { SessionDetail } from "../components/SessionDetail.js";
  * agy's account is the runner's redaction placeholder `[account]`.
  */
 const params = new URLSearchParams(window.location.search);
-type AntigravityState = "pickers" | "pickers-stress40" | "modes" | "modes-stress" | "attach-menu" | "resume-failed" | "streaming" | "approval" | "denied" | "stopped" | "install-failed" | "signin-failed" | "turn-failed";
+type AntigravityState = "pickers" | "pickers-stress40" | "modes" | "modes-stress" | "attach-menu" | "resume-failed" | "streaming" | "approval" | "denied" | "stopped" | "install-failed" | "signin-failed" | "turn-failed" | "auto-fallback" | "full-permissions";
 const state = (params.get("agState") ?? "pickers") as AntigravityState;
 
 const SESSION_ID = "antigravity-session-e2e";
@@ -68,7 +70,7 @@ const currentModel = models[0]![0];
 const AGY_MODES = [
   { id: "default", name: "Default", description: "Ask before edits and commands, per your permission settings." },
   { id: "accept-edits", name: "Accept edits", description: "Approve file edits in the workspace without asking." },
-  { id: "auto", name: "Auto", description: "Approve edits and safe commands; ask before irreversible actions." },
+  { ...ANTIGRAVITY_AUTO_MODE, description: "Approve edits and safe commands; ask before irreversible actions." },
   { id: "plan", name: "Plan", description: "Plan carefully before executing a task." },
 ];
 /** `modes-stress` (fixture only, not agy's): ten long-named modes, every odd one with a description
@@ -84,8 +86,15 @@ const STRESS_MODES = NUMBER_WORDS.map((word, index) => ({
   }),
 }));
 const modesStress = state === "modes-stress";
-const agentModes = modesStress ? STRESS_MODES : AGY_MODES;
-const currentMode = modesStress ? "mode-5" : "default";
+const fullPermissions = state === "full-permissions";
+/** The runner appends Wollipog's live Full Permissions Mode to agy's own modes (apps/runner/src/acp.ts). */
+const FULL_PERMISSIONS = { ...ANTIGRAVITY_FULL_PERMISSIONS_MODE,
+  description: "Approve every Antigravity action without asking. Runner isolation still applies." };
+/** Where agy's terminal sandbox is unavailable (AppArmor-restricted user namespaces), agy omits Auto. */
+const WITHOUT_AUTO = AGY_MODES.filter(({ id }) => id !== ANTIGRAVITY_AUTO_MODE.id);
+const agentModes = fullPermissions || state === "auto-fallback" ? [...WITHOUT_AUTO, FULL_PERMISSIONS]
+  : modesStress ? STRESS_MODES : AGY_MODES;
+const currentMode = fullPermissions ? ANTIGRAVITY_FULL_PERMISSIONS_MODE.id : modesStress ? "mode-5" : "default";
 
 /** What acpSessionPresentation (apps/runner/src/acp-session-state.ts) makes of agy's session: its
  * `model` and `thought_level` options and its four modes, each approving through ACP permission. */
@@ -98,7 +107,8 @@ const capabilities: AgentCapabilities = {
   supportsApprovals: true,
   permissionModes,
   agentPermissionModes: agentModes,
-  elicitation: Object.fromEntries(permissionModes.map((mode) => [mode, ["acp-permission" as const]])),
+  elicitation: Object.fromEntries(permissionModes.map((mode) =>
+    [mode, [mode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id ? "none" : "acp-permission"]])),
 };
 
 const launchFailed = state === "install-failed" || state === "signin-failed" || state === "resume-failed";
@@ -160,6 +170,26 @@ const payloads: SessionEvent["payload"][] = [];
 const prompt = (text = PROMPT) => payloads.push({ kind: "user_message", text, images: [] });
 const touch = (status: string) => payloads.push({ kind: "tool_call", toolCallId: "call_touch", title: "touch notes.txt", toolKind: "execute", status });
 switch (state) {
+  case "auto-fallback":
+    payloads.push({
+      kind: "error", nonFatal: true, source: "antigravity_auto_mode_fallback",
+      // What the runner sends on an Ubuntu host (apps/runner/src/antigravity-apparmor.ts).
+      message: "Google Antigravity does not offer Auto Mode on this machine: AppArmor blocks the user namespaces its terminal sandbox needs (kernel.apparmor_restrict_unprivileged_userns = 1). To allow them for Antigravity only, run the command below on this machine, then start a new Antigravity session. This session uses Default mode. Choose Full Permissions Mode to skip Antigravity’s approval prompts.",
+      fixCommand: [
+        "sudo install -D -o root -g root -m 0755 '/home/user/.local/bin/agy' /usr/local/lib/wollipog-antigravity/agy",
+        "ln -sfn /usr/local/lib/wollipog-antigravity/agy '/home/user/.local/bin/agy'",
+        "sudo tee /etc/apparmor.d/wollipog-antigravity > /dev/null <<'EOF'",
+        "abi <abi/4.0>,",
+        "include <tunables/global>",
+        'profile wollipog-antigravity "/usr/local/lib/wollipog-antigravity/agy" flags=(unconfined) {',
+        "  userns,",
+        "}",
+        "EOF",
+        "sudo apparmor_parser -r /etc/apparmor.d/wollipog-antigravity",
+      ].join("\n"),
+    });
+    break;
+  case "full-permissions":
   case "pickers":
   case "pickers-stress40":
   case "modes":
@@ -228,6 +258,7 @@ const events: SessionEvent[] = payloads.map((payload, index) => ({
 const statusByState: Record<AntigravityState, SessionStatus> = {
   pickers: "idle", "pickers-stress40": "idle", modes: "idle", "modes-stress": "idle", "attach-menu": "idle", "resume-failed": "failed", streaming: "running", approval: "input_required", denied: "idle", stopped: "idle",
   "install-failed": "failed", "signin-failed": "failed", "turn-failed": "idle",
+  "auto-fallback": "idle", "full-permissions": "idle",
 };
 
 const session = {

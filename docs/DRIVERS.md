@@ -1334,6 +1334,33 @@ retained without `_meta` or other arbitrary agent data. Stable agent-managed aut
 are retained as bounded render-only choices; draft environment-variable and terminal methods are
 ignored.
 
+**Managed worktrees (#4901, #4902).**
+
+- **Why some agents are refused.** On Linux, a native host launch in a runner-created worktree always
+  runs under bubblewrap. On a runner configured for `provider` isolation, that sandbox keeps only the
+  provider's own state directory writable (`preserveProviderHome`). The generic ACP driver has no
+  state directory, so it cannot keep one. Every ACP agent except Google Antigravity, whose profile
+  names `~/.gemini/antigravity-cli` (§4.3), would lose its settings and conversations there. Its
+  launch is therefore refused. This covers Claude Code (ACP), Codex (ACP), Gemini CLI, Hermes,
+  OpenClaw and operator-configured agents. That includes an operator's own agent under
+  Antigravity's id (`source: "config"`), which launches without Antigravity's profile.
+- **Where it is refused.** One rule, `managedWorktreeUnsupportedReason` in `@wollipog/protocol`,
+  refuses these agents before anything is created or lost:
+  - session creation, with a 409 that names the agent and the In Place alternative;
+  - `create_worktree` and `select_worktree`, so no worktree is made or moved to;
+  - `start`, which keeps an older control plane from making a worktree the launch would leave
+    behind. It is judged by the checkout that launch will use, so a restart into a selected attached
+    worktree proceeds. It runs at the launch-refusal step: after the session record exists, so the
+    refusal is published as the session's status, and before any worktree is made;
+  - the relaunch after a worktree switch, before the running provider is retired. The check that
+    used to guard that relaunch read the capabilities of the launch being retired.
+- **Unaffected.** In-place sessions, attached worktrees, and runners configured for bwrap or Seatbelt,
+  where every agent already runs with HOME read-only.
+- **A relaunch that fails anyway.** After a switch, a relaunch can still fail for a reason no check
+  could foresee, such as a provider rejecting the resume or its process exiting during the
+  handshake. The session then goes idle with the error instead of Failed. Its prompts queued for that relaunch are rejected, not retried, and the next
+  message or Restart retries. Setup and provider-account failures keep their own recovery states.
+
 The current client advertises its canonical-root filesystem service and the complete stable
 terminal lifecycle. Filesystem calls are active-session/root-bound with canonical and symlink
 escape checks plus 8 MiB text limits. ACP terminals are separate from dashboard shells, retain a
@@ -1617,9 +1644,10 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   Worktree, execution-isolation and admission checks are the shared ACP launch's. The one
   provider-home difference: a managed Linux worktree forces bwrap even under `provider` isolation,
   and normally asks bwrap to keep the provider's own state writable, which no ACP agent can name.
-  An ACP launch whose profile accepts read-only state (Antigravity) runs there with HOME read-only
-  instead of being refused; every other ACP agent keeps that refusal. Find Sessions and adoption
-  never probe the setup-derived row, since they spawn adapters without its context or profile.
+  An Antigravity launch runs there with HOME read-only and a private temporary mount at
+  `~/.gemini/antigravity-cli/bin` for its generated `agentapi` shell helper (#4896). Its credentials,
+  settings, and conversations stay read-only. Every other ACP agent keeps the refusal. Find Sessions
+  and adoption never probe the setup-derived row, since they spawn adapters without its context or profile.
 - **Compatibility profile.** The ACP client withholds, for Antigravity only: every advertised auth
   method (they include an API key and Agent Platform ADC, which would change the account or billing;
   sign-in happens in Connections), `logout` (it would sign every session on the runner out of the
@@ -1658,19 +1686,87 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
 - **Stop.** For every ACP agent, `cancel()` now answers each pending `session/request_permission`
   with `cancelled`, as ACP requires, so a stopped turn's approval never stays open in the agent. The
   card itself settles with the turn, as for the native drivers.
-- **Resume.** Only a launch with no runner-owned sandbox (`provider` isolation and no managed Linux
-  worktree) lets agy persist its conversation, so only then does the session advertise
-  `session/resume`, and a restart resumes by id without replaying history. Under any runner sandbox
-  (bwrap, including a managed worktree's, or Seatbelt) agy's state directory
-  (`~/.gemini/antigravity-cli`, which also holds its OAuth token and settings) is read-only and
-  nothing is persisted, so no resume is advertised and a restart shows the existing "read-only
-  history" refusal instead of starting a fresh conversation. A writable grant for agy's
-  conversation state is a follow-up. `session/load` is never used: agy answers a load of an id it
-  cannot read with an empty session, which would pass for a resumed conversation.
+- **Resume.** agy keeps its conversations in its state directory, `~/.gemini/antigravity-cli`, which
+  also holds its OAuth token and settings. It resumes only where that directory is writable. Where
+  it is, the session advertises `session/resume`, and a relaunch in the conversation's own folder
+  (parking, a runner restart) resumes by id without replaying history. A relaunch in another
+  folder, such as after a worktree switch, starts a fresh conversation instead (see "A
+  conversation stays in the folder it was created in" below). An explicit Restart is always a new
+  conversation.
+  - On a `provider` isolation runner, both in place and in a managed Linux worktree. A managed
+    worktree forces bwrap there, and the launch preserves the provider home as it does for Claude,
+    Codex and Pi. Antigravity's compatibility profile names the directory, since the generic ACP
+    driver has none, and only that directory is bound writable (plus the shared build caches every
+    preserved home gets). The rest of HOME stays read-only.
+  - The generated shell helper stays on its session-private tmpfs at `bin`. The launcher renders
+    it after the writable binds, so it shadows the shared directory's `bin`. A sandboxed session
+    therefore cannot plant a helper that another session's agy would run.
+  - A directory the launch creates is mode 0700.
+  - Before this (#4779 to #4898), the directory was read-only in managed worktrees. A session that
+    started in place and then created its own worktree failed on the relaunch with "ACP agent does
+    not advertise session resume or load support".
+  - **A conversation stays in the folder it was created in.** agy 1.5.14 runs every command of a
+    conversation in that folder, whatever `cwd` a `session/resume` names, whatever folder the
+    process starts in, and with the new folder in `additionalDirectories` or `--add-dir` (measured
+    with real agy outside Wollipog). The runner therefore records the folder a fresh ACP
+    conversation was created in (`providerConversationCwd`). An Antigravity launch that would
+    resume it in any other folder starts a fresh conversation there instead. That covers a worktree
+    switch, and any relaunch after one: parking, a runner restart, a retry.
+  - **The handoff.** The fresh conversation's first ordinary prompt is preceded, once, by a
+    handoff: the old and new folders and the conversation so far, meaning the person's messages and
+    the agent's top-level replies, the newest kept within 24,000 characters. Tool calls are not
+    replayed. This follows T3 Code's `create_with_handoff` and Omnigent's Antigravity harness, which
+    seeds a fresh agy conversation the same way.
+  - **Durability.** The new conversation's id, its folder and a pending-handoff marker
+    (`pendingConversationHandoffFrom`) are written in one patch, whichever path captures the id
+    first, and nothing is written before the conversation exists. Until the agent has accepted the
+    prompt carrying the handoff, every relaunch rebuilds it from the event log, so parking or a
+    runner restart cannot lose it. A replacement that fails before it exists leaves the old
+    conversation as it was, so returning to its folder resumes it without its own history.
+    Clearing the marker is delivery's bookkeeping only: a failure there never fails the accepted
+    turn, and a relaunch in the same runner process retries the clear instead of re-sending the
+    history. Across a runner crash in that window the handoff is sent again: it is delivered at
+    least once.
+  - **Exemptions.** An explicit Restart never resumes an ACP conversation (`restartResumeId`): it is
+    a new conversation by design ("Restarting starts a new conversation"), unseeded, recording its
+    own folder. A session that never recorded its folder (created before this) keeps resuming.
+    Codex and Claude Code need none of this: Codex takes `cwd` on every resume and turn, and Claude
+    Code starts a process per turn in the session's folder.
+
+  Under a runner configured for bwrap or Seatbelt, the directory stays read-only, so no resume is
+  advertised there. A restart shows the existing "read-only history" refusal instead of starting a
+  fresh conversation, and a worktree switch is refused before the provider is retired.
+  `session/load` is never used: agy answers a load of an id it cannot read with an empty session,
+  which would pass for a resumed conversation.
 - **Approvals.** Commands ask through `session/request_permission` (string request ids, `allow` and
-  `deny` options) and the card's title is the command line; Deny prevents the command. Modes are the
-  four agy advertises (`default`, `accept-edits`, `auto`, `plan`), offered as the session's approval
-  modes; Wollipog never passes `--dangerously-skip-permissions`. agy's own file edits are agent-owned
+  `deny` options) and the card's title is the command line. Deny prevents the command. New sessions
+  default to Auto Mode. Wollipog selects ACP's `auto` before the first prompt or after resume if agy
+  supports it. agy 1.5.14 offers `auto` only where its OS terminal sandbox works; on Linux hosts
+  with `kernel.apparmor_restrict_unprivileged_userns = 1` (Ubuntu's default) its log says
+  "Terminal sandbox unavailable", `auto` is missing from the session's modes and `session/set_mode`
+  refuses it. The session then shows a warning that names the reason and Full Permissions Mode,
+  and runs in Default mode. When the runner reads that sysctl as `1` and launched agy outside
+  bwrap, the warning also carries `fixCommand`, which the dashboard shows as a copyable block. It is
+  the exact host command (`antigravity-apparmor.ts`) that installs the AppArmor profile
+  `wollipog-antigravity`, granting `userns` only to a file no unprivileged program can replace.
+  - If root owns the launched agy's realpath and every parent directory, and none of them is
+    group- or world-writable, that path is granted.
+  - Otherwise, for example `~/.local/bin/agy`, the command first installs a root-owned copy at
+    `/usr/local/lib/wollipog-antigravity/agy`, turns the old path into a symlink to it, and grants
+    only the copy. A profile on a user-writable path would let any program running as the user
+    gain user namespaces by writing itself there.
+  - A Wollipog-managed copy gets no command, because updates replace it in a user-owned directory.
+  - An agy self-update that replaces the symlink drops Auto again, and the warning returns with
+    the command.
+
+  Unlike setting the sysctl to `0`, the restriction stays on for every other program. On Linux managed worktrees where agy's Auto sandbox cannot create its
+  nested namespace, a failed sandbox launch switches the session to Default mode once agy
+  confirms the change. The runner displays the effective mode and never retries the command.
+  **Full Permissions Mode** is Wollipog's own live mode, listed after agy's modes for every
+  non-Orchestrator session, as T3 Code runs Antigravity full access: agy stays in its `default`
+  mode and the runner answers each `session/request_permission` with its allow option. It needs
+  no sandbox and no launch flag, so it can be chosen at creation or switched in or out between
+  turns, and every launch stays under the same runner isolation. agy's own file edits are agent-owned
   tools: in `default` mode real agy wrote a file without asking, so edits are not approval-gated by
   Wollipog, which does not claim otherwise. No ACP approval context is synthesized from agy's tool
   input, because governance policies match on that context.

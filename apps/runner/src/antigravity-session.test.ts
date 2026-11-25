@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,6 +30,7 @@ import { effectiveAcpCompatibility } from "./session-manager.js";
 import { AntigravitySetupSupervisor, antigravityCredentialContext } from "./antigravity-setup.js";
 import { AcpDriver } from "./drivers/acp-driver.js";
 import type { DriverOptions } from "./drivers/driver.js";
+import { spawnAgent } from "./spawn.js";
 
 // Google's CLI is the credential-free fixture fixtures/antigravity/fake-agy.mjs, which models the
 // ACP behavior observed from real agy 1.5.14 (see DRIVERS.md §4.3).
@@ -72,7 +73,8 @@ function setup(overrides: Partial<AntigravitySetupView>): AntigravitySetupView {
 const PROVIDER = { mode: "provider", network: "inherit" } as const;
 const BWRAP = { mode: "bwrap", network: "inherit" } as const;
 
-function calls(): Array<{ method: string; clientInfo?: { name?: string } | null; outcome?: unknown; mcpServerNames?: string[] }> {
+function calls(): Array<{ method: string; clientInfo?: { name?: string } | null; outcome?: unknown;
+  mcpServerNames?: string[]; fullPermissions?: boolean; activeMode?: string; promptTexts?: string[] }> {
   const path = join(state, "calls.jsonl");
   return existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
 }
@@ -83,6 +85,7 @@ interface Observed {
   auth: string[];
   acp: AcpRuntimeCapabilities[];
   state: Array<{ capabilities: AgentCapabilities; config: SessionConfig }>;
+  handoffDelivered: number;
 }
 
 /** An Antigravity session driver launched exactly as the runner launches one. */
@@ -92,11 +95,14 @@ function launchDriver(
   cwd: string,
   resumeId?: string,
   overrides: { layeredEnv?: Record<string, string>; deadlines?: { handshakeMs: number; sessionMs: number }; config?: SessionConfig;
-    resolveLaunch?: AcpCompatibility["resolveLaunch"]; sessionContext?: DriverOptions["acpSessionContext"] } = {},
+    resolveLaunch?: AcpCompatibility["resolveLaunch"]; sessionContext?: DriverOptions["acpSessionContext"];
+    fixtureIsolation?: DriverOptions["isolation"];
+    appArmorFix?: (executable: string | undefined) => string | undefined; handoff?: string;
+    handoffRecordFails?: boolean } = {},
 ): { driver: AcpDriver; seen: Observed } {
   const context = antigravityCredentialContext();
   const launch = antigravitySessionLaunch(view, context, isolation);
-  const seen: Observed = { events: [], stderr: [], auth: [], acp: [], state: [] };
+  const seen: Observed = { events: [], stderr: [], auth: [], acp: [], state: [], handoffDelivered: 0 };
   const options: DriverOptions = {
     command: launch.command!,
     args: launch.args,
@@ -108,7 +114,9 @@ function launchDriver(
     cwd,
     config: overrides.config ?? {},
     acpSessionContext: overrides.sessionContext,
+    ...(overrides.handoff ? { acpConversationHandoff: overrides.handoff } : {}),
     context: { kind: "native" },
+    isolation: overrides.fixtureIsolation,
     ...(resumeId ? { resumeId } : {}),
   };
   const driver = new AcpDriver(options, {
@@ -118,7 +126,15 @@ function launchDriver(
     onAuthStatus: (status: string) => seen.auth.push(status),
     onAcpCapabilities: (capabilities: AcpRuntimeCapabilities) => seen.acp.push(capabilities),
     onAcpSessionState: (update: { capabilities: AgentCapabilities; config: SessionConfig }) => seen.state.push(update),
-  } as never);
+    onConversationHandoffDelivered: () => {
+      seen.handoffDelivered += 1;
+      if (overrides.handoffRecordFails) throw new Error("EIO: metadata write failed");
+    },
+  } as never, {
+    // Tests never read the real host's AppArmor setting.
+    antigravityAppArmorFix: overrides.appArmorFix ?? (() => undefined),
+    ...(overrides.fixtureIsolation ? { spawn: (opts) => spawnAgent({ ...opts, isolation: undefined }) } : {}),
+  });
   cleanup.push(() => driver.dispose());
   return { driver, seen };
 }
@@ -311,7 +327,8 @@ test("a session streams replies, advertises agy's models, efforts and modes, and
   const presented = seen.state.at(-1)!;
   assert.deepEqual(presented.capabilities.models.map((model) => model.id), ["fixture-pro", "fixture-flash"]);
   assert.deepEqual(presented.capabilities.effortLevels, ["low", "medium", "high", "xhigh"]);
-  assert.deepEqual(presented.capabilities.permissionModes, ["default", "accept-edits", "auto", "plan"]);
+  assert.deepEqual(presented.capabilities.permissionModes,
+    ["default", "accept-edits", "auto", "plan", "antigravity-full-permissions"]);
   assert.deepEqual(presented.config, { model: "fixture-pro", effort: "high", permissionMode: "default" });
   assert.deepEqual(seen.acp.at(-1), { logout: false, loadSession: false, sessionList: false, sessionDelete: false,
     sessionResume: true, sessionClose: true });
@@ -329,7 +346,8 @@ test("a session streams replies, advertises agy's models, efforts and modes, and
 test("a denied command never runs, an allowed one does, and Stop settles a pending approval", async () => {
   signIn();
   const cwd = mkdtempSync(join(root, "worktree-"));
-  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd);
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined,
+    { config: { permissionMode: "auto" } });
   await driver.initialize();
   await driver.newSession(cwd);
   const marker = join(cwd, "fixture-command-ran");
@@ -339,6 +357,8 @@ test("a denied command never runs, an allowed one does, and Stop settles a pendi
   let from = seen.events.length;
   const denied = driver.prompt("Please run the command.");
   const request = await permission(from);
+  assert.equal(calls().find((call) => call.method === "session/prompt")?.activeMode, "auto");
+  assert.equal(calls().find((call) => call.method === "initialize")?.fullPermissions, false);
   assert.equal(request.title, "touch fixture-command-ran", "the card names the command being approved");
   assert.deepEqual(request.options.map((option) => [option.optionId, option.kind]), [["allow", "allow_once"], ["deny", "reject_once"]]);
   assert.ok(seen.events.slice(from).some((event) => event.kind === "tool_call"), "the tool call is shown before the card");
@@ -367,6 +387,182 @@ test("a denied command never runs, an allowed one does, and Stop settles a pendi
   await waitFor(() => calls().some((call) => call.method === "session/prompt") ? true : undefined);
   driver.cancel();
   assert.equal(await waiting, "cancelled");
+});
+
+test("Auto Mode is restored on resume and falls back visibly when Antigravity withholds it", async () => {
+  signIn();
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const view = setup({ executable: { path: agy } });
+  const config = { permissionMode: "auto" };
+  const first = launchDriver(view, PROVIDER, cwd, undefined, { config });
+  await first.driver.initialize();
+  const id = await first.driver.newSession(cwd);
+  assert.equal(first.seen.state.at(-1)?.config.permissionMode, "auto");
+  assert.equal(first.seen.state.at(-1)?.capabilities.agentPermissionModes?.find((mode) => mode.id === "auto")?.name, "Auto Mode");
+  first.driver.dispose();
+
+  const resumed = launchDriver(view, PROVIDER, cwd, id, { config });
+  await resumed.driver.initialize();
+  assert.equal(await resumed.driver.newSession(cwd), id);
+  await resumed.driver.prompt("Say hello.");
+  assert.equal(calls().filter((call) => call.method === "session/prompt").at(-1)?.activeMode, "auto");
+  resumed.driver.dispose();
+
+  process.env.FAKE_AGY_MODE = "auto_unavailable";
+  const fallback = launchDriver(view, PROVIDER, cwd, id, { config });
+  await fallback.driver.initialize();
+  assert.equal(await fallback.driver.newSession(cwd), id);
+  assert.equal(fallback.seen.state.at(-1)?.config.permissionMode, "default");
+  assert.ok(fallback.seen.state.at(-1)?.capabilities.permissionModes?.includes("antigravity-full-permissions"),
+    "Full Permissions Mode stays available where Auto is not");
+  const warning = fallback.seen.events.find((event) => event.kind === "error" && event.nonFatal &&
+    event.source === "antigravity_auto_mode_fallback");
+  assert.match(warning?.kind === "error" ? warning.message : "",
+    /does not offer Auto Mode on this machine.*Default mode.*Full Permissions Mode/u);
+  assert.equal(calls().filter((call) => call.method === "initialize").at(-1)?.fullPermissions, false);
+  const prompt = fallback.driver.prompt("Please run the command.");
+  const request = await waitFor(() => fallback.seen.events.find((event) => event.kind === "permission_request"));
+  fallback.driver.resolvePermission(request.requestId, "deny");
+  assert.equal(await prompt, "end_turn");
+  assert.equal(existsSync(join(cwd, "fixture-command-ran")), false);
+});
+
+test("where AppArmor withholds Auto, the warning carries the exact host command for the agy this session launched", async () => {
+  signIn();
+  process.env.FAKE_AGY_MODE = "auto_unavailable";
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const asked: Array<string | undefined> = [];
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined, {
+    config: { permissionMode: "auto" },
+    appArmorFix: (executable) => { asked.push(executable); return `fix ${executable}`; },
+  });
+  await driver.initialize();
+  await driver.newSession(cwd);
+  assert.deepEqual(asked, [realpathSync.native(agy)], "the command names the executable the kernel runs");
+  const warning = seen.events.find((event) => event.kind === "error" && event.source === "antigravity_auto_mode_fallback");
+  assert.ok(warning?.kind === "error");
+  assert.equal(warning.fixCommand, `fix ${realpathSync.native(agy)}`);
+  assert.match(warning.message, /AppArmor blocks the user namespaces.*run the command below.*start a new Antigravity session.*Full Permissions Mode/u);
+});
+
+test("a denied native Auto sandbox switches to interactive Default mode without replaying the command", async () => {
+  signIn();
+  process.env.FAKE_AGY_MODE = "auto_sandbox_denied";
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), BWRAP, cwd, undefined, {
+    config: { permissionMode: "auto" }, layeredEnv: { FAKE_AGY_EXECUTABLE: agy },
+    fixtureIsolation: { backend: "bwrap", command: "bwrap", args: [], network: "inherit",
+      antigravityTerminalHelper: join(root, "bin") },
+  });
+  const marker = join(cwd, "fixture-command-ran");
+  await driver.initialize();
+  await driver.newSession(cwd);
+  assert.equal(seen.state.at(-1)?.config.permissionMode, "auto");
+  assert.equal(await driver.prompt("Please run the command."), "end_turn");
+  assert.equal(seen.state.at(-1)?.config.permissionMode, "default");
+  assert.ok(!seen.state.at(-1)?.capabilities.permissionModes?.includes("auto"));
+  assert.ok(seen.events.some((event) => event.kind === "error" && event.source === "antigravity_auto_mode_fallback"));
+  assert.deepEqual(calls().filter((call) => call.method === "session/prompt").map((call) => call.activeMode), ["auto"]);
+  assert.equal(existsSync(marker), false);
+
+  for (const decision of ["deny", "allow"] as const) {
+    const from = seen.events.length;
+    const turn = driver.prompt("Please run the command.");
+    const request = await waitFor(() => seen.events.slice(from).find((event) => event.kind === "permission_request"));
+    assert.equal(driver.resolvePermission(request.requestId, decision), true);
+    assert.equal(await turn, "end_turn");
+    assert.equal(existsSync(marker), decision === "allow");
+  }
+});
+
+test("Full Permissions Mode is a live mode: agy stays in Default and Wollipog approves its requests", async () => {
+  signIn();
+  // Real agy 1.5.14 withholds Auto where its terminal sandbox is unavailable; Full Permissions must not need it.
+  process.env.FAKE_AGY_MODE = "auto_unavailable";
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const marker = join(cwd, "fixture-command-ran");
+  const view = setup({ executable: { path: agy } });
+  const full = "antigravity-full-permissions";
+  const first = launchDriver(view, PROVIDER, cwd, undefined, { config: { permissionMode: full } });
+  await first.driver.initialize();
+  const id = await first.driver.newSession(cwd);
+  assert.equal(first.seen.state.at(-1)?.config.permissionMode, full);
+  assert.deepEqual(first.seen.state.at(-1)?.capabilities.permissionModes, ["default", "accept-edits", "plan", full],
+    "the composer offers agy's live modes and Full Permissions Mode together");
+  assert.equal(first.seen.state.at(-1)?.capabilities.agentPermissionModes?.at(-1)?.name, "Full Permissions Mode");
+  assert.equal(await first.driver.prompt("Please run the command."), "end_turn");
+  assert.equal(existsSync(marker), true);
+  rmSync(marker);
+  assert.equal(first.seen.events.some((event) => event.kind === "permission_request"), false);
+  assert.deepEqual(calls().filter((call) => call.method === "permission_response").at(-1)?.outcome,
+    { outcome: "selected", optionId: "allow" }, "Wollipog answered agy's approval request");
+  assert.equal(calls().find((call) => call.method === "session/prompt")?.activeMode, "default");
+  assert.equal(calls().find((call) => call.method === "initialize")?.fullPermissions, false, "no launch flag");
+
+  // Leaving Full Permissions between turns restores agy's own approvals in the same process.
+  await first.driver.setConfig({ permissionMode: "default" });
+  assert.equal(first.seen.state.at(-1)?.config.permissionMode, "default");
+  let from = first.seen.events.length;
+  const asked = first.driver.prompt("Please run the command.");
+  const request = await waitFor(() => first.seen.events.slice(from).find((event) => event.kind === "permission_request"));
+  first.driver.resolvePermission(request.requestId, "deny");
+  assert.equal(await asked, "end_turn");
+  assert.equal(existsSync(marker), false);
+
+  // And entering it from agy's Accept Edits mode returns agy to Default first.
+  await first.driver.setConfig({ permissionMode: "accept-edits" });
+  await first.driver.setConfig({ permissionMode: full });
+  assert.equal(first.seen.state.at(-1)?.config.permissionMode, full);
+  from = first.seen.events.length;
+  assert.equal(await first.driver.prompt("Please run the command."), "end_turn");
+  assert.equal(existsSync(marker), true);
+  rmSync(marker);
+  assert.equal(first.seen.events.slice(from).some((event) => event.kind === "permission_request"), false);
+  assert.equal(calls().filter((call) => call.method === "session/prompt").at(-1)?.activeMode, "default");
+  first.driver.dispose();
+
+  const resumed = launchDriver(view, PROVIDER, cwd, id, { config: { permissionMode: full } });
+  await resumed.driver.initialize();
+  assert.equal(await resumed.driver.newSession(cwd), id);
+  assert.equal(resumed.seen.state.at(-1)?.config.permissionMode, full);
+  assert.equal(await resumed.driver.prompt("Please run the command."), "end_turn");
+  assert.equal(existsSync(marker), true);
+  assert.equal(resumed.seen.events.some((event) => event.kind === "permission_request"), false);
+  assert.ok(calls().filter((call) => call.method === "initialize").every((call) => call.fullPermissions === false));
+});
+
+test("a fresh conversation's handoff rides once, ahead of its first prompt", async () => {
+  signIn();
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const handoff = "[Wollipog] This session moved. Conversation so far:\nuser: remember HERON-42";
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined, { handoff });
+  await driver.initialize();
+  await driver.newSession(cwd);
+  await driver.prompt("What was the code word?");
+  assert.equal(seen.handoffDelivered, 1, "reported once the agent accepted the prompt carrying it");
+  await driver.prompt("Say hello.");
+  const prompts = calls().filter((call) => call.method === "session/prompt").map((call) => call.promptTexts ?? []);
+  assert.equal(prompts[0]?.[0], handoff, "the conversation so far comes first, before the message it answers");
+  assert.equal(prompts[0]?.[1], "What was the code word?");
+  assert.ok(!prompts[1]?.some((text) => text.includes("Conversation so far")), "never repeated");
+  assert.equal(seen.handoffDelivered, 1);
+});
+
+test("a failure recording the delivered handoff never fails the accepted turn or re-sends the seed", async () => {
+  signIn();
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const handoff = "[Wollipog] Conversation so far:\nuser: remember HERON-42";
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined,
+    { handoff, handoffRecordFails: true });
+  await driver.initialize();
+  await driver.newSession(cwd);
+  assert.equal(await driver.prompt("What was the code word?"), "end_turn", "the agent accepted it");
+  assert.ok(seen.stderr.some((text) => text.includes("could not record the delivered conversation handoff")));
+  await driver.prompt("Say hello.");
+  const prompts = calls().filter((call) => call.method === "session/prompt").map((call) => call.promptTexts ?? []);
+  assert.equal(prompts[0]?.[0], handoff);
+  assert.ok(!prompts[1]?.some((text) => text === handoff), "the accepted seed is never sent again");
+  assert.equal(seen.handoffDelivered, 1);
 });
 
 test("resume reuses the provider conversation under provider isolation and never falls back to session/load", async () => {
@@ -595,6 +791,12 @@ test("the effective sandbox, not the configured mode, decides whether resume is 
   assert.deepEqual(effectiveAcpCompatibility(profile, undefined), { acpCompatibility: profile });
   assert.deepEqual(effectiveAcpCompatibility(profile, { backend: "bwrap" } as never), { acpCompatibility: { ...profile, resumable: false } });
   assert.deepEqual(effectiveAcpCompatibility(undefined, { backend: "bwrap" } as never), {});
+  // A managed worktree on a provider-isolation runner preserves agy's state directory, so the
+  // conversation it started in place resumes there (#4779's follow-up).
+  assert.deepEqual(effectiveAcpCompatibility(profile, { backend: "bwrap", preservesProviderHome: true } as never),
+    { acpCompatibility: profile });
+  assert.deepEqual(effectiveAcpCompatibility({ ...profile, resumable: false }, { backend: "bwrap", preservesProviderHome: true } as never),
+    { acpCompatibility: { ...profile, resumable: false } }, "a runner configured for bwrap never offers it");
 });
 
 test("account identifiers are redacted from agent text", () => {

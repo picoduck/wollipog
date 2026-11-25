@@ -11824,6 +11824,88 @@ test("createSession persists and launches the capability-dependent Claude permis
   assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, undefined);
 });
 
+test("a generic ACP agent is refused a managed worktree on a Linux provider runner before anything is created (#4901)", () => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const acp = { id: "gemini-cli", name: "Gemini CLI", command: "gemini", args: ["--acp"], env: {},
+      driver: "acp" as const, available: true, context: { kind: "native" as const } };
+    // The runner's setup-derived Antigravity row says where it came from (`antigravityAgentDefinition`).
+    meta.agents.push(acp, { ...acp, id: "google-antigravity", name: "Google Antigravity", command: "agy", args: ["acp"],
+      source: "discovered" as const });
+    meta.runtime = { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
+      admission: { agentLimits: {}, agentWeights: {} }, executionIsolation: { mode: "provider", network: "inherit" } };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const create = (agentId: string, useWorktree: boolean) =>
+      svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId, useWorktree });
+
+    const starts = hub.sentOfType("start_session").length;
+    const refused = create("gemini-cli", true);
+    assert.equal(refused.status, 409);
+    assert.match(refused.error ?? "", /^Gemini CLI can't run in a managed worktree on this machine: .* Start the session In Place instead\.$/u);
+    assert.equal(hub.sentOfType("start_session").length, starts, "the runner is never asked to create the worktree");
+    assert.equal(db.listSessions().some((session) => session.agentId === "gemini-cli"), false, "no session row is left behind");
+
+    assert.ok(create("gemini-cli", false).ok, "In Place stays available");
+    assert.ok(create("google-antigravity", true).ok, "Antigravity's state is preserved in managed worktrees (#4899)");
+    assert.ok(create(AGENT_ID, true).ok, "a driver with a known state directory is unaffected");
+    // An operator's own agent under Antigravity's id launches without Antigravity's profile.
+    meta.agents.find((agent) => agent.id === "google-antigravity")!.source = "config";
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    assert.equal(create("google-antigravity", true).status, 409);
+    meta.agents.find((agent) => agent.id === "google-antigravity")!.source = "discovered";
+    meta.runtime.executionIsolation = { mode: "bwrap", network: "inherit" };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    assert.ok(create("gemini-cli", true).ok, "a runner configured for bwrap already runs every agent with HOME read-only");
+  } finally { db.close(); }
+});
+
+test("createSession launches Antigravity in Auto Mode by default, persists an explicit Full Permissions Mode, and both stay switchable", () => {
+  const { db, hub, svc } = makeHarness();
+  const agent = {
+    ...runnerMeta().agents.find(({ id }) => id === AGENT_ID)!,
+    id: "google-antigravity",
+    driver: "acp" as const,
+    capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+      permissionModes: ["auto", "antigravity-full-permissions"],
+    },
+  };
+  const legacy = { ...agent, id: "legacy-acp", capabilities: { ...agent.capabilities, permissionModes: ["default", "auto"] } };
+  db.updateRunnerAgents(RUNNER_ID, [agent, legacy], Date.now());
+  const localUser = db.localIdentityContext().userId;
+  db.setAgentHarnessDefault(localUser, { agentId: agent.id, driver: "acp", context: { kind: "native" } },
+    { permissionMode: "antigravity-full-permissions" });
+  for (const { agentId, explicit, expected } of [
+    { agentId: agent.id, explicit: undefined, expected: "auto" },
+    { agentId: agent.id, explicit: "antigravity-full-permissions", expected: "antigravity-full-permissions" },
+    { agentId: legacy.id, explicit: undefined, expected: undefined },
+  ]) {
+    const result = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId,
+      ...(explicit ? { config: { permissionMode: explicit } } : {}),
+    }, undefined, undefined, false, false, false, { defaultOwnerUserId: localUser });
+    assert.ok(result.ok && result.data, JSON.stringify(result));
+    assert.equal(db.getSession(result.data.id)!.permissionMode, expected ?? null);
+    assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, expected);
+    if (agentId === agent.id) {
+      // Full Permissions Mode is a live Antigravity mode (agy stays in Default and the runner approves
+      // its requests), so a session moves in and out of it between turns like any other mode.
+      const otherMode = { permissionMode: explicit ? "auto" : "antigravity-full-permissions" };
+      const changed = svc.setConfig(result.data.id, otherMode);
+      assert.ok(changed.ok, JSON.stringify(changed));
+      const prompted = svc.prompt(result.data.id, "Change permissions", [], undefined, otherMode);
+      assert.doesNotMatch(prompted.error ?? "", /fixed at session creation/u);
+    }
+  }
+  const orchestrator = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: agent.id, role: "orchestrator",
+    config: { permissionMode: "antigravity-full-permissions" },
+  });
+  assert.equal(orchestrator.status, 409);
+  assert.match(orchestrator.error ?? "", /only for normal Antigravity sessions/u);
+});
+
 test("createSession persists and launches the resolved concrete model and effort", () => {
   const { db, hub, svc } = makeHarness();
   db.updateRunnerAgents(

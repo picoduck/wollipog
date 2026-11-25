@@ -23,12 +23,12 @@ const git = (cwd: string, ...args: string[]) => execFileSync("git", [
   "-C", cwd, ...args,
 ], { encoding: "utf8" }).trim();
 
-async function waitFor(predicate: () => boolean, message: string, attempts = 1500): Promise<void> {
+async function waitFor(predicate: () => boolean, message: string | (() => string), attempts = 1500): Promise<void> {
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (predicate()) return;
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
-  assert.fail(message);
+  assert.fail(typeof message === "function" ? message() : message);
 }
 
 /** Closed-world fixture probe. Only scan is scoped; identity reads still use the real kernel. */
@@ -371,8 +371,15 @@ test("a requested worktree whose directory was deleted by hand is made again on 
  * empty `config.worktree` in each of the session's other managed worktrees, so a test comparing their
  * Git admin directories byte for byte waits for it first. */
 async function relaunchedIn(h: Harness, path: string): Promise<void> {
+  const startedAt = performance.now();
   await waitFor(() => h.providers.at(-1)?.cwd === path && h.store.readMeta(h.sessionId)?.status !== "starting",
-    `the session did not relaunch in ${path}`);
+    // Read these when the wait expires, so a recurrence distinguishes a slow launch from a missing one.
+    () => `the session did not relaunch in ${path}: ${JSON.stringify({
+      sessionStatus: h.store.readMeta(h.sessionId)?.status ?? null,
+      lastProviderCwd: h.providers.at(-1)?.cwd ?? null,
+      expectedPath: path,
+      elapsedMs: Math.round(performance.now() - startedAt),
+    })}`);
 }
 
 for (const holder of ["a person, with no row of this session's", "another session that lists it"] as const) {

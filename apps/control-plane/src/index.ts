@@ -1,4 +1,5 @@
 import { createSessionGitManagement } from "./session-git-management.js";
+import { registerQuestionAnswerRoute } from "./question-answer-route.js";
 import { withoutProviderAccountNames } from "./agent-account-view.js";
 import { AssistantPromptImages } from "./assistant-prompt-images.js";
 import { createCampaignReviewManagement } from "./campaign-review-management.js";
@@ -4353,14 +4354,14 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/retire", async (req
   ));
 });
 
-// #4064: a Full Control root's question for its campaign's owner. `:id` is the caller's own
-// credential session; the service checks that it is the campaign's root and that only a person
-// can answer.
+// #4064, #4894: a standalone session's or root Orchestrator's Owner Question or Owner Approval.
+// `:id` is the caller's own credential session; the service verifies requester eligibility and
+// ensures only the authenticated owner can answer or decide.
 app.post("/api/sessions/:id/owner-decisions", async (req, reply) => {
   const { id } = req.params as { id: string };
   const principal = requestPrincipal(req);
-  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || principal.orchestrator !== true) {
-    return reply.code(403).send({ error: "a matching root Orchestrator credential is required" });
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching session credential is required" });
   }
   if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
   return respond(reply, await svc.createOwnerDecision(id, req.body as CreateOwnerDecisionRequest,
@@ -5427,26 +5428,9 @@ app.post("/api/sessions/:id/fork", async (req, reply) => sessionLifecycleManagem
 
 // Structured agent questions (AskUserQuestion): a sibling of /approve because the shapes
 // differ — N answers keyed by question id vs one optionId decision.
-app.post("/api/sessions/:id/answer", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const body = req.body as { requestId?: string; occurrenceId?: string; answers?: Record<string, string | string[]>; action?: "submit" | "dismiss" };
-  if (
-    typeof body?.requestId !== "string" ||
-    (body.occurrenceId != null && typeof body.occurrenceId !== "string") ||
-    body.answers == null ||
-    typeof body.answers !== "object" ||
-    Array.isArray(body.answers) ||
-    (body.action != null && body.action !== "submit" && body.action !== "dismiss")
-  ) {
-    return reply.code(400).send({ error: "requestId and answers are required; action must be submit or dismiss" });
-  }
-  const action = body.action ?? (Object.keys(body.answers).length > 0 ? "submit" : "dismiss");
-  const human = requestHuman(req);
-  return respond(reply, svc.answerQuestion(id, body.requestId, body.answers, {
-    kind: "human",
-    id: humanActorId(req),
-  }, action, undefined, body.occurrenceId, undefined,
-  (sessionId) => human ? db.canAccessSession(human, sessionId) : false));
+registerQuestionAnswerRoute(app, {
+  service: svc, requestHuman, humanActorId,
+  canAccessSession: (human, sessionId) => db.canAccessSession(human, sessionId),
 });
 
 // Host actions: open the session's working directory in a local editor on the runner host,

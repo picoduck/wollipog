@@ -1,4 +1,5 @@
 import { isManagedModelChoice, resolveManagedModelChoice } from "@wollipog/protocol";
+import { ANTIGRAVITY_AUTO_MODE, ANTIGRAVITY_FULL_PERMISSIONS_MODE, managedWorktreeUnsupportedReason } from "@wollipog/protocol";
 import type { WollipogPromptOrigin } from "@wollipog/protocol";
 import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
 import { personalRuleDelegation } from "./personal-rule-delegation.js";
@@ -2282,6 +2283,8 @@ export function defaultPermissionModeForNewSession(
 ): string | undefined {
   const modes = capabilities?.permissionModes;
   if (!modes?.length) return undefined;
+  if (driver === "acp" && modes.includes(ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) &&
+      modes.includes(ANTIGRAVITY_AUTO_MODE.id)) return ANTIGRAVITY_AUTO_MODE.id;
   if (driver === "pi") return piAgentControlAvailable && modes.includes("default") ? "default" : undefined;
   if (driver !== "claude-code") return undefined;
   if (modes.includes("auto")) return "auto";
@@ -4685,6 +4688,19 @@ export class SessionsService {
       launch = { ...launch, version: targetCandidate?.version, capabilities: undefined };
     }
     const useWorktree = resolvedTarget.useWorktree;
+    // Refused before anything is created (#4901): the runner would make the worktree, then fail
+    // the launch and leave it behind.
+    const managedWorktreeRefusal = useWorktree ? managedWorktreeUnsupportedReason({
+      os: runner.os,
+      isolationMode: runner.runtime?.executionIsolation?.mode,
+      driver: launch.driver,
+      agentId: snapshotSpec?.agentId ?? req.agentId,
+      agentName: runner.agents.find((agent) => agent.id === req.agentId)?.name,
+      agentSource: runner.agents.find((agent) => agent.id === req.agentId)?.source,
+      contextKind: launch.context?.kind,
+      targetAdapter: executionTarget.adapter,
+    }) : null;
+    if (managedWorktreeRefusal) return fail(managedWorktreeRefusal, 409);
     if (req.providerAccountId !== undefined &&
         (typeof req.providerAccountId !== "string" ||
           !(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(req.providerAccountId) || isProviderAccountRef(req.providerAccountId)))) {
@@ -4931,6 +4947,9 @@ export class SessionsService {
     if (threadLaunch && role === "orchestrator") return fail(ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL, 409);
     const orchestrator = role === "orchestrator";
     const presetPermissions = usesOrchestratorPresetPermissions(requestedConfig);
+    if (orchestrator && requestedConfig.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) {
+      return fail("Full Permissions Mode is available only for normal Antigravity sessions.", 409);
+    }
     // A saved permission mode can supply the Orchestrator preset after explicit model resolution.
     if (explicitManagedModel && (orchestrator || presetPermissions)) {
       return fail("Choose a specific model for this launch.", 409);
@@ -7155,8 +7174,11 @@ export class SessionsService {
       this.log.warn(`lifecycle merge observation sweep deferred: ${String(error)}`));
     this.maintainImageReviewerRetirement(now, runnerId);
     this.maintainArchivedWorktreeRemoval(now, runnerId);
-    for (const campaignId of this.db.listOrchestratorCampaignSessionIds(runnerId)) {
-      void this.reconcileUncertainIssueClosures(campaignId).catch(() => this.log.warn(`Issue closure recovery is pending for ${campaignId}`));
+    for (const targetSessionId of new Set([
+      ...this.db.listOrchestratorCampaignSessionIds(runnerId),
+      ...this.db.listUncertainIssueClosureSessionIds(runnerId),
+    ])) {
+      void this.reconcileUncertainIssueClosures(targetSessionId).catch(() => this.log.warn(`Issue closure recovery is pending for ${targetSessionId}`));
     }
     this.campaignRecovery.maintain(now, runnerId);
     // A first message whose command expired or failed without a receipt reopens its wait.
@@ -12486,8 +12508,74 @@ export class SessionsService {
     const excludedRepository = requesting && normalized.data && !this.armedMergesOf(requesting, normalized.data).length
       ? this.excludedRepositoryRefusal(requesting, null, normalized.data) : null;
     if (excludedRepository) return fail(excludedRepository, 409);
+    if (normalized.ok && normalized.data && requesting && this.standaloneDirectOwnerSession(requesting)) {
+      if (normalized.data.category === "follow_up_issue_publication" && normalized.data.recommendationId) {
+        return fail("recommendationId is valid only inside a campaign", 400);
+      }
+      if (normalized.data.category === "merged_branch_deletion" && normalized.data.merged === false) {
+        return fail("Temporary branch deletion receipts require a campaign session; use merged_branch_deletion for a merged pull request branch.", 409);
+      }
+      if (normalized.data.category === "pr_merge" || normalized.data.category === "merged_branch_deletion" ||
+          normalized.data.category === "follow_up_issue_publication") {
+        if (!canAccess(requesting.id)) return fail("session not found", 404);
+        if (isTerminal(requesting.status)) return fail("a terminal session cannot request a workflow decision", 409);
+        const unsupported = this.capabilityFailure(requesting.runnerId, "standaloneOwnerDecisions", "standalone owner approvals");
+        if (unsupported) return unsupported;
+        const verified = await this.verifyStandaloneRepositoryLocation(requesting, normalized.data.repository);
+        if (!verified.ok || !verified.data) return failAs(verified);
+        if (normalized.data.category === "pr_merge") {
+          return this.createMergeDecision(sessionId, request, normalized.data, canAccess, verified.data.id);
+        }
+        return this.createWorkflowDecision(sessionId, request, canAccess, { trustedForgeLocationId: verified.data.id });
+      }
+      if (normalized.data.category === "ui_evidence_approval") {
+        const unsupported = this.capabilityFailure(requesting.runnerId, "standaloneOwnerDecisions", "standalone owner approvals");
+        if (unsupported) return unsupported;
+      }
+    }
+    let verifiedCustomPublicationLocationId: string | undefined;
+    if (normalized.ok && normalized.data && requesting && this.customRootOwnWorkSession(requesting, normalized.data.category)) {
+      if (normalized.data.category === "pr_merge" || normalized.data.category === "merged_branch_deletion") {
+        if (!canAccess(requesting.id)) return fail("session not found", 404);
+        if (isTerminal(requesting.status)) return fail("a terminal session cannot request a workflow decision", 409);
+        const unsupported = this.capabilityFailure(requesting.runnerId, "standaloneOwnerDecisions", "custom campaign root own-work approvals");
+        if (unsupported) return unsupported;
+        const repo = normalized.data.repository;
+        const scopeRepos = campaignScopeRepositories(requesting);
+        if (scopeRepos.length > 0 && !scopeRepos.some((entry) => entry.repository === repo.toLowerCase())) {
+          return fail("The requested repository is outside this campaign's authorized repositories", 403);
+        }
+        const verified = await this.verifyStandaloneRepositoryLocation(requesting, repo);
+        if (!verified.ok || !verified.data) return failAs(verified);
+        if (normalized.data.category === "pr_merge") {
+          return this.createMergeDecision(sessionId, request, normalized.data, canAccess, verified.data.id);
+        }
+        return this.createWorkflowDecision(sessionId, request, canAccess, { trustedForgeLocationId: verified.data.id });
+      }
+      if (normalized.data.category === "ui_evidence_approval") {
+        const unsupported = this.capabilityFailure(requesting.runnerId, "standaloneOwnerDecisions", "custom campaign root own-work approvals");
+        if (unsupported) return unsupported;
+      }
+      if (normalized.data.category === "follow_up_issue_publication") {
+        const repo = normalized.data.repository;
+        const scopeRepos = campaignScopeRepositories(requesting);
+        if (scopeRepos.length > 0 && !scopeRepos.some((entry) => entry.repository === repo.toLowerCase())) {
+          return fail("The requested repository is outside this campaign's authorized repositories", 403);
+        }
+        if (scopeRepos.length === 0 && this.requesterForgeDecisionLocation(requesting)) {
+          if (!canAccess(requesting.id)) return fail("session not found", 404);
+          if (isTerminal(requesting.status)) return fail("a terminal session cannot request a workflow decision", 409);
+          const verified = await this.verifyStandaloneRepositoryLocation(requesting, repo, null);
+          if (!verified.ok || !verified.data) return failAs(verified);
+          verifiedCustomPublicationLocationId = verified.data.id;
+        }
+      }
+    }
     if (normalized.ok && normalized.data?.category === "follow_up_issue_publication" && normalized.data.recommendationId) {
-      if (normalized.data.issueAdmission) return this.createWorkflowDecision(sessionId, request, canAccess);
+      if (normalized.data.issueAdmission) {
+        return this.createWorkflowDecision(sessionId, request, canAccess,
+          verifiedCustomPublicationLocationId ? { trustedForgeLocationId: verifiedCustomPublicationLocationId } : undefined);
+      }
       const initialCaller = this.db.getSession(sessionId);
       const initialController = initialCaller && this.workflowDecisionController(initialCaller, "follow_up_issue_publication");
       const admitted = await this.admitCampaignPublication(sessionId, request, normalized.data, canAccess);
@@ -12509,9 +12597,14 @@ export class SessionsService {
       // The snapshot keeps the name exactly as requested, so the card shows what the person
       // approves and the requester consumes what it sent (#3918). Only the server's own
       // issueAdmission makes a publication bounded; a named recommendation never does.
-      return this.createWorkflowDecision(sessionId, request, canAccess,
-        "failure" in admitted ? { publicationAdmissionFailure: admitted.failure,
-          ...(admitted.failure === "origin_outside_scope" ? { publicationAdmissionReason: admitted.reason } : {}) } : undefined);
+      return this.createWorkflowDecision(sessionId, request, canAccess, {
+        ...("failure" in admitted ? { publicationAdmissionFailure: admitted.failure,
+          ...(admitted.failure === "origin_outside_scope" ? { publicationAdmissionReason: admitted.reason } : {}) } : {}),
+        ...(verifiedCustomPublicationLocationId ? { trustedForgeLocationId: verifiedCustomPublicationLocationId } : {}),
+      });
+    }
+    if (verifiedCustomPublicationLocationId) {
+      return this.createWorkflowDecision(sessionId, request, canAccess, { trustedForgeLocationId: verifiedCustomPublicationLocationId });
     }
     if (normalized.ok && normalized.data?.category === "pr_merge") {
       return this.createMergeDecision(sessionId, request, normalized.data, canAccess);
@@ -13019,7 +13112,16 @@ export class SessionsService {
     const entries = campaignScopeRepositories(root);
     const repository = snapshot.repository.toLowerCase();
     const entry = entries.find((candidate) => candidate.repository === repository);
-    if (!entry || !includeOwn && entries.length < 2) return null;
+    if (!entry) {
+      if (includeOwn && requester.id === controller.id && this.directOwnerSelfControlled(requester, "follow_up_issue_publication")) {
+        const location = this.requesterForgeDecisionLocation(requester);
+        if (location) {
+          return { root, entry: { repository, locationIds: [location.id] }, requester };
+        }
+      }
+      return null;
+    }
+    if (!includeOwn && entries.length < 2) return null;
     const own = requester.id === root.id ? campaignLaunchRepository(root) : this.db.campaignParticipantRepository(root, requester);
     return !includeOwn && own === repository ? null : { root, entry, ...(includeOwn && own === repository ? { requester } : {}) };
   }
@@ -13116,9 +13218,13 @@ export class SessionsService {
 
   private async readPublishedIssuePayload(root: SessionView,
     publication: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>, issue: number): Promise<PublishedIssueFailure | null> {
-    // An issue published in another boundary repository is read through one of its Locations (#4119).
+    // An issue published in another boundary repository (or a standalone session's Location) is read through its Location (#4119, #4894).
     if (publication.repository !== campaignLaunchRepository(root)) {
-      const entry = campaignScopeRepositories(root).find((candidate) => candidate.repository === publication.repository);
+      const entry = campaignScopeRepositories(root).find((candidate) => candidate.repository === publication.repository) ??
+        (() => {
+          const location = this.requesterForgeDecisionLocation(root);
+          return location ? { repository: publication.repository, locationIds: [location.id] } : undefined;
+        })();
       return entry ? verifyBoundaryPublishedIssue({ db: this.db, hub: this.hub }, root, entry,
         { sanitizedTitle: publication.sanitizedTitle, sanitizedBody: publication.sanitizedBody, labels: publication.labels }, issue) : "read_failed";
     }
@@ -14299,14 +14405,86 @@ export class SessionsService {
   ): Promise<ServiceResult<{ decision?: WorkflowDecisionView; outcome?: "already_closed"; url?: string; proofGaps?: IssueClosureProofGapNotice }>> {
     const session = this.db.getSession(sessionId);
     if (!session || !canAccess(sessionId)) return fail("session not found", 404);
-    if (sessionRole(session) !== "orchestrator" || !session.orchestratorPolicy ||
-        this.db.resolvedCampaignSessionId(sessionId) !== sessionId) {
+    if (this.decisionControllerRoot(session) === "refused") return fail(MALFORMED_ANCESTRY_DECISION_REFUSAL, 409);
+    const standalone = this.standaloneDirectOwnerSession(session);
+    if (!standalone && (sessionRole(session) !== "orchestrator" || !session.orchestratorPolicy ||
+        this.db.resolvedCampaignSessionId(sessionId) !== sessionId)) {
       return fail("issue closure requires the root campaign Orchestrator", 403);
     }
-    const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "human-approved issue closure");
+    const unsupported = this.capabilityFailure(session.runnerId,
+      standalone ? "standaloneOwnerDecisions" : "orchestratorIssueClosure",
+      standalone ? "standalone issue closure" : "human-approved issue closure");
     if (unsupported) return unsupported;
+    if (standalone) {
+      if (isTerminal(session.status)) return fail("Issue closure requires a live session; this session has ended.", 409);
+      const allowedStandaloneClosureKeys = new Set([
+        "requestId", "issue", "repository", "reason", "explanation", "evidence", "comment", "dispositionRecommendationId",
+      ]);
+      const unexpectedKeys = request && typeof request === "object" && !Array.isArray(request)
+        ? Object.keys(request).filter((key) => !allowedStandaloneClosureKeys.has(key)) : [];
+      if (unexpectedKeys.length) {
+        return fail(`Unexpected field(s) on standalone issue closure proposal: ${unexpectedKeys.join(", ")}`, 400);
+      }
+      const invalidFields = issueClosureRequestInvalidFields(request);
+      if (invalidFields.length) return issueClosureRequestInvalid(invalidFields);
+      if (request.dispositionRecommendationId !== undefined) {
+        return fail("dispositionRecommendationId is valid only inside a campaign", 400);
+      }
+      const location = this.requesterForgeDecisionLocation(session);
+      if (!location) return fail("Issue closure requires a registered Project Location", 409);
+      const verified = await inspectProjectLocation({ db: this.db, hub: this.hub }, location.id, {
+        projectId: location.projectId, requireProtocol: "standaloneOwnerDecisions", timeoutMs: 10_000,
+      });
+      if (!verified.ok) {
+        return fail(verified.failure === "runner_too_old"
+          ? runnerCapabilityRequirementError(this.db.getRunner(location.runnerId)?.protocolVersion, "standaloneOwnerDecisions", "standalone issue closure").error
+          : "The session's repository could not be verified at its Project Location", 409);
+      }
+      const authorizedRepository = verified.location.repository.toLowerCase();
+      if (request.repository !== undefined && request.repository.toLowerCase() !== authorizedRepository) {
+        return fail("The requested repository is outside this session's authorized Project Location", 403);
+      }
+      const gitlabUnsupported = gitlabIssueCompatibility(this.db, session, authorizedRepository);
+      if (gitlabUnsupported) return capabilityFail(gitlabUnsupported);
+      try {
+        const requestId = `issue_closure_inspect_${randomUUID()}`;
+        const inspected = await this.hub.requestFromRunner(session.runnerId, requestId, {
+          type: "github_issue_closure", operation: "inspect", requestId, sessionId, issue: request.issue,
+          standalone: true, expectedRepository: authorizedRepository,
+        }, 60_000);
+        if (inspected.type !== "github_issue_closure_result" || inspected.sessionId !== sessionId ||
+            !inspected.ok || !inspected.inspection || inspected.inspection.issue !== request.issue) {
+          return fail(inspected.type === "github_issue_closure_result" && inspected.error
+            ? inspected.error : "runner could not inspect the issue and its related open pull requests", 409);
+        }
+        if (inspected.inspection.repository.toLowerCase() !== authorizedRepository) {
+          return fail("The runner repository changed from the verified Project Location; restore the repository and retry.", 409);
+        }
+        const inspectedGitlab = gitlabIssueCompatibility(this.db, session, inspected.inspection.repository);
+        if (inspectedGitlab) return capabilityFail(inspectedGitlab);
+        if (inspected.inspection.state === "CLOSED") return ok({ outcome: "already_closed", url: inspected.inspection.url });
+        if (inspected.inspection.state !== "OPEN") return fail("runner returned invalid issue state", 409);
+        const { state: _state, crossRepositoryDelivery: _runnerCross, ...inspection } = inspected.inspection as typeof inspected.inspection & { crossRepositoryDelivery?: unknown };
+        const resourceKey = `issue_closure:${inspection.repository.toLowerCase()}#${request.issue}`;
+        const previousRefusal = this.db.latestIssueClosureRefusal(sessionId, resourceKey);
+        const snapshot: GithubIssueClosureSnapshot = { ...inspection, category: "issue_closure", reason: request.reason,
+          explanation: request.explanation, evidence: request.evidence,
+          ...(request.comment === undefined ? {} : { comment: request.comment }),
+          activeChildren: [], excludedChildren: [], issueAttemptDigest: auditDigest([])!,
+          ...(previousRefusal ? { previousRefusal } : {}) };
+        const created = this.createWorkflowDecision(sessionId, {
+          requestId: request.requestId, resourceKey, resourceSnapshot: snapshot,
+        }, canAccess, { trustedIssueClosure: true, trustedForgeLocationId: location.id });
+        if (!created.ok) return { ...failAs(created), ...(created.errorDetails ? { errorDetails: created.errorDetails } : {}) };
+        return ok({ decision: created.data }, created.status);
+      } catch {
+        return fail("issue inspection failed or the runner did not respond; no closure was attempted", 409);
+      }
+    }
+    const orchestratorPolicy = session.orchestratorPolicy;
+    if (!orchestratorPolicy) return fail("Issue closure requires a root campaign Orchestrator or standalone Normal session.", 403);
     // #3539: closing a GitLab issue needs a runner that reads and closes GitLab issues.
-    const gitlabUnsupported = gitlabIssueCompatibility(this.db, session, campaignOtherRepository(session, typeof request?.repository === "string" ? request.repository : undefined) ?? session.orchestratorPolicy.issueScope?.repository);
+    const gitlabUnsupported = gitlabIssueCompatibility(this.db, session, campaignOtherRepository(session, typeof request?.repository === "string" ? request.repository : undefined) ?? orchestratorPolicy.issueScope?.repository);
     if (gitlabUnsupported) return capabilityFail(gitlabUnsupported);
     if (issueBoundary(session)) {
       const compatibility = scopeCompatibility(this.db, session);
@@ -14334,18 +14512,18 @@ export class SessionsService {
       return scopeRefusal;
     }
     try {
-      if (session.orchestratorPolicy.issueScope && !await this.synchronizeCampaignIssueScope(sessionId)) return fail("Campaign scope synchronization is pending; reconnect every participating runner and retry.", 409);
+      if (orchestratorPolicy.issueScope && !await this.synchronizeCampaignIssueScope(sessionId)) return fail("Campaign scope synchronization is pending; reconnect every participating runner and retry.", 409);
       const requestId = `issue_closure_inspect_${randomUUID()}`;
       const fullBoundary = issueBoundary(session);
       const target = this.closureTarget(session, request.repository);
       if (!target) return fail(`No Location of ${otherRepository} is online on a runner that can close its issues, so no closure was requested. Retry once one is.`, 409);
       const routed = target.location ? { location: target.location } : {};
-      const repository = otherRepository ?? session.orchestratorPolicy.issueScope?.repository;
+      const repository = otherRepository ?? orchestratorPolicy.issueScope?.repository;
       const campaignPullRequests = repository && runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "closureCampaignPullRequests")
         ? closureCampaignPullRequests(this.db, session, repository) ?? null : undefined;
       const inspected = await this.hub.requestFromRunner(target.runnerId, requestId, {
         type: "github_issue_closure", operation: "inspect", requestId, sessionId, issue: request.issue, ...routed,
-        ...(session.orchestratorPolicy.issueScope ? { scopeRevision: session.orchestratorPolicy.issueScope.revision } : {}),
+        ...(orchestratorPolicy.issueScope ? { scopeRevision: orchestratorPolicy.issueScope.revision } : {}),
         ...(campaignPullRequests === undefined ? {} : { campaignPullRequests }),
       }, 60_000);
       if (inspected.type !== "github_issue_closure_result" || inspected.sessionId !== sessionId ||
@@ -14353,7 +14531,7 @@ export class SessionsService {
         return fail(inspected.type === "github_issue_closure_result" && inspected.error
           ? inspected.error : "runner could not inspect the issue and its related open pull requests", 409);
       }
-      if (session.orchestratorPolicy.issueScope && inspected.inspection.repository.toLowerCase() !== (otherRepository ?? session.orchestratorPolicy.issueScope.repository)) return fail("The runner repository changed from the authorized campaign scope; restore the repository and retry.", 409);
+      if (orchestratorPolicy.issueScope && inspected.inspection.repository.toLowerCase() !== (otherRepository ?? orchestratorPolicy.issueScope.repository)) return fail("The runner repository changed from the authorized campaign scope; restore the repository and retry.", 409);
       const inspectedGitlab = gitlabIssueCompatibility(this.db, session, inspected.inspection.repository);
       if (inspectedGitlab) return capabilityFail(inspectedGitlab);
       if (inspected.inspection.state === "CLOSED") return ok({ outcome: "already_closed", url: inspected.inspection.url });
@@ -14362,7 +14540,7 @@ export class SessionsService {
       const { state: _state, crossRepositoryDelivery: _runnerCross, ...inspection } = inspected.inspection as typeof inspected.inspection & { crossRepositoryDelivery?: unknown };
       const children = issueClosureChildren(this.db, sessionId, { repository: inspection.repository, number: request.issue });
       let snapshot: GithubIssueClosureSnapshot = { ...inspection, category: "issue_closure", reason: request.reason,
-        ...(session.orchestratorPolicy.issueScope ? { scopeRevision: session.orchestratorPolicy.issueScope.revision } : {}),
+        ...(orchestratorPolicy.issueScope ? { scopeRevision: orchestratorPolicy.issueScope.revision } : {}),
         explanation: request.explanation, evidence: request.evidence,
         ...(request.comment === undefined ? {} : { comment: request.comment }),
         ...(request.dispositionRecommendationId === undefined ? {} : { dispositionRecommendationId: request.dispositionRecommendationId }),
@@ -14478,8 +14656,20 @@ export class SessionsService {
   private closureApprovalChange(sessionId: string, decision: WorkflowDecisionView,
     snapshot: GithubIssueClosureSnapshot, resourceDigest: string): string | null {
     const session = this.db.getSession(sessionId);
-    if (!session || sessionRole(session) !== "orchestrator" || isTerminal(session.status) ||
-        this.db.resolvedCampaignSessionId(sessionId) !== sessionId) return "campaign session changed";
+    const standalone = Boolean(session && this.standaloneDirectOwnerSession(session));
+    if (!session || isTerminal(session.status)) return standalone ? "session changed" : "campaign session changed";
+    if (standalone) {
+      if (decision.authority !== "human") return "approval authority changed";
+      if (decision.resourceDigest !== resourceDigest) return "payload digest changed";
+      if (!decision.resolvedAt) return "approval resolution is missing";
+      if (snapshot.scopeRevision !== undefined) return "issue scope changed";
+      if (!this.requesterForgeDecisionLocation(session)) return "Project Location changed";
+      const policy = this.directOwnerPolicy(session);
+      if (decision.policyRevision !== policy.revision) return "policy revision changed";
+      if (!this.workflowDecisionAuthorityCurrent(session, policy, decision)) return "approval authority changed";
+      return null;
+    }
+    if (sessionRole(session) !== "orchestrator" || this.db.resolvedCampaignSessionId(sessionId) !== sessionId) return "campaign session changed";
     if (decision.resourceDigest !== resourceDigest) return "payload digest changed";
     if (!decision.resolvedAt) return "approval resolution is missing";
     if (!campaignClosureIssueHeld(session.orchestratorPolicy, { repository: snapshot.repository, number: snapshot.issue }) ||
@@ -14540,12 +14730,33 @@ export class SessionsService {
       this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
       return fail(`Issue-closure approval refused: ${changed ?? "campaign session changed"}; request renewed exact review`, 409);
     }
-    const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "human-approved issue closure");
+    const standalone = this.standaloneDirectOwnerSession(session);
+    const unsupported = this.capabilityFailure(session.runnerId,
+      standalone ? "standaloneOwnerDecisions" : "orchestratorIssueClosure",
+      standalone ? "standalone issue closure" : "human-approved issue closure");
     if (unsupported) return unsupported;
     const gitlabUnsupported = gitlabIssueCompatibility(this.db, session, snapshot.repository);
     if (gitlabUnsupported) return capabilityFail(gitlabUnsupported);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline; no closure was attempted", 409);
-    if (!this.closureTarget(session, snapshot.repository)) return fail(`No Location of ${snapshot.repository} is online on a runner that can close its issues; no closure was attempted. Retry once one is.`, 409);
+    if (standalone) {
+      const location = this.requesterForgeDecisionLocation(session);
+      if (!location) {
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+        return fail("Issue-closure approval refused: Project Location changed; request renewed exact review", 409);
+      }
+      const verified = await inspectProjectLocation({ db: this.db, hub: this.hub }, location.id, {
+        projectId: location.projectId, requireProtocol: "standaloneOwnerDecisions", timeoutMs: 10_000,
+      });
+      if (!verified.ok) {
+        return fail("The session's Project Location could not be verified; approval preserved. Retry once it is reachable.", 409);
+      }
+      if (verified.location.repository.toLowerCase() !== snapshot.repository.toLowerCase()) {
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+        return fail("Issue-closure approval refused: the session's Project Location repository changed; request renewed exact review", 409);
+      }
+    } else if (!this.closureTarget(session, snapshot.repository)) {
+      return fail(`No Location of ${snapshot.repository} is online on a runner that can close its issues; no closure was attempted. Retry once one is.`, 409);
+    }
     if (decision.authority === "orchestrator") await this.refreshClosureForge(sessionId, snapshot.issue, snapshot.repository);
     if (decision.authority === "orchestrator" && (!snapshot.issueAdmission || issueEvidenceDigest(closureEvidence(this.db, session, snapshot)) !== snapshot.issueAdmission.evidenceDigest)) {
       this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
@@ -14600,9 +14811,11 @@ export class SessionsService {
     }
     const settled = Date.now();
     // Read again as the last step before consumption: the Location must still be one of the repository's.
-    const target = this.closureTarget(freshSession, snapshot.repository);
+    const target = standalone ? { runnerId: freshSession.runnerId } : this.closureTarget(freshSession, snapshot.repository);
+    const freshPolicy = standalone ? this.directOwnerPolicy(freshSession) : freshSession.parentControlPolicy;
     if (this.db.workflowDecisionByOccurrence(occurrenceId)?.status !== "approved" ||
-        decision.policyRevision !== freshSession.parentControlPolicy?.revision || !this.hub.isRunnerOnline(session.runnerId) || !target ||
+        decision.policyRevision !== freshPolicy?.revision || !this.hub.isRunnerOnline(session.runnerId) || !target ||
+        (standalone && !this.requesterForgeDecisionLocation(freshSession)) ||
         this.pendingPolicyAsk(freshSession) || pendingRequests(freshSession.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
         this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, settled)) {
       return fail("The closure approval, runner or guardrails changed while execution was being prepared; no closure was attempted", 409);
@@ -14633,6 +14846,7 @@ export class SessionsService {
       const requestId = `issue_closure_execute_${randomUUID()}`;
       let response = await this.hub.requestFromRunner(target.runnerId, requestId, {
         type: "github_issue_closure", operation: "execute", requestId, sessionId, occurrenceId, snapshot: dispatched,
+        ...(standalone ? { standalone: true as const, expectedRepository: snapshot.repository } : {}),
         ...(prepare ? { prepare: true as const, campaignPullRequests } : {}),
         ...(target.location ? { location: target.location } : {}),
       }, 150_000);
@@ -14691,16 +14905,21 @@ export class SessionsService {
     request: CreateWorkflowDecisionRequest,
     snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
     canAccess: (sessionId: string) => boolean,
+    trustedForgeLocationId?: string,
   ): Promise<ServiceResult<WorkflowDecisionView>> {
     const child = this.db.getSession(sessionId);
     if (!child || isTerminal(child.status) || !canAccess(sessionId) ||
         !boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
-      return this.createWorkflowDecision(sessionId, request, canAccess);
+      return this.createWorkflowDecision(sessionId, request, canAccess,
+        trustedForgeLocationId ? { trustedForgeLocationId } : undefined);
     }
     const checked = await this.mergeClosures(child, snapshot);
     if (!checked.ok) return fail(checked.message, 409);
     return this.createWorkflowDecision(sessionId, request, canAccess,
-      checked.check ? { closingReferenceCheck: checked.check } : undefined);
+      checked.check || trustedForgeLocationId
+        ? { ...(checked.check ? { closingReferenceCheck: checked.check } : {}),
+            ...(trustedForgeLocationId ? { trustedForgeLocationId } : {}) }
+        : undefined);
   }
 
   /** What merging would close, read from the forge through the child's runner and compared with the
@@ -14886,10 +15105,12 @@ export class SessionsService {
         const snapshot = decision.resourceSnapshot;
         let result = decision.issueClosureResult;
         if (!result.reconciliation) {
+          const isStandalone = this.standaloneDirectOwnerSession(root);
+          const reconcileCap: RunnerProtocolCapability = isStandalone ? "standaloneOwnerDecisions" : "issueClosureReconciliation";
           const target = this.closureTarget(root, snapshot.repository);
           // An upgrade/reconnect that cannot send a read has made no recovery attempt yet.
           if (!target || !this.hub.isRunnerOnline(target.runnerId) ||
-              !runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "issueClosureReconciliation")) {
+              !runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, reconcileCap)) {
             const repositoryRemoved = Boolean(campaignOtherRepository(root, snapshot.repository)) &&
               !campaignScopeRepositories(root).some(entry => entry.repository.toLowerCase() === snapshot.repository.toLowerCase());
             const waitingSince = result.reconciliationWaitingSince ?? Date.now();
@@ -14906,12 +15127,13 @@ export class SessionsService {
           this.db.recordGithubIssueClosureResult(decision.occurrenceId, result);
           let verified = false;
           if (target && this.hub.isRunnerOnline(target.runnerId) &&
-              runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "issueClosureReconciliation")) {
+              runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, reconcileCap)) {
             const requestId = `issue_closure_reconcile_${randomUUID()}`;
             try {
               const response = await this.hub.requestFromRunner(target.runnerId, requestId, {
                 type: "github_issue_closure", operation: "reconcile", requestId, sessionId: decision.sessionId,
                 occurrenceId: decision.occurrenceId, snapshot, consumedAt: decision.consumedAt ?? result.completedAt,
+                ...(isStandalone ? { standalone: true as const } : {}),
                 ...(target.location ? { location: target.location } : {}),
               }, 60_000);
               verified = response.type === "github_issue_closure_result" && response.sessionId === decision.sessionId &&
@@ -15114,6 +15336,28 @@ export class SessionsService {
       }
       if (target.category === "ci_rerun" && target.jobId !== undefined && internal.ciRerunJobName) target.jobName = internal.ciRerunJobName;
     }
+    if ((this.standaloneDirectOwnerSession(child) &&
+          (normalized.data.category === "pr_merge" || normalized.data.category === "merged_branch_deletion" ||
+            normalized.data.category === "follow_up_issue_publication" || normalized.data.category === "issue_closure")) ||
+        (this.customRootOwnWorkSession(child, normalized.data.category) &&
+          (normalized.data.category === "pr_merge" || normalized.data.category === "merged_branch_deletion"))) {
+      const standaloneUnsupported = this.capabilityFailure(child.runnerId, "standaloneOwnerDecisions", "direct owner approvals");
+      if (standaloneUnsupported) return standaloneUnsupported;
+      if (!internal?.trustedForgeLocationId || this.requesterForgeDecisionLocation(child)?.id !== internal.trustedForgeLocationId) {
+        return fail("This action requires the session's verified Project Location", 409);
+      }
+    }
+    if (normalized.data.category === "follow_up_issue_publication" && internal?.trustedForgeLocationId &&
+        this.customRootOwnWorkSession(child, "follow_up_issue_publication") &&
+        this.requesterForgeDecisionLocation(child)?.id !== internal.trustedForgeLocationId) {
+      return fail("This action requires the session's verified Project Location", 409);
+    }
+    if (normalized.data.category === "ui_evidence_approval" && this.directOwnerSelfControlled(child, "ui_evidence_approval")) {
+      const standaloneUnsupported = this.capabilityFailure(child.runnerId, "standaloneOwnerDecisions", "direct owner approvals");
+      if (standaloneUnsupported) return standaloneUnsupported;
+      const artifactRefusal = this.uiEvidenceArtifactsRefusal(sessionId, normalized.data);
+      if (artifactRefusal) return fail(artifactRefusal, 409);
+    }
     if (normalized.data.category === "campaign_issue_scope" && !internal?.trustedIssueScope) {
       return fail("use request_campaign_issue_scope_change for a repository-bound human scope proposal", 403);
     }
@@ -15124,7 +15368,7 @@ export class SessionsService {
       return fail("use request_github_issue_closure for server-verified issue evidence", 403);
     }
     if (normalized.data.category === "owner_decision" && !internal?.trustedOwnerDecision) {
-      return fail("use request_owner_decision: only a Full Control root asks its campaign's owner a decision the owner kept", 403);
+      return fail("use request_owner_decision to ask the owner a question or request a generic Owner Approval", 403);
     }
     if (normalized.data.category === "review_round_extension") {
       const refused = this.reviewRoundExtensionRefusal(child, request.resourceKey, normalized.data);
@@ -15148,9 +15392,15 @@ export class SessionsService {
     }
     const controller = this.workflowDecisionController(child, normalized.data.category);
     if (!controller) {
-      return fail(this.decisionControllerRoot(child) === "refused"
-        ? MALFORMED_ANCESTRY_DECISION_REFUSAL
-        : "this session has no controlling Orchestrator ancestor", 409);
+      if (this.decisionControllerRoot(child) === "refused") return fail(MALFORMED_ANCESTRY_DECISION_REFUSAL, 409);
+      if (sessionRole(child) === "orchestrator" && child.orchestratorPolicy?.control?.mode !== "full_control" &&
+          this.decisionControllerRoot(child) === "none" &&
+          (normalized.data.category === "pr_merge" || normalized.data.category === "merged_branch_deletion" ||
+            normalized.data.category === "ui_evidence_approval") &&
+          child.orchestratorPolicy?.execution.strictProjectIsolation !== false) {
+        return fail("Strict Project Isolation is enabled on this Orchestrator, so direct implementation approvals are refused; delegate implementation to a child session or disable Strict Project Isolation.", 409);
+      }
+      return fail("this session has no controlling Orchestrator ancestor", 409);
     }
     if (isTerminal(controller.session.status)) {
       return fail("a terminal Orchestrator cannot control a new workflow decision", 409);
@@ -15275,6 +15525,9 @@ export class SessionsService {
       if (failure) authorityEvaluation.admissionFailure = failure;
       if (failure && issueBounded) authorityEvaluation.admissionMessage = internal?.publicationAdmissionReason ?? CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[failure];
     }
+    if (internal?.trustedForgeLocationId && this.directOwnerSelfControlled(child, category)) {
+      authorityEvaluation.verifiedLocationId = internal.trustedForgeLocationId;
+    }
     if (authority === "orchestrator") {
       const parentUnsupported = this.capabilityFailure(
         controller.session.runnerId,
@@ -15385,13 +15638,45 @@ export class SessionsService {
     return ok(session);
   }
 
-  /** A Full Control root asks for its campaign owner's decision (#4064). An Owner Question may
-   * also be answered through the owner's scoped Assistant grant. Its card waits on the root
-   * without parking it, and the choice comes back as the decision's resume prompt. */
+  /** The Full Control root, Custom campaign root, or standalone Normal session that may ask its
+   * owner an Owner Question or generic Owner Approval (#4064, #4894). */
+  private ownerDecisionRequester(session: SessionView | null): ServiceResult<{ session: SessionView; fullControl: boolean }> {
+    if (!session) return fail("session not found", 404);
+    const root = this.orchestratorCampaignController(session);
+    if (root === "refused" || this.decisionControllerRoot(session) === "refused") {
+      return fail(MALFORMED_ANCESTRY_DECISION_REFUSAL, 409);
+    }
+    const isFullControlRoot = session.orchestratorPolicy?.control?.mode === "full_control" &&
+      root !== null && root.id === session.id && Boolean(session.parentControlPolicy) && campaignBoundaryCurrent(session);
+    if (isFullControlRoot) {
+      const unsupported = this.capabilityFailure(session.runnerId, "ownerDecisions", "owner decisions");
+      if (unsupported) return unsupported;
+      if (isTerminal(session.status)) {
+        return fail("Only a live session can ask its owner a decision.", 409);
+      }
+      return ok({ session, fullControl: true });
+    }
+    if (this.standaloneDirectOwnerSession(session) || this.customRootOwnWorkSession(session, "owner_decision")) {
+      const unsupported = this.capabilityFailure(session.runnerId, "standaloneOwnerDecisions", "standalone owner decisions");
+      if (unsupported) return unsupported;
+      if (isTerminal(session.status)) {
+        return fail("Only a live session can ask its owner a decision.", 409);
+      }
+      return ok({ session, fullControl: false });
+    }
+    return fail("Only a standalone session or a campaign's root Orchestrator can request an Owner Question or Owner Approval; campaign children use request_workflow_decision with implementation_question.", 409);
+  }
+
+  /** A Full Control root, Custom campaign root, or standalone session asks its authenticated owner
+   * a question or generic Owner Approval (#4064, #4894). An Owner Question may also be answered
+   * through the owner's scoped Assistant grant. On an Orchestrator root its card waits without
+   * parking the root; on a standalone session it parks the session until answered, and the answer
+   * comes back as the durable resume prompt. */
   async createOwnerDecision(sessionId: string, request: CreateOwnerDecisionRequest,
     canAccess: (sessionId: string) => boolean = () => true): Promise<ServiceResult<WorkflowDecisionView>> {
-    const root = this.ownerDecisionRoot(this.db.getSession(sessionId));
-    if (!root.ok || !root.data) return failAs(root);
+    const requester = this.ownerDecisionRequester(this.db.getSession(sessionId));
+    if (!requester.ok || !requester.data) return failAs(requester);
+    const { session: target, fullControl } = requester.data;
     if (!request || typeof request !== "object" || Array.isArray(request) || Object.keys(request).some((key) =>
       !["requestId", "resourceKey", "question", "options", "recommendedOptionId", "material", "kind", "ruleDelegation"].includes(key))) {
       return fail("an owner decision has a requestId, resourceKey, question, options, and optionally recommendedOptionId, material and kind", 400);
@@ -15399,10 +15684,10 @@ export class SessionsService {
     if (request.kind !== undefined && request.kind !== "question" && request.kind !== "approval") {
       return fail("kind must be question or approval", 400);
     }
-    // An Owner Question (#4270) is presented and answered as a question only by a current root.
+    // An Owner Question (#4270) is presented and answered as a question only by a current peer.
     const question = request.kind === "question";
     if (question) {
-      const unsupported = this.capabilityFailure(root.data.runnerId, "ownerQuestions", "owner questions");
+      const unsupported = this.capabilityFailure(target.runnerId, "ownerQuestions", "owner questions");
       if (unsupported) return unsupported;
     }
     const snapshot = { category: "owner_decision" as const, question: request.question, options: request.options,
@@ -15411,8 +15696,8 @@ export class SessionsService {
       ...(question ? { kind: "question" as const } : {}) };
     if (request.ruleDelegation !== undefined) {
       const rule = personalRuleDelegation(request.ruleDelegation);
-      const control = root.data.orchestratorPolicy?.control;
-      if (question || !rule || control?.mode !== "full_control" ||
+      const control = target.orchestratorPolicy?.control;
+      if (question || !rule || !fullControl || control?.mode !== "full_control" ||
           rule.categories.some((c) => !control.boundary.operations.includes(c))) return fail("ruleDelegation requires an exact personal rule and already-delegated categories in a Full Control Owner Approval", 400);
       Object.assign(snapshot, {
         ruleDelegation: { ...rule, boundaryRevision: control.boundary.revision },
@@ -15424,23 +15709,27 @@ export class SessionsService {
     }
     const normalized = normalizeWorkflowDecisionSnapshot(snapshot);
     if (!normalized.ok || normalized.data?.category !== "owner_decision") return failAs(normalized);
-    // Full Control never asks anyone for credentials or sign-in, the owner included (#4104): the floor
-    // first, then the Decision Model. An uncertain or failed screen holds the decision for its owner
-    // to classify first; nobody can choose one of its options until then.
-    const refused = (): ServiceResult<WorkflowDecisionView> => fail("Full Control never asks anyone for credentials, sign-in or wider access, so this owner decision was not " +
-      "created. Ask about the design without requesting a value, or continue without it.", 403);
-    // These two fixed instruction filenames live beneath credential-store directories. The
-    // server-generated form asks about a rule, never to read those directories. Keep screening
-    // the exact untrusted quote for literals/paths and send the whole form to the model below.
-    if (credentialFormFloor(normalized.data.ruleDelegation
-      ? { ...normalized.data, material: normalized.data.ruleDelegation.rule.quote } : normalized.data)) return refused();
     if (!boundedDecisionString(request.requestId, 256)) return fail<WorkflowDecisionView>("requestId and resourceKey are required bounded identifiers", 400);
-    const screen = await this.screenCredentialText(root.data, sessionId, "owner_decision", request.requestId,
-      ownerDecisionScreenData(normalized.data));
-    if (screen === null) return fail<WorkflowDecisionView>(CREDENTIAL_SCREEN_UNRECORDED, 503);
-    if (screen.state === "ask") return refused();
+    let screen: CredentialScreenFact | undefined;
+    if (fullControl) {
+      // Full Control never asks anyone for credentials or sign-in, the owner included (#4104): the floor
+      // first, then the Decision Model. An uncertain or failed screen holds the decision for its owner
+      // to classify first; nobody can choose one of its options until then.
+      const refused = (): ServiceResult<WorkflowDecisionView> => fail("Full Control never asks anyone for credentials, sign-in or wider access, so this owner decision was not " +
+        "created. Ask about the design without requesting a value, or continue without it.", 403);
+      // These two fixed instruction filenames live beneath credential-store directories. The
+      // server-generated form asks about a rule, never to read those directories. Keep screening
+      // the exact untrusted quote for literals/paths and send the whole form to the model below.
+      if (credentialFormFloor(normalized.data.ruleDelegation
+        ? { ...normalized.data, material: normalized.data.ruleDelegation.rule.quote } : normalized.data)) return refused();
+      const screened = await this.screenCredentialText(target, sessionId, "owner_decision", request.requestId,
+        ownerDecisionScreenData(normalized.data));
+      if (screened === null) return fail<WorkflowDecisionView>(CREDENTIAL_SCREEN_UNRECORDED, 503);
+      if (screened.state === "ask") return refused();
+      screen = screened;
+    }
     return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: request.resourceKey,
-      resourceSnapshot: normalized.data }, canAccess, { trustedOwnerDecision: true, credentialScreen: screen });
+      resourceSnapshot: normalized.data }, canAccess, { trustedOwnerDecision: true, ...(screen ? { credentialScreen: screen } : {}) });
   }
 
   /**
@@ -15466,30 +15755,38 @@ export class SessionsService {
     if (decision.authority !== "human" || actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(sessionId, actor.id)) {
       return fail("Only the campaign's owner can answer an owner question", 403);
     }
-    // A held question cannot be answered. The owner may discard the server's informational
+    // A held question cannot be answered. The owner may acknowledge the server's informational
     // handoff without making a statement about credentials.
     if (credentialScreenDecline && action !== "dismiss") return fail("a declined question cannot be answered", 400);
-    const plainHandoffDismissal = action === "dismiss" && isCampaignHandoffQuestion(decision);
-    if (decision.authorityEvaluation?.reason === "credential_screen_review" && !credentialScreenDecline && !plainHandoffDismissal) {
+    const acknowledgeHandoff = action === "dismiss" && !credentialScreenDecline && isCampaignHandoffQuestion(decision);
+    if (decision.authorityEvaluation?.reason === "credential_screen_review" && !credentialScreenDecline && !acknowledgeHandoff) {
       return fail(TYPED_QUESTION_CLASSIFY_FIRST, 409);
     }
     const root = this.db.getSession(sessionId);
     if (!root || isTerminal(root.status)) return fail("the Orchestrator that asked this question has ended", 409);
+    if (action === "submit" && Object.keys(answers).length === 0) {
+      return fail("Choose an option or type an answer before submitting.", 400);
+    }
     const invalid = validateQuestionAnswers(ownerQuestionAgentQuestions(snapshot), answers, action);
     if (invalid) return fail(`invalid answers: ${invalid}`, 400);
     const answer = action === "submit" ? ownerQuestionAnswer(snapshot, answers) : null;
     if (action === "submit" && !answer) return fail("choose an option or type an answer", 400);
     const now = Date.now();
-    const oweResume = this.workflowDecisionResumeOwed(root);
+    const oweResume = !acknowledgeHandoff && this.workflowDecisionResumeOwed(root);
     const resolved = this.db.resolveWorkflowDecision(occurrenceId, "human", answer ? "approved" : "denied", now,
       answer?.selectedOptionId, undefined, auditDigest(assistantDelegation?.reason), answer?.text ?? credentialScreenDecline?.message,
       oweResume, undefined, undefined, undefined, assistantDelegation && {
         ...assistantDelegation, resolvedAt: now, outcome: answer ? "answered" : "denied",
       });
     if (!resolved) return fail("this owner question was answered concurrently", 409);
-    this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
-    this.recordWorkflowDecisionAudit(resolved, answer ? "answered" : "denied", actor, now, assistantDelegation?.reason);
-    if (plainHandoffDismissal) this.campaignRecovery.synchronize(root, now);
+    if (acknowledgeHandoff) {
+      this.settleWorkflowDecisionPause(sessionId, occurrenceId, now);
+      this.campaignRecovery.synchronize(root, now);
+    } else {
+      this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
+    }
+    this.recordWorkflowDecisionAudit(resolved, answer ? "answered" : "denied", actor, now,
+      assistantDelegation?.reason ?? (acknowledgeHandoff ? "Campaign handoffs acknowledged." : undefined));
     void this.reconcileUncertainIssueClosures(sessionId).catch(() => this.log.warn("Issue closure acknowledgement is pending"));
     this.hub.sessionChangedById(sessionId);
     this.publishCampaignAttentionTransition(root);
@@ -16104,16 +16401,16 @@ export class SessionsService {
       return ok(this.withMergeReviewEvidence(resolved));
     }
     const ownRequester = decision?.sessionId === childSessionId ? this.db.getSession(childSessionId) : null;
-    // A Custom root's own publication, which only the campaign owner decides (#3919).
-    const rootOwnPublication = Boolean(decision && ownRequester && decision.category === "follow_up_issue_publication" &&
-      parentSessionId === childSessionId && decision.authority === "human" && this.customRootOwnPublication(ownRequester));
+    // Standalone and Custom root self-owned decisions, decided directly by the authenticated owner (#3919, #4894).
+    const selfDirectOwner = Boolean(decision && ownRequester &&
+      this.directOwnerSelfDecision(ownRequester, ownRequester, decision) && parentSessionId === childSessionId);
     if (!decision || decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
         !((decision.category === "issue_closure" || decision.category === "campaign_issue_scope" ||
           decision.category === "campaign_follow_up_admission") && parentSessionId === childSessionId ||
           // Standalone owner decisions still have a controller, the requesting session itself.
           ((decision.category === "review_round_extension" || isRequesterForgeDecisionCategory(decision.category)) &&
             parentSessionId === childSessionId && decision.authority === "human") ||
-          rootOwnPublication ||
+          selfDirectOwner ||
           this.workflowDecisionRelationship(parentSessionId, childSessionId)) ||
         !canAccess(parentSessionId) || !canAccess(childSessionId)) {
       return fail("workflow decision not found", 404);
@@ -16127,6 +16424,13 @@ export class SessionsService {
       if (refused) {
         this.revokeWorkflowDecision(decision, { reason: "approval_refused_precondition", triggeredBy: actor });
         return fail(refused, 409);
+      }
+    }
+    if (resolution?.outcome === "approve" && selfDirectOwner && decision.resourceSnapshot.category === "ui_evidence_approval") {
+      const artifactRefusal = this.uiEvidenceArtifactsRefusal(childSessionId, decision.resourceSnapshot);
+      if (artifactRefusal) {
+        this.revokeWorkflowDecision(decision, { reason: "approval_refused_precondition", triggeredBy: actor });
+        return fail(artifactRefusal, 409);
       }
     }
     for (const sessionId of [childSessionId, parentSessionId]) {
@@ -16144,12 +16448,17 @@ export class SessionsService {
     const currentChild = this.db.getSession(childSessionId);
     const currentParent = this.db.getSession(parentSessionId);
     const directForge = isRequesterForgeDecisionCategory(decision.category);
-    if (directForge && (authority !== "human" || actor.kind !== "human" || !actor.id ||
+    const directOwner = Boolean(currentChild && currentParent && this.directOwnerSelfDecision(currentChild, currentParent, decision));
+    if ((directForge || directOwner) && (authority !== "human" || actor.kind !== "human" || !actor.id ||
         !this.db.campaignOwnerUser(parentSessionId, actor.id))) {
-      return fail("Only the owner can resolve this forge decision", 403);
+      return fail(directForge
+        ? "Only the owner can resolve this forge decision"
+        : currentParent && sessionRole(currentParent) === "orchestrator"
+          ? "Only the campaign owner can decide a root Orchestrator's own decision"
+          : "Only the session's owner can resolve this decision", 403);
     }
-    const currentController = directForge && currentChild ? this.workflowDecisionController(currentChild, decision.category) : null;
-    const currentPolicy = directForge
+    const currentController = (directForge || directOwner) && currentChild ? this.workflowDecisionController(currentChild, decision.category) : null;
+    const currentPolicy = directForge || directOwner
       ? (currentController?.session.id === parentSessionId ? currentController.policy : undefined)
       : currentParent?.parentControlPolicy;
     if (!currentChild || !currentParent || this.workflowDecisionChildEnded(currentChild) ||
@@ -16183,10 +16492,6 @@ export class SessionsService {
     }
     if ((decision.category === "issue_closure" || decision.category === "campaign_issue_scope") && authority === "human" && actor.kind !== "human") {
       return fail("issue closure always requires an authenticated human response", 403);
-    }
-    if (rootOwnPublication && (authority !== "human" || actor.kind !== "human" || !actor.id ||
-        !this.db.campaignOwnerUser(childSessionId, actor.id))) {
-      return fail("Only the campaign owner can decide a root Orchestrator's own follow-up publication", 403);
     }
     if (decision.category === "campaign_follow_up_admission") {
       // Only the campaign's owner admits a follow-up past its approval limit (#2940), never an agent.
@@ -16456,6 +16761,7 @@ export class SessionsService {
       return fail("use execute_workflow_decision for temporary deletion: it proves the forge action and retires the creation receipt atomically with its result; nothing was consumed", 403);
     }
     if (isChildQuestionSnapshot(decision.resourceSnapshot)) return fail("a question answer grants no authority and cannot be consumed as an approval", 403);
+    if (isOwnerQuestionSnapshot(decision.resourceSnapshot)) return fail("an owner question answer grants no authority and cannot be consumed as an approval", 403);
     if (decision.category === "campaign_issue_scope") return fail("Scope resolution applies and consumes the exact authorized proposal atomically", 403);
     if (decision.category === "automation_creation") return fail("use execute_automation_creation to consume and create the approved automation atomically", 403);
     if (decision.category === "location_switch") return fail("use execute_location_switch to carry out the exact Location its owner chose", 403);
@@ -16524,21 +16830,45 @@ export class SessionsService {
         return unsupported;
       }
     }
-    const policy = parent?.parentControlPolicy;
     // The same narrow self-control exceptions as creation/resolution: an ordinary standalone
-    // requester can consume its human-approved review extension, and a Custom root its
-    // owner-approved publication (#3919), never another self-owned gate.
-    const standaloneReviewExtension = child && parent?.id === child.id && decision.category === "review_round_extension" &&
-      decision.authority === "human" && this.decisionControllerRoot(child) === "none";
-    const rootOwnPublication = child && parent?.id === child.id && decision.category === "follow_up_issue_publication" &&
-      decision.authority === "human" && this.customRootOwnPublication(child);
+    // requester can consume its human-approved review extension or direct-owner approvals (#4894),
+    // and a Custom root its owner-approved own-work decisions (#3919, #4894).
+    const standaloneReviewExtension = Boolean(child && parent?.id === child.id && decision.category === "review_round_extension" &&
+      decision.authority === "human" && this.decisionControllerRoot(child) === "none");
+    const directOwner = Boolean(child && parent && this.directOwnerSelfDecision(child, parent, decision));
+    const policy = directOwner || standaloneReviewExtension ? this.directOwnerPolicy(parent!) : parent?.parentControlPolicy;
     if (!child || !parent || isTerminal(child.status) || isTerminal(parent.status) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
-        !(standaloneReviewExtension || rootOwnPublication || this.workflowDecisionRelationship(parent.id, child.id)) || !policy ||
+        !(standaloneReviewExtension || directOwner || this.workflowDecisionRelationship(parent.id, child.id)) || !policy ||
         policy.revision !== decision.policyRevision ||
         !this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
       this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
       return fail("workflow decision authority was revoked or ancestry changed before action start", 409);
+    }
+    if (normalized.data.category === "ui_evidence_approval" && directOwner) {
+      const artifactRefusal = this.uiEvidenceArtifactsRefusal(sessionId, normalized.data);
+      if (artifactRefusal) {
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+        return fail(artifactRefusal, 409);
+      }
+    }
+    // Re-verify the session's current Project Location repository before arming or consuming
+    // direct-owner repo-bound approvals so a live Location switch never acts on the old repo (#4894).
+    let verifiedDirectLocationId: string | null = null;
+    if (directOwner && this.requiresDirectLocationVerification(child, normalized.data.category, decision) &&
+        (normalized.data.category === "pr_merge" || normalized.data.category === "merged_branch_deletion" ||
+          normalized.data.category === "follow_up_issue_publication")) {
+      const requireProtocol = this.standaloneDirectOwnerSession(child) || normalized.data.category !== "follow_up_issue_publication"
+        ? "standaloneOwnerDecisions" : null;
+      const verified = await this.verifyStandaloneRepositoryLocation(child, normalized.data.repository, requireProtocol);
+      if (!verified.ok || !verified.data) {
+        if (verified.status === 403 || !this.requesterForgeDecisionLocation(this.db.getSession(sessionId)!)) {
+          this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+          return fail(verified.error ?? "Project Location repository changed; request a new approval", 409);
+        }
+        return failAs(verified);
+      }
+      verifiedDirectLocationId = verified.data.id;
     }
     // Consuming hands the action to the requester's own login. The approval still stands (#4319).
     const excludedRepository = this.excludedRepositoryRefusal(child, parent, normalized.data);
@@ -16716,9 +17046,12 @@ export class SessionsService {
       }
       // Read the controller again: the campaign's issue scope may have changed during the forge
       // reads above, and a merge closing an issue it no longer names is not the Orchestrator's (#4062).
+      const armingChild = this.db.getSession(sessionId);
       const armingParent = this.db.getSession(parent.id);
-      const armingPolicy = armingParent?.parentControlPolicy;
-      if (!armingParent || !armingPolicy || armingPolicy.revision !== decision.policyRevision ||
+      const armingDirectOwner = Boolean(armingChild && armingParent && this.directOwnerSelfDecision(armingChild, armingParent, decision));
+      const armingPolicy = armingDirectOwner ? this.directOwnerPolicy(armingParent!) : armingParent?.parentControlPolicy;
+      if (!armingChild || !armingParent || !armingPolicy || armingPolicy.revision !== decision.policyRevision ||
+          (verifiedDirectLocationId && this.requesterForgeDecisionLocation(armingChild)?.id !== verifiedDirectLocationId) ||
           !this.workflowDecisionAuthorityCurrent(armingParent, armingPolicy, decision)) {
         this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
         return fail("Merge review evidence or authority changed while arming; request a new exact merge decision.", 409);
@@ -16739,7 +17072,12 @@ export class SessionsService {
       this.hub.sessionChangedById(parent.id);
       return ok(this.withMergeReviewEvidence(armed));
     }
-    // Even a read that returns at once yields, so an exclusion can be recorded since the check above.
+    // Even a read that returns at once yields, so an exclusion or Location switch can be recorded since the check above.
+    const currentChildForConsume = this.db.getSession(sessionId);
+    if (verifiedDirectLocationId && (!currentChildForConsume || this.requesterForgeDecisionLocation(currentChildForConsume)?.id !== verifiedDirectLocationId)) {
+      this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+      return fail("The session's Project Location changed before consumption; request a new approval", 409);
+    }
     const excludedWhileConsuming = this.excludedRepositoryRefusal(child, parent, normalized.data);
     if (excludedWhileConsuming) return fail(excludedWhileConsuming, 409);
     // The publication freshness read yielded; execute may have claimed the occurrence meanwhile.
@@ -16823,28 +17161,58 @@ export class SessionsService {
         "Wollipog-performed forge actions");
       if (unsupported) return unsupported;
     }
+    // An uncertain or in-progress merge enqueue cannot be replayed; refuse before authority checks
+    // can revoke the approval so a duplicate or overlapping execute call never destroys a
+    // reconcileable merge, while letting beginWorkflowDecisionForgeAction expire a stale
+    // `in_progress` lease to `uncertain` so mergeClosureWatchTargets() monitors it (#4894).
+    const mergeEnqueueAlreadyAttempted = (
+      current: WorkflowDecisionView | null | undefined,
+      allowLeaseExpiry: boolean,
+    ): ServiceResult<WorkflowDecisionView> | null => {
+      if (kind !== "pr_merge_enqueue") return null;
+      const outcome = current?.forgeAction?.outcome;
+      if (outcome !== "uncertain" && outcome !== "in_progress") return null;
+      if (outcome === "in_progress" && allowLeaseExpiry) {
+        this.db.beginWorkflowDecisionForgeAction(occurrenceId, kind, Date.now(), FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS * 2);
+      }
+      const refreshed = this.db.workflowDecisionByOccurrence(occurrenceId);
+      return fail(refreshed?.forgeAction?.outcome === "uncertain"
+        ? "the earlier enqueue may have run, so it is not replayed: reconcile_workflow_decision once the pull request reads MERGED"
+        : "Wollipog is already performing this decision", 409);
+    };
+    const alreadyAttempted = mergeEnqueueAlreadyAttempted(decision, !this.forgeActionsInFlight.has(occurrenceId));
+    if (alreadyAttempted) return alreadyAttempted;
+    // A publication whose earlier attempt may have run only looks for its issue from then on. A
+    // dispatch still `in_progress` here is one the begin below will read as stale, so uncertain too.
+    let createdIssue = decision.forgeAction?.publicationCreatedIssue;
+    const lookOnly = snapshot.category === "follow_up_issue_publication" &&
+      (createdIssue !== undefined || decision.forgeAction?.outcome === "uncertain" || decision.forgeAction?.outcome === "in_progress");
+    const canRevokeApproved = (current: WorkflowDecisionView | null | undefined): current is WorkflowDecisionView => Boolean(
+      current?.status === "approved" && !lookOnly &&
+      !(kind === "pr_merge_enqueue" && (current.forgeAction?.outcome === "uncertain" || current.forgeAction?.outcome === "in_progress")),
+    );
     const authorityCurrent = (): boolean => {
       const currentChild = this.db.getSession(sessionId);
       const currentParent = this.db.getSession(decision.controllingSessionId);
       const currentController = directForge && currentChild ? this.workflowDecisionController(currentChild, decision.category) : null;
+      const directOwner = Boolean(currentChild && currentParent && this.directOwnerSelfDecision(currentChild, currentParent, decision));
       const policy = directForge
         ? (currentController?.session.id === currentParent?.id ? currentController?.policy : undefined)
-        : currentParent?.parentControlPolicy;
+        : directOwner
+          ? this.directOwnerPolicy(currentParent!)
+          : currentParent?.parentControlPolicy;
       // The occurrence itself must still stand: one superseded, revoked or settled meanwhile (for
       // example by a new request for the same resource during the forge read) never dispatches.
       const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
       return Boolean(latest && latest.status === decision.status && latest.resourceDigest === decision.resourceDigest &&
         currentChild && currentParent && policy && !isTerminal(currentChild.status) && !isTerminal(currentParent.status) &&
         canAccess(currentChild.id) && canAccess(currentParent.id) &&
-        (directForge || this.workflowDecisionRelationship(currentParent.id, currentChild.id) ||
-          // A Custom root's own owner-approved publication, the same exception as consuming it (#3919).
-          decision.category === "follow_up_issue_publication" && decision.authority === "human" &&
-            currentChild.id === currentParent.id && this.customRootOwnPublication(currentChild)) &&
+        (directForge || directOwner || this.workflowDecisionRelationship(currentParent.id, currentChild.id)) &&
         policy.revision === decision.policyRevision &&
-        this.workflowDecisionAuthorityCurrent(currentParent, policy, latest));
+        this.workflowDecisionAuthorityCurrent(currentParent, policy, latest, { observingPublication: lookOnly }));
     };
     if (!child || !parent || !authorityCurrent()) {
-      if (decision.status === "approved") {
+      if (decision.status === "approved" && !lookOnly) {
         this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
       }
       return fail("workflow decision authority was revoked or ancestry changed before the action", 409);
@@ -16852,11 +17220,6 @@ export class SessionsService {
     const excludedRepository = this.excludedRepositoryRefusal(child, parent, snapshot);
     if (excludedRepository) return fail(excludedRepository, 409);
     let action: ForgeDecisionAction;
-    // A publication whose earlier attempt may have run only looks for its issue from then on. A
-    // dispatch still `in_progress` here is one the begin below will read as stale, so uncertain too.
-    let createdIssue = decision.forgeAction?.publicationCreatedIssue;
-    const lookOnly = snapshot.category === "follow_up_issue_publication" &&
-      (createdIssue !== undefined || decision.forgeAction?.outcome === "uncertain" || decision.forgeAction?.outcome === "in_progress");
     let publicationPlace: ReturnType<SessionsService["publicationPlace"]> = null;
     if (snapshot.category === "ci_rerun") {
       const { category: _category, jobName: _jobName, ...target } = snapshot;
@@ -16904,8 +17267,9 @@ export class SessionsService {
       const command = canonicalPrMergeEnqueueCommand(snapshot);
       const admission = decision.actionAdmission;
       if (snapshot.mergeMethod !== undefined) return fail("Wollipog performs GitHub enqueues only; nothing was enqueued", 409);
-      if (!admission || admission.kind !== "pr_merge_enqueue" || admission.command !== command ||
-          admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command })) {
+      const requiresArming = child.driver === "claude-code" || child.driver === "codex-app-server";
+      if ((requiresArming || admission) && (!admission || admission.kind !== "pr_merge_enqueue" || admission.command !== command ||
+          admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command }))) {
         return fail("arm the merge first: consume_workflow_decision with its exact pr_merge_enqueue action, then execute it", 409);
       }
       const refused = this.mergeReviewEvidenceRefusal(child, snapshot);
@@ -16923,6 +17287,45 @@ export class SessionsService {
     if (this.forgeActionsInFlight.has(occurrenceId)) return fail("Wollipog is already performing this decision", 409);
     this.forgeActionsInFlight.add(occurrenceId);
     try {
+      const racedAttempt = mergeEnqueueAlreadyAttempted(this.db.workflowDecisionByOccurrence(occurrenceId), true);
+      if (racedAttempt) return racedAttempt;
+      let verifiedDirectLocation: { id: string; workspaceId: string; workspacePath: string; repository: string } | null = null;
+      if (!lookOnly && this.directOwnerSelfDecision(child, parent, decision) &&
+          this.requiresDirectLocationVerification(child, snapshot.category, decision) &&
+          (snapshot.category === "pr_merge" || snapshot.category === "merged_branch_deletion" ||
+            snapshot.category === "follow_up_issue_publication")) {
+        const requireProtocol = this.standaloneDirectOwnerSession(child) || snapshot.category !== "follow_up_issue_publication"
+          ? "standaloneOwnerDecisions" : null;
+        const verified = await this.verifyStandaloneRepositoryLocation(child, snapshot.repository, requireProtocol);
+        if (!verified.ok || !verified.data) {
+          const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+          if ((verified.status === 403 || !this.requesterForgeDecisionLocation(this.db.getSession(sessionId)!)) && canRevokeApproved(latest)) {
+            this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+          }
+          return fail(verified.error ?? "The session's Project Location could not be verified; nothing was performed.", 409);
+        }
+        const workspacePath = this.db.getWorkspacePath(verified.data.runnerId, verified.data.workspaceId);
+        if (!workspacePath) {
+          return fail("The session's Project Location path is unavailable; nothing was performed.", 409);
+        }
+        if (!authorityCurrent()) {
+          const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+          if (canRevokeApproved(latest)) this.revokeWorkflowDecision(latest, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
+          return fail("Authority changed while the action was being prepared; nothing was performed.", 409);
+        }
+        const currentLocation = this.requesterForgeDecisionLocation(this.db.getSession(sessionId)!);
+        if (!currentLocation || currentLocation.id !== verified.data.id) {
+          const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+          if (canRevokeApproved(latest)) this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+          return fail("The session's Project Location changed while the action was being prepared; nothing was performed.", 409);
+        }
+        verifiedDirectLocation = {
+          id: verified.data.id,
+          workspaceId: verified.data.workspaceId,
+          workspacePath,
+          repository: snapshot.repository.toLowerCase(),
+        };
+      }
       const begun = this.db.beginWorkflowDecisionForgeAction(occurrenceId, kind, Date.now(), FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS * 2);
       if (!begun) {
         const current = this.db.workflowDecisionByOccurrence(occurrenceId);
@@ -16939,7 +17342,9 @@ export class SessionsService {
           ...(publishedIssue === undefined ? {} : { publishedIssue, publicationVerified: true, performedByRunnerId: publicationPlace!.runnerId }), updatedAt: Date.now() });
       };
       if (snapshot.category === "follow_up_issue_publication" && !lookOnly) {
-        const stale = await this.publicationFreshnessRefusal(decision, parent, parent.parentControlPolicy!, snapshot);
+        const publicationPolicy = this.directOwnerSelfDecision(child, parent, decision)
+          ? this.directOwnerPolicy(parent) : parent.parentControlPolicy!;
+        const stale = await this.publicationFreshnessRefusal(decision, parent, publicationPolicy, snapshot);
         if (stale) {
           finish("refused", { reason: "publication_refused", summary: boundedForgeSummary(stale) });
           return this.forgeActionResult(sessionId, parent.id, occurrenceId);
@@ -16958,7 +17363,7 @@ export class SessionsService {
       if (!authorityCurrent()) {
         finish("refused", { reason: "runner_unavailable", summary: "Authority changed while the action was being prepared; nothing was performed." });
         const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
-        if (latest?.status === "approved") this.revokeWorkflowDecision(latest, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
+        if (canRevokeApproved(latest)) this.revokeWorkflowDecision(latest, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
         return this.forgeActionResult(sessionId, parent.id, occurrenceId);
       }
       // The review run may have moved during the forge read too: an uncited merge is only as good as
@@ -16992,6 +17397,15 @@ export class SessionsService {
           return this.forgeActionResult(sessionId, parent.id, occurrenceId);
         }
       }
+      if (verifiedDirectLocation) {
+        const currentLocation = this.requesterForgeDecisionLocation(this.db.getSession(sessionId)!);
+        if (!currentLocation || currentLocation.id !== verifiedDirectLocation.id) {
+          finish("refused", { reason: "runner_unavailable", summary: "The session's Project Location changed while the action was being prepared; nothing was performed." });
+          const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+          if (latest?.status === "approved") this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+          return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+        }
+      }
       // An exclusion recorded during the reads above changes no revision, so `authorityCurrent` can't
       // see it. Nothing is awaited between this check and the dispatch, and the approval stands (#4319).
       const excludedWhilePreparing = this.excludedRepositoryRefusal(this.db.getSession(sessionId)!, this.db.getSession(parent.id), snapshot);
@@ -17000,11 +17414,16 @@ export class SessionsService {
         return this.forgeActionResult(sessionId, parent.id, occurrenceId);
       }
       const requestId = `forge_decision_action_${randomUUID()}`;
+      const dispatchLocation = publicationPlace
+        ? { workspaceId: publicationPlace.workspaceId, workspacePath: publicationPlace.workspacePath, repository: publicationPlace.repository }
+        : verifiedDirectLocation
+          ? { workspaceId: verifiedDirectLocation.workspaceId, workspacePath: verifiedDirectLocation.workspacePath, repository: verifiedDirectLocation.repository }
+          : undefined;
       let answer: Partial<ForgeDecisionActionResultMessage> | null = null;
       try {
         answer = await this.hub.requestFromRunner(publicationPlace?.runnerId ?? child.runnerId, requestId, {
           type: "forge_decision_action", requestId, sessionId, occurrenceId, action,
-          ...(publicationPlace ? { location: { workspaceId: publicationPlace.workspaceId, workspacePath: publicationPlace.workspacePath, repository: publicationPlace.repository } } : {}),
+          ...(dispatchLocation ? { location: dispatchLocation } : {}),
         }, FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS) as unknown as Partial<ForgeDecisionActionResultMessage>;
       } catch (error) {
         if (isRunnerRequestNotSentError(error)) {
@@ -17035,7 +17454,8 @@ export class SessionsService {
           ? answer!.refusal!.reason : "forge_refused";
         finish("refused", { reason, summary: boundedForgeSummary(answer!.refusal?.summary) });
         const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
-        if (FORGE_DECISION_ACTION_STALE_REFUSALS.has(reason) && latest?.status === "approved") {
+        if ((FORGE_DECISION_ACTION_STALE_REFUSALS.has(reason) ||
+            (reason === "repository_mismatch" && Boolean(verifiedDirectLocation))) && latest?.status === "approved") {
           this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
         }
         return this.forgeActionResult(sessionId, parent.id, occurrenceId);
@@ -17081,13 +17501,16 @@ export class SessionsService {
         const actor: GovernanceActor = { kind: "system", id: "workflow-decision-forge-action" };
         let consumed: WorkflowDecisionView | null;
         if (snapshot.category === "pr_merge" && outcome === "already_merged") {
-          consumed = this.consumeForgeAttestedMerge(latest, snapshot, { forgeHeadSha: snapshot.headSha });
-        } else if (snapshot.category === "pr_merge") {
+          consumed = latest.actionAdmission
+            ? this.consumeForgeAttestedMerge(latest, snapshot, { forgeHeadSha: snapshot.headSha })
+            : this.db.consumeWorkflowDecision(occurrenceId, now);
+          if (consumed && !latest.actionAdmission) this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
+        } else if (snapshot.category === "pr_merge" && latest.actionAdmission) {
           // One enqueue per occurrence; a later re-approved enqueue of the same head is its own action.
           const receiptDigest = auditDigest({ transport: "wollipog-enqueue", occurrenceId, repository: snapshot.repository,
             pullRequest: snapshot.pullRequest, headSha: snapshot.headSha })!;
           const reconciled = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(sessionId, occurrenceId,
-            latest.actionAdmission!.commandDigest, receiptDigest, now, { forgeAttested: true });
+            latest.actionAdmission.commandDigest, receiptDigest, now, { forgeAttested: true });
           consumed = reconciled?.decision ?? null;
           if (reconciled) {
             this.recordWorkflowDecisionAudit(reconciled.decision, "consumed", actor, now);
@@ -17343,11 +17766,13 @@ export class SessionsService {
     }
     const child = this.db.getSession(sessionId);
     const parent = this.db.getSession(decision.controllingSessionId);
-    const policy = parent?.parentControlPolicy;
-    if (!child || (child.driver !== "codex-app-server" && child.driver !== "claude-code") ||
+    const directOwner = Boolean(child && parent && this.directOwnerSelfDecision(child, parent, decision));
+    const policy = directOwner ? this.directOwnerPolicy(parent!) : parent?.parentControlPolicy;
+    const wollipogQueued = this.wollipogMayHaveEnqueued(decision);
+    if (!child || (child.driver !== "codex-app-server" && child.driver !== "claude-code" && !wollipogQueued) ||
         !parent || isTerminal(child.status) ||
         isTerminal(parent.status) || !canAccess(child.id) || !canAccess(parent.id) ||
-        !this.workflowDecisionRelationship(parent.id, child.id) || !policy ||
+        !(directOwner || this.workflowDecisionRelationship(parent.id, child.id)) || !policy ||
         !this.completedMergeAuthorityCurrent(parent, policy, decision)) {
       return fail("workflow decision authority was revoked or ancestry changed before reconciliation", 409);
     }
@@ -17382,18 +17807,30 @@ export class SessionsService {
       this.retireResumeConsumedByRequester(consumed, Date.now());
       return ok(this.withMergeReviewEvidence(consumed));
     }
-    if (!admission) return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
+    if (!admission && !wollipogQueued) return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     // An enqueue Wollipog ran itself left no provider receipt in any harness, so the forge settles it.
-    if (decision.retirement || child.driver === "claude-code" || this.wollipogMayHaveEnqueued(decision)) {
+    if (decision.retirement || child.driver === "claude-code" || wollipogQueued) {
       const proven = await this.forgeAttestedMergeProof(child, decision, normalized.data);
       if (!proven.ok) return fail(proven.error!, 409);
       const current = this.mergeSettlementAuthority(decision, true, canAccess);
       if (!current) return fail("workflow decision authority or ancestry changed during reconciliation", 409);
-      const consumed = this.consumeForgeAttestedMerge(decision, normalized.data, proven.data!);
+      let consumed: WorkflowDecisionView | null;
+      if (admission) {
+        consumed = this.consumeForgeAttestedMerge(decision, normalized.data, proven.data!);
+      } else {
+        const now = Date.now();
+        consumed = this.db.consumeWorkflowDecision(occurrenceId, now);
+        if (consumed) {
+          this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "system", id: "workflow-decision-action-reconciliation" }, now);
+          this.hub.sessionChangedById(sessionId);
+          this.hub.sessionChangedById(parent.id);
+        }
+      }
       if (!consumed) return fail("workflow action proof was already used or the decision changed", 409);
       this.retireResumeConsumedByRequester(consumed, Date.now());
       return ok(this.withMergeReviewEvidence(consumed));
     }
+    if (!admission) return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     const requestId = `workflow_action_reconcile_${randomUUID()}`;
     const message: ReconcileWorkflowActionMessage = {
       type: "reconcile_workflow_action",
@@ -17450,10 +17887,11 @@ export class SessionsService {
     }
     const currentChild = this.db.getSession(sessionId);
     const currentParent = this.db.getSession(decision.controllingSessionId);
-    const currentPolicy = currentParent?.parentControlPolicy;
+    const currentDirectOwner = Boolean(currentChild && currentParent && this.directOwnerSelfDecision(currentChild, currentParent, decision));
+    const currentPolicy = currentDirectOwner ? this.directOwnerPolicy(currentParent!) : currentParent?.parentControlPolicy;
     if (!currentChild || !currentParent || isTerminal(currentChild.status) || isTerminal(currentParent.status) ||
         !canAccess(currentChild.id) || !canAccess(currentParent.id) ||
-        !this.workflowDecisionRelationship(currentParent.id, currentChild.id) || !currentPolicy ||
+        !(currentDirectOwner || this.workflowDecisionRelationship(currentParent.id, currentChild.id)) || !currentPolicy ||
         !this.completedMergeAuthorityCurrent(currentParent, currentPolicy, decision)) {
       return fail("workflow decision authority or ancestry changed during reconciliation", 409);
     }
@@ -17603,14 +18041,15 @@ export class SessionsService {
     )) return null;
     const parent = this.db.getSession(decision.controllingSessionId);
     const child = this.db.getSession(decision.sessionId);
-    const policy = parent?.parentControlPolicy;
+    const directOwner = Boolean(child && parent && this.directOwnerSelfDecision(child, parent, decision));
+    const policy = directOwner ? this.directOwnerPolicy(parent!) : parent?.parentControlPolicy;
     const unsupported = [child, parent].some((owner) => owner && this.capabilityFailure(
       owner.runnerId,
       "workflowDecisionActionAdmission",
       "workflow decision action admission",
     ));
     if (!child || child.id !== session.id || !parent || isTerminal(child.status) || isTerminal(parent.status) ||
-        unsupported || !this.workflowDecisionRelationship(parent.id, child.id) || !policy ||
+        unsupported || !(directOwner || this.workflowDecisionRelationship(parent.id, child.id)) || !policy ||
         policy.revision !== decision.policyRevision ||
         !this.workflowDecisionAuthorityCurrent(parent, policy, decision) ||
         canonicalPrMergeEnqueueCommand(decision.resourceSnapshot as Extract<
@@ -17688,6 +18127,9 @@ export class SessionsService {
         sessionRole(child) === "orchestrator" && child.parentControlPolicy) {
       return { session: child, policy: child.parentControlPolicy };
     }
+    if (category && this.directOwnerSelfControlled(child, category)) {
+      return { session: child, policy: this.directOwnerPolicy(child) };
+    }
     if (category === "follow_up_issue_publication" && this.customRootOwnPublication(child)) {
       return { session: child, policy: child.parentControlPolicy! };
     }
@@ -17732,6 +18174,106 @@ export class SessionsService {
   private customRootOwnPublication(session: SessionView): boolean {
     return sessionRole(session) === "orchestrator" && Boolean(session.parentControlPolicy) &&
       session.orchestratorPolicy?.control?.mode !== "full_control" && this.decisionControllerRoot(session) === "none";
+  }
+
+  /** A standalone Normal session (no Orchestrator ancestor, not a review session, sound ancestry)
+   * routes its own typed approvals and Owner Questions directly to its human owner (#4894). */
+  private standaloneDirectOwnerSession(session: SessionView): boolean {
+    return sessionRole(session) === "normal" && !this.db.reviewSessions.isReviewSession(session.id) &&
+      this.decisionControllerRoot(session) === "none";
+  }
+
+  /** A Custom campaign root performing its own work routes approvals directly to its owner (#4894).
+   * Implementation actions (pr_merge, merged_branch_deletion, ui_evidence_approval) require Strict
+   * Project Isolation to be disabled; follow-up publication and owner decisions are always available
+   * to the Custom root (while issue_closure keeps its dedicated root Orchestrator path). */
+  private customRootOwnWorkSession(session: SessionView, category: WorkflowDecisionCategory): boolean {
+    if (!this.customRootOwnPublication(session)) return false;
+    if (category === "follow_up_issue_publication" || category === "owner_decision") {
+      return true;
+    }
+    if (category === "pr_merge" || category === "merged_branch_deletion" || category === "ui_evidence_approval") {
+      return session.orchestratorPolicy?.execution.strictProjectIsolation === false;
+    }
+    return false;
+  }
+
+  private directOwnerSelfControlled(session: SessionView, category: WorkflowDecisionCategory): boolean {
+    if (this.standaloneDirectOwnerSession(session)) {
+      return category === "pr_merge" || category === "merged_branch_deletion" ||
+        category === "follow_up_issue_publication" || category === "ui_evidence_approval" ||
+        category === "issue_closure" || category === "owner_decision";
+    }
+    return this.customRootOwnWorkSession(session, category);
+  }
+
+  private directOwnerSelfDecision(
+    child: SessionView,
+    parent: SessionView,
+    decision: Pick<WorkflowDecisionView, "category" | "authority">,
+  ): boolean {
+    return child.id === parent.id && decision.authority === "human" &&
+      this.directOwnerSelfControlled(child, decision.category);
+  }
+
+  private requiresDirectLocationVerification(
+    session: SessionView,
+    category: WorkflowDecisionCategory,
+    decision?: Pick<WorkflowDecisionView, "authorityEvaluation">,
+  ): boolean {
+    if (this.standaloneDirectOwnerSession(session)) {
+      return category === "pr_merge" || category === "merged_branch_deletion" ||
+        category === "follow_up_issue_publication" || category === "issue_closure";
+    }
+    if (!this.customRootOwnWorkSession(session, category)) return false;
+    if (category === "pr_merge" || category === "merged_branch_deletion") return true;
+    if (category !== "follow_up_issue_publication") return false;
+    if (decision?.authorityEvaluation?.verifiedLocationId) return true;
+    return campaignScopeRepositories(session).length === 0 &&
+      Boolean(this.requesterForgeDecisionLocation(session));
+  }
+
+  private directOwnerPolicy(session: SessionView): ParentControlPolicy {
+    return session.parentControlPolicy ?? { revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } };
+  }
+
+  private async verifyStandaloneRepositoryLocation(
+    session: SessionView,
+    repository: string,
+    requireProtocol: RunnerProtocolCapability | null = "standaloneOwnerDecisions",
+  ): Promise<ServiceResult<ProjectLocationView>> {
+    const location = this.requesterForgeDecisionLocation(session);
+    if (!location) return fail("This action requires a registered Project Location", 409);
+    const inspected = await inspectProjectLocation({ db: this.db, hub: this.hub }, location.id, {
+      projectId: location.projectId, ...(requireProtocol ? { requireProtocol } : {}), timeoutMs: 10_000,
+    });
+    if (!inspected.ok) {
+      return fail(inspected.reason || "The requested repository could not be verified at this session's Location", 409);
+    }
+    if (!inspected.location.repository || inspected.location.repository.toLowerCase() !== repository.toLowerCase()) {
+      return fail(`The requested repository ${repository} is outside this session's authorized Project Location`, 403);
+    }
+    return ok(location);
+  }
+
+  private uiEvidenceArtifactsRefusal(
+    sessionId: string,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "ui_evidence_approval" }>,
+  ): string | null {
+    for (const item of snapshot.evidence) {
+      if (!item.artifactId) continue;
+      const artifact = this.db.artifactExportPreflight(item.artifactId)?.artifact;
+      if (!artifact || artifact.sessionId !== sessionId || artifact.sha256 !== item.sha256 ||
+          (item.mediaType !== undefined && artifact.mimeType !== item.mediaType)) {
+        return `UI evidence item ${item.evidenceId} must reference an artifact belonging to this session with a matching mediaType and sha256 digest`;
+      }
+      let bytes: Buffer | null;
+      try { bytes = this.db.readArtifactBytes(item.artifactId); } catch { bytes = null; }
+      if (!bytes || createHash("sha256").update(bytes).digest("hex") !== item.sha256) {
+        return `UI evidence item ${item.evidenceId} no longer matches the artifact bytes bound to this decision`;
+      }
+    }
+    return null;
   }
 
   /** How a repository mismatch refusal tells `session` to recover (#4138), or null when it cannot
@@ -17952,7 +18494,7 @@ export class SessionsService {
     controller: SessionView,
     policy: ParentControlPolicy,
     decision: WorkflowDecisionView,
-    options: { recordingCompletedMerge?: boolean } = {},
+    options: { recordingCompletedMerge?: boolean; observingPublication?: boolean } = {},
   ): boolean {
     const superseded = decision.authorityEvaluation?.supersededOwnerRule;
     // Keep removes authority to start new work. Recording an exact, already-armed merge after
@@ -17988,6 +18530,38 @@ export class SessionsService {
     if (isRequesterForgeDecisionCategory(decision.category)) {
       return decision.authority === "human" && Boolean(requester && this.requesterForgeDecisionLocation(requester) &&
         runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, requesterForgeCapability(decision.category)));
+    }
+    if (requester && this.directOwnerSelfDecision(requester, controller, decision)) {
+      // Exact verifiedLocationId equality gates arming, manual consumption, and new writes; read-only
+      // settlement of a completed merge or observation of an already-attempted publication still settles
+      // when the same checkout is filed under a replacement Project Location ID (#4894).
+      if (decision.authorityEvaluation?.verifiedLocationId &&
+          !options.recordingCompletedMerge && !options.observingPublication) {
+        const currentLocation = this.requesterForgeDecisionLocation(requester);
+        if (!currentLocation || currentLocation.id !== decision.authorityEvaluation.verifiedLocationId) {
+          return false;
+        }
+      }
+      if (this.standaloneDirectOwnerSession(requester)) {
+        if (!runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, "standaloneOwnerDecisions")) {
+          return false;
+        }
+        if (decision.category === "pr_merge" || decision.category === "merged_branch_deletion" ||
+            decision.category === "follow_up_issue_publication" || decision.category === "issue_closure") {
+          return decision.authority === "human" && Boolean(this.requesterForgeDecisionLocation(requester));
+        }
+        return decision.authority === "human";
+      }
+      if (decision.category === "pr_merge" || decision.category === "merged_branch_deletion" ||
+          decision.category === "ui_evidence_approval" || decision.category === "owner_decision") {
+        if (!runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, "standaloneOwnerDecisions")) {
+          return false;
+        }
+        if (decision.category === "pr_merge" || decision.category === "merged_branch_deletion") {
+          return decision.authority === "human" && Boolean(this.requesterForgeDecisionLocation(requester));
+        }
+      }
+      return decision.authority === "human";
     }
     if (ownerKept) return true;
     if (decision.category === "ui_evidence_approval" && decision.authority === "human") return true;
@@ -18862,10 +19436,15 @@ export class SessionsService {
       // root (#4536). Existing owner-kept cards retain their behavior (#4064); other root cards
       // need a runner supporting owner decisions. This changes delivery, never authority.
       ...(decision.sessionId === decision.controllingSessionId && decision.authority === "human" &&
+        requester && sessionRole(requester) === "orchestrator" &&
         (decision.category === "owner_decision" || decision.ownerHandoff || decision.ownerRule ||
           decision.authorityEvaluation?.reason === "owner_kept" ||
           decision.authorityEvaluation?.reason === "credential_screen_review" ||
-          requester?.orchestratorPolicy?.control?.mode === "full_control" &&
+          ((decision.category === "pr_merge" || decision.category === "merged_branch_deletion" ||
+            decision.category === "ui_evidence_approval") &&
+            this.customRootOwnWorkSession(requester, decision.category) &&
+            runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, "standaloneOwnerDecisions")) ||
+          requester.orchestratorPolicy?.control?.mode === "full_control" &&
             runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, "ownerDecisions")) ? { async: true } : {}),
       context: {
         toolName: "Typed Workflow Decision",
@@ -19658,14 +20237,15 @@ export class SessionsService {
   ): Promise<ServiceResult<{ forgeHeadSha: string }>> {
     const admission = decision.actionAdmission;
     const command = canonicalPrMergeEnqueueCommand(snapshot);
-    if (!admission || admission.kind !== "pr_merge_enqueue" || admission.command !== command ||
-        admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command })) {
+    const wollipogQueued = this.wollipogMayHaveEnqueued(decision);
+    if ((admission || !wollipogQueued) && (!admission || admission.kind !== "pr_merge_enqueue" || admission.command !== command ||
+        admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command }))) {
       return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     }
     // Claude Code's proof below reads the forge alone. Another harness's proof is a provider receipt
     // that an enqueue Wollipog ran never produced, so that one is read the same way Wollipog ran it:
     // from the filesystem root through the session's own login, read only, never enqueuing.
-    if (decision.retirement || child.driver !== "claude-code" && this.wollipogMayHaveEnqueued(decision)) {
+    if (decision.retirement || !admission || child.driver !== "claude-code" && wollipogQueued) {
       const unsupported = this.capabilityFailure(child.runnerId, "forgeDecisionActions", "Wollipog-performed forge actions");
       if (unsupported) return failAs(unsupported);
       const requestId = `forge_decision_action_${randomUUID()}`;
@@ -19757,11 +20337,12 @@ export class SessionsService {
   ): boolean {
     const child = this.db.getSession(decision.sessionId);
     const parent = this.db.getSession(decision.controllingSessionId);
-    const policy = parent?.parentControlPolicy;
+    const directOwner = Boolean(child && parent && this.directOwnerSelfDecision(child, parent, decision));
+    const policy = directOwner ? this.directOwnerPolicy(parent!) : parent?.parentControlPolicy;
     if (!child || !parent || !policy ||
         (requireLive && (isTerminal(child.status) || isTerminal(parent.status))) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
-        !this.workflowDecisionRelationship(parent.id, child.id) ||
+        !(directOwner || this.workflowDecisionRelationship(parent.id, child.id)) ||
         !this.completedMergeAuthorityCurrent(parent, policy, decision)) {
       return false;
     }
@@ -20177,7 +20758,7 @@ export class SessionsService {
     requestId: string,
     answers: Record<string, string | string[]>,
     actor: GovernanceActor = { kind: "human", id: "local" },
-    action: "submit" | "dismiss" = Object.keys(answers).length > 0 ? "submit" : "dismiss",
+    action?: "submit" | "dismiss",
     resolvedByParentSessionId?: string,
     occurrenceId?: string,
     /** Only the server's own Full Control dismissal passes this (#4063). */
@@ -20193,6 +20774,9 @@ export class SessionsService {
     // control plane resolves it, and no runner is asked.
     const ownerQuestionCard = pendingRequests(session.pendingApproval)
       .find((request) => request.requestId === requestId && isOwnerQuestionRequest(request));
+    // An omitted action must never erase an Owner Question's answer as a dismissal. Older
+    // provider question clients retain their empty-map dismissal convention.
+    action ??= ownerQuestionCard ? "submit" : Object.keys(answers).length > 0 ? "submit" : "dismiss";
     if (ownerQuestionCard) {
       if (occurrenceId !== undefined && occurrenceId !== ownerQuestionCard.occurrenceId) return fail("question occurrence is stale or missing", 409);
       if (scopeProposalOfRequest(ownerQuestionCard)) return this.answerScopeProposal(sessionId, ownerQuestionCard, answers, action, actor);

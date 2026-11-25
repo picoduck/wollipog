@@ -1,4 +1,4 @@
-/** AcpDriver — adapts the existing AcpClient to the Driver interface (no behavior change). */
+/** AcpDriver — adapts the AcpClient to the Driver interface. */
 
 import type { PromptImage, SessionConfig } from "@wollipog/protocol";
 import { AcpClient } from "../acp.js";
@@ -29,7 +29,8 @@ export class AcpDriver implements Driver {
   constructor(
     opts: DriverOptions,
     cb: DriverCallbacks,
-    deps: { spawn?: typeof spawnAgent; kill?: typeof killTree } = {},
+    deps: { spawn?: typeof spawnAgent; kill?: typeof killTree;
+      antigravityAppArmorFix?: (executable: string | undefined) => string | undefined } = {},
   ) {
     this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup, processOwnership: opts.processOwnership });
     this.orchestrator = opts.config.permissionMode === "orchestrator";
@@ -47,10 +48,12 @@ export class AcpDriver implements Driver {
         env: opts.env,
         ...(opts.scrubInheritedEnv?.length ? { scrubInheritedEnv: opts.scrubInheritedEnv } : {}),
         ...(opts.acpCompatibility ? { compatibility: opts.acpCompatibility } : {}),
+        initialPermissionMode: opts.config.permissionMode,
         context: opts.context,
         initialCommands: opts.resumeId ? opts.capabilities?.slashCommands : undefined,
         sessionContext: opts.acpSessionContext,
         artifactGuidance: opts.artifactGuidance,
+        ...(opts.acpConversationHandoff ? { conversationHandoff: opts.acpConversationHandoff } : {}),
         isolation: opts.isolation,
         reviewWriterCgroup: opts.reviewWriterCgroup,
         containerAgentLaunch: true,
@@ -66,6 +69,7 @@ export class AcpDriver implements Driver {
           return this.processes.launch(deps.spawn ?? spawnAgent, spawnOptions);
         },
         kill: deps.kill ?? killTree,
+        ...(deps.antigravityAppArmorFix ? { antigravityAppArmorFix: deps.antigravityAppArmorFix } : {}),
       },
     );
     this.resumeId = opts.resumeId;

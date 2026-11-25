@@ -60,9 +60,15 @@ function supervisor(server: FakeReleaseServer, options: Partial<AntigravitySetup
     musl: () => false,
     resolveExecutable: async () => null,
     fetch: server.fetch,
-    onUpdate: (view) => published.push(view),
-    log: (message) => logs.push(message),
     ...options,
+    onUpdate: (view) => {
+      published.push(view);
+      options.onUpdate?.(view);
+    },
+    log: (message) => {
+      logs.push(message);
+      options.log?.(message);
+    },
   });
   supervisors.push(setup);
   return { setup, published, logs, dataDir, managedRoot: join(dataDir, "antigravity-managed") };
@@ -87,6 +93,45 @@ async function install(setup: AntigravitySetupSupervisor): Promise<AntigravitySe
   const operationId = started.managedInstall?.operation?.operationId;
   return until(setup, (view) => view.managedInstall?.operation?.operationId === operationId && settled(view));
 }
+
+/** A settled operation may have failed. Check the prerequisite before reading its pointers.
+ * Select diagnostic fields rather than dumping a view (paths/sign-in data) or child output. */
+async function installInitial(created: ReturnType<typeof supervisor>): Promise<void> {
+  const view = await install(created.setup);
+  const operation = view.managedInstall?.operation;
+  const stages = [...new Set(created.published.map((entry) => entry.managedInstall?.operation?.stage).filter(Boolean))];
+  const logs = created.logs.slice(-8).map((line) => line
+    .replaceAll(root, "<fixture-root>")
+    .replace(/https?:\/\/[^\s;)]+/gu, "<url>")
+    .slice(0, 512));
+  assert.ok(operation?.status === "succeeded" && view.status === "ready" &&
+    view.executable?.source === "managed" && view.managedInstall?.active?.version === "1.5.14",
+  `initial managed install prerequisite failed: ${JSON.stringify({
+    status: view.status, failure: view.failure,
+    operation: operation && { kind: operation.kind, status: operation.status, failure: operation.failure },
+    stages, logs,
+  })}`);
+}
+
+test("the initial install prerequisite reports the operation failure before reading current", async () => {
+  const server = new FakeReleaseServer();
+  server.publish({ platform: PLATFORM, version: "1.5.14", archive: release("1.5.14"), manifestSha512: "0".repeat(128) });
+  const created = supervisor(server);
+  created.logs.push(`fixture ${root}/private https://fixture.invalid/private?code=fixture-code ${"x".repeat(8_000)}`);
+  await assert.rejects(installInitial(created), (error: Error) => {
+    assert.match(error.message, /initial managed install prerequisite failed/u);
+    assert.match(error.message, /"failure":"checksum_mismatch"/u);
+    assert.match(error.message, /"stages":\["fetching_installer","fetching_manifest","downloading"\]/u);
+    assert.match(error.message, /Google Antigravity install failed \(checksum_mismatch\)/u);
+    assert.ok(error.message.length < 5_000);
+    assert.ok(!error.message.includes(root));
+    assert.match(error.message, /<fixture-root>/u);
+    assert.match(error.message, /<url>/u);
+    assert.doesNotMatch(error.message, /ENOENT|readlink|fixture-code|fixture\.invalid/u);
+    return true;
+  });
+  assert.equal(existsSync(join(created.managedRoot, "current")), false);
+});
 
 function environments(): Array<{ label: string; copy: string; home: string | null; autoUpdateDisabled: string | null;
   runtimeDir: string | null; sessionBus: string | null; present: string[] }> {
@@ -476,7 +521,7 @@ async function updateWithBlockedFolder(candidate: Buffer) {
     },
   });
   root = created.managedRoot;
-  await install(created.setup);
+  await installInitial(created);
   const working = readlinkSync(join(root, "current"));
   server.publish({ platform: PLATFORM, version: "1.6.0", archive: candidate });
   block = true;

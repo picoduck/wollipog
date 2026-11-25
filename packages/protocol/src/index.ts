@@ -65,6 +65,8 @@ export * from "./pull-request-watch.js";
 export * from "./session-waits.js";
 export * from "./workspace-removal.js";
 export * from "./antigravity-setup.js";
+export * from "./managed-worktree-agents.js";
+import { ANTIGRAVITY_FULL_PERMISSIONS_MODE } from "./antigravity-setup.js";
 export * from "./forge-decision-action.js";
 export * from "./release-decision.js";
 export * from "./merge-closure-watch.js";
@@ -186,7 +188,7 @@ import type {
 } from "./campaign-work-ledger.js";
 export type { ConversationHandoffDraft, InPlaceHandoffTurn } from "./conversation-handoff.js";
 import { pendingRequests, prioritizedPendingRequests } from "./worker-attention.js";
-import { isChildQuestionSnapshot, isOwnerQuestionCard, isOwnerQuestionRequest } from "./owner-question.js";
+import { isCampaignHandoffQuestion, isChildQuestionSnapshot, isOwnerQuestionCard, isOwnerQuestionRequest } from "./owner-question.js";
 export {
   attentionRequestRank,
   pendingRequests,
@@ -504,6 +506,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * the control plane by the runner, because an older control plane would ignore the field and ask
    * the question as an approval, and against the root's runner by the control plane. */
   ownerQuestions: 303,
+  /** v412 (#4894): Standalone sessions and Custom campaign roots request human-owned structured
+   * approvals (PR merge, merged-branch deletion, issue publication, UI evidence, issue closure),
+   * generic Owner Approvals, and free-text Owner Questions. */
+  standaloneOwnerDecisions: 412,
   issueClosureReconciliation: 355,
   /** v332 (#4359): explicit child clarifications, with free text and no consumable action grant. */
   childQuestions: 332,
@@ -2487,8 +2493,8 @@ export interface CampaignOwnerDecision {
   /** The current campaign supports a human-only return of future requests. */
   returnableOwnerResource?: true;
   occurrenceId: string;
-  /** v332: a question is presented as input, never as an action approval. */
-  kind?: "question";
+  /** Which informational presentation to use when the request asks for no approval. */
+  kind?: "question" | "handoff";
   /** The session whose request it is: the root for an owner decision, else the requester. */
   sessionId: string;
   category: WorkflowDecisionCategory | "runner_recovery";
@@ -4378,13 +4384,24 @@ function singleSessionAttentionStatus(
   const pending = requests[0] ?? session.pendingApproval;
   if (requests.length > 1) {
     const children = requests.filter((request) => request.ownerToolUseId).length;
-    const questions = requests.filter((request) => request.kind === "question" || isOwnerQuestionRequest(request)).length;
+    const handoffs = requests.filter((request) => isCampaignHandoffQuestion(request.workflowDecision)).length;
+    const questions = requests.filter((request) => !isCampaignHandoffQuestion(request.workflowDecision) &&
+      (request.kind === "question" || isOwnerQuestionRequest(request))).length;
     const authentication = requests.filter((request) => request.kind === "authentication").length;
-    const approvals = requests.length - questions - authentication;
+    const approvals = requests.length - questions - authentication - handoffs;
     return {
       kind: "input_required",
       label: `${requests.length} Actions Required`,
-      description: `${requests.length} unresolved requests: ${approvals} approvals, ${questions} questions, ${authentication} authentication requests; ${children} belong to child agents. Open Agents to inspect each request.`,
+      description: handoffs === 0
+        ? `${requests.length} unresolved requests: ${approvals} approvals, ${questions} questions, ${authentication} authentication requests; ${children} belong to child agents. Open Agents to inspect each request.`
+        : `${approvals} approvals, ${questions} questions, and ${authentication} authentication requests remain open. ${handoffs} handoff notice${handoffs === 1 ? " needs" : "s need"} acknowledgment. Of the ${requests.length} open requests, ${children} belong to child agents. Open Agents to inspect each request.`,
+    };
+  }
+  if (isCampaignHandoffQuestion(pending?.workflowDecision)) {
+    return {
+      kind: "input_required",
+      label: "Handoffs to Acknowledge",
+      description: "Review and acknowledge the campaign handoffs. The work stays listed in Campaign Status.",
     };
   }
   if (isOwnerQuestionCard(pending)) {
@@ -6601,8 +6618,12 @@ export type SessionEventPayload =
       /** A problem the driver reported while the turn kept running (#3806), not a failed turn: a
        * dashboard shows it without Retry Turn. Older peers ignore the flag and show a failed turn. */
       nonFatal?: true;
-      /** A non-fatal warning from automatic worktree creation, before the first turn. */
-      source?: "worktree_base_fallback";
+      /** A non-fatal warning that can be shown before the first turn. */
+      source?: "worktree_base_fallback" | "antigravity_auto_mode_fallback";
+      /** The exact shell command, run on the runner's host, that fixes what the message reports
+       * (Antigravity's Auto Mode on an AppArmor-restricted host). Older dashboards show only the
+       * message, which still says what to do. */
+      fixCommand?: string;
       /** Correlates a promoted notice with this authorized transcript entry. */
       assistantThreadErrorId?: string;
     }
@@ -7392,6 +7413,7 @@ export function installationSupportsDefault(
   installation: Pick<AgentHarnessDefaultInstallation, "models" | "effortLevels" | "permissionModes">,
   config: AgentHarnessDefaultConfig,
 ): boolean {
+  if (config.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) return false;
   const model = config.model ? installation.models.find((candidate) => candidate.id === config.model) : undefined;
   if (config.model && !model) return false;
   const efforts = model?.efforts?.length ? model.efforts : installation.effortLevels;
@@ -9774,16 +9796,22 @@ export type GithubIssueClosureMessage = {
   requestId: string;
   sessionId: string;
   location?: GithubIssueClosureLocation;
+  /** v412 (#4894): human-owned closure for a standalone Normal session (never an Orchestrator). */
+  standalone?: true;
 } & (
   | { operation: "inspect"; issue: number; scopeRevision?: number; deliveryPullRequests?: Array<{ number: number; headSha: string }>;
       campaignPullRequests?: number[] | null;
       /** v278 (#4060): also read the issue's epic members into the inspection and its digest. */
-      epicMembers?: true }
+      epicMembers?: true;
+      /** v412 (#4894): verified Project Location repository for a standalone session. */
+      expectedRepository?: string }
   | { operation: "execute"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot;
       /** v360: fresh server-derived campaign context. Null relates every open PR. */
       campaignPullRequests?: number[] | null;
       /** v360: root execution also stops at the forge fence for a final control-plane recheck. */
-      prepare?: true }
+      prepare?: true;
+      /** v412 (#4894): verified Project Location repository for a standalone session. */
+      expectedRepository?: string }
   | { operation: "reconcile"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot; consumedAt: number }
   /** v323 (#4119): only with `location`. A Location's runner holds no copy of the campaign's scope,
    * so its `execute` stops at the mutation fence and answers `prepared`. The control plane rechecks

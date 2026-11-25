@@ -22,6 +22,10 @@
 /** The agent id of Google Antigravity sessions in a runner's agent list (#4779). */
 export const ANTIGRAVITY_AGENT_ID = "google-antigravity";
 
+export const ANTIGRAVITY_AUTO_MODE = { id: "auto", name: "Auto Mode" } as const;
+/** Wollipog's launch-only mode. Antigravity has no ACP mode id for its full-permissions flag. */
+export const ANTIGRAVITY_FULL_PERMISSIONS_MODE = { id: "antigravity-full-permissions", name: "Full Permissions Mode" } as const;
+
 /** Where the setup stands on one Machine.
  * - `checking`: the runner is checking the runtime and its sign-in.
  * - `missing_runtime`: no `agy` executable was found for the runner's user.

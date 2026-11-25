@@ -2,6 +2,8 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import {
   ANTIGRAVITY_AGENT_ID,
+  ANTIGRAVITY_AUTO_MODE,
+  ANTIGRAVITY_FULL_PERMISSIONS_MODE,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
   type AgentHarnessDefaultsView,
@@ -145,6 +147,7 @@ const antigravityAgent: RunnerView["agents"][number] | null = antigravityState ?
       ["claude-sonnet-5-5", "Claude Sonnet 5.5"], ["gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"],
     ].map(([id, displayName]) => ({ id: id!, displayName })) : [],
     effortLevels: [],
+    permissionModes: [ANTIGRAVITY_AUTO_MODE.id, ANTIGRAVITY_FULL_PERMISSIONS_MODE.id],
     slashCommands: [],
     supportsImages: true,
     supportsApprovals: true,

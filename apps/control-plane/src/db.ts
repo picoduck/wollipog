@@ -401,7 +401,7 @@ import { matchWorkspaceId, matchWorkspaceIds, workspacePathsEqual } from "./work
 import { installMaintenanceIndexes } from "./maintenance-indexes.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { CAMPAIGN_RECOVERY_SCHEMA, CampaignRecoveryStore, type CampaignRecoveryVerifiedReport } from "./campaign-recovery-store.js";
-import { CAMPAIGN_HANDOFF_QUESTION_KEY } from "@wollipog/protocol";
+import { CAMPAIGN_HANDOFF_QUESTION_KEY, CAMPAIGN_HANDOFF_TITLE, isCampaignHandoffQuestion } from "@wollipog/protocol";
 import {
   CAMPAIGN_FORGE_OBSERVATION_SCHEMA,
   CampaignForgeObservationStore,
@@ -23323,6 +23323,25 @@ export class ControlPlaneDb {
     return rows.map((row) => row.id);
   }
 
+  /** Live sessions (including standalone Normal sessions) holding an unacknowledged uncertain
+   * issue closure that needs scheduled read-only reconciliation (#4894). */
+  listUncertainIssueClosureSessionIds(runnerId?: string): string[] {
+    const rows = this.stmt(
+      `SELECT DISTINCT wd.controlling_session_id AS id
+       FROM workflow_decisions wd
+       JOIN sessions s ON s.id = wd.controlling_session_id
+       WHERE wd.category = 'issue_closure'
+         AND wd.status = 'consumed'
+         AND json_extract(wd.issue_closure_result, '$.outcome') = 'uncertain'
+         AND json_extract(wd.issue_closure_result, '$.reconciliation.acknowledgedAt') IS NULL
+         AND s.archived = 0
+         AND s.status NOT IN ('completed','failed','stopped')
+         ${runnerId ? "AND s.runner_id=?" : ""}
+       ORDER BY wd.controlling_session_id`,
+    ).all(...(runnerId ? [runnerId] : [])) as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  }
+
   campaignContinuationLifecycle(campaignSessionId: string): {
     runnerId: string;
     status: SessionStatus;
@@ -25582,8 +25601,9 @@ export class ControlPlaneDb {
           this.stmt("SELECT 1 FROM sessions WHERE id=? AND json_extract(orchestrator_policy, '$.control.mode')='full_control'")
             .get(decision.controllingSessionId)
           ? { returnableOwnerResource: true as const } : {}),
-        ...(isWorkflowQuestionSnapshot(decision.resourceSnapshot) ? { kind: "question" as const } : {}),
-        summary: decision.resourceSnapshot.category === "campaign_issue_scope"
+        ...(isCampaignHandoffQuestion(decision) ? { kind: "handoff" as const }
+          : isWorkflowQuestionSnapshot(decision.resourceSnapshot) ? { kind: "question" as const } : {}),
+        summary: isCampaignHandoffQuestion(decision) ? CAMPAIGN_HANDOFF_TITLE : decision.resourceSnapshot.category === "campaign_issue_scope"
           ? campaignScopeChangeSummary(decision.resourceSnapshot, this.scopeApprovalIncrease(controllingSessionId, decision.resourceSnapshot))
           : ownerDecisionSummary(decision.resourceSnapshot),
         ...(() => {

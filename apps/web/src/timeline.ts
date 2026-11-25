@@ -182,7 +182,7 @@ export type TimelineItem =
       parentToolUseId?: string;
     }
   | { kind: "file_edit"; id: number; path: string; diff?: string; diffRefs?: EventPayloadReference[]; parentToolUseId?: string }
-  | { kind: "error"; id: number; message: string; nonFatal?: true; source?: "worktree_base_fallback"; assistantThreadErrorId?: string }
+  | { kind: "error"; id: number; message: string; nonFatal?: true; source?: Extract<SessionEvent["payload"], { kind: "error" }>["source"]; fixCommand?: string; assistantThreadErrorId?: string }
   | {
       kind: "turn_interrupted";
       id: number;
@@ -1502,6 +1502,7 @@ export class TimelineBuilder {
         this.lastErrorIndex = this.items.push({
           kind: "error", id: ev.seq, message: p.message, ...(p.nonFatal ? { nonFatal: true as const } : {}),
           ...(p.source ? { source: p.source } : {}),
+          ...(typeof p.fixCommand === "string" && p.fixCommand ? { fixCommand: p.fixCommand } : {}),
           ...(p.assistantThreadErrorId ? { assistantThreadErrorId: p.assistantThreadErrorId } : {}),
         }) - 1;
         this.markDirty(this.lastErrorIndex);

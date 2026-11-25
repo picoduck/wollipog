@@ -47,7 +47,7 @@ export function OwnerRuleSummary({ rule }: { rule: WorkflowDecisionOwnerRule }) 
 
 /** What a workflow decision decides, as facts (§5.4): the Request Card's body for the kinds without
  * a review of their own, and the read-only summary of a decision the Orchestrator owns. */
-export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scopeMaxIssuesIncrease, authority, authorityReason, scopeDecisionDetails }: {
+export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scopeMaxIssuesIncrease, authority, authorityReason, scopeDecisionDetails, nonBlocking = true }: {
   snapshot: WorkflowDecisionResourceSnapshot;
   authority?: "human" | "orchestrator";
   authorityReason?: CampaignAuthorityEvaluation["reason"];
@@ -56,6 +56,9 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
   scopeDecisionDetails?: PendingApproval["scopeDecisionDetails"];
   /** The server-recorded closing-reference read of a GitHub merge, when there was one. */
   closingReferenceCheck?: PullRequestClosingReferenceCheck;
+  /** Whether the requesting session keeps working while waiting (Orchestrator roots) rather than
+   * parking on this card (standalone Normal sessions). */
+  nonBlocking?: boolean;
 }) {
   const delegationFailure = (authorityReason && TEMPORARY_DELEGATION_FAILURE_COPY[authorityReason]) ??
     "Your approval is required for this deletion; a creation receipt does not delegate the decision.";
@@ -95,8 +98,12 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
           {option.description ? <>: {option.description}</> : null}
         </li>)}</ul>}
         {authorityReason !== "credential_screen_review" && <p>{snapshot.kind === "question"
-          ? "The Orchestrator asked you this question. Only you can answer it, in your own words, and it keeps working while it waits."
-          : "You kept this decision, so only you can make it. The Orchestrator keeps working while it waits."}</p>}
+          ? nonBlocking
+            ? "The Orchestrator asked you this question. Only you can answer it, in your own words, and it keeps working while it waits."
+            : "This session asked you this question. Only you can answer it, in your own words."
+          : nonBlocking
+            ? "You kept this decision, so only you can make it. The Orchestrator keeps working while it waits."
+            : "Only you can make this decision."}</p>}
       </>;
     case "campaign_issue_scope":
       return <CampaignIssueScopeSummary snapshot={snapshot} decisionDetails={scopeDecisionDetails} {...(scopeMaxIssuesIncrease ? { derivedIncrease: scopeMaxIssuesIncrease } : {})} />;

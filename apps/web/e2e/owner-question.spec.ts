@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { installInboxFixture } from "./inbox-production-fixture.js";
+import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizontalOverflow } from "./layout-invariants.js";
 import type { WorkflowDecisionView } from "@wollipog/protocol";
 
 /** An Owner Question (#4270): a Full Control root's design question for its campaign's owner, asked
@@ -14,60 +15,127 @@ async function openOwnerQuestion(page: Page) {
 }
 
 for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844 }, { name: "narrow-phone", width: 320, height: 740 }]) {
-  test(`an expanded handoff question can be dismissed without an answer (${viewport.name})`, async ({ page }) => {
+  test(`a campaign handoff can be acknowledged (${viewport.name})`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/agent-questions-e2e.html?set=owner-question&style=composer&handoffs=true");
-    const card = page.locator(".composer-answer");
-    const dismiss = card.getByRole("button", { name: "Dismiss", exact: true });
-    await expect(card.locator("input.composer-answer-input")).toHaveValue("");
-    await expect(dismiss).toBeInViewport({ ratio: 1 });
-    if (process.env.WOLLIPOG_CAPTURE_DISMISS) await page.screenshot({ path: `/tmp/owner-question-dismiss-${viewport.name}.png`, fullPage: true });
-    await dismiss.click();
+    const card = page.locator(".request-card");
+    const acknowledge = card.getByRole("button", { name: "Acknowledge", exact: true });
+    await expect(page.locator(".composer-answer")).toHaveCount(0);
+    await expect(acknowledge).toBeInViewport({ ratio: 1 });
+    if (process.env.WOLLIPOG_CAPTURE_HANDOFFS) await page.screenshot({ path: `/tmp/campaign-handoff-${viewport.name}.png`, fullPage: true });
+    await acknowledge.click();
     await expect(card).toHaveCount(0);
     expect(await page.evaluate(() => window.agentQuestionCalls)).toEqual([
       expect.objectContaining({ answers: {}, action: "dismiss" }),
     ]);
   });
+
+  test(`a long campaign handoff keeps Acknowledge in view (${viewport.name})`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/agent-questions-e2e.html?set=owner-question&style=composer&handoffs=true&handoffStress=1");
+    const card = page.locator(".request-card");
+    const acknowledge = card.getByRole("button", { name: "Acknowledge", exact: true });
+    await expect(card.getByRole("listitem")).toHaveCount(8);
+    await expectNoHorizontalOverflow(card);
+    await expectPageNoHorizontalOverflow(page);
+    await expectFullyInViewport(acknowledge);
+    await expectFullyInViewport(page.getByRole("textbox", { name: "Composer" }));
+    if (process.env.WOLLIPOG_CAPTURE_HANDOFFS) await page.screenshot({ path: testInfo.outputPath("long-handoff.png") });
+    const last = card.getByRole("listitem").last();
+    await expect(last).toContainText("Review Work Item 8");
+    await last.scrollIntoViewIfNeeded();
+    await expect(last).toBeInViewport();
+    await expectFullyInViewport(acknowledge);
+  });
 }
 
-for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844 }]) {
-  test(`campaign handoffs appear in the Inbox as Needs Your Input (${viewport.name})`, async ({ page }) => {
-    await page.setViewportSize(viewport);
-    const fixture = await installInboxFixture(page);
-    await page.goto("/index.html");
-    await expect(page.locator(".inbox-row").first()).toBeVisible();
-    const decision: WorkflowDecisionView = {
-      requestId: "campaign_handoffs_synthetic", occurrenceId: "workflow_handoffs", sessionId: "synthetic-1",
-      controllingSessionId: "synthetic-1", category: "owner_decision", resourceKey: "campaign_handoffs:owner",
-      resourceDigest: "synthetic", authority: "human", policyRevision: 3, status: "pending", createdAt: Date.now(),
-      resourceSnapshot: { category: "owner_decision", kind: "question", options: [],
-        question: "This campaign handed work to you. What should happen next?",
-        material: "picoduck/wollipog#4541: Owner Handoff. Reason: A design decision is outside campaign authority. Next action: Choose the supported delivery path. Your answer grants no action authority." },
-    };
-    fixture.updateSession("synthetic-1", {
-      title: "Owner Handoffs — Campaign #4541", fullControlCampaignStatus: "waiting_human",
-      pendingApproval: { requestId: decision.occurrenceId, occurrenceId: decision.occurrenceId, title: "Owner Question",
-        kind: "workflow_decision", async: true, options: [], workflowDecision: decision },
-      attention: { version: 1, revision: 1, meaningfulAt: Date.now(), result: null,
-        humanActions: [{ requestId: decision.occurrenceId, rank: 3, requestedAt: Date.now() }] },
-    });
-    const row = page.locator(".inbox-row-shell", { hasText: "Owner Handoffs — Campaign #4541" });
-    await expect(row).toBeVisible();
-    await expect(row.getByText("Needs Your Input", { exact: true })).toBeVisible();
-    if (process.env.WOLLIPOG_CAPTURE_HANDOFFS) await page.screenshot({ path: `/tmp/4541-inbox-${viewport.name}.png`, fullPage: true });
+async function openInboxHandoff(page: Page) {
+  const fixture = await installInboxFixture(page);
+  await page.goto("/index.html");
+  await expect(page.locator(".inbox-row").first()).toBeVisible();
+  const decision: WorkflowDecisionView = {
+    requestId: "campaign_handoffs_synthetic", occurrenceId: "workflow_handoffs", sessionId: "synthetic-1",
+    controllingSessionId: "synthetic-1", category: "owner_decision", resourceKey: "campaign_handoffs:owner",
+    resourceDigest: "synthetic", authority: "human", policyRevision: 3, status: "pending", createdAt: Date.now(),
+    resourceSnapshot: { category: "owner_decision", kind: "question", options: [],
+      question: "This campaign handed work to you. What should happen next?",
+      material: "picoduck/wollipog#4541: Owner Handoff. Reason: A design decision is outside campaign authority. Next action: Choose the supported delivery path. Your answer grants no action authority." },
+  };
+  fixture.updateSession("synthetic-1", {
+    title: "Owner Handoffs — Campaign #4541", fullControlCampaignStatus: "waiting_human",
+    pendingApproval: { requestId: decision.occurrenceId, occurrenceId: decision.occurrenceId, title: "Owner Question",
+      kind: "workflow_decision", async: true, options: [], workflowDecision: decision },
+    attention: { version: 1, revision: 1, meaningfulAt: Date.now(), result: null,
+      humanActions: [{ requestId: decision.occurrenceId, rank: 3, requestedAt: Date.now() }] },
+  });
+  const row = page.locator(".inbox-row-shell", { hasText: "Owner Handoffs — Campaign #4541" });
+  await expect(row).toBeVisible();
+  await expect(row.getByText("Handoffs to Acknowledge", { exact: true })).toBeVisible();
+  return { decision, row };
+}
+
+test("D acknowledges the selected Inbox handoff without opening a preview", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  // Exercise the list's direct triage path before a preview registers its request handler,
+  // as inbox-triage-detail.spec.ts does. Otherwise the lazy desktop reader can mount a
+  // handoff card before the no-card precondition, depending on module-load timing.
+  await page.route("**/src/components/SessionDetail.tsx*", (route) => route.fulfill({
+    contentType: "application/javascript", body: "export function SessionDetail() { return null; }",
+  }));
+  const { decision, row } = await openInboxHandoff(page);
+  await expect(row).toHaveAttribute("aria-selected", "true");
+  const sessionPath = "/api/sessions/synthetic-1";
+  const session = await page.evaluate(async (path) => {
+    const response = await fetch(path);
+    return (await response.json()).session;
+  }, sessionPath);
+  const responses: unknown[] = [];
+  await page.route(`**${sessionPath}/answer`, async (route) => {
+    responses.push(route.request().postDataJSON());
+    await route.fulfill({ json: {
+      ...session,
+      pendingApproval: null,
+      attention: { ...session.attention, revision: 2, humanActions: [] },
+    } });
   });
 
-  test(`campaign handoffs ask for input without approval (${viewport.name})`, async ({ page }) => {
+  await expect(page.locator(".request-card")).toHaveCount(0);
+  await page.getByRole("grid").focus();
+  await page.keyboard.press("d");
+  await expect.poll(() => responses).toEqual([{
+    requestId: decision.occurrenceId, occurrenceId: decision.occurrenceId, answers: {}, action: "dismiss",
+  }]);
+  await expect(row).toBeVisible();
+  await expect(row.getByText("Handoffs to Acknowledge", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".request-card")).toHaveCount(0);
+});
+
+for (const viewport of [{ name: "desktop", width: 1280, height: 800 }, { name: "phone", width: 390, height: 844 }]) {
+  test(`campaign handoffs appear in the Inbox as Handoffs to Acknowledge (${viewport.name})`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await openInboxHandoff(page);
+    if (process.env.WOLLIPOG_CAPTURE_HANDOFFS) await page.screenshot({ path: `/tmp/4541-inbox-${viewport.name}.png`, fullPage: true });
+    if (viewport.name === "desktop") {
+      await page.getByRole("grid").focus();
+      await page.keyboard.press("a");
+      await expect(page.getByRole("heading", { name: "Campaign Handoffs" })).toBeVisible();
+    }
+  });
+
+  test(`campaign handoffs are shown as a status update (${viewport.name})`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/agent-questions-e2e.html?set=owner-question&style=composer&handoffs=true");
-    const card = page.locator(".composer-answer");
+    const card = page.locator(".request-card");
     await expect(card).toBeVisible();
-    await expect(card.locator(".answer-title")).toHaveText("This campaign handed work to you. What should happen next?");
-    await expect(page.getByLabel("Attention: Needs Your Input", { exact: true })).toBeVisible();
-    await expect(card.locator(".answer-context")).toContainText("Owner Handoff (human)");
-    await expect(card.locator(".answer-context")).toContainText("External Review (external)");
-    await expect(card.locator(".answer-context")).toContainText("Your answer grants no action authority.");
-    await expect(card.locator("input.composer-answer-input")).toBeEditable();
+    await expect(card.getByRole("heading", { name: "Campaign Handoffs" })).toBeVisible();
+    await expect(card.getByText("Status Update", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Attention: Handoffs to Acknowledge", { exact: true })).toBeVisible();
+    await expect(card).toContainText("Owner Handoff (human)");
+    await expect(card).toContainText("External Review (external)");
+    await expect(card).toContainText("Next action: Choose the supported delivery path.");
+    await expect(card).not.toContainText("What should happen next?");
+    await expect(card).not.toContainText("Your answer grants no action authority.");
+    await expect(page.getByRole("button", { name: "Submit Answers" })).toHaveCount(0);
     await expect(page.getByText("Approval Required")).toHaveCount(0);
     if (process.env.WOLLIPOG_CAPTURE_HANDOFFS) await page.screenshot({ path: `/tmp/4541-handoffs-${viewport.name}.png`, fullPage: true });
   });

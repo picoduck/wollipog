@@ -6,11 +6,9 @@ import { basename, isAbsolute } from "node:path";
 export function codexCliAdmission(script: string, output: string, threadId: string, turnId: string): {
   occurrenceId: string; command: string; approved: boolean;
 } | null {
-  const match = /^(?:"\$WOLLIPOG_CLI"|wollipog) decision consume ([A-Za-z0-9_-]{1,512}) --snapshot '([^'\n]+)'(?: --action '([^'\n]+)')? --json$/u.exec(script);
-  if (!match) return null;
+  const input = codexCliAdmissionInput(script);
+  if (!input) return null;
   try {
-    const snapshot = JSON.parse(match[2]!);
-    if (snapshot?.category !== "pr_merge") return null;
     // Node warnings precede the CLI's one JSON response in aggregated_output. Only complete
     // JSON lines count, and multiple responses are ambiguous. No substring extraction.
     const responses = output.length > 100_000 ? [] : output.split("\n").flatMap((line) => {
@@ -20,15 +18,30 @@ export function codexCliAdmission(script: string, output: string, threadId: stri
     const admission = decision?.actionAdmission;
     // --action is optional: the server derives the canonical enqueue from the snapshot.
     // Only the provider-recorded armed response supplies its identity in that form.
-    const action = match[3] === undefined ? admission : JSON.parse(match[3]);
+    const action = input.action === undefined ? admission : input.action;
     if (action?.kind !== "pr_merge_enqueue" || typeof action.command !== "string" ||
         !action.command || action.command.length > 2000) return null;
     return {
-      occurrenceId: match[1]!, command: action.command,
-      approved: decision?.occurrenceId === match[1] && decision?.status === "approved" &&
+      occurrenceId: input.occurrenceId, command: action.command,
+      approved: decision?.occurrenceId === input.occurrenceId && decision?.status === "approved" &&
         admission?.kind === "pr_merge_enqueue" && admission?.command === action.command &&
         admission?.providerThreadId === threadId && admission?.providerTurnId === turnId,
     };
+  } catch { return null; }
+}
+/** The output-independent part of the proof grammar, also checked before arming. */
+export function codexCliAdmissionInput(script: string): {
+  occurrenceId: string; action?: { kind: "pr_merge_enqueue"; command: string };
+} | null {
+  const match = /^(?:"\$WOLLIPOG_CLI"|wollipog) decision consume ([A-Za-z0-9_-]{1,512}) --snapshot '([^'\n]+)'(?: --action '([^'\n]+)')? --json$/u.exec(script);
+  if (!match) return null;
+  try {
+    const snapshot = JSON.parse(match[2]!);
+    if (snapshot?.category !== "pr_merge") return null;
+    const action = match[3] === undefined ? undefined : JSON.parse(match[3]);
+    if (action !== undefined && (action?.kind !== "pr_merge_enqueue" || typeof action.command !== "string" ||
+        !action.command || action.command.length > 2000)) return null;
+    return { occurrenceId: match[1]!, ...(action === undefined ? {} : { action }) };
   } catch { return null; }
 }
 /** Decode a provider-rendered shell argv for admission only. The enqueue command identity uses

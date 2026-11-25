@@ -1504,6 +1504,9 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
 );
 sessions.onProviderAccountCooldown = publishProviderAccountInventory;
 sessions.setDetachedClaudeEnvironment(sessionAgentEnvironment);
+// The same set prepareAntigravityLaunch consults: a configured agent with Antigravity's id gets no
+// Antigravity profile, so a managed worktree refuses it as it does any other ACP agent (#4901).
+sessions.setConfiguredAgentIds(configuredAgentIds);
 const sharedDirectoryForbiddenRoots = [parsed.configPath, providerAccountsConfigPath,
   ...(tokenFile ? [tokenFile] : []), ...config.providerAccounts.map((account) => account.directory)];
 sessions.configureSharedDirectories(config.workspaces, sharedDirectoryForbiddenRoots);

@@ -109,6 +109,7 @@ if (args[0] === "acp" && args[1] === "--login") {
   }
 } else if (args[0] === "acp") {
   recordEnvironment("acp");
+  const fullPermissions = args.includes("--dangerously-skip-permissions");
   if (modes.has("acp_exit")) process.exit(2);
   const lines = createInterface({ input: process.stdin });
   const send = (message) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
@@ -124,6 +125,9 @@ if (args[0] === "acp" && args[1] === "--login") {
     { id: "accept-edits", name: "Accept edits", description: "Approve file edits in the workspace without asking." },
     { id: "auto", name: "Auto", description: "Approve edits and safe commands; ask before irreversible actions." },
     { id: "plan", name: "Plan", description: "Plan carefully before executing a task." }] };
+  if (modes.has("auto_unavailable")) {
+    modeState.availableModes = modeState.availableModes.filter((mode) => mode.id !== "auto");
+  }
   const config = { model: "fixture-pro", thought_level: "high", mode: "default" };
   const configOptions = () => [
     { id: "model", name: "Model", category: "model", type: "select", currentValue: config.model,
@@ -150,6 +154,12 @@ if (args[0] === "acp" && args[1] === "--login") {
     const args = { CommandLine: "touch fixture-command-ran", WaitMsBeforeAsync: 5000, toolSummary: "Create a marker file" };
     const tool = { toolCallId, name: "run_command", args, kind: "execute", title: "touch fixture-command-ran", rawInput: args };
     update(sessionId, { sessionUpdate: "tool_call", ...tool, status: "in_progress" });
+    if (modes.has("auto_sandbox_denied") && config.mode === "auto") {
+      const output = `Created At: 2026-11-23T12:00:00Z\nCompleted At: 2026-11-23T12:00:01Z\nCommand failed to run: fork/exec ${process.env.FAKE_AGY_EXECUTABLE}: operation not permitted.\n\nNo output from the command.`;
+      update(sessionId, { sessionUpdate: "tool_call_update", toolCallId, status: "completed", rawOutput: { output },
+        content: [{ type: "content", content: { type: "text", text: output } }] });
+      return endTurn("end_turn");
+    }
     update(sessionId, { sessionUpdate: "tool_call_update", ...tool, status: "pending" });
     const permissionId = String(++permissionCounter);
     turn.permission = { id: permissionId, settle: (outcome) => {
@@ -167,6 +177,7 @@ if (args[0] === "acp" && args[1] === "--login") {
       update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "The command was denied, so nothing ran." } });
       return endTurn("end_turn");
     } };
+    if (fullPermissions) return turn.permission.settle({ outcome: "selected", optionId: "allow" });
     send({ id: permissionId, method: "session/request_permission", params: { sessionId, toolCall: {
       sessionUpdate: "tool_call", ...tool, status: "pending" },
       options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }] } });
@@ -199,7 +210,9 @@ if (args[0] === "acp" && args[1] === "--login") {
     }
     if (request.id === undefined) return;
     record({ method: request.method, ...(request.method === "initialize" ? { clientInfo: request.params?.clientInfo ?? null,
-      clientCapabilities: request.params?.clientCapabilities ?? null } : {}),
+      clientCapabilities: request.params?.clientCapabilities ?? null, fullPermissions } : {}),
+      ...(request.method === "session/prompt" ? { activeMode: config.mode,
+        promptTexts: (request.params?.prompt ?? []).filter((block) => block.type === "text").map((block) => block.text) } : {}),
       ...(request.params?.sessionId ? { sessionId: request.params.sessionId } : {}),
       ...(Array.isArray(request.params?.mcpServers)
         ? { mcpServerNames: request.params.mcpServers.map((server) => server.name) } : {}) });

@@ -10,6 +10,7 @@ import type {
   UpdateAgentHarnessDefaultRequest,
 } from "@wollipog/protocol";
 import {
+  ANTIGRAVITY_FULL_PERMISSIONS_MODE,
   agentHarnessIdentityKey,
   builtInAgentHarnessName,
   canonicalAgentHarnessIdentity,
@@ -88,7 +89,8 @@ export class AgentHarnessDefaultsSettings {
           online: runner.status === "online",
           models: [...visibleModels(agent.capabilities), ...managed],
           effortLevels: [...(agent.capabilities?.effortLevels ?? [])],
-          permissionModes: [...(agent.capabilities?.permissionModes ?? [])],
+          permissionModes: (agent.capabilities?.permissionModes ?? [])
+            .filter((mode) => mode !== ANTIGRAVITY_FULL_PERMISSIONS_MODE.id),
         };
         const current = options.get(key);
         if (current) {

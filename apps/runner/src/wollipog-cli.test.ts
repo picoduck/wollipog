@@ -1782,6 +1782,49 @@ test("CLI issue closure preserves the exact proposal and refuses other sessions 
   version = 193;
   assert.equal(await invoke(["issue-closure", "request", "--proposal", JSON.stringify(proposal), "--json"]), 1);
   assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
+
+  // Standalone Normal sessions require control plane protocol v412 for issue closure and ask-owner (#4894).
+  const standaloneEnv = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token",
+    WOLLIPOG_SESSION_ID: "solo" };
+  const invokeStandalone = (args: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", ...args], standaloneEnv, io, fetch);
+  calls.length = 0;
+  version = RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions - 1;
+  assert.equal(await invokeStandalone(["issue-closure", "request", "--proposal", JSON.stringify(proposal), "--json"]), 1);
+  assert.equal(await invokeStandalone(["decision", "ask-owner", "--request-id", "q1", "--resource-key", "k1",
+    "--kind", "question", "--question", "Which format?", "--options", "[]", "--json"]), 1);
+  assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")), "older peer never receives standalone calls");
+  version = PROTOCOL_VERSION;
+  assert.equal(await invokeStandalone(["issue-closure", "request", "--proposal", JSON.stringify(proposal), "--json"]), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/solo/github-issue-closures");
+  assert.equal(await invokeStandalone(["decision", "ask-owner", "--request-id", "q1", "--resource-key", "k1",
+    "--kind", "question", "--question", "Which format?", "--options", "[]", "--json"]), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/solo/owner-decisions");
+
+  // Custom Orchestrator root asking the owner against a v411 control plane gets v412 upgrade guidance
+  // before posting to /owner-decisions, while a Full Control root on v411 keeps working (#4894).
+  let orchestratorMode: "custom" | "full_control" = "custom";
+  const customFetch: McpFetch = async (url, init) => {
+    calls.push({ url, body: init?.body });
+    if (url.endsWith("/api/compatibility")) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions - 1 }) };
+    }
+    if (url.endsWith("/api/sessions/parent")) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ session: { id: "parent", orchestratorPolicy: { control: { mode: orchestratorMode } } } }) };
+    }
+    return { ok: true, status: 201, text: async () => JSON.stringify({ ok: true }) };
+  };
+  let customOut = "";
+  const customIo = { stdout: (s: string) => { customOut += s; }, stderr: (s: string) => { customOut += s; } };
+  calls.length = 0;
+  assert.equal(await runWollipogCli(["node", "cli.js", "--wollipog-cli", "decision", "ask-owner",
+    "--request-id", "cq1", "--resource-key", "ck1", "--kind", "question", "--question", "Proceed?", "--options", "[]", "--json"], env, customIo, customFetch), 1);
+  assert.match(customOut, /v412|Update Wollipog/u);
+  assert.ok(!calls.some((c) => c.url.endsWith("/owner-decisions")), "Custom root on v411 never posts to /owner-decisions");
+  orchestratorMode = "full_control";
+  calls.length = 0;
+  assert.equal(await runWollipogCli(["node", "cli.js", "--wollipog-cli", "decision", "ask-owner",
+    "--request-id", "fq1", "--resource-key", "fk1", "--kind", "question", "--question", "Proceed?", "--options", "[]", "--json"], env, io, customFetch), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/parent/owner-decisions");
 });
 
 test("CLI Location switch requests act only on the injected session and expose no approval command", async () => {

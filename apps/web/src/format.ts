@@ -1,4 +1,4 @@
-import type { AgentDriverKind, OS } from "@wollipog/protocol";
+import { ANTIGRAVITY_FULL_PERMISSIONS_MODE, type AgentDriverKind, type OS } from "@wollipog/protocol";
 
 export function relativeTime(ts: number | null): string {
   if (!ts) return "—";
@@ -317,6 +317,7 @@ export function serviceTierLabel(id: string): string {
 }
 
 export function permissionModeLabel(id: string, driver?: AgentDriverKind): string {
+  if (driver === "acp" && id === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) return ANTIGRAVITY_FULL_PERMISSIONS_MODE.name;
   if (driver === "codex" && id === "workspace-write") return "Auto (Workspace Sandbox)";
   return PERMISSION_LABELS[id] ?? id;
 }

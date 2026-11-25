@@ -111,9 +111,9 @@ A root's question to its owner, whatever the topic, is always an Owner Question 
 the owner about something you may decide yourself: resolve Orchestrator-owned implementation
 questions and accept, reject or defer follow-ups yourself. Never end a turn with a blocker that
 needs the owner without either a typed request or a recorded handoff with its reason and next
-action. When a Full Control campaign settles with human handoffs, the server keeps one Owner
-Question in the Inbox updated from that set; external handoffs are included but do not trigger it
-alone. Answering that question grants no authority.
+action. When a Full Control campaign settles with human handoffs, the server keeps one Campaign
+Handoffs status update in the Inbox. The update includes external handoffs when there is a human
+handoff. The owner can acknowledge the notice, and the items remain in Campaign Status.
 
 Children ask clarifications, preferences and design choices with `request_workflow_decision`,
 `category: "implementation_question"`, `kind: "question"` (protocol v332). These use normal question

@@ -119,7 +119,7 @@ test("Decline classifies once and refreshes the authoritative request", async ()
   } finally { await view.unmount(); }
 });
 
-test("a held campaign handoff can be dismissed without classifying it", async () => {
+test("a held campaign handoff can be acknowledged without classifying it", async () => {
   const request = heldQuestionCard();
   request.workflowDecision = { ...request.workflowDecision!, category: "owner_decision", resourceKey: "campaign_handoffs:owner",
     resourceSnapshot: { category: "owner_decision", kind: "question", question: "What should happen next?", options: [] } };
@@ -131,15 +131,49 @@ test("a held campaign handoff can be dismissed without classifying it", async ()
     onSessionUpdate={(updated) => updates.push(updated)} />, {
     campaignDecisions: async () => ({ campaignSessionId: session.id, canClassify: true, decisions: [],
       usage: { calls: 0, unpricedCalls: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0 } }),
-    classifyCampaignDecision: async () => { throw new Error("Plain dismissal must not classify the screen"); },
+    classifyCampaignDecision: async () => { throw new Error("Acknowledgment must not classify the screen"); },
     answerQuestion: async (...args) => { answers.push(args); return cleared; },
   });
   try {
-    const dismiss = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Dismiss");
-    assert.ok(dismiss);
-    await act(async () => { dismiss.click(); dismiss.click(); await tick(); });
+    const acknowledge = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Acknowledge");
+    assert.ok(acknowledge);
+    await act(async () => { acknowledge.click(); acknowledge.click(); await tick(); });
     assert.deepEqual(answers, [[session.id, { requestId: request.requestId, occurrenceId: request.occurrenceId, answers: {}, action: "dismiss" }]]);
     assert.deepEqual(updates, [cleared]);
+  } finally { await view.unmount(); }
+});
+
+test("the handoff preview opens on A and acknowledges once on D", async () => {
+  const base = heldQuestionCard();
+  const request: PendingApproval = {
+    ...base,
+    options: [],
+    workflowDecision: {
+      ...base.workflowDecision!,
+      category: "owner_decision",
+      resourceKey: "campaign_handoffs:owner",
+      authorityEvaluation: { ...base.workflowDecision!.authorityEvaluation!, reason: "owner_kept" },
+      resourceSnapshot: { category: "owner_decision", kind: "question", question: "What should happen next?", options: [] },
+    },
+  };
+  const session = sessionWith(request);
+  const intentRef = { current: null as RequestIntentHandler | null };
+  const answers: unknown[] = [];
+  let opened = 0;
+  const view = await render(<RequestCard session={session} request={request} runnerOnline presentation="dock"
+    intentRef={intentRef} onOpenHandoff={() => { opened++; }} />, {
+    answerQuestion: async (...args) => { answers.push(args); return sessionWith(null); },
+  });
+  try {
+    assert.equal(intentRef.current?.("approve"), true);
+    assert.equal(opened, 1);
+    assert.deepEqual(answers, []);
+    await act(async () => {
+      assert.equal(intentRef.current?.("deny"), true);
+      assert.equal(intentRef.current?.("deny"), true);
+      await tick();
+    });
+    assert.deepEqual(answers, [[session.id, { requestId: request.requestId, occurrenceId: request.occurrenceId, answers: {}, action: "dismiss" }]]);
   } finally { await view.unmount(); }
 });
 
@@ -521,6 +555,50 @@ test("a trust request's primary takes a click, not A, and D names only a one-tim
     }
   }
 });
+
+for (const scenario of [
+  { name: "D dismisses a docked campaign handoff exactly once with empty answers", intent: "deny", held: false },
+  { name: "A opens a docked campaign handoff without sending a response", intent: "approve", held: false },
+  { name: "D opens a classification-held docked campaign handoff without sending a response", intent: "deny", held: true },
+] as const) {
+  test(scenario.name, async () => {
+    const request = { ...heldQuestionCard(), requestId: "campaign-handoff", occurrenceId: "handoff-occurrence", options: [] };
+    request.workflowDecision = {
+      ...request.workflowDecision!, occurrenceId: request.occurrenceId, category: "owner_decision", resourceKey: "campaign_handoffs:owner",
+      authorityEvaluation: { ...request.workflowDecision!.authorityEvaluation!,
+        reason: scenario.held ? "credential_screen_review" : "owner_kept" },
+      resourceSnapshot: { category: "owner_decision", kind: "question", options: [],
+        question: "This campaign handed work to you. What should happen next?" },
+    };
+    const session = sessionWith(request);
+    const answers: unknown[] = [];
+    const approvals: unknown[] = [];
+    const opened: string[] = [];
+    const view = await render(<RequestDock session={session} requests={[request]} runnerOnline
+      onAnswerInSession={(requestId) => opened.push(requestId)} />, {
+      campaignDecisions: async () => ({ campaignSessionId: session.id, canClassify: false, decisions: [],
+        usage: { calls: 0, unpricedCalls: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0 } }),
+      answerQuestion: async (...args) => { answers.push(args); return sessionWith(null); },
+      approve: async (...args) => { approvals.push(args); return sessionWith(null); },
+    });
+    try {
+      assert.match(view.container.querySelector(".request-card")?.textContent ?? "", /Campaign Handoffs/u);
+      await act(async () => {
+        assert.equal(decideDockedRequest(session.id, scenario.intent), true);
+        // A repeated D before the response settles must not send a second dismissal.
+        if (!scenario.held && scenario.intent === "deny") {
+          assert.equal(decideDockedRequest(session.id, scenario.intent), true);
+        }
+        await tick();
+      });
+      assert.deepEqual(answers, !scenario.held && scenario.intent === "deny" ? [[session.id, {
+        requestId: request.requestId, occurrenceId: request.occurrenceId, answers: {}, action: "dismiss",
+      }]] : []);
+      assert.deepEqual(opened, scenario.held || scenario.intent === "approve" ? [request.requestId] : []);
+      assert.deepEqual(approvals, [], "handoff intents never send a permission decision");
+    } finally { await view.unmount(); }
+  });
+}
 
 test("a trust request's primary sends its trust option", async () => {
   const decisions: unknown[] = [];

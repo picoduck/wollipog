@@ -1141,6 +1141,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal
     : parsed.tool === "execute_workflow_decision"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.forgeDecisionActions
+    : parsed.tool === "request_owner_decision" && env.WOLLIPOG_PERMISSION_PRESET !== "orchestrator"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions
     : parsed.tool === "request_owner_decision" && parsed.input.kind === "question"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerQuestions
     : parsed.tool === "request_owner_decision" || parsed.tool === "hand_workflow_decision_to_owner"
@@ -1156,7 +1158,9 @@ export async function runWollipogCli(
     : ["get_campaign_issue_scope", "request_campaign_issue_scope_change"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueScopeChanges
     : ["request_github_issue_closure", "close_github_issue"].includes(parsed.tool)
-    ? RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure
+    ? env.WOLLIPOG_PERMISSION_PRESET === "orchestrator"
+      ? RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure
+      : RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions
     : parsed.tool === "allocate_campaign_budget"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission
     : parsed.tool === "request_review_session" && parsed.input.mode === "contributor"

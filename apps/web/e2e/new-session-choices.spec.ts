@@ -6,6 +6,7 @@ test.beforeEach(async ({ page }) => {
 });
 import { dialogMotionSettled } from "./dialog-motion.js";
 import { pinWidestFace } from "./font-geometry.js";
+import { expectNoHorizontalOverflow } from "./layout-invariants.js";
 
 /**
  * #832, in the only place that can answer it: a rendering engine.
@@ -54,6 +55,29 @@ async function openDialog(page: Page, query = "") {
   await page.goto(`/new-session-choices-e2e.html${query}`);
   await expect(page.getByRole("heading", { name: "New Session" })).toBeVisible();
   await dialogMotionSettled(page);
+}
+
+for (const viewport of [{ width: 390, height: 844 }, { width: 1440, height: 900 }]) {
+  test(`Antigravity starts in Auto Mode unless Full Permissions Mode is selected at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    const mode = page.getByRole("button", { name: /^Permission Mode:/ });
+    for (const full of [false, true]) {
+      await openDialog(page, "?antigravity=ready&savedAgent=google-antigravity");
+      await expect(mode).toHaveAccessibleName("Permission Mode: Auto Mode");
+      if (full) {
+        await mode.click();
+        const list = page.getByRole("listbox", { name: /Permission Mode/ });
+        await expectNoHorizontalOverflow(list, "Antigravity's Permission Mode choices");
+        await list.getByRole("option", { name: /Full Permissions Mode/ }).click();
+        await expect(mode).toHaveAccessibleName("Permission Mode: Full Permissions Mode");
+      }
+      const create = page.getByRole("button", { name: "Create Session" });
+      await expect(create).toBeInViewport();
+      await create.click();
+      await expect.poll(() => page.evaluate(() => document.documentElement.dataset.createSessionRequest))
+        .toContain(`"permissionMode":"${full ? "antigravity-full-permissions" : "auto"}"`);
+    }
+  });
 }
 
 test("selects a provider account and submits its opaque id", async ({ page }) => {

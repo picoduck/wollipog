@@ -17,7 +17,7 @@ import type {
   SessionConfig,
   SessionView,
 } from "@wollipog/protocol";
-import { runnerSupportsProtocol } from "@wollipog/protocol";
+import { ANTIGRAVITY_FULL_PERMISSIONS_MODE, runnerSupportsProtocol } from "@wollipog/protocol";
 import { ModelPickerList } from "./ModelPicker.js";
 import { isExactModelChoice } from "../model-picker.js";
 import { modelOptionLabel } from "../agent-presentation.js";
@@ -871,7 +871,8 @@ export function serviceTierChoices(
 
 /** A mode that runs every action without command approvals: the shield's amber risk warning. */
 function skipsApprovals(permissionMode: string | undefined): boolean {
-  return permissionMode === "bypassPermissions" || permissionMode === "danger-full-access";
+  return permissionMode === "bypassPermissions" || permissionMode === "danger-full-access" ||
+    permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id;
 }
 
 /**
@@ -966,6 +967,11 @@ export function advertisedPermissionMode(
   mode: string | undefined,
 ): { label: string; description: string } | undefined {
   if (driver !== "acp" || !mode) return undefined;
+  // Wollipog's own mode, not the agent's: the runner approves every request agy sends.
+  if (mode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) {
+    return { label: ANTIGRAVITY_FULL_PERMISSIONS_MODE.name,
+      description: "Wollipog approves every action Antigravity asks about, without asking you. Runner isolation still applies." };
+  }
   const entry = capabilities?.agentPermissionModes?.find((candidate) => candidate.id === mode);
   if (!entry) return undefined;
   // The agent's words, said as its own: Wollipog can't verify what an agent-owned mode permits (agy

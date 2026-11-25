@@ -1,5 +1,6 @@
 import { OWNER_CONFIRMATION_NOTICE_PREFIX, type PromptSessionMessage, type WollipogPromptOrigin } from "@wollipog/protocol";
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
+import { ANTIGRAVITY_AGENT_ID, ANTIGRAVITY_AUTO_MODE, managedWorktreeUnsupportedReason } from "@wollipog/protocol";
 import { isProviderCapacityFailure, PROVIDER_RETRY_CONTINUATION } from "./provider-turn-retry.js";
 import { artifactGuidance } from "./artifact-guidance.js";
 import { providerCommandHomeWriteSeparationDiagnostic } from "./provider-command-home-write-separation.js";
@@ -794,6 +795,13 @@ interface SteeringOperation {
 }
 
 interface ActiveSession {
+  /** A fresh ACP conversation this launch creates: the folder it is created in and, when it replaces
+   * a conversation in another folder, that folder until its handoff is delivered. Written with the
+   * conversation's id by `captureAgentSessionId`, never before. */
+  freshConversation?: { cwd: string; handoffFrom?: string };
+  /** Set while a worktree-switch relaunch is still starting (#4902): a provider that exits then
+   * leaves the session idle with the error, as a rejected start does, rather than Failed. */
+  recoverableLaunch?: true;
   /** False only when this exact launch has no host package filesystem sandbox. */
   codexPackageSandboxed?: boolean;
   /** Immutable package-denial snapshot from this exact native provider launch. */
@@ -1013,8 +1021,14 @@ export function effectiveAcpCompatibility(
   isolation: SpawnIsolation | undefined,
 ): Pick<DriverOptions, "acpCompatibility"> {
   if (!compatibility) return {};
-  return { acpCompatibility: isolation ? { ...compatibility, resumable: false } : compatibility };
+  // A sandbox makes agy's state directory read-only unless it preserves the provider home.
+  const stateReadOnly = isolation && !(isolation.backend === "bwrap" && isolation.preservesProviderHome);
+  return { acpCompatibility: stateReadOnly ? { ...compatibility, resumable: false } : compatibility };
 }
+
+/** Bound on the conversation carried into a fresh Antigravity conversation (`conversationHandoff`):
+ * the newest turns that fit, so the seed stays a modest share of one prompt. */
+const CONVERSATION_HANDOFF_MAX_CHARS = 24_000;
 
 function canResumeSession(meta: SessionMeta): boolean {
   if (meta.driver === "acp") {
@@ -2179,6 +2193,18 @@ export class SessionManager {
   /** Called by the host bootstrap, and again after a configured Workspace is removed (#4123). */
   setConfiguredProjectPaths(paths: readonly string[]): void {
     this.configuredProjectPaths = [...paths];
+  }
+
+  /** Conversations (by session) that accepted their handoff while clearing its marker failed. A
+   * relaunch in this process retries the clear instead of re-sending the history; across a runner
+   * crash in that window the handoff is delivered again (at least once). */
+  private readonly deliveredHandoffs = new Map<string, string>();
+
+  /** Agent ids the operator configured, set by the host bootstrap. A configured agent that reuses
+   * Antigravity's id launches without Antigravity's profile (#4901). */
+  private configuredAgentIds: ReadonlySet<string> = new Set();
+  setConfiguredAgentIds(ids: Iterable<string>): void {
+    this.configuredAgentIds = new Set(ids);
   }
 
   /** Called by the host bootstrap, and again after a configured Workspace is removed (#4123);
@@ -3805,6 +3831,8 @@ export class SessionManager {
       if (meta.executionTarget && meta.executionTarget.adapter !== "host") {
         throw new Error("session worktrees are available only on host execution targets");
       }
+      const managedWorktreeRefusal = this.managedWorktreeRefusal(meta);
+      if (managedWorktreeRefusal) throw new Error(managedWorktreeRefusal);
       const options = {
         context: meta.context,
         dataDir: this.dataDir,
@@ -4251,6 +4279,12 @@ export class SessionManager {
         );
       }
       const selected = { ...worktree, path: verified.path };
+      // The same boundary `requiresManagedWorktreeBwrap` applies at launch: refuse while the
+      // provider still runs where it is, rather than after it is retired (#4901, #4902).
+      const managedWorktreeRefusal = selected.source !== "attached" || selected.reusedInPlace === true
+        ? this.managedWorktreeRefusal(meta)
+        : null;
+      if (managedWorktreeRefusal) throw new Error(managedWorktreeRefusal);
       if (selected.setup?.status === "failed") {
         throw new Error("required worktree setup must be retried before selection");
       }
@@ -8717,7 +8751,30 @@ export class SessionManager {
     }
     durable?.queued();
     // A session persisted on the retired exec driver stays readable but never starts again (#3259).
-    const launchRefusal = launchAssertionError ?? (isRetiredCodexExec(meta) ? CODEX_EXEC_RETIRED_REASON : undefined);
+    // Nor does one whose agent a managed worktree's sandbox cannot run (#4901). Judged by the checkout
+    // this launch will use, read from the row the serialized write above refreshed (`prior`), as the
+    // materialization below reads it: a selected attached worktree is reattached unsandboxed, and only
+    // a runner-created one (or a new one) is sandboxed. Refused here, after the session record exists
+    // so the refusal is published as its status, and before any worktree is made.
+    const restartSelection = shouldUseWorktree && prior?.repoPath === repoPath &&
+        agentContextKey(prior.context) === agentContextKey(context) && prior.worktreePath
+      ? { path: prior.worktreePath, branch: prior.worktreeBranch,
+          row: prior.worktrees?.find((item) => sameWorktreePath(prior!.context, item.path, prior!.worktreePath!)) }
+      : undefined;
+    const targetsManagedWorktree = restartSelection?.row
+      ? restartSelection.row.source !== "attached" || restartSelection.row.reusedInPlace === true
+      : shouldUseWorktree;
+    const managedWorktreeRefusal = targetsManagedWorktree ? this.managedWorktreeRefusal(meta) : null;
+    if (managedWorktreeRefusal) {
+      // The replacement record starts without a selection, which materialization would restore. The
+      // session keeps the worktree it had, so its Files and shells still open there, not the base.
+      this.store.patchMeta(spec.sessionId, {
+        worktreePending: false,
+        ...(restartSelection ? { worktreePath: restartSelection.path, worktreeBranch: restartSelection.branch } : {}),
+      });
+    }
+    const launchRefusal = launchAssertionError ??
+      (isRetiredCodexExec(meta) ? CODEX_EXEC_RETIRED_REASON : managedWorktreeRefusal ?? undefined);
     if (launchRefusal) {
       this.emitEvent(spec.sessionId, { kind: "error", message: launchRefusal });
       this.emitStatus(spec.sessionId, "failed", launchRefusal);
@@ -10444,6 +10501,10 @@ export class SessionManager {
     resumeId: string | undefined,
     launchGeneration: number,
     approvedAuthentication?: ApprovedProviderAuthentication,
+    /** The relaunch after a worktree switch (#4902). Its conversation and history are intact, so a
+     * failure leaves the session idle with the error, where the next message or Restart retries,
+     * rather than Failed. Setup failures keep their own Retry Setup state either way. */
+    options: { recoverableFailure?: boolean } = {},
   ): Promise<boolean> {
     // A cache hit can expose the store's own object. Prepare only a launch-local copy.
     const meta = structuredClone(storedMeta);
@@ -10455,7 +10516,8 @@ export class SessionManager {
       ? this.providerHomeWaiter(meta, launchGeneration)
       : undefined;
     try {
-      return await this.launchPrepared(meta, resumeId, launchGeneration, approvedAuthentication, preparationHome, providerHomeWait);
+      return await this.launchPrepared(meta, resumeId, launchGeneration, approvedAuthentication, preparationHome,
+        providerHomeWait, options.recoverableFailure === true);
     } finally {
       if (providerHomeWait) this.endProviderHomeWait(meta.sessionId, launchGeneration);
       await preparationHome.settle();
@@ -10540,9 +10602,15 @@ export class SessionManager {
     approvedAuthentication: ApprovedProviderAuthentication | undefined,
     preparationHome: LaunchProviderHomeScope,
     providerHomeWait?: ProviderHomeWaiter,
+    recoverableFailure = false,
   ): Promise<boolean> {
     const launchStarted = Date.now();
     const sessionId = meta.sessionId;
+    // See `launch`'s `recoverableFailure`: the generic failure exits below report through this.
+    const failLaunch = (message: string, launchFailure?: SessionLaunchFailureCode): void => {
+      if (recoverableFailure) this.emitStatus(sessionId, "idle", message);
+      else this.emitStatus(sessionId, "failed", message, undefined, undefined, false, launchFailure);
+    };
     if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
     if (meta.review && (meta.review.update || meta.review.launchOwner !== this.lockOwner || resumeId)) {
       this.emitStatus(sessionId, "stopped", "A review session runs once and cannot be relaunched.");
@@ -10553,6 +10621,10 @@ export class SessionManager {
     this.emitStatus(sessionId, "starting");
     this.clearProviderHomeRefusal(sessionId);
     let cwd = meta.worktreePath ?? meta.repoPath;
+    /** The conversation so far, for a fresh Antigravity conversation that replaces a resume. */
+    let conversationHandoff: string | undefined;
+    /** The folder of the conversation a fresh Antigravity conversation replaces. */
+    let replacedConversationCwd: string | undefined;
     const worktree: WorktreeHandle | null = meta.worktreePath
       ? { path: meta.worktreePath, branch: meta.worktreeBranch ?? `agent/${sessionId}` }
       : null;
@@ -10624,8 +10696,47 @@ export class SessionManager {
         // Nothing may be spawned (#4779): fail the launch with the runner's sentence, as a failed
         // provider start would, before any isolation or provider process is set up.
         this.emitEvent(sessionId, { kind: "error", message: `agent init failed: ${launchPreparation.launchRefusal}` });
-        this.emitStatus(sessionId, "failed", launchPreparation.launchRefusal);
+        failLaunch(launchPreparation.launchRefusal);
         return false;
+      }
+      // agy fixes a conversation's working directory when it creates it: a resume in another folder
+      // still runs every command in the original one, whatever cwd the resume names or the process
+      // starts in. A launch that would resume across folders (a worktree switch, or any relaunch
+      // after one: parking, a runner restart, a retry) therefore starts a fresh conversation in this
+      // launch's folder, seeded once with the session's conversation so far, as T3 Code's
+      // create_with_handoff and Omnigent's Antigravity harness do. An explicit Restart never resumes
+      // an ACP conversation (`restartResumeId`), so it is a new conversation by design, unseeded.
+      // Unknown (an older session) keeps resuming.
+      const antigravityProfile = launchPreparation?.acpCompatibility?.profile === "antigravity";
+      if (resumeId && antigravityProfile &&
+          meta.providerConversationCwd && !sameWorktreePath(meta.context, meta.providerConversationCwd, cwd)) {
+        // Nothing is recorded until the fresh conversation's id is captured (`freshConversation`):
+        // a launch that fails first leaves the old conversation, its folder and no pending handoff,
+        // so a retry here seeds again and a return to the old folder resumes it untouched.
+        replacedConversationCwd = meta.providerConversationCwd;
+        conversationHandoff = this.conversationHandoff(sessionId, replacedConversationCwd, cwd);
+        resumeId = undefined;
+        this.emitEvent(sessionId, {
+          kind: "stderr",
+          text: "Google Antigravity keeps a conversation in the folder it started in, so this session continues " +
+            `in a new conversation in ${cwd}, given the conversation so far.`,
+        });
+      } else if (resumeId && antigravityProfile && meta.pendingConversationHandoffFrom &&
+          resumeId === meta.agentSessionId) {
+        if (this.deliveredHandoffs.get(sessionId) === resumeId) {
+          // Already accepted; only the marker's clear failed. Retry it, never re-send the history.
+          try {
+            this.store.patchMeta(sessionId, { pendingConversationHandoffFrom: undefined });
+            this.deliveredHandoffs.delete(sessionId);
+          } catch (error) {
+            this.log(`session ${sessionId} could not clear a delivered conversation handoff: ${errText(error)}`);
+          }
+        } else {
+          // The replacement was created but has not yet taken its handoff (it was parked, or the
+          // runner restarted, before its first ordinary prompt). The marker is written with this
+          // conversation's id, so it belongs to the conversation being resumed.
+          conversationHandoff = this.conversationHandoff(sessionId, meta.pendingConversationHandoffFrom, cwd);
+        }
       }
       // Repository setup values are resolved runner-side from the immutable base-commit config.
       // Apply them after agent-config refresh so they reach hooks and the provider without ever
@@ -10742,7 +10853,7 @@ export class SessionManager {
         return false;
       }
       this.emitEvent(sessionId, { kind: "error", message: `execution isolation unavailable: ${errText(error)}` });
-      this.emitStatus(sessionId, "failed", "Runner-owned execution isolation could not be established");
+      failLaunch("Runner-owned execution isolation could not be established");
       return false;
     }
 
@@ -10834,6 +10945,7 @@ export class SessionManager {
           ...effectiveAcpCompatibility(launchPreparation?.acpCompatibility, isolation),
           config: meta.config,
           artifactGuidance: meta.review ? "" : [artifactGuidance(meta, this.controlPlaneProtocolVersion()), shellGuidance(meta)].filter(Boolean).join(" "),
+          ...(conversationHandoff ? { acpConversationHandoff: conversationHandoff } : {}),
           ...(meta.review ? { review: true } : {}),
           ...(preparedProjectMemoryDirectory ? { projectMemoryDirectory: preparedProjectMemoryDirectory } : {}),
           orchestrator: meta.orchestrator,
@@ -10907,6 +11019,17 @@ export class SessionManager {
         },
         onStderr: (t) => this.onDriverStderr(sessionId, t),
         onExit: (code) => this.onDriverExit(sessionId, code, client),
+        onConversationHandoffDelivered: () => {
+          const live = this.active.get(sessionId);
+          if (live?.client === client && live.freshConversation) delete live.freshConversation.handoffFrom;
+          // Remembered before the durable clear: if that write fails, a relaunch in this runner
+          // process still knows the conversation has its handoff, and retries the clear instead of
+          // sending it again.
+          const accepted = client?.agentSessionId();
+          if (accepted) this.deliveredHandoffs.set(sessionId, accepted);
+          this.store.patchMeta(sessionId, { pendingConversationHandoffFrom: undefined });
+          this.deliveredHandoffs.delete(sessionId);
+        },
         onBackgroundWork: (update) => {
           // A retiring driver may emit an exit/null callback after a replacement owns the session.
           if (this.active.get(sessionId)?.client !== client) return;
@@ -11092,7 +11215,8 @@ export class SessionManager {
       const prefix = refusal ? "provider account unavailable"
         : error instanceof AcpLaunchRefusedError ? "agent init failed" : "agent process could not be created";
       this.emitEvent(sessionId, { kind: "error", message: `${prefix}: ${errText(error)}` });
-      this.emitStatus(sessionId, "failed", errText(error));
+      if (refusal) this.emitStatus(sessionId, "failed", errText(error));
+      else failLaunch(errText(error));
       if (refusal) this.recordProviderHomeRefusal(sessionId, refusal);
       return false;
     }
@@ -11113,6 +11237,10 @@ export class SessionManager {
         .filter((path) => path !== cwd && !!isolation.writableBinds?.some((bind) => bind.target === path))
       : [];
     const entry: ActiveSession = {
+      ...(recoverableFailure ? { recoverableLaunch: true as const } : {}),
+      ...(meta.driver === "acp" && !resumeId
+        ? { freshConversation: { cwd, ...(replacedConversationCwd ? { handoffFrom: replacedConversationCwd } : {}) } }
+        : {}),
       orchestratorLaunchPolicy: meta.orchestrator,
       projectMemoryKey: effectiveProjectMemoryKey(meta),
       sessionId,
@@ -11319,8 +11447,7 @@ export class SessionManager {
       if (err instanceof CodexAppServerResumeError && err.retryable) {
         this.emitStatus(sessionId, "idle", `${errText(err)} — retry when the other app-server releases the thread`);
       } else {
-        this.emitStatus(sessionId, "failed", errText(err), undefined, undefined, false,
-          err instanceof CodexCommandSandboxUnavailableError ? err.launchFailure : undefined);
+        failLaunch(errText(err), err instanceof CodexCommandSandboxUnavailableError ? err.launchFailure : undefined);
       }
       retireUnlaunched();
       await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "driver initialization failed", launchGeneration);
@@ -11330,6 +11457,8 @@ export class SessionManager {
       provider: meta.driver, sharing: meta.projectMemory.sharing,
       effective: preparedProjectMemoryDirectory ? meta.projectMemory.sharing : "account_native" }));
     this.log(`session ${sessionId} ready (cwd=${cwd}${resumeId ? ", resumed" : ""})`);
+    // Started: from here an exit is the running provider's, with the ordinary terminal statuses.
+    delete entry.recoverableLaunch;
     // Release prompts admitted while the provider was starting. Deferred so the caller first
     // activates the pre-launch FIFO, whose ordinals precede anything admitted during startup.
     setImmediate(() => {
@@ -11436,10 +11565,12 @@ export class SessionManager {
         path: protectedWorktree, gitWritableRoots, requiredReadOnlyPaths,
         ...(ownedWorktrees.length ? { ownedWorktrees } : {}),
       } } : {}),
-      // An ACP agent's home has no known preservable state; one whose compatibility profile accepts
-      // read-only state (Antigravity, #4779) runs in the protected worktree without it.
-      ...(protectedWorktree && this.executionIsolation.mode === "provider" &&
-        !(meta.driver === "acp" && this.launchAcpCompatibility.has(meta)) ? { preserveProviderHome: true } : {}),
+      // A generic ACP agent has no known state directory, so isolation refuses to preserve one.
+      // Antigravity's profile names agy's (~/.gemini/antigravity-cli): preserved, a relaunch in the
+      // worktree resumes its conversation, as one in place does.
+      ...(protectedWorktree && this.executionIsolation.mode === "provider" ? { preserveProviderHome: true } : {}),
+      ...(protectedWorktree && this.launchAcpCompatibility.get(meta)?.profile === "antigravity"
+        ? { antigravityTerminalHelper: true } : {}),
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(guardStateMask ? { guardStateMask } : {}),
       ...(this.strictProjectIsolation(meta) ? { orchestratorScratchOnly: true } : {}),
@@ -11471,6 +11602,64 @@ export class SessionManager {
   private rememberAcpCompatibility(meta: SessionMeta, preparation: SessionLaunchPreparation | void | undefined): void {
     if (preparation?.acpCompatibility) this.launchAcpCompatibility.set(meta, preparation.acpCompatibility);
     else this.launchAcpCompatibility.delete(meta);
+  }
+
+  /** The conversation so far, to seed a fresh Antigravity conversation that replaces a resume in
+   * another folder. Only the person's messages and the agent's top-level replies are carried, the
+   * newest first kept within a bound: agy has no API to inject history, so this rides once ahead of
+   * the next prompt, and tool calls are not replayed (as in Omnigent's Antigravity harness). */
+  private conversationHandoff(sessionId: string, fromCwd: string, toCwd: string): string {
+    const turns: Array<{ role: "user" | "assistant"; text: string; open: boolean }> = [];
+    for (const { payload } of this.store.readEvents(sessionId)) {
+      if (payload.kind === "user_message" && payload.text.trim()) {
+        turns.push({ role: "user", text: payload.text.trim(), open: false });
+      } else if (payload.kind === "agent_message" && !payload.parentToolUseId) {
+        const last = turns.at(-1);
+        if (last?.role === "assistant" && last.open) {
+          last.text = payload.final && payload.text.trim() ? payload.text : last.text + payload.text;
+        } else if (payload.text.trim()) {
+          turns.push({ role: "assistant", text: payload.text, open: true });
+        }
+        if (payload.final) turns.at(-1)!.open = false;
+      } else if (payload.kind === "agent_response_completed") {
+        const last = turns.at(-1);
+        if (last) last.open = false;
+      }
+    }
+    const lines: string[] = [];
+    let size = 0;
+    for (const turn of [...turns].reverse()) {
+      const line = `${turn.role}: ${turn.text.trim()}`;
+      if (lines.length && size + line.length > CONVERSATION_HANDOFF_MAX_CHARS) {
+        lines.push("[earlier conversation omitted]");
+        break;
+      }
+      lines.push(line.length > CONVERSATION_HANDOFF_MAX_CHARS ? `${line.slice(0, CONVERSATION_HANDOFF_MAX_CHARS)}…` : line);
+      size += line.length;
+    }
+    return [
+      `[Wollipog] This session moved from ${fromCwd} to ${toCwd}. Google Antigravity cannot move a ` +
+        "conversation to another folder, so this is a new conversation that continues the earlier one. " +
+        `Work only in ${toCwd}. Tool calls and their results from before the move are not included.`,
+      ...(lines.length ? ["Conversation so far:", ...lines.reverse()] : []),
+      "Continue from here with the message below.",
+    ].join("\n");
+  }
+
+  /** Why this session's agent cannot launch in a managed worktree on this runner (#4901), or null.
+   * Checked before a worktree is created or selected and before a running provider is retired for
+   * a worktree switch, so the refusal never costs the session its worktree or its conversation. */
+  private managedWorktreeRefusal(meta: Pick<SessionMeta, "driver" | "agentId" | "context" | "executionTarget">): string | null {
+    return managedWorktreeUnsupportedReason({
+      os: process.platform === "linux" ? "linux" : process.platform === "darwin" ? "macos"
+        : process.platform === "win32" ? "windows" : undefined,
+      isolationMode: this.executionIsolation.mode,
+      driver: meta.driver,
+      agentId: meta.agentId,
+      ...(meta.agentId && this.configuredAgentIds.has(meta.agentId) ? { agentSource: "config" as const } : {}),
+      contextKind: meta.context.kind,
+      targetAdapter: meta.executionTarget?.adapter,
+    });
   }
 
   private requiresManagedWorktreeBwrap(meta: SessionMeta): boolean {
@@ -14678,7 +14867,14 @@ export class SessionManager {
           entry.policyHookToolCallIds = new Set();
           entry.policyHookDecisionEvents = new Map();
         }
-        if (next.config && !configsEqual(next.config, this.store.readMeta(sessionId)?.config)) {
+        const current = this.store.readMeta(sessionId);
+        if (next.config?.permissionMode === ANTIGRAVITY_AUTO_MODE.id &&
+            current?.driver === "acp" && current.agentId === ANTIGRAVITY_AGENT_ID &&
+            current.capabilities && !current.capabilities.permissionModes?.includes(ANTIGRAVITY_AUTO_MODE.id)) {
+          // A prompt queued during launch may still carry the pre-negotiation Auto default.
+          next.config = { ...next.config, permissionMode: current.config.permissionMode };
+        }
+        if (next.config && !configsEqual(next.config, current?.config)) {
           // Apply the config THIS prompt was sent with (see QueuedPrompt.config). Drivers pick
           // config up at turn start, so setting it here is exactly "this turn runs under it".
           try {
@@ -16822,13 +17018,22 @@ export class SessionManager {
     // provider-visible events. Event sequence is the established resume predicate used by the
     // normal stopped-session path and prevents a failed first conversation from becoming fresh.
     const hasConversation = (resumable?.seq ?? 0) > 0;
-    if (!resumable || (!resumeId && hasConversation) || (resumeId && !canResumeSession(resumable))) {
+    // `canResumeSession` reads what the launch being retired recorded. Judge the launch this switch
+    // will make as well (#4902): a managed worktree's sandbox can refuse an agent that ran in place.
+    const selectedRow = resumable ? this.attributedWorktreeForPath(resumable, selectedPath) : undefined;
+    const launchRefusal = resumable && selectedRow &&
+        (selectedRow.source !== "attached" || selectedRow.reusedInPlace === true)
+      ? this.managedWorktreeRefusal(resumable)
+      : null;
+    if (!resumable || launchRefusal || (!resumeId && hasConversation) || (resumeId && !canResumeSession(resumable))) {
       const retirement = this.retirementRebindPending(entry);
       this.failRetirementRebind(entry);
       entry.pendingWorktreeRebind = undefined;
       this.emitEvent(sessionId, {
         kind: "error",
-        message: retirement
+        message: launchRefusal
+          ? `The session stays where it is. ${launchRefusal}`
+          : retirement
           ? "this provider conversation cannot resume, so the provider keeps its launch sandbox after one of " +
             "its worktrees was retired; restart the session to drop it"
           : "the selected worktree cannot resume this provider conversation",
@@ -16967,7 +17172,8 @@ export class SessionManager {
       }
       try {
         launched = await this.launch(
-          { ...fresh, worktreePath: verifiedWorktreePath }, resumeId, launchGeneration,
+          { ...fresh, worktreePath: verifiedWorktreePath }, resumeId, launchGeneration, undefined,
+          { recoverableFailure: true },
         );
       } catch (error) {
         // launch() contains expected preparation/driver failures. This final boundary keeps an
@@ -21316,10 +21522,24 @@ export class SessionManager {
   }
 
   /** Persist the agent-native resumable id once it's known (claude immediately, codex after turn 1). */
+  /** A fresh ACP conversation's facts (where it was created, and the handoff it still needs) are
+   * written in the same patch as its id, whichever caller captures it first: they must never be
+   * observed beside another conversation's id, after a crash or a concurrent worktree selection. */
   private captureAgentSessionId(sessionId: string, client: Driver): void {
     const aid = client.agentSessionId();
-    if (aid && this.store.readMeta(sessionId)?.agentSessionId !== aid) {
-      const updated = this.store.patchMeta(sessionId, { agentSessionId: aid, handoffPending: undefined });
+    const entry = this.active.get(sessionId);
+    const fresh = entry?.client === client ? entry.freshConversation : undefined;
+    const current = this.store.readMeta(sessionId);
+    // Capture only ever adds these facts. Clearing a delivered handoff's marker belongs to delivery
+    // alone (`onConversationHandoffDelivered`), so a failed clear never turns into another write here
+    // that could fail a turn the agent already completed.
+    const with_: Partial<SessionMeta> = fresh
+      ? { providerConversationCwd: fresh.cwd, ...(fresh.handoffFrom ? { pendingConversationHandoffFrom: fresh.handoffFrom } : {}) }
+      : {};
+    const stale = fresh && (current?.providerConversationCwd !== fresh.cwd ||
+      (fresh.handoffFrom !== undefined && current?.pendingConversationHandoffFrom !== fresh.handoffFrom));
+    if (aid && (current?.agentSessionId !== aid || stale)) {
+      const updated = this.store.patchMeta(sessionId, { agentSessionId: aid, handoffPending: undefined, ...with_ });
       if (updated && runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "sessionRestartResume")) {
         this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       }
@@ -21452,7 +21672,11 @@ export class SessionManager {
         // between turns completed it; one that cut a turn short, a non-zero code, or a signal failed it.
         this.fenceExitedProvider(sessionId, expectedClient);
         const turnCut = entry.running || entry.providerInitiatedTurnActive;
-        if (code === 0 && !turnCut) this.emitStatus(sessionId, "completed", "agent exited (code 0)");
+        // A worktree-switch relaunch that exits while starting keeps the session usable (#4902).
+        if (entry.recoverableLaunch) {
+          this.emitStatus(sessionId, "idle", `agent exited while starting in the selected worktree (${
+            code === null ? "signal" : `code ${code}`}); send a message to retry`);
+        } else if (code === 0 && !turnCut) this.emitStatus(sessionId, "completed", "agent exited (code 0)");
         else if (code === 0) this.emitStatus(sessionId, "failed", "agent exited (code 0) during a turn");
         else if (code === null) this.emitStatus(sessionId, "failed", "agent exited by a signal");
         else this.emitStatus(sessionId, "failed", `agent exited ${code}`);
@@ -22498,6 +22722,9 @@ export class SessionManager {
     if (typeof providerTurnId !== "string" || !bounded(providerTurnId, 512)) {
       return fail(occurrenceId, "Codex has not confirmed a provider turn for the current turn");
     }
+    const admissionRefusal = active.client.workflowActionAdmissionRefusal?.(occurrenceId, raw.commandDigest)
+      ?? (active.client.workflowActionAdmissionRefusal ? null : "the provider admission input is unavailable");
+    if (admissionRefusal) return fail(occurrenceId, admissionRefusal);
     const payload: WorkflowActionAdmissionArmedEvent = {
       kind: "workflow_action_admission_armed",
       occurrenceId,
@@ -22651,6 +22878,82 @@ export class SessionManager {
       const agentEnv = options.agentEnv?.(meta) ?? {};
       const neutral = meta.context?.kind === "wsl" ? "/" : parsePath(tmpdir()).root;
       const gh = options.gh ?? contextGhRunner(meta.context, neutral, agentEnv);
+      const verifyBoundLocation = message.location
+        ? async (): Promise<{ outcome: ForgeDecisionActionOutcome; refusal?: { reason: ForgeDecisionActionRefusalReason; summary: string } } | null> => {
+          const currentMeta = this.store.readMeta(message.sessionId);
+          if (!currentMeta) {
+            return {
+              outcome: "refused",
+              refusal: { reason: "runner_unavailable", summary: "The session is not known to this runner." },
+            };
+          }
+          const expectedWorkspaceId = typeof message.location?.workspaceId === "string" ? message.location.workspaceId : "";
+          const expectedWorkspacePath = typeof message.location?.workspacePath === "string" ? message.location.workspacePath : "";
+          const expectedRepository = typeof message.location?.repository === "string" ? message.location.repository.toLowerCase() : "";
+          const actionRepository = "repository" in message.action && typeof message.action.repository === "string"
+            ? message.action.repository.toLowerCase() : "";
+          const stripTrailing = (p: string) => p.length > 1 ? p.replace(/[\\/]+$/u, "") : p;
+          let pathMatches = Boolean(currentMeta.repoPath && expectedWorkspacePath &&
+            stripTrailing(currentMeta.repoPath) === stripTrailing(expectedWorkspacePath));
+          if (!pathMatches && currentMeta.repoPath && expectedWorkspacePath && currentMeta.context?.kind !== "wsl") {
+            try {
+              pathMatches = (await realpath(currentMeta.repoPath)) === (await realpath(expectedWorkspacePath));
+            } catch {
+              pathMatches = false;
+            }
+          }
+          if (!expectedWorkspaceId || !expectedWorkspacePath || !expectedRepository ||
+              (actionRepository && actionRepository !== expectedRepository) ||
+              currentMeta.workspaceId !== expectedWorkspaceId || !pathMatches) {
+            return {
+              outcome: "refused",
+              refusal: {
+                reason: "repository_mismatch",
+                summary: "The session's workspace no longer matches the approved GitHub repository; nothing was performed.",
+              },
+            };
+          }
+          let origin: string | undefined | null;
+          try {
+            const run = issueClosureRun(currentMeta.context, currentMeta.repoPath, options.agentEnv?.(currentMeta) ?? {});
+            origin = githubSlug((await run("git", ["remote", "get-url", "origin"])).trim());
+          } catch {
+            return {
+              outcome: "refused",
+              refusal: {
+                reason: "forge_unavailable",
+                summary: "The session's repository origin could not be read; nothing was performed.",
+              },
+            };
+          }
+          if (!origin || origin.toLowerCase() !== expectedRepository) {
+            return {
+              outcome: "refused",
+              refusal: {
+                reason: "repository_mismatch",
+                summary: "The session's repository no longer matches the approved GitHub repository; nothing was performed.",
+              },
+            };
+          }
+          // Re-check live metadata synchronously after awaiting git so a Location switch committed
+          // while reading origin cannot proceed into a forge write.
+          const latestMeta = this.store.readMeta(message.sessionId);
+          if (!latestMeta || latestMeta.workspaceId !== expectedWorkspaceId || latestMeta.repoPath !== currentMeta.repoPath) {
+            return {
+              outcome: "refused",
+              refusal: {
+                reason: "repository_mismatch",
+                summary: "The session's workspace changed while verifying the repository; nothing was performed.",
+              },
+            };
+          }
+          return null;
+        }
+        : undefined;
+      if (verifyBoundLocation) {
+        const locationRefusal = await verifyBoundLocation();
+        if (locationRefusal) return { ...base, ...locationRefusal };
+      }
       if (message.action?.kind === "ci_rerun" || message.action?.kind === "ci_rerun_inspect_job" ||
           message.action?.kind === "release_tag" || message.action?.kind === "release_publish") {
         const action = message.action;
@@ -22687,9 +22990,9 @@ export class SessionManager {
       const result = message.action?.kind === "temporary_branch_create" || message.action?.kind === "temporary_branch_deletion"
         ? await executeTemporaryBranch(message.action, gh)
         : message.action?.kind === "branch_deletion"
-        ? await executeBranchDeletion(message.action, gh)
+        ? await executeBranchDeletion(message.action, gh, verifyBoundLocation)
         : message.action?.kind === "pr_merge_enqueue"
-          ? await executePullRequestEnqueue(message.action, gh)
+          ? await executePullRequestEnqueue(message.action, gh, verifyBoundLocation)
           : message.action?.kind === "pr_merge_retirement_observe"
             ? await observePullRequestRetirement(message.action, gh)
           : message.action?.kind === "pr_merge_observe"
@@ -22943,7 +23246,12 @@ export class SessionManager {
       prepared.commit();
       return { ...await prepared.finished, ...base };
     }
-    if (!meta?.orchestrator || !meta.repoPath) {
+    const standalone = message.standalone === true;
+    if (standalone) {
+      if (!meta || meta.orchestrator || !meta.repoPath || !meta.workspaceId) {
+        return { ...base, ok: false, failure: "runner_failed", error: "Standalone issue closure requires a runner-local non-Orchestrator registered workspace" };
+      }
+    } else if (!meta?.orchestrator || !meta.repoPath) {
       return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires a runner-local Orchestrator repository" };
     }
     if (this.campaignHostTargetRefusal(meta)) {
@@ -22957,13 +23265,14 @@ export class SessionManager {
       } catch (error) { return issueClosureFailure(base, error); }
     }
     const issue = message.operation === "inspect" ? message.issue : message.snapshot.issue;
-    if (!meta.orchestrator.issueNumbers?.includes(issue)) {
+    if (!standalone && !meta.orchestrator?.issueNumbers?.includes(issue)) {
       return { ...base, ok: false, failure: "campaign_authority_changed", error: "Issue is outside the human-authorized campaign scope" };
     }
     const revision = message.operation === "inspect" ? message.scopeRevision : message.snapshot.scopeRevision;
-    if (meta.orchestrator.issueScope && revision !== meta.orchestrator.issueScope.revision) return { ...base, ok: false, failure: "campaign_authority_changed", error: "Campaign scope revision is stale; synchronize and request renewed review" };
+    if (!standalone && meta.orchestrator?.issueScope && revision !== meta.orchestrator.issueScope.revision) return { ...base, ok: false, failure: "campaign_authority_changed", error: "Campaign scope revision is stale; synchronize and request renewed review" };
     const boundedAuthorityCurrent = (current: SessionMeta): boolean => {
       if (message.operation !== "execute" || !message.snapshot.issueAdmission) return true;
+      if (standalone) return false;
       const control = current.orchestrator?.control;
       return control?.mode === "full_control" && validCampaignControl(control) &&
         control.boundary.issueScopeRevision === revision &&
@@ -22977,10 +23286,22 @@ export class SessionManager {
     try {
       if (message.operation === "inspect") {
         const inspection = await inspectGithubIssueClosure(issue, run, message.deliveryPullRequests, message.epicMembers === true, message.campaignPullRequests);
-        if (meta.orchestrator.issueScope && inspection.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, failure: "repository_changed", error: "Repository differs from the authorized scope" };
+        if (standalone) {
+          if (message.expectedRepository && inspection.repository.toLowerCase() !== message.expectedRepository.toLowerCase()) {
+            return { ...base, ok: false, failure: "repository_changed", error: "Repository differs from the verified Project Location" };
+          }
+        } else if (meta.orchestrator?.issueScope && inspection.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) {
+          return { ...base, ok: false, failure: "repository_changed", error: "Repository differs from the authorized scope" };
+        }
         return { ...base, ok: true, inspection };
       }
-      if (meta.orchestrator.issueScope && message.snapshot.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the authorized scope" };
+      if (standalone) {
+        if (message.expectedRepository && message.snapshot.repository.toLowerCase() !== message.expectedRepository.toLowerCase()) {
+          return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the verified Project Location" };
+        }
+      } else if (meta.orchestrator?.issueScope && message.snapshot.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) {
+        return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the authorized scope" };
+      }
       const digest = createHash("sha256").update(JSON.stringify(message.snapshot)).digest("hex");
       if (message.snapshot.campaignPullRequests !== undefined && (message.prepare !== true || message.campaignPullRequests === undefined)) {
         return { ...base, ok: false, failure: "campaign_authority_changed", error: "Filtered closure requires fresh campaign PR context and a separate commit" };
@@ -22989,15 +23310,20 @@ export class SessionManager {
         const fresh = this.store.readMeta(message.sessionId);
         const attempts = fresh?.githubIssueClosureAttempts ?? {};
         if (!fresh || attempts[message.occurrenceId] || Object.keys(attempts).length >= 1000 ||
-            isTerminal(fresh.status) || !fresh.orchestrator?.issueNumbers?.includes(issue) ||
-            (fresh.orchestrator.issueScope && revision !== fresh.orchestrator.issueScope.revision)) return false;
-        if (message.snapshot.issueAdmission && (!boundedAuthorityCurrent(fresh) ||
-            fresh.controlPlaneLaunchId !== meta.controlPlaneLaunchId ||
-            JSON.stringify(fresh.orchestrator.control) !== JSON.stringify(meta.orchestrator?.control))) {
-          this.log(JSON.stringify({ event: "campaign_issue_closure_authority_changed", entryPoint: "closure_mutation_fence",
-            requestId: message.requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId,
-            boundaryRevision: message.snapshot.issueAdmission.boundaryRevision, scopeRevision: revision, outcome: "refused" }));
-          return false;
+            isTerminal(fresh.status)) return false;
+        if (standalone) {
+          if (fresh.orchestrator || !fresh.workspaceId || !fresh.repoPath) return false;
+        } else {
+          if (!fresh.orchestrator?.issueNumbers?.includes(issue) ||
+              (fresh.orchestrator.issueScope && revision !== fresh.orchestrator.issueScope.revision)) return false;
+          if (message.snapshot.issueAdmission && (!boundedAuthorityCurrent(fresh) ||
+              fresh.controlPlaneLaunchId !== meta.controlPlaneLaunchId ||
+              JSON.stringify(fresh.orchestrator.control) !== JSON.stringify(meta.orchestrator?.control))) {
+            this.log(JSON.stringify({ event: "campaign_issue_closure_authority_changed", entryPoint: "closure_mutation_fence",
+              requestId: message.requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId,
+              boundaryRevision: message.snapshot.issueAdmission.boundaryRevision, scopeRevision: revision, outcome: "refused" }));
+            return false;
+          }
         }
         return this.store.patchMeta(message.sessionId, {
           githubIssueClosureAttempts: { ...attempts, [message.occurrenceId]: digest },
