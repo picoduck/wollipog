@@ -15,6 +15,10 @@ export interface WorktreeCreateCoordinates {
   baseRef?: string;
   /** Recovery incident current when the create started. Metadata only; not part of the key. */
   recoveryId?: string;
+  /** Session credential that started or joined this create while live (#4904). Metadata only;
+   * not part of the key. Only recorded sessions may poll this exact operation if they go idle
+   * before creation finishes. */
+  initiatorSessionId?: string;
 }
 
 export interface WorktreeCreateCompletion {
@@ -33,6 +37,9 @@ export type WorktreeCreateOperation =
 interface Entry extends WorktreeCreateCoordinates {
   key: string;
   operation: WorktreeCreateOperation;
+  /** Live agent sessions that started or joined this exact operation and may collect its status
+   * even if their turn settles to `idle` before creation completes (#4904). */
+  authorizedPollerSessionIds: Set<string>;
   /** Set when a later selection turned a completed create into a failure for its own poller. */
   superseded?: boolean;
   expiry?: ReturnType<typeof setTimeout>;
@@ -65,31 +72,45 @@ export class WorktreeCreateCoordinator {
     private readonly createId: () => string = () => `worktree_${randomUUID().slice(0, 8)}`,
   ) {}
 
-  startOrJoin(
-    coordinates: WorktreeCreateCoordinates,
-    start: (requestId: string) => Promise<WorktreeCreateCompletion>,
-  ): WorktreeCreateOperation {
-    const key = JSON.stringify([
+  private coordinatesKey(coordinates: Pick<WorktreeCreateCoordinates, "runnerId" | "sessionId" | "baseRef" | "branch">): string {
+    return JSON.stringify([
       coordinates.runnerId,
       coordinates.sessionId,
       coordinates.baseRef ?? null,
       coordinates.branch,
     ]);
+  }
+
+  private isStaleForIncident(entry: Entry, recoveryId: string | undefined): boolean {
+    return entry.operation.status !== "in_progress" &&
+      recoveryId !== undefined && entry.recoveryId !== recoveryId;
+  }
+
+  startOrJoin(
+    coordinates: WorktreeCreateCoordinates,
+    start: (requestId: string) => Promise<WorktreeCreateCompletion>,
+  ): WorktreeCreateOperation {
+    const key = this.coordinatesKey(coordinates);
     const existing = this.entriesByKey.get(key);
     // A running create is always joined, whatever incident started it: a second would duplicate it.
     // A retained result is replaced only for a request made under a different recovery incident.
     // A request under no incident still joins: a successful create clears the incident, so that is
     // exactly how its own poller arrives to collect the result, and restarting would duplicate it.
-    const staleForIncident = existing !== undefined && existing.operation.status !== "in_progress" &&
-      coordinates.recoveryId !== undefined && existing.recoveryId !== coordinates.recoveryId;
-    if (existing && !staleForIncident) return existing.operation;
+    const staleForIncident = existing !== undefined && this.isStaleForIncident(existing, coordinates.recoveryId);
+    if (existing && !staleForIncident) {
+      if (coordinates.initiatorSessionId) existing.authorizedPollerSessionIds.add(coordinates.initiatorSessionId);
+      return existing.operation;
+    }
     if (existing) this.deleteEntry(existing);
 
     const id = this.createId();
+    const authorizedPollerSessionIds = new Set<string>();
+    if (coordinates.initiatorSessionId) authorizedPollerSessionIds.add(coordinates.initiatorSessionId);
     const entry: Entry = {
       ...coordinates,
       key,
       operation: { id, status: "in_progress" },
+      authorizedPollerSessionIds,
     };
     this.entriesByKey.set(key, entry);
     this.entriesById.set(id, entry);
@@ -116,6 +137,35 @@ export class WorktreeCreateCoordinator {
       });
 
     return entry.operation;
+  }
+
+  /** Whether an idle agent session still has at least one in-flight or unconsumed terminal create
+   * on `targetSessionId` that it started or joined while live (#4904). Used in pre-body auth. */
+  hasJoinableForInitiator(initiatorSessionId: string, targetSessionId: string): boolean {
+    for (const entry of this.entriesById.values()) {
+      if (entry.sessionId === targetSessionId && entry.authorizedPollerSessionIds.has(initiatorSessionId)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Join an already-started operation that `initiatorSessionId` started or joined while live.
+   * Never starts new work, so an idle session can only collect status for its own in-flight
+   * create (#4904). */
+  joinExisting(
+    coordinates: WorktreeCreateCoordinates & { initiatorSessionId: string },
+  ): WorktreeCreateOperation | null {
+    const existing = this.entriesByKey.get(this.coordinatesKey(coordinates));
+    if (!existing || this.isStaleForIncident(existing, coordinates.recoveryId)) return null;
+    if (!existing.authorizedPollerSessionIds.has(coordinates.initiatorSessionId)) return null;
+    return existing.operation;
+  }
+
+  hasJoinableOperation(
+    coordinates: WorktreeCreateCoordinates & { initiatorSessionId: string },
+  ): boolean {
+    return this.joinExisting(coordinates) !== null;
   }
 
   recordProgress(runnerId: string, message: SessionWorktreeProgressMessage): boolean {

@@ -131,6 +131,22 @@ test("only a live orchestrator TUI extends an exact credential into idle, never 
   }
 });
 
+test("an in-flight worktree create poll extends a valid credential only into idle, never terminal, sessions (#4904)", () => {
+  const base = {
+    credentialValid: true,
+    claimedSessionId: "s_worker",
+    hasInFlightWorktreeCreatePoll: true,
+    session: { id: "s_worker", status: "idle" },
+  };
+  assert.equal(isAuthenticatedAgentControlClaim(base), true);
+  assert.equal(isAuthenticatedAgentControlClaim({ ...base, credentialValid: false }), false);
+  assert.equal(isAuthenticatedAgentControlClaim({ ...base, claimedSessionId: "s_other" }), false);
+  assert.equal(isAuthenticatedAgentControlClaim({ ...base, hasInFlightWorktreeCreatePoll: false }), false);
+  for (const status of ["completed", "failed", "stopped"]) {
+    assert.equal(isAuthenticatedAgentControlClaim({ ...base, session: { ...base.session, status } }), false, status);
+  }
+});
+
 test("session-management REST access is method- and route-scoped to its published MCP tools", () => {
   for (const [method, route] of [
     ["GET", "/api/compatibility"],

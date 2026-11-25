@@ -173,3 +173,179 @@ test("a real ACP agent and the terminal it ran are proven gone after disposal", 
     await rm(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
+
+test("ACP tracks unsolicited post-end_turn wakeup activity as a provider-initiated turn and holds settlement while tools or permissions stay open (#4905)", async () => {
+  const child = fakeAgentProcess();
+  const writes: string[] = [];
+  const log: string[] = [];
+  child.stdin.setEncoding("utf8");
+  child.stdin.on("data", (chunk: string) => writes.push(chunk));
+  const client = new AcpClient({
+    command: "agent",
+    args: [],
+    cwd: process.cwd(),
+    env: {},
+  }, {
+    onEvent: (event) => log.push(`event:${event.kind}`),
+    onStderr: () => {},
+    onExit: () => {},
+    onProviderInitiatedTurn: (state, turnId) => log.push(`provider:${state}:${turnId}`),
+  }, {
+    spawn: () => child,
+    kill: () => {},
+    providerTurnSettleMs: 60,
+    providerTurnResponseSettleMs: 30,
+  });
+  try {
+    (client as unknown as { sessionId: string }).sessionId = "s_wakeup";
+    const sendNotification = (update: Record<string, unknown>) => {
+      child.stdout.write(JSON.stringify({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: { sessionId: "s_wakeup", update },
+      }) + "\n");
+    };
+
+    // Normal prompt turn owns its own updates and never opens a provider-initiated turn.
+    const promptPromise = client.prompt("launch background task");
+    await nextTask();
+    const promptReq = JSON.parse(writes.join("").trim().split("\n").at(-1)!) as { id: number };
+    sendNotification({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "starting" } });
+    child.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: promptReq.id, result: { stopReason: "end_turn" } }) + "\n");
+    assert.equal(await promptPromise, "end_turn");
+    assert.equal(log.some((entry) => entry.startsWith("provider:")), false);
+
+    // Runtime-state and trailing cancelled tool updates while idle must NOT start a wakeup turn.
+    sendNotification({ sessionUpdate: "usage_update", size: 1000, used: 100 });
+    sendNotification({ sessionUpdate: "session_info_update", title: "Background work" });
+    sendNotification({ sessionUpdate: "tool_call_update", toolCallId: "tc_cancelled", status: "cancelled" });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(log.some((entry) => entry.startsWith("provider:")), false);
+
+    // Background task finishes after end_turn -> unsolicited tool_call_update starts wakeup turn.
+    log.length = 0;
+    sendNotification({ sessionUpdate: "tool_call_update", toolCallId: "tc_bg", status: "completed" });
+    sendNotification({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "inspecting result" } });
+    sendNotification({ sessionUpdate: "tool_call", toolCallId: "tc_followup", title: "check", status: "in_progress" });
+    await nextTask();
+    assert.equal(log[0], "provider:started:acp-provider:1",
+      "provider-initiated turn must start before forwarding the first wakeup event");
+
+    // While tc_followup stays in_progress, the wakeup must NOT settle even past providerTurnSettleMs.
+    await new Promise((resolve) => setTimeout(resolve, 110));
+    assert.equal(log.some((entry) => entry.startsWith("provider:settled:")), false,
+      "an open tool call must hold the wakeup turn active");
+
+    // Complete the tool call and stream a reply; settlement emits agent_response_completed first.
+    sendNotification({ sessionUpdate: "tool_call_update", toolCallId: "tc_followup", status: "completed" });
+    sendNotification({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Done." } });
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    assert.deepEqual(log.slice(-2), ["event:agent_response_completed", "provider:settled:acp-provider:1"]);
+
+    // Unsolicited permission request after end_turn opens a wakeup and stays open until resolved.
+    log.length = 0;
+    let permRequestId = "";
+    const client2 = new AcpClient({
+      command: "agent",
+      args: [],
+      cwd: process.cwd(),
+      env: {},
+    }, {
+      onEvent: (event) => {
+        log.push(`event:${event.kind}`);
+        if (event.kind === "permission_request") permRequestId = event.requestId;
+      },
+      onStderr: () => {},
+      onExit: () => {},
+      onProviderInitiatedTurn: (state, turnId) => log.push(`provider:${state}:${turnId}`),
+    }, {
+      spawn: () => fakeAgentProcess(),
+      kill: () => {},
+      providerTurnSettleMs: 50,
+      providerTurnResponseSettleMs: 25,
+    });
+    try {
+      const child2 = (client2 as unknown as { child: AgentProcess }).child;
+      (client2 as unknown as { sessionId: string }).sessionId = "s_perm";
+      child2.stdout.write(JSON.stringify({
+        jsonrpc: "2.0",
+        id: 77,
+        method: "session/request_permission",
+        params: {
+          sessionId: "s_perm",
+          toolCall: { toolCallId: "tc_p", title: "run test" },
+          options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+        },
+      }) + "\n");
+      await nextTask();
+      assert.deepEqual(log, ["provider:started:acp-provider:1", "event:permission_request"]);
+      await new Promise((resolve) => setTimeout(resolve, 90));
+      assert.equal(log.some((entry) => entry.startsWith("provider:settled:")), false,
+        "a pending permission request must hold the wakeup turn active");
+      assert.equal(client2.resolvePermission(permRequestId, "allow"), true);
+      await new Promise((resolve) => setTimeout(resolve, 90));
+      assert.equal(log.at(-1), "provider:settled:acp-provider:1");
+    } finally {
+      client2.dispose();
+    }
+  } finally {
+    client.dispose();
+  }
+});
+
+test("ACP wakeup turn settles cleanly on synchronous cancel during started, prompt(), and dispose() (#4905)", async () => {
+  const child = fakeAgentProcess();
+  const lifecycle: string[] = [];
+  let client!: AcpClient;
+  client = new AcpClient({
+    command: "agent",
+    args: [],
+    cwd: process.cwd(),
+    env: {},
+  }, {
+    onEvent: () => {},
+    onStderr: () => {},
+    onExit: () => {},
+    onProviderInitiatedTurn: (state, turnId) => {
+      lifecycle.push(`${state}:${turnId}`);
+      // Mirror SessionManager Active Turn Capacity rejection calling client.cancel() synchronously
+      // inside onProviderInitiatedTurn("started").
+      if (state === "started" && turnId === "acp-provider:1") client.cancel();
+    },
+  }, {
+    spawn: () => child,
+    kill: () => {},
+    providerTurnSettleMs: 500,
+    providerTurnResponseSettleMs: 500,
+  });
+  try {
+    (client as unknown as { sessionId: string }).sessionId = "s_cancel";
+    child.stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId: "s_cancel", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "wake" } } },
+    }) + "\n");
+    await nextTask();
+    await nextTask();
+    assert.deepEqual(lifecycle, ["started:acp-provider:1", "settled:acp-provider:1"]);
+
+    // Starting a new prompt() settles an active wakeup turn first.
+    child.stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId: "s_cancel", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "wake 2" } } },
+    }) + "\n");
+    await nextTask();
+    assert.deepEqual(lifecycle, ["started:acp-provider:1", "settled:acp-provider:1", "started:acp-provider:2"]);
+    (client as unknown as { peer: { request: () => Promise<{ stopReason: string }> } }).peer.request = async () => ({ stopReason: "end_turn" });
+    assert.equal(await client.prompt("next user turn"), "end_turn");
+    assert.deepEqual(lifecycle, [
+      "started:acp-provider:1",
+      "settled:acp-provider:1",
+      "started:acp-provider:2",
+      "settled:acp-provider:2",
+    ]);
+  } finally {
+    client.dispose();
+  }
+});

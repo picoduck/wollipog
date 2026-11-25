@@ -101,6 +101,9 @@ export interface AcpEvents {
   onEvent: (payload: SessionEventPayload) => void;
   onStderr: (text: string) => void;
   onExit: (code: number | null) => void;
+  /** The ACP adapter emitted unsolicited turn activity after `session/prompt` returned
+   * (for example, a background-task completion wakeup in `agy acp`, #4905). */
+  onProviderInitiatedTurn?: (state: "started" | "settled", turnId: string) => void;
   onAuthStatus?: (status: "authenticated" | "unauthenticated") => void;
   onAcpCapabilities?: (capabilities: AcpRuntimeCapabilities) => void;
   onAcpSessionState?: (state: { capabilities: AgentCapabilities; config: SessionConfig }) => void;
@@ -115,7 +118,16 @@ interface AcpClientDeps {
   kill: typeof killTree;
   /** The host command that would give agy its Auto Mode back (tests inject a host's answer). */
   antigravityAppArmorFix: (executable: string | undefined) => string | undefined;
+  /** Quiet settle window after non-message unsolicited ACP updates (tool completion, thought, plan)
+   * with no open tool calls or permissions (#4905). Bridges model TTFB latency. */
+  providerTurnSettleMs: number;
+  /** Shorter quiet settle window once an unsolicited ACP wakeup has streamed assistant text and
+   * has no open tool calls or permissions (#4905). */
+  providerTurnResponseSettleMs: number;
 }
+
+const DEFAULT_ACP_PROVIDER_TURN_SETTLE_MS = 8_000;
+const DEFAULT_ACP_PROVIDER_TURN_RESPONSE_SETTLE_MS = 2_000;
 
 export interface AcpListedSession {
   sessionId: string;
@@ -147,6 +159,21 @@ export class AcpClient {
   private pendingSessionStateUpdates: SessionNotification[] = [];
   private replaySuppressedStateUpdates: SessionNotification[] = [];
   private streamedAgentResponse = false;
+  private promptInFlight = false;
+  /** Unsolicited post-`end_turn` ACP wakeup turn tracking (#4905). ACP v1 defines no explicit
+   * turn-end notification outside `session/prompt`, so unsolicited execution updates open a
+   * provider-initiated turn that stays active while tool calls, permissions, or client requests
+   * remain in flight and settles after a bounded quiet window. */
+  private providerTurnCounter = 0;
+  private providerTurnId: string | null = null;
+  private providerTurnStreamedResponse = false;
+  private providerTurnLastWasMessage = false;
+  private providerTurnCancelling = false;
+  private readonly providerTurnToolCalls = new Set<string>();
+  private providerTurnInFlightRequests = 0;
+  private providerTurnSettleTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly providerTurnSettleMs: number;
+  private readonly providerTurnResponseSettleMs: number;
   private readonly filesystem: AcpFilesystemService;
   private readonly terminals: AcpTerminalService;
   private readonly terminalEventOutput = new Map<string, { cursor: number }>();
@@ -234,6 +261,8 @@ export class AcpClient {
     this.terminals = new AcpTerminalService(this.filesystem, context, opts.isolation, { cgroup: opts.reviewWriterCgroup });
     this.kill = deps.kill ?? killTree;
     this.appArmorFix = deps.antigravityAppArmorFix ?? ((executable) => antigravityAppArmorFix(executable));
+    this.providerTurnSettleMs = deps.providerTurnSettleMs ?? DEFAULT_ACP_PROVIDER_TURN_SETTLE_MS;
+    this.providerTurnResponseSettleMs = deps.providerTurnResponseSettleMs ?? DEFAULT_ACP_PROVIDER_TURN_RESPONSE_SETTLE_MS;
     try {
       this.child = (deps.spawn ?? spawnAgent)({ ...opts, command: launch.command, env });
     } catch (error) {
@@ -258,6 +287,7 @@ export class AcpClient {
       this.terminals.dispose();
       this.peer.dispose("agent process exited");
       this.settlePendingPermissions();
+      this.settleProviderInitiatedTurn(false, !this.disposed);
       if (!this.disposed) this.ev.onExit(code);
     });
     this.child.on("error", (err) => {
@@ -270,6 +300,7 @@ export class AcpClient {
       this.terminals.dispose();
       this.peer.dispose(`spawn error: ${err.message}`);
       this.settlePendingPermissions();
+      this.settleProviderInitiatedTurn(false, false);
       this.ev.onExit(null);
     });
 
@@ -777,8 +808,10 @@ export class AcpClient {
       }
     }
     if (content.length === 0) content.push({ type: "text", text: "" });
+    if (this.providerTurnId !== null) this.settleProviderInitiatedTurn(true, true);
     this.streamedAgentResponse = false;
     this.antigravitySandboxDeniedInTurn = false;
+    this.promptInFlight = true;
     try {
       let res: PromptResponse;
       try {
@@ -813,6 +846,7 @@ export class AcpClient {
       return stopReason;
     } finally {
       // User-write barriers exist only to reject stale notifications racing the write/next turn.
+      this.promptInFlight = false;
       this.modeBarrier = null;
       this.configBarriers.clear();
       this.streamedAgentResponse = false;
@@ -837,6 +871,18 @@ export class AcpClient {
       this.permPending.delete(requestId);
       resolve(null);
     }
+    if (this.providerTurnId !== null && !this.providerTurnCancelling) {
+      this.providerTurnCancelling = true;
+      this.clearProviderTurnSettleTimer();
+      this.providerTurnToolCalls.clear();
+      const cancelledTurnId = this.providerTurnId;
+      // Defer settlement to the next turn of the event loop so a synchronous cancel() triggered
+      // inside SessionManager.onProviderInitiatedTurn("started") (e.g. Active Turn Capacity
+      // rejection) settles after the started callback records providerInitiatedTurnId.
+      setImmediate(() => {
+        if (this.providerTurnId === cancelledTurnId) this.settleProviderInitiatedTurn(false, true);
+      });
+    }
   }
 
   resolvePermission(requestId: string, optionId: string | null): boolean {
@@ -844,6 +890,10 @@ export class AcpClient {
     if (!resolve) return false;
     this.permPending.delete(requestId);
     resolve(optionId);
+    if (!this.promptInFlight && this.providerTurnId !== null && !this.providerTurnCancelling) {
+      this.providerTurnLastWasMessage = false;
+      this.refreshProviderTurnSettleTimer();
+    }
     return true;
   }
 
@@ -854,6 +904,7 @@ export class AcpClient {
     this.transportClosed = true;
     this.terminals.dispose();
     this.settlePendingPermissions();
+    this.settleProviderInitiatedTurn(false, false);
     this.peer.dispose("client disposed");
     this.kill(this.child);
   }
@@ -875,6 +926,115 @@ export class AcpClient {
   private settlePendingPermissions(): void {
     for (const [, resolve] of this.permPending) resolve(null);
     this.permPending.clear();
+  }
+
+  private clearProviderTurnSettleTimer(): void {
+    if (!this.providerTurnSettleTimer) return;
+    clearTimeout(this.providerTurnSettleTimer);
+    this.providerTurnSettleTimer = null;
+  }
+
+  private hasPendingTurnPermission(): boolean {
+    for (const requestId of this.permPending.keys()) {
+      if (requestId.startsWith("perm_")) return true;
+    }
+    return false;
+  }
+
+  private hasActiveProviderTurnWork(): boolean {
+    return this.providerTurnToolCalls.size > 0 ||
+      this.providerTurnInFlightRequests > 0 ||
+      this.hasPendingTurnPermission();
+  }
+
+  private ensureProviderInitiatedTurnStarted(): boolean {
+    if (this.disposed || this.promptInFlight || this.suppressUpdates || !this.sessionId || this.providerTurnCancelling) {
+      return false;
+    }
+    if (this.providerTurnId !== null) return true;
+    const turnId = `acp-provider:${++this.providerTurnCounter}`;
+    this.providerTurnId = turnId;
+    this.providerTurnStreamedResponse = false;
+    this.providerTurnLastWasMessage = false;
+    this.providerTurnToolCalls.clear();
+    this.ev.onProviderInitiatedTurn?.("started", turnId);
+    return !this.disposed && !this.providerTurnCancelling && this.providerTurnId === turnId;
+  }
+
+  private refreshProviderTurnSettleTimer(): void {
+    this.clearProviderTurnSettleTimer();
+    if (this.providerTurnId === null || this.providerTurnCancelling || this.disposed) return;
+    if (this.hasActiveProviderTurnWork()) return;
+    const delayMs = this.providerTurnLastWasMessage
+      ? this.providerTurnResponseSettleMs
+      : this.providerTurnSettleMs;
+    this.providerTurnSettleTimer = setTimeout(() => {
+      this.providerTurnSettleTimer = null;
+      this.settleProviderInitiatedTurn(true, true);
+    }, delayMs);
+  }
+
+  private settleProviderInitiatedTurn(emitResponseCompleted: boolean, notify: boolean): void {
+    this.clearProviderTurnSettleTimer();
+    const turnId = this.providerTurnId;
+    const streamed = this.providerTurnStreamedResponse;
+    this.providerTurnId = null;
+    this.providerTurnStreamedResponse = false;
+    this.providerTurnLastWasMessage = false;
+    this.providerTurnCancelling = false;
+    this.providerTurnToolCalls.clear();
+    this.providerTurnInFlightRequests = 0;
+    if (!turnId || !notify || this.disposed) return;
+    if (emitResponseCompleted && streamed) {
+      this.ev.onEvent({ kind: "agent_response_completed" });
+    }
+    this.ev.onProviderInitiatedTurn?.("settled", turnId);
+  }
+
+  private noteProviderTurnUpdate(
+    kind: "thought" | "message" | "plan" | "tool_call" | "tool_call_update",
+    tool?: { id: string; status: string | null | undefined },
+  ): void {
+    if (this.promptInFlight || this.providerTurnCancelling) return;
+    if (kind === "tool_call_update" && tool?.status === "cancelled" && this.providerTurnId === null) {
+      // A trailing cancelled tool update after an interrupted turn is not a new wakeup.
+      return;
+    }
+    if (!this.ensureProviderInitiatedTurnStarted()) return;
+    if (tool) {
+      if (tool.status === "completed" || tool.status === "failed" || tool.status === "cancelled") {
+        this.providerTurnToolCalls.delete(tool.id);
+      } else if (tool.status === "pending" || tool.status === "in_progress") {
+        this.providerTurnToolCalls.add(tool.id);
+      }
+    }
+    if (kind === "message") {
+      this.providerTurnStreamedResponse = true;
+      this.providerTurnLastWasMessage = true;
+    } else {
+      this.providerTurnLastWasMessage = false;
+    }
+    this.refreshProviderTurnSettleTimer();
+  }
+
+  private async runProviderTurnClientRequest<T>(fn: () => T | Promise<T>): Promise<T> {
+    if (this.promptInFlight || this.providerTurnCancelling || this.disposed) {
+      return await fn();
+    }
+    const tracked = this.ensureProviderInitiatedTurnStarted();
+    if (!tracked) return await fn();
+    this.providerTurnInFlightRequests += 1;
+    this.providerTurnLastWasMessage = false;
+    this.refreshProviderTurnSettleTimer();
+    try {
+      return await fn();
+    } finally {
+      this.providerTurnInFlightRequests = Math.max(0, this.providerTurnInFlightRequests - 1);
+      if (this.providerTurnId !== null && !this.providerTurnCancelling) {
+        this.providerTurnLastWasMessage = false;
+        this.refreshProviderTurnSettleTimer();
+      }
+    }
   }
 
   /* ----------------------- Inbound translation --------------------------- */
@@ -956,7 +1116,10 @@ export class AcpClient {
     switch (u.sessionUpdate) {
       case "agent_message_chunk": {
         const text = blockText(u.content as ContentBlock);
-        if (text) this.streamedAgentResponse = true;
+        if (text) {
+          if (this.promptInFlight) this.streamedAgentResponse = true;
+          else this.noteProviderTurnUpdate("message");
+        }
         this.ev.onEvent({
           kind: "agent_message",
           text,
@@ -964,37 +1127,46 @@ export class AcpClient {
         });
         break;
       }
-      case "agent_thought_chunk":
+      case "agent_thought_chunk": {
+        const text = blockText(u.content as ContentBlock);
+        if (text && !this.promptInFlight) this.noteProviderTurnUpdate("thought");
         this.ev.onEvent({
           kind: "agent_thought",
-          text: blockText(u.content as ContentBlock),
+          text,
           ...(typeof u.messageId === "string" && u.messageId ? { messageId: u.messageId } : {}),
         });
         break;
+      }
       case "user_message_chunk":
         this.ev.onEvent({ kind: "user_message", text: blockText(u.content as ContentBlock) });
         break;
-      case "tool_call":
+      case "tool_call": {
+        const toolCallId = u.toolCallId ?? "tool";
+        const status = u.status ?? "pending";
+        if (!this.promptInFlight) this.noteProviderTurnUpdate("tool_call", { id: toolCallId, status });
         this.ev.onEvent({
           kind: "tool_call",
-          toolCallId: u.toolCallId ?? "tool",
+          toolCallId,
           title: u.title ?? "tool",
           toolKind: u.kind,
-          status: u.status ?? "pending",
+          status,
           text: toolText(u.content),
         });
         this.emitDiffs(u.content);
         this.emitTerminalOutputs(u.content);
         break;
-      case "tool_call_update":
-        if (u.status === "completed" && this.antigravitySandboxExecutable &&
+      }
+      case "tool_call_update": {
+        const toolCallId = u.toolCallId ?? "tool";
+        if (this.promptInFlight && u.status === "completed" && this.antigravitySandboxExecutable &&
             (this.modes?.currentModeId ?? optionForCategory(this.configOptions, "mode")?.currentValue) === ANTIGRAVITY_AUTO_MODE.id &&
             antigravitySandboxSpawnDenied(u.rawOutput, this.antigravitySandboxExecutable)) {
           this.antigravitySandboxDeniedInTurn = true;
         }
+        if (!this.promptInFlight) this.noteProviderTurnUpdate("tool_call_update", { id: toolCallId, status: u.status });
         this.ev.onEvent({
           kind: "tool_call_update",
-          toolCallId: u.toolCallId ?? "tool",
+          toolCallId,
           status: u.status ?? "in_progress",
           title: u.title ?? undefined,
           text: toolText(u.content ?? undefined),
@@ -1002,7 +1174,9 @@ export class AcpClient {
         this.emitDiffs(u.content ?? undefined);
         this.emitTerminalOutputs(u.content ?? undefined);
         break;
+      }
       case "plan":
+        if (!this.promptInFlight) this.noteProviderTurnUpdate("plan");
         this.ev.onEvent({
           kind: "plan",
           entries: (u.entries ?? []).map((e) => ({
@@ -1011,6 +1185,10 @@ export class AcpClient {
             priority: e.priority as "low" | "medium" | "high" | undefined,
           })),
         });
+        break;
+      case "plan_update":
+      case "plan_removed":
+        if (!this.promptInFlight) this.noteProviderTurnUpdate("plan");
         break;
       case "available_commands_update":
         this.commands = this.orchestrator ? [] : normalizeAcpCommands(u.availableCommands);
@@ -1101,10 +1279,17 @@ export class AcpClient {
 
   private handlePermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
     if (this.disposed || this.orchestrator) return Promise.resolve({ outcome: { outcome: "cancelled" } });
+    const trackedProviderTurn = !this.promptInFlight && this.ensureProviderInitiatedTurnStarted();
     if (this.antigravityFullPermissions && this.offersAntigravityFullPermissions()) {
       const allow = params.options?.find((option) => option.kind === "allow_once") ??
         params.options?.find((option) => option.kind === "allow_always");
-      if (allow) return Promise.resolve({ outcome: { outcome: "selected", optionId: allow.optionId } });
+      if (allow) {
+        if (trackedProviderTurn) {
+          this.providerTurnLastWasMessage = false;
+          this.refreshProviderTurnSettleTimer();
+        }
+        return Promise.resolve({ outcome: { outcome: "selected", optionId: allow.optionId } });
+      }
     }
     const requestId = `perm_${++this.permCounter}`;
     const options: PermissionOption[] = (params.options ?? []).map((o) => ({
@@ -1121,6 +1306,10 @@ export class AcpClient {
         ),
       );
     });
+    if (trackedProviderTurn) {
+      this.providerTurnLastWasMessage = false;
+      this.refreshProviderTurnSettleTimer();
+    }
     this.ev.onEvent({
       kind: "permission_request",
       requestId,
@@ -1133,7 +1322,9 @@ export class AcpClient {
   private async handleRead(params: ReadTextFileRequest): Promise<ReadTextFileResponse> {
     this.assertActiveSession(params.sessionId);
     this.assertOrchestratorClientServiceRefused("filesystem reads");
-    return { content: await this.filesystem.read(params.path, params.line ?? undefined, params.limit ?? undefined) };
+    return this.runProviderTurnClientRequest(async () => ({
+      content: await this.filesystem.read(params.path, params.line ?? undefined, params.limit ?? undefined),
+    }));
   }
 
   private async handleWrite(params: WriteTextFileRequest): Promise<WriteTextFileResponse> {
@@ -1142,34 +1333,38 @@ export class AcpClient {
     // The runner writes outside the agent's sandbox; a profile that withholds the service (it was
     // never advertised to that agent) refuses any write the agent asks for anyway.
     if (!acpClientFileWritesOffered(this.compatibility)) throw new Error("ACP filesystem writes are not offered to this agent");
-    await this.filesystem.write(params.path, params.content);
-    this.ev.onEvent({ kind: "file_edit", path: params.path });
-    return {};
+    return this.runProviderTurnClientRequest(async () => {
+      await this.filesystem.write(params.path, params.content);
+      this.ev.onEvent({ kind: "file_edit", path: params.path });
+      return {};
+    });
   }
 
   private async handleTerminalCreate(params: CreateTerminalRequest): Promise<CreateTerminalResponse> {
     this.assertActiveSession(params.sessionId);
     this.assertOrchestratorClientServiceRefused("terminal commands");
-    return this.terminals.create(params);
+    return this.runProviderTurnClientRequest(() => this.terminals.create(params));
   }
 
-  private handleTerminalOutput(params: TerminalOutputRequest): TerminalOutputResponse {
+  private handleTerminalOutput(params: TerminalOutputRequest): Promise<TerminalOutputResponse> {
     this.assertActiveSession(params.sessionId);
     this.assertOrchestratorClientServiceRefused("terminal commands");
-    return this.terminals.output(params.sessionId, params.terminalId);
+    return this.runProviderTurnClientRequest(() => this.terminals.output(params.sessionId, params.terminalId));
   }
 
   private handleTerminalWait(params: WaitForTerminalExitRequest): Promise<WaitForTerminalExitResponse> {
     this.assertActiveSession(params.sessionId);
     this.assertOrchestratorClientServiceRefused("terminal commands");
-    return this.terminals.wait(params.sessionId, params.terminalId);
+    return this.runProviderTurnClientRequest(() => this.terminals.wait(params.sessionId, params.terminalId));
   }
 
-  private handleTerminalKill(params: KillTerminalRequest): Record<string, never> {
+  private handleTerminalKill(params: KillTerminalRequest): Promise<Record<string, never>> {
     this.assertActiveSession(params.sessionId);
     this.assertOrchestratorClientServiceRefused("terminal commands");
-    this.terminals.kill(params.sessionId, params.terminalId);
-    return {};
+    return this.runProviderTurnClientRequest(() => {
+      this.terminals.kill(params.sessionId, params.terminalId);
+      return {};
+    });
   }
 
   private handleTerminalRelease(params: ReleaseTerminalRequest): Record<string, never> {

@@ -17,7 +17,7 @@ export function createSessionWorktreeManagement(deps: {
   async function runSessionWorktreeRequest(
     sessionId: string,
     request:
-      | { operation: "create"; baseRef?: string; branch: string; progress?: boolean }
+      | { operation: "create"; baseRef?: string; branch: string; progress?: boolean; joinOnly?: boolean }
       | { operation: "attach" | "select" | "discard" | "retry_setup"; path: string }
       | { operation: "generate_setup" }
       | { operation: "delete_refs"; path?: string; refs: import("@wollipog/protocol").SessionWorktreeRefDeletion[] },
@@ -58,27 +58,39 @@ export function createSessionWorktreeManagement(deps: {
       db.getRunner(session.runnerId)?.protocolVersion,
       "progressAwareSessionWorktrees",
     )) {
-      const operation = worktreeCreates.startOrJoin({
+      const initiatorSessionId = principal?.kind === "agent" ? principal.credentialSessionId : undefined;
+      const coordinates = {
         runnerId: session.runnerId,
         sessionId,
         branch: request.branch,
         ...(request.baseRef ? { baseRef: request.baseRef } : {}),
         ...(session.worktreeRecovery ? { recoveryId: session.worktreeRecovery.recoveryId } : {}),
-      }, async (requestId) => {
-        const res = await hub.requestFromRunner(
-          session.runnerId,
-          requestId,
-          { ...request, ...selfRequest, type: "session_worktree", requestId, sessionId, progress: true },
-          SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
-        );
-        if (res.type !== "session_worktree_result") throw new Error("unexpected runner reply");
-        if (res.sessionId !== sessionId || res.operation !== "create") {
-          throw new Error("mismatched runner worktree reply");
-        }
-        if (!res.ok || !res.snapshot) throw new Error(res.error ?? "worktree operation failed");
-        db.updateSessionFromSnapshot(sessionId, res.snapshot, Date.now());
-        return { snapshot: res.snapshot, worktree: res.worktree, ...(res.isolation ? { isolation: res.isolation } : {}) };
-      });
+        ...(initiatorSessionId ? { initiatorSessionId } : {}),
+      };
+      const operation = request.joinOnly
+        ? (initiatorSessionId ? worktreeCreates.joinExisting({ ...coordinates, initiatorSessionId }) : null)
+        : worktreeCreates.startOrJoin(coordinates, async (requestId) => {
+          const { joinOnly: _joinOnly, ...wireRequest } = request;
+          const res = await hub.requestFromRunner(
+            session.runnerId,
+            requestId,
+            { ...wireRequest, ...selfRequest, type: "session_worktree", requestId, sessionId, progress: true },
+            SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
+          );
+          if (res.type !== "session_worktree_result") throw new Error("unexpected runner reply");
+          if (res.sessionId !== sessionId || res.operation !== "create") {
+            throw new Error("mismatched runner worktree reply");
+          }
+          if (!res.ok || !res.snapshot) throw new Error(res.error ?? "worktree operation failed");
+          db.updateSessionFromSnapshot(sessionId, res.snapshot, Date.now());
+          return { snapshot: res.snapshot, worktree: res.worktree, ...(res.isolation ? { isolation: res.isolation } : {}) };
+        });
+      if (!operation) {
+        return reply.code(401).send({
+          error: "session agent credential refused: this request is unavailable to the session credential; " +
+            "no matching in-flight worktree create remains for this idle session",
+        });
+      }
       if (operation.status === "in_progress") {
         return reply.code(202).send({ operation });
       }
@@ -92,6 +104,12 @@ export function createSessionWorktreeManagement(deps: {
         session: db.getSession(sessionId),
         ...(operation.isolation ? { isolation: operation.isolation } : {}),
       };
+    }
+    if (request.operation === "create" && request.joinOnly) {
+      return reply.code(401).send({
+        error: "session agent credential refused: this request is unavailable to the session credential; " +
+          "no matching in-flight worktree create remains for this idle session",
+      });
     }
     const requestId = `worktree_${randomUUID().slice(0, 8)}`;
     const campaignDeliveredPullRequests = request.operation === "discard" &&

@@ -30,7 +30,9 @@ export class AcpDriver implements Driver {
     opts: DriverOptions,
     cb: DriverCallbacks,
     deps: { spawn?: typeof spawnAgent; kill?: typeof killTree;
-      antigravityAppArmorFix?: (executable: string | undefined) => string | undefined } = {},
+      antigravityAppArmorFix?: (executable: string | undefined) => string | undefined;
+      providerTurnSettleMs?: number;
+      providerTurnResponseSettleMs?: number } = {},
   ) {
     this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup, processOwnership: opts.processOwnership });
     this.orchestrator = opts.config.permissionMode === "orchestrator";
@@ -70,6 +72,8 @@ export class AcpDriver implements Driver {
         },
         kill: deps.kill ?? killTree,
         ...(deps.antigravityAppArmorFix ? { antigravityAppArmorFix: deps.antigravityAppArmorFix } : {}),
+        ...(deps.providerTurnSettleMs !== undefined ? { providerTurnSettleMs: deps.providerTurnSettleMs } : {}),
+        ...(deps.providerTurnResponseSettleMs !== undefined ? { providerTurnResponseSettleMs: deps.providerTurnResponseSettleMs } : {}),
       },
     );
     this.resumeId = opts.resumeId;

@@ -465,3 +465,165 @@ test("a switch landed by another provider replacement, such as an account switch
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("normal turn completion while a session's own worktree create is still activating still continues after relaunch (#4904)", { skip: !haveGit() }, async () => {
+  const activation = gate();
+  let switched: Promise<Switched> | undefined;
+  await withSession("ended-before-activation", {
+    during: async ({ manager, sessionId }, text) => {
+      if (text !== "start the fix") return;
+      const internals = manager as unknown as {
+        worktreeIsolationNotice: (meta: unknown, path: string) => Promise<SessionWorktreeIsolationNotice>;
+      };
+      const notice = internals.worktreeIsolationNotice.bind(manager);
+      internals.worktreeIsolationNotice = async (meta, path) => {
+        await activation.wait();
+        return notice(meta, path);
+      };
+      // Start the worktree request without awaiting it inside the turn, mirroring a backgrounded CLI
+      // command whose requesting turn completes normally before setup finishes.
+      switched = manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/ended-before-activation" },
+        undefined, { requestedBySession: true });
+      await activation.arrived;
+    },
+  }, async ({ manager, store, sessionId, fake }) => {
+    manager.prompt(sessionId, "start the fix");
+    await waitFor(() => store.readMeta(sessionId)?.status === "idle" && fake.prompts.length === 1,
+      "the requesting turn did not finish normally before activation");
+    assert.ok(switched, "the worktree create should be in flight");
+
+    // Now setup/activation finishes while the session is already idle.
+    activation.open();
+    const result = await switched!;
+    assert.deepEqual(result.isolation, {
+      writableNow: false,
+      writableAtNextLaunch: true,
+      continuesAfterRelaunch: true,
+    });
+    await waitFor(() => fake.prompts.length === 2 && store.readMeta(sessionId)?.status === "idle",
+      "the runner did not relaunch and continue automatically");
+    const worktree = { path: result.worktree.path, branch: "fix/ended-before-activation" };
+    assert.deepEqual(fake.prompts[1], { cwd: worktree.path, text: worktreeContinuationPrompt(worktree) });
+    assert.equal(fake.launches(), 2);
+    await settle();
+    assert.equal(fake.prompts.length, 2, "continuation runs exactly once");
+  });
+});
+
+test("interrupt, queued user prompt, superseding selection, or stop while an ended turn's create activates still suppresses continuation (#4904)", { skip: !haveGit() }, async () => {
+  // 1. Interrupting the turn (even when the provider races and returns end_turn) before activation finishes.
+  {
+    const activation = gate();
+    let switched: Promise<Switched> | undefined;
+    await withSession("ended-after-interrupt", {
+      during: async ({ manager, sessionId }, text) => {
+        if (text !== "start the fix") return;
+        const internals = manager as unknown as {
+          worktreeIsolationNotice: (meta: unknown, path: string) => Promise<SessionWorktreeIsolationNotice>;
+        };
+        const notice = internals.worktreeIsolationNotice.bind(manager);
+        internals.worktreeIsolationNotice = async (meta, path) => {
+          await activation.wait();
+          return notice(meta, path);
+        };
+        switched = manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/ended-after-interrupt" },
+          undefined, { requestedBySession: true });
+        await activation.arrived;
+        assert.equal(manager.interruptTurn(sessionId), "applied");
+      },
+    }, async ({ manager, store, sessionId, fake }) => {
+      manager.prompt(sessionId, "start the fix");
+      await waitFor(() => store.readMeta(sessionId)?.status === "idle" && fake.prompts.length === 1,
+        "the interrupted turn did not finish");
+      activation.open();
+      const result = await switched!;
+      assert.equal(result.isolation.continuesAfterRelaunch, undefined);
+      await waitFor(() => fake.launches() === 2 && store.readMeta(sessionId)?.status === "idle",
+        "the relaunch did not settle");
+      await settle();
+      assert.equal(fake.prompts.length, 1, "an interrupted turn never continues automatically");
+    });
+  }
+
+  // 2. A user prompt sent after the requesting turn ended, before activation finishes, supersedes continuation.
+  {
+    const activation = gate();
+    let switched: Promise<Switched> | undefined;
+    await withSession("ended-then-prompted", {
+      during: async ({ manager, sessionId }, text) => {
+        if (text !== "start the fix") return;
+        const internals = manager as unknown as {
+          worktreeIsolationNotice: (meta: unknown, path: string) => Promise<SessionWorktreeIsolationNotice>;
+        };
+        const notice = internals.worktreeIsolationNotice.bind(manager);
+        internals.worktreeIsolationNotice = async (meta, path) => {
+          await activation.wait();
+          return notice(meta, path);
+        };
+        switched = manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/ended-then-prompted" },
+          undefined, { requestedBySession: true });
+        await activation.arrived;
+      },
+    }, async ({ manager, store, sessionId, fake }) => {
+      manager.prompt(sessionId, "start the fix");
+      await waitFor(() => store.readMeta(sessionId)?.status === "idle" && fake.prompts.length === 1,
+        "turn 1 did not finish");
+      manager.prompt(sessionId, "human follow-up");
+      await waitFor(() => store.readMeta(sessionId)?.status === "idle" && fake.prompts.length === 2,
+        "turn 2 did not finish");
+      activation.open();
+      const result = await switched!;
+      assert.equal(result.isolation.continuesAfterRelaunch, undefined);
+      await waitFor(() => fake.launches() === 2 && store.readMeta(sessionId)?.status === "idle",
+        "the relaunch did not settle");
+      await settle();
+      assert.deepEqual(fake.prompts.map((prompt) => prompt.text), ["start the fix", "human follow-up"]);
+    });
+  }
+
+  // 3. A superseding worktree selection during the create window suppresses continuation.
+  {
+    const activation = gate();
+    let other: Switched | undefined;
+    let switched: Promise<Switched> | undefined;
+    await withSession("ended-then-reselected", {
+      during: async ({ manager, sessionId }, text) => {
+        if (text !== "start the fix") return;
+        other = await manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/other-before-gate" });
+        const internals = manager as unknown as {
+          worktreeIsolationNotice: (meta: unknown, path: string) => Promise<SessionWorktreeIsolationNotice>;
+        };
+        const notice = internals.worktreeIsolationNotice.bind(manager);
+        let gated = false;
+        internals.worktreeIsolationNotice = async (meta, path) => {
+          if (!gated) {
+            gated = true;
+            await activation.wait();
+          }
+          return notice(meta, path);
+        };
+        switched = manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/superseded-by-select" },
+          undefined, { requestedBySession: true });
+        await activation.arrived;
+      },
+    }, async ({ manager, store, sessionId, fake }) => {
+      manager.prompt(sessionId, "start the fix");
+      await waitFor(() => store.readMeta(sessionId)?.status === "idle" && fake.prompts.length === 1,
+        "turn 1 did not finish");
+      // Select another worktree before the pending create finishes activating.
+      const selectionPromise = manager.selectWorktree(sessionId, other!.worktree.path);
+      // Note: runWorktreeOperation serializes operations on the session, so test an intervening
+      // selection revision bump directly as would happen from an already-queued/concurrent selection
+      // once the create's capture ran.
+      const revisions = (manager as unknown as { worktreeSelectionRevisions: Map<string, number> }).worktreeSelectionRevisions;
+      revisions.set(sessionId, (revisions.get(sessionId) ?? 0) + 1);
+      activation.open();
+      const result = await switched!;
+      await selectionPromise;
+      assert.equal(result.isolation.continuesAfterRelaunch, undefined);
+      await waitFor(() => store.readMeta(sessionId)?.status === "idle", "session did not settle");
+      await settle();
+      assert.equal(fake.prompts.length, 1, "a superseded selection must not trigger continuation");
+    });
+  }
+});

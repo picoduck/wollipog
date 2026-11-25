@@ -64,6 +64,10 @@ export function isAuthenticatedAgentControlClaim(input: {
   session: { id: string; status: string; permissionMode?: string | null; role?: SessionRole } | null | undefined;
   /** Computed from the online owning runner and its live Agent TUI registry, never request input. */
   hasLiveOrchestratorTui?: boolean;
+  /** Computed from the server's in-flight worktree-create coordinator for an already-started
+   * progress-aware poll on POST /api/sessions/:id/worktrees (#4904). Never authorizes starting
+   * new work or reaching any other route while `idle`. */
+  hasInFlightWorktreeCreatePoll?: boolean;
 }): boolean {
   return input.credentialValid &&
     typeof input.claimedSessionId === "string" &&
@@ -71,8 +75,9 @@ export function isAuthenticatedAgentControlClaim(input: {
     input.claimedSessionId.length <= 256 &&
     input.session?.id === input.claimedSessionId &&
     (["starting", "running", "input_required"].includes(input.session.status) ||
-      (input.session.status === "idle" && sessionRole(input.session) === "orchestrator" &&
-        input.hasLiveOrchestratorTui === true));
+      (input.session.status === "idle" &&
+        ((sessionRole(input.session) === "orchestrator" && input.hasLiveOrchestratorTui === true) ||
+          input.hasInFlightWorktreeCreatePoll === true)));
 }
 
 /** Authenticate one hook sidecar with a credential independently bound to its live Claude session. */
