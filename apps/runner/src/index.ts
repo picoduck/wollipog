@@ -877,6 +877,10 @@ const subscriptionUsage = new SubscriptionUsageManager({
   },
   resolveSubscriptionIdentity: readSubscriptionIdentity,
   claudeRefreshEnabled: () => runnerSupportsProtocol(controlPlaneProtocolVersion, "claudeSubscriptionUsageRefresh"),
+  antigravityEnabled: () => runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySubscriptionUsage"),
+  antigravityPlanTier: () => antigravitySetup.planTier(),
+  acquireAntigravityLaunch: () => antigravitySetup.acquireLaunchTarget(),
+  onAntigravityUnauthenticated: () => updateAgentAuthStatus(ANTIGRAVITY_AGENT_ID, { status: "unauthenticated" }),
   onTargetChanged: () => {
     void runDiscovery(false, false).catch((error) =>
       log(`harness rediscovery after usage target change failed: ${errText(error)}`));
@@ -1059,6 +1063,13 @@ function publishAntigravityAgent(setup: AntigravitySetupView): void {
   if (!discoveryDone) return;
   metadata.agents = overlayAcpAuthStatus(withAntigravityAgent(metadata.agents, row, configuredAgentIds), acpAuthStatus);
   sendUp({ type: "agents_updated", runnerId: config.runnerId, agents: agentsForControlPlane(), editors: metadata.editors });
+  if (runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySubscriptionUsage")) {
+    publishSubscriptionUsageInventory(false);
+    if (setup.status === "ready") {
+      void subscriptionUsage.refreshAntigravitySources()
+        .catch((error) => log(`Google Antigravity subscription usage refresh failed: ${errText(error)}`));
+    }
+  }
 }
 /** An Antigravity session launch (after the shared preparation): the setup's current executable,
  * `agy acp`, and the setup's credential context, whose ambient credentials are dropped both from
@@ -3496,7 +3507,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }
       void (msg.providerAccountId
         ? subscriptionUsage.refreshAccount(msg.providerAccountId)
-        : subscriptionUsage.refreshAll())
+        : msg.sourceId
+          ? subscriptionUsage.refreshSourceById(msg.sourceId)
+          : subscriptionUsage.refreshAll())
         .then((snapshots) => sendUp({
           type: "subscription_usage_refresh_result",
           requestId: msg.requestId,

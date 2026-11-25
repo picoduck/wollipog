@@ -66,7 +66,8 @@ import { grantReviewMaxIssues, ownerReviewMaxIssues, proposalMaxIssues, scopeApp
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignBudgetAuthority, validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation, type CampaignBudgetAuthority } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
-import { claudeUsageProbeable } from "./subscription-usage.js";
+import { ANTIGRAVITY_AGENT_ID, antigravityCliVersionSupportsUsage, type SubscriptionUsageProvider } from "@wollipog/protocol";
+import { antigravityUsageProbeable, claudeUsageProbeable } from "./subscription-usage.js";
 import { ACCRUED_USAGE_SQL, claudeTurnRunningTotal } from "./claude-running-total.js";
 import { lookupRate, priceUsage, resolveCostSource, sameRequestInputTier, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
@@ -3149,7 +3150,7 @@ CREATE TABLE IF NOT EXISTS subscription_usage_snapshots (
   runner_id           TEXT NOT NULL,
   source_id           TEXT NOT NULL,
   agent_id            TEXT NOT NULL,
-  provider            TEXT NOT NULL CHECK (provider IN ('codex', 'claude')),
+  provider            TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'antigravity')),
   provider_account_id TEXT,
   snapshot             TEXT NOT NULL,
   fetched_at           INTEGER NOT NULL,
@@ -7990,6 +7991,47 @@ export class ControlPlaneDb {
       try { db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`); } catch { /* column already present */ }
     }
     try { db.exec("ALTER TABLE subscription_usage_snapshots ADD COLUMN provider_account_id TEXT"); } catch { /* column already present */ }
+    // #4922: widen subscription_usage_snapshots.provider CHECK constraint to admit 'antigravity'.
+    const subscriptionSchema = db.prepare(
+      "SELECT sql FROM sqlite_schema WHERE type='table' AND name='subscription_usage_snapshots'",
+    ).get() as { sql?: string } | undefined;
+    if (subscriptionSchema?.sql && !subscriptionSchema.sql.includes("'antigravity'")) {
+      db.exec("PRAGMA foreign_keys = OFF");
+      try {
+        db.exec("BEGIN IMMEDIATE");
+        db.exec(`
+          CREATE TABLE subscription_usage_snapshots_v2 (
+            runner_id           TEXT NOT NULL,
+            source_id           TEXT NOT NULL,
+            agent_id            TEXT NOT NULL,
+            provider            TEXT NOT NULL CHECK (provider IN ('codex', 'claude', 'antigravity')),
+            provider_account_id TEXT,
+            snapshot             TEXT NOT NULL,
+            fetched_at           INTEGER NOT NULL,
+            updated_at           INTEGER NOT NULL,
+            PRIMARY KEY (runner_id, source_id),
+            FOREIGN KEY (runner_id) REFERENCES runners(runner_id) ON DELETE CASCADE
+          );
+          INSERT INTO subscription_usage_snapshots_v2
+            (runner_id, source_id, agent_id, provider, provider_account_id, snapshot, fetched_at, updated_at)
+          SELECT runner_id, source_id, agent_id, provider, provider_account_id, snapshot, fetched_at, updated_at
+          FROM subscription_usage_snapshots;
+          DROP TABLE subscription_usage_snapshots;
+          ALTER TABLE subscription_usage_snapshots_v2 RENAME TO subscription_usage_snapshots;
+          CREATE INDEX IF NOT EXISTS idx_subscription_usage_runner
+            ON subscription_usage_snapshots(runner_id, provider, agent_id);
+        `);
+        if (db.prepare("PRAGMA foreign_key_check(subscription_usage_snapshots)").get()) {
+          throw new Error("Invalid runner reference in subscription_usage_snapshots after provider migration");
+        }
+        db.exec("COMMIT");
+      } catch (error) {
+        try { db.exec("ROLLBACK"); } catch { /* not in transaction */ }
+        throw error;
+      } finally {
+        db.exec("PRAGMA foreign_keys = ON");
+      }
+    }
     // #4353: existing rows become fixed policies, keeping their default, revision and legacy fallback.
     for (const column of [
       "mode TEXT NOT NULL DEFAULT 'fixed'",
@@ -17705,7 +17747,10 @@ export class ControlPlaneDb {
           const agent = sourceAgentFor(compatible, preferred, account.provider, account.id);
           return agent ? [{ agent, provider: account.provider, account }] : [];
         }),
-        ...runner.agents.flatMap((agent) => {
+        ...runner.agents.flatMap((agent): Array<{ agent: AgentDefinition; provider: SubscriptionUsageProvider; account: undefined }> => {
+            if (agent.id === ANTIGRAVITY_AGENT_ID && (agent.driver ?? "acp") === "acp") {
+              return [{ agent, provider: "antigravity", account: undefined }];
+            }
             const provider = agent.driver === "codex-app-server"
               ? "codex" as const
               : agent.driver === "claude-code"
@@ -17740,19 +17785,21 @@ export class ControlPlaneDb {
         const recorded = stored.get(`${runner.runnerId}:${sourceId}`);
         // Account source IDs omit the agent. The runner may legitimately probe a WSL agent whose
         // credential home is compatible even when the control plane's display fallback is native.
-        const recordedAgent = account && recorded && runner.agents.find((candidate) => {
-          if (candidate.id !== recorded.agentId || candidate.driver !== agent.driver) return false;
-          const candidateSelection = selectionFor(candidate, provider);
-          if (candidateSelection && candidate.defaultProviderAccountId &&
-              candidate.defaultProviderAccountId !== account.id) return false;
-          if (!candidateSelection || candidate.installation?.id === candidateSelection.installationId) return true;
-          return recorded.state === "unsupported" && !runner.agents.some((other) =>
-            other.driver === candidate.driver &&
-            harnessInstallationContext(other.context) === harnessInstallationContext(candidate.context) &&
-            other.installation?.id === candidateSelection.installationId);
-        });
+        const recordedAgent = account && recorded && (provider === "codex" || provider === "claude")
+          ? runner.agents.find((candidate) => {
+              if (candidate.id !== recorded.agentId || candidate.driver !== agent.driver) return false;
+              const candidateSelection = selectionFor(candidate, provider);
+              if (candidateSelection && candidate.defaultProviderAccountId &&
+                  candidate.defaultProviderAccountId !== account.id) return false;
+              if (!candidateSelection || candidate.installation?.id === candidateSelection.installationId) return true;
+              return recorded.state === "unsupported" && !runner.agents.some((other) =>
+                other.driver === candidate.driver &&
+                harnessInstallationContext(other.context) === harnessInstallationContext(candidate.context) &&
+                other.installation?.id === candidateSelection.installationId);
+            })
+          : undefined;
         const displayAgent = recordedAgent || agent;
-        const selection = selectionFor(displayAgent, provider);
+        const selection = provider === "codex" || provider === "claude" ? selectionFor(displayAgent, provider) : undefined;
         const unsupportedSelection = Boolean(selection &&
           (!runnerSupportsProtocol(runner.protocolVersion, "harnessSelectionBackgroundConsumers") ||
             displayAgent.installation?.id !== selection.installationId ||
@@ -17762,25 +17809,36 @@ export class ControlPlaneDb {
           (!unsupportedSelection || recorded.state === "unsupported")
           ? recorded : undefined;
         const fetchedAt = persisted?.fetchedAt ?? runner.lastSeen ?? now;
+        const runnerSupportsProviderUsage = provider === "antigravity"
+          ? runnerSupportsProtocol(runner.protocolVersion, "antigravitySubscriptionUsage")
+          : runnerSupportsProtocol(runner.protocolVersion, "subscriptionUsage");
+        const unsupportedAntigravityCli = provider === "antigravity" &&
+          runnerSupportsProviderUsage &&
+          displayAgent.available === true &&
+          !antigravityCliVersionSupportsUsage(displayAgent.version);
+        const unauthenticatedSource = account?.authStatus === "unauthenticated" ||
+          (provider === "antigravity" && displayAgent.authStatus === "unauthenticated");
         const snapshot: SubscriptionUsageSnapshot = persisted ?? {
           sourceId,
           runnerId: runner.runnerId,
           agentId: displayAgent.id,
           provider,
-          state: unsupportedSelection
+          state: unsupportedSelection || unsupportedAntigravityCli
             ? "unsupported"
-            : account?.authStatus === "unauthenticated"
+            : unauthenticatedSource
               ? "unauthenticated"
-            : runnerSupportsProtocol(runner.protocolVersion, "subscriptionUsage")
+            : runnerSupportsProviderUsage
               ? "unavailable"
               : "unsupported",
           detail: unsupportedSelection
             ? !runnerSupportsProtocol(runner.protocolVersion, "harnessSelectionBackgroundConsumers")
               ? "Update this runner to enforce the selected harness installation for subscription usage."
               : "The selected harness installation is unavailable in this execution context."
-            : account?.authStatus === "unauthenticated"
-            ? `${account.label} is not signed in.`
-            : runnerSupportsProtocol(runner.protocolVersion, "subscriptionUsage")
+            : unsupportedAntigravityCli
+              ? "This Google Antigravity version does not report subscription usage. Update Google Antigravity to view quotas."
+            : unauthenticatedSource
+            ? `${account?.label ?? displayAgent.name} is not signed in.`
+            : runnerSupportsProviderUsage
               ? "This provider has not reported subscription usage yet."
               : "Update this runner to view subscription usage.",
           fetchedAt,
@@ -17802,10 +17860,14 @@ export class ControlPlaneDb {
           agentName: displayAgent.name,
           runnerStatus: runner.status,
           freshness: runner.status === "offline" || now - fetchedAt > staleAfterMs ? "stale" : "fresh",
-          // Refresh Account names a provider account; a source without one refreshes with Refresh All.
-          refreshable: Boolean(account) && (provider === "codex" ||
-            (runnerSupportsProtocol(runner.protocolVersion, "claudeSubscriptionUsageRefresh") &&
-              claudeUsageProbeable(displayAgent))),
+          // Refresh Account targets a provider account for Codex/Claude, or the opaque sourceId
+          // for Antigravity's runner-shared Google sign-in (v413).
+          refreshable: provider === "antigravity"
+            ? runnerSupportsProtocol(runner.protocolVersion, "antigravitySubscriptionUsage") &&
+              antigravityUsageProbeable(displayAgent)
+            : Boolean(account) && (provider === "codex" ||
+              (runnerSupportsProtocol(runner.protocolVersion, "claudeSubscriptionUsageRefresh") &&
+                claudeUsageProbeable(displayAgent))),
         });
       }
     }

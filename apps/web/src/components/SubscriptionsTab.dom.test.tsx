@@ -518,7 +518,7 @@ test("with no sources the tab is No Subscriptions Connected with Open Connection
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     const panel = container.querySelector("#usage-subscriptions-panel")!;
     assert.match(panel.textContent ?? "", /No Subscriptions Connected/);
-    assert.match(panel.textContent ?? "", /Sign in to Codex or Claude on a connected machine, and each plan's remaining allowance shows here\./);
+    assert.match(panel.textContent ?? "", /Sign in to Codex, Claude, or Google Antigravity on a connected machine, and each plan's remaining allowance shows here\./);
     assert.equal([...container.querySelectorAll("button")].some((button) => /Refresh/.test(button.textContent ?? "") ||
       /Refresh/.test(button.getAttribute("aria-label") ?? "")), false, "nothing to refresh");
     const link = panel.querySelector<HTMLAnchorElement>("a.btn")!;
@@ -661,6 +661,55 @@ test("loading is three skeleton rows in one surface, and a failed load is an err
     await act(async () => { view.button("Retry")!.click(); await Promise.resolve(); });
     await act(async () => { resolveFirst(); await Promise.resolve(); await Promise.resolve(); });
     assert.equal(view.panel()!.querySelectorAll(".subscription-plan").length, 1);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Google Antigravity renders its plan tier, model-group windows, credits, and sourceId-targeted Refresh Account", async () => {
+  const requests: unknown[] = [];
+  const agySource = source({
+    sourceId: "e".repeat(32),
+    runnerId: "agy-box",
+    runnerName: "dev-box",
+    agentId: "google-antigravity",
+    agentName: "Google Antigravity",
+    provider: "antigravity",
+    providerAccountId: undefined,
+    accountLabel: undefined,
+    plan: "Google AI Ultra",
+    refreshable: true,
+    credits: { hasCredits: true, balance: "3000" },
+    buckets: [
+      window_("gemini-5h", "Gemini Models — Five-Hour Window", 96, { resetsAt: NOW + 4 * HOUR }),
+      window_("gemini-weekly", "Gemini Models — Weekly", 93),
+      window_("3p-5h", "Claude and GPT Models — Five-Hour Window", 100, { resetsAt: NOW + 5 * HOUR }),
+    ],
+  });
+  const view = await renderTab({
+    subscriptionUsage: async () => response([agySource]),
+    refreshSubscriptionUsage: async (target: unknown) => {
+      requests.push(target);
+      return response([agySource], { attempted: 1, failed: 0 });
+    },
+  });
+  try {
+    const card = view.panel()!.querySelector(".subscription-plan")!;
+    assert.equal(card.querySelector(".subscription-plan-title")?.textContent, "Google Antigravity — Google AI Ultra");
+    assert.match(card.querySelector(".subscription-plan-meta")?.textContent ?? "", /Google Antigravity on dev-box/);
+    assert.deepEqual(
+      [...card.querySelectorAll(".subscription-window-label")].map((node) => node.textContent),
+      [
+        "Gemini Models — Five-Hour Window",
+        "Gemini Models — Weekly",
+        "Claude and GPT Models — Five-Hour Window",
+      ],
+    );
+    assert.match(card.textContent ?? "", /Credits: 3000/);
+    const refreshBtn = view.button("Refresh Account")!;
+    assert.ok(refreshBtn, "Google Antigravity exposes Refresh Account via sourceId");
+    await act(async () => { refreshBtn.click(); await Promise.resolve(); await Promise.resolve(); });
+    assert.deepEqual(requests, [{ runnerId: "agy-box", sourceId: "e".repeat(32) }]);
   } finally {
     await view.unmount();
   }

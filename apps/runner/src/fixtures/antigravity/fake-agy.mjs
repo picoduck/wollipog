@@ -322,7 +322,10 @@ if (args[0] === "acp" && args[1] === "--login") {
         mkdirSync(sessionsDir, { recursive: true });
         writeFileSync(join(sessionsDir, sessionId), "");
       }
-      send({ id: request.id, result: { sessionId, ...sessionState() } });
+      const meta = modes.has("session_tier")
+        ? { _meta: { antigravity: { tier: { name: "Google AI Pro", id: "g1-pro-tier", upgradeUri: "https://antigravity.google/g1-upgrade" } } } }
+        : {};
+      send({ id: request.id, result: { sessionId, ...sessionState(), ...meta } });
       update(sessionId, { sessionUpdate: "available_commands_update", availableCommands: [
         { name: "plan", description: "Plan carefully before executing a task." }, { name: "compact", description: "Compact the conversation now." }] });
       return;

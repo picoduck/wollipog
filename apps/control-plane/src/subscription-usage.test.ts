@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { PROTOCOL_VERSION, type AgentDefinition, type RunnerMetadata } from "@wollipog/protocol";
+import { ANTIGRAVITY_AGENT_ID, PROTOCOL_VERSION, type AgentDefinition, type RunnerMetadata } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
 import {
@@ -697,4 +701,132 @@ test("authoritative inventories replace removed sources atomically", () => {
   const stored = db.raw().prepare("SELECT source_id FROM subscription_usage_snapshots ORDER BY source_id").all();
   assert.deepEqual(stored.map((row) => ({ ...row })), [{ source_id: first.sourceId }]);
   db.close();
+});
+
+function antigravityAgent(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
+  return {
+    id: ANTIGRAVITY_AGENT_ID,
+    name: "Google Antigravity",
+    command: "/usr/local/bin/agy",
+    args: ["acp"],
+    env: {},
+    driver: "acp",
+    context: { kind: "native" },
+    source: "discovered",
+    version: "1.5.14",
+    available: true,
+    authStatus: "authenticated",
+    ...overrides,
+  };
+}
+
+function antigravitySourceId(runnerId: string): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ runnerId, agentId: ANTIGRAVITY_AGENT_ID, provider: "antigravity", context: "native" }))
+    .digest("hex")
+    .slice(0, 32);
+}
+
+test("Google Antigravity snapshots validate, project refreshable state by runner and CLI version, and reject bad bindings", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  db.registerRunner(meta("agy-ready", [antigravityAgent()]), now, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  db.registerRunner(meta("agy-old-runner", [antigravityAgent()]), now, 412, OWNED_BY_ALICE);
+  db.registerRunner(meta("agy-old-cli", [antigravityAgent({ version: "1.1.10" })]), now, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  db.registerRunner(meta("agy-signed-out", [antigravityAgent({ available: false, authStatus: "unauthenticated" })]), now, PROTOCOL_VERSION, OWNED_BY_ALICE);
+
+  const valid = {
+    sourceId: antigravitySourceId("agy-ready"),
+    runnerId: "agy-ready",
+    agentId: ANTIGRAVITY_AGENT_ID,
+    provider: "antigravity" as const,
+    state: "available" as const,
+    fetchedAt: now,
+    plan: "Google AI Ultra",
+    buckets: [{
+      id: "gemini-5h",
+      label: "Gemini Models — Five-Hour Window",
+      usedPercent: 10,
+      remainingPercent: 90,
+      windowDurationMinutes: 300,
+      resetsAt: now + 3_600_000,
+      status: "available" as const,
+    }],
+    credits: { hasCredits: true, balance: "3000" },
+  };
+  const checked = validateSubscriptionUsageSnapshot(valid, "agy-ready", db, now);
+  assert.deepEqual(checked, valid);
+  assert.throws(
+    () => validateSubscriptionUsageSnapshot({ ...valid, providerAccountId: "personal" }, "agy-ready", db, now),
+    /not advertised/,
+  );
+
+  db.upsertSubscriptionUsageSnapshot(checked, now);
+  const byRunner = new Map(db.subscriptionUsageForPrincipal(human(), now).sources.map((s) => [s.runnerId, s]));
+  assert.equal(byRunner.get("agy-ready")?.state, "available");
+  assert.equal(byRunner.get("agy-ready")?.plan, "Google AI Ultra");
+  assert.equal(byRunner.get("agy-ready")?.refreshable, true);
+  assert.deepEqual(byRunner.get("agy-ready")?.credits, { hasCredits: true, balance: "3000" });
+
+  assert.equal(byRunner.get("agy-old-runner")?.state, "unsupported");
+  assert.equal(byRunner.get("agy-old-runner")?.refreshable, false);
+  assert.equal(byRunner.get("agy-old-cli")?.state, "unsupported");
+  assert.equal(byRunner.get("agy-old-cli")?.refreshable, false);
+  assert.equal(byRunner.get("agy-signed-out")?.state, "unauthenticated");
+  assert.equal(byRunner.get("agy-signed-out")?.refreshable, false);
+  db.close();
+});
+
+test("existing SQLite databases migrate subscription_usage_snapshots to allow antigravity without losing rows", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-agy-sub-mig-"));
+  const dbPath = join(dir, "control-plane.db");
+  try {
+    const now = 1_000_000;
+    const initial = ControlPlaneDb.open(dbPath);
+    initial.registerRunner(meta("runner-1", [codexAgent(), antigravityAgent()]), now, PROTOCOL_VERSION, OWNED_BY_ALICE);
+    initial.upsertSubscriptionUsageSnapshot(snapshot("runner-1", now), now);
+    initial.close();
+
+    // Simulate a pre-#4922 database whose CHECK constraint only allows ('codex', 'claude').
+    const raw = new DatabaseSync(dbPath);
+    raw.exec("PRAGMA foreign_keys = OFF");
+    raw.exec(`
+      CREATE TABLE subscription_usage_snapshots_legacy (
+        runner_id           TEXT NOT NULL,
+        source_id           TEXT NOT NULL,
+        agent_id            TEXT NOT NULL,
+        provider            TEXT NOT NULL CHECK (provider IN ('codex', 'claude')),
+        provider_account_id TEXT,
+        snapshot             TEXT NOT NULL,
+        fetched_at           INTEGER NOT NULL,
+        updated_at           INTEGER NOT NULL,
+        PRIMARY KEY (runner_id, source_id),
+        FOREIGN KEY (runner_id) REFERENCES runners(runner_id) ON DELETE CASCADE
+      );
+      INSERT INTO subscription_usage_snapshots_legacy SELECT * FROM subscription_usage_snapshots;
+      DROP TABLE subscription_usage_snapshots;
+      ALTER TABLE subscription_usage_snapshots_legacy RENAME TO subscription_usage_snapshots;
+    `);
+    raw.close();
+
+    const migrated = ControlPlaneDb.open(dbPath);
+    const agySnap = {
+      sourceId: antigravitySourceId("runner-1"),
+      runnerId: "runner-1",
+      agentId: ANTIGRAVITY_AGENT_ID,
+      provider: "antigravity" as const,
+      state: "available" as const,
+      fetchedAt: now,
+      buckets: [{ id: "gemini-5h", label: "Gemini Models — Five-Hour Window", remainingPercent: 90, usedPercent: 10 }],
+    };
+    migrated.upsertSubscriptionUsageSnapshot(agySnap, now);
+    const sources = migrated.subscriptionUsageForPrincipal(human(), now).sources;
+    assert.deepEqual(sources.map((s) => [s.provider, s.state]), [
+      ["antigravity", "available"],
+      ["codex", "available"],
+    ]);
+    migrated.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

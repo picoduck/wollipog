@@ -162,7 +162,7 @@ const CONTROL = /[\u0000-\u001f\u007f]/u;
 
 /** Outcome of the access check. `models` is set only for `ready`. */
 export type AntigravityAccessResult =
-  | { status: "ready"; models: Array<{ id: string; name: string }>; observedAt: number }
+  | { status: "ready"; models: Array<{ id: string; name: string }>; observedAt: number; tier?: string }
   | { status: "sign_in_required" }
   | { status: "verification_failed"; failure: AntigravitySetupFailure };
 
@@ -243,6 +243,21 @@ export function advertisedAntigravityModels(response: unknown): Array<{ id: stri
     }
   }
   return models;
+}
+
+/** The Google AI subscription tier an ACP `session/new` response reports in `_meta.antigravity.tier`
+ * (observed on agy 1.5.14 as `{ name, id, upgradeUri }`). Bounded and stripped of control chars. */
+export function advertisedAntigravityTier(response: unknown): string | undefined {
+  const root = response && typeof response === "object" ? response as Record<string, unknown> : undefined;
+  const meta = root?._meta && typeof root._meta === "object" ? root._meta as Record<string, unknown> : undefined;
+  const agy = meta?.antigravity && typeof meta.antigravity === "object" ? meta.antigravity as Record<string, unknown> : undefined;
+  const tier = agy?.tier;
+  if (typeof tier === "string") return boundedText(tier.trim(), 80);
+  if (tier && typeof tier === "object") {
+    const name = (tier as Record<string, unknown>).name;
+    if (typeof name === "string") return boundedText(name.trim(), 80);
+  }
+  return undefined;
 }
 
 /** Run `agy --version`. Undefined `version` with `ok` means it exited successfully but printed no
@@ -388,8 +403,9 @@ export async function checkAntigravityAccess(
     if (!boundedText(sessionId, 1_024) || models.length === 0) {
       return { status: "verification_failed", failure: "session_check_failed" };
     }
+    const tier = advertisedAntigravityTier(response);
     // Stamped when access was seen working, before the cleanup below awaits the process's exit.
-    return { status: "ready", models, observedAt };
+    return { status: "ready", models, observedAt, ...(tier ? { tier } : {}) };
   } finally {
     peer.dispose("Antigravity access check finished");
     await options.kill(child).catch(() => false);
@@ -487,6 +503,8 @@ export class AntigravitySetupSupervisor {
   private rollbackCause: AntigravityInstallFailure | undefined;
   /** Why the managed copy's version check failed in the last check that fell back to the PATH copy. */
   private managedVersionFailure: AntigravitySetupFailure | undefined;
+  /** The Google AI subscription tier from the last ready access check (e.g., "Google AI Ultra"). */
+  private currentTier: string | undefined;
   private releasePlatformKey: string | null | undefined;
   private stopped = false;
   private readonly store: AntigravityManagedStore;
@@ -585,6 +603,11 @@ export class AntigravitySetupSupervisor {
    * than what it observed. */
   accessObservedAt(): number | undefined {
     return this.launches.accessObservedAt();
+  }
+
+  /** Subscription tier name observed on the last ready check, if `agy acp` advertised one. */
+  planTier(): string | undefined {
+    return this.view.status === "ready" ? this.currentTier : undefined;
   }
 
   /** Check the runtime and its sign-in. Concurrent calls share one check. While a sign-in or an
@@ -875,10 +898,12 @@ export class AntigravitySetupSupervisor {
     await latestRead;
     if (access.status === "ready") {
       const isManaged = executable.source === "managed";
+      this.currentTier = access.tier;
       return this.settleCheck({ ...base, status: "ready", executable, models: access.models, checkedAt: this.now() },
         { command: isManaged ? managedGeneration ?? executable.path : executable.path, managed: isManaged,
           accessObservedAt: access.observedAt });
     }
+    this.currentTier = undefined;
     return this.settleCheck({ ...base, status: access.status, executable,
       ...(access.status === "verification_failed" ? { failure: access.failure } : {}), checkedAt: this.now() });
   }

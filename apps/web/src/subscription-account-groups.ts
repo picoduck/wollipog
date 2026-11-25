@@ -6,6 +6,10 @@ import type { SubscriptionUsageBucket, SubscriptionUsageSourceView } from "@woll
  */
 const SAME_WINDOW_TOLERANCE_MS = 5 * 60_000;
 
+export type SubscriptionAccountRefreshTarget =
+  | { runnerId: string; providerAccountId: string }
+  | { runnerId: string; sourceId: string };
+
 /** One subscription on the Subscriptions tab, however many machines are signed in to it. */
 export interface SubscriptionAccountGroup {
   key: string;
@@ -14,9 +18,9 @@ export interface SubscriptionAccountGroup {
   members: readonly SubscriptionUsageSourceView[];
   machineCount: number;
   hasWindows: boolean;
-  /** The accounts the control plane says can be read on request. An older control plane says
-   * nothing, and there only a Codex account could be. */
-  refreshTargets: ReadonlyArray<{ runnerId: string; providerAccountId: string }>;
+  /** The accounts or sources the control plane says can be read on request. An older control plane
+   * says nothing, and there only a Codex account could be. */
+  refreshTargets: ReadonlyArray<SubscriptionAccountRefreshTarget>;
 }
 
 const STATUS_SEVERITY: Readonly<Record<NonNullable<SubscriptionUsageBucket["status"]>, number>> = {
@@ -102,9 +106,14 @@ export function subscriptionAccountGroups(sources: readonly SubscriptionUsageSou
     members,
     machineCount: new Set(members.map((member) => member.runnerId)).size,
     hasWindows: members.some((member) => member.buckets.length > 0),
-    refreshTargets: members.flatMap((member) =>
-      member.providerAccountId && (member.refreshable ?? member.provider === "codex")
-        ? [{ runnerId: member.runnerId, providerAccountId: member.providerAccountId }]
-        : []),
+    refreshTargets: members.flatMap((member): SubscriptionAccountRefreshTarget[] => {
+      if (member.providerAccountId && (member.refreshable ?? member.provider === "codex")) {
+        return [{ runnerId: member.runnerId, providerAccountId: member.providerAccountId }];
+      }
+      if (!member.providerAccountId && member.refreshable === true) {
+        return [{ runnerId: member.runnerId, sourceId: member.sourceId }];
+      }
+      return [];
+    }),
   }));
 }

@@ -435,3 +435,25 @@ export function validAntigravitySetupView(value: unknown): value is AntigravityS
   }
   return true;
 }
+
+/** First Antigravity CLI release whose headless print mode answers `/usage` and `/credits`
+ * natively without starting an agent turn or spending quota. */
+export const ANTIGRAVITY_MIN_USAGE_CLI_VERSION = "1.1.11";
+const MIN_USAGE_VERSION: readonly [number, number, number] = [1, 1, 11];
+
+/** Whether an installed `agy` CLI version is at least `ANTIGRAVITY_MIN_USAGE_CLI_VERSION`.
+ * Unknown or unparseable versions fail closed to false so older CLIs never receive `/usage` as a prompt. */
+export function antigravityCliVersionSupportsUsage(version: string | undefined): boolean {
+  if (typeof version !== "string") return false;
+  const match = version.trim().match(/^v?(\d+)\.(\d+)(?:\.(\d+))?(?:(-[^+]+))?(?:\+.+)?$/u);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  const patch = match[3] === undefined ? 0 : Number(match[3]);
+  const prerelease = match[4];
+  const [minMajor, minMinor, minPatch] = MIN_USAGE_VERSION;
+  if (major !== minMajor) return major > minMajor;
+  if (minor !== minMinor) return minor > minMinor;
+  if (patch !== minPatch) return patch > minPatch;
+  return prerelease === undefined;
+}

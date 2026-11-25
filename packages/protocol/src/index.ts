@@ -466,6 +466,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   subscriptionUsage: 80,
   /** A refresh reads Claude usage too, for a control plane whose deadline counts those sources. */
   claudeSubscriptionUsageRefresh: 342,
+  /** v413 (Refs #4922): Google Antigravity subscription usage snapshots and source-targeted refresh. */
+  antigravitySubscriptionUsage: 413,
   managedBackgroundDelivery: 82,
   backgroundFollowUp: 240,
   managedBackgroundInventory: 82,
@@ -7430,7 +7432,7 @@ export interface DeleteAgentHarnessDefaultRequest extends AgentHarnessIdentity {
 
 /* ---------------- Provider subscription usage (account-level) ---------- */
 
-export type SubscriptionUsageProvider = "codex" | "claude";
+export type SubscriptionUsageProvider = "codex" | "claude" | "antigravity";
 export type SubscriptionUsageState =
   | "available"
   | "unavailable"
@@ -11374,6 +11376,8 @@ export interface RefreshSubscriptionUsageMessage {
   requestId: string;
   /** Opaque account coordinate; omission refreshes every source for legacy clients. */
   providerAccountId?: string;
+  /** Protocol v413: opaque source coordinate for providers without multi-account providerAccountId. */
+  sourceId?: string;
 }
 
 export interface SessionNamingPromptMessage {

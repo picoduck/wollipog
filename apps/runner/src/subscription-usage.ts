@@ -13,7 +13,11 @@ import type {
   SubscriptionUsageSnapshot,
   SubscriptionUsageSpendControl,
 } from "@wollipog/protocol";
-import { runnerSupportsProtocol } from "@wollipog/protocol";
+import {
+  ANTIGRAVITY_AGENT_ID,
+  antigravityCliVersionSupportsUsage,
+  runnerSupportsProtocol,
+} from "@wollipog/protocol";
 import { JsonRpcPeer } from "./jsonrpc.js";
 import { killTree, spawnAgent, type AgentProcess, type SpawnIsolation } from "./spawn.js";
 import type { DriverSubscriptionUsageUpdate } from "./drivers/driver.js";
@@ -21,6 +25,8 @@ import { agentForProviderAccount, providerForDriver } from "./provider-accounts.
 import { harnessChoiceFor, selectedHarnessAgent } from "./harness-selection.js";
 import { launchTargetStillMatches } from "./discovery/resolve.js";
 import { claudeStatusIdentity, codexCredentialIdentity } from "./provider-login.js";
+import { antigravityCredentialContext, type AntigravityCredentialContext } from "./antigravity-setup.js";
+import { probeAntigravitySubscriptionUsage } from "./antigravity-subscription-usage.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -954,6 +960,7 @@ export async function readSubscriptionIdentity(request: SubscriptionIdentityRequ
   if (request.provider === "codex") {
     return request.env.OPENAI_API_KEY ? undefined : readCodexSubscriptionIdentity(request.agent, request.env);
   }
+  if (request.provider === "antigravity") return undefined;
   return probeClaudeSubscriptionIdentity(request.agent, request.env, await request.authorize(), request.processes);
 }
 
@@ -1002,6 +1009,16 @@ export interface SubscriptionUsageManagerOptions {
   /** Whether a refresh may also read Claude usage. An older control plane's refresh deadline counts
    * only Codex sources, so Claude reads would run it out. Defaults to true. */
   claudeRefreshEnabled?: () => boolean;
+  /** Whether the negotiated control plane accepts Google Antigravity subscription snapshots (v413). */
+  antigravityEnabled?: () => boolean;
+  /** Subscription plan tier observed from Antigravity's ACP `session/new` access check. */
+  antigravityPlanTier?: () => string | undefined;
+  /** Acquires the verified Antigravity launch target (managed generation or PATH copy + context),
+   * pinned until the probe releases it. Falls back to the agent command + default context in tests. */
+  acquireAntigravityLaunch?: () => { command: string; context: AntigravityCredentialContext; release: () => void } | null;
+  /** Called when an Antigravity usage probe observes that the shared Google sign-in expired. */
+  onAntigravityUnauthenticated?: () => void;
+  probeAntigravity?: typeof probeAntigravitySubscriptionUsage;
 }
 
 export class SubscriptionUsageManager {
@@ -1068,10 +1085,15 @@ export class SubscriptionUsageManager {
     return this.identityRefresh;
   }
 
-  /** A source whose usage a refresh reads: every Codex source, and a Claude source whose installation
-   * can be locked down to answer `get_usage` alone, while the control plane counts it. */
+  /** A source whose usage a refresh reads: every Codex source, a Claude source whose installation
+   * can be locked down to answer `get_usage` alone, and a ready Antigravity source whose CLI
+   * version supports native print-mode `/usage`. */
   private probed(source: SubscriptionSource): boolean {
     if (source.provider === "codex") return true;
+    if (source.provider === "antigravity") {
+      return (this.options.antigravityEnabled?.() ?? true) && !source.unsupportedDetail &&
+        source.agent.available === true && antigravityCliVersionSupportsUsage(source.agent.version);
+    }
     const claude = source.agent.claudeCode;
     return (this.options.claudeRefreshEnabled?.() ?? true) && !source.unsupportedDetail &&
       claude?.streamJsonInput === true && claude.controlProtocol === true && claude.sessionNaming === true;
@@ -1223,6 +1245,24 @@ export class SubscriptionUsageManager {
       });
     }
     for (const agent of agents) {
+      if (agent.id === ANTIGRAVITY_AGENT_ID && (agent.driver ?? "acp") === "acp") {
+        if (!(this.options.antigravityEnabled?.() ?? true)) continue;
+        const sourceId = subscriptionUsageSourceId(
+          this.options.runnerId,
+          agent.id,
+          "antigravity",
+          agent.context,
+        );
+        if (seen.has(sourceId)) continue;
+        seen.add(sourceId);
+        result.push({
+          agent,
+          provider: "antigravity",
+          sourceId,
+          ...(agent.authStatus === "unauthenticated" ? { authStatus: "unauthenticated" as const } : {}),
+        });
+        continue;
+      }
       const provider = providerForDriver(agent.driver ?? "acp");
       if (!provider || agent.driver === "codex") continue;
       const sourceContext = `${provider}\0${contextKey(agent.context)}`;
@@ -1279,6 +1319,32 @@ export class SubscriptionUsageManager {
     };
     if (source.unsupportedDetail) {
       return { ...base, state: "unsupported", detail: source.unsupportedDetail };
+    }
+    if (provider === "antigravity") {
+      if (source.authStatus === "unauthenticated" || agent.authStatus === "unauthenticated") {
+        return { ...base, state: "unauthenticated", detail: `${agent.name} is not signed in.` };
+      }
+      if (agent.available !== true) {
+        return {
+          ...base,
+          state: "unavailable",
+          detail: agent.unavailableReason ?? `${agent.name} is not available on this runner.`,
+        };
+      }
+      if (!antigravityCliVersionSupportsUsage(agent.version)) {
+        return {
+          ...base,
+          state: "unsupported",
+          detail: "This Google Antigravity version does not report subscription usage. Update Google Antigravity to view quotas.",
+        };
+      }
+      const plan = this.options.antigravityPlanTier?.();
+      return {
+        ...base,
+        state: "unavailable",
+        detail: "Google Antigravity subscription usage has not been fetched yet.",
+        ...(plan ? { plan } : {}),
+      };
     }
     if (agent.available !== true) {
       return { ...base, state: "unavailable", detail: `${agent.name} is not available on this runner.` };
@@ -1347,7 +1413,11 @@ export class SubscriptionUsageManager {
       // refresh, so comparing them here would mistake every populated Codex snapshot for a switch.
       const accountChanged = source.provider === "claude" && Boolean(prior) &&
         source.accountLabel !== prior?.accountLabel;
+      const recovered = source.provider === "antigravity" &&
+        (prior?.state === "unauthenticated" || prior?.state === "unsupported") &&
+        initial.state === "unavailable";
       const forced = source.unsupportedDetail != null || prior?.agentId !== source.agent.id ||
+        recovered ||
         initial.state === "unsupported" ||
         initial.state === "unauthenticated" ||
         initial.state === "not_applicable";
@@ -1476,6 +1546,29 @@ export class SubscriptionUsageManager {
     return this.inventory();
   }
 
+  async refreshSourceById(sourceId: string): Promise<SubscriptionUsageSnapshot[]> {
+    if (this.shuttingDown) throw new Error("subscription usage manager is shutting down");
+    this.syncSources();
+    const selectionGeneration = this.selectionGeneration;
+    const source = this.sources().find((candidate) => candidate.sourceId === sourceId);
+    if (!source) throw new Error("subscription usage source is not configured");
+    if (source.provider === "claude" && !this.probed(source)) {
+      void this.refreshIdentities((candidate) => candidate.sourceId === sourceId);
+    }
+    await this.refreshSource(source, selectionGeneration);
+    return this.inventory();
+  }
+
+  async refreshAntigravitySources(): Promise<SubscriptionUsageSnapshot[]> {
+    if (this.shuttingDown) return this.inventory();
+    this.syncSources();
+    const selectionGeneration = this.selectionGeneration;
+    for (const source of this.sources().filter((candidate) => candidate.provider === "antigravity")) {
+      await this.refreshSource(source, selectionGeneration);
+    }
+    return this.inventory();
+  }
+
   private async refreshAllNow(): Promise<SubscriptionUsageSnapshot[]> {
     this.syncSources();
     const selectionGeneration = this.selectionGeneration;
@@ -1490,7 +1583,106 @@ export class SubscriptionUsageManager {
   private async refreshSource(source: SubscriptionSource, selectionGeneration: number): Promise<void> {
     if (!this.probed(source)) return;
     if (source.provider === "codex") await this.refreshCodex(source, selectionGeneration);
+    else if (source.provider === "antigravity") await this.refreshAntigravity(source, selectionGeneration);
     else await this.refreshClaude(source, selectionGeneration);
+  }
+
+  private async refreshAntigravity(source: SubscriptionSource, selectionGeneration: number): Promise<void> {
+    const isCurrent = () => !this.shuttingDown && selectionGeneration === this.selectionGeneration &&
+      this.isCurrentSource(source);
+    if (!isCurrent()) return;
+    const initial = this.initialSnapshot(source);
+    if (source.agent.available !== true || initial.state === "unsupported" ||
+        initial.state === "unauthenticated" || initial.state === "not_applicable") return;
+    const now = this.now();
+    if (now - (this.lastProbeAt.get(source.sourceId) ?? 0) < SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS) return;
+    this.lastProbeAt.set(source.sourceId, now);
+
+    const acquired = this.options.acquireAntigravityLaunch
+      ? this.options.acquireAntigravityLaunch()
+      : { command: source.agent.command, context: antigravityCredentialContext(), release: () => {} };
+    if (!acquired) return;
+    const kill = this.options.killProbe ?? killTree;
+    let authorization: SubscriptionUsageProbeAuthorization | undefined;
+    const probeChildren: AgentProcess[] = [];
+    try {
+      authorization = await this.options.authorizeProbe?.(source.agent, acquired.context.env, source.sourceId);
+      if (!authorization) throw new Error("subscription usage probe authorization is unavailable");
+      if (!isCurrent()) return;
+      const result = await (this.options.probeAntigravity ?? probeAntigravitySubscriptionUsage)({
+        command: acquired.command,
+        cwd: authorization.cwd,
+        context: acquired.context,
+        isolation: authorization.isolation,
+        timeoutMs: SUBSCRIPTION_USAGE_PROBE_TIMEOUT_MS,
+        now: () => this.now(),
+        deps: {
+          kill,
+          onSpawn: (child) => {
+            probeChildren.push(child);
+            this.activeProbeChildren.add(child);
+            if (this.shuttingDown) kill(child);
+          },
+          onFinish: (child) => this.activeProbeChildren.delete(child),
+        },
+      });
+      if (!isCurrent()) return;
+      const fetchedAt = this.now();
+      const plan = this.options.antigravityPlanTier?.();
+      if (result.state === "available") {
+        const snapshot: SubscriptionUsageSnapshot = withReadingTimes({
+          sourceId: source.sourceId,
+          runnerId: this.options.runnerId,
+          agentId: source.agent.id,
+          provider: "antigravity",
+          state: "available",
+          fetchedAt,
+          buckets: result.buckets,
+          ...(plan ? { plan } : {}),
+          ...(result.credits ? { credits: result.credits } : {}),
+        });
+        this.snapshots.set(source.sourceId, snapshot);
+        this.publish(snapshot);
+        return;
+      }
+      const next: SubscriptionUsageSnapshot = {
+        ...initial,
+        state: result.state,
+        detail: result.detail,
+        fetchedAt,
+        buckets: [],
+        ...(plan && result.state !== "unauthenticated" ? { plan } : {}),
+      };
+      this.snapshots.set(source.sourceId, next);
+      this.publish(next);
+      if (result.state === "unauthenticated") {
+        this.options.onAntigravityUnauthenticated?.();
+      }
+    } catch (error) {
+      if (!isCurrent()) return;
+      this.options.log?.(`subscription usage probe failed for ${source.agent.id}: ${errorText(error)}`);
+      const prior = this.snapshots.get(source.sourceId);
+      const failed: SubscriptionUsageSnapshot = prior?.buckets.length
+        ? {
+            ...prior,
+            detail: "The latest Google Antigravity refresh failed; showing the last provider snapshot.",
+          }
+        : {
+            ...initial,
+            state: "unavailable",
+            detail: "Google Antigravity subscription usage could not be refreshed. Try again.",
+            fetchedAt: this.now(),
+          };
+      this.snapshots.set(source.sourceId, failed);
+      this.publish(failed);
+    } finally {
+      acquired.release();
+      try {
+        await authorization?.settle?.(probeChildren);
+      } catch (error) {
+        this.options.log?.(`subscription usage probe ownership settlement failed: ${errorText(error)}`);
+      }
+    }
   }
 
   /** The probe's launch target moved since discovery: report it and ask for rediscovery. */

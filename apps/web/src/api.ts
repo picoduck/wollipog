@@ -436,7 +436,7 @@ export function createApiClient(transport: ApiTransport) {
   refreshUsagePricing: () => req<{ pricing: UsagePricingStatus }>("/api/usage/pricing/refresh", { method: "POST" }),
   subscriptionUsage: () => req<SubscriptionUsageResponse>("/api/usage/subscriptions"),
 
-  refreshSubscriptionUsage: (target?: { runnerId: string; providerAccountId: string }) => req<SubscriptionUsageResponse>("/api/usage/subscriptions/refresh", {
+  refreshSubscriptionUsage: (target?: { runnerId: string; providerAccountId: string } | { runnerId: string; sourceId: string }) => req<SubscriptionUsageResponse>("/api/usage/subscriptions/refresh", {
     method: "POST",
     body: target ? JSON.stringify(target) : undefined,
   }),

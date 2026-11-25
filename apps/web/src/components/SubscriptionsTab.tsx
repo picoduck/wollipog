@@ -11,7 +11,11 @@ import { subscriptionResetLabel } from "../account-unavailable-reasons.js";
 import { viewPath } from "../navigation.js";
 import { isPersonalIdentifier, redactPersonalIdentifiers } from "../personal-identifiers.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
-import { subscriptionAccountGroups, type SubscriptionAccountGroup } from "../subscription-account-groups.js";
+import {
+  subscriptionAccountGroups,
+  type SubscriptionAccountGroup,
+  type SubscriptionAccountRefreshTarget,
+} from "../subscription-account-groups.js";
 import { subscriptionPlanLabel } from "../usage-view-model.js";
 import { usageLeftPercent, usageMeterClass, usageWindowAttention, usageWindowAttentionDetail } from "./AccountChoice.js";
 import { useFeedback } from "./FeedbackProvider.js";
@@ -24,10 +28,7 @@ import { BusyButton } from "./ui/BusyButton.js";
 /** What Refresh All refreshes, as the in-flight key; an account's key is its group's. */
 const ALL = "*";
 
-export interface SubscriptionRefreshTarget {
-  runnerId: string;
-  providerAccountId: string;
-}
+export type SubscriptionRefreshTarget = SubscriptionAccountRefreshTarget;
 
 export interface SubscriptionRefreshAccount {
   key: string;
@@ -155,7 +156,16 @@ function lowerFirst(text: string): string {
 }
 
 function providerName(source: SubscriptionUsageSourceView): string {
-  return source.provider === "codex" ? "Codex" : "Claude";
+  if (source.provider === "codex") return "Codex";
+  if (source.provider === "antigravity") return "Google Antigravity";
+  return "Claude";
+}
+
+function subscriptionCardTitle(source: SubscriptionUsageSourceView): string {
+  const provider = providerName(source);
+  if (!source.plan) return provider;
+  const plan = subscriptionPlanLabel(source.plan);
+  return source.provider === "antigravity" ? `${provider} — ${plan}` : `${provider} ${plan}`;
 }
 
 /** The account's one badge, only when something is wrong (§11.1): no "Available" on a healthy one. */
@@ -317,7 +327,7 @@ function SubscriptionAccount({ group, now, refreshing, onRefresh }: {
       <header className="subscription-plan-head">
         <div className="subscription-plan-heading">
           <h3 className="subscription-plan-title" id={titleId}>
-            {providerName(source)}{source.plan ? ` ${subscriptionPlanLabel(source.plan)}` : ""}
+            {subscriptionCardTitle(source)}
           </h3>
           {badge && (
             <StatusBadge
@@ -474,7 +484,7 @@ export function SubscriptionsTab({ usage, phone, onOpenConnections }: {
           </a>
         )}
       >
-        Sign in to Codex or Claude on a connected machine, and each plan's remaining allowance shows here.
+        Sign in to Codex, Claude, or Google Antigravity on a connected machine, and each plan's remaining allowance shows here.
       </State>
     );
   }

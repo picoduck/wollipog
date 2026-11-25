@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import Fastify from "fastify";
-import { PROTOCOL_VERSION, type ControlPlaneToRunner } from "@wollipog/protocol";
+import { ANTIGRAVITY_AGENT_ID, PROTOCOL_VERSION, type ControlPlaneToRunner } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { registerUsageRoutes } from "./usage-routes.js";
@@ -481,4 +481,77 @@ test("daily budgets cannot be armed over an active user-owned Agent TUI", async 
   assert.equal(response.statusCode, 409);
   assert.match(response.json().error, /Close every Agent TUI/);
   assert.equal(persisted, false);
+});
+
+test("subscription refresh supports Google Antigravity in Refresh All and sourceId-targeted refreshes with v413 gating", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = Date.now();
+  const agyAgent = {
+    id: ANTIGRAVITY_AGENT_ID,
+    name: "Google Antigravity",
+    command: "/usr/local/bin/agy",
+    args: ["acp"],
+    env: {},
+    driver: "acp" as const,
+    context: { kind: "native" as const },
+    version: "1.5.14",
+    available: true,
+    authStatus: "authenticated" as const,
+  };
+  const owner = { organizationId: "org_personal", owner: { kind: "user" as const, userId: "operator-user" } };
+  db.registerRunner({ runnerId: "agy-current", hostname: "agy-current", os: "linux", version: "1", agents: [agyAgent], workspaces: [] }, now, PROTOCOL_VERSION, owner);
+  db.registerRunner({ runnerId: "agy-old", hostname: "agy-old", os: "linux", version: "1", agents: [agyAgent], workspaces: [] }, now, 412, owner);
+
+  const expectedSourceId = createHash("sha256")
+    .update(JSON.stringify({ runnerId: "agy-current", agentId: ANTIGRAVITY_AGENT_ID, provider: "antigravity", context: "native" }))
+    .digest("hex")
+    .slice(0, 32);
+
+  const sent: Array<{ runnerId: string; message: ControlPlaneToRunner; timeoutMs: number }> = [];
+  const app = Fastify();
+  registerUsageRoutes(app, db, () => human("operator"), {
+    requestFromRunner: async (runnerId, requestId, message, timeoutMs) => {
+      sent.push({ runnerId, message, timeoutMs });
+      return { type: "subscription_usage_refresh_result", requestId, ok: true, snapshots: [] };
+    },
+  });
+
+  // Refresh All contacts only the v413+ Antigravity runner with 2 probe budgets (18_000 ms).
+  const all = await app.inject({ method: "POST", url: "/api/usage/subscriptions/refresh" });
+  assert.equal(all.statusCode, 200);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0]?.runnerId, "agy-current");
+  assert.equal(sent[0]?.timeoutMs, 18_000);
+
+  // Source-targeted refresh sends sourceId and budgets 2 probes.
+  const targeted = await app.inject({
+    method: "POST",
+    url: "/api/usage/subscriptions/refresh",
+    payload: { runnerId: "agy-current", sourceId: expectedSourceId },
+  });
+  assert.equal(targeted.statusCode, 200);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1]?.message.type, "refresh_subscription_usage");
+  assert.equal(sent[1]?.message.type === "refresh_subscription_usage" ? sent[1].message.sourceId : undefined, expectedSourceId);
+  assert.equal(sent[1]?.timeoutMs, 18_000);
+
+  // Validation errors and unknown sourceId.
+  assert.equal((await app.inject({
+    method: "POST",
+    url: "/api/usage/subscriptions/refresh",
+    payload: { runnerId: "agy-current", providerAccountId: "work", sourceId: expectedSourceId },
+  })).statusCode, 400);
+  assert.equal((await app.inject({
+    method: "POST",
+    url: "/api/usage/subscriptions/refresh",
+    payload: { runnerId: "agy-current", sourceId: "not-hex" },
+  })).statusCode, 400);
+  assert.equal((await app.inject({
+    method: "POST",
+    url: "/api/usage/subscriptions/refresh",
+    payload: { runnerId: "agy-current", sourceId: "f".repeat(32) },
+  })).statusCode, 404);
+
+  await app.close();
+  db.close();
 });
