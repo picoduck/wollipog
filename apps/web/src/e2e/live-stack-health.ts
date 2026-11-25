@@ -5,23 +5,23 @@ import { setTimeout as delay } from "node:timers/promises";
 const HEALTH_TIMEOUT_MS = 20_000;
 const OUTPUT_LIMIT = 8_192;
 
-export function sanitizeStartupOutput(value: string, secrets: readonly string[]): string {
+export function sanitizeStartupOutput(value: string, secrets: readonly string[], repoRoot?: string): string {
   // Redact before truncation so a boundary cannot expose part of a known secret.
   let result = value;
   for (const secret of secrets) if (secret) result = result.split(secret).join("[redacted]");
+  if (repoRoot) result = result.split(repoRoot + "/").join("[repo]");
   return result
     .replace(/\x1b\[[0-9;]*[A-Za-z]/gu, "")
     .replace(/\bBearer\s+\S+/giu, "Bearer [redacted]")
-    .replace(/((?:[\w-]*(?:token|secret|password|authorization|api[_-]?key)[\w-]*)["']?\s*[:=]\s*)[^\r\n]+/giu, "$1[redacted]")
-    .replace(/(?:[A-Za-z]:[\\/]|\/)[^\s"'<>]+/gu, "[path]")
-    .slice(-OUTPUT_LIMIT);
+    .replace(/(?<![\w-])((?:[\w-]*(?:token|secret|password|authorization|api[_-]?key)[\w-]*)["']?\s*[:=]\s*)[^\r\n]+/giu, "$1[redacted]")
+    .replace(/(?<![\w:/\]])(?:file:\/\/)?(?:[A-Za-z]:[\\/]|\/)[^\s"'<>]+/gu, "[path]");
 }
 
 export async function waitForLiveStackHealth(
   baseUrl: string,
   child: ChildProcess,
-  logs: () => string,
-  options: { phase: "initial startup" | "restart"; secrets: readonly string[]; timeoutMs?: number },
+  logs: () => { controlPlane: string; runner: string },
+  options: { phase: "initial startup" | "restart"; secrets: readonly string[]; repoRoot?: string; timeoutMs?: number },
 ): Promise<void> {
   const timeoutMs = options.timeoutMs ?? HEALTH_TIMEOUT_MS;
   const started = performance.now();
@@ -33,13 +33,17 @@ export async function waitForLiveStackHealth(
   child.on("spawn", onSpawn);
   child.on("error", onError);
   if (child.pid !== undefined) phase = "process spawned";
-  const failed = (reason: string) => new Error(
+  const failed = (reason: string) => {
+    const output = logs();
+    const section = (value: string) => sanitizeStartupOutput(value, options.secrets, options.repoRoot).slice(-OUTPUT_LIMIT);
+    return new Error(
     `control plane did not become healthy: ${reason}\n` +
     `startup=${options.phase}; phase=${phase}; elapsedMs=${Math.round(performance.now() - started)}; budgetMs=${timeoutMs}\n` +
     `process=${spawnError ? "spawn failed" : child.exitCode !== null || child.signalCode !== null ? "exited" : child.pid === undefined ? "pending" : "running"}; ` +
     `exitCode=${child.exitCode}; signal=${child.signalCode}; spawnError=${spawnError ?? "none"}\n` +
-    `lastHealthProbe=${lastProbe}\n${sanitizeStartupOutput(logs(), options.secrets)}`,
-  );
+    `lastHealthProbe=${lastProbe}\n=== CONTROL PLANE ===\n${section(output.controlPlane)}\n=== RUNNER ===\n${section(output.runner)}`,
+    );
+  };
   try {
     while (performance.now() - started < timeoutMs) {
       if (spawnError || child.exitCode !== null || child.signalCode !== null) throw failed("process stopped");

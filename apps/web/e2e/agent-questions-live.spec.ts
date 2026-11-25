@@ -1,5 +1,5 @@
 import { ControlPlaneDb } from "../../control-plane/src/db.js";
-import { sanitizeStartupOutput, waitForLiveStackHealth } from "../src/e2e/live-stack-health.js";
+import { waitForLiveStackHealth } from "../src/e2e/live-stack-health.js";
 import { openMobileQuestion } from "./open-mobile-question.js";
 import { expect, test, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -250,7 +250,8 @@ async function startLiveStack(
     runner = child;
     return child;
   };
-  const logs = () => `=== CONTROL PLANE ===\n${sanitizeStartupOutput(controlPlaneOutput, startupSecrets)}\n=== RUNNER ===\n${sanitizeStartupOutput(runnerOutput, startupSecrets)}`;
+  const logs = () => `=== CONTROL PLANE ===\n${controlPlaneOutput}\n=== RUNNER ===\n${runnerOutput}`;
+  const startupOutput = () => ({ controlPlane: controlPlaneOutput, runner: runnerOutput });
   const stop = async () => {
     await stopChild(runner);
     await stopChild(controlPlane);
@@ -259,7 +260,7 @@ async function startLiveStack(
 
   try {
     const initialControlPlane = spawnControlPlane();
-    await waitForLiveStackHealth(httpBase, initialControlPlane, logs, { phase: "initial startup", secrets: startupSecrets });
+    await waitForLiveStackHealth(httpBase, initialControlPlane, startupOutput, { phase: "initial startup", secrets: startupSecrets, repoRoot: REPO_ROOT });
     const credentialResponse = await fetch(`${httpBase}/api/runner-credentials`, {
       method: "POST",
       headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
@@ -345,7 +346,7 @@ async function startLiveStack(
       await stopChild(controlPlane);
       controlPlane = null;
       const restartedControlPlane = spawnControlPlane();
-      await waitForLiveStackHealth(httpBase, restartedControlPlane, logs, { phase: "restart", secrets: startupSecrets });
+      await waitForLiveStackHealth(httpBase, restartedControlPlane, startupOutput, { phase: "restart", secrets: startupSecrets, repoRoot: REPO_ROOT });
       const restartedRunner = restartRunner ? spawnRunner() : runner!;
       let lastSession: SessionView | null = null;
       for (let attempt = 0; attempt < 100; attempt += 1) {
