@@ -1,3 +1,4 @@
+import { sanitizeStartupOutput, waitForLiveStackHealth } from "../src/e2e/live-stack-health.js";
 import { expect, test } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -50,6 +51,7 @@ test("a browser sees delegated image review complete through live scoped routes 
   test.setTimeout(120_000);
   let temp: string | null = null;
   let output = "";
+  const startupSecrets: string[] = [];
   const evidenceBase64 = readFileSync(fileURLToPath(new URL("../public/icons/icon-192.png", import.meta.url)))
     .toString("base64");
   const evidenceMarker = evidenceBase64.slice(1_000, 1_200);
@@ -64,6 +66,7 @@ test("a browser sees delegated image review complete through live scoped routes 
     mkdirSync(workspacePath);
     const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
     const seeded = seedDelegatedUiEvidence(databasePath, workspacePath);
+    startupSecrets.push(ownerToken, seeded.parentToken);
     // Serve the exact source build in the browser, not a bundle left by another test run.
     const built = spawnSync("pnpm", ["--dir", "apps/web", "exec", "vite", "build", "--outDir", webDist], {
       cwd: REPO_ROOT, encoding: "utf8", timeout: 60_000, shell: process.platform === "win32",
@@ -91,14 +94,9 @@ test("a browser sees delegated image review complete through live scoped routes 
     };
     controlPlane.stdout?.on("data", captureLog);
     controlPlane.stderr?.on("data", captureLog);
-    let ready = false;
-    for (let attempt = 0; attempt < 400; attempt += 1) {
-      if (controlPlane.exitCode !== null) throw new Error("control plane exited early");
-      try { ready = (await fetch(`${base}/healthz`)).ok; } catch { /* still starting */ }
-      if (ready) break;
-      await delay(50);
-    }
-    if (!ready) throw new Error("control plane did not become healthy");
+    await waitForLiveStackHealth(base, controlPlane, () => ({ controlPlane: output, runner: "" }), {
+      phase: "initial startup", secrets: startupSecrets, repoRoot: REPO_ROOT,
+    });
     // Startup marks sessions with no connected runner stopped. Restore their fixture status after
     // recovery, so an exact live agent credential can exercise the real authorization routes.
     const db = ControlPlaneDb.attach(databasePath);
@@ -176,7 +174,7 @@ test("a browser sees delegated image review complete through live scoped routes 
     expect(auditText).not.toContain(seeded.parentToken);
     expect(mediaLogged, "control-plane logs must not contain the delivered image").toBe(false);
   } catch (error) {
-    const safeOutput = output.replace(/[A-Za-z0-9+/]{120,}={0,2}/gu, "[redacted media]");
+    const safeOutput = sanitizeStartupOutput(output, startupSecrets, REPO_ROOT).slice(-8_192).replace(/[A-Za-z0-9+/]{120,}={0,2}/gu, "[redacted media]");
     throw new Error(`${error instanceof Error ? error.stack : String(error)}\n${safeOutput}`);
   } finally {
     if (controlPlane) await stopChild(controlPlane);
