@@ -570,7 +570,11 @@ function VirtualList<T>({
   virtualizer.options.onChange = (instance, synchronous) => {
     const resize = resizeCommitRef.current;
     resizeCommitRef.current = false;
-    notifyMeasurements?.(instance, synchronous || (resize && !measuringInCommitRef.current));
+    const commitResize = resize && !measuringInCommitRef.current;
+    notifyMeasurements?.(instance, synchronous || commitResize);
+    // The commit can grow the shallower list root after its observer already delivered this
+    // frame. Re-pin a followed tail against the committed size without waiting for that notice.
+    if (commitResize) dispatchVirtualRowResize(scrollRef.current);
   };
   const initialMeasurementVirtualizerRef = useRef(virtualizer);
   initialMeasurementVirtualizerRef.current = virtualizer;
