@@ -244,3 +244,51 @@ test("a poller collecting a create that cleared its incident joins instead of re
   assert.equal(collected.id, "worktree_cleared");
   assert.equal(starts, 1);
 });
+
+test("joinExisting only joins operations started or joined by the same session and never starts work (#4904)", async () => {
+  let starts = 0;
+  let complete!: (value: { snapshot: SessionSnapshot }) => void;
+  const coordinator = new WorktreeCreateCoordinator(60_000, () => "worktree_idle_poll");
+
+  // Nothing in flight: joinExisting returns null and never invokes a runner request.
+  assert.equal(coordinator.hasJoinableForInitiator("session-1", "session-1"), false);
+  assert.equal(coordinator.joinExisting({ ...coordinates, initiatorSessionId: "session-1" }), null);
+
+  // Human-initiated create (no initiatorSessionId) cannot be joined by an idle agent session.
+  coordinator.startOrJoin(coordinates, () => {
+    starts += 1;
+    return new Promise((resolve) => { complete = resolve; });
+  });
+  await flush();
+  assert.equal(coordinator.hasJoinableForInitiator("session-1", "session-1"), false);
+  assert.equal(coordinator.joinExisting({ ...coordinates, initiatorSessionId: "session-1" }), null);
+
+  // Once the live session joins (or starts) the create, it becomes an authorized poller for those
+  // exact coordinates — and only those coordinates.
+  coordinator.startOrJoin({ ...coordinates, initiatorSessionId: "session-1" }, async () => {
+    starts += 1;
+    return { snapshot };
+  });
+  assert.equal(starts, 1);
+  assert.equal(coordinator.hasJoinableForInitiator("session-1", "session-1"), true);
+  assert.equal(coordinator.hasJoinableForInitiator("session-other", "session-1"), false);
+  assert.equal(coordinator.hasJoinableForInitiator("session-1", "session-other"), false);
+  assert.equal(coordinator.joinExisting({ ...coordinates, branch: "fix/other", initiatorSessionId: "session-1" }), null);
+  assert.equal(coordinator.joinExisting({ ...coordinates, baseRef: "origin/other", initiatorSessionId: "session-1" }), null);
+  assert.equal(coordinator.joinExisting({ ...coordinates, initiatorSessionId: "session-other" }), null);
+  assert.deepEqual(coordinator.joinExisting({ ...coordinates, initiatorSessionId: "session-1" }), {
+    id: "worktree_idle_poll",
+    status: "in_progress",
+  });
+
+  // Completion stays joinable once so the idle poller collects the terminal result, then disappears.
+  complete({ snapshot });
+  await flush();
+  const terminal = coordinator.joinExisting({ ...coordinates, initiatorSessionId: "session-1" });
+  assert.equal(terminal?.status, "completed");
+  assert.equal(terminal?.id, "worktree_idle_poll");
+  coordinator.releaseTerminal(terminal!.id);
+  assert.equal(coordinator.hasJoinableForInitiator("session-1", "session-1"), false);
+  assert.equal(coordinator.joinExisting({ ...coordinates, initiatorSessionId: "session-1" }), null);
+  assert.equal(starts, 1);
+});

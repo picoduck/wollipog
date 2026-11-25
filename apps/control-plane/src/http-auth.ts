@@ -30,8 +30,9 @@ export interface AuthedDevice {
 
 export interface AuthGateDeps {
   /** Resolve the device a request authenticates as. `allowQueryToken` is true only for `/ui`
-   * (browsers cannot set headers on a WebSocket upgrade). */
-  authenticate: (req: FastifyRequest, allowQueryToken?: boolean) => AuthedDevice | null;
+   * (browsers cannot set headers on a WebSocket upgrade). `bodyParsed` is false in `onRequest`
+   * (before JSON parsing) and true in `preHandler` (after JSON parsing). */
+  authenticate: (req: FastifyRequest, allowQueryToken?: boolean, bodyParsed?: boolean) => AuthedDevice | null;
   /** Credential-bound diagnostics only, called after authentication has failed. */
   authenticationRefusal?: (req: FastifyRequest) => string | undefined;
   /** Optional organization-role authorization layered after authentication/origin checks. */
@@ -76,12 +77,17 @@ export function isPublicPushReceiptAck(method: string, routePath: string): boole
 }
 
 export function registerAuthGate(app: FastifyInstance, deps: AuthGateDeps): void {
+  const gatedApiRoute = (method: string, routePath: string): boolean =>
+    requiresDeviceAuth(routePath) &&
+    !isPublicTranscriptShareRead(method, routePath) &&
+    !isPublicPushReceiptAck(method, routePath) &&
+    routePath !== "/ui";
   app.addHook("onRequest", async (req, reply) => {
     const routePath = req.routeOptions?.url ?? req.url.split("?")[0] ?? "";
     if (requiresDeviceAuth(routePath) && !isPublicTranscriptShareRead(req.method, routePath) &&
         !isPublicPushReceiptAck(req.method, routePath)) {
       if (routePath === "/ui") return; // authenticated inside the /ui upgrade handler
-      const principal = deps.authenticate(req);
+      const principal = deps.authenticate(req, false, false);
       if (!principal) return reply.code(401).send({ error: deps.authenticationRefusal?.(req) ?? UNAUTHORIZED });
       return; // token-authed non-loopback API call: Origin is moot (possession beats Origin)
     }
@@ -93,15 +99,18 @@ export function registerAuthGate(app: FastifyInstance, deps: AuthGateDeps): void
     // Device-authenticated API calls returned above: possession beats Origin.
     if (isApiRoute(routePath) && !isPublicPushReceiptAck(req.method, routePath)) {
       const origin = req.headers.origin;
-      if (origin && !deps.isAllowedOrigin(origin) && !deps.authenticate(req)) {
+      if (origin && !deps.isAllowedOrigin(origin) && !deps.authenticate(req, false, false)) {
         return reply.code(403).send({ error: CROSS_ORIGIN_BLOCKED });
       }
     }
   });
   app.addHook("preHandler", async (req, reply) => {
-    if (!deps.authorize) return;
     const routePath = req.routeOptions?.url ?? req.url.split("?")[0] ?? "";
-    const presented = deps.authenticate(req);
+    const presented = deps.authenticate(req, false, true);
+    if (gatedApiRoute(req.method, routePath) && !presented) {
+      return reply.code(401).send({ error: deps.authenticationRefusal?.(req) ?? UNAUTHORIZED });
+    }
+    if (!deps.authorize) return;
     const denial = deps.authorize(req, presented);
     if (typeof denial === "string") return reply.code(403).send({ error: denial || FORBIDDEN });
     if (denial) return reply.code(denial.statusCode).send({ error: denial.error });

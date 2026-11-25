@@ -314,6 +314,50 @@ test("role authorization runs after body parsing and blocks viewer mutations", a
   assert.equal(operator.statusCode, 200);
 });
 
+test("registerAuthGate re-verifies authentication after body parsing and returns 401 on body mismatch (#4904)", async (t) => {
+  const app = Fastify();
+  let handlerCalls = 0;
+  registerAuthGate(app, {
+    authenticate: (req, _allowQueryToken, bodyParsed) => {
+      if (extractBearer(req.headers.authorization) !== VALID) return null;
+      if (!bodyParsed) return { id: "idle-poll", name: "Idle Poll" };
+      const body = req.body as { branch?: unknown; progress?: unknown } | undefined;
+      return body?.progress === true && body.branch === "fix/allowed"
+        ? { id: "idle-poll", name: "Idle Poll" }
+        : null;
+    },
+    authenticationRefusal: () => "idle poll refused",
+    isAllowedOrigin,
+  });
+  app.post("/api/sessions/:id/worktrees", async () => {
+    handlerCalls += 1;
+    return { ok: true };
+  });
+  await app.ready();
+  t.after(() => app.close());
+
+  const mismatched = await app.inject({
+    method: "POST",
+    url: "/api/sessions/s1/worktrees",
+    remoteAddress: REMOTE,
+    headers: { authorization: `Bearer ${VALID}`, "content-type": "application/json" },
+    body: { branch: "fix/other", progress: true },
+  });
+  assert.equal(mismatched.statusCode, 401);
+  assert.deepEqual(mismatched.json(), { error: "idle poll refused" });
+  assert.equal(handlerCalls, 0);
+
+  const matched = await app.inject({
+    method: "POST",
+    url: "/api/sessions/s1/worktrees",
+    remoteAddress: REMOTE,
+    headers: { authorization: `Bearer ${VALID}`, "content-type": "application/json" },
+    body: { branch: "fix/allowed", progress: true },
+  });
+  assert.equal(matched.statusCode, 200);
+  assert.equal(handlerCalls, 1);
+});
+
 /**
  * The preflight contract, exercised through the REAL @fastify/cors plugin rather than by reading
  * the constant back. @fastify/cors v11 narrows its default `methods` to the CORS-safelisted set

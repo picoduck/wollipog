@@ -1686,6 +1686,24 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
 - **Stop.** For every ACP agent, `cancel()` now answers each pending `session/request_permission`
   with `cancelled`, as ACP requires, so a stopped turn's approval never stays open in the agent. The
   card itself settles with the turn, as for the native drivers.
+- **Post-`end_turn` wakeups and background tasks (#4905).** ACP v1 (`@agentclientprotocol/sdk`
+  1.2.1) defines no dedicated notifications for background-task lifecycle or provider-initiated turn
+  boundaries after `session/prompt` resolves with `end_turn`. Adapters such as `agy acp` 1.5.14
+  deliver background-task completions and reactive wakeup turns as unsolicited `session/update`
+  notifications (`tool_call_update`, `agent_thought_chunk`, `tool_call`, `plan`,
+  `agent_message_chunk`) and agent-to-client requests (`session/request_permission`, `fs/*`,
+  `terminal/*`) while no `session/prompt` RPC is in flight, then simply go quiet without an
+  explicit turn-end frame. `AcpClient` translates those unsolicited execution events into the same
+  `onProviderInitiatedTurn("started" | "settled", turnId)` contract used by native persistent
+  drivers, while ignoring runtime-state updates (`available_commands_update`, `current_mode_update`,
+  `config_option_update`, `session_info_update`, `usage_update`) and trailing `cancelled` tool
+  updates as turn openers. The wakeup turn stays active while any provider-turn tool call,
+  permission request, or client service request remains open, and settles (emitting
+  `agent_response_completed` if assistant text streamed) after a bounded quiet window (8 s after
+  non-message updates to bridge model TTFB, 2 s after streamed `agent_message_chunk`), immediately
+  when a new `prompt()` begins, or on `cancel()` / transport close. While active, `SessionManager`
+  marks the session `running`, keeps its agent-control credential valid, and defers idle-gated
+  rebinds and switches until the wakeup settles.
 - **Resume.** agy keeps its conversations in its state directory, `~/.gemini/antigravity-cli`, which
   also holds its OAuth token and settings. It resumes only where that directory is writable. Where
   it is, the session advertises `session/resume`, and a relaunch in the conversation's own folder

@@ -605,8 +605,57 @@ function authedLocalBootstrap(
   return token && tokenMatchesHash(token, LOCAL_DEVICE_TOKEN_HASH) ? localApiPrincipal() : null;
 }
 
+function hasLiveOrchestratorTui(session: { id: string; runnerId: string; permissionMode?: string | null; role?: import("@wollipog/protocol").SessionRole } | null | undefined): boolean {
+  return Boolean(session && sessionRole(session) === "orchestrator" &&
+    runnerSupportsProtocol(db.getRunner(session.runnerId)?.protocolVersion, "orchestratorNativeTui") &&
+    hub.isRunnerOnline(session.runnerId) &&
+    shellRegistry.list(session.id).some((shell) => shell.kind === "agent_tui" && shell.status === "running"));
+}
+
+/** Whether an idle session is polling status for an already-started progress-aware worktree create
+ * that it initiated or joined while live (#4904). Before body parsing (`bodyParsed === false`),
+ * verifies that such an operation exists for the target session; after body parsing
+ * (`bodyParsed === true`), verifies the exact `progress: true` coordinates. Never authorizes
+ * starting a new create or calling any other route while `idle`. */
+function hasInFlightWorktreeCreatePoll(
+  req: { method?: string; params?: unknown; body?: unknown },
+  routePath: string,
+  session: { id: string; status: string } | null | undefined,
+  bodyParsed: boolean,
+): boolean {
+  if (!session || session.status !== "idle") return false;
+  if (req.method !== "POST" || routePath !== "/api/sessions/:id/worktrees") return false;
+  const targetSessionId = typeof (req.params as { id?: unknown } | undefined)?.id === "string"
+    ? (req.params as { id: string }).id
+    : null;
+  if (!targetSessionId) return false;
+  if (!bodyParsed) return worktreeCreates.hasJoinableForInitiator(session.id, targetSessionId);
+  const body = req.body as { baseRef?: unknown; branch?: unknown; progress?: unknown } | null | undefined;
+  if (!body || typeof body !== "object" || body.progress !== true ||
+      typeof body.branch !== "string" || !body.branch || body.branch.length > 255) {
+    return false;
+  }
+  if (body.baseRef !== undefined && (typeof body.baseRef !== "string" || !body.baseRef || body.baseRef.length > 1024)) {
+    return false;
+  }
+  const targetSession = db.getSession(targetSessionId);
+  if (!targetSession) return false;
+  return worktreeCreates.hasJoinableOperation({
+    runnerId: targetSession.runnerId,
+    sessionId: targetSessionId,
+    initiatorSessionId: session.id,
+    branch: body.branch,
+    ...(typeof body.baseRef === "string" ? { baseRef: body.baseRef } : {}),
+    ...(targetSession.worktreeRecovery ? { recoveryId: targetSession.worktreeRecovery.recoveryId } : {}),
+  });
+}
+
 /** Resolve one live session whose runner-minted control credential is bound to that exact row. */
-function authedAgentControl(req: { headers: { authorization?: string; [key: string]: unknown } }) {
+function authedAgentControl(
+  req: { headers: { authorization?: string; [key: string]: unknown }; method?: string; params?: unknown; body?: unknown },
+  routePath = "",
+  bodyParsed = false,
+) {
   const claimed = req.headers[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER];
   const session = typeof claimed === "string" && claimed.length <= 256 ? db.getSession(claimed) : null;
   const bearer = extractBearer(req.headers.authorization);
@@ -615,10 +664,8 @@ function authedAgentControl(req: { headers: { authorization?: string; [key: stri
       db.agentControlCredentialValid(session.id, session.runnerId, hashToken(bearer))),
     claimedSessionId: claimed,
     session,
-    hasLiveOrchestratorTui: Boolean(session && sessionRole(session) === "orchestrator" &&
-      runnerSupportsProtocol(db.getRunner(session.runnerId)?.protocolVersion, "orchestratorNativeTui") &&
-      hub.isRunnerOnline(session.runnerId) &&
-      shellRegistry.list(session.id).some((shell) => shell.kind === "agent_tui" && shell.status === "running")),
+    hasLiveOrchestratorTui: hasLiveOrchestratorTui(session),
+    hasInFlightWorktreeCreatePoll: hasInFlightWorktreeCreatePoll(req, routePath, session, bodyParsed),
   }) ? session : null;
 }
 
@@ -648,8 +695,11 @@ function authedApiPrincipal(
     method: string;
     routeOptions?: { url?: string };
     url: string;
+    params?: unknown;
+    body?: unknown;
   },
   allowQueryToken = false,
+  bodyParsed = false,
 ): { id: string; name: string; principal: AuthPrincipal } | null {
   if ((allowQueryToken || extractBearer(req.headers.authorization)) && remoteAccess.isProbeRequest(req)) {
     return { id: "remote-access-check", name: "Connection Check", principal: {
@@ -659,7 +709,7 @@ function authedApiPrincipal(
   const local = authedLocalBootstrap(req, allowQueryToken);
   if (local) return local;
   const routePath = req.routeOptions?.url ?? req.url.split("?")[0] ?? "";
-  const agentControl = authedAgentControl(req);
+  const agentControl = authedAgentControl(req, routePath, bodyParsed);
   const mediaPurpose = agentControl ? svc.mediaSessionPurposes.owns(agentControl.id) : false;
   if (agentControl && mediaPurpose && !svc.mediaSessionPurposes.credentialCurrent(agentControl.id)) return null;
   // A delegated image reviewer's credential reaches only its own review routes (#4074).
@@ -711,7 +761,7 @@ function localApiPrincipal(): { id: string; name: string; principal: HumanPrinci
 }
 
 function requestPrincipal(req: FastifyRequest, allowQueryToken = false): AuthPrincipal | null {
-  const authenticated = authedApiPrincipal(req, allowQueryToken);
+  const authenticated = authedApiPrincipal(req, allowQueryToken, true);
   return authenticated?.principal ?? null;
 }
 
@@ -5321,12 +5371,19 @@ app.post("/api/sessions/:id/worktrees", async (req, reply) => {
   if (body.progress !== undefined && typeof body.progress !== "boolean") {
     return reply.code(400).send({ error: "progress must be a boolean" });
   }
+  const principal = requestPrincipals.get(req) ?? requestPrincipal(req);
+  const credentialSession = principal?.kind === "agent" && principal.credentialSessionId
+    ? db.getSession(principal.credentialSessionId)
+    : null;
+  const joinOnly = Boolean(credentialSession && credentialSession.status === "idle" &&
+    !hasLiveOrchestratorTui(credentialSession));
   return runSessionWorktreeRequest(id, {
     operation: "create",
     branch: body.branch,
     ...(typeof body.baseRef === "string" ? { baseRef: body.baseRef } : {}),
     ...(body.progress === true ? { progress: true } : {}),
-  }, requestPrincipal(req), reply);
+    ...(joinOnly ? { joinOnly: true } : {}),
+  }, principal, reply);
 });
 
 // Read-only view of this session's unconsumed progress-aware creates, so a reloaded client can
