@@ -225,6 +225,38 @@ test("unsafe, partial or ambiguous archives are refused whole", async () => {
   assert.equal((await extract(fakeTarGz([binary], { trailing: Buffer.alloc(9_216, 0) }))).error, undefined);
 });
 
+test("extraction closes the binary before making it executable", { timeout: 5_000 }, async (t) => {
+  const archive = fresh("close-before-exec-archive");
+  const destination = fresh("close-before-exec-binary");
+  writeFileSync(archive, fakeTarGz([{ name: "antigravity", content: "#!/bin/sh\nexit 0\n" }]));
+  let output: WriteStream | undefined;
+  const originalCreateWriteStream = createWriteStream;
+  const originalChmod = fsPromises.chmod;
+  t.mock.method(fs, "createWriteStream", (path: Parameters<typeof createWriteStream>[0], options: Parameters<typeof createWriteStream>[1]) => {
+    output = originalCreateWriteStream(path, {
+      ...options as object,
+      fs: {
+        open: fs.open,
+        write: fs.write,
+        // Finish and close are distinct events. Keep the writer open across the finish
+        // continuation, as a busy filesystem can, without relying on a wall-clock delay.
+        close: (fd, callback) => { setImmediate(() => fs.close(fd, callback)); },
+      },
+    });
+    return output;
+  });
+  t.mock.method(fsPromises, "chmod", async (...args: Parameters<typeof originalChmod>) => {
+    assert.equal(output?.closed, true, "the write descriptor is closed before executable permissions are granted");
+    await originalChmod(...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+
+  await extractAntigravityBinary(archive, destination);
+  assert.equal(readFileSync(destination, "utf8"), "#!/bin/sh\nexit 0\n");
+  assert.equal(statSync(destination).mode & 0o777, 0o755);
+});
+
 test("archive refusal waits for a pending output open and close before removing the binary", { timeout: 5_000 }, async (t) => {
   const folder = mkdtempSync(join(root, "delayed-open-"));
   const archive = join(folder, "release.tar.gz");
