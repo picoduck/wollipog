@@ -503,8 +503,6 @@ export class AntigravitySetupSupervisor {
   private rollbackCause: AntigravityInstallFailure | undefined;
   /** Why the managed copy's version check failed in the last check that fell back to the PATH copy. */
   private managedVersionFailure: AntigravitySetupFailure | undefined;
-  /** The Google AI subscription tier from the last ready access check (e.g., "Google AI Ultra"). */
-  private currentTier: string | undefined;
   private releasePlatformKey: string | null | undefined;
   private stopped = false;
   private readonly store: AntigravityManagedStore;
@@ -559,24 +557,31 @@ export class AntigravitySetupSupervisor {
    * generation path, never by the movable `current/agy`; the store keeps that generation through
    * the next update's commit. Null when nothing is verified (a failed check, or a rejected release
    * a rollback could not undo). Synchronous, so a launch resolves it at the moment it spawns. */
-  launchableTarget(): { command: string; context: AntigravityCredentialContext; accessObservedAt: number } | null {
+  launchableTarget(): { command: string; version?: string; context: AntigravityCredentialContext; accessObservedAt: number } | null {
     const verified = this.launches.launchable();
     return verified
-      ? { command: verified.command, context: this.credentialContext(verified.managed), accessObservedAt: verified.accessObservedAt }
+      ? {
+          command: verified.command,
+          ...(verified.version ? { version: verified.version } : {}),
+          context: this.credentialContext(verified.managed),
+          accessObservedAt: verified.accessObservedAt,
+        }
       : null;
   }
 
   /** `launchableTarget` for a launch about to spawn, held until `release`: no update removes its
    * generation meanwhile, so a launcher that opens the executable after the spawn (bwrap, the cgroup
    * helper) still finds it. Release once the agent answered its handshake, failed or exited. */
-  acquireLaunchTarget(): { command: string; context: AntigravityCredentialContext; release: () => void } | null {
+  acquireLaunchTarget(): { command: string; version?: string; context: AntigravityCredentialContext; release: () => void } | null {
     const target = this.launchableTarget();
     if (!target) return null;
-    const { command } = target;
+    const { command, version } = target;
     this.launchesInUse.set(command, (this.launchesInUse.get(command) ?? 0) + 1);
     let released = false;
     return {
-      command, context: target.context,
+      command,
+      ...(version ? { version } : {}),
+      context: target.context,
       release: () => {
         if (released) return;
         released = true;
@@ -590,7 +595,7 @@ export class AntigravitySetupSupervisor {
   /** `launchableTarget` once no install, update or check is running, for a launch's preparation:
    * a launch that begins during an update or check takes its outcome into account. The launch
    * still resolves its executable again when it spawns. */
-  async verifiedLaunchTarget(): Promise<{ command: string; context: AntigravityCredentialContext; accessObservedAt: number } | null> {
+  async verifiedLaunchTarget(): Promise<{ command: string; version?: string; context: AntigravityCredentialContext; accessObservedAt: number } | null> {
     while (this.installing || this.checking) {
       await this.installing?.catch(() => {});
       await this.checking?.catch(() => {});
@@ -605,9 +610,9 @@ export class AntigravitySetupSupervisor {
     return this.launches.accessObservedAt();
   }
 
-  /** Subscription tier name observed on the last ready check, if `agy acp` advertised one. */
+  /** Subscription tier name observed on the committed launchable check, if `agy acp` advertised one. */
   planTier(): string | undefined {
-    return this.view.status === "ready" ? this.currentTier : undefined;
+    return this.view.status === "ready" ? this.launches.launchable()?.tier : undefined;
   }
 
   /** Check the runtime and its sign-in. Concurrent calls share one check. While a sign-in or an
@@ -898,12 +903,15 @@ export class AntigravitySetupSupervisor {
     await latestRead;
     if (access.status === "ready") {
       const isManaged = executable.source === "managed";
-      this.currentTier = access.tier;
       return this.settleCheck({ ...base, status: "ready", executable, models: access.models, checkedAt: this.now() },
-        { command: isManaged ? managedGeneration ?? executable.path : executable.path, managed: isManaged,
-          accessObservedAt: access.observedAt });
+        {
+          command: isManaged ? managedGeneration ?? executable.path : executable.path,
+          managed: isManaged,
+          ...(executable.version ? { version: executable.version } : {}),
+          ...(access.tier ? { tier: access.tier } : {}),
+          accessObservedAt: access.observedAt,
+        });
     }
-    this.currentTier = undefined;
     return this.settleCheck({ ...base, status: access.status, executable,
       ...(access.status === "verification_failed" ? { failure: access.failure } : {}), checkedAt: this.now() });
   }

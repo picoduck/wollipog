@@ -232,7 +232,7 @@ test("probeAntigravitySubscriptionUsage runs zero-turn /usage and /credits in an
   assert.equal(finished, 2);
 });
 
-test("probeAntigravitySubscriptionUsage preserves model quotas when /credits fails", async () => {
+test("probeAntigravitySubscriptionUsage preserves model quotas when /credits fails transiently", async () => {
   const result = await probeAntigravitySubscriptionUsage({
     command: "/managed/agy",
     cwd: "/safe/probe",
@@ -243,6 +243,7 @@ test("probeAntigravitySubscriptionUsage preserves model quotas when /credits fai
       spawn: (opts) => fakeProcess((child, stdout, stderr) => {
         if (opts.args.includes("/usage")) {
           stdout.write(`${JSON.stringify({ event: "command_result", command: { name: "usage", data: sampleUsageData() } })}\n`);
+          stdout.write(`${JSON.stringify({ event: "result", result: { status: "SUCCESS", num_turns: 0 } })}\n`);
           stdout.end();
           child.emit("close", 0);
         } else {
@@ -256,6 +257,110 @@ test("probeAntigravitySubscriptionUsage preserves model quotas when /credits fai
   assert.equal(result.state, "available");
   assert.equal(result.buckets.length, 4);
   assert.equal(result.credits, undefined);
+});
+
+test("probeAntigravitySubscriptionUsage requires a successful zero-turn terminal result and exit 0", async () => {
+  const cases: Array<{ name: string; emit: (child: EventEmitter, stdout: PassThrough) => void }> = [
+    {
+      name: "missing terminal result frame",
+      emit: (child, stdout) => {
+        stdout.write(`${JSON.stringify({ event: "command_result", command: { name: "usage", data: sampleUsageData() } })}\n`);
+        stdout.end();
+        child.emit("close", 0);
+      },
+    },
+    {
+      name: "terminal ERROR frame after command_result",
+      emit: (child, stdout) => {
+        stdout.write(`${JSON.stringify({ event: "command_result", command: { name: "usage", data: sampleUsageData() } })}\n`);
+        stdout.write(`${JSON.stringify({ event: "result", result: { status: "ERROR", num_turns: 0, error: "backend interrupted" } })}\n`);
+        stdout.end();
+        child.emit("close", 0);
+      },
+    },
+    {
+      name: "nonzero exit code after SUCCESS frame",
+      emit: (child, stdout) => {
+        stdout.write(`${JSON.stringify({ event: "command_result", command: { name: "usage", data: sampleUsageData() } })}\n`);
+        stdout.write(`${JSON.stringify({ event: "result", result: { status: "SUCCESS", num_turns: 0 } })}\n`);
+        stdout.end();
+        child.emit("close", 1);
+      },
+    },
+    {
+      name: "terminal SUCCESS missing num_turns",
+      emit: (child, stdout) => {
+        stdout.write(`${JSON.stringify({ event: "command_result", command: { name: "usage", data: sampleUsageData() } })}\n`);
+        stdout.write(`${JSON.stringify({ event: "result", result: { status: "SUCCESS" } })}\n`);
+        stdout.end();
+        child.emit("close", 0);
+      },
+    },
+  ];
+  for (const tc of cases) {
+    await assert.rejects(
+      () => probeAntigravitySubscriptionUsage({
+        command: "/managed/agy",
+        cwd: "/safe/probe",
+        context: antigravityCredentialContext(),
+        timeoutMs: 2_000,
+        now: () => NOW,
+        deps: {
+          spawn: () => fakeProcess((child, stdout) => tc.emit(child, stdout)),
+          kill: () => {},
+        },
+      }),
+      /zero-turn result/,
+      tc.name,
+    );
+  }
+});
+
+test("probeAntigravitySubscriptionUsage propagates unsupported and unauthenticated results from /credits", async () => {
+  const runCreditsCase = async (emitCredits: (child: EventEmitter, stdout: PassThrough) => void) => {
+    let killed = 0;
+    const result = await probeAntigravitySubscriptionUsage({
+      command: "/managed/agy",
+      cwd: "/safe/probe",
+      context: antigravityCredentialContext(),
+      timeoutMs: 2_000,
+      now: () => NOW,
+      deps: {
+        spawn: (opts) => fakeProcess((child, stdout) => {
+          if (opts.args.includes("/usage")) {
+            stdout.write(`${JSON.stringify({ event: "command_result", command: { name: "usage", data: sampleUsageData() } })}\n`);
+            stdout.write(`${JSON.stringify({ event: "result", result: { status: "SUCCESS", num_turns: 0 } })}\n`);
+            stdout.end();
+            child.emit("close", 0);
+          } else {
+            emitCredits(child, stdout);
+          }
+        }),
+        kill: () => { killed += 1; },
+      },
+    });
+    return { result, killed };
+  };
+
+  const initCase = await runCreditsCase((_child, stdout) => {
+    stdout.write(`${JSON.stringify({ event: "init", conversation_id: "c1" })}\n`);
+  });
+  assert.equal(initCase.result.state, "unsupported");
+  assert.equal(initCase.killed, 2);
+
+  const turnsCase = await runCreditsCase((child, stdout) => {
+    stdout.write(`${JSON.stringify({ event: "result", result: { status: "SUCCESS", num_turns: 1 } })}\n`);
+    stdout.end();
+    child.emit("close", 0);
+  });
+  assert.equal(turnsCase.result.state, "unsupported");
+  assert.equal(turnsCase.killed, 2);
+
+  const authCase = await runCreditsCase((_child, stdout) => {
+    stdout.write("Authentication required. Please visit the URL to log in:\nhttps://accounts.google.com/o/oauth2/auth\n");
+  });
+  assert.equal(authCase.result.state, "unauthenticated");
+  assert.equal(authCase.killed, 2);
 });
 
 test("probeAntigravitySubscriptionUsage aborts immediately on init event or non-zero turns (never runs a prompt)", async () => {
@@ -354,7 +459,7 @@ test("SubscriptionUsageManager probes Antigravity, gates old CLIs and old contro
     now: () => clock,
     antigravityEnabled: () => enabled,
     antigravityPlanTier: () => tier,
-    acquireAntigravityLaunch: () => ({ command: agent.command, context: antigravityCredentialContext(), release: () => {} }),
+    acquireAntigravityLaunch: () => ({ command: agent.command, version: agent.version, context: antigravityCredentialContext(), release: () => {} }),
     onAntigravityUnauthenticated: () => { unauthNotified += 1; },
     probeAntigravity: async () => {
       probeCalls += 1;
@@ -429,4 +534,167 @@ test("SubscriptionUsageManager probes Antigravity, gates old CLIs and old contro
   agent = antigravityAgent({ version: "1.5.14", available: false, authStatus: "unauthenticated" });
   assert.equal(manager.syncSources()[0]?.state, "unauthenticated");
   assert.ok(published.length > 0);
+});
+
+test("SubscriptionUsageManager enforces the CLI version floor on the acquired executable (never probes an old committed generation)", async () => {
+  let agent = antigravityAgent({ version: "1.5.14", command: "/managed/current/agy" });
+  let committed: { command: string; version: string } = { command: "/managed/generations/g1/agy", version: "1.1.10" };
+  const probedCommands: string[] = [];
+
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent],
+    resolveEnv: () => ({}),
+    authorizeProbe: async () => ({ cwd: "/safe/probe" }),
+    publish: () => {},
+    now: () => NOW,
+    antigravityEnabled: () => true,
+    antigravityLaunchTarget: () => committed,
+    acquireAntigravityLaunch: () => ({
+      command: committed.command,
+      version: committed.version,
+      context: antigravityCredentialContext({}, { managed: true }),
+      release: () => {},
+    }),
+    probeAntigravity: async (opts) => {
+      probedCommands.push(opts.command);
+      const normalized = normalizeAntigravityUsageData(sampleUsageData(), NOW)!;
+      assert.equal(normalized.state, "available");
+      return { state: "available", buckets: normalized.buckets };
+    },
+  });
+
+  // Activation confirmation is still pending: catalog advertises 1.5.14 while committed ledger holds 1.1.10.
+  manager.syncSources();
+  await manager.refreshAntigravitySources();
+  assert.deepEqual(probedCommands, [], "must never send /usage to an old committed generation");
+
+  // Once activation commits, the supported generation is probed immediately without hitting dedupe.
+  committed = { command: "/managed/generations/g2/agy", version: "1.5.14" };
+  manager.syncSources();
+  const afterCommit = await manager.refreshAntigravitySources();
+  assert.deepEqual(probedCommands, ["/managed/generations/g2/agy"]);
+  assert.equal(afterCommit[0]?.state, "available");
+  assert.equal(afterCommit[0]?.buckets.length, 4);
+});
+
+test("SubscriptionUsageManager discards in-flight Antigravity probe results superseded by sign-out or executable change", async () => {
+  let agent = antigravityAgent({ version: "1.5.14", command: "/managed/current/agy" });
+  let committed = { command: "/managed/generations/g1/agy", version: "1.5.14" };
+  const published: SubscriptionUsageSnapshot[] = [];
+  let releaseProbe!: () => void;
+
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent],
+    resolveEnv: () => ({}),
+    authorizeProbe: async () => ({ cwd: "/safe/probe" }),
+    publish: (snapshot) => published.push(snapshot),
+    now: () => NOW,
+    antigravityEnabled: () => true,
+    antigravityLaunchTarget: () => committed,
+    acquireAntigravityLaunch: () => ({
+      command: committed.command,
+      version: committed.version,
+      context: antigravityCredentialContext({}, { managed: true }),
+      release: () => {},
+    }),
+    probeAntigravity: async () => {
+      await new Promise<void>((resolve) => { releaseProbe = resolve; });
+      const normalized = normalizeAntigravityUsageData(sampleUsageData(), NOW)!;
+      assert.equal(normalized.state, "available");
+      return { state: "available", buckets: normalized.buckets, credits: { hasCredits: true, balance: "3000" } };
+    },
+  });
+
+  manager.syncSources();
+  const inFlight = manager.refreshAntigravitySources();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  // Sign-out occurs while the probe is paused in flight.
+  agent = antigravityAgent({ version: "1.5.14", available: false, authStatus: "unauthenticated" });
+  const signedOut = manager.syncSources();
+  assert.equal(signedOut[0]?.state, "unauthenticated");
+
+  // Resolving the stale probe must not overwrite the signed-out state or publish available quotas.
+  releaseProbe();
+  await inFlight;
+  assert.equal(manager.inventory()[0]?.state, "unauthenticated");
+  assert.equal(published.length, 0);
+
+  // Also test executable change superseding an in-flight probe.
+  agent = antigravityAgent({ version: "1.5.14", available: true, authStatus: "authenticated" });
+  manager.syncSources();
+  const secondInFlight = manager.refreshAntigravitySources();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  committed = { command: "/managed/generations/g2/agy", version: "1.5.15" };
+  agent = antigravityAgent({ version: "1.5.15", available: true, authStatus: "authenticated" });
+  manager.syncSources();
+  releaseProbe();
+  await secondInFlight;
+  assert.equal(published.length, 0, "probe from superseded executable generation must not publish");
+});
+
+test("SubscriptionUsageManager shares an active Antigravity probe across entry points before and after the dedupe window", async () => {
+  let clock = NOW;
+  const agent = antigravityAgent();
+  const sourceId = subscriptionUsageSourceId("runner-1", ANTIGRAVITY_AGENT_ID, "antigravity", { kind: "native" });
+  let probeCalls = 0;
+  let releaseProbe!: () => void;
+
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent],
+    resolveEnv: () => ({}),
+    authorizeProbe: async () => ({ cwd: "/safe/probe" }),
+    publish: () => {},
+    now: () => clock,
+    antigravityEnabled: () => true,
+    acquireAntigravityLaunch: () => ({
+      command: agent.command,
+      version: agent.version,
+      context: antigravityCredentialContext(),
+      release: () => {},
+    }),
+    probeAntigravity: async () => {
+      probeCalls += 1;
+      await new Promise<void>((resolve) => { releaseProbe = resolve; });
+      const normalized = normalizeAntigravityUsageData(sampleUsageData(), clock)!;
+      assert.equal(normalized.state, "available");
+      return { state: "available", buckets: normalized.buckets, credits: { hasCredits: true, balance: "1200" } };
+    },
+  });
+
+  manager.syncSources();
+  const autoRefresh = manager.refreshAntigravitySources();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(probeCalls, 1);
+
+  // Before the dedupe window expires, Refresh Account joins the in-flight probe instead of returning stale data.
+  let earlyDone = false;
+  const earlyRefresh = manager.refreshSourceById(sourceId).then((res) => {
+    earlyDone = true;
+    return res;
+  });
+  await Promise.resolve();
+  assert.equal(earlyDone, false, "must wait for the active probe instead of returning stale data immediately");
+
+  // After the dedupe window expires while the probe is still running, Refresh Account still shares the active probe.
+  clock += SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS + 5_000;
+  const lateRefresh = manager.refreshSourceById(sourceId);
+  await Promise.resolve();
+  assert.equal(probeCalls, 1, "must not launch a second overlapping probe while the first is in flight");
+
+  releaseProbe();
+  const [autoResult, earlyResult, lateResult] = await Promise.all([autoRefresh, earlyRefresh, lateRefresh]);
+  assert.equal(probeCalls, 1);
+  for (const res of [autoResult, earlyResult, lateResult]) {
+    assert.equal(res[0]?.state, "available");
+    assert.equal(res[0]?.buckets.length, 4);
+    assert.deepEqual(res[0]?.credits, { hasCredits: true, balance: "1200" });
+  }
 });

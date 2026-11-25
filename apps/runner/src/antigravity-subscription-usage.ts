@@ -281,6 +281,8 @@ function probeAntigravityPrintCommand(
     let stderrText = "";
     let commandData: unknown = undefined;
     let hasCommandData = false;
+    let verifiedZeroTurnSuccess = false;
+    let sawTerminalError = false;
     let errorMessage: string | undefined;
 
     const finish = (action: () => void) => {
@@ -335,7 +337,12 @@ function probeAntigravityPrintCommand(
           commandData = command.data;
           hasCommandData = true;
         }
+        if (numTurns === 0) {
+          verifiedZeroTurnSuccess = true;
+        }
       } else if (status === "ERROR") {
+        sawTerminalError = true;
+        verifiedZeroTurnSuccess = false;
         const err = stringValue(envelope.error, 300);
         if (err) errorMessage = err;
       }
@@ -386,7 +393,7 @@ function probeAntigravityPrintCommand(
       if (settled) return;
       if (stdoutBuffer.trim()) handleLine(stdoutBuffer);
       if (settled) return;
-      if (hasCommandData) {
+      if (code === 0 && hasCommandData && verifiedZeroTurnSuccess && !sawTerminalError) {
         finish(() => resolve({ kind: "ok", data: commandData }));
         return;
       }
@@ -403,7 +410,7 @@ function probeAntigravityPrintCommand(
         }
       }
       finish(() => reject(new Error(
-        `Google Antigravity /${expectedCommand} probe exited without usage data (code ${code ?? "null"})`,
+        `Google Antigravity /${expectedCommand} probe did not complete with a zero-turn result (code ${code ?? "null"})`,
       )));
     });
   });
@@ -444,11 +451,20 @@ export async function probeAntigravitySubscriptionUsage(
   let credits: SubscriptionUsageCredits | undefined;
   try {
     const creditsOutcome = await probeAntigravityPrintCommand("credits", ANTIGRAVITY_CREDITS_PROBE_ARGS, options);
+    if (creditsOutcome.kind === "unauthenticated") {
+      return { state: "unauthenticated", detail: "Google Antigravity is not signed in." };
+    }
+    if (creditsOutcome.kind === "unsupported") {
+      return {
+        state: "unsupported",
+        detail: "This Google Antigravity version does not report subscription usage. Update Google Antigravity to view quotas.",
+      };
+    }
     if (creditsOutcome.kind === "ok") {
       credits = normalizeAntigravityCreditsData(creditsOutcome.data);
     }
   } catch {
-    // AI credits are supplementary; a transient or unsupported /credits reply never hides model quotas.
+    // AI credits are supplementary; a transient /credits error never hides model quotas.
   }
 
   return {

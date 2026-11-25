@@ -714,3 +714,63 @@ test("Google Antigravity renders its plan tier, model-group windows, credits, an
     await view.unmount();
   }
 });
+
+test("an online refreshable Google Antigravity source without quota windows offers Refresh Account in Sources Unavailable", async () => {
+  const requests: unknown[] = [];
+  const unavailableAgy = source({
+    sourceId: "f".repeat(32),
+    runnerId: "agy-box",
+    runnerName: "dev-box",
+    runnerStatus: "online",
+    agentId: "google-antigravity",
+    agentName: "Google Antigravity",
+    provider: "antigravity",
+    providerAccountId: undefined,
+    accountLabel: undefined,
+    state: "unavailable",
+    detail: "Google Antigravity subscription usage could not be refreshed. Try again.",
+    refreshable: true,
+    buckets: [],
+  });
+  const offlineAgy = source({
+    sourceId: "1".repeat(32),
+    runnerId: "agy-offline",
+    runnerName: "sleepy-box",
+    runnerStatus: "offline",
+    agentId: "google-antigravity",
+    agentName: "Google Antigravity",
+    provider: "antigravity",
+    providerAccountId: undefined,
+    accountLabel: undefined,
+    state: "unavailable",
+    refreshable: true,
+    buckets: [],
+  });
+  const view = await renderTab({
+    subscriptionUsage: async () => response([unavailableAgy, offlineAgy]),
+    refreshSubscriptionUsage: async (target: unknown) => {
+      requests.push(target);
+      return response([{
+        ...unavailableAgy,
+        state: "available",
+        detail: undefined,
+        buckets: [window_("gemini-5h", "Gemini Models — Five-Hour Window", 90)],
+      }, offlineAgy], { attempted: 1, failed: 0 });
+    },
+  });
+  try {
+    const details = view.panel()!.querySelector("details.disclosure") as unknown as HTMLDetailsElement;
+    assert.ok(details);
+    details.open = true;
+    const rows = [...details.querySelectorAll(".subscription-unavailable-row")];
+    assert.equal(rows.length, 2);
+    const retryBtn = rows[0]!.querySelector<HTMLButtonElement>('button[aria-label="Refresh Account"]');
+    assert.ok(retryBtn, "online refreshable unavailable source offers Refresh Account");
+    assert.equal(rows[1]!.querySelector('button[aria-label="Refresh Account"]'), null, "offline source does not offer Refresh Account");
+    await act(async () => { retryBtn.click(); await Promise.resolve(); await Promise.resolve(); });
+    assert.deepEqual(requests, [{ runnerId: "agy-box", sourceId: "f".repeat(32) }]);
+    assert.equal(view.panel()!.querySelectorAll(".subscription-plan").length, 1);
+  } finally {
+    await view.unmount();
+  }
+});

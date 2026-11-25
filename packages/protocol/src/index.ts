@@ -1021,7 +1021,59 @@ export function projectRunnerMessageForProtocol(
   ) {
     return { ...message, code: worktreeRecoveryReceiptCode(protocolVersion) };
   }
+  if (
+    message.type === "subscription_usage_inventory" &&
+    !runnerSupportsProtocol(protocolVersion, "antigravitySubscriptionUsage")
+  ) {
+    return {
+      ...message,
+      snapshots: message.snapshots.filter((snapshot) => snapshot.provider !== "antigravity"),
+    };
+  }
+  if (
+    message.type === "subscription_usage_refresh_result" &&
+    message.snapshots &&
+    !runnerSupportsProtocol(protocolVersion, "antigravitySubscriptionUsage")
+  ) {
+    return {
+      ...message,
+      snapshots: message.snapshots.filter((snapshot) => snapshot.provider !== "antigravity"),
+    };
+  }
   return message;
+}
+
+/** Project subscription-usage runner frames for the negotiated peer protocol. Drops frames the
+ * peer predates (including queued Antigravity updates replayed after reconnecting to a v412 peer)
+ * and strips Antigravity entries from inventory and refresh-result frames. */
+export function projectSubscriptionUsageMessageForProtocol(
+  message: RunnerToControlPlane,
+  protocolVersion: number | null | undefined,
+): RunnerToControlPlane | null {
+  if (
+    message.type !== "subscription_usage_updated" &&
+    message.type !== "subscription_usage_inventory" &&
+    message.type !== "subscription_usage_refresh_result"
+  ) {
+    return message;
+  }
+  if (!runnerSupportsProtocol(protocolVersion, "subscriptionUsage")) return null;
+  if (runnerSupportsProtocol(protocolVersion, "antigravitySubscriptionUsage")) return message;
+  if (message.type === "subscription_usage_updated") {
+    return message.snapshot.provider === "antigravity" ? null : message;
+  }
+  if (message.type === "subscription_usage_inventory") {
+    return {
+      ...message,
+      snapshots: message.snapshots.filter((snapshot) => snapshot.provider !== "antigravity"),
+    };
+  }
+  return message.snapshots
+    ? {
+        ...message,
+        snapshots: message.snapshots.filter((snapshot) => snapshot.provider !== "antigravity"),
+      }
+    : message;
 }
 
 export interface MachineSkillAdoptionRequirement {
