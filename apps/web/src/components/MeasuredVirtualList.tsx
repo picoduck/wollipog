@@ -125,27 +125,6 @@ export function shouldAdjustVirtualScrollForResize({
   return itemStart < scrollOffset && !anchorPending;
 }
 
-export function shouldCommitAnchoredResizeSynchronously({
-  itemEnd,
-  scrollOffset,
-  anchorPending,
-  widthReflowPending,
-}: {
-  itemEnd: number;
-  scrollOffset: number;
-  anchorPending: boolean;
-  /** Read only when it decides the result; the caller may consult live layout. */
-  widthReflowPending: () => boolean;
-}): boolean {
-  // A session-return or structural anchor owns a fully preceding row's growth, but TanStack
-  // renders that growth asynchronously when it does not compensate. The frame before that render
-  // paints the grown row over the anchor, and a render landing as the bounded window releases
-  // adopts the wrong visible row. Committing it before paint lets the anchor correct in the same
-  // pass without a TanStack scroll write, which iOS may defer past the window. A width anchor
-  // restores its rewrapped rows on its own schedule.
-  return anchorPending && itemEnd <= scrollOffset && !widthReflowPending();
-}
-
 interface VirtualMeasurementReseeder {
   measure: () => void;
   getVirtualItems: () => unknown;
@@ -461,7 +440,7 @@ function VirtualList<T>({
   const clearAnchorFrameRef = useRef<number | null>(null);
   const widthAnchorFrameRef = useRef<number | null>(null);
   const widthAnchorRef = useRef<VirtualScrollAnchor | null>(null);
-  const anchoredResizeCommitRef = useRef(false);
+  const resizeCommitRef = useRef(false);
   const measuringInCommitRef = useRef(false);
   const anchorCorrectionScrollTopRef = useRef<number | null>(null);
   const anchorCorrectionIntentVersionRef = useRef<number | null>(null);
@@ -584,14 +563,15 @@ function VirtualList<T>({
     // that phase; the fault-injection provider enables its animation-frame deferral so the painted-
     // frame regressions retain a library-owned negative control.
     useAnimationFrameWithResizeObserver: deferMeasurements,
-    onChange: () => {
-      if (!anchoredResizeCommitRef.current) return;
-      anchoredResizeCommitRef.current = false;
-      // TanStack's own rerender is asynchronous here. This render reads the same live measurements
-      // and lets the pending anchor's layout effect correct them before paint.
-      flushSync(() => forceAnchorRetry((epoch) => epoch + 1));
-    },
   });
+  // Upgrade the notification before the React adapter renders. Clearing the marker first also
+  // keeps nested commit/layout notifications from requesting flushSync inside React's lifecycle.
+  const notifyMeasurements = virtualizer.options.onChange;
+  virtualizer.options.onChange = (instance, synchronous) => {
+    const resize = resizeCommitRef.current;
+    resizeCommitRef.current = false;
+    notifyMeasurements?.(instance, synchronous || (resize && !measuringInCommitRef.current));
+  };
   const initialMeasurementVirtualizerRef = useRef(virtualizer);
   initialMeasurementVirtualizerRef.current = virtualizer;
   const mountedVirtualRows = virtualizer.getVirtualItems();
@@ -612,11 +592,9 @@ function VirtualList<T>({
   // The logical-key anchor corrects session-return, structural, and width changes while pending.
   // Below-viewport rows must not move paused readers. The public tracked offset includes each
   // adjustment before the next row is measured.
-  // A session-return or structural anchor's fully preceding row instead requests a synchronous
-  // render above, so its growth that lands at the end of the bounded window is restored before
-  // paint. A row measured during a commit needs none: React commits that update before paint.
-  // TanStack's row observer can report rewrapped rows before the viewport observer below records
-  // the new width, so a width reflow is also pending while the live width differs from that record.
+  // Every observer-owned size change needs a synchronous render, including rows inside the
+  // viewport for which TanStack does not compensate scrollTop. Otherwise their content can grow
+  // before later rows move. A row measured during a commit needs none: React already flushes it.
   virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
     // TanStack consults this for every measured size change, so it is where a followed tail learns
     // that a row grew, at a point where reading the scroll geometry is free. It runs before TanStack
@@ -625,18 +603,7 @@ function VirtualList<T>({
     dispatchVirtualRowResize(scrollRef.current);
     const scrollOffset = instance.scrollOffset ?? 0;
     const anchorPending = pendingAnchorRef.current != null;
-    anchoredResizeCommitRef.current = !measuringInCommitRef.current &&
-      shouldCommitAnchoredResizeSynchronously({
-        itemEnd: item.end,
-        scrollOffset,
-        anchorPending,
-        widthReflowPending: () => {
-          if (widthAnchorRef.current != null) return true;
-          const scroll = scrollRef.current;
-          return scroll != null && viewportWidthRef.current !== 0 &&
-            Math.round(scroll.getBoundingClientRect().width) !== viewportWidthRef.current;
-        },
-      });
+    resizeCommitRef.current = !measuringInCommitRef.current;
     return shouldAdjustVirtualScrollForResize({
       itemStart: item.start,
       scrollOffset,
@@ -678,7 +645,7 @@ function VirtualList<T>({
       // observer setup, invalidate estimate-backed geometry, and synchronously restore mounted DOM
       // heights. Dependent absolute rows stay hidden until the render using that cache commits.
       viewportWidthRef.current = width;
-      reseedMountedVirtualRows(root, initialMeasurementVirtualizerRef.current);
+      measureInCommit(() => reseedMountedVirtualRows(root, initialMeasurementVirtualizerRef.current));
       setInitialMeasurementsReady(true);
       return true;
     };
@@ -714,7 +681,7 @@ function VirtualList<T>({
       cancelPendingCommit?.();
       widthObserver?.disconnect();
     };
-  }, [commitVirtualMeasurements, deferMeasurements, scrollRef]);
+  }, [commitVirtualMeasurements, deferMeasurements, measureInCommit, scrollRef]);
 
   useLayoutEffect(() => {
     if (!initialMeasurementsReady) return;
