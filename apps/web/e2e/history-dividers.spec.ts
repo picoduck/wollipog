@@ -11,7 +11,27 @@ const DIVIDERS = [
   "Forked from Turn 1",
   "Handoff from Claude Code to Codex after Turn 1",
   "Automatically Switched Account to Work",
+  "Conversation Compacted",
+  "Conversation Compacted Automatically",
 ];
+
+for (const width of [1440, 390]) {
+  test(`many history dividers with long labels fit at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+    await page.goto(`${PAGE}&history-stress=1`);
+    await page.locator("nav").evaluate((node) => { node.hidden = true; });
+    await expect(page.locator(".tl-divider")).toHaveCount(8);
+    for (const divider of await page.locator(".tl-divider").all()) {
+      await divider.scrollIntoViewIfNeeded();
+      const label = divider.locator(".tl-divider-label");
+      const box = await label.boundingBox();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(width);
+      await expect(label.locator("svg")).toHaveAttribute("width", "14");
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+  });
+}
 
 async function themeColor(page: Page, token: string): Promise<string> {
   return page.evaluate((name) => {
@@ -33,7 +53,7 @@ for (const theme of ["dark", "light"] as const) {
     const faint = await themeColor(page, "--text-faint");
 
     for (const name of DIVIDERS) {
-      const divider = page.getByRole("separator", { name });
+      const divider = page.getByRole("separator", { name, exact: true });
       await expect(divider).toBeVisible();
       const label = divider.locator(".tl-divider-label");
       await expect(label).toHaveCSS("color", dim);
