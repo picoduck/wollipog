@@ -123,7 +123,11 @@ for (const managed of MANAGED) {
         const setup = new AntigravitySetupSupervisor({
           dataDir, platform: "linux", arch: "x64", musl: () => false, fetch: server.fetch,
           resolveExecutable: async () => pathExecutable, onUpdate: (view) => published.push(view),
-          versionTimeoutMs: 1_000, sessionTimeoutMs: 1_000, handshakeTimeoutMs: 5_000,
+          // Only deliberately hanging probes need a short deadline. Working Node fixtures
+          // must be allowed to start even when CI is scheduling many test processes.
+          versionTimeoutMs: managed === "version_timeout" ? 1_000 : 10_000,
+          sessionTimeoutMs: candidate === "timeout" ? 1_000 : 10_000,
+          handshakeTimeoutMs: 10_000,
         });
         supervisors.push(setup);
         await setup.check("never");
@@ -135,7 +139,7 @@ for (const managed of MANAGED) {
           view.managedInstall?.operation?.status !== "running" && view.status !== "checking");
         const operation = settled.managedInstall!.operation!;
 
-        assert.equal(operation.status, want.proceeds ? "succeeded" : "failed");
+        assert.equal(operation.status, want.proceeds ? "succeeded" : "failed", JSON.stringify(operation));
         assert.equal(operation.failure, want.failure);
         const currentAfter = existsSync(join(managedRoot, "current")) ? readlinkSync(join(managedRoot, "current")) : null;
         if (want.proceeds) assert.notEqual(currentAfter, currentBefore, "the candidate is current");

@@ -271,12 +271,17 @@ export async function downloadAntigravityArchive(
   }
 }
 
-/** End a file stream and wait until its bytes are written; a write or open error refuses. */
+/** Finish writing and close the descriptor before a caller can execute the file. A writable's
+ * end callback runs at finish, while the descriptor may still be open (exec can then fail ETXTBSY). */
 function closed(stream: WriteStream, message: string): Promise<void> {
-  return new Promise<void>((resolve, reject) => stream.end((error?: Error | null) => {
-    if (error || stream.errored) reject(new AntigravityInstallError("activation_failed", message));
-    else resolve();
-  }));
+  return new Promise<void>((resolve, reject) => {
+    stream.once("error", () => reject(new AntigravityInstallError("activation_failed", message)));
+    stream.once("close", () => {
+      if (stream.errored) reject(new AntigravityInstallError("activation_failed", message));
+      else resolve();
+    });
+    stream.end();
+  });
 }
 
 export interface AntigravityReleaseSource extends AntigravityManifest {
