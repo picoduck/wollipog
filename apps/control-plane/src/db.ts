@@ -17676,7 +17676,27 @@ export class ControlPlaneDb {
           // A corrupt row is intentionally replaced, never retained as last-known state.
         }
       }
-      this.stmt("DELETE FROM subscription_usage_snapshots WHERE runner_id=?").run(runnerId);
+      // Runner startup runs general discovery and Antigravity setup concurrently. While Antigravity
+      // setup is still `checking`, an inventory published before it settles omits Antigravity; keep
+      // persisted Antigravity rows until setup finishes so a subsequent failure retains cached data.
+      let preserveCheckingAntigravity = false;
+      if (!snapshots.some((snapshot) => snapshot.provider === "antigravity")) {
+        const runnerRow = this.stmt("SELECT antigravity_setup FROM runners WHERE runner_id=?")
+          .get(runnerId) as { antigravity_setup: string | null } | undefined;
+        if (runnerRow?.antigravity_setup) {
+          try {
+            const setup = JSON.parse(runnerRow.antigravity_setup) as { status?: unknown };
+            preserveCheckingAntigravity = setup.status === "checking";
+          } catch {
+            preserveCheckingAntigravity = false;
+          }
+        }
+      }
+      if (preserveCheckingAntigravity) {
+        this.stmt("DELETE FROM subscription_usage_snapshots WHERE runner_id=? AND provider != 'antigravity'").run(runnerId);
+      } else {
+        this.stmt("DELETE FROM subscription_usage_snapshots WHERE runner_id=?").run(runnerId);
+      }
       for (const snapshot of snapshots) {
         if (snapshot.runnerId !== runnerId) throw new Error("subscription usage inventory runner mismatch");
         this.writeSubscriptionUsageSnapshot(

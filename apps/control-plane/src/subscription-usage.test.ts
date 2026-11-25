@@ -857,15 +857,28 @@ test("a failed Antigravity setup check after runner restart surfaces unavailable
   };
   db.upsertSubscriptionUsageSnapshot(seeded, now);
 
-  // Runner restarts and its initial Antigravity setup check fails transiently.
+  // Runner restarts: general discovery registers and publishes an inventory omitting Antigravity
+  // while the initial Antigravity setup check is still in `checking` state.
+  const checkingAt = now + 2_000;
+  db.registerRunner({
+    ...meta("agy-box", [codexAgent()]),
+    antigravitySetup: { version: 1, status: "checking", checkedAt: checkingAt, credentialStore: "shared_os_keyring" },
+  }, checkingAt, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  db.replaceSubscriptionUsageSnapshots("agy-box", [], checkingAt);
+
+  // Initial Antigravity setup check then fails transiently and advertises Antigravity unavailable.
   const restartAt = now + 5_000;
   const reason = "Google Antigravity couldn't verify its access on this machine.";
-  db.registerRunner(
-    meta("agy-box", [antigravityAgent({ available: false, unavailableReason: reason })]),
-    restartAt,
-    PROTOCOL_VERSION,
-    OWNED_BY_ALICE,
-  );
+  db.registerRunner({
+    ...meta("agy-box", [codexAgent(), antigravityAgent({ available: false, unavailableReason: reason })]),
+    antigravitySetup: {
+      version: 1,
+      status: "verification_failed",
+      failure: "session_check_failed",
+      checkedAt: restartAt,
+      credentialStore: "shared_os_keyring",
+    },
+  }, restartAt, PROTOCOL_VERSION, OWNED_BY_ALICE);
   // Fresh runner manager has no local prior, so its first inventory sends state: unavailable with empty buckets.
   db.replaceSubscriptionUsageSnapshots("agy-box", [{
     sourceId: seeded.sourceId,
@@ -878,12 +891,25 @@ test("a failed Antigravity setup check after runner restart surfaces unavailable
     buckets: [],
   }], restartAt);
 
-  const projected = db.subscriptionUsageForPrincipal(human(), restartAt).sources[0]!;
+  const projected = db.subscriptionUsageForPrincipal(human(), restartAt).sources
+    .find((source) => source.provider === "antigravity")!;
   assert.equal(projected.state, "unavailable");
   assert.equal(projected.detail, reason);
   assert.equal(projected.fetchedAt, now);
   assert.equal(projected.plan, "Google AI Ultra");
   assert.deepEqual(projected.credits, { hasCredits: true, balance: "3000" });
   assert.deepEqual(projected.buckets, seeded.buckets);
+
+  // Once setup later settles without Antigravity (e.g., missing_runtime), omitting it removes the persisted row.
+  const removedAt = now + 10_000;
+  db.registerRunner({
+    ...meta("agy-box", [codexAgent()]),
+    antigravitySetup: { version: 1, status: "missing_runtime", checkedAt: removedAt, credentialStore: "shared_os_keyring" },
+  }, removedAt, PROTOCOL_VERSION, OWNED_BY_ALICE);
+  db.replaceSubscriptionUsageSnapshots("agy-box", [], removedAt);
+  assert.equal(
+    db.subscriptionUsageForPrincipal(human(), removedAt).sources.some((source) => source.provider === "antigravity"),
+    false,
+  );
   db.close();
 });
