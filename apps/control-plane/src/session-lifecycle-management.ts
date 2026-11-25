@@ -1,5 +1,5 @@
 import {randomUUID} from "node:crypto";
-import {runnerSupportsProtocol, validProviderHomeLaunchRefusal, handoffDestinationError, providerSupportsConversationFork, type SessionConfig, type SetProjectRequest, type SetWorkspaceRequest, type RunnerProtocolCapability} from "@wollipog/protocol";
+import {runnerSupportsProtocol, validProviderHomeLaunchRefusal, handoffDestinationError, isManagedModelChoice, launchModelChoice, providerSupportsConversationFork, type SessionConfig, type SetProjectRequest, type SetWorkspaceRequest, type RunnerProtocolCapability} from "@wollipog/protocol";
 import type {ControlPlaneDb} from "./db.js";
 import {isRunnerRequestTimeoutError, type Hub} from "./hub.js";
 import {sessionBlocksConversationFork, type SessionsService} from "./sessions.js";
@@ -127,6 +127,7 @@ export function createSessionLifecycleManagement(deps: {
   if (!sourceScope) return reply.code(409).send({ error: "source session ownership is unavailable" });
   const sourceAgent = db.getRunner(source.runnerId)?.agents.find((agent) => agent.id === source.agentId);
   const handoff = (input as { handoff?: { agentId: string; config: SessionConfig } })?.handoff;
+  let handoffConfig = handoff?.config;
   const destination = handoff ? db.getRunner(source.runnerId)?.agents.find((agent) => agent.id === handoff.agentId) : undefined;
   // Recovering a quarantined conversation is the one fork whose destination may be the same
   // provider: the invalid item is excluded by a new thread, not by a different vendor. Validate the
@@ -152,7 +153,13 @@ export function createSessionLifecycleManagement(deps: {
   }
   if (handoff) {
     if (!handoff.config || typeof handoff.config !== "object" || Array.isArray(handoff.config)) return reply.code(400).send({ error: "handoff config is required" });
-    const error = handoffDestinationError(destination, source.driver, handoff.config, { allowSameProvider: recovery });
+    if (isManagedModelChoice(handoff.config.model)) {
+      const model = launchModelChoice(destination?.driver, destination?.capabilities, handoff.config.model);
+      if (!model) return reply.code(409).send({ error: "Latest is no longer available on the destination. Choose a supported destination model." });
+      // The runner receives and revalidates the exact model, including on older versions.
+      handoffConfig = { ...handoff.config, model: model.id };
+    }
+    const error = handoffDestinationError(destination, source.driver, handoffConfig!, { allowSameProvider: recovery });
     if (error) return reply.code(409).send({ error });
     if (!db.getAgentLaunch(source.runnerId, handoff.agentId)) {
       return reply.code(409).send({ error: "The destination harness installation is unavailable or not selected." });
@@ -189,7 +196,7 @@ export function createSessionLifecycleManagement(deps: {
         title: `${source.title} (${recovery ? "recovered" : handoff ? "handoff" : "fork"})`.slice(0, 120),
         ...(handoff ? { handoff: {
           agentId: handoff.agentId,
-          config: handoff.config,
+          config: handoffConfig!,
           ...(destination?.installation?.selection === "selected"
             ? { expectedInstallationId: destination.installation.id } : {}),
         } } : {}),

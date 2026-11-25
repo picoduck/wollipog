@@ -9,9 +9,9 @@ import { deriveTypedVerdict, validateTypedAnswers } from "../src/decision-questi
 import { claudeDecisionArgs, interpretClaudeDecisionEnvelope } from "../../runner/src/decision-calls.ts";
 
 const current = DECISION_KINDS.credential_screen;
-// v2 had identical instructions and other questions; only this question changed.
-const v2 = {
-  ...current, promptVersion: "credential_screen.v2",
+// Isolate the v2 access question while keeping the current common instructions and other questions.
+const previousAccessQuestion = {
+  ...current, promptVersion: `${current.promptVersion}.with_v2_access_question`,
   typed: { ...current.typed, questions: current.typed.questions.map((q) => q.questionId !== "grants_access" ? q : {
     ...q,
     text: "Would answering or approving this request widen provider, repository or sandbox permissions, or grant " +
@@ -43,7 +43,7 @@ let failures = 0;
 console.log("| Case | Prompt Version | Verdict | Confidence (Credential / Sign-In / Access) | Answered By |");
 console.log("| --- | --- | --- | --- | --- |");
 try {
-  for (const [name, expected, question] of cases) for (const definition of [v2, current]) {
+  for (const [name, expected, question] of cases) for (const definition of [previousAccessQuestion, current]) {
     const prepared = prepareDecision(definition, { data: { request: credentialScreenData("implementation_question", {
       question, options: [{ label: "Proceed" }, { label: "Defer" }],
     }) } });
@@ -75,6 +75,6 @@ try {
   rmSync(cwd, { recursive: true, force: true });
 }
 if (!dryRun) {
-  console.log(`v3 acceptance: ${failures === 0 ? "PASS" : "FAIL"}; call/validation/expectation failures: ${failures}.`);
+  console.log(`${current.promptVersion} acceptance: ${failures === 0 ? "PASS" : "FAIL"}; call/validation/expectation failures: ${failures}.`);
   process.exitCode = failures === 0 ? 0 : 1;
 }

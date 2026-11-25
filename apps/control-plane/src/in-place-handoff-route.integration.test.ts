@@ -26,16 +26,17 @@ test("fork route admits an in-place handoff, retains native and protocol gates, 
   const runner: RunnerMetadata = {
     runnerId: "handoff-runner", hostname: "handoff-fixture", os: "linux", version: "fixture",
     workspaces: [{ id: "source-workspace", name: "Source", path: "/fixture/source" }],
-    agents: ["codex-app-server", "claude-code"].map((driver, index) => ({
+    agents: ["claude-code", "codex-app-server"].map((driver, index) => ({
       id: index ? "destination" : "source", name: index ? "Destination" : "Source", driver,
       command: "fixture", args: [], env: {}, available: true, authStatus: "authenticated",
-      capabilities: { models: [{ id: "test" }], effortLevels: [], permissionModes: [], slashCommands: [],
+      capabilities: { models: [{ id: "gpt-6.1-sol" }, { id: "gpt-6.2-sol" }], modelSource: "live",
+        effortLevels: [], permissionModes: [], slashCommands: [], supportsConversationFork: true,
         supportsImages: true, supportsApprovals: true },
     })) as RunnerMetadata["agents"],
   };
   const source: SessionSnapshot = {
     id: "s_source", workspaceId: "source-workspace", workspacePath: "/fixture/source", agentId: "source",
-    title: "In Place", status: "idle", driver: "codex-app-server", useWorktree: false, worktreePath: null,
+    title: "In Place", status: "idle", driver: "claude-code", useWorktree: false, worktreePath: null,
     config: {}, preview: null, pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0,
     seq: 0, historyEpoch: 0, createdAt: 1, updatedAt: 1,
   };
@@ -88,7 +89,7 @@ test("fork route admits an in-place handoff, retains native and protocol gates, 
     });
     return { status: response.status, body: await response.json() as Record<string, unknown> };
   };
-  const handoff = { turn: 1, handoff: { agentId: "destination", config: { model: "test" } } };
+  const handoff = { turn: 1, handoff: { agentId: "destination", config: { model: "wollipog:latest:sol" } } };
   const unsupported = await post(handoff);
   assert.equal(unsupported.status, 409);
   assert.match(String(unsupported.body.error), /runner/i);
@@ -105,15 +106,16 @@ test("fork route admits an in-place handoff, retains native and protocol gates, 
     forks++;
     assert.equal(message.sourceSessionId, source.id);
     assert.equal(message.handoff.agentId, "destination");
+    assert.equal(message.handoff.config.model, "gpt-6.2-sol", "only the exact resolution reaches the runner");
     if (reply === "legacy") socket.send(JSON.stringify({ type: "fork_result", requestId: message.requestId,
       ok: false, error: "conversation fork requires a worktree session" }));
     // #3240: the fork's provider launch was refused at the account's lease.
     else if (reply === "lease") socket.send(JSON.stringify({ type: "fork_result", requestId: message.requestId,
       ok: false, error: "Provider HOME is already in use.",
-      providerHomeRefusal: { code: "busy", cause: "holder_alive", provider: "claude", detectedAt: 7 } }));
+      providerHomeRefusal: { code: "busy", cause: "holder_alive", provider: "codex", detectedAt: 7 } }));
     else socket.send(JSON.stringify({ type: "fork_result", requestId: message.requestId, ok: true,
-      snapshot: { ...source, id: message.targetSessionId, agentId: "destination", driver: "claude-code",
-        useWorktree: true, worktreePath: "/fixture/new-worktree", config: handoff.handoff.config },
+      snapshot: { ...source, id: message.targetSessionId, agentId: "destination", driver: "codex-app-server",
+        useWorktree: true, worktreePath: "/fixture/new-worktree", config: message.handoff.config },
       events: [], handoffDraft: { text: "Files reflect the repository at hand-off time.", images: [], disclosure: "Current files." },
     }));
   });
@@ -134,7 +136,7 @@ test("fork route admits an in-place handoff, retains native and protocol gates, 
   const refused = await post(handoff);
   assert.equal(refused.status, 409);
   assert.equal(refused.body.error, "Provider HOME is already in use.");
-  assert.deepEqual(refused.body.providerHomeRefusal, { code: "busy", cause: "holder_alive", provider: "claude", detectedAt: 7 },
+  assert.deepEqual(refused.body.providerHomeRefusal, { code: "busy", cause: "holder_alive", provider: "codex", detectedAt: 7 },
     "the typed refusal reaches the client beside the text");
   reply = "ok";
   const result = await post(handoff);
@@ -142,6 +144,7 @@ test("fork route admits an in-place handoff, retains native and protocol gates, 
   assert.equal(result.body.workspaceId, source.workspaceId);
   assert.equal(result.body.worktreePath, "/fixture/new-worktree");
   assert.equal(result.body.agentId, "destination");
+  assert.equal(result.body.model, "gpt-6.2-sol");
   assert.deepEqual(result.body.handoffDraft, { text: "Files reflect the repository at hand-off time.", images: [], disclosure: "Current files." });
   assert.equal(forks, 3);
 });

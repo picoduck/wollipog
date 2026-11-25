@@ -529,12 +529,14 @@ test("a runner whose marker holds one of the later of 257 grants in its scope is
 test("Add Account on a v225 runner records a created grant with the creator's role and completes it from the account report", async () => {
   const f = await fixture();
   try {
-    const grantId = authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, principal("operator"), "codex", 10, "created-operator");
-    assert.ok(grantId, "any person who can manage the Machine is granted the account they create");
+    const dispatch = authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, principal("operator"), "codex", 10, "created-operator");
+    assert.ok(dispatch, "any person who can manage the Machine is granted the account they create");
+    const { profileGrantId: grantId } = dispatch;
+    assert.equal(dispatch.newAccountId, undefined, "a legacy runner chooses the id");
     const pending = f.db.getProviderProfileGrant(grantId)!;
     assert.deepEqual([pending.status, pending.origin, pending.grantedBy, pending.grantedRole, pending.provider, pending.profileId],
       ["pending", "created", "user-1", "operator", "codex", null]);
-    assert.notEqual(pending.providerAccountId, "work-1234", "the account is named only by the runner's start reply");
+    assert.equal(pending.providerAccountId, `login:${grantId}`, "the account is named only by the runner's start reply");
     assert.deepEqual(providerProfileGrantsForRunner(f.db, "runner-a", []), [{ grantId, status: "pending" }],
       "a reconnect during the sign-in still lists the grant to the runner");
 
@@ -567,12 +569,12 @@ test("an Add Account grant is spent when the sign-in does not start, settles wit
   const f = await fixture();
   try {
     const owner = principal("admin");
-    const refused = authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, owner, "claude", 1, "refused")!;
+    const { profileGrantId: refused } = authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, owner, "claude", 1, "refused")!;
     settleCreatedProviderProfileGrantStart(f.db, refused, { started: false }, owner, 2);
     assert.deepEqual([f.db.getProviderProfileGrant(refused)?.status, f.db.getProviderProfileGrant(refused)?.revokedBy],
       ["revoked", "user-1"]);
 
-    const cancelled = authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, owner, "claude", 3, "cancelled")!;
+    const { profileGrantId: cancelled } = authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, owner, "claude", 3, "cancelled")!;
     settleCreatedProviderProfileGrantStart(f.db, cancelled, { started: true, accountId: "cancelled-1" }, owner, 4);
     const adoption = f.db.authorizeProviderProfileGrant({ grantId: randomUUID(), runnerId: "runner-a", providerAccountId: "work",
       provider: "claude", origin: "adopted", grantedBy: "user-1", grantedRole: "owner", now: 4 })!.grant.grantId;
@@ -584,7 +586,7 @@ test("an Add Account grant is spent when the sign-in does not start, settles wit
     assert.equal(f.db.getProviderProfileGrant(cancelled)?.status, "revoked");
     assert.equal(f.db.getProviderProfileGrant(adoption)?.status, "pending");
 
-    const windows = authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, owner, "claude", 7, "windows")!;
+    const { profileGrantId: windows } = authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, owner, "claude", 7, "windows")!;
     settleCreatedProviderProfileGrantStart(f.db, windows, { started: true, accountId: "windows-1" }, owner, 8);
     f.register("runner-a", [account("windows-1"), account("work")]);
     assert.deepEqual(reconcileProviderProfileGrants(f.db, "runner-a", f.db.getRunner("runner-a")?.providerAccounts, 9), []);

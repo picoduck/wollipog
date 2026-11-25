@@ -5,8 +5,9 @@ import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizont
 /**
  * The Assistants section (#4664) in a real browser, against `assistants-main.tsx`'s stub of the
  * provisional Thread API: the rail destination, the Wollipog Assistant's threads with New Thread,
- * rename and archive, the open thread's transcript and composer with its access level, launched
- * sessions as live work cards with an inline approval, the unavailable control plane, and a phone.
+ * rename and archive, the open thread's transcript and composer with its access level, the launched
+ * sessions' toggle with a waiting approval inline in the header, the unavailable control plane, and a
+ * phone. The Launched Sessions panel itself is `assistant-launched-sessions.spec.ts` (#4776).
  * With `WOLLIPOG_EVIDENCE_DIR` set, each state is also captured as UI evidence.
  */
 
@@ -34,6 +35,93 @@ async function expectEmptyStateAligned(page: Page) {
 const threadsList = (page: Page) => page.getByRole("complementary", { name: "Assistants" });
 const threadRow = (page: Page, title: string) => threadsList(page).getByRole("button", { name: new RegExp(`^${title}`) });
 
+async function captureAccountList(page: Page, dialog: Locator, action: Locator, name: string, accountRows: number) {
+  const body = dialog.locator(".modal-body");
+  const accounts = dialog.getByRole("radiogroup", { name: "Account" });
+  await expect(accounts.getByRole("radio")).toHaveCount(accountRows);
+  await expectNoHorizontalOverflow(dialog, "Thread account dialog");
+  await expectNoHorizontalOverflow(accounts, "Account choices");
+  // The dialog body is the only scroll surface. Its footer remains in view as all nine accounts
+  // are browsed. Verify every whole row is visible in at least one captured scroll position.
+  expect(await accounts.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeLessThanOrEqual(1);
+  const visibleRows = (bottom: boolean) => body.evaluate((element, bottom) => {
+    element.scrollTop = bottom ? element.scrollHeight : 0;
+    const clip = element.getBoundingClientRect();
+    return Array.from(element.querySelectorAll('[aria-labelledby].choice-rows .choice-row'))
+      .map((row, index) => {
+        const rect = row.getBoundingClientRect();
+        return rect.top >= clip.top && rect.bottom <= clip.bottom ? index : -1;
+      }).filter((index) => index >= 0);
+  }, bottom);
+  const visible = await visibleRows(false);
+  await expectFullyInViewport(action, "Thread account dialog primary action");
+  await capture(page, `${name}-top`);
+  const atBottom = await visibleRows(true);
+  expect(new Set([...visible, ...atBottom]).size).toBe(accountRows);
+  await expectFullyInViewport(action, "Thread account dialog primary action after scrolling");
+  if (visible.length < accountRows) await capture(page, `${name}-bottom`);
+}
+
+for (const theme of ["dark", "light"] as const) {
+  for (const device of ["desktop", "phone"] as const) {
+    test.describe(`thread accounts in ${theme} on ${device}`, () => {
+      const phone = device === "phone";
+      test.use({ viewport: phone ? { width: 390, height: 844 } : { width: 1440, height: 900 },
+        hasTouch: phone, isMobile: phone, colorScheme: theme });
+
+      test("changes an existing thread's account", async ({ page }) => {
+        await page.clock.setFixedTime(new Date("2026-11-19T16:00:00Z"));
+        const prefix = `assistant-account-${theme}-${device}`;
+        const path = "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA";
+        const openChange = async () => {
+          await page.getByRole("button", { name: "Thread Actions" }).click();
+          await page.getByRole("menuitem", { name: "Thread Settings…" }).click();
+          await page.getByRole("button", { name: "Change… Account" }).click();
+        };
+        await open(page, theme, "accounts=default&limits=enabled", path);
+        await openChange();
+        const change = page.getByRole("dialog", { name: "Change Account" });
+        const changeButton = change.getByRole("button", { name: "Use Account" });
+        const fresh = change.getByRole("checkbox", { name: "Start a Fresh Conversation" });
+        await expect(fresh).not.toBeChecked();
+        await expect(fresh).toHaveAccessibleDescription(/can't carry the conversation over/);
+        await expectFullyInViewport(changeButton, "Use Account");
+        await capture(page, `${prefix}-change-default`);
+
+        await open(page, theme, "accounts=stress&limits=enabled", path);
+        const panel = page.locator("#right-panel");
+        const toggle = page.getByRole("button", { name: /Side Panel/ });
+        const details = panel.getByRole("tabpanel", { name: "Details" });
+        const revealAccount = async () => {
+          await toggle.click();
+          await panel.getByRole("tab", { name: "Details" }).click();
+          await details.getByRole("button", { name: "Show Account" }).click();
+        };
+        await revealAccount();
+        await expect(details).toContainText("DesignResearchAndEngineering");
+        await panel.getByRole("button", { name: "Close Panel" }).click();
+        await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
+        await expectFullyInViewport(page.locator(".composer"), "Thread composer");
+        await expectPageNoHorizontalOverflow(page);
+        await openChange();
+        const changeOptions = change.getByRole("radiogroup", { name: "Account" });
+        await expect(changeOptions.getByRole("radio", { name: /DesignResearchAndEngineering/ })).toHaveAttribute("aria-disabled", "true");
+        await changeOptions.getByRole("radio", { name: "Studio Subscription" }).check();
+        await captureAccountList(page, change, changeButton, `${prefix}-change-stress`, 9);
+        await changeButton.click();
+        await page.getByRole("button", { name: "Save Changes" }).click();
+        await page.getByRole("button", { name: "Confirm and Save" }).click();
+        await expect(page.locator("body")).toHaveAttribute("data-changed-account", "acct:0000000000000001");
+        await revealAccount();
+        await expect(details).toContainText("Studio Subscription");
+        await panel.getByRole("button", { name: "Close Panel" }).click();
+        await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
+        await expect(page.getByRole("button", { name: /Side Panel/ })).toHaveAccessibleName("Show Side Panel, 1 Session Needs You");
+      });
+    });
+  }
+}
+
 for (const theme of ["dark", "light"] as const) {
   test.describe(`${theme} at 1440×900`, () => {
     test.use({ viewport: { width: 1440, height: 900 }, colorScheme: theme });
@@ -42,34 +130,32 @@ for (const theme of ["dark", "light"] as const) {
       await open(page, theme);
       await expect(page.getByRole("heading", { level: 1, name: "Assistants", exact: true })).toBeVisible();
       await expect(page.getByRole("link", { name: "Assistants", exact: true })).toHaveAttribute("aria-current", "page");
-      await expect(threadsList(page).getByRole("heading", { level: 2, name: "Wollipog Assistant" })).toBeVisible();
+      await expect(threadsList(page).getByRole("heading", { level: 2, name: /^Threads/ })).toBeVisible();
       await expect(threadsList(page).getByRole("button", { name: "New Thread" })).toBeVisible();
       const rows = threadsList(page).locator("[data-thread-id]");
       await expect(rows).toHaveCount(3);
-      // Newest activity first, each with its status badge.
+      // Newest activity first within each group. An idle thread has no badge.
       await expect(rows.locator(".row-title")).toHaveText(["Triage Open Issues", "Ship the Release Notes", "Weekly Cleanup"]);
-      await expect(rows.locator(".status")).toHaveText(["Needs You", "Working", "Done"]);
-      await expect(rows.nth(1).locator(".row-sub")).toContainText("Codex");
+      await expect(rows.locator(".status")).toHaveText(["Needs You", "Working"]);
+      await expect(rows.nth(1).locator(".assistant-thread-glyph .agent-openai")).toBeVisible();
       await capture(page, `assistants-list-${theme}-desktop`);
     });
 
-    test("an open thread shows its transcript, composer, access level and live work cards", async ({ page }) => {
+    test("an open thread shows its transcript, composer and the waiting approval", async ({ page }) => {
       await open(page, theme, "", "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA");
-      const head = page.locator(".assistant-thread-head");
-      await expect(head.getByRole("heading", { level: 2, name: "Triage Open Issues" })).toBeVisible();
-      await expect(head.getByRole("list", { name: "Thread Details" })).toContainText("Full Access · Ask Before Destructive");
-      await expect(head.getByRole("list", { name: "Thread Details" })).toContainText("Claude Code");
+      // The bar spans the thread pane above the waiting requests.
+      const bar = page.locator(".assistant-thread-bar");
+      await expect(bar.getByRole("heading", { level: 2, name: "Triage Open Issues" })).toBeVisible();
+      await expect(bar).not.toContainText("Full access.");
       // The backing session's transcript and composer.
       await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
       await expect(page.locator(".composer")).toBeVisible();
-      // Launched sessions are work cards; the waiting one carries its approval inline.
-      const cards = page.getByRole("region", { name: "Launched Work" }).locator(".assistant-work-card");
-      await expect(cards).toHaveCount(2);
-      // Work waiting on the person comes first.
-      await expect(cards.nth(0)).toContainText("Bump the Vite Group");
-      const flaky = cards.filter({ hasText: "Fix the Flaky Upload Test" });
-      await expect(flaky).toHaveCount(1);
-      await expect(flaky.locator(".status")).toHaveText("Running");
+      // The panel toggle signals waiting sessions. The only card in the conversation is the
+      // waiting approval, while the running session is in Work.
+      await expect(bar.getByRole("button", { name: /Side Panel/ })).toHaveAccessibleName("Show Side Panel, 1 Session Needs You");
+      const cards = page.getByRole("region", { name: "Waiting for You" }).locator(".assistant-dock-card");
+      await expect(cards).toHaveCount(1);
+      await expect(cards.first()).not.toContainText("Fix the Flaky Upload Test");
       const waiting = cards.filter({ hasText: "Bump the Vite Group" });
       await expect(waiting).toContainText("Run pnpm install --frozen-lockfile");
       await expect(waiting.getByRole("button", { name: "Approve Once" })).toBeVisible();
@@ -77,39 +163,35 @@ for (const theme of ["dark", "light"] as const) {
       await expect(waiting.getByRole("button", { name: "Open Session" })).toBeVisible();
       await capture(page, `assistants-thread-${theme}-desktop`);
 
-      // Live: the running session finishes and its card follows.
-      await page.evaluate(() => (window as unknown as { assistantsAdvance: () => void }).assistantsAdvance());
-      await expect(flaky.locator(".status")).not.toHaveText("Running");
-
-      // Approve Once answers the exact request with its once-only option.
+      // Approve Once answers the exact request with its once-only option, and the counts follow.
       await waiting.getByRole("button", { name: "Approve Once" }).click();
       await expect(page.locator("body")).toHaveAttribute("data-approved", "sess-deps:req-1:allow");
-      await expect(waiting.getByRole("button", { name: "Approve Once" })).toHaveCount(0);
-
-      // A card opens its session.
-      await flaky.getByRole("button", { name: /Fix the Flaky Upload Test/ }).click();
-      await expect(page).toHaveURL(/path=%2Fsessions%2F(~|%7E)/);
+      await expect(page.getByRole("button", { name: "Approve Once" })).toHaveCount(0);
+      await expect(bar.getByRole("button", { name: /Side Panel/ })).toHaveAccessibleName("Side Panel");
     });
 
     test("a thread change arrives as an event, and one that lands during a list read survives it", async ({ page }) => {
       await open(page, theme, "", "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA");
-      const cards = page.getByRole("region", { name: "Launched Work" }).locator(".assistant-work-card");
-      await expect(cards).toHaveCount(2);
+      const toggle = page.getByRole("button", { name: /Side Panel/ });
+      await expect(toggle).toHaveAccessibleName("Show Side Panel, 1 Session Needs You");
       // The launched sessions arrive as summaries, without their requests' options: the card reads
       // the detail and still offers the inline approval.
+      const cards = page.getByRole("region", { name: "Waiting for You" }).locator(".assistant-dock-card");
       await expect(cards.filter({ hasText: "Bump the Vite Group" }).getByRole("button", { name: "Approve Once" })).toBeVisible();
 
       // Mid-turn the assistant launches more work while its own status stays put. The control plane
-      // republishes the thread, and the card follows from that event alone: well inside the 15s poll.
+      // republishes the thread, and the counts follow from that event alone: well inside the 15s poll.
       await page.evaluate(() => (window as unknown as { assistantsLaunch: () => void }).assistantsLaunch());
-      await expect(cards).toHaveCount(3, { timeout: 2_000 });
-      await expect(cards.filter({ hasText: "Write the Changelog" })).toHaveCount(1);
+      await toggle.click();
+      await expect(page.getByRole("tab", { name: "Work 3", exact: true })).toBeVisible({ timeout: 2_000 });
+      await expect(page.locator("#right-panel .launched-sessions")).toContainText("Write the Changelog");
+      await toggle.click();
 
       // A rename starts a list read; hold that read, publish another change to the thread while it
       // is in flight, then let it land. The read began before the change, so the change must stay.
       await page.evaluate(() => (window as unknown as { assistantsHoldNextList: () => void }).assistantsHoldNextList());
-      await page.locator(".assistant-thread-head").getByRole("button", { name: "Thread Actions" }).click();
-      await page.getByRole("menuitem", { name: "Rename" }).click();
+      await page.locator(".assistant-thread-bar").getByRole("button", { name: "Thread Actions" }).click();
+      await page.getByRole("menuitem", { name: "Rename…" }).click();
       const rename = page.getByRole("dialog", { name: "Rename Thread" });
       await expect(rename.getByRole("textbox", { name: "Title" })).toHaveAttribute("maxlength", "120");
       await rename.getByRole("textbox", { name: "Title" }).fill("Triage Last Night's CI");
@@ -118,11 +200,11 @@ for (const theme of ["dark", "light"] as const) {
       await expect(threadRow(page, "Triage Last Night's CI")).toBeVisible();
       await page.evaluate(() => (window as unknown as { assistantsThreadStatus: (id: string, status: string) => void })
         .assistantsThreadStatus("thr_triage", "done"));
-      await expect(threadRow(page, "Triage Last Night's CI").locator(".status")).toHaveText("Done");
+      await expect(threadRow(page, "Triage Last Night's CI").locator(".status")).toHaveCount(0);
       await page.evaluate(() => (window as unknown as { assistantsReleaseList: () => void }).assistantsReleaseList());
       await page.waitForTimeout(500);
-      await expect(threadRow(page, "Triage Last Night's CI").locator(".status")).toHaveText("Done");
-      await expect(page.locator(".assistant-thread-head").getByRole("heading", { level: 2 })).toHaveText("Triage Last Night's CI");
+      await expect(threadRow(page, "Triage Last Night's CI").locator(".status")).toHaveCount(0);
+      await expect(page.locator(".assistant-thread-bar").getByRole("heading", { level: 2 })).toHaveText("Triage Last Night's CI");
     });
 
     test("the thread's transcript is the backing session's, as the Sessions page shows it", async ({ page }) => {
@@ -134,9 +216,11 @@ for (const theme of ["dark", "light"] as const) {
       await capture(page, `assistants-backing-session-page-${theme}-desktop`);
     });
 
-    test("work cards share the row's width, so a title is not cut while there is room", async ({ page }) => {
+    test("Work panel titles fit when there is room", async ({ page }) => {
       await open(page, theme, "", "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA");
-      const titles = page.getByRole("region", { name: "Launched Work" }).locator(".assistant-work-title");
+      await expect(page.getByRole("region", { name: "Waiting for You" }).locator(".assistant-dock-target .chip")).toHaveCount(1);
+      await page.getByRole("button", { name: /Side Panel/ }).click();
+      const titles = page.locator("#right-panel .launched-sessions .assistant-work-title");
       await expect(titles).toHaveCount(2);
       for (const title of await titles.all()) {
         expect(await title.evaluate((element) => element.scrollWidth <= element.clientWidth), await title.textContent() ?? "")
@@ -156,28 +240,28 @@ for (const theme of ["dark", "light"] as const) {
       // A rename starts a list read; hold it, change the triage thread while it is in flight, then
       // send more changes to another thread than the store keeps, each in its own render.
       await page.evaluate(() => (window as unknown as Fixture).assistantsHoldNextList());
-      await page.locator(".assistant-thread-head").getByRole("button", { name: "Thread Actions" }).click();
-      await page.getByRole("menuitem", { name: "Rename" }).click();
+      await page.locator(".assistant-thread-bar").getByRole("button", { name: "Thread Actions" }).click();
+      await page.getByRole("menuitem", { name: "Rename…" }).click();
       const rename = page.getByRole("dialog", { name: "Rename Thread" });
       await rename.getByRole("textbox", { name: "Title" }).fill("Triage Last Night's CI");
       await rename.getByRole("button", { name: "Rename" }).click();
       await expect(page.locator("body")).toHaveAttribute("data-list-held", "true", { timeout: 5_000 });
       await page.evaluate(() => (window as unknown as Fixture).assistantsThreadStatus("thr_triage", "done"));
-      await expect(threadRow(page, "Triage Last Night's CI").locator(".status")).toHaveText("Done");
+      await expect(threadRow(page, "Triage Last Night's CI").locator(".status")).toHaveCount(0);
       await page.evaluate(() => (window as unknown as Fixture).assistantsFlood("thr_cleanup", 70, 5));
       // The held read predates the status change, and the store no longer has it to replay: the
       // read lands, sees that, and reads again rather than leaving the old status in place.
       await page.evaluate(() => (window as unknown as Fixture).assistantsReleaseList());
       await page.waitForTimeout(1_000);
-      await expect(threadRow(page, "Triage Last Night's CI").locator(".status")).toHaveText("Done");
+      await expect(threadRow(page, "Triage Last Night's CI").locator(".status")).toHaveCount(0);
     });
 
-    test("an archived thread open on its own follows a change the store could not keep", async ({ page }) => {
+    test("an archived thread follows a change the store could not keep", async ({ page }) => {
       await open(page, theme, "", "/assistants/~dABoAHIAXwByAGUAdABpAHIAZQBkAA");
-      const head = page.locator(".assistant-thread-head");
+      const head = page.locator(".assistant-thread-bar");
       await expect(head.getByRole("heading", { level: 2, name: "Retire the Old Runner" })).toBeVisible();
-      // Its rename and more changes than the store keeps arrive in one render: the list is read
-      // again, and so is the archived thread, which the list leaves out.
+      // Its rename and more changes than the store keeps arrive in one render, so the full list
+      // is read again and the selected archive gets its latest title from it.
       await page.evaluate(async () => {
         const fixture = window as unknown as {
           assistantsRenameElsewhere: (id: string, title: string) => void;
@@ -189,11 +273,11 @@ for (const theme of ["dark", "light"] as const) {
       await expect(head.getByRole("heading", { level: 2, name: "Runner Retired in November" })).toBeVisible({ timeout: 3_000 });
     });
 
-    test("a link to an archived thread opens it on its own, though the list leaves it out", async ({ page }) => {
+    test("a link to an archived thread opens it beside the active list", async ({ page }) => {
       // thr_retired
       await open(page, theme, "", "/assistants/~dABoAHIAXwByAGUAdABpAHIAZQBkAA");
       await expect(threadsList(page).locator("[data-thread-id]")).toHaveCount(3);
-      const head = page.locator(".assistant-thread-head");
+      const head = page.locator(".assistant-thread-bar");
       await expect(head.getByRole("heading", { level: 2, name: "Retire the Old Runner" })).toBeVisible();
       await expect(head.locator(".status")).toHaveText("Archived");
     });
@@ -209,53 +293,46 @@ for (const theme of ["dark", "light"] as const) {
       await capture(page, `assistants-owner-only-${theme}-desktop`);
     });
 
-    test("New Thread preselects the Orchestrator harness, and rename and archive act on the thread", async ({ page }) => {
+    test("New Thread preselects the default harness, and rename and archive act on the thread", async ({ page }) => {
       await open(page, theme);
       await page.getByRole("button", { name: "New Thread" }).first().click();
-      const dialog = page.getByRole("dialog", { name: "New Thread" });
-      await expect(dialog.getByRole("radio", { name: /Claude Code/ })).toBeChecked();
-      await capture(page, `assistants-new-thread-${theme}-desktop`);
-      await dialog.getByRole("radio", { name: /Codex/ }).check();
-      // The control plane takes titles of up to 120 characters; the field stops there.
-      await expect(dialog.getByRole("textbox", { name: "Title (Optional)" })).toHaveAttribute("maxlength", "120");
-      await dialog.getByRole("textbox", { name: "Title (Optional)" }).fill("Plan the Next Release");
-      await dialog.getByRole("button", { name: "Start Thread" }).click();
-      await expect(dialog).toHaveCount(0);
-      await expect(page.locator(".assistant-thread-head").getByRole("heading", { level: 2, name: "Plan the Next Release" })).toBeVisible();
+      const form = page.getByRole("form", { name: "What should the assistant work on?" });
+      await form.getByRole("button", { name: /^Harness Claude Code/ }).click();
+      await page.getByRole("radio", { name: "Codex", exact: true }).check();
+      await page.getByRole("button", { name: "Close Harness" }).click();
+      await form.getByRole("textbox", { name: "First Message" }).fill("Plan the Next Release");
+      await form.getByRole("button", { name: "Start Thread" }).click();
+      await expect(form).toHaveCount(0);
+      await expect(page.locator(".assistant-thread-bar").getByRole("heading", { level: 2, name: "Plan the Next Release" })).toBeVisible();
       await expect(threadRow(page, "Plan the Next Release")).toHaveAttribute("aria-current", "true");
-      await expect(threadRow(page, "Plan the Next Release").locator(".row-sub")).toContainText("Codex");
+      await expect(threadRow(page, "Plan the Next Release").locator(".assistant-thread-glyph .agent-openai")).toBeVisible();
 
-      await page.locator(".assistant-thread-head").getByRole("button", { name: "Thread Actions" }).click();
-      await page.getByRole("menuitem", { name: "Rename" }).click();
+      await page.locator(".assistant-thread-bar").getByRole("button", { name: "Thread Actions" }).click();
+      await page.getByRole("menuitem", { name: "Rename…" }).click();
       const rename = page.getByRole("dialog", { name: "Rename Thread" });
       await rename.getByRole("textbox", { name: "Title" }).fill("Plan Release 0.31");
       await rename.getByRole("button", { name: "Rename" }).click();
       await expect(threadRow(page, "Plan Release 0.31")).toBeVisible();
 
-      await page.locator(".assistant-thread-head").getByRole("button", { name: "Thread Actions" }).click();
-      await page.getByRole("menuitem", { name: "Archive" }).click();
+      await page.locator(".assistant-thread-bar").getByRole("button", { name: "Thread Actions" }).click();
+      await page.getByRole("menuitem", { name: "Archive Thread…" }).click();
       await page.getByRole("dialog", { name: "Archive Thread" }).getByRole("button", { name: "Archive Thread" }).click();
       await expect(threadRow(page, "Plan Release 0.31")).toHaveCount(0);
       await expect(threadsList(page).locator("[data-thread-id]")).toHaveCount(3);
+      await threadsList(page).getByRole("button", { name: /^Archived Threads 2/ }).click();
+      await expect(threadRow(page, "Plan Release 0.31")).toBeVisible();
     });
 
-    test("a control plane without threads shows the empty section, and New Thread explains", async ({ page }) => {
+    test("a control plane without threads explains why and offers no thread creation", async ({ page }) => {
       await open(page, theme, "threads=unavailable");
-      await expect(threadsList(page).getByText("No Threads Yet", { exact: true })).toBeVisible();
+      await expect(threadsList(page).getByText("Threads Aren't Available Yet", { exact: true })).toBeVisible();
       await expect(threadsList(page)).toContainText("Assistant threads aren't available on this control plane yet.");
       await expect(page.getByRole("alert")).toHaveCount(0);
       await expectEmptyStateAligned(page);
       // The pane beside the list offers no thread to choose: the list already says why.
       await expect(page.locator(".assistant-thread-pane")).toBeEmpty();
       await capture(page, `assistants-unavailable-${theme}-desktop`);
-      await page.getByRole("button", { name: "New Thread" }).first().click();
-      const dialog = page.getByRole("dialog", { name: "New Thread" });
-      await expect(dialog.getByText("Threads Aren't Available Yet", { exact: true })).toBeVisible();
-      await expect(dialog).toContainText("aren't available on this control plane yet");
-      await expect(dialog.getByRole("button", { name: "Start Thread" })).toHaveCount(0);
-      await capture(page, `assistants-unavailable-new-thread-${theme}-desktop`);
-      await dialog.getByRole("button", { name: "Close" }).click();
-      await expect(dialog).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "New Thread" })).toHaveCount(0);
     });
   });
 
@@ -270,17 +347,17 @@ for (const theme of ["dark", "light"] as const) {
       await threadRow(page, "Triage Open Issues").click();
       await expect(page.getByRole("button", { name: "Back to Assistants" })).toBeVisible();
       await expect(threadsList(page)).toBeHidden();
-      await expect(page.getByRole("list", { name: "Thread Details" })).toContainText("Full Access · Ask Before Destructive");
+      await expect(page.locator(".page > .detail-bar")).not.toContainText("Full access.");
       await expect(page.getByText("Last night's CI had two failures.")).toBeVisible();
-      await expect(page.getByRole("region", { name: "Launched Work" }).getByRole("button", { name: "Approve Once" })).toBeVisible();
+      await expect(page.getByRole("region", { name: "Waiting for You" }).getByRole("button", { name: "Approve Once" })).toBeVisible();
       // The waiting approval is whole on the screen: its title, its command and all three buttons sit
       // inside the phone's width, with no sideways scroll to find them.
-      const approval = page.locator(".assistant-work-card", { hasText: "Bump the Vite Group" });
+      const approval = page.locator(".assistant-dock-card", { hasText: "Bump the Vite Group" });
       const width = page.viewportSize()!.width;
       for (const part of [
         approval,
-        approval.locator(".assistant-work-title"),
-        approval.locator(".assistant-work-request-title"),
+        approval.locator(".assistant-dock-target .chip"),
+        approval.locator(".request-card-title"),
         approval.getByRole("button", { name: "Approve Once" }),
         approval.getByRole("button", { name: "Deny" }),
         approval.getByRole("button", { name: "Open Session" }),
@@ -289,7 +366,7 @@ for (const theme of ["dark", "light"] as const) {
         expect(box.x, "starts on the screen").toBeGreaterThanOrEqual(0);
         expect(box.x + box.width, "ends on the screen").toBeLessThanOrEqual(width);
       }
-      expect(await approval.locator(".assistant-work-title").evaluate((element) => element.scrollWidth <= element.clientWidth),
+      expect(await approval.locator(".assistant-dock-target .chip").evaluate((element) => element.scrollWidth <= element.clientWidth),
         "the card's title is not cut").toBe(true);
       // Nothing overflows the phone's width.
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
@@ -299,9 +376,10 @@ for (const theme of ["dark", "light"] as const) {
       await expect(threadsList(page).locator("[data-thread-id]")).toHaveCount(3);
     });
 
-    test("a phone without threads shows the empty section", async ({ page }) => {
+    test("a phone without thread support explains why and offers no thread creation", async ({ page }) => {
       await open(page, theme, "threads=unavailable");
-      await expect(threadsList(page).getByText("No Threads Yet", { exact: true })).toBeVisible();
+      await expect(threadsList(page).getByText("Threads Aren't Available Yet", { exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "New Thread" })).toHaveCount(0);
       await expectEmptyStateAligned(page);
       await capture(page, `assistants-unavailable-${theme}-mobile`);
     });
@@ -315,8 +393,8 @@ for (const theme of ["dark", "light"] as const) {
   });
 }
 
-/** Threads named at the 120-character limit: the list pane never scrolls sideways, each title ends in
- * an ellipsis inside its row, and New Thread stays whole at the pane's trailing edge, from a desktop
+/** Long thread titles: the list pane never scrolls sideways, titles wrap inside their rows,
+ * and New Thread stays whole at the pane's trailing edge, from a desktop
  * through the compact tier's 280px pane to a phone. The open thread's header keeps its width too. */
 const TRIAGE_PATH = "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA";
 const LONG_TITLE_VIEWPORTS = [
@@ -343,7 +421,7 @@ for (const viewport of LONG_TITLE_VIEWPORTS) {
       ...(viewport.phone ? { hasTouch: true, isMobile: true } : {}),
     });
 
-    test("the list never scrolls sideways, titles end in an ellipsis and New Thread stays whole", async ({ page }) => {
+    test("the list never scrolls sideways, titles are clamped and New Thread stays whole", async ({ page }) => {
       await open(page, "dark", "threads=long");
       const pane = threadsList(page);
       await expect(pane.locator("[data-thread-id]")).toHaveCount(12);
@@ -353,9 +431,11 @@ for (const viewport of LONG_TITLE_VIEWPORTS) {
       await expectWithinWidth(newThread, pane, "New Thread");
       for (const row of await pane.locator("[data-thread-id]").all()) {
         await expectWithinWidth(row, pane, "A thread row");
-        await expectWithinWidth(row.locator(".status"), pane, "A thread's status");
+        if (await row.locator(".status").count()) {
+          await expectWithinWidth(row.locator(".status"), pane, "A thread's status");
+        }
       }
-      await expectTitleEllipsized(pane.locator(".row-title").first(), pane, "The first thread's title");
+      await expect(pane.locator(".row-title").first()).toHaveCSS("-webkit-line-clamp", "2");
       await expectPageNoHorizontalOverflow(page);
     });
 
@@ -368,11 +448,11 @@ for (const viewport of LONG_TITLE_VIEWPORTS) {
         await expectFullyInViewport(page.getByRole("button", { name: "Back to Assistants" }), "Back to Assistants");
         await expectFullyInViewport(bar.getByRole("button", { name: "Thread Actions" }), "Thread Actions");
       } else {
-        const head = page.locator(".assistant-thread-head");
-        const title = head.getByRole("heading", { level: 2 });
-        await expect(title).toHaveAttribute("title", /^Triage every open issue/);
-        // The work cards' row scrolls sideways by design; the title row never does.
-        await expectNoHorizontalOverflow(head.locator(".assistant-thread-title-row"), "The thread's title row");
+        const head = page.locator(".assistant-thread-bar");
+        const title = head.locator(".detail-bar-title");
+        await expect(title).toHaveText(/^Triage every open issue/);
+        // The bar never scrolls sideways; its title gives way first.
+        await expectNoHorizontalOverflow(head, "The thread's bar");
         await expectTitleEllipsized(title, head, "The thread's title");
         await expectFullyInViewport(head.getByRole("button", { name: "Thread Actions" }), "Thread Actions");
         await expectNoHorizontalOverflow(threadsList(page), "The Assistants list");

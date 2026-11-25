@@ -1,4 +1,4 @@
-import type { AssistantOwnerConfirmationResponse, AssistantThreadListResponse } from "@wollipog/protocol";
+import type { AssistantOwnerConfirmationResponse, AssistantThreadListResponse, OrchestratorCampaignBudgetDefault } from "@wollipog/protocol";
 import type { AssistantConnectionsView, AssistantConnection, AssistantGrant, AssistantActivity } from "./assistant-connections.js";
 import { assistantThreadRoutes } from "./assistant-threads.js";
 import type { OrchestratorCampaignBehaviorView, UpdateOrchestratorCampaignBehaviorRequest } from "@wollipog/protocol";
@@ -70,6 +70,7 @@ import type {
   PromptImageInput,
   PromptImageReference,
   ProviderLoginView,
+  AntigravitySetupView,
   ProviderCredentialImportSource,
   ProviderHomeLeaseInspection,
   QueuedPromptDraft,
@@ -293,11 +294,18 @@ export function createApiClient(transport: ApiTransport) {
   acknowledgeCampaignClosureReport: (occurrenceId: string, kind: string) => req<{ ok: true }>(
     `/api/campaign-closure-reports/${encodeURIComponent(occurrenceId)}/${encodeURIComponent(kind)}/acknowledge`, { method: "POST" }),
 
-  /** The owner's Assistant threads, read for their pending owner confirmations (#4665). */
+  /** The owner's Assistant threads, read for navigation attention and pending owner confirmations. */
   assistantConfirmationThreads: () => req<AssistantThreadListResponse>("/api/assistant-threads"),
   /** Approve Once: the control plane runs the bound command, then answers with how it ended. */
   approveAssistantConfirmation: (threadId: string, confirmationId: string) => req<AssistantOwnerConfirmationResponse>(
     `/api/assistant-threads/${encodeURIComponent(threadId)}/confirmations/${encodeURIComponent(confirmationId)}/approve`, { method: "POST" }),
+  approveAssistantCampaign: (threadId: string, confirmationId: string, digest: string) => req<AssistantOwnerConfirmationResponse>(
+    `/api/assistant-threads/${encodeURIComponent(threadId)}/confirmations/${encodeURIComponent(confirmationId)}/approve-campaign`,
+    { method: "POST", body: JSON.stringify({ digest }) }),
+  reviseAssistantCampaignBudget: (threadId: string, confirmationId: string, digest: string, budget: OrchestratorCampaignBudgetDefault) =>
+    req<AssistantOwnerConfirmationResponse>(
+      `/api/assistant-threads/${encodeURIComponent(threadId)}/confirmations/${encodeURIComponent(confirmationId)}/campaign-budget`,
+      { method: "PUT", body: JSON.stringify({ digest, budget }) }),
   denyAssistantConfirmation: (threadId: string, confirmationId: string) => req<AssistantOwnerConfirmationResponse>(
     `/api/assistant-threads/${encodeURIComponent(threadId)}/confirmations/${encodeURIComponent(confirmationId)}/deny`, { method: "POST" }),
 
@@ -1077,7 +1085,7 @@ export function createApiClient(transport: ApiTransport) {
   answerQuestion: (id: string, body: { requestId: string; occurrenceId?: string; answers: Record<string, string | string[]>; action?: "submit" | "dismiss" }) =>
     req<SessionView>(`/api/sessions/${id}/answer`, {
       method: "POST",
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, action: body.action ?? "submit" }),
     }),
 
   rewind: (id: string, turn: number) =>
@@ -1455,6 +1463,33 @@ export function createApiClient(transport: ApiTransport) {
   cancelProviderLogin: (runnerId: string, operationId: string) =>
     req<{ login: ProviderLoginView }>(
       `/api/runners/${encodeURIComponent(runnerId)}/provider-logins/${encodeURIComponent(operationId)}`,
+      { method: "DELETE" },
+    ),
+
+  /** Google Antigravity setup (#4780). Each returns the runner's setup after the action; the
+   * authorization code is sent once and never kept. */
+  checkAntigravitySetup: (runnerId: string) =>
+    req<{ setup?: AntigravitySetupView }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/antigravity-setup/check`, { method: "POST" }),
+
+  /** Install Google's latest release as the machine's managed copy, or update it (v404). */
+  installAntigravity: (runnerId: string) =>
+    req<{ setup?: AntigravitySetupView }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/antigravity-setup/install`, { method: "POST" }),
+
+  startAntigravitySignIn: (runnerId: string) =>
+    req<{ setup?: AntigravitySetupView }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/antigravity-setup/sign-in`, { method: "POST" }),
+
+  submitAntigravitySignInCode: (runnerId: string, operationId: string, code: string) =>
+    req<{ setup?: AntigravitySetupView }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/antigravity-setup/sign-in/${encodeURIComponent(operationId)}/code`,
+      { method: "POST", body: JSON.stringify({ code }) },
+    ),
+
+  cancelAntigravitySignIn: (runnerId: string, operationId: string) =>
+    req<{ setup?: AntigravitySetupView }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/antigravity-setup/sign-in/${encodeURIComponent(operationId)}`,
       { method: "DELETE" },
     ),
 

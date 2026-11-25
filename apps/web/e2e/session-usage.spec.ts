@@ -852,12 +852,12 @@ test("mobile: Model Settings opens with the Session Usage group, and the bar sta
   // First in the sheet, ahead of the model choices, and in view without scrolling (#2191).
   const order = await menu.evaluate((sheet) => [...sheet.querySelectorAll('[role="group"], [role="radiogroup"]')]
     .map((element) => element.getAttribute("aria-label")));
-  expect(order).toEqual(["Session Usage", "Model", "Reasoning Effort"]);
+  expect(order).toEqual(["Session Usage", "Model"]);
+  await expect(menu.getByRole("button", { name: /^Reasoning Effort:/ })).toBeInViewport();
   expect(await menu.evaluate((sheet) => sheet.scrollTop)).toBe(0);
   const [sheetBox, groupBox] = await Promise.all([menu.boundingBox(), group.boundingBox()]);
   expect(groupBox!.y).toBeGreaterThanOrEqual(sheetBox!.y);
   expect(groupBox!.y + groupBox!.height).toBeLessThanOrEqual(sheetBox!.y + sheetBox!.height);
-  await expect(menu.locator(".model-settings-columns"), "one column on a phone").toHaveCount(0);
   // Each figure is a row named by its label alone, in this order (#2447).
   const rows = group.getByRole("button");
   await expect(rows).toHaveCount(2);
@@ -931,7 +931,15 @@ test.describe("mobile: the Session Usage group opens its breakdowns inside Model
     await page.keyboard.press("Enter");
     const menu = page.getByRole("dialog", { name: "Model Settings" });
     await expect(menu.getByRole("radio", { name: "GPT Tiered" })).toBeFocused();
-    // The group comes before the model choices, so Shift+Tab from the current model reaches it.
+    // The model search and compact setting rows precede the current model.
+    for (const stop of [
+      menu.getByRole("searchbox", { name: "Search Models" }),
+      menu.getByRole("button", { name: /^Speed:/ }),
+      menu.getByRole("button", { name: /^Reasoning Effort:/ }),
+    ]) {
+      await page.keyboard.press("Shift+Tab");
+      await expect(stop).toBeFocused();
+    }
     await page.keyboard.press("Shift+Tab");
     const cost = menu.getByRole("button", { name: "Session Cost" });
     await expect(cost).toBeFocused();

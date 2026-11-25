@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { canonicalReleasePayload } from "../packages/protocol/src/release-payload.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -89,7 +90,7 @@ export function services(cwd = process.cwd(), cacheDirectory = null) {
     }
     throw new Error("GitHub pagination exceeded its bound");
   };
-  return { cwd, git, gh, api, optional, pages,
+  return { cwd, git, gh, api, optional, pages, typedDecision: executeTypedReleaseDecision,
     run: (program, args, options) => command(program, args, { cwd, ...options }),
     certification: (state) => {
       const args = [fileURLToPath(new URL("./release-certification.mjs", import.meta.url)), "--report",
@@ -103,6 +104,36 @@ export function services(cwd = process.cwd(), cacheDirectory = null) {
     gates: (state) => verifyReleaseJobs(state, pages(`repos/${state.repository}/actions/runs/${state.runId}/jobs?filter=latest`, "jobs")),
     timings: (state) => readReleaseTimings(state.repository, state.runId, (args) => JSON.parse(gh(args))),
   };
+}
+
+function releaseGate(state, category, releasePayload, mutation) {
+  const snapshot = { category, repository: state.repository.toLowerCase(), tag: state.tag, commitSha: state.mergeSha,
+    ...(releasePayload ? { releaseId: state.releaseId, releasePayload } : {}),
+    releasePayloadDigest: digest(canonicalReleasePayload(releasePayload
+      ? { mutation, draft: releasePayload.draft, assets: releasePayload.assets,
+        previousStable: releasePayload.previousStable, workflow: releasePayload.workflow }
+      : { ref: `refs/tags/${state.tag}`, sha: state.mergeSha })) };
+  return {
+    action: `Request and approve the exact ${category} decision, then resume with --reviewed-head ${state.headSha} and --${category === "release_tag" ? "tag" : "publish"}-decision <occurrence>.`,
+    resourceKey: `${category}:${snapshot.repository}:${snapshot.tag}`,
+    resourceSnapshot: snapshot,
+  };
+}
+
+function executeTypedReleaseDecision(occurrenceId, expected) {
+  const cli = process.env.WOLLIPOG_CLI;
+  check(cli, "Typed release decisions require the injected Wollipog CLI");
+  check(/^workflow_[a-f0-9]{32}$/.test(occurrenceId), "Invalid release decision occurrence ID");
+  const decision = JSON.parse(command(cli, ["decision", "get", occurrenceId, "--json"])).decision;
+  check(decision?.status === "approved" && decision.occurrenceId === occurrenceId &&
+    /^[a-f0-9]{64}$/.test(decision.resourceDigest ?? "") &&
+    canonicalReleasePayload(decision.resourceSnapshot) === canonicalReleasePayload(expected),
+  "The release approval does not match the current certified commit and exact payload");
+  const result = JSON.parse(command(cli, ["decision", "execute", occurrenceId, "--resource-digest", decision.resourceDigest, "--json"],
+    { timeout: 150_000 })).decision;
+  check(result?.status === "consumed" && result.occurrenceId === occurrenceId &&
+    result.forgeAction?.outcome === (expected.category === "release_tag" ? "release_tagged" : "release_published"),
+  "Wollipog did not confirm the approved release write; read the decision and GitHub before retrying");
 }
 
 /** Version edits are constrained to the seven known files; interrupted edits accept old or new. */
@@ -297,6 +328,12 @@ export function advance(state, grants, io, save = () => {}, { reconcileOnResume 
     requestCommand: `gh workflow run main-rolling-controller.yml --ref main --repo ${state.repository} -f candidate_sha=${state.mergeSha} -f purpose=release`,
   });
   if (!ref) {
+    if (grants.typedDecisions) {
+      const gate = releaseGate(state, "release_tag");
+      if (grants.reviewedHead !== state.headSha || !grants.tagDecision) return finish("tag-approval", gate);
+      io.typedDecision(grants.tagDecision, gate.resourceSnapshot);
+      return finish("tag-created", { waiting: true });
+    }
     if (grants.reviewedHead !== state.headSha || !grants.allowTag) return finish("tag-approval", { action: "Supply the reviewed head and explicit --allow-tag authority." });
     // The API creates only an absent ref; it cannot force-update an existing tag.
     io.api(`repos/${state.repository}/git/refs`, { ref: `refs/tags/${state.tag}`, sha: state.mergeSha });
@@ -334,7 +371,9 @@ export function advance(state, grants, io, save = () => {}, { reconcileOnResume 
   // Verify fresh hosted bytes using the helpers from the exact merged release commit.
   const recheckAssets = io.verify(state, release);
   if (release.draft) {
-    if (grants.reviewedHead !== state.headSha || !grants.allowPublish) return finish("publish-approval", { action: "Supply the reviewed head and explicit --allow-publish authority." });
+    if (!grants.typedDecisions && (grants.reviewedHead !== state.headSha || !grants.allowPublish)) {
+      return finish("publish-approval", { action: "Supply the reviewed head and explicit --allow-publish authority." });
+    }
     save(state); // Bind immutable IDs before the mutation; reconcile after a crash, never replay blindly.
     if (!reconcileCertification(state, io)) return finish("full-regression-certification", {
       waiting: state.certification.status === "pending", certification: state.certification,
@@ -357,11 +396,25 @@ export function advance(state, grants, io, save = () => {}, { reconcileOnResume 
       check(VERSION.test(previousVersion ?? "") && stableOrder(state.version, previousVersion) > 0,
         "A newer or unrecognised stable release exists; automatic latest promotion is refused");
     }
-    recheckAssets();
-    io.api(`repos/${state.repository}/releases/${state.releaseId}`, {
+    const verifiedAssets = recheckAssets();
+    const mutation = {
       tag_name: state.tag, target_commitish: state.mergeSha, name: `Wollipog ${state.tag}`,
       body: notes, prerelease: false, draft: false, make_latest: "true",
-    }, "PATCH");
+    };
+    if (grants.typedDecisions) {
+      check(Array.isArray(verifiedAssets) && verifiedAssets.length > 0, "Exact verified asset inventory is required for typed publication");
+      const gate = releaseGate(state, "release_publish", {
+        name: mutation.name, body: notes,
+        draft: { name: currentRelease.name, body: currentRelease.body, targetCommitish: currentRelease.target_commitish },
+        assets: verifiedAssets,
+        previousStable: previousStable ? { id: previousStable.id, tag: previousStable.tag_name } : null,
+        workflow: { runId: state.runId, attempt: state.runAttempt },
+      }, mutation);
+      if (grants.reviewedHead !== state.headSha || !grants.publishDecision) return finish("publish-approval", gate);
+      io.typedDecision(grants.publishDecision, gate.resourceSnapshot);
+    } else {
+      io.api(`repos/${state.repository}/releases/${state.releaseId}`, mutation, "PATCH");
+    }
     return finish("publication-requested", { waiting: true });
   }
   if (!reconcileCertification(state, io)) return finish("full-regression-certification", {
@@ -431,6 +484,7 @@ export function verifyPublishedAssets(state, release, io) {
         "Hosted assets changed after verification");
       check(io.api(`repos/${state.repository}/actions/variables/TAURI_UPDATER_PUBLIC_KEY`).value === key,
         "Updater public key changed after verification");
+      return assets.map(({ id, name, size, digest: sha }) => ({ id, name, size, digest: sha })).sort((a, b) => a.id - b.id);
     };
   } finally { rmSync(directory, { recursive: true, force: true }); }
 }
@@ -465,9 +519,14 @@ export async function main(args) {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
     state: { type: "string" }, version: { type: "string" }, "reviewed-head": { type: "string" },
     "allow-tag": { type: "boolean" }, "allow-publish": { type: "boolean" }, watch: { type: "boolean" },
+    "typed-decisions": { type: "boolean" }, "tag-decision": { type: "string" }, "publish-decision": { type: "string" },
     "timeout-seconds": { type: "string", default: "21600" },
   } });
   check(positionals.length === 1 && ["prepare", "resume", "status"].includes(positionals[0]) && values.state, "Usage: node scripts/release.mjs prepare|resume|status --state /persistent/path.json [--version X.Y.Z] [--reviewed-head SHA --allow-tag --allow-publish --watch]");
+  check(!(values["tag-decision"] || values["publish-decision"]) ||
+    (values["typed-decisions"] && positionals[0] === "resume"), "Typed release approvals require resume --typed-decisions");
+  check(!values["typed-decisions"] || (!values["allow-tag"] && !values["allow-publish"]),
+    "Do not combine typed release decisions with manual tag or publish grants");
   const checkpoint = resolve(values.state);
   const io = services(process.cwd(), checkpoint + ".assets");
   const root = io.git(["rev-parse", "--show-toplevel"]);
@@ -482,7 +541,10 @@ export async function main(args) {
     const timeout = Number(values["timeout-seconds"]);
     check(Number.isFinite(timeout) && timeout > 0 && timeout <= 86400, "Timeout must be between 1 and 86400 seconds");
     const deadline = Date.now() + timeout * 1000;
-    const grants = positionals[0] === "status" ? {} : { reviewedHead: values["reviewed-head"], allowTag: values["allow-tag"], allowPublish: values["allow-publish"] };
+    const grants = positionals[0] === "status" ? { typedDecisions: values["typed-decisions"] } : {
+      reviewedHead: values["reviewed-head"], allowTag: values["allow-tag"], allowPublish: values["allow-publish"],
+      typedDecisions: values["typed-decisions"], tagDecision: values["tag-decision"], publishDecision: values["publish-decision"],
+    };
     let last, reconcileOnResume = true;
     do {
       const result = advance(state, grants, io, (next) => saveCheckpoint(checkpoint, next), { reconcileOnResume });

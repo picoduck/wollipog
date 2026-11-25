@@ -47,6 +47,7 @@ import {
   type AgentDriverKind,
   type AgentDefinition,
   type AgentContext,
+  type AntigravitySetupView,
   type ProviderCredentialImportCode,
   type AgentsUpdatedMessage,
   type ControlPlaneToRunner,
@@ -181,6 +182,18 @@ import { inspectProviderHomeLeaseCommand, recoverProviderHomeLeaseCommand, type 
 import { ProviderProfileGrants } from "./provider-profile-grants.js";
 import { managedProviderProfileRoot } from "./provider-profile-home.js";
 import { providerLoginStartFailure } from "./provider-login-start-failure.js";
+import { AntigravitySetupSupervisor, antigravitySetupForControlPlane } from "./antigravity-setup.js";
+import {
+  ANTIGRAVITY_AGENT_ID,
+  antigravityAgentDefinition,
+  antigravitySessionLaunch,
+  antigravitySignOutSuperseded,
+  antigravityLaunchResolver,
+  antigravitySessionEnvironment,
+  withAntigravityAgent,
+  withoutAntigravityAgent,
+} from "./antigravity-session.js";
+import { acpCompatibilityFailure } from "./acp-compatibility.js";
 import { createProviderProfileLoginSettlement } from "./provider-profile-login-settlement.js";
 import { runnerCredentialRoots, setCampaignCredentialRoots } from "./campaign-operation-evidence.js";
 import {
@@ -309,7 +322,7 @@ import {
   type DurableCommandHandle,
   type DurableCommandReceipt,
 } from "./durable-command-store.js";
-import type { DurableCommandLifecycle, SessionCommandInvocationLifecycle, SkillProviderHomeScope } from "./session-manager.js";
+import type { DurableCommandLifecycle, SessionCommandInvocationLifecycle, SessionLaunchPreparation, SkillProviderHomeScope } from "./session-manager.js";
 import {
   isInvokeSessionCommandMessage,
   SessionCommandReceiptStore,
@@ -524,6 +537,7 @@ const agentControlRelays = new AgentControlRelaySockets(relayAgentControlRequest
 const assistantProxies = new AssistantProxies({
   // Kept in the hook state directory, which every sandboxed launch hides from other sessions.
   configDir: claudeHookHost.configDir,
+  credentialRejected: (sessionId, rejected) => sessions.setAssistantToolsUnavailable(sessionId, rejected),
   register: (sessionId, tokenHash) => {
     if (ws && ws.readyState === WebSocket.OPEN && registered) sendUp({ type: "assistant_credential", sessionId, tokenHash });
   },
@@ -876,6 +890,18 @@ const subscriptionUsage = new SubscriptionUsageManager({
 });
 
 function updateAgentAuthStatus(agentId: string, update: AcpAuthRuntime): void {
+  // A session found the shared Antigravity sign-in gone: check the setup again, so New Session
+  // and Connections say sign-in is needed rather than offering a session that cannot start.
+  if (agentId === ANTIGRAVITY_AGENT_ID && update.status === "unauthenticated" && !configuredAgentIds.has(agentId)) {
+    const signedOutAt = Date.now();
+    antigravitySignedOutAt = signedOutAt;
+    // A check already in flight may have probed access before this report; then one more check
+    // probes it afresh, so the sign-out stands until a probe made after it says otherwise.
+    void antigravitySetup.check().then((setup) => {
+      const observed = antigravitySetup.accessObservedAt();
+      if (setup.status === "ready" && observed !== undefined && observed <= signedOutAt) void antigravitySetup.check();
+    }, () => {});
+  }
   const prior = acpAuthStatus.get(agentId) ?? {};
   if (
     (update.status === undefined || prior.status === update.status) &&
@@ -971,7 +997,94 @@ function defaultCodexImportSource(): ProviderCredentialImportSourceHome | undefi
   const keys = new Set(sources.map((source) => `${source.layout}\u0000${source.home}`));
   return keys.size === 1 ? sources[0] : undefined;
 }
+/** Google Antigravity setup (#4780). The access check opens an ACP session with the runner's
+ * Google sign-in, so it runs at runner start, on a person's Check Again or sign-in, and when a
+ * session finds the sign-in gone: never on periodic discovery or Rediscover, which the Assistant
+ * may also send. A settled setup also decides Antigravity's New Session row (#4779). */
+const antigravitySetup = new AntigravitySetupSupervisor({
+  dataDir: config.dataDir,
+  log,
+  onUpdate: (setup) => {
+    // The register frame carries the latest setup, so registration stores it atomically: nothing
+    // later in the registration handler (session recovery, say) can leave it unpublished. The peer's
+    // version is unknown when it is sent, so it carries the v403 shape every peer accepts; the
+    // registration republish then sends the managed install fields to a v404 peer.
+    metadata.antigravitySetup = antigravitySetupForControlPlane(setup, false);
+    if (registered && runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySetup")) {
+      sendUp({ type: "antigravity_setup_updated", runnerId: config.runnerId, setup: antigravitySetupForPeer(setup) });
+    }
+    publishAntigravityAgent(setup);
+  },
+});
+metadata.antigravitySetup = antigravitySetupForControlPlane(antigravitySetup.current(), false);
+/** On `registered`: the register frame carried the setup as it was then, and its frames are
+ * connection-local, so the current setup goes up once more in case it changed before the reply. */
+function publishAntigravitySetupOnRegistration(): void {
+  if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySetup")) return;
+  sendUp({ type: "antigravity_setup_updated", runnerId: config.runnerId, setup: antigravitySetupForPeer(antigravitySetup.current()) });
+}
+/** A control plane before v404 refuses the managed install fields, so they are left out for it. */
+function antigravitySetupForPeer(setup: ReturnType<AntigravitySetupSupervisor["current"]>) {
+  return antigravitySetupForControlPlane(setup, runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravityManagedInstall"));
+}
 const providerCredentialImportSupported = providerCredentialImportHostSupported();
+/** The executable an Antigravity launch runs and its credential context (#4779): the setup's
+ * checked copy, managed or on PATH, with the managed copy's self-updater off. */
+function antigravityLaunchContext(): ReturnType<AntigravitySetupSupervisor["credentialContext"]> {
+  return antigravitySetup.launchTarget()?.context ?? antigravitySetup.credentialContext();
+}
+/** Antigravity's New Session row from the last settled setup. A check in progress keeps the row
+ * it replaces, so New Session does not flicker while a person checks again. */
+let antigravityAgentRow: AgentDefinition | null = null;
+/** When a session last reported the shared Antigravity sign-in gone. */
+let antigravitySignedOutAt: number | undefined;
+const configuredAgentIds = new Set(config.agents.map((agent) => agent.id));
+function publishAntigravityAgent(setup: AntigravitySetupView): void {
+  // An operator's configured agent owns the id, its row and its auth status; the setup touches none.
+  if (setup.status === "checking" || configuredAgentIds.has(ANTIGRAVITY_AGENT_ID)) return;
+  const row = antigravityAgentDefinition(setup, antigravityLaunchContext(), config.executionIsolation,
+    antigravitySetup.launchableTarget() !== null);
+  // A sign-in confirmed by a check that finished after a session's sign-out report replaces it.
+  const runtime = acpAuthStatus.get(ANTIGRAVITY_AGENT_ID);
+  const staleSignOut = runtime?.status !== undefined &&
+    antigravitySignOutSuperseded(setup, antigravitySetup.accessObservedAt(), antigravitySignedOutAt);
+  if (staleSignOut) {
+    if (runtime?.capabilities) acpAuthStatus.set(ANTIGRAVITY_AGENT_ID, { capabilities: runtime.capabilities });
+    else acpAuthStatus.delete(ANTIGRAVITY_AGENT_ID);
+  }
+  if (!staleSignOut && JSON.stringify(row) === JSON.stringify(antigravityAgentRow)) return;
+  antigravityAgentRow = row;
+  // Discovery rebuilds the list and adds this row itself; until it first completes, publishing
+  // would send only the configured agents.
+  if (!discoveryDone) return;
+  metadata.agents = overlayAcpAuthStatus(withAntigravityAgent(metadata.agents, row, configuredAgentIds), acpAuthStatus);
+  sendUp({ type: "agents_updated", runnerId: config.runnerId, agents: agentsForControlPlane(), editors: metadata.editors });
+}
+/** An Antigravity session launch (after the shared preparation): the setup's current executable,
+ * `agy acp`, and the setup's credential context, whose ambient credentials are dropped both from
+ * the inherited environment and from anything the preparation layered on. */
+async function prepareAntigravityLaunch(
+  meta: SessionMeta,
+): Promise<Pick<SessionLaunchPreparation, "scrubInheritedEnv" | "acpCompatibility" | "launchRefusal"> | undefined> {
+  if (meta.agentId !== ANTIGRAVITY_AGENT_ID || configuredAgentIds.has(ANTIGRAVITY_AGENT_ID) ||
+      meta.driver !== "acp" || meta.context.kind !== "native") return undefined;
+  // Only what a ready check verified and its install committed, once no install, update or check
+  // is running: a managed copy by its resolved generation path, never `current/agy`, which an
+  // update moves before verifying its candidate. The client asks again when it spawns (below).
+  const target = await antigravitySetup.verifiedLaunchTarget();
+  const launch = antigravitySessionLaunch(antigravitySetup.current(), target?.context ?? antigravitySetup.credentialContext(),
+    config.executionIsolation);
+  // Nothing verified (a failed check, or a rejected release a rollback could not undo): refuse,
+  // rather than run an executable no check passed.
+  if (!target) return { launchRefusal: acpCompatibilityFailure(launch.acpCompatibility, "start")! };
+  meta.command = target.command;
+  meta.args = [...launch.args];
+  meta.env = antigravitySessionEnvironment(meta.env, launch.scrubInheritedEnv, antigravitySetup.credentialContext(true));
+  // Isolation and preparation await before the spawn, and updates can commit meanwhile: the
+  // executable is resolved once more at the spawn itself, so it is always one the store keeps.
+  return { scrubInheritedEnv: launch.scrubInheritedEnv,
+    acpCompatibility: { ...launch.acpCompatibility, resolveLaunch: antigravityLaunchResolver(antigravitySetup) } };
+}
 const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSupervisor({
   dataDir: config.dataDir,
   configPath: providerAccountsConfigPath,
@@ -1084,7 +1197,7 @@ setCampaignCredentialRoots(() => {
     userHome: homedir(),
   });
 });
-store.scrubLegacyAgentEnv();
+store.scrubLegacyAgentEnv((count) => log(`Could not complete session metadata cleanup in ${count} directories`));
 const durableCommands = new DurableCommandStore(resolve(config.dataDir, "command-receipts"));
 durableCommands.prune();
 const sessionCommandReceipts = new SessionCommandReceiptStore(
@@ -1142,9 +1255,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
       }
     };
     assertPreparationCurrent();
-    meta.env = meta.adopted && !meta.agentId
-      ? adoptedLaunchEnvironment(meta)
-      : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
+    meta.env = sessionAgentEnvironment(meta);
     if (meta.providerCredentialHome && meta.providerAccountProvider) {
       Object.assign(meta.env, providerAccountEnvironment({
         provider: meta.providerAccountProvider,
@@ -1331,6 +1442,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
       ...(codexLaunchArgs ? { codexLaunchArgs } : {}),
       sessionCommandCatalogProvenance: JSON.stringify(meta.sessionSlashCommandProvenance ?? null),
       ...(codexPrompts.outcome !== "not_applicable" ? { codexPrompts: launchPrompts } : {}),
+      ...(await prepareAntigravityLaunch(meta)),
     };
   },
   createPromptImageFetcher({
@@ -1391,9 +1503,33 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
   attestation.instanceId,
 );
 sessions.onProviderAccountCooldown = publishProviderAccountInventory;
+sessions.setDetachedClaudeEnvironment(sessionAgentEnvironment);
+// The same set prepareAntigravityLaunch consults: a configured agent with Antigravity's id gets no
+// Antigravity profile, so a managed worktree refuses it as it does any other ACP agent (#4901).
+sessions.setConfiguredAgentIds(configuredAgentIds);
 const sharedDirectoryForbiddenRoots = [parsed.configPath, providerAccountsConfigPath,
   ...(tokenFile ? [tokenFile] : []), ...config.providerAccounts.map((account) => account.directory)];
 sessions.configureSharedDirectories(config.workspaces, sharedDirectoryForbiddenRoots);
+const registeredLocationSwitchLookups = new Map<string, (path: string | null | undefined) => void>();
+sessions.setRegisteredLocationSwitchLookup((sessionId, { occurrenceId, workspaceId, repository }, phase) => {
+  const socket = ws;
+  if (!socket || socket.readyState !== WebSocket.OPEN || !registered) return Promise.resolve(undefined);
+  if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "registeredLocationSwitch")) return Promise.resolve(null);
+  const requestId = randomUUID();
+  return new Promise<string | null | undefined>((resolve) => {
+    const finish = (path: string | null | undefined) => {
+      clearTimeout(timer);
+      registeredLocationSwitchLookups.delete(requestId);
+      resolve(path);
+    };
+    const timer = setTimeout(() => finish(undefined), 10_000);
+    timer.unref();
+    registeredLocationSwitchLookups.set(requestId, finish);
+    // A lookup belongs to this connection alone. Never queue it for replay on reconnect.
+    const message: RunnerToControlPlane = { type: "registered_location_switch_lookup", requestId, sessionId, occurrenceId, workspaceId, repository, phase };
+    try { socket.send(JSON.stringify(message)); } catch { finish(undefined); }
+  });
+});
 sessions.configureProviderProfiles({
   access: () => providerProfileGrants.access(),
   expectedProfileIdForHome: (home) => providerProfileGrants.expectedProfileIdForHome(home),
@@ -1624,7 +1760,10 @@ function sendUp(msg: RunnerToControlPlane): void {
   }
   // A provider-reported email answers one live request. Never hold it in the reconnect buffer:
   // the waiting HTTP request cannot outlive this socket, so a buffered copy has no recipient.
-  const ephemeral = msg.type === "inspect_provider_authentication_result";
+  // Google Antigravity setup frames are connection-local too (#4780): registration republishes the
+  // current setup, so a buffered copy could only reach an older peer or overwrite a newer report.
+  const ephemeral = msg.type === "inspect_provider_authentication_result" ||
+    msg.type === "antigravity_setup_updated" || msg.type === "antigravity_setup_result";
   if (ws && ws.readyState === WebSocket.OPEN && registered) {
     let projected: RunnerToControlPlane | null;
     try {
@@ -1784,7 +1923,6 @@ reviewSessionLauncher.releaseAll();
 const pullRequestWatcher = new PullRequestWatcher({
   gh: contextGhRunner({ kind: "native" }, process.cwd()),
   send: (update) => sendUp(update),
-  log,
 });
 sessions.setReviewSessions({
   markPreparing: (sessionId) => reviewSessionLauncher.markPreparing(sessionId),
@@ -2318,6 +2456,7 @@ async function discoverAndPublish(refreshModels: boolean, refreshSubscriptionUsa
     if (runtime.capabilities) acpAuthStatus.set(agent.id, { capabilities: runtime.capabilities });
     else acpAuthStatus.delete(agent.id);
   }
+  metadata.agents = withAntigravityAgent(metadata.agents, antigravityAgentRow, configuredAgentIds);
   metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus);
   metadata.editors = editors;
   if (refreshModels && metadata.executionTargets) {
@@ -2483,6 +2622,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       backoff = INITIAL_BACKOFF_MS;
       registered = true;
       controlPlaneProtocolVersion = msg.protocolVersion ?? null;
+      // Before anything that can throw (session recovery writes metadata): a setup that changed
+      // after the register frame was built must still reach this control plane.
+      publishAntigravitySetupOnRegistration();
       sessions.reconcileRunnerRestartRecovery(msg.rootOrchestratorSessionIds);
       skillStateReporter.resumeRequests(runnerSupportsProtocol(controlPlaneProtocolVersion, "skillRequestResumption")
         ? msg.pendingSkillRequests : undefined);
@@ -2849,7 +2991,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }
       if (msg.artifactUploads) sessions.setArtifactUploads(msg.sessionId, msg.artifactUploads);
       if (msg.projectMemory) sessions.setProjectMemory(msg.sessionId, msg.projectMemory);
-      sessions.prompt(msg.sessionId, msg.text, msg.images, msg.slashCommand, msg.config);
+      sessions.promptFromControlPlane(msg);
       break;
     case "steer_session": {
       handleSteerSessionMessage(msg, sessions, sendUp);
@@ -2944,21 +3086,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         startTrackedSession(msg.command, lifecycle);
       } else if (msg.command.type === "prompt_session") {
         try {
-          sessions.prompt(
-            msg.command.sessionId,
-            msg.command.text,
-            msg.command.images,
-            msg.command.slashCommand,
-            msg.command.config,
-            lifecycle,
-            false,
-            undefined,
-            false,
-            undefined,
-            undefined,
-            undefined,
-            Boolean(msg.command.campaignContinuation || msg.command.reviewContinuation),
-          );
+          sessions.promptFromControlPlane(msg.command, lifecycle);
         } catch (error) {
           lifecycle.failed(`prompt acceptance failed: ${errText(error)}`);
         }
@@ -3299,6 +3427,40 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       log("rediscover requested");
       void runDiscovery(true);
       break;
+    case "antigravity_setup": {
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySetup")) break;
+      const reply = (result: { ok: true } | { ok: false; error: string }) => sendUp({
+        type: "antigravity_setup_result", requestId: msg.requestId, ...result, setup: antigravitySetupForPeer(antigravitySetup.current()),
+      });
+      if (msg.runnerId !== config.runnerId) { reply({ ok: false, error: "Google Antigravity setup targeted a different machine." }); break; }
+      try {
+        if (msg.action === "check") {
+          // The reply confirms the check started; its outcome arrives as antigravity_setup_updated.
+          // A person's check also reads Google's latest release, to offer an update.
+          void antigravitySetup.check("always");
+        } else if (msg.action === "start_sign_in") {
+          antigravitySetup.startSignIn();
+        } else if (msg.action === "submit_code") {
+          antigravitySetup.submitCode(msg.operationId ?? "", msg.code ?? "");
+        } else if (msg.action === "cancel_sign_in") {
+          antigravitySetup.cancelSignIn(msg.operationId ?? "");
+        } else if (msg.action === "install") {
+          // v404: an explicit Install or Update. Progress and outcome arrive as antigravity_setup_updated.
+          if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravityManagedInstall")) {
+            reply({ ok: false, error: "Update the control plane to install Google Antigravity from Connections." });
+            break;
+          }
+          antigravitySetup.startInstall();
+        } else {
+          reply({ ok: false, error: "Unknown Google Antigravity setup action." });
+          break;
+        }
+        reply({ ok: true });
+      } catch (error) {
+        reply({ ok: false, error: errText(error) });
+      }
+      break;
+    }
     case "configure_runner_capacity":
       if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "machineRunnerCapacity")) break;
       if (sessions.configureCapacity(msg)) {
@@ -3360,9 +3522,20 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         });
         break;
       }
+      if (msg.accountId !== undefined && msg.newAccountId !== undefined) {
+        sendUp({
+          type: "provider_login_result",
+          requestId: msg.requestId,
+          action: "start",
+          ok: false,
+          error: "Provider sign-in cannot name both a new and an existing account.",
+        });
+        break;
+      }
       runCommandTask("start_provider_login", providerLoginSupervisor.startAccount(
         msg.accountId ? { accountId: msg.accountId } : {
           provider: msg.provider!, label: msg.label!,
+          newAccountId: msg.newAccountId,
           // A managed profile needs a v225 control plane's grant; anything else keeps today's HOME.
           ...(typeof msg.profileGrantId === "string" && runnerSupportsProtocol(controlPlaneProtocolVersion, "providerProfiles")
             ? { profileGrantId: msg.profileGrantId } : {}),
@@ -3663,10 +3836,19 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         }),
       ));
       break;
+    case "assistant_harness_readiness":
+      sendUp({
+        type: "assistant_harness_readiness_result",
+        requestId: msg.requestId,
+        ok: sessions.assistantHarnessReady(msg),
+      });
+      break;
     case "switch_session_provider_account":
       runCommandTask(
         "switch_session_provider_account",
-        sessions.switchProviderAccount(msg.sessionId, msg.providerAccountId).then((result) =>
+        (msg.assistantThread
+          ? sessions.changeAssistantThreadAccount(msg.sessionId, msg.providerAccountId, msg.assistantThread)
+          : sessions.switchProviderAccount(msg.sessionId, msg.providerAccountId)).then((result) =>
           sendUp({
             type: "switch_session_provider_account_result",
             requestId: msg.requestId,
@@ -3690,6 +3872,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           }),
         ),
       );
+      break;
+    case "registered_location_switch_lookup_result":
+      if (typeof msg.workspacePath === "string" || msg.workspacePath === null) {
+        registeredLocationSwitchLookups.get(msg.requestId)?.(msg.workspacePath);
+      }
       break;
     case "prepare_session_role":
       runCommandTask("prepare_session_role", sessions.prepareSessionRole(msg, () => {
@@ -4302,7 +4489,7 @@ async function handleListExternal(requestId: string, agentId?: string): Promise<
       selectedDriver && selectedDriver !== "acp"
         ? Promise.resolve([])
         : listAcpExternalSessions(
-          selectedAgent ? [selectedAgent] : metadata.agents,
+          withoutAntigravityAgent(selectedAgent ? [selectedAgent] : metadata.agents, configuredAgentIds),
           knownAcp,
           (reportedAgentId, capabilities) => {
             updateAgentAuthStatus(reportedAgentId, { capabilities });
@@ -4340,9 +4527,10 @@ async function handleAdopt(msg: AdoptSessionMessage): Promise<void> {
   let adoptedProviderState: SessionMeta["adoptedProviderState"];
   let adoptionEvents: SessionEventPayload[] | undefined;
   if (claimedAcpAgentId) {
-    const agent = configuredAcpAgent(metadata.agents, claimedAcpAgentId);
+    const adoptable = withoutAntigravityAgent(metadata.agents, configuredAgentIds);
+    const agent = configuredAcpAgent(adoptable, claimedAcpAgentId);
     if (!agent) return fail("that ACP agent is not configured or available on this box");
-    const found = await findAcpExternalSession(metadata.agents, claimedAcpAgentId, claimed.agentSessionId);
+    const found = await findAcpExternalSession(adoptable, claimedAcpAgentId, claimed.agentSessionId);
     if (!found) return fail("that ACP session was not found on the selected agent");
     descriptor = found.descriptor;
     launch = launchForAcpAgent(agent);
@@ -4588,6 +4776,7 @@ function connect(): void {
     stopHeartbeat();
     registered = false;
     forgetAgentControlRegistrationAnswers();
+    for (const finish of registeredLocationSwitchLookups.values()) finish(undefined);
     controlPlaneProtocolVersion = null;
     automaticAccountSwitchConfigurationSynchronized = false;
     sessions.setAutomaticAccountSwitchAuthorityReady(false);
@@ -4640,6 +4829,7 @@ function shutdown(exitCode = 0): void {
   });
   bestEffort("stop subscription usage", () => subscriptionUsage.shutdown());
   bestEffort("stop provider sign-ins", () => providerLoginSupervisor.shutdown());
+  bestEffort("stop Google Antigravity sign-in and install", () => antigravitySetup.shutdown());
   // Track whether every provider driver was disposed. If not (a dispose threw), a provider may still
   // be alive with no registered kill, so we must NOT release its provider-home lease below even if
   // waitForPendingKills reports "reaped" — releasing it could let a replacement runner share the HOME.
@@ -4747,6 +4937,8 @@ log(
 // Probe installed agents in the background; results are advertised on register or
 // pushed via agents_updated once discovery completes.
 void runDiscovery();
+// At start, Google's latest release is read only when a managed copy exists, to offer its update.
+void antigravitySetup.check("if_managed");
 // Claude Code can update itself while the runner remains connected. A bounded periodic pass
 // notices the new version and refreshes its flags/auth/slash commands; model discovery is already
 // keyed by version, so a changed binary automatically bypasses the prior version's cache entry.

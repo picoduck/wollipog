@@ -1,5 +1,5 @@
 import React, { useId, useRef, useState } from "react";
-import { runnerCapabilityRequirement, runnerSupportsProtocol, type AgentDefinition, type RunnerView } from "@wollipog/protocol";
+import { ANTIGRAVITY_AGENT_ID, runnerCapabilityRequirement, runnerSupportsProtocol, type AgentDefinition, type RunnerView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import {
   agentContextLabel,
@@ -23,6 +23,8 @@ import { agentInstallHints, harnessUpdateGuidance } from "../runners.js";
 import { statusMeta } from "../status-meta.js";
 import { providerReadinessSentence, providerReadinessLabel } from "../provider-readiness.js";
 import { AgentIcon } from "./AgentIcon.js";
+import { antigravitySetupVisible } from "../antigravity-setup.js";
+import { AntigravitySetupRow } from "./AntigravitySetup.js";
 import { agentSessionDiscoveryUnavailableReason, agentSupportsSessionDiscovery, AgentSessionDiscoveryDialog } from "./AgentSessionDiscoveryDialog.js";
 import { CopyButton, Modal } from "./common.js";
 import { DetailSection } from "./DetailSection.js";
@@ -235,7 +237,7 @@ function AgentDetailsDialog({ agent, name, machineName, runner, online, returnFo
  * Agent Details, the agents not installed folded into a closed disclosure at the end, and, while no
  * agent is ready, how to install one.
  */
-export function MachineAgentsSection({ runner, online, machineName, canFindSessions, onChooseInstallation }: {
+export function MachineAgentsSection({ runner, online, machineName, canFindSessions, onChooseInstallation, antigravitySetup = false }: {
   runner: RunnerView;
   /** The machine's agent reports are current: its runner (and an SSH machine's connection) is up. */
   online: boolean;
@@ -244,12 +246,21 @@ export function MachineAgentsSection({ runner, online, machineName, canFindSessi
   canFindSessions: boolean;
   /** Opens Machine Settings at its installations; absent for those who may not open it. */
   onChooseInstallation?: () => void;
+  /** Shows the Google Antigravity setup row (#4780): on the machine's own page, not in Account Setup. */
+  antigravitySetup?: boolean;
 }) {
   const [openAgentId, setOpenAgentId] = useState<string | null>(null);
   const [findingSessionsFor, setFindingSessionsFor] = useState<string | null>(null);
   const opener = useRef<HTMLElement | null>(null);
-  const agents = runner.agents;
-  const { listed, notInstalled, anyReady } = machineAgentGroups(agents, online);
+  // Where its setup row shows, that row stands for Google Antigravity (#4779): the agent the runner
+  // derives from that setup is not listed a second time, though it still counts as a ready agent.
+  // An operator-configured agent that happens to use the id is its own row.
+  const showsAntigravitySetup = antigravitySetup && antigravitySetupVisible(runner);
+  const agents = showsAntigravitySetup
+    ? runner.agents.filter((agent) => agent.id !== ANTIGRAVITY_AGENT_ID || agent.source === "config")
+    : runner.agents;
+  const { listed, notInstalled } = machineAgentGroups(agents, online);
+  const { anyReady } = machineAgentGroups(runner.agents, online);
   const nameOf = (agent: AgentDefinition) => agentDisplayName(agent, agents);
   const open = (agentId: string) => (button: HTMLButtonElement) => {
     opener.current = button;
@@ -322,6 +333,7 @@ export function MachineAgentsSection({ runner, online, machineName, canFindSessi
           )}
         </>
       )}
+      {showsAntigravitySetup && <AntigravitySetupRow runner={runner} online={online} machineName={machineName} />}
       {openAgent && (
         <AgentDetailsDialog
           agent={openAgent}

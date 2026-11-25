@@ -178,6 +178,60 @@ test("ordinary sessions above the outermost Orchestrator keep its authority exac
   }
 });
 
+test("descendant requests ignore quiet retained event history and skip campaign projections (#4856)", (t) => {
+  const { db, svc, make, always } = harness();
+  try {
+    make("campaign", undefined, true);
+    make("quiet", "campaign");
+    make("asking", "quiet");
+    make("decision", "campaign", true);
+    db.updateSessionParentControl("campaign", "questions", Date.now());
+    const questions = [{ id: "q", header: "Choice", question: "Continue?", options: [{ label: "Yes" }] }];
+    db.appendEvent("asking", { kind: "question_request", requestId: "question", questions }, 5);
+    db.setPendingApproval("asking", { requestId: "question", occurrenceId: "generic", title: "Question",
+      kind: "question", options: [], questions });
+    const decision = svc.createWorkflowDecision("decision", {
+      requestId: "implementation", resourceKey: "implementation",
+      resourceSnapshot: { category: "implementation_question", question: "Choose an implementation",
+        options: [{ optionId: "a", label: "Implementation A" }, { optionId: "b", label: "Implementation B" }] },
+    });
+    assert.ok(decision.ok && decision.data, decision.error ?? "workflow decision was not created");
+    // Pending durable decisions can exist without the mirrored session approval.
+    db.setPendingApproval("decision", null);
+    const read = () => svc.descendantRequests("campaign", always, "human", true);
+    const expected = read();
+    assert.ok(expected.ok && expected.data, expected.error ?? "descendant requests were not returned");
+    assert.deepEqual(expected.data.requests.map(({ occurrenceId, sessionId }) => ({ occurrenceId, sessionId })), [
+      { occurrenceId: decision.data.occurrenceId, sessionId: "decision" },
+      { occurrenceId: "generic", sessionId: "asking" },
+    ]);
+    assert.equal(expected.data.requests[1]?.createdAt, 5);
+
+    const sqlite = db.raw();
+    sqlite.exec(`WITH RECURSIVE history(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM history WHERE seq < 512)
+      INSERT INTO session_events (session_id, seq, ts, kind, payload)
+      SELECT 'quiet', seq, seq, 'agent_message',
+        json_object('kind', 'agent_message', 'text', hex(zeroblob(512)), 'final', false) FROM history`);
+    const eventVisits = new Map<string, number>();
+    sqlite.function("observe_event_kind", (sessionId, kind) => {
+      const id = String(sessionId);
+      eventVisits.set(id, (eventVisits.get(id) ?? 0) + 1);
+      return kind;
+    });
+    // Count SQLite's row visits without timing thresholds or relying on the query plan's wording.
+    sqlite.exec(`CREATE TEMP VIEW session_events AS
+      SELECT id, session_id, seq, runner_seq, ts, observe_event_kind(session_id, kind) AS kind, payload
+      FROM main.session_events`);
+    const projection = t.mock.method(db, "campaignProjection");
+    assert.deepEqual(read(), expected);
+    assert.ok(eventVisits.has("asking"), "the probe sees event reads for a pending question");
+    assert.equal(eventVisits.get("quiet") ?? 0, 0, "pending-less descendants skip event history");
+    assert.equal(projection.mock.callCount(), 0, "the nested Orchestrator's decision needs no campaign projection");
+  } finally {
+    db.close();
+  }
+});
+
 test("64 sessions is within the bound for every authority operation (#2468)", () => {
   const { db, svc, make, spawn, behaviorError, always } = harness();
   try {

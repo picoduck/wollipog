@@ -75,7 +75,7 @@ function MachineSections({
     <div className="machine-detail-sections">
       <MachineCapacitySection runner={runner} onChangeLimit={onChangeLimit} />
       <MachineAgentsSection runner={runner} online={online} machineName={name}
-        canFindSessions={canFindSessions} onChooseInstallation={onChooseInstallation} />
+        canFindSessions={canFindSessions} onChooseInstallation={onChooseInstallation} antigravitySetup />
       <ProviderAccountsSection key={runner.runnerId} runner={runner} online={online} machineName={name} canManageProfiles={canManageProfiles}
         profileAccessKnown={profileAccessKnown} intent={accountsIntent} />
       <MachineWorkspacesSection runner={runner} machineName={name} online={online} canAdd={canManageMachines} />

@@ -1,27 +1,37 @@
+import { isManagedModelChoice, resolveManagedModelChoice } from "@wollipog/protocol";
+import { ANTIGRAVITY_AUTO_MODE, ANTIGRAVITY_FULL_PERMISSIONS_MODE, managedWorktreeUnsupportedReason } from "@wollipog/protocol";
+import type { WollipogPromptOrigin } from "@wollipog/protocol";
 import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
 import { personalRuleDelegation } from "./personal-rule-delegation.js";
 import { scheduledAssistantOwner, type AssistantAutomationAuthorization } from "./assistant-automation-authority.js";
 import { AssistantRefusal, assistantCallContext } from "./assistant-connections.js";
+import { assistantEvidenceReviewAvailability } from "./assistant-evidence-review.js";
+import { threadDecisionDelegation } from "./assistant-thread-store.js";
+import { ASSISTANT_EVIDENCE_INSPECT, ASSISTANT_EVIDENCE_PREPARE, campaignEvidenceAuthorityBound } from "@wollipog/protocol";
 import { WOLLIPOG_ASSISTANT_SKILL } from "./assistant-skill.js";
 import { normalizeDeliveryVerificationFailure, publishedIssueFailure, type PublishedIssueFailure } from "@wollipog/protocol";
 import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import { failedCampaignRun } from "./campaign-failed-run.js";
 import { providerAccountRef } from "./agent-account-view.js";
 import {
-  isProviderAccountRef, PROVIDER_ACCOUNT_CHOICE_REQUIRED, providerAccountChoiceRequired, providerAccountChoiceRequiredSentence,
+  isProviderAccountRef, PROVIDER_ACCOUNT_CHOICE_REQUIRED, PROVIDER_ACCOUNT_SKIP_TEXT, providerAccountChoiceRequired, providerAccountChoiceRequiredSentence,
   providerAccountExplicitRecord, providerAccountIneligibility, providerAccountNamedRefusal, providerAccountNamedRefusalSentence,
   providerAccountSelectionRecord, providerForDriver, resolveProviderAccountSelection,
   supportsClaudeProjectMemory, type AgentDefinition, type ProviderAccountChoice, type ProviderAccountChoiceRequired, type ProviderAccountDefinition, type ProviderAccountSelectionPreview,
-  type ProviderAccountSelectionRecord, type ProviderAccountSelectionResult, type RunnerProviderAccountDefault, type RunnerView,
+  type AssistantThreadAccountChoices, type ChangeAssistantThreadAccountRequest, type ProviderAccountSelectionRecord,
+  type ProviderAccountSelectionResult, type RunnerProviderAccountDefault, type RunnerView,
 } from "@wollipog/protocol";
 import { runnerSupportsReviewQuestionPreservation } from "./review-session-capability.js";
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
 import { FORGE_DECISION_ACTION_REFUSAL_REASONS, FORGE_DECISION_ACTION_STALE_REFUSALS, FORGE_DECISION_ACTION_SUCCESSES,
-  FORGE_DECISION_ACTION_SUMMARY_LIMIT, type ExecuteWorkflowDecisionRequest, type ForgeDecisionAction,
+  FORGE_DECISION_ACTION_SUMMARY_LIMIT, ciRerunResourceKey, isRequesterForgeDecisionCategory, normalizeCiRerunTarget,
+  isReleaseDecisionCategory, normalizeReleaseDecision, releaseDecisionResourceKey, releaseDecisionPayloadBytes, requesterForgeCapability,
+  type ExecuteWorkflowDecisionRequest, type ForgeDecisionAction, type ProjectLocationView,
   type ForgeDecisionActionRefusalReason, type ForgeDecisionActionResultMessage, type WorkflowDecisionForgeAction } from "@wollipog/protocol";
 import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 import type { CampaignCleanupItem, CampaignStuckItem } from "@wollipog/protocol";
 import { inspectionResource, invalidInspectionReason } from "./campaign-worktree-inspection.js";
+import { workspacePathsEqual } from "./workspace-match.js";
 import { worktreeDirtyPaths } from "@wollipog/protocol";
 import { formatCampaignAssignment } from "./campaign-assignment.js";
 import { campaignFollowUpAdmissionKey } from "./campaign-budget.js";
@@ -75,6 +85,7 @@ import { SCOPE_CHECKS_PER_ADDITIONS, scopeCheckAdditionsPrefix, scopeCheckInputD
 import { scopeGrantDigest, scopeReviewInputDigest, scopeReviewInputs, scopeReviewKey } from "./scope-selection.js";
 import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type CampaignScopeOwnerReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
+import { CAMPAIGN_HANDOFF_QUESTION_KEY, isCampaignHandoffQuestion } from "@wollipog/protocol";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision, outstandingDecisionsBearOnScopeRequest, campaignAwaitsInitialScope, campaignScopeIsProposed, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
 import { boundedDecisionString, boundedDecisionStringProblem, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
@@ -165,12 +176,13 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   isOwnerQuestionSnapshot,
   isChildQuestionSnapshot,
   OWNER_QUESTION_ANSWER_ID,
+  OWNER_QUESTION_NOTE_ID,
   WORKFLOW_QUESTION_ANSWER_MAX_CHARS,
   ownerQuestionAgentQuestions,
   ownerQuestionAnswer,
   type OwnerQuestionSnapshot,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
-  ASSISTANT_THREAD_LIMITS,
+  type AssistantThreadLimits,
   type AgentContext,
   type AgentDriverKind,
   type AcpSessionContextConfig,
@@ -291,11 +303,14 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type WorkflowDecisionCategory,
   type WorkflowDecisionResourceSnapshot,
   type WorkflowDecisionView,
+  type ProviderForgeRefusal,
+  mergedBranchDeletionCommand,
   type MergeClosureWatch,
   type WorkflowDecisionRevocation,
   type WorkflowDecisionRevocationReason,
   type CreateWorkflowDecisionRequest,
   type ConsumeWorkflowDecisionRequest,
+  type ReconcileWorkflowDecisionRequest,
   type ResolveWorkflowDecisionRequest,
   type WithdrawWorkflowDecisionRequest,
   type CreateOwnerDecisionRequest,
@@ -336,6 +351,7 @@ import {
   type SessionStopConfirmation,
   type WorkflowDecisionResumeState,
   type DecisionOccurrenceRecord,
+  FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS,
 } from "./db.js";
 import { questionPolicyAnswers } from "./question-policy.js";
 import type { SessionEvent } from "@wollipog/protocol";
@@ -475,11 +491,57 @@ export const GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS = 45_000;
 export const GITLAB_MERGE_CLOSURES_TIMEOUT_MS = 40_000;
 /** #4067: one GraphQL read (30s), an origin check and a push (60s each), or a `gh pr merge` (30s). */
 export const FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS = 120_000;
+const LIFECYCLE_MERGE_RECHECK_MS = 60_000;
+const LIFECYCLE_MERGE_CHECK_WINDOW_MS = 24 * 60 * 60_000;
 
 /** A runner's refusal summary, kept bounded and single-line on the decision. */
 function boundedForgeSummary(value: unknown): string {
   const text = typeof value === "string" ? value.replace(/[\x00-\x1f\x7f]+/gu, " ").trim() : "";
   return (text || "The action was refused.").slice(0, FORGE_DECISION_ACTION_SUMMARY_LIMIT);
+}
+
+// Allow small skew in a runner's event clock, without attributing an old history refusal to a
+// newer approval of the same command or accepting approval times beyond receipt.
+const PROVIDER_FORGE_REFUSAL_CLOCK_SKEW_MS = 30_000;
+
+function pendingProviderForgeAction(decision: WorkflowDecisionView, at: number): boolean {
+  const snapshot = decision.resourceSnapshot;
+  if (decision.resolvedAt === undefined || decision.resolvedAt > at ||
+      (decision.forgeAction && decision.forgeAction.outcome !== "refused")) return false;
+  if (snapshot.category === "pr_merge") {
+    const admission = decision.actionAdmission;
+    return decision.status === "approved" && snapshot.mergeMethod === undefined && !!admission &&
+      admission.kind === "pr_merge_enqueue" && admission.armedAt <= at && admission.command === canonicalPrMergeEnqueueCommand(snapshot);
+  }
+  return snapshot.category === "merged_branch_deletion" && snapshot.merged &&
+    snapshot.pullRequest !== undefined && snapshot.headSha !== undefined &&
+    /^[^/]+\/[^/]+$/u.test(snapshot.repository) &&
+    (decision.status === "approved" || decision.status === "consumed");
+}
+
+function matchesProviderForgeCommand(decision: WorkflowDecisionView, commandSha256: string): boolean {
+  const snapshot = decision.resourceSnapshot;
+  const digestMatches = (command: string) => createHash("sha256").update(command, "utf8").digest("hex") === commandSha256;
+  if (snapshot.category === "pr_merge") return digestMatches(canonicalPrMergeEnqueueCommand(snapshot));
+  if (snapshot.category !== "merged_branch_deletion" || !snapshot.merged || snapshot.pullRequest === undefined) return false;
+  if (digestMatches(mergedBranchDeletionCommand(snapshot.repository, snapshot.branch, snapshot.pullRequest))) return true;
+  if (!/^[A-Za-z0-9_./+@-]+$/u.test(snapshot.branch) || snapshot.branch.startsWith("-")) return false;
+  const ref = `repos/${snapshot.repository}/git/refs/heads/${snapshot.branch}`;
+  return digestMatches(`git push origin --delete ${snapshot.branch}`) || digestMatches(`gh api -X DELETE ${ref}`) ||
+    digestMatches(`gh api --method DELETE ${ref}`);
+}
+
+function providerForgeRefusalNotice(decision: WorkflowDecisionView, kind: ProviderForgeRefusal["kind"], forOrchestrator = false): string {
+  const target = decision.category === "pr_merge" ? "merge enqueue" : "merged branch deletion";
+  if (kind === "command") {
+    return `Claude Code refused the approved ${target} command for decision ${decision.occurrenceId}. ` +
+      `${forOrchestrator ? "Have the child use" : "Use"} execute_workflow_decision with that occurrence and resource digest ${decision.resourceDigest}.`;
+  }
+  return `Claude Code refused execute_workflow_decision for the approved ${target} on decision ${decision.occurrenceId}. ` +
+    (decision.category === "merged_branch_deletion"
+      ? "Check Campaign Cleanup for Wollipog's approved branch deletion or hand off the specific blocker."
+      : forOrchestrator ? "Check the decision and forge state before deciding how to hand off an unresolved enqueue."
+        : "Read the decision and the forge state, then report the specific blocker to the Orchestrator.");
 }
 export const SESSION_COMMAND_INVOCATION_EXPIRY_MS = 24 * 60 * 60_000;
 export const SESSION_COMMAND_INVOCATION_RETENTION_MS = 30 * 24 * 60 * 60_000;
@@ -586,6 +648,7 @@ function campaignIdleLeftovers(cleanup: readonly CampaignCleanupItem[], stuck: r
       ? { kind: item.kind, repository: item.repository, pullRequest: item.pullRequest, state: item.state,
         ...(item.branch ? { branch: boundedCampaignEventText(item.branch) } : {}) }
       : item.kind === "worktree" ? { kind: item.kind, sessionId: item.sessionId, status: item.status }
+      : item.kind === "image_reviewer" ? { kind: item.kind, sessionId: item.sessionId }
       : { kind: item.kind, workItemId: item.workItemId, responsibleActor: item.responsibleActor }),
   ];
 }
@@ -847,6 +910,8 @@ export interface ServiceResult<T> {
   /** A launch whose account policy needs an explicit choice (#4353), under
    * `code: PROVIDER_ACCOUNT_CHOICE_REQUIRED`. Routes return it beside `error`. */
   providerAccountSelection?: ProviderAccountChoiceRequired;
+  /** Why a thread launch received its implicit cap, or had none. */
+  threadBudget?: { costBudgetUsd: number | null; explanation: string };
 }
 
 /** Exact runner commands plus the control-plane resources they materialize. Durable automation
@@ -862,6 +927,8 @@ export interface PreStagedDeliveryPlan {
  * throwing from `stage` prevents materialization, while `activate` runs only after it completes. */
 export interface PreStagedDeliveryOptions {
   sessionId?: string;
+  /** Display provenance for a server-authored prompt. Never taken from the request. */
+  promptOrigin?: WollipogPromptOrigin;
   /** Trusted automation origin copied into every newly materialized session before it is visible. */
   automationOrigin?: SessionAutomationOrigin;
   /** Recovery-only exact commands read from the durable outbox. When present, resource
@@ -949,7 +1016,9 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
   const ownerKept = decision.category === "owner_decision" || decision.category === "campaign_repository_addition" ||
     decision.ownerHandoff !== undefined || decision.ownerRule !== undefined;
   const resolver = decision.withdrawal || decision.authority === "orchestrator" ? "Your Orchestrator"
-    : ownerKept && decision.status !== "revoked" ? "Your campaign's owner" : "A human reviewer";
+    : decision.assistantDelegation && (decision.status === "approved" || decision.status === "denied")
+      ? assistantDecisionResolver(decision.assistantDelegation)
+      : ownerKept && decision.status !== "revoked" ? "Your campaign's owner" : "A human reviewer";
   // A withdrawal's own reason replaces the message an earlier approval left (#3917), and the option
   // that approval chose no longer applies.
   const message = decision.withdrawal ? decision.withdrawal.reason : decision.childMessage;
@@ -995,16 +1064,24 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
 
 /** The prompt that brings the owner's answer to an Owner Question back to the root (#4270): the
  * option they chose and their own words, exactly as they wrote them. It grants nothing. */
+function assistantDecisionResolver(delegation: NonNullable<WorkflowDecisionView["assistantDelegation"]>): string {
+  const title = delegation.threadTitle ? `${decisionLiteral(delegation.threadTitle)} (${decisionLiteral(delegation.threadId)})` : decisionLiteral(delegation.threadId);
+  return `Assistant thread ${title} under your owner's delegation`;
+}
+
 function ownerQuestionAnswerPrompt(decision: WorkflowDecisionView, snapshot: OwnerQuestionSnapshot): string {
   const option = decision.selectedOptionId === undefined ? undefined
     : snapshot.options.find((candidate) => candidate.optionId === decision.selectedOptionId);
   const answered = decision.status === "approved" || decision.status === "consumed";
+  const resolver = decision.assistantDelegation
+    ? assistantDecisionResolver(decision.assistantDelegation)
+    : "Your campaign's owner";
   return [
     `[Wollipog Owner Answer — ${decision.occurrenceId}]`,
     answered
-      ? `Your campaign's owner answered your owner question ${decision.occurrenceId} (resource ${decisionLiteral(decision.resourceKey)}).`
+      ? `${resolver} answered your owner question ${decision.occurrenceId} (resource ${decisionLiteral(decision.resourceKey)}).`
       : decision.status === "denied"
-        ? `Your campaign's owner dismissed your owner question ${decision.occurrenceId} (resource ${decisionLiteral(decision.resourceKey)}) without answering it.`
+        ? `${resolver} dismissed your owner question ${decision.occurrenceId} (resource ${decisionLiteral(decision.resourceKey)}) without answering it.`
         : `Your owner question ${decision.occurrenceId} (resource ${decisionLiteral(decision.resourceKey)}) ended unanswered.`,
     ...(answered && option ? [`They chose option ${decisionLiteral(option.optionId)}: ${decisionLiteral(option.label)}.`] : []),
     ...(answered && decision.childMessage ? [option ? "They added, in their own words:" : "Their answer, in their own words:",
@@ -1183,6 +1260,22 @@ const PULL_REQUEST_WATCH_OUTCOME_TEXT: Record<PullRequestWatchOutcome, string> =
  * the server: nobody else can stand in for a report, or replace one by asking under its key. */
 export const MERGE_CLOSURE_REPORT_REQUEST_PREFIX = "merge_closure_";
 export const MERGE_CLOSURE_REPORT_RESOURCE_PREFIX = "merge_closure:";
+const ISSUE_CLOSURE_RECOVERY_REQUEST_PREFIX = "issue_closure_recovery_";
+const ISSUE_CLOSURE_RECOVERY_RESOURCE_PREFIX = "issue_closure_recovery:";
+
+function isIssueClosureRecoveryCoordinate({ requestId, resourceKey }: Pick<WorkflowDecisionView, "requestId" | "resourceKey">): boolean {
+  return requestId.startsWith(ISSUE_CLOSURE_RECOVERY_REQUEST_PREFIX) || resourceKey.startsWith(ISSUE_CLOSURE_RECOVERY_RESOURCE_PREFIX);
+}
+
+function isMergeClosureReportCoordinate({ requestId, resourceKey }: Pick<WorkflowDecisionView, "requestId" | "resourceKey">): boolean {
+  return requestId.startsWith(MERGE_CLOSURE_REPORT_REQUEST_PREFIX) || resourceKey.startsWith(MERGE_CLOSURE_REPORT_RESOURCE_PREFIX);
+}
+
+/** Server-generated reports require the owner's own acknowledgement, including a dismissal. */
+export function isReservedOwnerQuestion(decision: WorkflowDecisionView): boolean {
+  return isOwnerQuestionSnapshot(decision.resourceSnapshot) &&
+    (isCampaignHandoffQuestion(decision) || isIssueClosureRecoveryCoordinate(decision) || isMergeClosureReportCoordinate(decision));
+}
 /** Times one report is asked again after its question was revoked unanswered. */
 const MERGE_CLOSURE_REPORT_ATTEMPTS = 20;
 
@@ -1297,6 +1390,20 @@ export function normalizeWorkflowDecisionSnapshot(
   }
   const value = input as Record<string, unknown>;
   const category = value.category;
+  if (isReleaseDecisionCategory(category)) {
+    const release = normalizeReleaseDecision(value);
+    if (!release || createHash("sha256").update(releaseDecisionPayloadBytes(release)).digest("hex") !== release.releasePayloadDigest) {
+      return fail("a release decision needs exact GitHub release coordinates and the digest of its canonical payload");
+    }
+    return ok(release);
+  }
+  if (category === "ci_rerun") {
+    const target = normalizeCiRerunTarget(value);
+    if (!target || Object.keys(value).some((key) => !["category", "repository", "runId", "jobId", "headSha", "attempt"].includes(key))) {
+      return fail("a CI rerun requires an exact GitHub repository, runId, headSha and attempt, with an optional jobId");
+    }
+    return ok({ category, ...target });
+  }
   if (category === "automation_creation") {
     const snapshot = normalizeAutomationCreationSnapshot(value);
     return snapshot ? ok(snapshot) : fail("automation creation requires a server-prepared exact configuration");
@@ -1954,6 +2061,7 @@ export function capabilityConfigError(
   config: SessionConfig | undefined,
   capabilities: AgentCapabilities | undefined,
 ): string | null {
+  if (isManagedModelChoice(config?.model)) return "Choose a specific model for this session configuration.";
   if (config?.permissionMode === "orchestrator" && !capabilities?.permissionModes?.includes("orchestrator")) {
     return "the orchestrator preset requires explicit support from this agent installation";
   }
@@ -2137,8 +2245,25 @@ function assistantLaunchPolicy(threadId: string): import("@wollipog/protocol").A
   return { threadId, guide: WOLLIPOG_ASSISTANT_SKILL.content };
 }
 
-const ASSISTANT_THREAD_BUDGET_REFUSAL = "This Wollipog Assistant thread has spent or committed its whole " +
-  `$${ASSISTANT_THREAD_LIMITS.costUsd} budget, so it cannot launch another session. Tell your owner; they can continue in a new thread.`;
+export function assistantThreadBudgetRefusal(costUsd: number): string {
+  return `This Wollipog Assistant thread has spent or committed its whole $${costUsd} budget, so it cannot launch another session.`;
+}
+
+export function assistantThreadLaunchLimitMessage(launched: number, limit: number | null, paused = false): string | null {
+  if (paused) return "This Wollipog Assistant thread has paused new launches.";
+  return limit !== null && launched >= limit
+    ? `This Wollipog Assistant thread has launched ${launched} of the ${limit} sessions it may launch, so it cannot launch another.`
+    : null;
+}
+
+export function floorBudgetCents(usd: number): number {
+  return Math.floor(usd * 100 + 1e-8) / 100;
+}
+
+function assistantThreadBackingCap(limitUsd: number | null, heldUsd: number): number | null {
+  // A zero runner threshold means unlimited. Use one cent when launched work holds the remainder.
+  return limitUsd === null ? null : Math.max(Math.min(0.01, limitUsd), floorBudgetCents(limitUsd - heldUsd));
+}
 
 /** An Orchestrator's children would run outside the thread's launch count. */
 const ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL = "A Wollipog Assistant thread cannot start an Orchestrator. " +
@@ -2158,6 +2283,8 @@ export function defaultPermissionModeForNewSession(
 ): string | undefined {
   const modes = capabilities?.permissionModes;
   if (!modes?.length) return undefined;
+  if (driver === "acp" && modes.includes(ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) &&
+      modes.includes(ANTIGRAVITY_AUTO_MODE.id)) return ANTIGRAVITY_AUTO_MODE.id;
   if (driver === "pi") return piAgentControlAvailable && modes.includes("default") ? "default" : undefined;
   if (driver !== "claude-code") return undefined;
   if (modes.includes("auto")) return "auto";
@@ -2412,6 +2539,7 @@ export class SessionsService {
   /** When each campaign was last checked for leftovers to repair, so a tick never derives them all. */
   private readonly campaignRepairCheckedAt = new Map<string, number>();
   private readonly archiveWorktreeRetirements = new Set<string>();
+  private readonly archiveWorktreeRetries = new Map<string, { delay: number; due: boolean }>();
   private readonly refusedWorktreeRecheckedAt = new Map<string, number>();
   private readonly refusedWorktreeSweep = new Map<string, { at: number; after: string }>();
   /** Full Control campaigns whose first message is being established (#2940). */
@@ -3625,49 +3753,93 @@ export class SessionsService {
    * not prove its capability because protocol metadata itself arrived in v15. */
   /** The Assistant thread whose call is launching work, with what it may still spend, or why it may
    * launch nothing more (#4663). Null outside a thread's Assistant call. */
-  private assistantThreadLaunch(): { threadId: string; backingSessionId: string | null; launchedHeldUsd: number; remainingUsd: number } | { refusal: string } | null {
+  private assistantThreadLaunch():
+    | { threadId: string; backingSessionId: string | null; budget: { limitUsd: number; heldUsd: number; remainingUsd: number } | null }
+    | { refusal: string } | null {
     const call = assistantCallContext.getStore();
     const thread = call ? this.db.assistantThreads.forConnection(call.connectionId) : null;
     if (!thread) return null;
-    const limits = ASSISTANT_THREAD_LIMITS;
-    const launched = this.db.assistantThreads.launchedSessionIds(thread.id).length;
-    if (launched >= limits.launchedSessions) {
-      return { refusal: `This Wollipog Assistant thread has launched ${launched} of the ${limits.launchedSessions} sessions it may launch, ` +
-        "so it cannot launch another. Tell your owner; they can continue in a new thread." };
-    }
+    const refusal = this.assistantThreadLaunchLimitRefusal(thread);
+    if (refusal) return { refusal };
+    const launch = { threadId: thread.id, backingSessionId: thread.session_id };
+    const limitUsd = thread.cost_limit_usd;
+    if (limitUsd === null) return { ...launch, budget: null };
     const { backingSpentUsd, launchedHeldUsd } = this.db.assistantThreads.costs(thread.id);
     // A reservation whose launch then failed, or a cap a deleted session no longer holds, goes back
     // to the backing assistant before this launch takes its share.
-    const settled = this.rebalanceAssistantBacking({ threadId: thread.id, backingSessionId: thread.session_id }, launchedHeldUsd);
+    const settled = this.rebalanceAssistantBacking(launch.backingSessionId, limitUsd, launchedHeldUsd);
     if (!settled.ok) return { refusal: settled.error ?? "The thread's budget could not be settled." };
-    // A launch takes from what the backing assistant has not spent and launched work does not
-    // hold, and never more than the backing session's own remaining cap. Whole cents, rounded down.
-    const backingCap = thread.session_id ? this.db.getSession(thread.session_id)?.costBudgetUsd ?? null : null;
-    const unheld = limits.costUsd - launchedHeldUsd - backingSpentUsd;
-    const remainingUsd = Math.floor(Math.min(unheld, backingCap === null ? unheld : backingCap - backingSpentUsd) * 100) / 100;
-    if (remainingUsd < 0.01) return { refusal: ASSISTANT_THREAD_BUDGET_REFUSAL };
-    return { threadId: thread.id, backingSessionId: thread.session_id, launchedHeldUsd, remainingUsd };
+    // A launch takes from what the backing assistant has not spent and launched work does not hold.
+    const remainingUsd = floorBudgetCents(limitUsd - launchedHeldUsd - backingSpentUsd);
+    if (remainingUsd < 0.01) return { refusal: assistantThreadBudgetRefusal(limitUsd) };
+    return { ...launch, budget: { limitUsd, heldUsd: launchedHeldUsd, remainingUsd } };
+  }
+
+  assistantThreadLaunchLimitRefusal(thread: Pick<import("./assistant-thread-store.js").ThreadRow, "id" | "launch_limit" | "launch_paused">): string | null {
+    const paused = Boolean(thread.launch_paused);
+    if (thread.launch_limit === null && !paused) return null;
+    const launched = this.db.assistantThreads.launchedSessionIds(thread.id).length +
+      this.db.assistantOwnerConfirmations.launchedCampaignIds(thread.id).length;
+    const message = assistantThreadLaunchLimitMessage(launched, thread.launch_limit, paused);
+    return message ? `${message} The owner can change when launches are allowed in Thread Settings.` : null;
+  }
+
+  /** Both owner-facing editors write the thread limit. Existing spend and launches take priority. */
+  updateAssistantThreadLimits(
+    row: Pick<import("./assistant-thread-store.js").ThreadRow, "id" | "session_id" | "cost_limit_usd" | "launch_limit" | "launch_paused">,
+    limits: AssistantThreadLimits,
+    edit?: { config: SessionConfig; actor: GovernanceActor },
+  ): ServiceResult<SessionView> {
+    const backing = row.session_id ? this.db.getSession(row.session_id) : null;
+    if (!backing || backing.archived) return fail("Limits cannot be changed on an archived thread.", 409);
+    const budgetChanged = row.cost_limit_usd !== limits.costUsd;
+    const { backingSpentUsd, launchedHeldUsd } = budgetChanged || edit
+      ? this.db.assistantThreads.costs(row.id) : { backingSpentUsd: 0, launchedHeldUsd: 0 };
+    if (budgetChanged && limits.costUsd !== null) {
+      const committed = backingSpentUsd + launchedHeldUsd;
+      if (floorBudgetCents(limits.costUsd - committed) < 0) {
+        return fail(`The thread has already spent or committed $${(Math.ceil(committed * 100 - 1e-8) / 100).toFixed(2)}. Choose a budget at least that high.`, 409);
+      }
+      if (row.cost_limit_usd === null && this.db.assistantThreads.hasUncappedWork(row.id)) {
+        return fail("This thread still has work launched without a cost cap. Delete those launched sessions and their descendants before setting a budget.", 409);
+      }
+    }
+    return this.db.assistantThreadLimitsTransaction(() => {
+      // The session publish reads the thread row. Store the new limits before it and restore on
+      // refusal, so the persisted limits and the runner's derived cap advance together.
+      this.db.assistantThreads.setLimits(row.id, limits);
+      const target = assistantThreadBackingCap(limits.costUsd, launchedHeldUsd + this.db.assistantThreads.earlierBackingSpend(row.id));
+      const changed = Boolean(budgetChanged || edit) && (backing.costBudgetUsd ?? null) !== target;
+      if (edit || changed) {
+        const { costBudgetUsd: _threadBudget, ...other } = edit?.config ?? {};
+        const result = this.applySessionConfig(backing.id, { ...other, ...(changed ? { costBudgetUsd: target ?? 0 } : {}) }, edit?.actor);
+        if (!result.ok) this.db.assistantThreads.setLimits(row.id, {
+          costUsd: row.cost_limit_usd, launchedSessions: row.launch_limit, launchPaused: Boolean(row.launch_paused),
+        });
+        return result;
+      }
+      const updated = this.db.getSession(backing.id)!;
+      this.hub.sessionChanged(updated);
+      return ok(updated);
+    });
   }
 
   /** Sets the backing assistant's cost cap to what the thread's budget leaves it while launched
-   * work holds `heldUsd`, so the assistant and its launched sessions together stay within it. A
-   * cap the thread set itself follows the budget both ways; one the owner changed is only lowered. */
-  private rebalanceAssistantBacking(launch: { threadId: string; backingSessionId: string | null }, heldUsd: number): ServiceResult<never> | { ok: true } {
-    if (!launch.backingSessionId) return { ok: true };
-    const backing = this.db.getSession(launch.backingSessionId);
+   * work holds `heldUsd`, so the assistant and its launched sessions share one budget. */
+  private rebalanceAssistantBacking(
+    backingSessionId: string | null,
+    limitUsd: number | null,
+    heldUsd: number,
+  ): ServiceResult<never> | { ok: true } {
+    if (!backingSessionId) return { ok: true };
+    const backing = this.db.getSession(backingSessionId);
     if (!backing) return { ok: true };
-    const managed = this.db.assistantThreads.backingCap(launch.threadId) ?? ASSISTANT_THREAD_LIMITS.costUsd;
-    const current = backing.costBudgetUsd ?? null;
-    // A cap other than the one the thread last set is the owner's: remember it as a ceiling the
-    // thread never raises the cap above, even after lowering it further itself.
-    if (current !== null && Math.abs(current - managed) >= 0.005) this.db.assistantThreads.recordBackingOwnerCap(launch.threadId, current);
-    const ownerCap = this.db.assistantThreads.backingOwnerCap(launch.threadId);
-    const target = Math.max(0.01, Math.floor(Math.min(ASSISTANT_THREAD_LIMITS.costUsd - heldUsd, ownerCap ?? Number.POSITIVE_INFINITY) * 100) / 100);
-    if (current !== null && Math.abs(current - target) < 0.005) return { ok: true };
-    const updated = this.setConfig(backing.id, { costBudgetUsd: target });
-    if (!updated.ok) return fail(`The thread's budget could not be reserved for this launch: ${updated.error ?? "unknown error"}.`, 409);
-    this.db.assistantThreads.setBackingCap(launch.threadId, target);
-    return { ok: true };
+    const thread = this.db.assistantThreads.forSession(backingSessionId);
+    const earlierSpend = thread ? this.db.assistantThreads.earlierBackingSpend(thread.id) : 0;
+    const target = assistantThreadBackingCap(limitUsd, heldUsd + earlierSpend);
+    if ((backing.costBudgetUsd ?? null) === target) return { ok: true };
+    const updated = this.applySessionConfig(backing.id, { costBudgetUsd: target ?? 0 });
+    return updated.ok ? { ok: true } : fail(`The backing session's budget could not be updated: ${updated.error ?? "unknown error"}.`, 409);
   }
 
   /** Sets a member of a thread's launched tree to its allowance less what its children hold, and
@@ -4208,6 +4380,9 @@ export class SessionsService {
       /** Trusted Assistant command origin. Never copied from CreateSessionRequest JSON. */
       assistantWorkOrigin?: {connectionId: string; commandId: string};
       defaultOwnerUserId?: string;
+      /** Ordinary human session creation and ordinary create-session automations may pin Latest
+       * before validation. Protected launches keep the exact model inputs their approvals bind. */
+      allowManagedModelChoice?: boolean;
       /** Trusted launcher attribution (#3840) when it is not the authenticated human above, such as
        * a side chat's parent's launcher. A child or review session always inherits instead. */
       launcherUserId?: string;
@@ -4225,8 +4400,11 @@ export class SessionsService {
         tasks: import("@wollipog/protocol").AutomationCampaign["tasks"];
       };
       /** Internal fixture/admission seam; never accepted from ordinary session request JSON. */
-      humanCampaignLaunch?: {
-        principal: HumanPrincipal; requestId: string; digest: string;
+      humanCampaignLaunch?: { principal: HumanPrincipal; requestId: string; digest: string } & ({
+        customBudget: import("@wollipog/protocol").CampaignBudgetAuthority;
+        control?: never;
+      } | {
+        customBudget?: never;
         control: Extract<import("@wollipog/protocol").CampaignControl, { mode: "full_control" }>;
         issueScope: import("@wollipog/protocol").CampaignIssueScope;
         /** Project Locations the reviewed launch inspection left out of the boundary (#4117). */
@@ -4241,33 +4419,48 @@ export class SessionsService {
          * owner's first message sets the objective and issue scope before its first turn. Only
          * the limits it derived (no Human override) may grow to fit that message's issues. */
         firstMessage?: { derivedLimits: import("@wollipog/protocol").FullControlDerivedLimits };
-      };
+      });
       /** Internal only (#3368): this session is a review of the requester's pull request. */
       review?: { policy: ReviewLaunchPolicy };
       /** Internal only (#4663): this session backs a Wollipog Assistant thread, so its role is
        * `assistant`. Only the owner's thread creation passes it; request JSON cannot. */
-      assistantThread?: { threadId: string };
+      assistantThread?: { threadId: string; stagedSessionId?: string };
       /** Internal only (#4074): this session is the delegated image reviewer of one decision. */
       [DELEGATED_IMAGE_REVIEW]?: NewDelegatedImageReview;
+      assistantImageReviewAccount?: string | null;
     },
   ): ServiceResult<SessionView> {
     // A Wollipog Assistant thread's assistant launches within its thread's limits (#4663): a launch
     // past them is refused, and the new session is capped at what the thread has left to spend.
     const threadLaunch = creationContext?.assistantThread ? null : this.assistantThreadLaunch();
-    let threadLaunchCapUsd = 0;
+    if (assistantCallContext.getStore() && creationContext?.humanCampaignLaunch) {
+      return fail(ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL, 409);
+    }
+    let threadBudget: ServiceResult<SessionView>["threadBudget"];
     if (threadLaunch && "refusal" in threadLaunch) return fail(threadLaunch.refusal, 409);
     if (threadLaunch) {
       if (req.role === "orchestrator" || req.orchestrator !== undefined || usesOrchestratorPresetPermissions(req.config)) {
         return fail(ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL, 409);
       }
-      // An absent, zero or negative request would otherwise mean "no budget": a thread launch is
-      // always capped, at most at what the thread has left.
-      const requested = req.config?.costBudgetUsd;
-      const capUsd = typeof requested === "number" && Number.isFinite(requested) && requested > 0
-        ? Math.floor(Math.min(requested, threadLaunch.remainingUsd) * 100) / 100 : threadLaunch.remainingUsd;
-      if (capUsd < 0.01) return fail(ASSISTANT_THREAD_BUDGET_REFUSAL, 409);
-      threadLaunchCapUsd = capUsd;
-      req = { ...req, config: { ...req.config, costBudgetUsd: capUsd } };
+      const configError = sessionGuardrailConfigError(req.config);
+      if (configError) return fail(configError, 400);
+      const requested = req.config?.costBudgetUsd ?? 0;
+      if (threadLaunch.budget) {
+        const { limitUsd, remainingUsd } = threadLaunch.budget;
+        const capUsd = requested > 0 ? floorBudgetCents(Math.min(requested, remainingUsd)) : remainingUsd;
+        if (capUsd < 0.01) return fail(assistantThreadBudgetRefusal(limitUsd), 409);
+        if (requested !== capUsd) {
+          threadBudget = {
+            costBudgetUsd: capUsd,
+            explanation: requested > 0 && requested <= remainingUsd
+              ? `The requested cost cap was rounded down to $${capUsd.toFixed(2)} in whole cents.`
+              : `This session has a $${capUsd.toFixed(2)} cost cap based on what the Assistant thread's budget has left.`,
+          };
+        }
+        req = { ...req, config: { ...req.config, costBudgetUsd: capUsd } };
+      } else if (requested <= 0) {
+        threadBudget = { costBudgetUsd: null, explanation: "This session has no cost cap because the Assistant thread has no budget and none was requested." };
+      }
     }
     // Attribution is supplied only by the authenticated route, never by the request payload.
     const capture = creationContext?.[PREPARED_MEDIA_CAPTURE];
@@ -4279,7 +4472,7 @@ export class SessionsService {
     const parentSessionId = creationContext?.parentSessionId;
     /** A thread-tree parent, whose own cap gives up this child's just before it exists (#4671). */
     let threadMemberParentId: string | null = null;
-    // Only prepareDescendantImageEvidenceReview holds this module-private symbol. Request JSON
+    // Only the server's image reviewer launch holds this module-private symbol. Request JSON
     // cannot opt into the exemption. Keep all cost/tool guards and campaign budget admission.
     if (parentSessionId) {
       if (this.db.delegatedImageReviews.isReviewer(parentSessionId)) return fail(DELEGATED_IMAGE_REVIEWER_ERROR, 409);
@@ -4327,7 +4520,8 @@ export class SessionsService {
       if (this.db.roleConversionBlocksSession(parentSessionId)) return fail("wait for the session role change to finish before creating children", 409);
       const parent = this.db.getSession(parentSessionId);
       if (this.db.campaignPaused(parentSessionId)) return fail("The campaign is paused; resume it before starting children.", 409);
-      if (!parent || !["starting", "running", "input_required"].includes(parent.status)) {
+      if (!parent || !(["starting", "running", "input_required"].includes(parent.status) ||
+          imageReview?.assistant && parent.status === "idle")) {
         return fail("the creating parent session is no longer active", 409);
       }
       parentSession = parent;
@@ -4494,6 +4688,19 @@ export class SessionsService {
       launch = { ...launch, version: targetCandidate?.version, capabilities: undefined };
     }
     const useWorktree = resolvedTarget.useWorktree;
+    // Refused before anything is created (#4901): the runner would make the worktree, then fail
+    // the launch and leave it behind.
+    const managedWorktreeRefusal = useWorktree ? managedWorktreeUnsupportedReason({
+      os: runner.os,
+      isolationMode: runner.runtime?.executionIsolation?.mode,
+      driver: launch.driver,
+      agentId: snapshotSpec?.agentId ?? req.agentId,
+      agentName: runner.agents.find((agent) => agent.id === req.agentId)?.name,
+      agentSource: runner.agents.find((agent) => agent.id === req.agentId)?.source,
+      contextKind: launch.context?.kind,
+      targetAdapter: executionTarget.adapter,
+    }) : null;
+    if (managedWorktreeRefusal) return fail(managedWorktreeRefusal, 409);
     if (req.providerAccountId !== undefined &&
         (typeof req.providerAccountId !== "string" ||
           !(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(req.providerAccountId) || isProviderAccountRef(req.providerAccountId)))) {
@@ -4514,6 +4721,7 @@ export class SessionsService {
       launch,
       hostTarget: usesRunnerProviderAccount,
       ...(req.providerAccountId ? { requestedId: req.providerAccountId } : {}),
+      ...(assistantThread && req.providerAccountId ? { assistantChoice: true } : {}),
       ...(creationContext?.parentSessionId ? { namedByAgent: true } : {}),
       ...(req.config?.model ? { model: req.config.model } : {}),
       ...(snapshotSpec
@@ -4524,6 +4732,9 @@ export class SessionsService {
     });
     if (!launchAccount.ok || !launchAccount.data) return failAs(launchAccount);
     const { providerAccount, selection: providerAccountSelection } = launchAccount.data;
+    if (imageReview?.assistant && creationContext?.assistantImageReviewAccount !== (providerAccount?.id ?? null)) {
+      return fail("The managed reviewer could not use the Assistant thread’s authorized provider account.", 409);
+    }
     const acpSessionContext = snapshotSpec?.acpSessionContext ?? req.acpSessionContext;
     if ((executionTarget.adapter === "container" || executionTarget.adapter === "cloud") &&
         ((acpSessionContext?.additionalDirectories?.length ?? 0) > 0 || (acpSessionContext?.mcpServers?.length ?? 0) > 0)) {
@@ -4604,7 +4815,7 @@ export class SessionsService {
     if (delivery?.sessionId !== undefined && (!delivery.sessionId.trim() || delivery.sessionId.length > 256)) {
       return fail("pre-staged session id is invalid", 400);
     }
-    const id = delivery?.sessionId ?? shortId("s_");
+    const id = delivery?.sessionId ?? creationContext?.assistantThread?.stagedSessionId ?? shortId("s_");
     const now = Date.now();
     const images = snapshotCommand?.type === "start_session" ? (snapshotCommand.initialImages ?? []) : (req.images ?? []);
     if (capture && images.length) return fail("Initial media is delivered only through the exact prepared grant.", 409);
@@ -4626,6 +4837,7 @@ export class SessionsService {
     const agentCapabilities = selectedInstallationId ? undefined :
       snapshotSpec?.capabilities ?? runner.agents.find((agent) => agent.id === req.agentId)?.capabilities;
     const requestedConfig = { ...(snapshotSpec?.config ?? req.config ?? {}) };
+    const explicitManagedModel = !snapshotSpec && isManagedModelChoice(requestedConfig.model);
     if (!snapshotSpec) {
       const campaignBehavior = imageReview ? undefined : campaignController?.orchestratorPolicy?.behavior;
       if (campaignBehavior) {
@@ -4644,19 +4856,37 @@ export class SessionsService {
           requestedConfig.effort = campaignBehavior.childEffort;
         }
       }
-      const preference = creationContext?.defaultOwnerUserId
+      if (explicitManagedModel) {
+        if (!creationContext?.allowManagedModelChoice || campaignController || req.role === "orchestrator" ||
+            req.orchestrator || executionTarget.adapter !== "host" || usesOrchestratorPresetPermissions(requestedConfig)) {
+          return fail("Choose a specific model for this launch.", 409);
+        }
+        const model = resolveManagedModelChoice(launch.driver, agentCapabilities, requestedConfig.model!);
+        if (!model) return fail("Latest is unavailable for this installation. Choose a specific model or rediscover the harness.", 409);
+        requestedConfig.model = model.id;
+      }
+      const savedPreference = creationContext?.defaultOwnerUserId
         ? this.db.getAgentHarnessDefault(
           creationContext.defaultOwnerUserId,
           agentHarnessIdentityFor({ id: req.agentId, driver: launch.driver, context: launch.context }),
         )?.config
         : undefined;
+      const managedId = savedPreference?.model;
+      const managed = isManagedModelChoice(managedId);
+      const managedModel = managed && managedId ? resolveManagedModelChoice(launch.driver, agentCapabilities, managedId) : undefined;
+      const preference = managed ? (managedModel && { ...savedPreference, model: managedModel.id }) : savedPreference;
+
       // Saved defaults are all-or-nothing under capability drift. A stale combination is never
       // partially sent to a harness, while explicit per-session knobs retain field-level priority.
-      if (preference && agentCapabilities && installationSupportsDefault({
+      const compatible = preference && agentCapabilities && installationSupportsDefault({
         models: agentCapabilities.models.filter((model) => model.id !== "default" && !model.hidden),
         effortLevels: agentCapabilities.effortLevels ?? [],
         permissionModes: agentCapabilities.permissionModes ?? [],
-      }, preference)) {
+      }, preference);
+      if (managed && !compatible && requestedConfig.model === undefined && requestedConfig.effort === undefined) {
+        return fail("The saved Latest model is unavailable with these defaults. Choose a specific model or update Agent Defaults.", 409);
+      }
+      if (preference && compatible) {
         if (requestedConfig.model === undefined && requestedConfig.effort === undefined) {
           if (preference.model !== undefined) requestedConfig.model = preference.model;
           if (preference.effort !== undefined) requestedConfig.effort = preference.effort;
@@ -4717,6 +4947,13 @@ export class SessionsService {
     if (threadLaunch && role === "orchestrator") return fail(ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL, 409);
     const orchestrator = role === "orchestrator";
     const presetPermissions = usesOrchestratorPresetPermissions(requestedConfig);
+    if (orchestrator && requestedConfig.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) {
+      return fail("Full Permissions Mode is available only for normal Antigravity sessions.", 409);
+    }
+    // A saved permission mode can supply the Orchestrator preset after explicit model resolution.
+    if (explicitManagedModel && (orchestrator || presetPermissions)) {
+      return fail("Choose a specific model for this launch.", 409);
+    }
     let orchestratorPolicy: OrchestratorCampaignPolicy | undefined;
     if (orchestrator) {
       const configured = creationContext?.orchestratorDefaults;
@@ -5039,7 +5276,7 @@ export class SessionsService {
     // as `none`, so no later message counts as the first; with no first message yet, the person's
     // first prompt decides (`promptFromHuman`).
     if (orchestratorPolicy && creationContext?.defaultOwnerUserId && !parentSessionId && !snapshotCommand &&
-        !creationContext.humanCampaignLaunch && !inheritedIssueScope && !orchestratorIssueNumbers.length && requestedText) {
+        !creationContext.humanCampaignLaunch?.control && !inheritedIssueScope && !orchestratorIssueNumbers.length && requestedText) {
       orchestratorPolicy.issueScopeSeed = { state: needsCampaignIssueScopeSeed(requestedText) ? "pending" : "none",
         messageDigest: firstMessageDigest(requestedText) };
     }
@@ -5192,6 +5429,11 @@ export class SessionsService {
           effectiveSessionScope?.owner.kind !== "user" || effectiveSessionScope.owner.userId !== humanLaunch.principal.userId) {
         return fail("atomic Human launch requires the exact Human-owned managed root", 409);
       }
+      const allowance = humanLaunch.customBudget ?? humanLaunch.control.boundary.budgetAuthority;
+      const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, allowance?.costUsd !== undefined);
+      if (accountingError) return fail(accountingError, 409);
+    }
+    if (humanLaunch?.control && orchestratorPolicy) {
       const control = structuredClone(humanLaunch.control);
       if (humanLaunch.evidenceAuthority !== undefined) {
         if (!this.evidenceAuthorityDisclosures || !control.boundary.operations.includes("ui_evidence_approval")) {
@@ -5205,10 +5447,6 @@ export class SessionsService {
       const authoritySupport = campaignAuthorityPreflight(control, launch.driver, runner.protocolVersion,
         this.pacedVideoInstallationContract(req.runnerId, req.agentId));
       if (!authoritySupport.supported) return campaignRefusalFail(authoritySupport.requirement ?? authoritySupport.reason ?? "campaign authority is unsupported");
-      // A launch with no cost ceiling still meters cost, but only an explicit ceiling needs it priced.
-      const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model,
-        control.boundary.budgetAuthority?.costUsd !== undefined);
-      if (accountingError) return fail(accountingError, 409);
       const nativeReview = control.boundary.budgetAuthority?.controlledReview;
       if (nativeReview && (!runner.runtime?.campaignReview || controlledReviewCapabilityKey(nativeReview) !== controlledReviewCapabilityKey(runner.runtime.campaignReview))) {
         return fail("the required native reviewer does not match current runner discovery", 409);
@@ -5329,6 +5567,8 @@ export class SessionsService {
       ...(launcherUserId ? { launcherUserId } : {}),
       campaignBudgetUserLimits,
       reviewRequesterSessionId: creationContext?.review?.policy.requesterSessionId,
+      initialPromptSubmitted: !delivery && !capture && !creationContext?.review && !imageReview &&
+        Boolean(command.type === "start_session" && (command.initialPrompt || images.length)),
       id,
       parentSessionId,
       creationActor: creationContext?.defaultOwnerUserId
@@ -5362,11 +5602,12 @@ export class SessionsService {
       automationOrigin: delivery?.automationOrigin,
       now,
     };
-    if (threadLaunch && !("refusal" in threadLaunch)) {
+    if (threadLaunch?.budget) {
       // Reserve the cap only once every check has passed, just before the session exists: the
       // backing assistant's own cap shrinks by it, so all of the thread's caps together never exceed
       // its budget. Refuse rather than launch unreserved.
-      const reserved = this.rebalanceAssistantBacking(threadLaunch, threadLaunch.launchedHeldUsd + threadLaunchCapUsd);
+      const { limitUsd, heldUsd } = threadLaunch.budget;
+      const reserved = this.rebalanceAssistantBacking(threadLaunch.backingSessionId, limitUsd, heldUsd + (config.costBudgetUsd ?? 0));
       if (!reserved.ok) return reserved;
     }
     if (threadMemberParentId) {
@@ -5418,7 +5659,7 @@ export class SessionsService {
           return this.db.getSession(created.id)!;
         });
       } else if (humanLaunch) {
-        const admitted = this.db.createHumanCampaignLaunch(sessionInput, humanLaunch.principal, humanLaunch.requestId, humanLaunch.digest);
+        const admitted = this.db.createHumanCampaignLaunch(sessionInput, humanLaunch.principal, humanLaunch.requestId, humanLaunch.digest, humanLaunch.customBudget);
         if (!admitted.created && !scheduled) return ok(admitted.session);
         session = admitted.session;
         config.costBudgetUsd = session.costBudgetUsd ?? undefined;
@@ -5521,7 +5762,7 @@ export class SessionsService {
       void this.establishCustomCampaignRepositories(id).catch((error: unknown) =>
         this.log.warn(`Could not read the Project's repositories for campaign ${id}: ${error instanceof Error ? error.message : String(error)}`));
     }
-    return ok(this.db.getSession(id)!, 201);
+    return { ...ok(this.db.getSession(id)!, 201), ...(threadBudget ? { threadBudget } : {}) };
   }
 
   /** A Custom campaign's initial repositories (#4118): every verified Location of its Project that
@@ -5631,8 +5872,10 @@ export class SessionsService {
 
   /** Every ingress that can start a provider turn refuses while the campaign waits for its owner's
    * first message, except that message's own delivery. */
-  private firstMessageFence(sessionId: string, session = this.db.getSession(sessionId)): string | null {
-    return this.firstMessageDelivery !== sessionId && (this.awaitingFirstMessage(session) || this.firstMessagesInFlight.has(sessionId))
+  private firstMessageFence(sessionId: string, session: Pick<SessionView, "orchestratorPolicy"> | null = {
+    orchestratorPolicy: this.db.sessionOrchestratorPolicy(sessionId) ?? undefined,
+  }): string | null {
+    return this.firstMessageDelivery !== sessionId && (awaitsFirstMessage(session?.orchestratorPolicy) || this.firstMessagesInFlight.has(sessionId))
       ? "This Full Control campaign starts from its owner's first message." : null;
   }
 
@@ -6566,6 +6809,7 @@ export class SessionsService {
     holdReader?: HoldAdviceReader,
     /** Trusted server notices may be retained unsent. Never populated from a caller's request. */
     retainNoticeDuringCampaignPause = false,
+    promptOrigin?: WollipogPromptOrigin,
   ): ServiceResult<PromptAdmissionView> {
     const pausedCampaign = this.db.campaignPaused(sessionId);
     if (pausedCampaign && (delivery || !retainNoticeDuringCampaignPause && !binding)) {
@@ -6579,8 +6823,12 @@ export class SessionsService {
           snapshotCommand.sessionId !== sessionId)) {
       return fail("pre-staged prompt command snapshot is malformed", 409);
     }
-    const session = this.db.getSession(sessionId);
+    let session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    if (session.role === "assistant" && (!this.db.assistantThreads.forSession(sessionId) ||
+        this.db.assistantThreads.harnessChangeBlocksSession(sessionId))) {
+      return fail("This Assistant conversation is read-only or changing harnesses.", 409);
+    }
     // Only its owner's first message can start a Full Control campaign launched without a task
     // (#2940); nothing an agent or automation sends may reach it first.
     const firstMessageRefusal = this.firstMessageFence(sessionId, session);
@@ -6594,18 +6842,38 @@ export class SessionsService {
     if (isRetiredCodexExec(session)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
     const budgetError = this.db.campaignBudgets.admissionError(sessionId);
     if (budgetError) return fail(budgetError, 409);
-    const requestedConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
+    let requestedConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
     const budgetConfigError = this.campaignBudgetConfigError(session, requestedConfig);
     if (budgetConfigError) return campaignRefusalFail(budgetConfigError);
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before sending a message", 409);
     const configInputError = sessionGuardrailConfigError(requestedConfig);
     if (configInputError) return fail(configInputError, 400);
+    if (session.assistantThreadBudget && requestedConfig?.costBudgetUsd !== undefined) {
+      // Older dashboards repeat the last Guardrails edit with the next prompt. That budget has
+      // already been applied, and must never overwrite the backing session's derived cap.
+      const { costBudgetUsd: _threadBudget, ...other } = requestedConfig;
+      requestedConfig = other;
+    }
     if (!snapshotCommand) {
       const campaignBehaviorError = this.campaignChildBehaviorError(session, requestedConfig);
       if (campaignBehaviorError) return campaignRefusalFail(campaignBehaviorError);
     }
     const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, requestedConfig);
     if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
+    if (!snapshotCommand && session.assistantThreadBudget) {
+      // A migration or a released reservation can leave the previous runner threshold behind.
+      // Settle it before admitting the next turn, including when no launch happens during it.
+      const { threadId, limitUsd } = session.assistantThreadBudget;
+      const costs = this.db.assistantThreads.costs(threadId);
+      if (limitUsd !== null && this.db.assistantThreads.earlierBackingSpend(threadId) > 0 &&
+          floorBudgetCents(limitUsd - costs.backingSpentUsd - costs.launchedHeldUsd) < 0.01) {
+        return fail(assistantThreadBudgetRefusal(limitUsd), 409);
+      }
+      const held = limitUsd === null ? 0 : costs.launchedHeldUsd;
+      const settled = this.rebalanceAssistantBacking(sessionId, limitUsd, held);
+      if (!settled.ok) return settled;
+      session = this.db.getSession(sessionId)!;
+    }
     const pendingInputBarrier = session.status === "input_required" || awaitsPendingInput(session.pendingApproval);
     const incomingMode = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config?.permissionMode : config?.permissionMode;
     if (incomingMode !== undefined && (incomingMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
@@ -6766,10 +7034,12 @@ export class SessionsService {
       }
       commandImages = externalized.data;
     }
+    const origin = delivery?.promptOrigin ?? promptOrigin;
     const command: DurableSessionCommand = snapshotCommand ?? {
       type: "prompt_session",
       sessionId,
       text: effectiveText,
+      ...(origin ? { promptOrigin: origin } : {}),
       ...(binding?.reviewContinuation ? { reviewContinuation: true as const } : {}),
       images: nonEmpty(commandImages),
       slashCommand: effectiveSlashCommand,
@@ -6890,15 +7160,25 @@ export class SessionsService {
     });
   }
 
+  promptWollipogNotice(sessionId: string, text: string, origin?: WollipogPromptOrigin): ServiceResult<PromptAdmissionView> {
+    return this.prompt(sessionId, text, [], undefined, undefined, undefined, false, undefined, undefined, false, origin);
+  }
+
   private promptSystemNotice(sessionId: string, text: string): ServiceResult<PromptAdmissionView> {
-    return this.prompt(sessionId, text, [], undefined, undefined, undefined, false, undefined, undefined, true);
+    return this.prompt(sessionId, text, [], undefined, undefined, undefined, false, undefined, undefined, true, { kind: "system_notice" });
   }
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
     this.expireAutomationCreationDecisions(now);
+    void this.retryLifecycleMergeSettlements(now, runnerId).catch((error: unknown) =>
+      this.log.warn(`lifecycle merge observation sweep deferred: ${String(error)}`));
+    this.maintainImageReviewerRetirement(now, runnerId);
     this.maintainArchivedWorktreeRemoval(now, runnerId);
-    for (const campaignId of this.db.listOrchestratorCampaignSessionIds(runnerId)) {
-      void this.reconcileUncertainIssueClosures(campaignId).catch(() => this.log.warn(`Issue closure recovery is pending for ${campaignId}`));
+    for (const targetSessionId of new Set([
+      ...this.db.listOrchestratorCampaignSessionIds(runnerId),
+      ...this.db.listUncertainIssueClosureSessionIds(runnerId),
+    ])) {
+      void this.reconcileUncertainIssueClosures(targetSessionId).catch(() => this.log.warn(`Issue closure recovery is pending for ${targetSessionId}`));
     }
     this.campaignRecovery.maintain(now, runnerId);
     // A first message whose command expired or failed without a receipt reopens its wait.
@@ -6985,15 +7265,8 @@ export class SessionsService {
       if (!campaign || campaign.archived || campaign.status !== "idle" || campaign.hasPendingApproval) continue;
       // Only its owner's first message may start a Full Control campaign launched without a task (#2940).
       if (this.firstMessageFence(campaignSessionId)) continue;
-      if (this.db.campaignContinuationAdmission(campaignSessionId).state !== "available") continue;
       if (!this.db.hasPendingCampaignContinuationEvents(campaignSessionId)) continue;
-      const projection = this.db.campaignProjection(campaignSessionId);
-      if (!projection || (projection.status === "waiting_human" &&
-          !this.db.campaignMayContinueWhileHumanWaiting(campaignSessionId)) || campaignStatusTerminal(projection.status) ||
-          !runnerSupportsProtocol(
-            this.db.getRunner(campaign.runnerId)?.protocolVersion,
-            "campaignContinuations",
-          )) continue;
+      if (!runnerSupportsProtocol(this.db.getRunner(campaign.runnerId)?.protocolVersion, "campaignContinuations")) continue;
       const currentLatest = this.db.latestCampaignContinuation(campaignSessionId);
       let resetAttemptCount = false;
       if (currentLatest?.state === "failed") {
@@ -7020,6 +7293,10 @@ export class SessionsService {
         ? promptAt + CAMPAIGN_CONTINUATION_FAN_IN_MS
         : events[0]!.createdAt + CAMPAIGN_CONTINUATION_COALESCE_MS;
       if (now < dueAt) continue;
+      if (this.db.campaignContinuationAdmission(campaignSessionId).state !== "available") continue;
+      const projection = this.db.campaignProjection(campaignSessionId);
+      if (!projection || (projection.status === "waiting_human" &&
+          !this.db.campaignMayContinueWhileHumanWaiting(campaignSessionId)) || campaignStatusTerminal(projection.status)) continue;
       const sessions = new Map<string, SessionView | null>();
       // Several turn ends of one child in this range are one entry, carrying its latest status and
       // how many it stands for (#4073). The range itself still covers every event.
@@ -7093,18 +7370,36 @@ export class SessionsService {
   }
 
   private async reconcileCampaignHandoffQuestionNow(campaignId: string): Promise<void> {
-    const root = this.db.getSession(campaignId);
+    const root = this.db.getSession(campaignId, { includeCampaignProjection: false });
     if (!root || root.archived || isTerminal(root.status) || root.orchestratorPolicy?.control?.mode !== "full_control" ||
         !runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "ownerQuestions")) return;
     const prior = this.db.campaignHandoffQuestion(campaignId);
     const handoffs = this.db.campaignWorkLedger.completionFacts(campaignId).handoffs;
+    const revision = root.parentControlPolicy?.revision ?? 0;
+    const retireSupersededDecline = (current: string | null) => {
+      const retired = this.db.campaignRecovery.retireSupersededHandoffDecline(campaignId, current);
+      const legacy = this.db.campaignRecovery.singleRootCredentialDecline(campaignId, revision);
+      let retiredLegacy = false;
+      if (current !== null && legacy === current) {
+        // Old floor and model refusals used the exact same content coordinate but a shared row.
+        this.db.campaignRecovery.blockHandoffCredentials(campaignId, current, revision, Date.now());
+        retiredLegacy = this.db.campaignRecovery.retireLegacyHandoffDecline(campaignId, current, current, revision);
+      } else if (legacy) {
+        const oldQuestion = this.db.campaignDeniedHandoffQuestions(campaignId).find(decision =>
+          recoveryCoordinate(`workflow:${campaignId}:${decision.requestId}`) === legacy);
+        if (oldQuestion) {
+          const content = recoveryCoordinate(`campaign_handoffs:${oldQuestion.resourceDigest}`);
+          if (content !== current) retiredLegacy = this.db.campaignRecovery.retireLegacyHandoffDecline(campaignId, legacy, content, revision);
+        }
+      }
+      if (retired || retiredLegacy) this.campaignRecovery.synchronize(root, Date.now());
+    };
     if (!handoffs.some(item => item.handoff.responsibleActor === "human")) {
+      retireSupersededDecline(null);
       if (prior?.status === "pending") this.revokeWorkflowDecision(prior, { reason: "authority_superseded",
         triggeredBy: { kind: "system", id: "campaign_handoffs" } });
       return;
     }
-    const projection = this.db.campaignProjection(campaignId);
-    if (prior?.status !== "pending" && projection?.status !== "stuck" && projection?.status !== "complete_needs_cleanup") return;
     const material = [...handoffs].sort((a, b) => a.workItemId.localeCompare(b.workItemId)).map(item => {
       const issue = item.issue ? `${item.issue.repository}#${item.issue.number}: ` : "";
       return `- ${issue}${item.title} (${item.handoff.responsibleActor})\n  Reason: ${item.handoff.reason}\n  Next action: ${item.handoff.nextAction}`;
@@ -7116,27 +7411,24 @@ export class SessionsService {
     const snapshot = normalized.data;
     snapshot.material = material + "\n\nThis question authorizes nothing. Your answer grants no action authority.";
     const digest = workflowDecisionResourceDigest(snapshot);
-    if (prior?.resourceDigest === digest && prior.status !== "revoked") return;
     const declineCoordinate = recoveryCoordinate(`campaign_handoffs:${digest}`);
-    const revision = root.parentControlPolicy?.revision ?? 0;
-    if (this.db.campaignRecovery.hasDeclinedOccurrence(campaignId, campaignId, declineCoordinate, revision)) {
-      if (prior?.status === "pending") this.revokeWorkflowDecision(prior, { reason: "authority_superseded",
-        triggeredBy: { kind: "system", id: "campaign_handoffs" } });
-      this.campaignRecovery.synchronize(this.db.getSession(campaignId) ?? root, Date.now());
-      return;
-    }
-    const requestId = prior?.status === "pending" ? prior.requestId : `campaign_handoffs_${digest}_${prior?.occurrenceId ?? "initial"}`;
+    retireSupersededDecline(declineCoordinate);
+    const previouslyDeclined = this.db.campaignRecovery.hasDeclinedOccurrence(campaignId, campaignId, declineCoordinate, revision);
     const blocked = () => {
       if (prior?.status === "pending") this.revokeWorkflowDecision(prior, { reason: "authority_superseded",
         triggeredBy: { kind: "system", id: "campaign_handoffs" } });
-      this.db.campaignRecovery.recordDecline(campaignId, campaignId, "secrets_and_sign_in",
-        declineCoordinate, revision, Date.now());
-      this.campaignRecovery.synchronize(this.db.getSession(campaignId) ?? root, Date.now());
+      this.db.campaignRecovery.blockHandoffCredentials(campaignId, declineCoordinate, revision, Date.now());
+      this.campaignRecovery.synchronize(this.db.getSession(campaignId, { includeCampaignProjection: false }) ?? root, Date.now());
     };
+    if (previouslyDeclined) { blocked(); return; }
+    if (prior?.resourceDigest === digest && prior.status !== "revoked") return;
+    const projection = this.db.campaignProjection(campaignId);
+    if (prior?.status !== "pending" && projection?.status !== "stuck" && projection?.status !== "complete_needs_cleanup") return;
+    const requestId = prior?.status === "pending" ? prior.requestId : `campaign_handoffs_${digest}_${prior?.occurrenceId ?? "initial"}`;
     // Handoff text is agent-written. Server-owned coordinates do not make its content trusted.
     if (credentialFormFloor(snapshot)) { blocked(); return; }
-    const screen = await this.screenCredentialText(root, campaignId, "owner_decision", requestId, ownerDecisionScreenData(snapshot));
-    const latest = this.db.getSession(campaignId);
+    const screen = await this.screenCredentialText(root, campaignId, "owner_decision", requestId, ownerDecisionScreenData(snapshot), true);
+    const latest = this.db.getSession(campaignId, { includeCampaignProjection: false });
     const current = this.db.campaignHandoffQuestion(campaignId);
     if (!latest || latest.archived || isTerminal(latest.status) || latest.orchestratorPolicy?.control?.mode !== "full_control" ||
         latest.parentControlPolicy?.revision !== root.parentControlPolicy?.revision ||
@@ -7157,7 +7449,7 @@ export class SessionsService {
       return;
     }
     const result = this.createWorkflowDecision(campaignId, {
-      requestId, resourceKey: "campaign_handoffs:owner", resourceSnapshot: snapshot,
+      requestId, resourceKey: CAMPAIGN_HANDOFF_QUESTION_KEY, resourceSnapshot: snapshot,
     }, () => true, { trustedOwnerDecision: true, trustedCampaignHandoffs: true, credentialScreen: screen });
     if (!result.ok) this.log.warn(`campaign handoff question for ${campaignId} was refused: ${result.error}`);
   }
@@ -7268,7 +7560,7 @@ export class SessionsService {
   ): CampaignContinuationEventDetail {
     const base = { seq: event.seq, kind: event.kind, createdAt: event.createdAt };
     const session = (id: string) => {
-      if (!sessions.has(id)) sessions.set(id, this.db.getSession(id));
+      if (!sessions.has(id)) sessions.set(id, this.db.getSession(id, { includeCampaignProjection: false }));
       return sessions.get(id) ?? null;
     };
     const subject = (sessionId: string | undefined) => {
@@ -7374,12 +7666,21 @@ export class SessionsService {
           ...base, ...subject(event.subjectSessionId), watchId: event.occurrenceId,
           pullRequest: event.subjectStatus, instruction: "The queue wait is stalled. The child stays parked. Inspect the forge; this grants no authority and performs no re-enqueue." } };
       }
-      case "child_blocked":
+      case "child_blocked": {
+        const refusalKind = event.subjectStatus === "provider_forge_command" ? "command"
+          : event.subjectStatus === "provider_forge_managed" ? "managed" : undefined;
+        if (refusalKind && event.occurrenceId) {
+          const decision = this.db.workflowDecisionByOccurrence(event.occurrenceId);
+          const actionable = !!decision && decision.sessionId === event.subjectSessionId && pendingProviderForgeAction(decision, now);
+          return { actionable, summary: { ...base, ...subject(event.subjectSessionId), occurrenceId: event.occurrenceId,
+            ...(actionable ? { instruction: providerForgeRefusalNotice(decision, refusalKind, true) } : {}) } };
+        }
         return { actionable: true, summary: {
           ...base, ...subject(event.subjectSessionId),
           ...(event.subjectStatus ? { hold: event.subjectStatus } : {}),
           ...(event.occurrenceId ? { holdId: event.occurrenceId } : {}),
         } };
+      }
       case "human_blockers_cleared":
         return { actionable: true, summary: base };
       case "campaign_idle": {
@@ -7613,6 +7914,27 @@ export class SessionsService {
 
   /** Change model/effort/approval mode mid-session (applies to the next turn). */
   setConfig(
+    sessionId: string,
+    config: SessionConfig,
+    actor: GovernanceActor = { kind: "human", id: "local" },
+  ): ServiceResult<SessionView> {
+    const inputError = sessionGuardrailConfigError(config);
+    if (inputError) return fail(inputError, 400);
+    const thread = config.costBudgetUsd === undefined ? null : this.db.assistantThreads.forSession(sessionId);
+    if (!thread) return this.applySessionConfig(sessionId, config, actor);
+    if (actor.kind !== "human" || actor.id !== thread.owner_user_id ||
+        this.db.operatingHumanPrincipal(thread.owner_user_id, thread.organization_id)?.role !== "owner") {
+      return fail("Only the Assistant thread's owner can change its budget.", 403);
+    }
+    const requested = config.costBudgetUsd!;
+    const limit = requested > 0 ? requested : null;
+    if (limit !== null && (!Number.isSafeInteger(Math.round(limit * 100)) || Number(limit.toFixed(2)) !== limit)) {
+      return fail("Enter a thread budget in whole cents.", 400);
+    }
+    return this.updateAssistantThreadLimits(thread, { costUsd: limit, launchedSessions: thread.launch_limit }, { config, actor });
+  }
+
+  private applySessionConfig(
     sessionId: string,
     config: SessionConfig,
     actor: GovernanceActor = { kind: "human", id: "local" },
@@ -8672,7 +8994,7 @@ export class SessionsService {
   private campaignPeerContracts(controller: SessionView, requesterId: string): { controller?: unknown; requester?: unknown } | undefined {
     const control = controller.orchestratorPolicy?.control;
     if (control?.mode !== "full_control" || !control.boundary.evidenceAuthority) return undefined;
-    const requester = this.db.getSession(requesterId);
+    const requester = this.db.getSession(requesterId, { includeCampaignProjection: false });
     return { controller: this.pacedVideoInstallationContract(controller.runnerId, controller.agentId),
       requester: requester ? this.pacedVideoInstallationContract(requester.runnerId, requester.agentId) : undefined };
   }
@@ -8762,6 +9084,7 @@ export class SessionsService {
     const pause = this.db.campaignPause(id);
     if (!pause || pause.resumedAt !== undefined) return;
     if (pause.stoppedSessionIds.some(childId => this.db.hasSessionStopIntent(childId))) return;
+    const promptOrigin: WollipogPromptOrigin = { kind: actor === "scheduled" ? "scheduled_wake" : "system_notice" };
     const text = "The campaign has resumed. Continue the preserved work within its existing authority and budget. Main may have moved; fetch it and inspect dependencies before continuing.";
     // Restart keeps suspension active until every retained child has passed existing admission.
     // An unsuccessful restart stays in this durable list for the next sweep, without more grants.
@@ -8769,7 +9092,7 @@ export class SessionsService {
       const child = this.db.getSession(childId);
       if (!child || child.archived) continue;
       if (child.status === "stopped" && !this.restart(childId, { campaignResume: true }).ok) continue;
-      this.promptOutbox.stage(childId, child.runnerId, { type: "prompt_session", sessionId: childId, text }, now,
+      this.promptOutbox.stage(childId, child.runnerId, { type: "prompt_session", sessionId: childId, text, promptOrigin }, now,
         `campaign_resume_${id}_${pause.pausedAt}_${childId}`);
       pause.stoppedSessionIds = pause.stoppedSessionIds.filter(memberId => memberId !== childId);
       this.db.saveCampaignPause(id, pause);
@@ -8778,7 +9101,7 @@ export class SessionsService {
     for (const memberId of pause.inFlightSessionIds) {
       const member = this.db.getSession(memberId);
       if (!member || member.archived || isTerminal(member.status)) continue;
-      this.promptOutbox.stage(memberId, member.runnerId, { type: "prompt_session", sessionId: memberId, text }, now,
+      this.promptOutbox.stage(memberId, member.runnerId, { type: "prompt_session", sessionId: memberId, text, promptOrigin }, now,
         `campaign_resume_${id}_${pause.pausedAt}_${memberId}`);
     }
     pause.resumedAt = now; pause.resumedBy = actor;
@@ -8982,7 +9305,7 @@ export class SessionsService {
     /** #3240: wait for a busy provider account instead of failing the launch. */
     waitForProviderHome?: boolean;
     campaignResume?: boolean;
-  } = {}): ServiceResult<SessionView> {
+  } = {}): ServiceResult<SessionView & { initialPromptWarning?: string }> {
     if (this.db.campaignPaused(sessionId) && !options.campaignResume) return fail("The campaign is paused; only its owner or scheduled resume can restart it.", 409);
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "runs once and cannot be restarted");
     if (reviewRefusal) return fail(reviewRefusal, 409);
@@ -9296,7 +9619,12 @@ export class SessionsService {
     this.hub.sessionChangedById(sessionId);
     this.publishCampaignAttentionTransition(campaignBefore);
     this.log.info(unarchived ? `session unarchived and restarted ${sessionId}` : `session restarted ${sessionId}`);
-    return ok(this.db.getSession(sessionId)!);
+    const restarted = this.db.getSession(sessionId)!;
+    if (session.status === "stopped" && this.db.hasInterruptedInitialPrompt(sessionId)) {
+      return ok({ ...restarted,
+        initialPromptWarning: "The initial prompt was not carried into this restart. Resend it if it did not run before Stop." });
+    }
+    return ok(restarted);
   }
 
   setParentControl(sessionId: string, mode: ParentControlMode): ServiceResult<SessionView> {
@@ -9536,6 +9864,10 @@ export class SessionsService {
         boundedDecisionString(request?.childSessionId, 256) &&
         this.db.isSessionDescendant(campaignSessionId, request.childSessionId) &&
         canAccess(campaignSessionId) && canAccess(request.childSessionId)) {
+      const helper = this.db.delegatedImageReviews.byReviewer(request.childSessionId);
+      if (helper && (helper.state === "consumed" || helper.state === "ended")) {
+        return this.verifyCampaignChild(campaignSessionId, request, canAccess);
+      }
       await this.hydrateHistory(request.childSessionId);
       // Registration inventories can advertise seq=0 without inspecting the stored log. A
       // complete cursor is not proof that the exact requested report is absent from the runner.
@@ -9636,6 +9968,14 @@ export class SessionsService {
     if (!root?.orchestratorPolicy) return fail("Orchestrator campaign not found", 404);
     const completion = root.orchestratorPolicy.behavior.completion;
     if (this.db.campaignPaused(root.id)) return fail("The campaign is paused; paused children cannot be verified.", 409);
+    const imageReview = this.db.delegatedImageReviews.byReviewer(child.id);
+    if (imageReview && (imageReview.state === "consumed" || imageReview.state === "ended") && !workItem) {
+      if (!checkOnly) {
+        const archived = this.setArchived(child.id, true);
+        if (!archived.ok) return failAs(archived, "reviewer archive failed");
+      }
+      return ok({ campaign: this.db.campaignProjection(root.id)!, child: this.db.getSession(child.id)! });
+    }
     // A requested stop, a guardrail Stop, a runner disconnect, and startup settlement all write
     // `stopped` before the runner confirms anything, so that row is not yet proof the child's last
     // report is final. Only a recorded confirmation is (#1466): it survives the runner going
@@ -10442,7 +10782,8 @@ export class SessionsService {
   private genericCampaignAuthority(controller: SessionView, requester: Pick<SessionView, "id" | "driver" | "runnerId"> & Partial<Pick<SessionView, "workspaceId">>, request: PendingApproval): CampaignAuthorityEvaluation {
     const repositoryRoot = controller.orchestratorPolicy?.control?.mode === "full_control" && request.context?.operation
       ? this.db.sessionRepositoryRoot(requester.id) : undefined;
-    const workspaceId = requester.workspaceId ?? (controller.orchestratorPolicy?.control?.mode === "full_control" ? this.db.getSession(requester.id)?.workspaceId : undefined);
+    const workspaceId = requester.workspaceId ?? (controller.orchestratorPolicy?.control?.mode === "full_control"
+      ? this.db.getSession(requester.id, { includeCampaignProjection: false })?.workspaceId : undefined);
     return evaluateCampaignAuthority(controller, this.campaignPlaced(controller, { ...requester, workspaceId, repositoryRoot: repositoryRoot ?? undefined }), this.db.getRunner(requester.runnerId)?.protocolVersion, this.db.campaignPolicyRequest(requester.id, controller.orchestratorPolicy?.control, request), controller.parentControlPolicy,
       controller.orchestratorPolicy?.control?.mode === "full_control" ? this.db.getRunner(controller.runnerId)?.protocolVersion : undefined,
       this.campaignPeerContracts(controller, requester.id));
@@ -10964,9 +11305,10 @@ export class SessionsService {
    * resolve protected requests by treating itself as a descendant. */
   private workflowDecisionRelationship(controllerId: string, requesterId: string): boolean {
     if (this.db.isSessionDescendant(controllerId, requesterId)) return true;
-    const controller = this.db.getSession(controllerId);
+    if (controllerId !== requesterId) return false;
+    const controller = this.db.getSession(controllerId, { includeCampaignProjection: false });
     const root = this.orchestratorCampaignController(controller);
-    return controllerId === requesterId && controller?.orchestratorPolicy?.control?.mode === "full_control" &&
+    return controller?.orchestratorPolicy?.control?.mode === "full_control" &&
       campaignBoundaryCurrent(controller) && root !== "refused" && root?.id === controllerId;
   }
 
@@ -12035,15 +12377,19 @@ export class SessionsService {
     const origin = this.db.raw().prepare("SELECT execution_id FROM automation_session_origins WHERE session_id=?").get(rootId) as { execution_id: string } | undefined;
     const scheduled = origin ? this.db.getAutomationExecution(origin.execution_id)?.specSnapshot : undefined;
     const customSchedule = scheduled?.action.kind === "create_session" && scheduled.action.request.campaign?.controlMode === "custom";
-    if (customSchedule && controller && !control) {
-      // An approved Custom schedule grants an aggregate allowance, never Full Control decisions.
-      // Its children stay in the inspected root Location; broader repository authority still
-      // requires the existing human-owned scope and control operations.
+    const rootAudience = controller ? this.db.sessionScope(controller.id) : null;
+    const customLaunch = !control && rootAudience?.owner.kind === "user" &&
+      this.db.hasHumanCustomCampaignLaunch(rootId, rootAudience.owner.userId);
+    if ((customSchedule || customLaunch) && controller && !control) {
+      // Owner-confirmed Custom launches and schedules grant only an aggregate allowance at the
+      // inspected root Location. An explicit control record supersedes that launch authority.
       const target = placement ?? session;
       if (controller.runnerId !== target.runnerId || controller.workspaceId !== target.workspaceId ||
-          !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "campaignBudgetAdmission") ||
-          view.authority.costUsd !== scheduled!.limits.maxCostUsd || view.authority.toolCalls !== scheduled!.limits.maxToolCalls) {
-        return "scheduled campaign allowance requires its approved limits and root Location";
+          !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "campaignBudgetAdmission")) {
+        return "Custom campaign allowance requires its approved root Location and accounting support";
+      }
+      if (customSchedule && (view.authority.costUsd !== scheduled.limits.maxCostUsd || view.authority.toolCalls !== scheduled.limits.maxToolCalls)) {
+        return "scheduled campaign allowance requires its approved limits";
       }
     } else {
       if (!controller || control?.mode !== "full_control" || !campaignBoundaryCurrent(controller)) return "campaign allowance boundary is stale or revoked";
@@ -12162,8 +12508,74 @@ export class SessionsService {
     const excludedRepository = requesting && normalized.data && !this.armedMergesOf(requesting, normalized.data).length
       ? this.excludedRepositoryRefusal(requesting, null, normalized.data) : null;
     if (excludedRepository) return fail(excludedRepository, 409);
+    if (normalized.ok && normalized.data && requesting && this.standaloneDirectOwnerSession(requesting)) {
+      if (normalized.data.category === "follow_up_issue_publication" && normalized.data.recommendationId) {
+        return fail("recommendationId is valid only inside a campaign", 400);
+      }
+      if (normalized.data.category === "merged_branch_deletion" && normalized.data.merged === false) {
+        return fail("Temporary branch deletion receipts require a campaign session; use merged_branch_deletion for a merged pull request branch.", 409);
+      }
+      if (normalized.data.category === "pr_merge" || normalized.data.category === "merged_branch_deletion" ||
+          normalized.data.category === "follow_up_issue_publication") {
+        if (!canAccess(requesting.id)) return fail("session not found", 404);
+        if (isTerminal(requesting.status)) return fail("a terminal session cannot request a workflow decision", 409);
+        const unsupported = this.capabilityFailure(requesting.runnerId, "standaloneOwnerDecisions", "standalone owner approvals");
+        if (unsupported) return unsupported;
+        const verified = await this.verifyStandaloneRepositoryLocation(requesting, normalized.data.repository);
+        if (!verified.ok || !verified.data) return failAs(verified);
+        if (normalized.data.category === "pr_merge") {
+          return this.createMergeDecision(sessionId, request, normalized.data, canAccess, verified.data.id);
+        }
+        return this.createWorkflowDecision(sessionId, request, canAccess, { trustedForgeLocationId: verified.data.id });
+      }
+      if (normalized.data.category === "ui_evidence_approval") {
+        const unsupported = this.capabilityFailure(requesting.runnerId, "standaloneOwnerDecisions", "standalone owner approvals");
+        if (unsupported) return unsupported;
+      }
+    }
+    let verifiedCustomPublicationLocationId: string | undefined;
+    if (normalized.ok && normalized.data && requesting && this.customRootOwnWorkSession(requesting, normalized.data.category)) {
+      if (normalized.data.category === "pr_merge" || normalized.data.category === "merged_branch_deletion") {
+        if (!canAccess(requesting.id)) return fail("session not found", 404);
+        if (isTerminal(requesting.status)) return fail("a terminal session cannot request a workflow decision", 409);
+        const unsupported = this.capabilityFailure(requesting.runnerId, "standaloneOwnerDecisions", "custom campaign root own-work approvals");
+        if (unsupported) return unsupported;
+        const repo = normalized.data.repository;
+        const scopeRepos = campaignScopeRepositories(requesting);
+        if (scopeRepos.length > 0 && !scopeRepos.some((entry) => entry.repository === repo.toLowerCase())) {
+          return fail("The requested repository is outside this campaign's authorized repositories", 403);
+        }
+        const verified = await this.verifyStandaloneRepositoryLocation(requesting, repo);
+        if (!verified.ok || !verified.data) return failAs(verified);
+        if (normalized.data.category === "pr_merge") {
+          return this.createMergeDecision(sessionId, request, normalized.data, canAccess, verified.data.id);
+        }
+        return this.createWorkflowDecision(sessionId, request, canAccess, { trustedForgeLocationId: verified.data.id });
+      }
+      if (normalized.data.category === "ui_evidence_approval") {
+        const unsupported = this.capabilityFailure(requesting.runnerId, "standaloneOwnerDecisions", "custom campaign root own-work approvals");
+        if (unsupported) return unsupported;
+      }
+      if (normalized.data.category === "follow_up_issue_publication") {
+        const repo = normalized.data.repository;
+        const scopeRepos = campaignScopeRepositories(requesting);
+        if (scopeRepos.length > 0 && !scopeRepos.some((entry) => entry.repository === repo.toLowerCase())) {
+          return fail("The requested repository is outside this campaign's authorized repositories", 403);
+        }
+        if (scopeRepos.length === 0 && this.requesterForgeDecisionLocation(requesting)) {
+          if (!canAccess(requesting.id)) return fail("session not found", 404);
+          if (isTerminal(requesting.status)) return fail("a terminal session cannot request a workflow decision", 409);
+          const verified = await this.verifyStandaloneRepositoryLocation(requesting, repo, null);
+          if (!verified.ok || !verified.data) return failAs(verified);
+          verifiedCustomPublicationLocationId = verified.data.id;
+        }
+      }
+    }
     if (normalized.ok && normalized.data?.category === "follow_up_issue_publication" && normalized.data.recommendationId) {
-      if (normalized.data.issueAdmission) return this.createWorkflowDecision(sessionId, request, canAccess);
+      if (normalized.data.issueAdmission) {
+        return this.createWorkflowDecision(sessionId, request, canAccess,
+          verifiedCustomPublicationLocationId ? { trustedForgeLocationId: verifiedCustomPublicationLocationId } : undefined);
+      }
       const initialCaller = this.db.getSession(sessionId);
       const initialController = initialCaller && this.workflowDecisionController(initialCaller, "follow_up_issue_publication");
       const admitted = await this.admitCampaignPublication(sessionId, request, normalized.data, canAccess);
@@ -12185,12 +12597,63 @@ export class SessionsService {
       // The snapshot keeps the name exactly as requested, so the card shows what the person
       // approves and the requester consumes what it sent (#3918). Only the server's own
       // issueAdmission makes a publication bounded; a named recommendation never does.
-      return this.createWorkflowDecision(sessionId, request, canAccess,
-        "failure" in admitted ? { publicationAdmissionFailure: admitted.failure,
-          ...(admitted.failure === "origin_outside_scope" ? { publicationAdmissionReason: admitted.reason } : {}) } : undefined);
+      return this.createWorkflowDecision(sessionId, request, canAccess, {
+        ...("failure" in admitted ? { publicationAdmissionFailure: admitted.failure,
+          ...(admitted.failure === "origin_outside_scope" ? { publicationAdmissionReason: admitted.reason } : {}) } : {}),
+        ...(verifiedCustomPublicationLocationId ? { trustedForgeLocationId: verifiedCustomPublicationLocationId } : {}),
+      });
+    }
+    if (verifiedCustomPublicationLocationId) {
+      return this.createWorkflowDecision(sessionId, request, canAccess, { trustedForgeLocationId: verifiedCustomPublicationLocationId });
     }
     if (normalized.ok && normalized.data?.category === "pr_merge") {
       return this.createMergeDecision(sessionId, request, normalized.data, canAccess);
+    }
+    if (normalized.ok && normalized.data && (normalized.data.category === "ci_rerun" ||
+        normalized.data.category === "release_tag" || normalized.data.category === "release_publish")) {
+      const child = requesting;
+      if (!child || !canAccess(child.id)) return fail("session not found", 404);
+      const target = normalized.data;
+      const key = target.category === "ci_rerun" ? ciRerunResourceKey(target) : releaseDecisionResourceKey(target);
+      if (!boundedDecisionString(request?.requestId, 256) || request.resourceKey !== key) {
+        return fail(`Supply a requestId and the canonical resourceKey: ${key}`, 400);
+      }
+      const controller = this.workflowDecisionController(child, target.category);
+      if (!controller || !canAccess(controller.session.id)) return fail("workflow decision controller is unavailable", 409);
+      if (isTerminal(child.status) || isTerminal(controller.session.status)) return fail("a terminal session cannot request or control a workflow decision", 409);
+      const capability = requesterForgeCapability(target.category);
+      const unsupported = this.capabilityFailure(child.runnerId, capability,
+        target.category === "ci_rerun" ? "typed CI reruns" : "typed release decisions");
+      if (unsupported) return unsupported;
+      const location = this.requesterForgeDecisionLocation(child);
+      if (!location) return fail("This action requires a registered Project Location", 409);
+      const inspected = await inspectProjectLocation({ db: this.db, hub: this.hub }, location.id, {
+        projectId: location.projectId, requireProtocol: capability, timeoutMs: 10_000,
+      });
+      if (!inspected.ok || inspected.location.repository !== normalized.data.repository) {
+        return fail("The requested GitHub repository could not be verified at this session's Location", 409);
+      }
+      if (target.category !== "ci_rerun") {
+        return this.createWorkflowDecision(sessionId, request, canAccess, { trustedForgeLocationId: location.id });
+      }
+      const prior = this.db.workflowDecisionByRequestId(sessionId, request.requestId)?.resourceSnapshot;
+      let jobName = prior?.category === "ci_rerun" ? prior.jobName : undefined;
+      if (!prior && target.jobId !== undefined) {
+        const requestId = `ci_job_inspection_${randomUUID()}`;
+        const { repository, runId, headSha, attempt } = target;
+        try {
+          const answer = await this.hub.requestFromRunner(child.runnerId, requestId, {
+            type: "forge_decision_action", requestId, sessionId, occurrenceId: requestId,
+            action: { kind: "ci_rerun_inspect_job", repository, runId, jobId: target.jobId, headSha, attempt },
+          }, 10_000);
+          if (answer.type === "forge_decision_action_result" && answer.requestId === requestId &&
+              answer.occurrenceId === requestId && answer.sessionId === sessionId && answer.outcome === "ci_job_inspected" &&
+              boundedDecisionString(answer.jobName, 200) && !/[\p{Cc}\p{Cf}]/u.test(answer.jobName)) jobName = answer.jobName;
+        } catch {
+          // The exact job ID is still available if GitHub cannot supply a display name.
+        }
+      }
+      return this.createWorkflowDecision(sessionId, request, canAccess, { trustedForgeLocationId: location.id, ciRerunJobName: jobName });
     }
     if (normalized.ok && normalized.data?.category === "implementation_question") {
       const credentialScreen = await this.screenImplementationQuestion(sessionId, request, normalized.data);
@@ -12525,7 +12988,9 @@ export class SessionsService {
 
   private excludedRepositoryRefusalDetail(requester: SessionView, controller: SessionView | null, snapshot: WorkflowDecisionResourceSnapshot):
     ExcludedRepositoryDetail | null {
-    if (snapshot.category !== "follow_up_issue_publication" && snapshot.category !== "pr_merge" && snapshot.category !== "merged_branch_deletion") return null;
+    if (snapshot.category !== "follow_up_issue_publication" && snapshot.category !== "pr_merge" &&
+        snapshot.category !== "merged_branch_deletion" && snapshot.category !== "ci_rerun" &&
+        snapshot.category !== "release_tag" && snapshot.category !== "release_publish") return null;
     const rootId = this.db.campaignRootForMember(requester.id);
     const root = (rootId ? this.db.getSession(rootId) : null) ?? controller ?? requester;
     return this.excludedRepositoryDetail(root, snapshot.repository, requester);
@@ -12647,7 +13112,16 @@ export class SessionsService {
     const entries = campaignScopeRepositories(root);
     const repository = snapshot.repository.toLowerCase();
     const entry = entries.find((candidate) => candidate.repository === repository);
-    if (!entry || !includeOwn && entries.length < 2) return null;
+    if (!entry) {
+      if (includeOwn && requester.id === controller.id && this.directOwnerSelfControlled(requester, "follow_up_issue_publication")) {
+        const location = this.requesterForgeDecisionLocation(requester);
+        if (location) {
+          return { root, entry: { repository, locationIds: [location.id] }, requester };
+        }
+      }
+      return null;
+    }
+    if (!includeOwn && entries.length < 2) return null;
     const own = requester.id === root.id ? campaignLaunchRepository(root) : this.db.campaignParticipantRepository(root, requester);
     return !includeOwn && own === repository ? null : { root, entry, ...(includeOwn && own === repository ? { requester } : {}) };
   }
@@ -12744,9 +13218,13 @@ export class SessionsService {
 
   private async readPublishedIssuePayload(root: SessionView,
     publication: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>, issue: number): Promise<PublishedIssueFailure | null> {
-    // An issue published in another boundary repository is read through one of its Locations (#4119).
+    // An issue published in another boundary repository (or a standalone session's Location) is read through its Location (#4119, #4894).
     if (publication.repository !== campaignLaunchRepository(root)) {
-      const entry = campaignScopeRepositories(root).find((candidate) => candidate.repository === publication.repository);
+      const entry = campaignScopeRepositories(root).find((candidate) => candidate.repository === publication.repository) ??
+        (() => {
+          const location = this.requesterForgeDecisionLocation(root);
+          return location ? { repository: publication.repository, locationIds: [location.id] } : undefined;
+        })();
       return entry ? verifyBoundaryPublishedIssue({ db: this.db, hub: this.hub }, root, entry,
         { sanitizedTitle: publication.sanitizedTitle, sanitizedBody: publication.sanitizedBody, labels: publication.labels }, issue) : "read_failed";
     }
@@ -13927,14 +14405,86 @@ export class SessionsService {
   ): Promise<ServiceResult<{ decision?: WorkflowDecisionView; outcome?: "already_closed"; url?: string; proofGaps?: IssueClosureProofGapNotice }>> {
     const session = this.db.getSession(sessionId);
     if (!session || !canAccess(sessionId)) return fail("session not found", 404);
-    if (sessionRole(session) !== "orchestrator" || !session.orchestratorPolicy ||
-        this.db.resolvedCampaignSessionId(sessionId) !== sessionId) {
+    if (this.decisionControllerRoot(session) === "refused") return fail(MALFORMED_ANCESTRY_DECISION_REFUSAL, 409);
+    const standalone = this.standaloneDirectOwnerSession(session);
+    if (!standalone && (sessionRole(session) !== "orchestrator" || !session.orchestratorPolicy ||
+        this.db.resolvedCampaignSessionId(sessionId) !== sessionId)) {
       return fail("issue closure requires the root campaign Orchestrator", 403);
     }
-    const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "human-approved issue closure");
+    const unsupported = this.capabilityFailure(session.runnerId,
+      standalone ? "standaloneOwnerDecisions" : "orchestratorIssueClosure",
+      standalone ? "standalone issue closure" : "human-approved issue closure");
     if (unsupported) return unsupported;
+    if (standalone) {
+      if (isTerminal(session.status)) return fail("Issue closure requires a live session; this session has ended.", 409);
+      const allowedStandaloneClosureKeys = new Set([
+        "requestId", "issue", "repository", "reason", "explanation", "evidence", "comment", "dispositionRecommendationId",
+      ]);
+      const unexpectedKeys = request && typeof request === "object" && !Array.isArray(request)
+        ? Object.keys(request).filter((key) => !allowedStandaloneClosureKeys.has(key)) : [];
+      if (unexpectedKeys.length) {
+        return fail(`Unexpected field(s) on standalone issue closure proposal: ${unexpectedKeys.join(", ")}`, 400);
+      }
+      const invalidFields = issueClosureRequestInvalidFields(request);
+      if (invalidFields.length) return issueClosureRequestInvalid(invalidFields);
+      if (request.dispositionRecommendationId !== undefined) {
+        return fail("dispositionRecommendationId is valid only inside a campaign", 400);
+      }
+      const location = this.requesterForgeDecisionLocation(session);
+      if (!location) return fail("Issue closure requires a registered Project Location", 409);
+      const verified = await inspectProjectLocation({ db: this.db, hub: this.hub }, location.id, {
+        projectId: location.projectId, requireProtocol: "standaloneOwnerDecisions", timeoutMs: 10_000,
+      });
+      if (!verified.ok) {
+        return fail(verified.failure === "runner_too_old"
+          ? runnerCapabilityRequirementError(this.db.getRunner(location.runnerId)?.protocolVersion, "standaloneOwnerDecisions", "standalone issue closure").error
+          : "The session's repository could not be verified at its Project Location", 409);
+      }
+      const authorizedRepository = verified.location.repository.toLowerCase();
+      if (request.repository !== undefined && request.repository.toLowerCase() !== authorizedRepository) {
+        return fail("The requested repository is outside this session's authorized Project Location", 403);
+      }
+      const gitlabUnsupported = gitlabIssueCompatibility(this.db, session, authorizedRepository);
+      if (gitlabUnsupported) return capabilityFail(gitlabUnsupported);
+      try {
+        const requestId = `issue_closure_inspect_${randomUUID()}`;
+        const inspected = await this.hub.requestFromRunner(session.runnerId, requestId, {
+          type: "github_issue_closure", operation: "inspect", requestId, sessionId, issue: request.issue,
+          standalone: true, expectedRepository: authorizedRepository,
+        }, 60_000);
+        if (inspected.type !== "github_issue_closure_result" || inspected.sessionId !== sessionId ||
+            !inspected.ok || !inspected.inspection || inspected.inspection.issue !== request.issue) {
+          return fail(inspected.type === "github_issue_closure_result" && inspected.error
+            ? inspected.error : "runner could not inspect the issue and its related open pull requests", 409);
+        }
+        if (inspected.inspection.repository.toLowerCase() !== authorizedRepository) {
+          return fail("The runner repository changed from the verified Project Location; restore the repository and retry.", 409);
+        }
+        const inspectedGitlab = gitlabIssueCompatibility(this.db, session, inspected.inspection.repository);
+        if (inspectedGitlab) return capabilityFail(inspectedGitlab);
+        if (inspected.inspection.state === "CLOSED") return ok({ outcome: "already_closed", url: inspected.inspection.url });
+        if (inspected.inspection.state !== "OPEN") return fail("runner returned invalid issue state", 409);
+        const { state: _state, crossRepositoryDelivery: _runnerCross, ...inspection } = inspected.inspection as typeof inspected.inspection & { crossRepositoryDelivery?: unknown };
+        const resourceKey = `issue_closure:${inspection.repository.toLowerCase()}#${request.issue}`;
+        const previousRefusal = this.db.latestIssueClosureRefusal(sessionId, resourceKey);
+        const snapshot: GithubIssueClosureSnapshot = { ...inspection, category: "issue_closure", reason: request.reason,
+          explanation: request.explanation, evidence: request.evidence,
+          ...(request.comment === undefined ? {} : { comment: request.comment }),
+          activeChildren: [], excludedChildren: [], issueAttemptDigest: auditDigest([])!,
+          ...(previousRefusal ? { previousRefusal } : {}) };
+        const created = this.createWorkflowDecision(sessionId, {
+          requestId: request.requestId, resourceKey, resourceSnapshot: snapshot,
+        }, canAccess, { trustedIssueClosure: true, trustedForgeLocationId: location.id });
+        if (!created.ok) return { ...failAs(created), ...(created.errorDetails ? { errorDetails: created.errorDetails } : {}) };
+        return ok({ decision: created.data }, created.status);
+      } catch {
+        return fail("issue inspection failed or the runner did not respond; no closure was attempted", 409);
+      }
+    }
+    const orchestratorPolicy = session.orchestratorPolicy;
+    if (!orchestratorPolicy) return fail("Issue closure requires a root campaign Orchestrator or standalone Normal session.", 403);
     // #3539: closing a GitLab issue needs a runner that reads and closes GitLab issues.
-    const gitlabUnsupported = gitlabIssueCompatibility(this.db, session, campaignOtherRepository(session, typeof request?.repository === "string" ? request.repository : undefined) ?? session.orchestratorPolicy.issueScope?.repository);
+    const gitlabUnsupported = gitlabIssueCompatibility(this.db, session, campaignOtherRepository(session, typeof request?.repository === "string" ? request.repository : undefined) ?? orchestratorPolicy.issueScope?.repository);
     if (gitlabUnsupported) return capabilityFail(gitlabUnsupported);
     if (issueBoundary(session)) {
       const compatibility = scopeCompatibility(this.db, session);
@@ -13962,18 +14512,18 @@ export class SessionsService {
       return scopeRefusal;
     }
     try {
-      if (session.orchestratorPolicy.issueScope && !await this.synchronizeCampaignIssueScope(sessionId)) return fail("Campaign scope synchronization is pending; reconnect every participating runner and retry.", 409);
+      if (orchestratorPolicy.issueScope && !await this.synchronizeCampaignIssueScope(sessionId)) return fail("Campaign scope synchronization is pending; reconnect every participating runner and retry.", 409);
       const requestId = `issue_closure_inspect_${randomUUID()}`;
       const fullBoundary = issueBoundary(session);
       const target = this.closureTarget(session, request.repository);
       if (!target) return fail(`No Location of ${otherRepository} is online on a runner that can close its issues, so no closure was requested. Retry once one is.`, 409);
       const routed = target.location ? { location: target.location } : {};
-      const repository = otherRepository ?? session.orchestratorPolicy.issueScope?.repository;
+      const repository = otherRepository ?? orchestratorPolicy.issueScope?.repository;
       const campaignPullRequests = repository && runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "closureCampaignPullRequests")
         ? closureCampaignPullRequests(this.db, session, repository) ?? null : undefined;
       const inspected = await this.hub.requestFromRunner(target.runnerId, requestId, {
         type: "github_issue_closure", operation: "inspect", requestId, sessionId, issue: request.issue, ...routed,
-        ...(session.orchestratorPolicy.issueScope ? { scopeRevision: session.orchestratorPolicy.issueScope.revision } : {}),
+        ...(orchestratorPolicy.issueScope ? { scopeRevision: orchestratorPolicy.issueScope.revision } : {}),
         ...(campaignPullRequests === undefined ? {} : { campaignPullRequests }),
       }, 60_000);
       if (inspected.type !== "github_issue_closure_result" || inspected.sessionId !== sessionId ||
@@ -13981,7 +14531,7 @@ export class SessionsService {
         return fail(inspected.type === "github_issue_closure_result" && inspected.error
           ? inspected.error : "runner could not inspect the issue and its related open pull requests", 409);
       }
-      if (session.orchestratorPolicy.issueScope && inspected.inspection.repository.toLowerCase() !== (otherRepository ?? session.orchestratorPolicy.issueScope.repository)) return fail("The runner repository changed from the authorized campaign scope; restore the repository and retry.", 409);
+      if (orchestratorPolicy.issueScope && inspected.inspection.repository.toLowerCase() !== (otherRepository ?? orchestratorPolicy.issueScope.repository)) return fail("The runner repository changed from the authorized campaign scope; restore the repository and retry.", 409);
       const inspectedGitlab = gitlabIssueCompatibility(this.db, session, inspected.inspection.repository);
       if (inspectedGitlab) return capabilityFail(inspectedGitlab);
       if (inspected.inspection.state === "CLOSED") return ok({ outcome: "already_closed", url: inspected.inspection.url });
@@ -13990,7 +14540,7 @@ export class SessionsService {
       const { state: _state, crossRepositoryDelivery: _runnerCross, ...inspection } = inspected.inspection as typeof inspected.inspection & { crossRepositoryDelivery?: unknown };
       const children = issueClosureChildren(this.db, sessionId, { repository: inspection.repository, number: request.issue });
       let snapshot: GithubIssueClosureSnapshot = { ...inspection, category: "issue_closure", reason: request.reason,
-        ...(session.orchestratorPolicy.issueScope ? { scopeRevision: session.orchestratorPolicy.issueScope.revision } : {}),
+        ...(orchestratorPolicy.issueScope ? { scopeRevision: orchestratorPolicy.issueScope.revision } : {}),
         explanation: request.explanation, evidence: request.evidence,
         ...(request.comment === undefined ? {} : { comment: request.comment }),
         ...(request.dispositionRecommendationId === undefined ? {} : { dispositionRecommendationId: request.dispositionRecommendationId }),
@@ -14106,8 +14656,20 @@ export class SessionsService {
   private closureApprovalChange(sessionId: string, decision: WorkflowDecisionView,
     snapshot: GithubIssueClosureSnapshot, resourceDigest: string): string | null {
     const session = this.db.getSession(sessionId);
-    if (!session || sessionRole(session) !== "orchestrator" || isTerminal(session.status) ||
-        this.db.resolvedCampaignSessionId(sessionId) !== sessionId) return "campaign session changed";
+    const standalone = Boolean(session && this.standaloneDirectOwnerSession(session));
+    if (!session || isTerminal(session.status)) return standalone ? "session changed" : "campaign session changed";
+    if (standalone) {
+      if (decision.authority !== "human") return "approval authority changed";
+      if (decision.resourceDigest !== resourceDigest) return "payload digest changed";
+      if (!decision.resolvedAt) return "approval resolution is missing";
+      if (snapshot.scopeRevision !== undefined) return "issue scope changed";
+      if (!this.requesterForgeDecisionLocation(session)) return "Project Location changed";
+      const policy = this.directOwnerPolicy(session);
+      if (decision.policyRevision !== policy.revision) return "policy revision changed";
+      if (!this.workflowDecisionAuthorityCurrent(session, policy, decision)) return "approval authority changed";
+      return null;
+    }
+    if (sessionRole(session) !== "orchestrator" || this.db.resolvedCampaignSessionId(sessionId) !== sessionId) return "campaign session changed";
     if (decision.resourceDigest !== resourceDigest) return "payload digest changed";
     if (!decision.resolvedAt) return "approval resolution is missing";
     if (!campaignClosureIssueHeld(session.orchestratorPolicy, { repository: snapshot.repository, number: snapshot.issue }) ||
@@ -14168,12 +14730,33 @@ export class SessionsService {
       this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
       return fail(`Issue-closure approval refused: ${changed ?? "campaign session changed"}; request renewed exact review`, 409);
     }
-    const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "human-approved issue closure");
+    const standalone = this.standaloneDirectOwnerSession(session);
+    const unsupported = this.capabilityFailure(session.runnerId,
+      standalone ? "standaloneOwnerDecisions" : "orchestratorIssueClosure",
+      standalone ? "standalone issue closure" : "human-approved issue closure");
     if (unsupported) return unsupported;
     const gitlabUnsupported = gitlabIssueCompatibility(this.db, session, snapshot.repository);
     if (gitlabUnsupported) return capabilityFail(gitlabUnsupported);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline; no closure was attempted", 409);
-    if (!this.closureTarget(session, snapshot.repository)) return fail(`No Location of ${snapshot.repository} is online on a runner that can close its issues; no closure was attempted. Retry once one is.`, 409);
+    if (standalone) {
+      const location = this.requesterForgeDecisionLocation(session);
+      if (!location) {
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+        return fail("Issue-closure approval refused: Project Location changed; request renewed exact review", 409);
+      }
+      const verified = await inspectProjectLocation({ db: this.db, hub: this.hub }, location.id, {
+        projectId: location.projectId, requireProtocol: "standaloneOwnerDecisions", timeoutMs: 10_000,
+      });
+      if (!verified.ok) {
+        return fail("The session's Project Location could not be verified; approval preserved. Retry once it is reachable.", 409);
+      }
+      if (verified.location.repository.toLowerCase() !== snapshot.repository.toLowerCase()) {
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+        return fail("Issue-closure approval refused: the session's Project Location repository changed; request renewed exact review", 409);
+      }
+    } else if (!this.closureTarget(session, snapshot.repository)) {
+      return fail(`No Location of ${snapshot.repository} is online on a runner that can close its issues; no closure was attempted. Retry once one is.`, 409);
+    }
     if (decision.authority === "orchestrator") await this.refreshClosureForge(sessionId, snapshot.issue, snapshot.repository);
     if (decision.authority === "orchestrator" && (!snapshot.issueAdmission || issueEvidenceDigest(closureEvidence(this.db, session, snapshot)) !== snapshot.issueAdmission.evidenceDigest)) {
       this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
@@ -14228,9 +14811,11 @@ export class SessionsService {
     }
     const settled = Date.now();
     // Read again as the last step before consumption: the Location must still be one of the repository's.
-    const target = this.closureTarget(freshSession, snapshot.repository);
+    const target = standalone ? { runnerId: freshSession.runnerId } : this.closureTarget(freshSession, snapshot.repository);
+    const freshPolicy = standalone ? this.directOwnerPolicy(freshSession) : freshSession.parentControlPolicy;
     if (this.db.workflowDecisionByOccurrence(occurrenceId)?.status !== "approved" ||
-        decision.policyRevision !== freshSession.parentControlPolicy?.revision || !this.hub.isRunnerOnline(session.runnerId) || !target ||
+        decision.policyRevision !== freshPolicy?.revision || !this.hub.isRunnerOnline(session.runnerId) || !target ||
+        (standalone && !this.requesterForgeDecisionLocation(freshSession)) ||
         this.pendingPolicyAsk(freshSession) || pendingRequests(freshSession.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
         this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, settled)) {
       return fail("The closure approval, runner or guardrails changed while execution was being prepared; no closure was attempted", 409);
@@ -14261,6 +14846,7 @@ export class SessionsService {
       const requestId = `issue_closure_execute_${randomUUID()}`;
       let response = await this.hub.requestFromRunner(target.runnerId, requestId, {
         type: "github_issue_closure", operation: "execute", requestId, sessionId, occurrenceId, snapshot: dispatched,
+        ...(standalone ? { standalone: true as const, expectedRepository: snapshot.repository } : {}),
         ...(prepare ? { prepare: true as const, campaignPullRequests } : {}),
         ...(target.location ? { location: target.location } : {}),
       }, 150_000);
@@ -14319,16 +14905,21 @@ export class SessionsService {
     request: CreateWorkflowDecisionRequest,
     snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
     canAccess: (sessionId: string) => boolean,
+    trustedForgeLocationId?: string,
   ): Promise<ServiceResult<WorkflowDecisionView>> {
     const child = this.db.getSession(sessionId);
     if (!child || isTerminal(child.status) || !canAccess(sessionId) ||
         !boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
-      return this.createWorkflowDecision(sessionId, request, canAccess);
+      return this.createWorkflowDecision(sessionId, request, canAccess,
+        trustedForgeLocationId ? { trustedForgeLocationId } : undefined);
     }
     const checked = await this.mergeClosures(child, snapshot);
     if (!checked.ok) return fail(checked.message, 409);
     return this.createWorkflowDecision(sessionId, request, canAccess,
-      checked.check ? { closingReferenceCheck: checked.check } : undefined);
+      checked.check || trustedForgeLocationId
+        ? { ...(checked.check ? { closingReferenceCheck: checked.check } : {}),
+            ...(trustedForgeLocationId ? { trustedForgeLocationId } : {}) }
+        : undefined);
   }
 
   /** What merging would close, read from the forge through the child's runner and compared with the
@@ -14501,22 +15092,25 @@ export class SessionsService {
   /** Upgrade recovery uses the stored consumed occurrence. A durable read fence precedes dispatch;
    * a lost read goes to the owner after restart, never to another mutation or an agent assertion. */
   async reconcileUncertainIssueClosures(campaignId: string): Promise<void> {
-    const root = this.db.getSession(campaignId);
-    if (!root || root.archived || isTerminal(root.status)) return;
+    let root: SessionView | null | undefined;
     for (const decision of this.db.campaignRecoverySettledDecisions(campaignId)) {
       if (decision.status !== "consumed" || decision.resourceSnapshot.category !== "issue_closure" ||
           decision.issueClosureResult?.outcome !== "uncertain" || this.issueClosureRecoveries.has(decision.occurrenceId)) continue;
       const pendingOwner = decision.issueClosureResult.reconciliation?.ownerDecisionOccurrenceId;
       if (pendingOwner && this.db.workflowDecisionByOccurrence(pendingOwner)?.status === "pending") continue;
+      root ??= this.db.getSession(campaignId, { includeCampaignProjection: false });
+      if (!root || root.archived || isTerminal(root.status)) return;
       this.issueClosureRecoveries.add(decision.occurrenceId);
       try {
         const snapshot = decision.resourceSnapshot;
         let result = decision.issueClosureResult;
         if (!result.reconciliation) {
+          const isStandalone = this.standaloneDirectOwnerSession(root);
+          const reconcileCap: RunnerProtocolCapability = isStandalone ? "standaloneOwnerDecisions" : "issueClosureReconciliation";
           const target = this.closureTarget(root, snapshot.repository);
           // An upgrade/reconnect that cannot send a read has made no recovery attempt yet.
           if (!target || !this.hub.isRunnerOnline(target.runnerId) ||
-              !runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "issueClosureReconciliation")) {
+              !runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, reconcileCap)) {
             const repositoryRemoved = Boolean(campaignOtherRepository(root, snapshot.repository)) &&
               !campaignScopeRepositories(root).some(entry => entry.repository.toLowerCase() === snapshot.repository.toLowerCase());
             const waitingSince = result.reconciliationWaitingSince ?? Date.now();
@@ -14533,12 +15127,13 @@ export class SessionsService {
           this.db.recordGithubIssueClosureResult(decision.occurrenceId, result);
           let verified = false;
           if (target && this.hub.isRunnerOnline(target.runnerId) &&
-              runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "issueClosureReconciliation")) {
+              runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, reconcileCap)) {
             const requestId = `issue_closure_reconcile_${randomUUID()}`;
             try {
               const response = await this.hub.requestFromRunner(target.runnerId, requestId, {
                 type: "github_issue_closure", operation: "reconcile", requestId, sessionId: decision.sessionId,
                 occurrenceId: decision.occurrenceId, snapshot, consumedAt: decision.consumedAt ?? result.completedAt,
+                ...(isStandalone ? { standalone: true as const } : {}),
                 ...(target.location ? { location: target.location } : {}),
               }, 60_000);
               verified = response.type === "github_issue_closure_result" && response.sessionId === decision.sessionId &&
@@ -14563,18 +15158,18 @@ export class SessionsService {
         }
         // Reserved coordinates make this idempotent even if a restart lost the result update.
         let requestId = result.reconciliation?.ownerDecisionOccurrenceId
-          ? this.db.workflowDecisionByOccurrence(result.reconciliation.ownerDecisionOccurrenceId)?.requestId ?? `issue_closure_recovery_${decision.occurrenceId}`
-          : `issue_closure_recovery_${decision.occurrenceId}`;
+          ? this.db.workflowDecisionByOccurrence(result.reconciliation.ownerDecisionOccurrenceId)?.requestId ?? `${ISSUE_CLOSURE_RECOVERY_REQUEST_PREFIX}${decision.occurrenceId}`
+          : `${ISSUE_CLOSURE_RECOVERY_REQUEST_PREFIX}${decision.occurrenceId}`;
         let question = this.db.workflowDecisionByRequestId(campaignId, requestId);
         // A session stop may revoke an unanswered card. Keep one current request, and never read
         // that revocation as acknowledgement or redispatch the forge read.
         while (question?.status === "revoked") {
-          requestId = `issue_closure_recovery_${decision.occurrenceId}_${question.occurrenceId}`;
+          requestId = `${ISSUE_CLOSURE_RECOVERY_REQUEST_PREFIX}${decision.occurrenceId}_${question.occurrenceId}`;
           question = this.db.workflowDecisionByRequestId(campaignId, requestId);
         }
         if (!question) {
           const created = this.createWorkflowDecision(campaignId, { requestId,
-            resourceKey: `issue_closure_recovery:${decision.occurrenceId}`,
+            resourceKey: `${ISSUE_CLOSURE_RECOVERY_RESOURCE_PREFIX}${decision.occurrenceId}`,
             resourceSnapshot: { category: "owner_decision", kind: "question",
               question: `Review the uncertain closure of ${snapshot.repository}#${snapshot.issue} (occurrence ${decision.occurrenceId}).`,
               material: `Wollipog could not prove the approved state reason and exact closing comment on the forge. Inspect [${snapshot.repository}/issues/${snapshot.issue}](${snapshot.url}). Answer or dismiss this request to acknowledge the uncertainty and clear this recovery record. This does not close the issue, post a comment, or authorize another attempt.`,
@@ -14663,6 +15258,9 @@ export class SessionsService {
     request: CreateWorkflowDecisionRequest,
     canAccess: (sessionId: string) => boolean = () => true,
     internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean; trustedIssueScope?: boolean; trustedPublication?: boolean; trustedAutomationCreation?: boolean;
+      /** The control plane just verified this registered Location's origin through the runner. */
+      trustedForgeLocationId?: string;
+      ciRerunJobName?: string;
       /** A regular session's Location switch, inspected by LocationSwitchService (#4138). */
       trustedLocationSwitch?: boolean;
       /** An Orchestrator's repository addition, inspected by CampaignLocations (#4117). */
@@ -14689,16 +15287,16 @@ export class SessionsService {
     if (!boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
       return fail("requestId and resourceKey are required bounded identifiers", 400);
     }
-    if ((request.requestId.startsWith("issue_closure_recovery_") || request.resourceKey.startsWith("issue_closure_recovery:")) &&
+    if (isIssueClosureRecoveryCoordinate(request) &&
         !internal?.trustedIssueClosureRecovery) return fail("Issue closure recovery coordinates are reserved for the server", 400);
     // #4323: the server's merge closure reports are found again by their request id, so nobody else
     // may claim one and stand in for a report.
-    if ((request.requestId.startsWith(MERGE_CLOSURE_REPORT_REQUEST_PREFIX) || request.resourceKey.startsWith(MERGE_CLOSURE_REPORT_RESOURCE_PREFIX)) &&
+    if (isMergeClosureReportCoordinate(request) &&
         !internal?.trustedMergeClosureReport) {
       return fail(`requestId and resourceKey may not start with ${MERGE_CLOSURE_REPORT_REQUEST_PREFIX} or ${MERGE_CLOSURE_REPORT_RESOURCE_PREFIX}, ` +
         "which Wollipog reserves for its own reports", 400);
     }
-    if ((request.requestId.startsWith("campaign_handoffs_") || request.resourceKey === "campaign_handoffs:owner") &&
+    if ((request.requestId.startsWith("campaign_handoffs_") || request.resourceKey === CAMPAIGN_HANDOFF_QUESTION_KEY) &&
         !internal?.trustedCampaignHandoffs) return fail("Campaign handoff question coordinates are reserved for the server", 400);
     const ownerRule = normalizeWorkflowDecisionOwnerRule(request.ownerRule);
     if (!ownerRule.ok) return fail(ownerRule.message, 400);
@@ -14727,6 +15325,39 @@ export class SessionsService {
       "typed workflow decisions",
     );
     if (unsupported) return unsupported;
+    if (normalized.data.category === "ci_rerun" || normalized.data.category === "release_tag" || normalized.data.category === "release_publish") {
+      const target = normalized.data;
+      if (!internal?.trustedForgeLocationId || this.requesterForgeDecisionLocation(child)?.id !== internal.trustedForgeLocationId) {
+        return fail("This action requires the session's verified Project Location", 409);
+      }
+      const key = target.category === "ci_rerun" ? ciRerunResourceKey(target) : releaseDecisionResourceKey(target);
+      if (request.resourceKey !== key) {
+        return fail(`Use the canonical resourceKey: ${key}`, 400);
+      }
+      if (target.category === "ci_rerun" && target.jobId !== undefined && internal.ciRerunJobName) target.jobName = internal.ciRerunJobName;
+    }
+    if ((this.standaloneDirectOwnerSession(child) &&
+          (normalized.data.category === "pr_merge" || normalized.data.category === "merged_branch_deletion" ||
+            normalized.data.category === "follow_up_issue_publication" || normalized.data.category === "issue_closure")) ||
+        (this.customRootOwnWorkSession(child, normalized.data.category) &&
+          (normalized.data.category === "pr_merge" || normalized.data.category === "merged_branch_deletion"))) {
+      const standaloneUnsupported = this.capabilityFailure(child.runnerId, "standaloneOwnerDecisions", "direct owner approvals");
+      if (standaloneUnsupported) return standaloneUnsupported;
+      if (!internal?.trustedForgeLocationId || this.requesterForgeDecisionLocation(child)?.id !== internal.trustedForgeLocationId) {
+        return fail("This action requires the session's verified Project Location", 409);
+      }
+    }
+    if (normalized.data.category === "follow_up_issue_publication" && internal?.trustedForgeLocationId &&
+        this.customRootOwnWorkSession(child, "follow_up_issue_publication") &&
+        this.requesterForgeDecisionLocation(child)?.id !== internal.trustedForgeLocationId) {
+      return fail("This action requires the session's verified Project Location", 409);
+    }
+    if (normalized.data.category === "ui_evidence_approval" && this.directOwnerSelfControlled(child, "ui_evidence_approval")) {
+      const standaloneUnsupported = this.capabilityFailure(child.runnerId, "standaloneOwnerDecisions", "direct owner approvals");
+      if (standaloneUnsupported) return standaloneUnsupported;
+      const artifactRefusal = this.uiEvidenceArtifactsRefusal(sessionId, normalized.data);
+      if (artifactRefusal) return fail(artifactRefusal, 409);
+    }
     if (normalized.data.category === "campaign_issue_scope" && !internal?.trustedIssueScope) {
       return fail("use request_campaign_issue_scope_change for a repository-bound human scope proposal", 403);
     }
@@ -14737,7 +15368,7 @@ export class SessionsService {
       return fail("use request_github_issue_closure for server-verified issue evidence", 403);
     }
     if (normalized.data.category === "owner_decision" && !internal?.trustedOwnerDecision) {
-      return fail("use request_owner_decision: only a Full Control root asks its campaign's owner a decision the owner kept", 403);
+      return fail("use request_owner_decision to ask the owner a question or request a generic Owner Approval", 403);
     }
     if (normalized.data.category === "review_round_extension") {
       const refused = this.reviewRoundExtensionRefusal(child, request.resourceKey, normalized.data);
@@ -14761,9 +15392,15 @@ export class SessionsService {
     }
     const controller = this.workflowDecisionController(child, normalized.data.category);
     if (!controller) {
-      return fail(this.decisionControllerRoot(child) === "refused"
-        ? MALFORMED_ANCESTRY_DECISION_REFUSAL
-        : "this session has no controlling Orchestrator ancestor", 409);
+      if (this.decisionControllerRoot(child) === "refused") return fail(MALFORMED_ANCESTRY_DECISION_REFUSAL, 409);
+      if (sessionRole(child) === "orchestrator" && child.orchestratorPolicy?.control?.mode !== "full_control" &&
+          this.decisionControllerRoot(child) === "none" &&
+          (normalized.data.category === "pr_merge" || normalized.data.category === "merged_branch_deletion" ||
+            normalized.data.category === "ui_evidence_approval") &&
+          child.orchestratorPolicy?.execution.strictProjectIsolation !== false) {
+        return fail("Strict Project Isolation is enabled on this Orchestrator, so direct implementation approvals are refused; delegate implementation to a child session or disable Strict Project Isolation.", 409);
+      }
+      return fail("this session has no controlling Orchestrator ancestor", 409);
     }
     if (isTerminal(controller.session.status)) {
       return fail("a terminal Orchestrator cannot control a new workflow decision", 409);
@@ -14888,6 +15525,9 @@ export class SessionsService {
       if (failure) authorityEvaluation.admissionFailure = failure;
       if (failure && issueBounded) authorityEvaluation.admissionMessage = internal?.publicationAdmissionReason ?? CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[failure];
     }
+    if (internal?.trustedForgeLocationId && this.directOwnerSelfControlled(child, category)) {
+      authorityEvaluation.verifiedLocationId = internal.trustedForgeLocationId;
+    }
     if (authority === "orchestrator") {
       const parentUnsupported = this.capabilityFailure(
         controller.session.runnerId,
@@ -14998,13 +15638,45 @@ export class SessionsService {
     return ok(session);
   }
 
-  /** A Full Control root asks its campaign's owner a decision the owner kept (#4064). The decision
-   * is always the person's: no agent can answer, approve or resolve it. Its card waits on the root
-   * without parking it, and the owner's choice comes back as the decision's resume prompt. */
+  /** The Full Control root, Custom campaign root, or standalone Normal session that may ask its
+   * owner an Owner Question or generic Owner Approval (#4064, #4894). */
+  private ownerDecisionRequester(session: SessionView | null): ServiceResult<{ session: SessionView; fullControl: boolean }> {
+    if (!session) return fail("session not found", 404);
+    const root = this.orchestratorCampaignController(session);
+    if (root === "refused" || this.decisionControllerRoot(session) === "refused") {
+      return fail(MALFORMED_ANCESTRY_DECISION_REFUSAL, 409);
+    }
+    const isFullControlRoot = session.orchestratorPolicy?.control?.mode === "full_control" &&
+      root !== null && root.id === session.id && Boolean(session.parentControlPolicy) && campaignBoundaryCurrent(session);
+    if (isFullControlRoot) {
+      const unsupported = this.capabilityFailure(session.runnerId, "ownerDecisions", "owner decisions");
+      if (unsupported) return unsupported;
+      if (isTerminal(session.status)) {
+        return fail("Only a live session can ask its owner a decision.", 409);
+      }
+      return ok({ session, fullControl: true });
+    }
+    if (this.standaloneDirectOwnerSession(session) || this.customRootOwnWorkSession(session, "owner_decision")) {
+      const unsupported = this.capabilityFailure(session.runnerId, "standaloneOwnerDecisions", "standalone owner decisions");
+      if (unsupported) return unsupported;
+      if (isTerminal(session.status)) {
+        return fail("Only a live session can ask its owner a decision.", 409);
+      }
+      return ok({ session, fullControl: false });
+    }
+    return fail("Only a standalone session or a campaign's root Orchestrator can request an Owner Question or Owner Approval; campaign children use request_workflow_decision with implementation_question.", 409);
+  }
+
+  /** A Full Control root, Custom campaign root, or standalone session asks its authenticated owner
+   * a question or generic Owner Approval (#4064, #4894). An Owner Question may also be answered
+   * through the owner's scoped Assistant grant. On an Orchestrator root its card waits without
+   * parking the root; on a standalone session it parks the session until answered, and the answer
+   * comes back as the durable resume prompt. */
   async createOwnerDecision(sessionId: string, request: CreateOwnerDecisionRequest,
     canAccess: (sessionId: string) => boolean = () => true): Promise<ServiceResult<WorkflowDecisionView>> {
-    const root = this.ownerDecisionRoot(this.db.getSession(sessionId));
-    if (!root.ok || !root.data) return failAs(root);
+    const requester = this.ownerDecisionRequester(this.db.getSession(sessionId));
+    if (!requester.ok || !requester.data) return failAs(requester);
+    const { session: target, fullControl } = requester.data;
     if (!request || typeof request !== "object" || Array.isArray(request) || Object.keys(request).some((key) =>
       !["requestId", "resourceKey", "question", "options", "recommendedOptionId", "material", "kind", "ruleDelegation"].includes(key))) {
       return fail("an owner decision has a requestId, resourceKey, question, options, and optionally recommendedOptionId, material and kind", 400);
@@ -15012,10 +15684,10 @@ export class SessionsService {
     if (request.kind !== undefined && request.kind !== "question" && request.kind !== "approval") {
       return fail("kind must be question or approval", 400);
     }
-    // An Owner Question (#4270) is presented and answered as a question only by a current root.
+    // An Owner Question (#4270) is presented and answered as a question only by a current peer.
     const question = request.kind === "question";
     if (question) {
-      const unsupported = this.capabilityFailure(root.data.runnerId, "ownerQuestions", "owner questions");
+      const unsupported = this.capabilityFailure(target.runnerId, "ownerQuestions", "owner questions");
       if (unsupported) return unsupported;
     }
     const snapshot = { category: "owner_decision" as const, question: request.question, options: request.options,
@@ -15024,8 +15696,8 @@ export class SessionsService {
       ...(question ? { kind: "question" as const } : {}) };
     if (request.ruleDelegation !== undefined) {
       const rule = personalRuleDelegation(request.ruleDelegation);
-      const control = root.data.orchestratorPolicy?.control;
-      if (question || !rule || control?.mode !== "full_control" ||
+      const control = target.orchestratorPolicy?.control;
+      if (question || !rule || !fullControl || control?.mode !== "full_control" ||
           rule.categories.some((c) => !control.boundary.operations.includes(c))) return fail("ruleDelegation requires an exact personal rule and already-delegated categories in a Full Control Owner Approval", 400);
       Object.assign(snapshot, {
         ruleDelegation: { ...rule, boundaryRevision: control.boundary.revision },
@@ -15037,29 +15709,33 @@ export class SessionsService {
     }
     const normalized = normalizeWorkflowDecisionSnapshot(snapshot);
     if (!normalized.ok || normalized.data?.category !== "owner_decision") return failAs(normalized);
-    // Full Control never asks anyone for credentials or sign-in, the owner included (#4104): the floor
-    // first, then the Decision Model. An uncertain or failed screen holds the decision for its owner
-    // to classify first; nobody can choose one of its options until then.
-    const refused = (): ServiceResult<WorkflowDecisionView> => fail("Full Control never asks anyone for credentials, sign-in or wider access, so this owner decision was not " +
-      "created. Ask about the design without requesting a value, or continue without it.", 403);
-    // These two fixed instruction filenames live beneath credential-store directories. The
-    // server-generated form asks about a rule, never to read those directories. Keep screening
-    // the exact untrusted quote for literals/paths and send the whole form to the model below.
-    if (credentialFormFloor(normalized.data.ruleDelegation
-      ? { ...normalized.data, material: normalized.data.ruleDelegation.rule.quote } : normalized.data)) return refused();
     if (!boundedDecisionString(request.requestId, 256)) return fail<WorkflowDecisionView>("requestId and resourceKey are required bounded identifiers", 400);
-    const screen = await this.screenCredentialText(root.data, sessionId, "owner_decision", request.requestId,
-      ownerDecisionScreenData(normalized.data));
-    if (screen === null) return fail<WorkflowDecisionView>(CREDENTIAL_SCREEN_UNRECORDED, 503);
-    if (screen.state === "ask") return refused();
+    let screen: CredentialScreenFact | undefined;
+    if (fullControl) {
+      // Full Control never asks anyone for credentials or sign-in, the owner included (#4104): the floor
+      // first, then the Decision Model. An uncertain or failed screen holds the decision for its owner
+      // to classify first; nobody can choose one of its options until then.
+      const refused = (): ServiceResult<WorkflowDecisionView> => fail("Full Control never asks anyone for credentials, sign-in or wider access, so this owner decision was not " +
+        "created. Ask about the design without requesting a value, or continue without it.", 403);
+      // These two fixed instruction filenames live beneath credential-store directories. The
+      // server-generated form asks about a rule, never to read those directories. Keep screening
+      // the exact untrusted quote for literals/paths and send the whole form to the model below.
+      if (credentialFormFloor(normalized.data.ruleDelegation
+        ? { ...normalized.data, material: normalized.data.ruleDelegation.rule.quote } : normalized.data)) return refused();
+      const screened = await this.screenCredentialText(target, sessionId, "owner_decision", request.requestId,
+        ownerDecisionScreenData(normalized.data));
+      if (screened === null) return fail<WorkflowDecisionView>(CREDENTIAL_SCREEN_UNRECORDED, 503);
+      if (screened.state === "ask") return refused();
+      screen = screened;
+    }
     return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: request.resourceKey,
-      resourceSnapshot: normalized.data }, canAccess, { trustedOwnerDecision: true, credentialScreen: screen });
+      resourceSnapshot: normalized.data }, canAccess, { trustedOwnerDecision: true, ...(screen ? { credentialScreen: screen } : {}) });
   }
 
   /**
    * The campaign owner's answer to an Owner Question (#4270): the option they chose, their own words,
    * or both, from the question form (`ownerQuestionAgentQuestions`); or, with `dismiss`, no answer.
-   * Only that person answers it, never an agent. It grants nothing, so unlike an approval it is not
+   * Only that person or their explicitly delegated Assistant answers it. It grants nothing, so it is not
    * bound to the policy revision it was asked under: a scope, boundary or policy change since leaves
    * it answerable. The answer reaches the root as its prompt, exactly as typed.
    */
@@ -15067,7 +15743,8 @@ export class SessionsService {
     action: "submit" | "dismiss", actor: GovernanceActor,
     /** #4104: the owner's Decline classification of a question the Decision Model could not screen,
      * which dismisses it with this message. */
-    credentialScreenDecline?: { message: string }): ServiceResult<SessionView> {
+    credentialScreenDecline?: { message: string },
+    assistantDelegation?: import("@wollipog/protocol").AssistantDecisionResolution): ServiceResult<SessionView> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId || decision.controllingSessionId !== sessionId ||
         !isOwnerQuestionSnapshot(decision.resourceSnapshot)) return fail("owner question not found", 404);
@@ -15078,25 +15755,38 @@ export class SessionsService {
     if (decision.authority !== "human" || actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(sessionId, actor.id)) {
       return fail("Only the campaign's owner can answer an owner question", 403);
     }
-    // A question the Decision Model could not screen is classified first, never answered (#4104):
-    // only its owner's Decline, which dismisses it, settles it from there.
+    // A held question cannot be answered. The owner may acknowledge the server's informational
+    // handoff without making a statement about credentials.
     if (credentialScreenDecline && action !== "dismiss") return fail("a declined question cannot be answered", 400);
-    if (decision.authorityEvaluation?.reason === "credential_screen_review" && !credentialScreenDecline) {
+    const acknowledgeHandoff = action === "dismiss" && !credentialScreenDecline && isCampaignHandoffQuestion(decision);
+    if (decision.authorityEvaluation?.reason === "credential_screen_review" && !credentialScreenDecline && !acknowledgeHandoff) {
       return fail(TYPED_QUESTION_CLASSIFY_FIRST, 409);
     }
     const root = this.db.getSession(sessionId);
     if (!root || isTerminal(root.status)) return fail("the Orchestrator that asked this question has ended", 409);
+    if (action === "submit" && Object.keys(answers).length === 0) {
+      return fail("Choose an option or type an answer before submitting.", 400);
+    }
     const invalid = validateQuestionAnswers(ownerQuestionAgentQuestions(snapshot), answers, action);
     if (invalid) return fail(`invalid answers: ${invalid}`, 400);
     const answer = action === "submit" ? ownerQuestionAnswer(snapshot, answers) : null;
     if (action === "submit" && !answer) return fail("choose an option or type an answer", 400);
     const now = Date.now();
-    const oweResume = this.workflowDecisionResumeOwed(root);
+    const oweResume = !acknowledgeHandoff && this.workflowDecisionResumeOwed(root);
     const resolved = this.db.resolveWorkflowDecision(occurrenceId, "human", answer ? "approved" : "denied", now,
-      answer?.selectedOptionId, undefined, undefined, answer?.text ?? credentialScreenDecline?.message, oweResume);
+      answer?.selectedOptionId, undefined, auditDigest(assistantDelegation?.reason), answer?.text ?? credentialScreenDecline?.message,
+      oweResume, undefined, undefined, undefined, assistantDelegation && {
+        ...assistantDelegation, resolvedAt: now, outcome: answer ? "answered" : "denied",
+      });
     if (!resolved) return fail("this owner question was answered concurrently", 409);
-    this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
-    this.recordWorkflowDecisionAudit(resolved, answer ? "answered" : "denied", actor, now);
+    if (acknowledgeHandoff) {
+      this.settleWorkflowDecisionPause(sessionId, occurrenceId, now);
+      this.campaignRecovery.synchronize(root, now);
+    } else {
+      this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
+    }
+    this.recordWorkflowDecisionAudit(resolved, answer ? "answered" : "denied", actor, now,
+      assistantDelegation?.reason ?? (acknowledgeHandoff ? "Campaign handoffs acknowledged." : undefined));
     void this.reconcileUncertainIssueClosures(sessionId).catch(() => this.log.warn("Issue closure acknowledgement is pending"));
     this.hub.sessionChangedById(sessionId);
     this.publishCampaignAttentionTransition(root);
@@ -15191,8 +15881,13 @@ export class SessionsService {
             "sign-in or access. Continue without them; the request is recorded as blocked work." },
           "human", actor, canAccess, { credentialScreenDecline: true });
         if (!denied.ok) return failAs(denied);
-        this.db.campaignRecovery.recordDecline(root.id, session.id, "secrets_and_sign_in",
-          recoveryCoordinate(`workflow:${session.id}:${decision.requestId}`), root.parentControlPolicy?.revision ?? 0, now);
+        const revision = root.parentControlPolicy?.revision ?? 0;
+        if (isCampaignHandoffQuestion(decision)) {
+          this.db.campaignRecovery.blockHandoffCredentials(root.id, recoveryCoordinate(`campaign_handoffs:${decision.resourceDigest}`), revision, now);
+        } else {
+          this.db.campaignRecovery.recordDecline(root.id, session.id, "secrets_and_sign_in",
+            recoveryCoordinate(`workflow:${session.id}:${decision.requestId}`), revision, now);
+        }
         this.campaignRecovery.synchronize(root, now);
       } else {
         const control = root.orchestratorPolicy?.control;
@@ -15288,7 +15983,7 @@ export class SessionsService {
    * The runtime is idempotent per occurrence, so a replay joins the recorded outcome and never
    * records a second verdict. A screen that cannot even start is a failure: the owner classifies. */
   private async screenCredentialText(root: SessionView, sessionId: string, surface: CredentialScreenSurface,
-    requestId: string, data: string): Promise<CredentialScreenFact | null> {
+    requestId: string, data: string, retryUnavailableHarness = false): Promise<CredentialScreenFact | null> {
     const organizationId = this.db.sessionScope(root.id)?.organizationId;
     // With no organization there is no audit to hold a failure for its owner to classify, so the
     // caller refuses the request and nobody can answer it.
@@ -15296,7 +15991,8 @@ export class SessionsService {
     try {
       // A screen the runtime cannot finish is recorded as an audited failure the owner classifies.
       return await screenCredentialRequest(this.db, this.decisionRuntime, { organizationId, campaignSessionId: root.id, sessionId,
-        surface, requestId, data, automaticHarness: root.agentId ? { runnerId: root.runnerId, agentId: root.agentId, driver: root.driver } : null });
+        surface, requestId, data, retryUnavailableHarness,
+        automaticHarness: root.agentId ? { runnerId: root.runnerId, agentId: root.agentId, driver: root.driver } : null });
     } catch (error) {
       this.log.warn(`credential screen for ${sessionId} could not be recorded: ${(error as Error).message}`);
       return null;
@@ -15436,7 +16132,7 @@ export class SessionsService {
   /** Snapshot once for a check that may inspect many owner-kept occurrences. */
   private personalRuleLookup(rootId: string, category: WorkflowDecisionCategory):
     (rule: import("@wollipog/protocol").WorkflowDecisionOwnerRule) => string | undefined {
-    const root = this.db.getSession(rootId);
+    const root = this.db.getSession(rootId, { includeCampaignProjection: false });
     const control = root?.orchestratorPolicy?.control;
     if (control?.mode !== "full_control" || !control.boundary.operations.includes(category)) return () => undefined;
     const current = this.db.personalRuleDelegations(rootId).filter((d) => {
@@ -15523,6 +16219,58 @@ export class SessionsService {
     return ok({ decisions, ...(rows.length > limit ? { nextCursor: decisions.at(-1)!.occurrenceId } : {}) });
   }
 
+  /** The Assistant operation has verified its live credential, grant, occurrence digest, and
+   * both sessions' placement. Reuse the owner's resolution and consumption rules. */
+  resolveAssistantDecision(
+    decision: WorkflowDecisionView,
+    resolution: ResolveWorkflowDecisionRequest,
+    assistantDelegation: import("@wollipog/protocol").AssistantDecisionResolution,
+    owner: HumanPrincipal,
+  ): ServiceResult<WorkflowDecisionView> {
+    const snapshot = decision.resourceSnapshot;
+    const ownerQuestion = isOwnerQuestionSnapshot(snapshot);
+    const reason = decision.authorityEvaluation?.reason;
+    const controller = this.db.getSession(decision.controllingSessionId);
+    const customClosure = snapshot.category === "issue_closure" && reason === "protected_request" &&
+      controller?.orchestratorPolicy?.control?.mode !== "full_control";
+    const evidenceFallback = snapshot.category === "ui_evidence_approval" && reason === "evidence_review_unavailable";
+    const explicitlyKept = !ownerQuestion && this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, snapshot);
+    if (decision.ownerRule || decision.ownerHandoff || explicitlyKept || decision.authorityEvaluation?.disposition ||
+        (reason !== "custom_owner" && !(ownerQuestion && reason === "owner_kept") && !customClosure && !evidenceFallback) ||
+        isReservedOwnerQuestion(decision) || (ownerQuestion && credentialFormFloor(snapshot)) ||
+        (snapshot.category === "merged_branch_deletion" && snapshot.merged === false)) {
+      return fail("This occurrence requires a direct human response.", 403);
+    }
+    if (resolution.childMessage !== undefined && (!ownerQuestion || resolution.outcome !== "approve")) {
+      return fail("An answer is only valid when answering a question.", 400);
+    }
+    if (credentialFormFloor({ question: assistantDelegation.reason, options: [], material: resolution.childMessage })) {
+      return fail("Delegated decisions cannot carry credentials or credential-store locations.", 403);
+    }
+    const actor = { kind: "human", id: owner.userId } as const;
+    if (ownerQuestion) {
+      if (resolution.outcome === "deny" && resolution.selectedOptionId !== undefined) return fail("Dismissing a question cannot select an option.", 400);
+      const selected = resolution.selectedOptionId === undefined ? -1 :
+        snapshot.options.findIndex((option) => option.optionId === resolution.selectedOptionId);
+      if (resolution.selectedOptionId !== undefined && selected < 0) return fail("Choose one of the offered options.", 400);
+      const answers = {
+        ...(selected >= 0
+          ? { [OWNER_QUESTION_ANSWER_ID]: ownerQuestionAgentQuestions(snapshot)[0]!.options[selected]!.label,
+              ...(resolution.childMessage ? { [OWNER_QUESTION_NOTE_ID]: resolution.childMessage } : {}) }
+          : resolution.childMessage ? { [OWNER_QUESTION_ANSWER_ID]: resolution.childMessage } : {}),
+      };
+      const result = this.answerOwnerQuestion(decision.sessionId, decision.occurrenceId, answers,
+        resolution.outcome === "approve" ? "submit" : "dismiss", actor, undefined, assistantDelegation);
+      return result.ok ? ok(this.db.workflowDecisionByOccurrence(decision.occurrenceId)!) : failAs(result);
+    }
+    return this.resolveWorkflowDecision(decision.controllingSessionId, decision.sessionId, decision.occurrenceId,
+      { ...resolution, rationale: assistantDelegation.reason,
+        ...(snapshot.category === "ui_evidence_approval" && resolution.outcome === "approve"
+          ? { evidenceReviewed: snapshot.evidence.map((item) => item.evidenceId) } : {}),
+      }, "human", actor,
+      (sessionId) => this.db.canAccessSession(owner, sessionId), { assistantDelegation });
+  }
+
   resolveWorkflowDecision(
     parentSessionId: string,
     childSessionId: string,
@@ -15532,7 +16280,7 @@ export class SessionsService {
     actor: GovernanceActor,
     canAccess: (sessionId: string) => boolean,
     /** #4104: the owner's Decline classification of a question the Decision Model could not screen. */
-    internal?: { credentialScreenDecline?: boolean },
+    internal?: { credentialScreenDecline?: boolean; assistantDelegation?: import("@wollipog/protocol").AssistantDecisionResolution },
   ): ServiceResult<WorkflowDecisionView> {
     if (canAccess(childSessionId)) this.expireAutomationCreationDecisions(Date.now(), childSessionId);
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
@@ -15653,15 +16401,16 @@ export class SessionsService {
       return ok(this.withMergeReviewEvidence(resolved));
     }
     const ownRequester = decision?.sessionId === childSessionId ? this.db.getSession(childSessionId) : null;
-    // A Custom root's own publication, which only the campaign owner decides (#3919).
-    const rootOwnPublication = Boolean(decision && ownRequester && decision.category === "follow_up_issue_publication" &&
-      parentSessionId === childSessionId && decision.authority === "human" && this.customRootOwnPublication(ownRequester));
+    // Standalone and Custom root self-owned decisions, decided directly by the authenticated owner (#3919, #4894).
+    const selfDirectOwner = Boolean(decision && ownRequester &&
+      this.directOwnerSelfDecision(ownRequester, ownRequester, decision) && parentSessionId === childSessionId);
     if (!decision || decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
         !((decision.category === "issue_closure" || decision.category === "campaign_issue_scope" ||
           decision.category === "campaign_follow_up_admission") && parentSessionId === childSessionId ||
-          // A standalone session's own extra review rounds, which only a person decides (#3369).
-          decision.category === "review_round_extension" && parentSessionId === childSessionId && decision.authority === "human" ||
-          rootOwnPublication ||
+          // Standalone owner decisions still have a controller, the requesting session itself.
+          ((decision.category === "review_round_extension" || isRequesterForgeDecisionCategory(decision.category)) &&
+            parentSessionId === childSessionId && decision.authority === "human") ||
+          selfDirectOwner ||
           this.workflowDecisionRelationship(parentSessionId, childSessionId)) ||
         !canAccess(parentSessionId) || !canAccess(childSessionId)) {
       return fail("workflow decision not found", 404);
@@ -15675,6 +16424,13 @@ export class SessionsService {
       if (refused) {
         this.revokeWorkflowDecision(decision, { reason: "approval_refused_precondition", triggeredBy: actor });
         return fail(refused, 409);
+      }
+    }
+    if (resolution?.outcome === "approve" && selfDirectOwner && decision.resourceSnapshot.category === "ui_evidence_approval") {
+      const artifactRefusal = this.uiEvidenceArtifactsRefusal(childSessionId, decision.resourceSnapshot);
+      if (artifactRefusal) {
+        this.revokeWorkflowDecision(decision, { reason: "approval_refused_precondition", triggeredBy: actor });
+        return fail(artifactRefusal, 409);
       }
     }
     for (const sessionId of [childSessionId, parentSessionId]) {
@@ -15691,7 +16447,20 @@ export class SessionsService {
     }
     const currentChild = this.db.getSession(childSessionId);
     const currentParent = this.db.getSession(parentSessionId);
-    const currentPolicy = currentParent?.parentControlPolicy;
+    const directForge = isRequesterForgeDecisionCategory(decision.category);
+    const directOwner = Boolean(currentChild && currentParent && this.directOwnerSelfDecision(currentChild, currentParent, decision));
+    if ((directForge || directOwner) && (authority !== "human" || actor.kind !== "human" || !actor.id ||
+        !this.db.campaignOwnerUser(parentSessionId, actor.id))) {
+      return fail(directForge
+        ? "Only the owner can resolve this forge decision"
+        : currentParent && sessionRole(currentParent) === "orchestrator"
+          ? "Only the campaign owner can decide a root Orchestrator's own decision"
+          : "Only the session's owner can resolve this decision", 403);
+    }
+    const currentController = (directForge || directOwner) && currentChild ? this.workflowDecisionController(currentChild, decision.category) : null;
+    const currentPolicy = directForge || directOwner
+      ? (currentController?.session.id === parentSessionId ? currentController.policy : undefined)
+      : currentParent?.parentControlPolicy;
     if (!currentChild || !currentParent || this.workflowDecisionChildEnded(currentChild) ||
         isTerminal(currentParent.status) ||
         !currentPolicy || currentPolicy.revision !== decision.policyRevision ||
@@ -15724,10 +16493,6 @@ export class SessionsService {
     if ((decision.category === "issue_closure" || decision.category === "campaign_issue_scope") && authority === "human" && actor.kind !== "human") {
       return fail("issue closure always requires an authenticated human response", 403);
     }
-    if (rootOwnPublication && (authority !== "human" || actor.kind !== "human" || !actor.id ||
-        !this.db.campaignOwnerUser(childSessionId, actor.id))) {
-      return fail("Only the campaign owner can decide a root Orchestrator's own follow-up publication", 403);
-    }
     if (decision.category === "campaign_follow_up_admission") {
       // Only the campaign's owner admits a follow-up past its approval limit (#2940), never an agent.
       const audience = this.db.sessionScope(childSessionId);
@@ -15739,8 +16504,8 @@ export class SessionsService {
     if (resolution?.delegatedVideoEvidence !== undefined && (authority !== "orchestrator" || !this.workflowVideoApprovals)) {
       return fail("Delegated video approval requires an admitted current managed-media runtime and Orchestrator owner", 403);
     }
-    if (resolution?.delegatedImageReview !== undefined && authority !== "orchestrator") {
-      return fail("Delegated image approval requires the Orchestrator owner", 403);
+    if (resolution?.delegatedImageReview !== undefined && authority !== "orchestrator" && !internal?.assistantDelegation) {
+      return fail("Delegated image approval requires the Orchestrator or a granted Assistant thread", 403);
     }
     if (decision.resourceSnapshot.category === "review_round_extension" && resolution?.outcome === "approve") {
       const refused = this.reviewRoundExtensionRefusal(currentChild, decision.resourceKey, decision.resourceSnapshot);
@@ -15760,9 +16525,15 @@ export class SessionsService {
     // Repeating evidence identifiers proves nothing. An Orchestrator approval is backed only by
     // receipts the server itself recorded when it delivered each exact artifact to this reviewer.
     let reviewReceipts: UiEvidenceReviewReceipt[] = [];
+    const delegatedImage = normalizedResolution.delegatedImageReview;
+    if (internal?.assistantDelegation && decision.resourceSnapshot.category === "ui_evidence_approval" &&
+        normalizedResolution.outcome === "approve") {
+      const proof = this.assistantEvidenceApprovalReceipts(decision, internal.assistantDelegation.threadId, now, delegatedImage);
+      if (!proof.ok || !proof.data) return failAs(proof);
+      reviewReceipts = proof.data;
+    }
     // A delegated image approval (#4074) rests on the reviewer's receipts instead, and only once the
     // server's own records prove that reviewer's approving verdict for this exact occurrence.
-    const delegatedImage = normalizedResolution.delegatedImageReview;
     if (decision.resourceSnapshot.category === "ui_evidence_approval" && authority === "orchestrator") {
       if (delegatedImage) {
         const refused = this.delegatedImageApprovalRefusal(decision, delegatedImage, now);
@@ -15943,7 +16714,11 @@ export class SessionsService {
       oweResume,
       normalizedResolution.delegatedVideoEvidence,
       delegatedImage,
-      actor,
+      internal?.assistantDelegation ? { kind: "agent", id: internal.assistantDelegation.threadId } : actor,
+      internal?.assistantDelegation && {
+        ...internal.assistantDelegation, resolvedAt: now,
+        outcome: normalizedResolution.outcome === "deny" ? "denied" : "approved",
+      },
     );
     let resolved: WorkflowDecisionView | null;
     try {
@@ -15979,10 +16754,14 @@ export class SessionsService {
   ): Promise<ServiceResult<WorkflowDecisionView>> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
+    if (isRequesterForgeDecisionCategory(decision.category)) {
+      return fail("Use execute_workflow_decision to perform this approval through Wollipog", 403);
+    }
     if (decision.resourceSnapshot.category === "merged_branch_deletion" && decision.resourceSnapshot.merged === false) {
       return fail("use execute_workflow_decision for temporary deletion: it proves the forge action and retires the creation receipt atomically with its result; nothing was consumed", 403);
     }
     if (isChildQuestionSnapshot(decision.resourceSnapshot)) return fail("a question answer grants no authority and cannot be consumed as an approval", 403);
+    if (isOwnerQuestionSnapshot(decision.resourceSnapshot)) return fail("an owner question answer grants no authority and cannot be consumed as an approval", 403);
     if (decision.category === "campaign_issue_scope") return fail("Scope resolution applies and consumes the exact authorized proposal atomically", 403);
     if (decision.category === "automation_creation") return fail("use execute_automation_creation to consume and create the approved automation atomically", 403);
     if (decision.category === "location_switch") return fail("use execute_location_switch to carry out the exact Location its owner chose", 403);
@@ -16051,21 +16830,45 @@ export class SessionsService {
         return unsupported;
       }
     }
-    const policy = parent?.parentControlPolicy;
     // The same narrow self-control exceptions as creation/resolution: an ordinary standalone
-    // requester can consume its human-approved review extension, and a Custom root its
-    // owner-approved publication (#3919), never another self-owned gate.
-    const standaloneReviewExtension = child && parent?.id === child.id && decision.category === "review_round_extension" &&
-      decision.authority === "human" && this.decisionControllerRoot(child) === "none";
-    const rootOwnPublication = child && parent?.id === child.id && decision.category === "follow_up_issue_publication" &&
-      decision.authority === "human" && this.customRootOwnPublication(child);
+    // requester can consume its human-approved review extension or direct-owner approvals (#4894),
+    // and a Custom root its owner-approved own-work decisions (#3919, #4894).
+    const standaloneReviewExtension = Boolean(child && parent?.id === child.id && decision.category === "review_round_extension" &&
+      decision.authority === "human" && this.decisionControllerRoot(child) === "none");
+    const directOwner = Boolean(child && parent && this.directOwnerSelfDecision(child, parent, decision));
+    const policy = directOwner || standaloneReviewExtension ? this.directOwnerPolicy(parent!) : parent?.parentControlPolicy;
     if (!child || !parent || isTerminal(child.status) || isTerminal(parent.status) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
-        !(standaloneReviewExtension || rootOwnPublication || this.workflowDecisionRelationship(parent.id, child.id)) || !policy ||
+        !(standaloneReviewExtension || directOwner || this.workflowDecisionRelationship(parent.id, child.id)) || !policy ||
         policy.revision !== decision.policyRevision ||
         !this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
       this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
       return fail("workflow decision authority was revoked or ancestry changed before action start", 409);
+    }
+    if (normalized.data.category === "ui_evidence_approval" && directOwner) {
+      const artifactRefusal = this.uiEvidenceArtifactsRefusal(sessionId, normalized.data);
+      if (artifactRefusal) {
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+        return fail(artifactRefusal, 409);
+      }
+    }
+    // Re-verify the session's current Project Location repository before arming or consuming
+    // direct-owner repo-bound approvals so a live Location switch never acts on the old repo (#4894).
+    let verifiedDirectLocationId: string | null = null;
+    if (directOwner && this.requiresDirectLocationVerification(child, normalized.data.category, decision) &&
+        (normalized.data.category === "pr_merge" || normalized.data.category === "merged_branch_deletion" ||
+          normalized.data.category === "follow_up_issue_publication")) {
+      const requireProtocol = this.standaloneDirectOwnerSession(child) || normalized.data.category !== "follow_up_issue_publication"
+        ? "standaloneOwnerDecisions" : null;
+      const verified = await this.verifyStandaloneRepositoryLocation(child, normalized.data.repository, requireProtocol);
+      if (!verified.ok || !verified.data) {
+        if (verified.status === 403 || !this.requesterForgeDecisionLocation(this.db.getSession(sessionId)!)) {
+          this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+          return fail(verified.error ?? "Project Location repository changed; request a new approval", 409);
+        }
+        return failAs(verified);
+      }
+      verifiedDirectLocationId = verified.data.id;
     }
     // Consuming hands the action to the requester's own login. The approval still stands (#4319).
     const excludedRepository = this.excludedRepositoryRefusal(child, parent, normalized.data);
@@ -16243,9 +17046,12 @@ export class SessionsService {
       }
       // Read the controller again: the campaign's issue scope may have changed during the forge
       // reads above, and a merge closing an issue it no longer names is not the Orchestrator's (#4062).
+      const armingChild = this.db.getSession(sessionId);
       const armingParent = this.db.getSession(parent.id);
-      const armingPolicy = armingParent?.parentControlPolicy;
-      if (!armingParent || !armingPolicy || armingPolicy.revision !== decision.policyRevision ||
+      const armingDirectOwner = Boolean(armingChild && armingParent && this.directOwnerSelfDecision(armingChild, armingParent, decision));
+      const armingPolicy = armingDirectOwner ? this.directOwnerPolicy(armingParent!) : armingParent?.parentControlPolicy;
+      if (!armingChild || !armingParent || !armingPolicy || armingPolicy.revision !== decision.policyRevision ||
+          (verifiedDirectLocationId && this.requesterForgeDecisionLocation(armingChild)?.id !== verifiedDirectLocationId) ||
           !this.workflowDecisionAuthorityCurrent(armingParent, armingPolicy, decision)) {
         this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
         return fail("Merge review evidence or authority changed while arming; request a new exact merge decision.", 409);
@@ -16266,7 +17072,12 @@ export class SessionsService {
       this.hub.sessionChangedById(parent.id);
       return ok(this.withMergeReviewEvidence(armed));
     }
-    // Even a read that returns at once yields, so an exclusion can be recorded since the check above.
+    // Even a read that returns at once yields, so an exclusion or Location switch can be recorded since the check above.
+    const currentChildForConsume = this.db.getSession(sessionId);
+    if (verifiedDirectLocationId && (!currentChildForConsume || this.requesterForgeDecisionLocation(currentChildForConsume)?.id !== verifiedDirectLocationId)) {
+      this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+      return fail("The session's Project Location changed before consumption; request a new approval", 409);
+    }
     const excludedWhileConsuming = this.excludedRepositoryRefusal(child, parent, normalized.data);
     if (excludedWhileConsuming) return fail(excludedWhileConsuming, 409);
     // The publication freshness read yielded; execute may have claimed the occurrence meanwhile.
@@ -16324,14 +17135,18 @@ export class SessionsService {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId || !canAccess(sessionId)) return fail("workflow decision not found", 404);
     const snapshot = decision.resourceSnapshot;
-    if (snapshot.category !== "merged_branch_deletion" && snapshot.category !== "pr_merge" && snapshot.category !== "follow_up_issue_publication") {
-      return fail("Wollipog performs only an approved merged_branch_deletion, an armed pr_merge, or a follow_up_issue_publication in a campaign repository", 403);
+    if (snapshot.category !== "merged_branch_deletion" && snapshot.category !== "pr_merge" &&
+        snapshot.category !== "follow_up_issue_publication" && snapshot.category !== "ci_rerun" &&
+        snapshot.category !== "release_tag" && snapshot.category !== "release_publish") {
+      return fail("This workflow decision has no Wollipog forge executor", 403);
     }
     if (typeof request?.resourceDigest !== "string" || request.resourceDigest !== decision.resourceDigest) {
       return fail("the resource digest does not match this decision; read get_workflow_decision and pass its resourceDigest", 409);
     }
     const kind: WorkflowDecisionForgeAction["kind"] = snapshot.category === "pr_merge" ? "pr_merge_enqueue"
-      : snapshot.category === "follow_up_issue_publication" ? "issue_publication" : "branch_deletion";
+      : snapshot.category === "follow_up_issue_publication" ? "issue_publication"
+      : snapshot.category === "merged_branch_deletion" ? "branch_deletion" : snapshot.category;
+    const directForge = isRequesterForgeDecisionCategory(kind);
     const performed = decision.forgeAction && (FORGE_DECISION_ACTION_SUCCESSES as ReadonlySet<string>).has(decision.forgeAction.outcome);
     const consumedDeletion = kind === "branch_deletion" && decision.status === "consumed" && !performed;
     if (decision.status !== "approved" && !consumedDeletion) {
@@ -16342,28 +17157,62 @@ export class SessionsService {
     const parent = this.db.getSession(decision.controllingSessionId);
     // A publication is performed by its Location's runner, whose own version is checked below.
     if (child && snapshot.category !== "follow_up_issue_publication") {
-      const unsupported = this.capabilityFailure(child.runnerId, "forgeDecisionActions", "Wollipog-performed forge actions");
+      const unsupported = this.capabilityFailure(child.runnerId, directForge ? requesterForgeCapability(kind) : "forgeDecisionActions",
+        "Wollipog-performed forge actions");
       if (unsupported) return unsupported;
     }
+    // An uncertain or in-progress merge enqueue cannot be replayed; refuse before authority checks
+    // can revoke the approval so a duplicate or overlapping execute call never destroys a
+    // reconcileable merge, while letting beginWorkflowDecisionForgeAction expire a stale
+    // `in_progress` lease to `uncertain` so mergeClosureWatchTargets() monitors it (#4894).
+    const mergeEnqueueAlreadyAttempted = (
+      current: WorkflowDecisionView | null | undefined,
+      allowLeaseExpiry: boolean,
+    ): ServiceResult<WorkflowDecisionView> | null => {
+      if (kind !== "pr_merge_enqueue") return null;
+      const outcome = current?.forgeAction?.outcome;
+      if (outcome !== "uncertain" && outcome !== "in_progress") return null;
+      if (outcome === "in_progress" && allowLeaseExpiry) {
+        this.db.beginWorkflowDecisionForgeAction(occurrenceId, kind, Date.now(), FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS * 2);
+      }
+      const refreshed = this.db.workflowDecisionByOccurrence(occurrenceId);
+      return fail(refreshed?.forgeAction?.outcome === "uncertain"
+        ? "the earlier enqueue may have run, so it is not replayed: reconcile_workflow_decision once the pull request reads MERGED"
+        : "Wollipog is already performing this decision", 409);
+    };
+    const alreadyAttempted = mergeEnqueueAlreadyAttempted(decision, !this.forgeActionsInFlight.has(occurrenceId));
+    if (alreadyAttempted) return alreadyAttempted;
+    // A publication whose earlier attempt may have run only looks for its issue from then on. A
+    // dispatch still `in_progress` here is one the begin below will read as stale, so uncertain too.
+    let createdIssue = decision.forgeAction?.publicationCreatedIssue;
+    const lookOnly = snapshot.category === "follow_up_issue_publication" &&
+      (createdIssue !== undefined || decision.forgeAction?.outcome === "uncertain" || decision.forgeAction?.outcome === "in_progress");
+    const canRevokeApproved = (current: WorkflowDecisionView | null | undefined): current is WorkflowDecisionView => Boolean(
+      current?.status === "approved" && !lookOnly &&
+      !(kind === "pr_merge_enqueue" && (current.forgeAction?.outcome === "uncertain" || current.forgeAction?.outcome === "in_progress")),
+    );
     const authorityCurrent = (): boolean => {
       const currentChild = this.db.getSession(sessionId);
       const currentParent = this.db.getSession(decision.controllingSessionId);
-      const policy = currentParent?.parentControlPolicy;
+      const currentController = directForge && currentChild ? this.workflowDecisionController(currentChild, decision.category) : null;
+      const directOwner = Boolean(currentChild && currentParent && this.directOwnerSelfDecision(currentChild, currentParent, decision));
+      const policy = directForge
+        ? (currentController?.session.id === currentParent?.id ? currentController?.policy : undefined)
+        : directOwner
+          ? this.directOwnerPolicy(currentParent!)
+          : currentParent?.parentControlPolicy;
       // The occurrence itself must still stand: one superseded, revoked or settled meanwhile (for
       // example by a new request for the same resource during the forge read) never dispatches.
       const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
       return Boolean(latest && latest.status === decision.status && latest.resourceDigest === decision.resourceDigest &&
         currentChild && currentParent && policy && !isTerminal(currentChild.status) && !isTerminal(currentParent.status) &&
         canAccess(currentChild.id) && canAccess(currentParent.id) &&
-        (this.workflowDecisionRelationship(currentParent.id, currentChild.id) ||
-          // A Custom root's own owner-approved publication, the same exception as consuming it (#3919).
-          decision.category === "follow_up_issue_publication" && decision.authority === "human" &&
-            currentChild.id === currentParent.id && this.customRootOwnPublication(currentChild)) &&
+        (directForge || directOwner || this.workflowDecisionRelationship(currentParent.id, currentChild.id)) &&
         policy.revision === decision.policyRevision &&
-        this.workflowDecisionAuthorityCurrent(currentParent, policy, latest));
+        this.workflowDecisionAuthorityCurrent(currentParent, policy, latest, { observingPublication: lookOnly }));
     };
     if (!child || !parent || !authorityCurrent()) {
-      if (decision.status === "approved") {
+      if (decision.status === "approved" && !lookOnly) {
         this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
       }
       return fail("workflow decision authority was revoked or ancestry changed before the action", 409);
@@ -16371,13 +17220,17 @@ export class SessionsService {
     const excludedRepository = this.excludedRepositoryRefusal(child, parent, snapshot);
     if (excludedRepository) return fail(excludedRepository, 409);
     let action: ForgeDecisionAction;
-    // A publication whose earlier attempt may have run only looks for its issue from then on. A
-    // dispatch still `in_progress` here is one the begin below will read as stale, so uncertain too.
-    let createdIssue = decision.forgeAction?.publicationCreatedIssue;
-    const lookOnly = snapshot.category === "follow_up_issue_publication" &&
-      (createdIssue !== undefined || decision.forgeAction?.outcome === "uncertain" || decision.forgeAction?.outcome === "in_progress");
     let publicationPlace: ReturnType<SessionsService["publicationPlace"]> = null;
-    if (snapshot.category === "follow_up_issue_publication") {
+    if (snapshot.category === "ci_rerun") {
+      const { category: _category, jobName: _jobName, ...target } = snapshot;
+      action = { kind: "ci_rerun", ...target };
+    } else if (snapshot.category === "release_tag") {
+      const { category, ...target } = snapshot;
+      action = { kind: category, ...target };
+    } else if (snapshot.category === "release_publish") {
+      const { category, ...target } = snapshot;
+      action = { kind: category, ...target };
+    } else if (snapshot.category === "follow_up_issue_publication") {
       const route = this.publicationRoute(child, parent, snapshot, true);
       if (!route) return fail("This publication is outside the campaign's verified repositories; nothing was performed", 403);
       if (campaignRepositoryLocation(snapshot.repository)?.forge === "gitlab") {
@@ -16414,8 +17267,9 @@ export class SessionsService {
       const command = canonicalPrMergeEnqueueCommand(snapshot);
       const admission = decision.actionAdmission;
       if (snapshot.mergeMethod !== undefined) return fail("Wollipog performs GitHub enqueues only; nothing was enqueued", 409);
-      if (!admission || admission.kind !== "pr_merge_enqueue" || admission.command !== command ||
-          admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command })) {
+      const requiresArming = child.driver === "claude-code" || child.driver === "codex-app-server";
+      if ((requiresArming || admission) && (!admission || admission.kind !== "pr_merge_enqueue" || admission.command !== command ||
+          admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command }))) {
         return fail("arm the merge first: consume_workflow_decision with its exact pr_merge_enqueue action, then execute it", 409);
       }
       const refused = this.mergeReviewEvidenceRefusal(child, snapshot);
@@ -16433,9 +17287,49 @@ export class SessionsService {
     if (this.forgeActionsInFlight.has(occurrenceId)) return fail("Wollipog is already performing this decision", 409);
     this.forgeActionsInFlight.add(occurrenceId);
     try {
+      const racedAttempt = mergeEnqueueAlreadyAttempted(this.db.workflowDecisionByOccurrence(occurrenceId), true);
+      if (racedAttempt) return racedAttempt;
+      let verifiedDirectLocation: { id: string; workspaceId: string; workspacePath: string; repository: string } | null = null;
+      if (!lookOnly && this.directOwnerSelfDecision(child, parent, decision) &&
+          this.requiresDirectLocationVerification(child, snapshot.category, decision) &&
+          (snapshot.category === "pr_merge" || snapshot.category === "merged_branch_deletion" ||
+            snapshot.category === "follow_up_issue_publication")) {
+        const requireProtocol = this.standaloneDirectOwnerSession(child) || snapshot.category !== "follow_up_issue_publication"
+          ? "standaloneOwnerDecisions" : null;
+        const verified = await this.verifyStandaloneRepositoryLocation(child, snapshot.repository, requireProtocol);
+        if (!verified.ok || !verified.data) {
+          const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+          if ((verified.status === 403 || !this.requesterForgeDecisionLocation(this.db.getSession(sessionId)!)) && canRevokeApproved(latest)) {
+            this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+          }
+          return fail(verified.error ?? "The session's Project Location could not be verified; nothing was performed.", 409);
+        }
+        const workspacePath = this.db.getWorkspacePath(verified.data.runnerId, verified.data.workspaceId);
+        if (!workspacePath) {
+          return fail("The session's Project Location path is unavailable; nothing was performed.", 409);
+        }
+        if (!authorityCurrent()) {
+          const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+          if (canRevokeApproved(latest)) this.revokeWorkflowDecision(latest, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
+          return fail("Authority changed while the action was being prepared; nothing was performed.", 409);
+        }
+        const currentLocation = this.requesterForgeDecisionLocation(this.db.getSession(sessionId)!);
+        if (!currentLocation || currentLocation.id !== verified.data.id) {
+          const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+          if (canRevokeApproved(latest)) this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+          return fail("The session's Project Location changed while the action was being prepared; nothing was performed.", 409);
+        }
+        verifiedDirectLocation = {
+          id: verified.data.id,
+          workspaceId: verified.data.workspaceId,
+          workspacePath,
+          repository: snapshot.repository.toLowerCase(),
+        };
+      }
       const begun = this.db.beginWorkflowDecisionForgeAction(occurrenceId, kind, Date.now(), FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS * 2);
       if (!begun) {
         const current = this.db.workflowDecisionByOccurrence(occurrenceId);
+        if (directForge) return fail("This target may already have been acted on or has no attempt left. Read the decision and GitHub; do not replay an uncertain write.", 409);
         return fail(current?.forgeAction?.outcome === "uncertain" && kind === "pr_merge_enqueue"
           ? "the earlier enqueue may have run, so it is not replayed: reconcile_workflow_decision once the pull request reads MERGED"
           : "this decision has no attempt left, is being performed, or was already performed; read get_workflow_decision", 409);
@@ -16448,7 +17342,9 @@ export class SessionsService {
           ...(publishedIssue === undefined ? {} : { publishedIssue, publicationVerified: true, performedByRunnerId: publicationPlace!.runnerId }), updatedAt: Date.now() });
       };
       if (snapshot.category === "follow_up_issue_publication" && !lookOnly) {
-        const stale = await this.publicationFreshnessRefusal(decision, parent, parent.parentControlPolicy!, snapshot);
+        const publicationPolicy = this.directOwnerSelfDecision(child, parent, decision)
+          ? this.directOwnerPolicy(parent) : parent.parentControlPolicy!;
+        const stale = await this.publicationFreshnessRefusal(decision, parent, publicationPolicy, snapshot);
         if (stale) {
           finish("refused", { reason: "publication_refused", summary: boundedForgeSummary(stale) });
           return this.forgeActionResult(sessionId, parent.id, occurrenceId);
@@ -16467,7 +17363,7 @@ export class SessionsService {
       if (!authorityCurrent()) {
         finish("refused", { reason: "runner_unavailable", summary: "Authority changed while the action was being prepared; nothing was performed." });
         const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
-        if (latest?.status === "approved") this.revokeWorkflowDecision(latest, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
+        if (canRevokeApproved(latest)) this.revokeWorkflowDecision(latest, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
         return this.forgeActionResult(sessionId, parent.id, occurrenceId);
       }
       // The review run may have moved during the forge read too: an uncited merge is only as good as
@@ -16501,6 +17397,15 @@ export class SessionsService {
           return this.forgeActionResult(sessionId, parent.id, occurrenceId);
         }
       }
+      if (verifiedDirectLocation) {
+        const currentLocation = this.requesterForgeDecisionLocation(this.db.getSession(sessionId)!);
+        if (!currentLocation || currentLocation.id !== verifiedDirectLocation.id) {
+          finish("refused", { reason: "runner_unavailable", summary: "The session's Project Location changed while the action was being prepared; nothing was performed." });
+          const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+          if (latest?.status === "approved") this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+          return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+        }
+      }
       // An exclusion recorded during the reads above changes no revision, so `authorityCurrent` can't
       // see it. Nothing is awaited between this check and the dispatch, and the approval stands (#4319).
       const excludedWhilePreparing = this.excludedRepositoryRefusal(this.db.getSession(sessionId)!, this.db.getSession(parent.id), snapshot);
@@ -16509,11 +17414,16 @@ export class SessionsService {
         return this.forgeActionResult(sessionId, parent.id, occurrenceId);
       }
       const requestId = `forge_decision_action_${randomUUID()}`;
+      const dispatchLocation = publicationPlace
+        ? { workspaceId: publicationPlace.workspaceId, workspacePath: publicationPlace.workspacePath, repository: publicationPlace.repository }
+        : verifiedDirectLocation
+          ? { workspaceId: verifiedDirectLocation.workspaceId, workspacePath: verifiedDirectLocation.workspacePath, repository: verifiedDirectLocation.repository }
+          : undefined;
       let answer: Partial<ForgeDecisionActionResultMessage> | null = null;
       try {
         answer = await this.hub.requestFromRunner(publicationPlace?.runnerId ?? child.runnerId, requestId, {
           type: "forge_decision_action", requestId, sessionId, occurrenceId, action,
-          ...(publicationPlace ? { location: { workspaceId: publicationPlace.workspaceId, workspacePath: publicationPlace.workspacePath, repository: publicationPlace.repository } } : {}),
+          ...(dispatchLocation ? { location: dispatchLocation } : {}),
         }, FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS) as unknown as Partial<ForgeDecisionActionResultMessage>;
       } catch (error) {
         if (isRunnerRequestNotSentError(error)) {
@@ -16522,12 +17432,16 @@ export class SessionsService {
         }
       }
       const valid = answer?.type === "forge_decision_action_result" && answer.sessionId === sessionId &&
+        (!directForge || answer.requestId === requestId) &&
         answer.occurrenceId === occurrenceId && typeof answer.outcome === "string";
       const outcome = valid ? answer!.outcome! : "uncertain";
       const allowed: ReadonlySet<string> = kind === "branch_deletion"
         ? new Set(["deleted", "already_deleted", "refused", "uncertain"])
         : kind === "issue_publication"
           ? new Set([lookOnly ? "already_published" : "published", "refused", "uncertain"])
+          : kind === "ci_rerun" ? new Set(["rerun_requested", "refused", "uncertain"])
+          : kind === "release_tag" ? new Set(["release_tagged", "refused", "uncertain"])
+          : kind === "release_publish" ? new Set(["release_published", "refused", "uncertain"])
           : new Set(["enqueued", "already_queued", "already_merged", "refused", "uncertain"]);
       // A publication's success must name the issue it created.
       const publishedIssue = kind === "issue_publication" && Number.isSafeInteger(answer?.issue) && answer!.issue! > 0 ? answer!.issue! : undefined;
@@ -16540,7 +17454,8 @@ export class SessionsService {
           ? answer!.refusal!.reason : "forge_refused";
         finish("refused", { reason, summary: boundedForgeSummary(answer!.refusal?.summary) });
         const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
-        if (FORGE_DECISION_ACTION_STALE_REFUSALS.has(reason) && latest?.status === "approved") {
+        if ((FORGE_DECISION_ACTION_STALE_REFUSALS.has(reason) ||
+            (reason === "repository_mismatch" && Boolean(verifiedDirectLocation))) && latest?.status === "approved") {
           this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
         }
         return this.forgeActionResult(sessionId, parent.id, occurrenceId);
@@ -16566,6 +17481,16 @@ export class SessionsService {
           return this.forgeActionResult(sessionId, parent.id, occurrenceId);
         }
       }
+      if (directForge) {
+        const now = Date.now();
+        const consumed = this.db.completeRequesterForgeDecision(occurrenceId, { ...begun, outcome,
+          updatedAt: now, performedByRunnerId: child.runnerId });
+        if (consumed) {
+          this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "system", id: "workflow-decision-forge-action" }, now);
+          this.retireResumeConsumedByRequester(consumed, now);
+        }
+        return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+      }
       finish(outcome, undefined, publishedIssue);
       // Authority was checked immediately before dispatch. A revision changing during readback
       // cannot make a confirmed external effect uncertain; record it and consume an approval that
@@ -16576,13 +17501,16 @@ export class SessionsService {
         const actor: GovernanceActor = { kind: "system", id: "workflow-decision-forge-action" };
         let consumed: WorkflowDecisionView | null;
         if (snapshot.category === "pr_merge" && outcome === "already_merged") {
-          consumed = this.consumeForgeAttestedMerge(latest, snapshot, { forgeHeadSha: snapshot.headSha });
-        } else if (snapshot.category === "pr_merge") {
+          consumed = latest.actionAdmission
+            ? this.consumeForgeAttestedMerge(latest, snapshot, { forgeHeadSha: snapshot.headSha })
+            : this.db.consumeWorkflowDecision(occurrenceId, now);
+          if (consumed && !latest.actionAdmission) this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
+        } else if (snapshot.category === "pr_merge" && latest.actionAdmission) {
           // One enqueue per occurrence; a later re-approved enqueue of the same head is its own action.
           const receiptDigest = auditDigest({ transport: "wollipog-enqueue", occurrenceId, repository: snapshot.repository,
             pullRequest: snapshot.pullRequest, headSha: snapshot.headSha })!;
           const reconciled = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(sessionId, occurrenceId,
-            latest.actionAdmission!.commandDigest, receiptDigest, now, { forgeAttested: true });
+            latest.actionAdmission.commandDigest, receiptDigest, now, { forgeAttested: true });
           consumed = reconciled?.decision ?? null;
           if (reconciled) {
             this.recordWorkflowDecisionAudit(reconciled.decision, "consumed", actor, now);
@@ -16749,7 +17677,7 @@ export class SessionsService {
     if (decision.authority === "human" && PERSON_SETTLED_WORKFLOW_DECISION_CATEGORIES.has(decision.category) && !ownPendingScope) {
       return fail(`a person settles this ${decision.category} decision, so it cannot be withdrawn`, 403);
     }
-    if (decision.requestId.startsWith("issue_closure_recovery_")) return fail("Only the owner can acknowledge issue closure recovery; agents cannot withdraw it", 403);
+    if (isIssueClosureRecoveryCoordinate(decision)) return fail("Only the owner can acknowledge issue closure recovery; agents cannot withdraw it", 403);
     if (!byRequester && decision.authority !== "orchestrator") {
       return fail("only its requester can withdraw a human-owned workflow decision", 403);
     }
@@ -16810,18 +17738,24 @@ export class SessionsService {
   async reconcileWorkflowDecision(
     sessionId: string,
     occurrenceId: string,
-    request: Pick<ConsumeWorkflowDecisionRequest, "resourceSnapshot">,
+    request: ReconcileWorkflowDecisionRequest,
     canAccess: (sessionId: string) => boolean = () => true,
   ): Promise<ServiceResult<WorkflowDecisionView>> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
-    if (decision.status === "superseded" && decision.supersededBy) {
+    if (request?.externalMerge !== undefined && request.externalMerge !== true) {
+      return fail("externalMerge must be true when supplied", 400);
+    }
+    const externalMerge = request?.externalMerge === true;
+    const superseded = !externalMerge && decision.status === "superseded" &&
+      this.db.reconcilableSupersededMerge(occurrenceId) !== null;
+    if (decision.status === "superseded" && decision.supersededBy && !superseded) {
       return { ok: false, status: 409, errorDetails: { code: "workflow_decision_superseded", supersededBy: decision.supersededBy },
         error: `workflow decision ${occurrenceId} was superseded by workflow decision ${decision.supersededBy}; ` +
           "it is settled and has nothing left to reconcile" };
     }
-    if (decision.status !== "approved" && decision.status !== "retired" &&
-        !this.db.isRecoverableWorkflowDecisionActionRevocation(sessionId, occurrenceId)) {
+    if (decision.status !== "approved" && (externalMerge || (!superseded && decision.status !== "retired" &&
+        !this.db.isRecoverableWorkflowDecisionActionRevocation(sessionId, occurrenceId)))) {
       return fail(`workflow decision cannot be reconciled from ${decision.status} state`, 409);
     }
     const normalized = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot);
@@ -16832,11 +17766,13 @@ export class SessionsService {
     }
     const child = this.db.getSession(sessionId);
     const parent = this.db.getSession(decision.controllingSessionId);
-    const policy = parent?.parentControlPolicy;
-    if (!child || (child.driver !== "codex-app-server" && child.driver !== "claude-code") ||
+    const directOwner = Boolean(child && parent && this.directOwnerSelfDecision(child, parent, decision));
+    const policy = directOwner ? this.directOwnerPolicy(parent!) : parent?.parentControlPolicy;
+    const wollipogQueued = this.wollipogMayHaveEnqueued(decision);
+    if (!child || (child.driver !== "codex-app-server" && child.driver !== "claude-code" && !wollipogQueued) ||
         !parent || isTerminal(child.status) ||
         isTerminal(parent.status) || !canAccess(child.id) || !canAccess(parent.id) ||
-        !this.workflowDecisionRelationship(parent.id, child.id) || !policy ||
+        !(directOwner || this.workflowDecisionRelationship(parent.id, child.id)) || !policy ||
         !this.completedMergeAuthorityCurrent(parent, policy, decision)) {
       return fail("workflow decision authority was revoked or ancestry changed before reconciliation", 409);
     }
@@ -16851,22 +17787,50 @@ export class SessionsService {
     const command = canonicalPrMergeEnqueueCommand(normalized.data);
     const admission = decision.actionAdmission;
     const action: WorkflowDecisionAction = { kind: "pr_merge_enqueue", command };
-    if (!admission || admission.kind !== action.kind || admission.command !== command ||
+    if (admission && (admission.kind !== action.kind || admission.command !== command ||
         admission.commandDigest !== auditDigest(action) || !Number.isSafeInteger(admission.armedAt) ||
-        admission.armedAt < 1) {
+        admission.armedAt < 1)) {
       return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     }
-    // An enqueue Wollipog ran itself left no provider receipt in any harness, so the forge settles it.
-    if (decision.retirement || child.driver === "claude-code" || this.wollipogMayHaveEnqueued(decision)) {
-      const proven = await this.forgeAttestedMergeProof(child, decision, normalized.data);
-      if (!proven.ok) return fail(proven.error!, 409);
-      const current = this.forgeAttestedMergeAuthority(decision, true, canAccess);
-      if (!current) return fail("workflow decision authority or ancestry changed during reconciliation", 409);
-      const consumed = this.consumeForgeAttestedMerge(decision, normalized.data, proven.data!);
+    if (externalMerge) {
+      const observation = await this.readMergeSettlementObservation(decision, normalized.data);
+      if (observation?.state !== "merged" || observation.headSha !== normalized.data.headSha ||
+          observation.mergedAt === undefined || decision.resolvedAt === undefined ||
+          observation.mergedAt <= decision.resolvedAt) {
+        return fail("the forge must prove that the approved head merged after the approval", 409);
+      }
+      if (!this.mergeSettlementAuthority(decision, true, canAccess)) {
+        return fail("workflow decision authority or ancestry changed during reconciliation", 409);
+      }
+      const consumed = this.consumeForgeAttestedMerge(decision, normalized.data, { forgeHeadSha: observation.headSha }, true);
       if (!consumed) return fail("workflow action proof was already used or the decision changed", 409);
       this.retireResumeConsumedByRequester(consumed, Date.now());
       return ok(this.withMergeReviewEvidence(consumed));
     }
+    if (!admission && !wollipogQueued) return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
+    // An enqueue Wollipog ran itself left no provider receipt in any harness, so the forge settles it.
+    if (decision.retirement || child.driver === "claude-code" || wollipogQueued) {
+      const proven = await this.forgeAttestedMergeProof(child, decision, normalized.data);
+      if (!proven.ok) return fail(proven.error!, 409);
+      const current = this.mergeSettlementAuthority(decision, true, canAccess);
+      if (!current) return fail("workflow decision authority or ancestry changed during reconciliation", 409);
+      let consumed: WorkflowDecisionView | null;
+      if (admission) {
+        consumed = this.consumeForgeAttestedMerge(decision, normalized.data, proven.data!);
+      } else {
+        const now = Date.now();
+        consumed = this.db.consumeWorkflowDecision(occurrenceId, now);
+        if (consumed) {
+          this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "system", id: "workflow-decision-action-reconciliation" }, now);
+          this.hub.sessionChangedById(sessionId);
+          this.hub.sessionChangedById(parent.id);
+        }
+      }
+      if (!consumed) return fail("workflow action proof was already used or the decision changed", 409);
+      this.retireResumeConsumedByRequester(consumed, Date.now());
+      return ok(this.withMergeReviewEvidence(consumed));
+    }
+    if (!admission) return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     const requestId = `workflow_action_reconcile_${randomUUID()}`;
     const message: ReconcileWorkflowActionMessage = {
       type: "reconcile_workflow_action",
@@ -16923,10 +17887,11 @@ export class SessionsService {
     }
     const currentChild = this.db.getSession(sessionId);
     const currentParent = this.db.getSession(decision.controllingSessionId);
-    const currentPolicy = currentParent?.parentControlPolicy;
+    const currentDirectOwner = Boolean(currentChild && currentParent && this.directOwnerSelfDecision(currentChild, currentParent, decision));
+    const currentPolicy = currentDirectOwner ? this.directOwnerPolicy(currentParent!) : currentParent?.parentControlPolicy;
     if (!currentChild || !currentParent || isTerminal(currentChild.status) || isTerminal(currentParent.status) ||
         !canAccess(currentChild.id) || !canAccess(currentParent.id) ||
-        !this.workflowDecisionRelationship(currentParent.id, currentChild.id) || !currentPolicy ||
+        !(currentDirectOwner || this.workflowDecisionRelationship(currentParent.id, currentChild.id)) || !currentPolicy ||
         !this.completedMergeAuthorityCurrent(currentParent, currentPolicy, decision)) {
       return fail("workflow decision authority or ancestry changed during reconciliation", 409);
     }
@@ -16951,6 +17916,7 @@ export class SessionsService {
       admission.commandDigest,
       receiptDigest,
       now,
+      { recoverSuperseded: superseded },
     );
     if (!reconciled) return fail("workflow action proof was already used or the decision changed", 409);
     const consumed = reconciled.decision;
@@ -17075,14 +18041,15 @@ export class SessionsService {
     )) return null;
     const parent = this.db.getSession(decision.controllingSessionId);
     const child = this.db.getSession(decision.sessionId);
-    const policy = parent?.parentControlPolicy;
+    const directOwner = Boolean(child && parent && this.directOwnerSelfDecision(child, parent, decision));
+    const policy = directOwner ? this.directOwnerPolicy(parent!) : parent?.parentControlPolicy;
     const unsupported = [child, parent].some((owner) => owner && this.capabilityFailure(
       owner.runnerId,
       "workflowDecisionActionAdmission",
       "workflow decision action admission",
     ));
     if (!child || child.id !== session.id || !parent || isTerminal(child.status) || isTerminal(parent.status) ||
-        unsupported || !this.workflowDecisionRelationship(parent.id, child.id) || !policy ||
+        unsupported || !(directOwner || this.workflowDecisionRelationship(parent.id, child.id)) || !policy ||
         policy.revision !== decision.policyRevision ||
         !this.workflowDecisionAuthorityCurrent(parent, policy, decision) ||
         canonicalPrMergeEnqueueCommand(decision.resourceSnapshot as Extract<
@@ -17160,6 +18127,9 @@ export class SessionsService {
         sessionRole(child) === "orchestrator" && child.parentControlPolicy) {
       return { session: child, policy: child.parentControlPolicy };
     }
+    if (category && this.directOwnerSelfControlled(child, category)) {
+      return { session: child, policy: this.directOwnerPolicy(child) };
+    }
     if (category === "follow_up_issue_publication" && this.customRootOwnPublication(child)) {
       return { session: child, policy: child.parentControlPolicy! };
     }
@@ -17173,6 +18143,9 @@ export class SessionsService {
     if (category === "review_round_extension" && root === "none") {
       return { session: child, policy: { revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } };
     }
+    if (isRequesterForgeDecisionCategory(category) && root === "none") {
+      return { session: child, policy: child.parentControlPolicy ?? { revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } };
+    }
     const parent = typeof root === "object" ? this.db.getSession(root.id) : null;
     const controller = parent ? {
       session: parent,
@@ -17184,12 +18157,123 @@ export class SessionsService {
     return controller;
   }
 
+  private requesterForgeDecisionLocation(session: SessionView): ProjectLocationView | null {
+    const location = session.projectLocationId ? this.db.getProjectLocation(session.projectLocationId) : null;
+    if (!location || location.projectId !== session.projectId || location.runnerId !== session.runnerId ||
+        location.workspaceId !== session.workspaceId || location.availability !== "available") return null;
+    // Runner snapshots persist the launch directory for registered workspaces too.
+    const launchPath = this.db.getAdHocWorkspacePath(session.id);
+    if (!launchPath) return location;
+    const registeredPath = this.db.getWorkspacePath(location.runnerId, location.workspaceId);
+    return registeredPath && workspacePathsEqual(launchPath, registeredPath) ? location : null;
+  }
+
   /** A Custom campaign root publishing a draft it wrote itself (#3919). It controls that gate, which
    * stays the campaign owner's: a root's request is never Orchestrator-owned outside Full Control.
    * Full Control roots and Orchestrators nested under another one resolve exactly as before. */
   private customRootOwnPublication(session: SessionView): boolean {
     return sessionRole(session) === "orchestrator" && Boolean(session.parentControlPolicy) &&
       session.orchestratorPolicy?.control?.mode !== "full_control" && this.decisionControllerRoot(session) === "none";
+  }
+
+  /** A standalone Normal session (no Orchestrator ancestor, not a review session, sound ancestry)
+   * routes its own typed approvals and Owner Questions directly to its human owner (#4894). */
+  private standaloneDirectOwnerSession(session: SessionView): boolean {
+    return sessionRole(session) === "normal" && !this.db.reviewSessions.isReviewSession(session.id) &&
+      this.decisionControllerRoot(session) === "none";
+  }
+
+  /** A Custom campaign root performing its own work routes approvals directly to its owner (#4894).
+   * Implementation actions (pr_merge, merged_branch_deletion, ui_evidence_approval) require Strict
+   * Project Isolation to be disabled; follow-up publication and owner decisions are always available
+   * to the Custom root (while issue_closure keeps its dedicated root Orchestrator path). */
+  private customRootOwnWorkSession(session: SessionView, category: WorkflowDecisionCategory): boolean {
+    if (!this.customRootOwnPublication(session)) return false;
+    if (category === "follow_up_issue_publication" || category === "owner_decision") {
+      return true;
+    }
+    if (category === "pr_merge" || category === "merged_branch_deletion" || category === "ui_evidence_approval") {
+      return session.orchestratorPolicy?.execution.strictProjectIsolation === false;
+    }
+    return false;
+  }
+
+  private directOwnerSelfControlled(session: SessionView, category: WorkflowDecisionCategory): boolean {
+    if (this.standaloneDirectOwnerSession(session)) {
+      return category === "pr_merge" || category === "merged_branch_deletion" ||
+        category === "follow_up_issue_publication" || category === "ui_evidence_approval" ||
+        category === "issue_closure" || category === "owner_decision";
+    }
+    return this.customRootOwnWorkSession(session, category);
+  }
+
+  private directOwnerSelfDecision(
+    child: SessionView,
+    parent: SessionView,
+    decision: Pick<WorkflowDecisionView, "category" | "authority">,
+  ): boolean {
+    return child.id === parent.id && decision.authority === "human" &&
+      this.directOwnerSelfControlled(child, decision.category);
+  }
+
+  private requiresDirectLocationVerification(
+    session: SessionView,
+    category: WorkflowDecisionCategory,
+    decision?: Pick<WorkflowDecisionView, "authorityEvaluation">,
+  ): boolean {
+    if (this.standaloneDirectOwnerSession(session)) {
+      return category === "pr_merge" || category === "merged_branch_deletion" ||
+        category === "follow_up_issue_publication" || category === "issue_closure";
+    }
+    if (!this.customRootOwnWorkSession(session, category)) return false;
+    if (category === "pr_merge" || category === "merged_branch_deletion") return true;
+    if (category !== "follow_up_issue_publication") return false;
+    if (decision?.authorityEvaluation?.verifiedLocationId) return true;
+    return campaignScopeRepositories(session).length === 0 &&
+      Boolean(this.requesterForgeDecisionLocation(session));
+  }
+
+  private directOwnerPolicy(session: SessionView): ParentControlPolicy {
+    return session.parentControlPolicy ?? { revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } };
+  }
+
+  private async verifyStandaloneRepositoryLocation(
+    session: SessionView,
+    repository: string,
+    requireProtocol: RunnerProtocolCapability | null = "standaloneOwnerDecisions",
+  ): Promise<ServiceResult<ProjectLocationView>> {
+    const location = this.requesterForgeDecisionLocation(session);
+    if (!location) return fail("This action requires a registered Project Location", 409);
+    const inspected = await inspectProjectLocation({ db: this.db, hub: this.hub }, location.id, {
+      projectId: location.projectId, ...(requireProtocol ? { requireProtocol } : {}), timeoutMs: 10_000,
+    });
+    if (!inspected.ok) {
+      return fail(inspected.reason || "The requested repository could not be verified at this session's Location", 409);
+    }
+    if (!inspected.location.repository || inspected.location.repository.toLowerCase() !== repository.toLowerCase()) {
+      return fail(`The requested repository ${repository} is outside this session's authorized Project Location`, 403);
+    }
+    return ok(location);
+  }
+
+  private uiEvidenceArtifactsRefusal(
+    sessionId: string,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "ui_evidence_approval" }>,
+  ): string | null {
+    for (const item of snapshot.evidence) {
+      if (!item.artifactId) continue;
+      const artifact = this.db.artifactExportPreflight(item.artifactId)?.artifact;
+      if (!artifact || artifact.sessionId !== sessionId || artifact.sha256 !== item.sha256 ||
+          (item.mediaType !== undefined && artifact.mimeType !== item.mediaType)) {
+        return `UI evidence item ${item.evidenceId} must reference an artifact belonging to this session with a matching mediaType and sha256 digest`;
+      }
+      let bytes: Buffer | null;
+      try { bytes = this.db.readArtifactBytes(item.artifactId); } catch { bytes = null; }
+      if (!bytes || createHash("sha256").update(bytes).digest("hex") !== item.sha256) {
+        return `UI evidence item ${item.evidenceId} no longer matches the artifact bytes bound to this decision`;
+      }
+    }
+    return null;
   }
 
   /** How a repository mismatch refusal tells `session` to recover (#4138), or null when it cannot
@@ -17248,7 +18332,7 @@ export class SessionsService {
         controller.orchestratorPolicy?.control?.mode !== "full_control") return direct;
     // Full Control never routes evidence to the Human (#2940). The Orchestrator keeps a decision it
     // cannot fully inspect only while the current boundary gives it UI Evidence Approval.
-    const requester = this.db.getSession(childSessionId);
+    const requester = this.db.getSession(childSessionId, { includeCampaignProjection: false });
     const owner = requester ? evaluateCampaignAuthority(controller, this.campaignPlaced(controller, requester),
       this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
       this.campaignPeerContracts(controller, requester.id)).owner : "human";
@@ -17263,7 +18347,7 @@ export class SessionsService {
     childSessionId: string,
     snapshot: WorkflowDecisionResourceSnapshot,
   ): WorkflowDecisionAuthority {
-    const requester = this.db.getSession(childSessionId);
+    const requester = this.db.getSession(childSessionId, { includeCampaignProjection: false });
     return requester ? evaluateCampaignAuthority(controller, this.campaignPlaced(controller, requester),
       this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
       this.campaignPeerContracts(controller, requester.id), this.reviewExtensionCap(requester.id, snapshot)).owner : "human";
@@ -17293,7 +18377,7 @@ export class SessionsService {
       this.db.uiEvidenceReviewClient(controller, authority),
     );
     if (client.effectiveOwner === "human") return client;
-    if (snapshot.videoReview && ![controller, this.db.getSession(childSessionId)].every((owner) =>
+    if (snapshot.videoReview && ![controller, this.db.getSession(childSessionId, { includeCampaignProjection: false })].every((owner) =>
       owner && runnerSupportsProtocol(this.db.getRunner(owner.runnerId)?.protocolVersion,
         "orchestratorVideoFrameReview"))) {
       return { effectiveOwner: "human", fallback: { code: "runner_unsupported",
@@ -17303,7 +18387,7 @@ export class SessionsService {
       return { effectiveOwner: "human", fallback: { code: "artifact_mismatch",
         reason: "The derived video frames no longer match their complete source manifest." } };
     }
-    const child = this.db.getSession(childSessionId);
+    const child = this.db.getSession(childSessionId, { includeCampaignProjection: false });
     if (!snapshot.videoReview && child && this.productionVideoReviewAvailable(controller, child, snapshot)) {
       const images = snapshot.evidence.filter((item) => item.mediaType?.startsWith("image/"));
       return images.length ? evaluateUiEvidenceItems(controller.driver, childSessionId, images,
@@ -17410,7 +18494,7 @@ export class SessionsService {
     controller: SessionView,
     policy: ParentControlPolicy,
     decision: WorkflowDecisionView,
-    options: { recordingCompletedMerge?: boolean } = {},
+    options: { recordingCompletedMerge?: boolean; observingPublication?: boolean } = {},
   ): boolean {
     const superseded = decision.authorityEvaluation?.supersededOwnerRule;
     // Keep removes authority to start new work. Recording an exact, already-armed merge after
@@ -17435,7 +18519,7 @@ export class SessionsService {
     if (!ownerKept && decision.authority === "human" && ["campaign_issue_scope", "issue_closure", "campaign_follow_up_admission"].includes(decision.category)) {
       return this.evaluateWorkflowDecisionAuthority(controller, policy, decision.sessionId, decision.resourceSnapshot).effectiveOwner === "human";
     }
-    const requester = this.db.getSession(decision.sessionId);
+    const requester = this.db.getSession(decision.sessionId, { includeCampaignProjection: false });
     if (!options.recordingCompletedMerge && decision.status === "approved" && requester && decision.resourceSnapshot.category === "pr_merge" &&
         this.mergeReviewEvidenceRefusal(requester, decision.resourceSnapshot)) return false;
     if (decision.authorityEvaluation?.boundaryRevision !== undefined && (!requester ||
@@ -17443,6 +18527,42 @@ export class SessionsService {
           decision.resourceSnapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
           this.campaignPeerContracts(controller, requester.id)).boundaryRevision !== decision.authorityEvaluation.boundaryRevision ||
         !campaignBoundaryCurrent(controller))) return false;
+    if (isRequesterForgeDecisionCategory(decision.category)) {
+      return decision.authority === "human" && Boolean(requester && this.requesterForgeDecisionLocation(requester) &&
+        runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, requesterForgeCapability(decision.category)));
+    }
+    if (requester && this.directOwnerSelfDecision(requester, controller, decision)) {
+      // Exact verifiedLocationId equality gates arming, manual consumption, and new writes; read-only
+      // settlement of a completed merge or observation of an already-attempted publication still settles
+      // when the same checkout is filed under a replacement Project Location ID (#4894).
+      if (decision.authorityEvaluation?.verifiedLocationId &&
+          !options.recordingCompletedMerge && !options.observingPublication) {
+        const currentLocation = this.requesterForgeDecisionLocation(requester);
+        if (!currentLocation || currentLocation.id !== decision.authorityEvaluation.verifiedLocationId) {
+          return false;
+        }
+      }
+      if (this.standaloneDirectOwnerSession(requester)) {
+        if (!runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, "standaloneOwnerDecisions")) {
+          return false;
+        }
+        if (decision.category === "pr_merge" || decision.category === "merged_branch_deletion" ||
+            decision.category === "follow_up_issue_publication" || decision.category === "issue_closure") {
+          return decision.authority === "human" && Boolean(this.requesterForgeDecisionLocation(requester));
+        }
+        return decision.authority === "human";
+      }
+      if (decision.category === "pr_merge" || decision.category === "merged_branch_deletion" ||
+          decision.category === "ui_evidence_approval" || decision.category === "owner_decision") {
+        if (!runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, "standaloneOwnerDecisions")) {
+          return false;
+        }
+        if (decision.category === "pr_merge" || decision.category === "merged_branch_deletion") {
+          return decision.authority === "human" && Boolean(this.requesterForgeDecisionLocation(requester));
+        }
+      }
+      return decision.authority === "human";
+    }
     if (ownerKept) return true;
     if (decision.category === "ui_evidence_approval" && decision.authority === "human") return true;
     // Likewise a person's review round extension stays theirs when Full Control could now own it
@@ -17473,6 +18593,149 @@ export class SessionsService {
   private uiEvidenceDirectRouteCurrent(controller: SessionView, policy: ParentControlPolicy, decision: WorkflowDecisionView): boolean {
     return this.directWorkflowDecisionAuthority(controller, policy, decision.sessionId, decision.resourceSnapshot)
       .effectiveOwner === "orchestrator";
+  }
+
+  /** The same live authority check backs Assistant delivery, receipt acknowledgement and approval. */
+  private assistantEvidenceReviewContext(
+    decision: WorkflowDecisionView,
+    threadId: string,
+    operation: string,
+  ): ServiceResult<{ session: SessionView; binding: string; model: string; snapshot: Extract<WorkflowDecisionResourceSnapshot,
+    { category: "ui_evidence_approval" }> }> {
+    const snapshot = decision.resourceSnapshot;
+    const thread = this.db.assistantThreads.get(threadId);
+    const session = thread?.session_id ? this.db.getSession(thread.session_id) : null;
+    const connection = thread?.connection_id ? this.db.assistantConnections.get(thread.connection_id) : null;
+    if (thread?.state !== "active" || !session || session.archived || session.role !== "assistant" ||
+        this.db.assistantThreads.harnessChangeInProgress(threadId) ||
+        connection?.threadId !== threadId || connection.revoked) {
+      return fail("This Assistant thread or its connection is unavailable.", 403);
+    }
+    const { grant, revision } = threadDecisionDelegation(thread);
+    if (!grant?.categories.includes("ui_evidence_review") || grant.expiresAt !== null && Date.now() >= grant.expiresAt) {
+      return fail("The thread needs a current grant for Approve UI Evidence. The owner can change it in Decision Delegation.", 403);
+    }
+    const owner = this.db.operatingHumanPrincipal(thread.owner_user_id, thread.organization_id);
+    const controller = this.db.getSession(decision.controllingSessionId);
+    const requester = this.db.getSession(decision.sessionId);
+    const policy = controller?.parentControlPolicy;
+    if (snapshot.category !== "ui_evidence_approval" || decision.status !== "pending" || decision.authority !== "human" ||
+        !controller || !requester || !policy || policy.revision !== decision.policyRevision ||
+        isTerminal(controller.status) || controller.archived || this.workflowDecisionChildEnded(requester) ||
+        !this.workflowDecisionRelationship(controller.id, requester.id) ||
+        !this.workflowDecisionAuthorityCurrent(controller, policy, decision) ||
+        decision.ownerRule || decision.ownerHandoff || decision.authorityEvaluation?.disposition ||
+        this.ownerKept(controller.id, decision.category, decision.resourceKey, snapshot) ||
+        !["custom_owner", "evidence_review_unavailable"].includes(decision.authorityEvaluation?.reason ?? "")) {
+      return fail("This occurrence is no longer eligible for Assistant UI evidence review.", 409);
+    }
+    const campaign = this.db.campaignRootForMember(requester.id) ?? controller.id;
+    if (owner?.role !== "owner" || !this.db.campaignOwnerUser(controller.id, owner.userId) ||
+        (grant.campaigns !== "all" && !grant.campaigns.includes(campaign)) ||
+        (connection.grant.operations !== "all" && !connection.grant.operations.includes(operation)) ||
+        [controller, requester].some((target) => target.id === session.id ||
+          !this.db.canAccessSession(owner, target.id) || !this.db.isSessionOwner(owner, target.id) ||
+          (grant.projects !== "all" && (!target.projectId || !grant.projects.includes(target.projectId))) ||
+          (connection.grant.projects !== "all" && (!target.projectId || !connection.grant.projects.includes(target.projectId))))) {
+      return fail("This decision is outside the Assistant thread’s current scope.", 403);
+    }
+    const sessionScope = this.db.sessionScope(session.id);
+    const requesterScope = this.db.sessionScope(requester.id);
+    if (!sessionScope || !requesterScope || !this.db.scopeAudienceContainedWithMembership(sessionScope, requesterScope)) {
+      return fail("This thread’s audience is outside the evidence audience.", 403);
+    }
+    const availability = assistantEvidenceReviewAvailability(this.db, session);
+    if (!availability.available) return fail(availability.reason, 409);
+    if (grant.evidenceDisclosureDigest !== availability.disclosureDigest) {
+      return fail("The thread’s provider, model or account changed. The owner needs to renew its grant for Approve UI Evidence.", 409);
+    }
+    const control = controller.orchestratorPolicy?.control;
+    const boundary = control?.mode === "full_control" ? control.boundary : undefined;
+    const authority = boundary?.evidenceAuthority;
+    if (authority && (!campaignEvidenceAuthorityBound(authority, boundary!) ||
+        !campaignEvidenceDisclosuresCurrent(authority, this.evidenceAuthorityDisclosures) ||
+        !authority.providers.some((provider) => provider.providerId === session.driver && provider.reviewers.some((reviewer) =>
+          reviewer.driver === session.driver && reviewer.modelId === availability.model)))) {
+      return fail("The campaign’s current evidence disclosure does not cover this thread’s provider and model.", 403);
+    }
+    const unsupported = snapshot.evidence.filter((item) => snapshot.videoReview ||
+      evaluateUiEvidenceItems(session.driver, requester.id, [item], (id) => this.db.artifactExportPreflight(id)?.artifact ?? null)
+        .effectiveOwner !== "orchestrator");
+    if (unsupported.length) {
+      return fail(`The Assistant cannot inspect evidence ${unsupported.map((item) => JSON.stringify(item.evidenceId)).join(", ")}. Ask for screenshots attached as Session artifacts, or leave the approval to the owner.`, 409);
+    }
+    const binding = auditDigest([threadId, session.id, connection.id, connection.revision, revision,
+      availability.disclosureDigest, decision.occurrenceId, decision.resourceDigest])!;
+    return ok({ session, binding, model: availability.model, snapshot });
+  }
+
+  private assistantEvidenceBytes(artifactId: string, sha256: string): Buffer | null {
+    let bytes: Buffer | null;
+    try { bytes = this.db.readArtifactBytes(artifactId); } catch { return null; }
+    return bytes && bytes.byteLength <= MAX_UI_EVIDENCE_REVIEW_BYTES &&
+      createHash("sha256").update(bytes).digest("hex") === sha256 ? bytes : null;
+  }
+
+  deliverAssistantUiEvidence(
+    decision: WorkflowDecisionView,
+    threadId: string,
+    evidenceId: string,
+  ): ServiceResult<UiEvidenceReviewDelivery> {
+    const context = this.assistantEvidenceReviewContext(decision, threadId, ASSISTANT_EVIDENCE_INSPECT);
+    if (!context.ok || !context.data) return failAs(context);
+    const { session, snapshot, binding } = context.data;
+    const item = snapshot.evidence.find((candidate) => candidate.evidenceId === evidenceId);
+    if (!item?.artifactId) return fail("Evidence item not found on this workflow decision.", 404);
+    const bytes = this.assistantEvidenceBytes(item.artifactId, item.sha256);
+    if (!bytes) return fail("Evidence content no longer matches the digest bound to this decision.", 409);
+    const now = Date.now();
+    const receipt = this.db.recordUiEvidenceReviewReceipt({
+      receiptId: `uireceipt_${randomUUID().replace(/-/gu, "")}`,
+      occurrenceId: decision.occurrenceId, reviewerSessionId: session.id,
+      childSessionId: decision.sessionId, policyRevision: decision.policyRevision, evidenceId,
+      artifactId: item.artifactId, sha256: item.sha256, deliveredAt: now, assistantBinding: binding,
+    }, now + UI_EVIDENCE_REVIEW_RECEIPT_TTL_MS);
+    this.recordWorkflowDecisionAudit(decision, "answered", { kind: "agent", id: threadId }, now,
+      undefined, [receipt.receiptId], "review");
+    return ok({ receipt, mimeType: item.mediaType!, sizeBytes: bytes.length, data: bytes.toString("base64") });
+  }
+
+  acknowledgeAssistantUiEvidence(decision: WorkflowDecisionView, threadId: string, evidenceId: string,
+    receiptId: string, sha256: string): ServiceResult<{ acknowledged: true }> {
+    const context = this.assistantEvidenceReviewContext(decision, threadId, ASSISTANT_EVIDENCE_INSPECT);
+    if (!context.ok || !context.data) return failAs(context);
+    const { session, binding, snapshot } = context.data;
+    const item = snapshot.evidence.find((candidate) => candidate.evidenceId === evidenceId);
+    if (!item?.artifactId || item.sha256 !== sha256 || !this.assistantEvidenceBytes(item.artifactId, sha256)) {
+      return fail("Evidence content no longer matches the digest bound to this decision.", 409);
+    }
+    return this.db.acknowledgeUiEvidenceReviewReceipt(receiptId, session.id, sha256, Date.now(), binding)
+      ? ok({ acknowledged: true }) : fail("The image delivery receipt was replaced, expired, or revoked.", 409);
+  }
+
+  private assistantEvidenceApprovalReceipts(
+    decision: WorkflowDecisionView,
+    threadId: string,
+    now: number,
+    reference?: DelegatedImageReviewReference,
+  ): ServiceResult<UiEvidenceReviewReceipt[]> {
+    const context = this.assistantEvidenceReviewContext(decision, threadId, reference ? ASSISTANT_EVIDENCE_PREPARE : ASSISTANT_EVIDENCE_INSPECT);
+    if (!context.ok || !context.data) return failAs(context);
+    const { session, binding, snapshot } = context.data;
+    if (reference) {
+      const refused = this.delegatedImageApprovalRefusal(decision, reference, now, binding);
+      if (refused) return fail(refused, 409);
+    }
+    const verdict = reference ? this.db.delegatedImageReviews.get(reference.reviewId)?.verdict : undefined;
+    const receipts = this.db.validUiEvidenceReviewReceipts(decision.occurrenceId, reference?.reviewerSessionId ?? session.id, now)
+      .filter((receipt) => (reference ? verdict?.receiptIds.includes(receipt.receiptId) : receipt.assistantBinding === binding) &&
+        receipt.policyRevision === decision.policyRevision &&
+        receipt.childSessionId === decision.sessionId);
+    const missing = snapshot.evidence.filter((item) => !item.artifactId ||
+      !receipts.some((receipt) => receipt.evidenceId === item.evidenceId && receipt.artifactId === item.artifactId &&
+        receipt.sha256 === item.sha256) || !this.assistantEvidenceBytes(item.artifactId, item.sha256));
+    return missing.length ? fail(`UI evidence approval requires current review receipts for ${missing.map((item) =>
+      JSON.stringify(item.evidenceId)).join(", ")}. Inspect those items with ${ASSISTANT_EVIDENCE_INSPECT}, ask for Session screenshots, or deny the claim if your grant permits it.`, 409) : ok(receipts);
   }
 
   /** Deliver one exact evidence artifact of a pending descendant decision to the Orchestrator that
@@ -17666,7 +18929,7 @@ export class SessionsService {
     const briefSha256 = createHash("sha256").update(brief).digest("hex");
     this.db.delegatedImageReviews.clearReuse(occurrenceId);
     for (const prior of this.db.delegatedImageReviews.forChild(parentSessionId, childSessionId)) {
-      if (prior.occurrenceId === occurrenceId || !prior.verdict || prior.briefSha256 !== briefSha256) continue;
+      if (prior.assistant || prior.occurrenceId === occurrenceId || !prior.verdict || prior.briefSha256 !== briefSha256) continue;
       const reference = { reviewId: prior.reviewId, verdictId: prior.verdict.verdictId, reviewerSessionId: prior.reviewerSessionId };
       this.db.delegatedImageReviews.prepareReuse(occurrenceId, prior.reviewId, briefSha256, decision.resourceDigest);
       if (!this.delegatedImageApprovalRefusal(decision, reference, now)) {
@@ -17675,12 +18938,69 @@ export class SessionsService {
       }
       this.db.delegatedImageReviews.clearReuse(occurrenceId);
     }
+    return this.launchDelegatedImageReview(parent, child, decision, snapshot, brief, parent);
+  }
+
+  prepareAssistantImageEvidenceReview(decision: WorkflowDecisionView, threadId: string,
+    brief: string): ServiceResult<DelegatedImageReviewView> {
+    if (!brief.trim() || brief.length > DELEGATED_IMAGE_REVIEW_BRIEF_MAX_CHARS) {
+      return fail(`State the claims and criteria in at most ${DELEGATED_IMAGE_REVIEW_BRIEF_MAX_CHARS} characters.`, 400);
+    }
+    const context = this.assistantEvidenceReviewContext(decision, threadId, ASSISTANT_EVIDENCE_PREPARE);
+    if (!context.ok || !context.data) return failAs(context);
+    const { session, model, binding, snapshot } = context.data;
+    const parent = this.db.getSession(decision.controllingSessionId)!;
+    const child = this.db.getSession(decision.sessionId)!;
+    if (!this.db.campaignBudgets.governingRoot(parent.id)) {
+      return fail("A managed Assistant image reviewer needs a campaign allowance. Inspect the screenshots directly.", 409);
+    }
+    const runner = this.db.getRunner(session.runnerId);
+    const agent = runner?.agents.find((candidate) => candidate.id === session.agentId && candidate.available);
+    if (!runnerSupportsProtocol(runner?.protocolVersion, "delegatedImageEvidenceReview") ||
+        session.driver !== "claude-code" || agent?.driver !== "claude-code" ||
+        (agent.context?.kind ?? "native") !== "native" || session.executionTarget && session.executionTarget.adapter !== "host" ||
+        !this.hub.isRunnerOnline(session.runnerId)) {
+      return fail("This thread cannot launch a restricted native Claude Code reviewer on its authorized provider. Inspect the screenshots directly.", 409);
+    }
+    const scope = this.db.sessionScope(session.id);
+    const parentScope = this.db.sessionScope(parent.id);
+    if (!scope || !parentScope || !this.db.scopeAudienceContainedWithMembership(scope, parentScope)) {
+      return fail("This thread’s audience is outside the campaign’s audience.", 403);
+    }
+    return this.launchDelegatedImageReview(parent, child, decision, snapshot, brief, session, { threadId, binding, model });
+  }
+
+  assistantImageEvidenceReview(decision: WorkflowDecisionView, threadId: string, reviewId: string): ServiceResult<DelegatedImageReviewView> {
+    const context = this.assistantEvidenceReviewContext(decision, threadId, ASSISTANT_EVIDENCE_PREPARE);
+    if (!context.ok || !context.data) return failAs(context);
+    const review = this.db.delegatedImageReviews.get(reviewId);
+    if (review?.assistant?.threadId !== threadId || review.assistant.binding !== context.data.binding ||
+        review.occurrenceId !== decision.occurrenceId) {
+      return fail("No managed image review matches this grant and decision.", 404);
+    }
+    return ok(this.delegatedImageReviewViewOf(review, decision));
+  }
+
+  private launchDelegatedImageReview(
+    parent: SessionView,
+    child: SessionView,
+    decision: WorkflowDecisionView,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "ui_evidence_approval" }>,
+    brief: string,
+    launcher: SessionView,
+    assistant?: { threadId: string; binding: string; model: string },
+  ): ServiceResult<DelegatedImageReviewView> {
+    const now = Date.now();
+    const { occurrenceId } = decision;
+    const direct = assistant ? "Inspect screenshots directly with assistant_evidence_inspect."
+      : "Use review_descendant_ui_evidence to inspect the images directly.";
     // A live review is returned as it is. One that can no longer back an approval (its reviewer ended
     // without a verdict, or its verdict's receipts expired) is retired, and a fresh reviewer replaces it.
     const live = this.db.delegatedImageReviews.liveForOccurrence(occurrenceId);
     if (live) {
       const settled = this.settleDelegatedImageReview(live, now);
       if (settled.state === "running" || settled.state === "verdict") {
+        if (settled.assistant?.binding !== assistant?.binding) return fail("Another reviewer is already reviewing this occurrence.", 409);
         return ok(this.delegatedImageReviewViewOf(settled, decision));
       }
     }
@@ -17688,12 +19008,13 @@ export class SessionsService {
     const review: NewDelegatedImageReview = {
       reviewId: `uiimgreview_${randomUUID().replace(/-/gu, "")}`,
       occurrenceId,
-      rootSessionId: parentSessionId,
-      childSessionId,
+      rootSessionId: parent.id,
+      childSessionId: child.id,
       policyRevision: decision.policyRevision,
       resourceDigest: decision.resourceDigest,
       evidence,
       briefSha256: createHash("sha256").update(brief).digest("hex"),
+      ...(assistant ? { assistant: { threadId: assistant.threadId, binding: assistant.binding } } : {}),
     };
     for (const active of this.db.delegatedImageReviews.activeForRoot(parent.id)) {
       // A stalled reviewer must not hold the separate slot indefinitely. Stopping is idempotent;
@@ -17701,13 +19022,15 @@ export class SessionsService {
       if (now - active.createdAt >= DELEGATED_IMAGE_REVIEW_MAX_DURATION_MS) this.stop(active.reviewerSessionId);
       return fail(`This Orchestrator already has one active image reviewer (the separate review limit is 1). Wait for it or stop that reviewer Session. ${direct}`, 409);
     }
-    const workspacePath = parent.workspaceId ? undefined : this.db.getAdHocWorkspacePath(parent.id) ?? undefined;
+    const workspacePath = launcher.workspaceId ? undefined : this.db.getAdHocWorkspacePath(launcher.id) ?? undefined;
+    const launchModel = assistant?.model ?? launcher.model;
     const created = this.createSession({
-      runnerId: parent.runnerId,
-      workspaceId: parent.workspaceId ?? "",
+      runnerId: launcher.runnerId,
+      workspaceId: launcher.workspaceId ?? "",
       ...(workspacePath ? { workspacePath } : {}),
-      agentId: parent.agentId,
-      ...(parent.executionTarget ? { executionTargetId: parent.executionTarget.id } : {}),
+      agentId: launcher.agentId!,
+      ...(launcher.executionTarget ? { executionTargetId: launcher.executionTarget.id } : {}),
+      ...(assistant && launcher.providerAccountId ? { providerAccountId: launcher.providerAccountId } : {}),
       title: `UI Evidence Review of ${child.title}`.slice(0, 120),
       prompt: delegatedImageReviewPrompt(evidence.map((item) => item.evidenceId), brief),
       useWorktree: false,
@@ -17715,23 +19038,24 @@ export class SessionsService {
       // (no built-in tools, only the two review tools, never asking), whatever the installation offers.
       config: {
         maxChildSessions: 0,
-        ...(parent.model ? { model: parent.model } : {}),
-        ...(parent.effort ? { effort: parent.effort } : {}),
+        ...(launchModel ? { model: launchModel } : {}),
+        ...(launcher.effort ? { effort: launcher.effort } : {}),
         // A bounded review: one delivery per image, one verdict, and a little room to retry.
         costBudgetUsd: DELEGATED_IMAGE_REVIEW_COST_BUDGET_USD,
         maxToolCalls: evidence.length * 2 + 8,
       },
-    }, undefined, this.db.sessionScope(parent.id) ?? undefined, true, false, true,
-    { parentSessionId: parent.id, [DELEGATED_IMAGE_REVIEW]: review });
+    }, undefined, this.db.sessionScope(launcher.id) ?? undefined, true, false, true,
+    { parentSessionId: parent.id, [DELEGATED_IMAGE_REVIEW]: review,
+      ...(assistant ? { assistantImageReviewAccount: launcher.providerAccountId ?? null } : {}) });
     if (!created.ok || !created.data) {
       return { ...failAs<DelegatedImageReviewView>(created),
         error: `The image reviewer could not be started: ${created.error ?? "unknown reason"}. ${direct}` };
     }
     // A "review" stage entry, so it never displaces the child's request as the card's provenance.
-    this.recordWorkflowDecisionAudit(decision, "answered", { kind: "agent", id: parentSessionId }, now, undefined, undefined, "review");
-    this.log.info(JSON.stringify({ event: "delegated_image_review_prepared", sessionId: parentSessionId, childSessionId,
+    this.recordWorkflowDecisionAudit(decision, "answered", { kind: "agent", id: assistant?.threadId ?? parent.id }, now, undefined, undefined, "review");
+    this.log.info(JSON.stringify({ event: "delegated_image_review_prepared", sessionId: parent.id, childSessionId: child.id,
       occurrenceId, reviewId: review.reviewId, reviewerSessionId: created.data.id, evidenceCount: evidence.length }));
-    this.hub.sessionChangedById(parentSessionId);
+    this.hub.sessionChangedById(parent.id);
     return ok(this.delegatedImageReviewViewOf(this.db.delegatedImageReviews.get(review.reviewId)!, decision), 201);
   }
 
@@ -17743,24 +19067,61 @@ export class SessionsService {
     canAccess: (sessionId: string) => boolean,
   ): ServiceResult<DelegatedImageReviewView> {
     const review = typeof reviewId === "string" ? this.db.delegatedImageReviews.get(reviewId) : null;
-    if (!review || review.rootSessionId !== parentSessionId || !canAccess(parentSessionId) ||
+    if (!review || review.assistant || review.rootSessionId !== parentSessionId || !canAccess(parentSessionId) ||
         !canAccess(review.childSessionId)) {
       return fail("delegated image review not found", 404);
     }
     return ok(this.delegatedImageReviewViewOf(review, this.db.workflowDecisionByOccurrence(review.occurrenceId)));
   }
 
+  private readonly imageReviewerSweepCursors = new Map<string, string>();
+
+  /** Runs on reconnect and the durable prompt maintenance tick; never trusts agent reports. */
+  maintainImageReviewerRetirement(now: number, runnerId?: string): void {
+    const key = runnerId ?? "*";
+    const reviews = this.db.delegatedImageReviews.unsettled(runnerId, this.imageReviewerSweepCursors.get(key));
+    this.imageReviewerSweepCursors.set(key, reviews.length === 64 ? reviews.at(-1)!.reviewId : "");
+    for (const review of reviews) {
+      const current = this.settleDelegatedImageReview(review, now);
+      if (current.state !== "consumed" && current.state !== "ended") continue;
+      const session = this.db.getSession(current.reviewerSessionId);
+      // A failed Stop keeps its bounded retry policy. Only a reconnect explicitly rearms it.
+      if (runnerId && session?.archiveStatus === "stop_failed" && this.hub.isRunnerOnline(runnerId)) {
+        this.retryStop(session.id);
+      }
+      // Existing durable intents own retries; do not resend a Stop on every maintenance tick.
+      if (this.db.sessionStopIntent(current.reviewerSessionId)?.archiveAfterStop) continue;
+      const result = this.setArchived(current.reviewerSessionId, true, false);
+      if (result.ok && (result.data?.archived !== session?.archived || result.data?.archiveStatus !== session?.archiveStatus)) {
+        this.log.info(JSON.stringify({ event: "delegated_image_reviewer_retirement", reviewId: current.reviewId,
+          reviewerSessionId: current.reviewerSessionId, rootSessionId: current.rootSessionId,
+          entryPoint: runnerId ? "runner_reconnect" : "maintenance", reviewState: current.state,
+          archived: result.data?.archived, archiveStatus: result.data?.archiveStatus ?? null }));
+        this.campaignViewsChanged(current.rootSessionId, current.reviewerSessionId);
+      }
+    }
+  }
+
   /** Ends a live review that can never back an approval, and returns its current record. */
   private settleDelegatedImageReview(review: DelegatedImageReviewRecord, now: number): DelegatedImageReviewRecord {
     let reason: string | null = null;
-    if (review.state === "running") {
+    if ((review.state === "running" || review.state === "verdict") && review.assistant &&
+        !this.assistantManagedReviewIsCurrent(review, this.db.workflowDecisionByOccurrence(review.occurrenceId))) {
+      this.stop(review.reviewerSessionId);
+      reason = "assistant_authority_changed";
+    } else if (review.state === "running") {
       if (now - review.createdAt >= DELEGATED_IMAGE_REVIEW_MAX_DURATION_MS) {
         this.stop(review.reviewerSessionId);
         reason = "reviewer_deadline_expired";
       }
       // A reviewer whose turn or Session ended without a verdict will never submit one.
       const reviewer = this.db.getSession(review.reviewerSessionId);
-      if (!reason && (!reviewer || isTerminal(reviewer.status) || reviewer.status === "idle")) reason = "reviewer_finished_without_verdict";
+      const finished = !reviewer || reviewer.status === "idle" || reviewer.status === "completed" || reviewer.status === "failed" ||
+        reviewer.status === "stopped" && !this.db.hasSessionStopIntent(reviewer.id) &&
+          Boolean(this.db.sessionStopProvenance(reviewer.id)?.confirmation);
+      // Disconnect/startup writes a provisional Stop while the provider may still be working.
+      // A maintenance tick cannot turn that into an ended review before runner reconciliation.
+      if (!reason && finished) reason = "reviewer_finished_without_verdict";
     } else if (review.state === "verdict" && review.verdict) {
       // A verdict rests on its receipts. Once any of them expires the reviewer cannot look again
       // (nothing is delivered after a verdict), so the review is retired for a fresh one (#4074).
@@ -17779,7 +19140,7 @@ export class SessionsService {
     const approvable = current.state === "verdict" && current.verdict?.recommendation === "approve" && decision !== null &&
       this.delegatedImageApprovalRefusal(decision, {
         reviewId: current.reviewId, verdictId: current.verdict.verdictId, reviewerSessionId: current.reviewerSessionId,
-      }, Date.now()) === null;
+      }, Date.now(), current.assistant?.binding) === null;
     return this.db.delegatedImageReviews.view(current, approvable);
   }
 
@@ -17790,20 +19151,25 @@ export class SessionsService {
     decision: WorkflowDecisionView,
     reference: DelegatedImageReviewReference,
     now: number,
+    assistantBinding?: string,
   ): string | null {
     const snapshot = decision.resourceSnapshot;
-    if (snapshot.category !== "ui_evidence_approval" || decision.authority !== "orchestrator" || decision.status !== "pending") {
-      return "a delegated image review backs only a pending Orchestrator-owned UI evidence decision";
+    if (snapshot.category !== "ui_evidence_approval" || decision.authority !== (assistantBinding ? "human" : "orchestrator") ||
+        decision.status !== "pending") {
+      return "a delegated image review backs only an eligible pending UI evidence decision";
     }
     const review = this.db.delegatedImageReviews.get(reference.reviewId);
     const verdict = review?.verdict;
-    if (!review || !verdict ||
+    if (!review || !verdict || review.assistant?.binding !== assistantBinding ||
         review.rootSessionId !== decision.controllingSessionId || review.childSessionId !== decision.sessionId ||
         review.reviewerSessionId !== reference.reviewerSessionId || verdict.reviewerSessionId !== reference.reviewerSessionId ||
         verdict.verdictId !== reference.verdictId) {
       return "the delegated image review does not identify an actual reviewer verdict for this decision";
     }
     const reuse = review.occurrenceId !== decision.occurrenceId;
+    if (review.assistant && (reuse || !this.assistantManagedReviewIsCurrent(review, decision))) {
+      return "the managed image review is no longer bound to this decision and the thread’s current grant and provider";
+    }
     if (reuse && !this.db.delegatedImageReviews.reusePrepared(decision.occurrenceId, review.reviewId,
       review.briefSha256, decision.resourceDigest)) return "prepare this occurrence with the same claims and criteria before reusing a delegated verdict";
     if (!reuse && review.state !== "verdict") return `the delegated image review is ${review.state}${review.endedReason ? ` (${review.endedReason})` : ""}`;
@@ -17835,6 +19201,17 @@ export class SessionsService {
         "receipts expire after an hour, so prepare a fresh review";
     }
     return null;
+  }
+
+  private assistantManagedReviewIsCurrent(review: DelegatedImageReviewRecord, decision: WorkflowDecisionView | null): boolean {
+    if (!decision || !review.assistant || decision.occurrenceId !== review.occurrenceId ||
+        decision.resourceDigest !== review.resourceDigest || !this.db.campaignBudgets.governingRoot(review.rootSessionId)) return false;
+    const authority = this.assistantEvidenceReviewContext(decision, review.assistant.threadId, ASSISTANT_EVIDENCE_PREPARE);
+    const reviewer = this.db.getSession(review.reviewerSessionId);
+    const launcher = authority.data?.session;
+    return Boolean(authority.ok && authority.data?.binding === review.assistant.binding && launcher && reviewer &&
+      reviewer.runnerId === launcher.runnerId && reviewer.agentId === launcher.agentId && reviewer.driver === launcher.driver &&
+      reviewer.model === authority.data.model && reviewer.providerAccountId === launcher.providerAccountId);
   }
 
   private delegatedImageReviewerAudienceCurrent(review: DelegatedImageReviewRecord,
@@ -17870,7 +19247,7 @@ export class SessionsService {
     const snapshot = decision.resourceSnapshot;
     if (snapshot.category !== "ui_evidence_approval" || decision.resourceDigest !== review.resourceDigest ||
         decision.policyRevision !== review.policyRevision || decision.controllingSessionId !== review.rootSessionId ||
-        decision.sessionId !== review.childSessionId || decision.authority !== "orchestrator") {
+        decision.sessionId !== review.childSessionId || decision.authority !== (review.assistant ? "human" : "orchestrator")) {
       return end("decision_changed", "the decision changed after this review was prepared");
     }
     const reviewer = this.db.getSession(reviewerSessionId);
@@ -17893,7 +19270,7 @@ export class SessionsService {
       this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: reviewerSessionId } });
       return fail("workflow decision authority was revoked or superseded", 409);
     }
-    if (this.directWorkflowDecisionAuthority(root, policy, child.id, snapshot).effectiveOwner !== "orchestrator") {
+    if (!review.assistant && this.directWorkflowDecisionAuthority(root, policy, child.id, snapshot).effectiveOwner !== "orchestrator") {
       return end("route_unavailable", "the decision's owner can no longer inspect this evidence, so neither can its reviewer");
     }
     return ok({ review, decision: decision as WorkflowDecisionView & { resourceSnapshot: typeof snapshot } });
@@ -18000,10 +19377,13 @@ export class SessionsService {
   private workflowDecisionApproval(decision: WorkflowDecisionView): PendingApproval {
     const snapshot = decision.resourceSnapshot;
     const requester = decision.sessionId === decision.controllingSessionId && decision.authority === "human"
-      ? this.db.getSession(decision.sessionId) : null;
+      ? this.db.getSession(decision.sessionId, { includeCampaignProjection: false }) : null;
     const categoryTitle: Record<WorkflowDecisionCategory, string> = {
       implementation_question: "Implementation Decision Required",
       pr_merge: "PR Merge Approval Required",
+      ci_rerun: "CI Rerun Approval Required",
+      release_tag: "Release Tag Approval Required",
+      release_publish: "Release Publication Approval Required",
       merged_branch_deletion: "Merged Branch Deletion Approval Required",
       follow_up_issue_publication: "Follow-Up Issue Publication Approval Required",
       issue_closure: "Issue Closure Approval Required",
@@ -18056,10 +19436,15 @@ export class SessionsService {
       // root (#4536). Existing owner-kept cards retain their behavior (#4064); other root cards
       // need a runner supporting owner decisions. This changes delivery, never authority.
       ...(decision.sessionId === decision.controllingSessionId && decision.authority === "human" &&
+        requester && sessionRole(requester) === "orchestrator" &&
         (decision.category === "owner_decision" || decision.ownerHandoff || decision.ownerRule ||
           decision.authorityEvaluation?.reason === "owner_kept" ||
           decision.authorityEvaluation?.reason === "credential_screen_review" ||
-          requester?.orchestratorPolicy?.control?.mode === "full_control" &&
+          ((decision.category === "pr_merge" || decision.category === "merged_branch_deletion" ||
+            decision.category === "ui_evidence_approval") &&
+            this.customRootOwnWorkSession(requester, decision.category) &&
+            runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, "standaloneOwnerDecisions")) ||
+          requester.orchestratorPolicy?.control?.mode === "full_control" &&
             runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, "ownerDecisions")) ? { async: true } : {}),
       context: {
         toolName: "Typed Workflow Decision",
@@ -18070,7 +19455,7 @@ export class SessionsService {
           (decision.ownerRule || decision.ownerHandoff || decision.authorityEvaluation?.reason === "owner_kept") &&
           !this.db.ownerOccurrenceWasReturned(decision.occurrenceId) &&
           this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot) &&
-          this.db.getSession(decision.controllingSessionId)?.orchestratorPolicy?.control?.mode === "full_control"
+          this.db.sessionOrchestratorPolicy(decision.controllingSessionId)?.control?.mode === "full_control"
           ? { returnableOwnerResource: true as const } : {}) },
     };
   }
@@ -18130,7 +19515,7 @@ export class SessionsService {
           return fail("Original video approval requires separate actual-worker provenance", 400);
         }
         const image = resolution.delegatedImageReview;
-        if (image !== undefined && (decision.authority !== "orchestrator" || snapshot.videoReview || delegated !== undefined ||
+        if (image !== undefined && (snapshot.videoReview || delegated !== undefined ||
           !image || typeof image !== "object" || Array.isArray(image) ||
           Object.keys(image).sort().join(",") !== "reviewId,reviewerSessionId,verdictId" ||
           Object.values(image).some((value) => !boundedDecisionString(value, 256)))) {
@@ -18165,6 +19550,7 @@ export class SessionsService {
 
   private revokeWorkflowDecision(
     decision: WorkflowDecisionView, cause: WorkflowDecisionRevocationCause, oweRestartNotice = false, rationale?: string,
+    scheduleMergeCheck = false,
   ): void {
     // A caller may hold a decision it read before an await. One that settled meanwhile (withdrawn,
     // consumed or resolved) keeps its own record: a later refusal must not audit or report it again
@@ -18173,9 +19559,14 @@ export class SessionsService {
     if (current?.status !== "pending" && current?.status !== "approved") return;
     const now = Date.now();
     const controllerBefore = this.db.getSession(decision.controllingSessionId);
-    this.db.markWorkflowDecisionRevoked(decision.occurrenceId, now, oweRestartNotice);
+    const mergeCheck = scheduleMergeCheck && current.status === "approved" ? {
+      nextAt: now + LIFECYCLE_MERGE_RECHECK_MS,
+      expiresAt: now + LIFECYCLE_MERGE_CHECK_WINDOW_MS,
+      audit: () => this.recordWorkflowDecisionRevocation(current, cause, now, rationale),
+    } : undefined;
+    this.db.markWorkflowDecisionRevoked(decision.occurrenceId, now, oweRestartNotice, false, mergeCheck);
     this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
-    this.recordWorkflowDecisionRevocation(current, cause, now, rationale);
+    if (!mergeCheck) this.recordWorkflowDecisionRevocation(current, cause, now, rationale);
     this.hub.sessionChangedById(decision.sessionId);
     this.publishCampaignAttentionTransition(controllerBefore);
   }
@@ -18388,8 +19779,9 @@ export class SessionsService {
       return false;
     }
     const text = workflowDecisionResolutionPrompt(decision);
+    const origin = decision.assistantDelegation ? { kind: "delegation_notice" as const } : undefined;
     if (!runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "worktreeRecovery")) {
-      const delivered = this.prompt(child.id, text);
+      const delivered = this.promptWollipogNotice(child.id, text, origin);
       if (!delivered.ok) {
         this.log.warn(`workflow decision ${decision.occurrenceId} resolution not delivered to ${child.id}: ${delivered.error}`);
       }
@@ -18419,6 +19811,7 @@ export class SessionsService {
     let delivered: ReturnType<SessionsService["prompt"]>;
     try {
       delivered = this.prompt(child.id, text, [], undefined, undefined, {
+        promptOrigin: origin,
         ...(childIdle ? { admitAs: "queued" as const } : {}),
         // Staging is the success boundary: once the payload is durable, a failed flush is retried by
         // the outbox rather than reported, exactly as for a human's durable prompt.
@@ -18717,11 +20110,12 @@ export class SessionsService {
     if (pause && pause.resumedAt === undefined && pause.stoppedSessionIds.includes(sessionId)) return;
     const child = this.db.getSession(sessionId);
     for (const decision of this.db.unconsumedWorkflowDecisionsForSession(sessionId)) {
-      const settle = child ? this.forgeSettlesArmedMerge(child, decision) : false;
+      const settle = child && decision.authority === "orchestrator" &&
+        FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS.includes(actorId) && this.forgeSettlesArmedMerge(child, decision);
       this.revokeWorkflowDecision(decision, {
         reason: actorId === "session-restarted" ? "session_restarted" : "session_ended", systemId: actorId,
-      }, actorId === "session-restarted");
-      if (settle) void this.settleArmedMergeFromForge(child!, decision);
+      }, actorId === "session-restarted", undefined, Boolean(settle));
+      if (settle) void this.settleArmedMergeFromForge(child, decision);
     }
     // A child that already reads terminal was stopped provisionally, which kept any in-flight
     // resume for the runner's return (#1827). This end is final, so that resume ends too; a live
@@ -18770,7 +20164,7 @@ export class SessionsService {
         WorkflowDecisionResourceSnapshot, { category: "pr_merge" }
       >;
       const proven = await this.forgeAttestedMergeProof(child, decision, snapshot);
-      if (proven.ok && this.forgeAttestedMergeAuthority(decision, false)) {
+      if (proven.ok && this.mergeSettlementAuthority(decision, false)) {
         this.consumeForgeAttestedMerge(decision, snapshot, proven.data!);
       }
     } catch (error) {
@@ -18780,6 +20174,47 @@ export class SessionsService {
     } finally {
       this.forgeMergeSettlements.delete(decision.occurrenceId);
     }
+  }
+
+  private async readMergeSettlementObservation(
+    decision: WorkflowDecisionView, snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
+  ) {
+    const ref = { repository: snapshot.repository, number: snapshot.pullRequest };
+    const campaign = this.db.campaignAncestryRoot(decision.sessionId);
+    if (typeof campaign !== "object" || !campaign.hasPolicy || !this.campaignForgeReadNow) return undefined;
+    const results = await this.campaignForgeReadNow(campaign.id, [ref]);
+    return results?.find((result) => forgeRefKey(result.ref) === forgeRefKey(ref))?.observation;
+  }
+
+  /** Retry a stopped child's read only. The next attempt and deadline survive a restart. */
+  async retryLifecycleMergeSettlements(now = Date.now(), runnerId?: string): Promise<void> {
+    if (!this.campaignForgeReadNow) return;
+    const attempts: Promise<void>[] = [];
+    for (const { occurrenceId, expiresAt } of this.db.dueLifecycleMergeChecks(now, runnerId)) {
+      if (this.forgeMergeSettlements.size >= 16) break;
+      if (this.forgeMergeSettlements.has(occurrenceId) ||
+          !this.db.deferLifecycleMergeCheck(occurrenceId, now, now + LIFECYCLE_MERGE_RECHECK_MS)) continue;
+      const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+      const snapshot = decision?.resourceSnapshot;
+      if (!decision || snapshot?.category !== "pr_merge" || !this.mergeSettlementAuthority(decision, false) ||
+          !this.db.isRecoverableWorkflowDecisionActionRevocation(decision.sessionId, occurrenceId, FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS)) {
+        this.db.finishLifecycleMergeCheck(occurrenceId);
+        continue;
+      }
+      this.forgeMergeSettlements.add(occurrenceId);
+      attempts.push(this.readMergeSettlementObservation(decision, snapshot).then((observation) => {
+        if (!observation) return;
+        if (observation.state !== "open" || observation.headSha !== snapshot.headSha) {
+          if (Date.now() < expiresAt && observation.state === "merged" && observation.headSha === snapshot.headSha &&
+              this.mergeSettlementAuthority(decision, false)) {
+            this.consumeForgeAttestedMerge(decision, snapshot, { forgeHeadSha: observation.headSha });
+          }
+          this.db.finishLifecycleMergeCheck(occurrenceId);
+        }
+      }).catch((error: unknown) => this.log.warn(`lifecycle merge observation for ${occurrenceId} failed: ${String(error)}`))
+        .finally(() => this.forgeMergeSettlements.delete(occurrenceId)));
+    }
+    await Promise.all(attempts);
   }
 
   /** Whether Wollipog itself may have run this armed enqueue (#4067): its own record shows an
@@ -18802,14 +20237,15 @@ export class SessionsService {
   ): Promise<ServiceResult<{ forgeHeadSha: string }>> {
     const admission = decision.actionAdmission;
     const command = canonicalPrMergeEnqueueCommand(snapshot);
-    if (!admission || admission.kind !== "pr_merge_enqueue" || admission.command !== command ||
-        admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command })) {
+    const wollipogQueued = this.wollipogMayHaveEnqueued(decision);
+    if ((admission || !wollipogQueued) && (!admission || admission.kind !== "pr_merge_enqueue" || admission.command !== command ||
+        admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command }))) {
       return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     }
     // Claude Code's proof below reads the forge alone. Another harness's proof is a provider receipt
     // that an enqueue Wollipog ran never produced, so that one is read the same way Wollipog ran it:
     // from the filesystem root through the session's own login, read only, never enqueuing.
-    if (decision.retirement || child.driver !== "claude-code" && this.wollipogMayHaveEnqueued(decision)) {
+    if (decision.retirement || !admission || child.driver !== "claude-code" && wollipogQueued) {
       const unsupported = this.capabilityFailure(child.runnerId, "forgeDecisionActions", "Wollipog-performed forge actions");
       if (unsupported) return failAs(unsupported);
       const requestId = `forge_decision_action_${randomUUID()}`;
@@ -18894,18 +20330,19 @@ export class SessionsService {
       this.evaluateWorkflowDecisionAuthority(parent, policy, decision.sessionId, decision.resourceSnapshot).effectiveOwner === "orchestrator";
   }
 
-  private forgeAttestedMergeAuthority(
+  private mergeSettlementAuthority(
     decision: WorkflowDecisionView,
     requireLive: boolean,
     canAccess: (sessionId: string) => boolean = () => true,
   ): boolean {
     const child = this.db.getSession(decision.sessionId);
     const parent = this.db.getSession(decision.controllingSessionId);
-    const policy = parent?.parentControlPolicy;
-    if (!child || !parent || !policy || (!decision.retirement && child.driver !== "claude-code" && !this.wollipogMayHaveEnqueued(decision)) ||
+    const directOwner = Boolean(child && parent && this.directOwnerSelfDecision(child, parent, decision));
+    const policy = directOwner ? this.directOwnerPolicy(parent!) : parent?.parentControlPolicy;
+    if (!child || !parent || !policy ||
         (requireLive && (isTerminal(child.status) || isTerminal(parent.status))) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
-        !this.workflowDecisionRelationship(parent.id, child.id) ||
+        !(directOwner || this.workflowDecisionRelationship(parent.id, child.id)) ||
         !this.completedMergeAuthorityCurrent(parent, policy, decision)) {
       return false;
     }
@@ -18920,6 +20357,7 @@ export class SessionsService {
     decision: WorkflowDecisionView,
     snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
     proof: { forgeHeadSha: string },
+    externalMerge = false,
   ): WorkflowDecisionView | null {
     // One merged head is one action: the same forge fact cannot settle a second occurrence in any
     // session.
@@ -18933,14 +20371,16 @@ export class SessionsService {
     const reconciled = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(
       decision.sessionId,
       decision.occurrenceId,
-      decision.actionAdmission!.commandDigest,
+      decision.actionAdmission?.commandDigest ?? auditDigest({ kind: "pr_merge_enqueue",
+        command: canonicalPrMergeEnqueueCommand(snapshot) })!,
       receiptDigest,
       now,
-      { forgeAttested: true },
+      { forgeAttested: true, externalMerge, recoverSuperseded: decision.status === "superseded" },
     );
     if (!reconciled) return null;
     const consumed = reconciled.decision;
-    const actor: GovernanceActor = { kind: "system", id: "workflow-decision-forge-reconciliation" };
+    const actor: GovernanceActor = { kind: "system", id: externalMerge
+      ? "workflow-decision-external-merge-reconciliation" : "workflow-decision-forge-reconciliation" };
     this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
     this.settleSupersededArmedMerges(reconciled.supersededOccurrenceIds, actor, now);
     this.hub.sessionChangedById(consumed.sessionId);
@@ -18994,7 +20434,7 @@ export class SessionsService {
     // A person's approval of a follow-up publication records the issue boundary it was made under
     // (#2940), from the controller's current boundary, so a later same-author, same-objective
     // re-mint can still prove that approval's objective when its issue is admitted to scope.
-    const controller = decision.category === "follow_up_issue_publication" && decision.authority === "human" &&
+    const controller = !decision.assistantDelegation && decision.category === "follow_up_issue_publication" && decision.authority === "human" &&
       outcome === "allowed" && stage === "resolution" && actor.kind === "human" ? this.db.getSession(decision.controllingSessionId) : null;
     const approvalBoundary = controller ? issueBoundary(controller) : null;
     const publicationAuthority = approvalBoundary
@@ -19014,11 +20454,16 @@ export class SessionsService {
       approvalKind: "workflow_decision",
       stage,
       outcome,
-      actor,
+      actor: resolvingRecord && decision.assistantDelegation ? { kind: "agent", id: decision.assistantDelegation.threadId } : actor,
       scope: approvalScope(child, {}),
       contentDigest: decision.resourceDigest,
       optionId: decision.selectedOptionId,
       workflowDecision: {
+        ...(resolvingRecord && decision.assistantDelegation ? { assistantDelegation: {
+          threadId: decision.assistantDelegation.threadId,
+          ownerUserId: decision.assistantDelegation.ownerUserId,
+          grantRevision: decision.assistantDelegation.grantRevision,
+        } } : {}),
         ...(decision.withdrawal ? { withdrawal: { reasonDigest: auditDigest(decision.withdrawal.reason)! } } : {}),
         occurrenceId: decision.occurrenceId,
         parentSessionId: decision.controllingSessionId,
@@ -19116,7 +20561,7 @@ export class SessionsService {
             (!unbound && (decision.policyRevision !== typedPolicy.revision ||
               !this.workflowDecisionAuthorityCurrent(parent, typedPolicy, decision))) ||
             !this.workflowDecisionRelationship(parentSessionId, decision.sessionId) || !canAccess(decision.sessionId)) return [];
-        const session = this.db.getSession(decision.sessionId);
+        const session = this.db.getSession(decision.sessionId, { includeCampaignProjection: false });
         if (!session || isTerminal(session.status) || !runnerSupportsProtocol(
           this.db.getRunner(session.runnerId)?.protocolVersion,
           "typedWorkflowDecisionDelegation",
@@ -19313,7 +20758,7 @@ export class SessionsService {
     requestId: string,
     answers: Record<string, string | string[]>,
     actor: GovernanceActor = { kind: "human", id: "local" },
-    action: "submit" | "dismiss" = Object.keys(answers).length > 0 ? "submit" : "dismiss",
+    action?: "submit" | "dismiss",
     resolvedByParentSessionId?: string,
     occurrenceId?: string,
     /** Only the server's own Full Control dismissal passes this (#4063). */
@@ -19329,6 +20774,9 @@ export class SessionsService {
     // control plane resolves it, and no runner is asked.
     const ownerQuestionCard = pendingRequests(session.pendingApproval)
       .find((request) => request.requestId === requestId && isOwnerQuestionRequest(request));
+    // An omitted action must never erase an Owner Question's answer as a dismissal. Older
+    // provider question clients retain their empty-map dismissal convention.
+    action ??= ownerQuestionCard ? "submit" : Object.keys(answers).length > 0 ? "submit" : "dismiss";
     if (ownerQuestionCard) {
       if (occurrenceId !== undefined && occurrenceId !== ownerQuestionCard.occurrenceId) return fail("question occurrence is stale or missing", 409);
       if (scopeProposalOfRequest(ownerQuestionCard)) return this.answerScopeProposal(sessionId, ownerQuestionCard, answers, action, actor);
@@ -19788,6 +21236,9 @@ export class SessionsService {
             nextConfig.costBudgetUsd = pending.runnerGuardrail && session.costBudgetUsd > observed
               ? session.costBudgetUsd
               : Math.max(session.costBudgetUsd, observed) + step;
+          }
+          if (session.assistantThreadBudget && nextConfig.costBudgetUsd !== (session.costBudgetUsd ?? null)) {
+            return fail("Change the Assistant thread budget in Thread Settings to continue.", 409);
           }
         } else {
           const step = session.maxToolCallsStep ?? session.maxToolCalls;
@@ -20280,10 +21731,11 @@ export class SessionsService {
       return fail("An active media review Session cannot be archived yet: Stop it and let authenticated reconciliation " +
         "settle it first; capacity is retained.", 409);
     }
-    // A disconnected side chat is already hidden and provisionally stopped. An explicit
-    // Archive must still record a durable Stop, rather than becoming a visibility-only no-op.
-    const stoppedSideChat = session.status === "stopped" && this.db.sideChatParent(sessionId) !== null;
-    if (archiveRequiresStop(session.status) || this.db.hasSessionStopIntent(sessionId) || stoppedSideChat) {
+    // A provisionally stopped auxiliary session has not proved provider release. Archive
+    // must still record a durable Stop, rather than becoming a visibility-only no-op.
+    const stoppedAuxiliarySession = session.status === "stopped" && (this.db.sideChatParent(sessionId) !== null ||
+      this.db.delegatedImageReviews.isReviewer(sessionId) && !this.db.sessionStopProvenance(sessionId)?.confirmation);
+    if (archiveRequiresStop(session.status) || this.db.hasSessionStopIntent(sessionId) || stoppedAuxiliarySession) {
       const media = this.mediaSessionPurposes.owns(session.id);
       // A dedicated media Stop records no archive intent and settles nothing, so archival cannot be
       // scheduled for an active or ambiguous media Session (#3365). Refuse before any effect rather
@@ -20343,41 +21795,45 @@ export class SessionsService {
     if (previous && now - previous.at < 30_000) return;
     const children = this.db.archivedChildrenWithRefusedWorktrees(previous?.after ?? "", runnerId);
     this.refusedWorktreeSweep.set(key, { at: now, after: children.length === 64 ? children.at(-1)! : "" });
-    for (const childId of children) this.queueCampaignWorktreeRetirement(childId, false, now);
+    const rootPolicies = new Map<string, OrchestratorCampaignPolicy | null>();
+    for (const childId of children) this.queueCampaignWorktreeRetirement(childId, false, now, rootPolicies);
   }
 
   private reconcileRefusedCampaignWorktrees(projection: OrchestratorCampaignProjection | null): void {
+    const rootPolicies = new Map<string, OrchestratorCampaignPolicy | null>();
     for (const childId of new Set(projection?.cleanupWorktrees?.filter(item => item.status === "refused")
-      .map(item => item.sessionId))) this.queueCampaignWorktreeRetirement(childId);
+      .map(item => item.sessionId))) this.queueCampaignWorktreeRetirement(childId, false, Date.now(), rootPolicies);
   }
 
   /** A verified child and its archived flag are the durable intent. Reconnect replays this
    * request if the control plane exited before sending it; the runner owns deferred replay after
    * it accepts a request. Refusals only receive metadata reconciliation, never a deletion retry. */
-  private queueCampaignWorktreeRetirement(sessionId: string, retryDeferred = false, recheckAt = Date.now()): void {
-    const child = this.db.getSession(sessionId);
-    const campaignId = this.db.campaignForVerifiedChild(sessionId);
-    const campaign = campaignId ? this.db.getSession(campaignId) : null;
-    if (!child?.archived || child.archiveStatus || !campaign?.orchestratorPolicy ||
-        campaign.orchestratorPolicy.behavior.completion !== "stop_and_archive" ||
-        !runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "archiveWorktreeRetirement") ||
-        !this.hub.isRunnerOnline(child.runnerId) || this.archiveWorktreeRetirements.has(sessionId)) return;
-    const reconcileRefused = runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion,
+  private queueCampaignWorktreeRetirement(sessionId: string, retryDeferred = false, recheckAt = Date.now(),
+    rootPolicies = new Map<string, OrchestratorCampaignPolicy | null>(), previousRetryDelayMs = 0): void {
+    if (this.archiveWorktreeRetirements.has(sessionId)) return;
+    const child = this.db.campaignWorktreeRetirementState(sessionId);
+    if (!child?.archived || child.archivePending) return;
+    const campaignId = this.db.campaignForVerifiedChild(sessionId, rootPolicies);
+    if (!campaignId || rootPolicies.get(campaignId)?.behavior.completion !== "stop_and_archive") return;
+    const protocol = this.db.getRunner(child.runnerId)?.protocolVersion;
+    if (!runnerSupportsProtocol(protocol, "archiveWorktreeRetirement") || !this.hub.isRunnerOnline(child.runnerId)) return;
+    const reconcileRefused = runnerSupportsProtocol(protocol,
       "campaignWorktreeRemovalReconciliation") &&
       (retryDeferred || recheckAt - (this.refusedWorktreeRecheckedAt.get(sessionId) ?? 0) >= 30_000);
+    const discard = !this.archiveWorktreeRetries.has(sessionId);
     const pending = this.db.campaignWorktreeCleanup(sessionId).filter((item) =>
-      item.status === "pending" || (retryDeferred && item.status === "deferred") ||
-      (reconcileRefused && item.status === "refused"));
+      item.status === "refused" ? reconcileRefused
+        : discard && (item.status === "pending" || (retryDeferred && item.status === "deferred")));
     if (!pending.length) return;
     if (pending.some(item => item.status === "refused")) this.refusedWorktreeRecheckedAt.set(sessionId, recheckAt);
     this.archiveWorktreeRetirements.add(sessionId);
     void (async () => {
       let retry = false;
-      let retryDelayMs = 60_000;
+      let minimumRetryDelayMs = 60_000;
       try {
         for (const item of pending) {
-          const current = this.db.getSession(sessionId);
-          if (!current?.archived || !this.db.campaignChildReportVerified(campaignId!, sessionId)) break;
+          const current = this.db.campaignWorktreeRetirementState(sessionId);
+          if (!current?.archived || !this.db.campaignChildReportVerified(campaignId, sessionId)) break;
           const worktree = current.worktrees?.find((candidate) => candidate.path === item.path);
           const worktreeId = worktree?.id ?? "";
           if (item.status !== this.db.campaignWorktreeCleanup(sessionId)
@@ -20396,7 +21852,7 @@ export class SessionsService {
                   !result.snapshot.worktrees?.some(tree => tree.path === item.path)) {
                 this.db.updateSessionFromSnapshot(sessionId, result.snapshot, Date.now());
                 this.hub.sessionChangedById(sessionId);
-                this.campaignViewsChanged(campaignId!, sessionId);
+                this.campaignViewsChanged(campaignId, sessionId);
               }
             } catch {
               this.log.warn(JSON.stringify({ event: "campaign_worktree_external_reconciliation_unavailable",
@@ -20408,6 +21864,7 @@ export class SessionsService {
           const campaignDeliveredPullRequests = runnerSupportsProtocol(
             this.db.getRunner(child.runnerId)?.protocolVersion, "worktreePatchDelivery")
             ? this.db.campaignChildDeliveredPullRequests(sessionId) : undefined;
+          let changed = false;
           try {
             const result = await this.hub.requestFromRunner(child.runnerId, requestId, {
               type: "session_worktree", requestId, sessionId, operation: "discard", path: item.path,
@@ -20421,6 +21878,7 @@ export class SessionsService {
             }
             if (result.ok && result.snapshot && result.retirement) {
               this.db.updateSessionFromSnapshot(sessionId, result.snapshot, Date.now());
+              changed = true;
               if (result.retirement.status === "deferred" &&
                   this.db.campaignWorktreeCleanup(sessionId).find((candidate) => candidate.path === item.path)
                     ?.status !== "refused") {
@@ -20428,15 +21886,22 @@ export class SessionsService {
                   "deferred", result.retirement.reason ?? "runner cleanup is pending", Date.now());
               }
             } else if (!result.ok && result.error === "worktree retained: forge state is temporarily unavailable") {
-              this.db.recordCampaignWorktreeCleanup(sessionId, item.path, worktreeId,
-                "pending", "forge state is temporarily unavailable; retirement will retry", Date.now());
+              const currentCleanup = this.db.campaignWorktreeCleanup(sessionId)
+                .find((candidate) => candidate.path === item.path);
+              const reason = "forge state is temporarily unavailable; retirement will retry";
+              if (currentCleanup?.status === item.status &&
+                  (currentCleanup.status !== "pending" || currentCleanup.reason !== reason)) {
+                this.db.recordCampaignWorktreeCleanup(sessionId, item.path, worktreeId, "pending", reason, Date.now());
+                changed = true;
+              }
               retry = true;
-              retryDelayMs = 5 * 60_000;
+              minimumRetryDelayMs = 5 * 60_000;
             } else if (!result.ok && result.error?.startsWith("worktree retained: ") &&
                 /^(?:attached operator-owned worktrees|the worktree has a detached HEAD|the worktree is checked out on branch|runner ownership could not be proven|the worktree has uncommitted changes|the branch has no upstream|the branch has unpushed commits|the worktree head is not on the default branch|the linked pull request is not verified as merged)/u
                   .test(result.error.slice("worktree retained: ".length))) {
               this.db.recordCampaignWorktreeCleanup(sessionId, item.path, worktreeId,
                 "refused", result.error.slice("worktree retained: ".length, 1050), Date.now());
+              changed = true;
             } else {
               retry = true;
               this.log.warn(`archive worktree retirement for ${sessionId} needs retry: ${result.error ?? "incomplete runner reply"}`);
@@ -20445,21 +21910,42 @@ export class SessionsService {
             retry = true;
             this.log.warn(`archive worktree retirement for ${sessionId} needs retry: ${String(error)}`);
           }
-          this.hub.sessionChangedById(sessionId);
-          this.campaignViewsChanged(campaignId!, sessionId);
+          if (changed) {
+            this.hub.sessionChangedById(sessionId);
+            this.campaignViewsChanged(campaignId, sessionId);
+          }
         }
       } finally {
         this.archiveWorktreeRetirements.delete(sessionId);
-        if (retry) setTimeout(() => this.queueCampaignWorktreeRetirement(sessionId), retryDelayMs).unref();
+        if (retry) {
+          const delay = Math.min(Math.max(minimumRetryDelayMs, 2 * previousRetryDelayMs), 60 * 60_000);
+          const scheduled = { delay, due: false };
+          this.archiveWorktreeRetries.set(sessionId, scheduled);
+          setTimeout(() => {
+            scheduled.due = true;
+            this.runDueArchiveWorktreeRetry(sessionId);
+          }, delay).unref();
+        }
+        this.runDueArchiveWorktreeRetry(sessionId);
       }
     })();
   }
 
+  private runDueArchiveWorktreeRetry(sessionId: string): void {
+    const retry = this.archiveWorktreeRetries.get(sessionId);
+    // An independent refusal reconciliation may be in flight. Its finally block picks up the
+    // retry after the runner's reply so snapshots for this child are still applied serially.
+    if (!retry?.due || this.archiveWorktreeRetirements.has(sessionId)) return;
+    this.archiveWorktreeRetries.delete(sessionId);
+    this.queueCampaignWorktreeRetirement(sessionId, false, Date.now(), undefined, retry.delay);
+  }
+
   /** A new control-plane process replays an archive request that was not delivered before exit. */
   reconcileArchivedCampaignWorktrees(runnerId: string): void {
+    const rootPolicies = new Map<string, OrchestratorCampaignPolicy | null>();
     for (const session of this.db.runnerSessionInventory(runnerId)) {
       if (session.archived && (session.worktreePath || session.worktrees?.length)) {
-        this.queueCampaignWorktreeRetirement(session.id, true);
+        this.queueCampaignWorktreeRetirement(session.id, true, Date.now(), rootPolicies);
       }
     }
   }
@@ -20844,13 +22330,15 @@ export class SessionsService {
     requestedId?: string;
     /** The account was named by an agent, which can't recover a sign-in or accept a billing choice. */
     namedByAgent?: boolean;
+    /** An Assistant thread can explicitly choose only a ready subscription account. */
+    assistantChoice?: boolean;
     /** The model this launch names, if any: a policy's choice can't vouch for it. */
     model?: string;
     pinned?: { accountId?: string; selection?: ProviderAccountSelectionRecord };
   }): ServiceResult<{ providerAccount?: ProviderAccountDefinition; selection?: ProviderAccountSelectionRecord }> {
     if (!input.hostTarget) {
       // A person's request keeps its long-standing shape; an agent must learn its choice can't apply.
-      return input.namedByAgent && input.requestedId && !input.pinned
+      return (input.namedByAgent || input.assistantChoice) && input.requestedId && !input.pinned
         ? fail("This session's execution target doesn't use this machine's provider accounts, so it can't run with the chosen account.", 409)
         : ok({});
     }
@@ -20912,6 +22400,11 @@ export class SessionsService {
       const profileRefusal = providerProfileSessionRefusal(this.db, runner, providerAccount);
       if (profileRefusal && "capability" in profileRefusal) return capabilityFail(profileRefusal.capability);
       if (profileRefusal) return fail(profileRefusal.error, 409);
+      if (input.assistantChoice && requestedId && !pinned) {
+        const refusal = this.assistantThreadAccountIneligibility(runner, agent, providerAccount);
+        if (refusal) return fail(`The chosen account ${PROVIDER_ACCOUNT_SKIP_TEXT[refusal.reason]}. Choose another account for this thread.`, 409);
+        selection = { ...providerAccountExplicitRecord(policy), revalidateAtLaunch: true };
+      }
       if (input.namedByAgent && requestedId && !pinned) {
         const usage = this.db.providerAccountUsageSnapshots(runner.runnerId).find((snapshot) => snapshot.providerAccountId === providerAccount.id);
         const refused = providerAccountNamedRefusal(providerAccount, { ...(agent ? { agent } : {}), ...(usage ? { usage } : {}), now: Date.now() });
@@ -20924,6 +22417,77 @@ export class SessionsService {
       return fail("The default provider account is not ready. Choose a ready account or review its sign-in and ownership details.", 409);
     }
     return ok({ ...(providerAccount ? { providerAccount } : {}), ...(selection ? { selection } : {}) });
+  }
+
+  private assistantThreadAccountIneligibility(
+    runner: RunnerView, agent: AgentDefinition | undefined, account: ProviderAccountDefinition,
+    usage = this.db.providerAccountUsageSnapshots(runner.runnerId),
+  ) {
+    return providerAccountIneligibility(account, {
+      agent,
+      usage: usage.find((entry) => entry.providerAccountId === account.id),
+      accessRefused: providerProfileSessionRefusal(this.db, runner, account) !== null,
+      now: Date.now(),
+    });
+  }
+
+  /** An owner-only view of the shared Machine policy and eligibility for this thread's native agent. */
+  assistantThreadAccountChoices(runner: RunnerView, agent: AgentDefinition, session?: SessionView): AssistantThreadAccountChoices {
+    const provider = providerForDriver(agent.driver ?? "acp");
+    if (!provider) return { accounts: [], unavailable: "This harness doesn't use Machine provider accounts." };
+    const result = this.providerAccountPolicyResult(runner, provider, agent, true, this.applicableProviderAccountPolicy(runner, provider));
+    const usage = this.db.providerAccountUsageSnapshots(runner.runnerId);
+    const accounts = (runner.providerAccounts ?? []).filter((account) => account.provider === provider).map((account) => {
+      const refusal = this.assistantThreadAccountIneligibility(runner, agent, account, usage);
+      return { accountRef: providerAccountRef(runner.runnerId, account.id), label: account.label,
+        ...(refusal ? { reason: refusal.reason } : {}),
+        ...(refusal?.retryAt !== undefined ? { retryAt: refusal.retryAt } : {}) };
+    });
+    const policyAccountRef = result.status === "selected" && result.accountId
+      ? providerAccountRef(runner.runnerId, result.accountId)
+      : undefined;
+    return {
+      accounts,
+      ...(policyAccountRef ? { policyAccountRef } : {}),
+      ...(result.status === "choice_required" && result.refusal
+        ? { policyRefusal: providerAccountChoiceRequiredSentence(provider, result.refusal, result.candidates) } : {}),
+      ...(session?.providerAccountId ? { currentAccountRef: providerAccountRef(runner.runnerId, session.providerAccountId) } : {}),
+      ...(session?.providerAccountSwitchFailure ? { retryCurrentAccount: true } : {}),
+    };
+  }
+
+  async changeAssistantThreadAccount(
+    runner: RunnerView, agent: AgentDefinition, session: SessionView, threadId: string, input: ChangeAssistantThreadAccountRequest,
+  ): Promise<ServiceResult<void>> {
+    const unsupported = this.capabilityFailure(runner.runnerId, "assistantThreadProviderAccount", "changing an assistant thread's account");
+    if (unsupported) return unsupported;
+    if (!this.hub.isRunnerOnline(runner.runnerId)) return fail("This Machine is offline. Connect it before changing the account.", 409);
+    if (session.status === "queued" || session.status === "starting" || session.status === "running") {
+      return fail("The thread is working. Wait for the current turn to finish before changing accounts.", 409);
+    }
+    if (session.status === "stopped" || this.db.hasSessionStopIntent(session.id)) {
+      return fail("Restart the stopped thread before changing accounts.", 409);
+    }
+    const current = session.providerAccountId ? providerAccountRef(runner.runnerId, session.providerAccountId) : null;
+    if (input.expectedProviderAccountRef !== current) return fail("The thread's account changed. Reopen Change Account to see the current account.", 409);
+    const provider = providerForDriver(session.driver);
+    const account = (runner.providerAccounts ?? []).find((candidate) => candidate.provider === provider &&
+      providerAccountRef(runner.runnerId, candidate.id) === input.providerAccountRef);
+    if (!account) return fail("The chosen account is no longer available for this thread.", 409);
+    const refusal = this.assistantThreadAccountIneligibility(runner, agent, account);
+    if (refusal) return fail(`The chosen account ${PROVIDER_ACCOUNT_SKIP_TEXT[refusal.reason]}. Choose another account for this thread.`, 409);
+    const requestId = randomUUID();
+    try {
+      const result = await this.hub.requestFromRunner(runner.runnerId, requestId, {
+        type: "switch_session_provider_account", requestId, sessionId: session.id, providerAccountId: account.id,
+        assistantThread: { threadId, expectedProviderAccountId: session.providerAccountId ?? null, freshConversation: input.freshConversation === true },
+      }, 30_000);
+      if (result.type !== "switch_session_provider_account_result") return fail("The Machine sent an unexpected reply.", 502);
+      if (!result.ok) return fail(result.error ?? "The thread's account could not be changed.", 409);
+      return ok(undefined);
+    } catch {
+      return fail("The Machine did not confirm the account change. Check the thread before trying again.", 504);
+    }
   }
 
   /** A Claude project session on a version without Wollipog's project memory keeps that memory in the
@@ -21221,7 +22785,9 @@ export class SessionsService {
     }
     const existing = pending.find((request) =>
       request.kind === message.kind && !request.runnerGuardrail);
-    const title = message.kind === "cost_budget"
+    const threadBudget = message.kind === "cost_budget" && session.assistantThreadBudget;
+    const title = threadBudget ? "The Assistant thread budget has been reached. Change it in Thread Settings to continue."
+      : message.kind === "cost_budget"
       ? `Runner paused at the $${message.threshold.toFixed(2)} cost threshold. Continue with the current guardrails?`
       : `Runner paused at ${message.threshold} distinct tool calls. Continue with the current guardrails?`;
     const runnerGuardrail = {
@@ -21240,7 +22806,7 @@ export class SessionsService {
       kind: message.kind,
       title,
       options: [
-        { optionId: "continue", name: "Continue", kind: "allow_once" },
+        ...(threadBudget ? [] : [{ optionId: "continue", name: "Continue", kind: "allow_once" } as const]),
         { optionId: "cancel", name: "Stop", kind: "reject_once" },
       ],
       runnerGuardrail,
@@ -21423,6 +22989,10 @@ export class SessionsService {
     if (!ask) return false;
     const occupied = pendingRequests(s.pendingApproval);
     const approval = approvalForDecision(ask, sessionId, now);
+    if (ask.rule.kind === "cost_budget" && s.assistantThreadBudget) {
+      approval.title = "The Assistant thread budget has been reached. Change it in Thread Settings to continue.";
+      approval.options = approval.options.filter((option) => option.optionId !== "continue");
+    }
     if (s.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
     // A control-plane-only card must also stop the runner draining queued prompts behind the
     // turn it parks; the runner-owned thresholds already tripped on the runner itself.
@@ -21532,13 +23102,23 @@ export class SessionsService {
     ts: number,
     staged?: StagedSessionEventPayload | null,
   ): ExternalizedSessionEventPayload {
-    if (staged === null) return { payload, artifactIds: [] };
-    try {
-      return staged ? staged.commit() : externalizeSessionEventPayload(this.db, sessionId, payload, ts);
-    } catch {
-      this.log.warn(`event payload externalization deferred for ${sessionId} (${payload.kind})`);
-      return { payload, artifactIds: [] };
+    let result: ExternalizedSessionEventPayload = { payload, artifactIds: [] };
+    if (staged !== null) {
+      try {
+        result = staged ? staged.commit() : externalizeSessionEventPayload(this.db, sessionId, payload, ts);
+      } catch {
+        this.log.warn(`event payload externalization deferred for ${sessionId} (${payload.kind})`);
+      }
     }
+    if (result.payload.kind !== "tool_call_update" ||
+        (result.payload.assistantReceiptKey === undefined && result.payload.assistantReceipt === undefined)) return result;
+    // All live and recovered tool events go through here. The provider can identify the tool
+    // result, but it cannot supply owner-facing facts or use a key from another backing session.
+    const { assistantReceiptKey, assistantReceipt: _untrusted, ...tool } = result.payload;
+    const receipt = typeof assistantReceiptKey === "string"
+      ? this.db.assistantThreads.transcriptReceipt(sessionId, assistantReceiptKey)
+      : undefined;
+    return { ...result, payload: { ...tool, ...(receipt ? { assistantReceipt: receipt } : {}) } };
   }
 
   /** Make a large payload's chunks durable off the event loop (#2794). Null keeps it inline. */
@@ -21691,6 +23271,40 @@ export class SessionsService {
     if (frame) this.hub.sendToRunner(runnerId, frame);
   }
 
+  private recordProviderForgeRefusal(session: SessionView, payload: SessionEventPayload, eventTime: number,
+    entryPoint: "live_event" | "history_hydration"): void {
+    if (session.driver !== "claude-code" || payload.kind !== "tool_call_update" || payload.status !== "failed" ||
+        payload.parentToolUseId || !payload.providerForgeRefusal || !Number.isSafeInteger(eventTime)) return;
+    const proof = payload.providerForgeRefusal;
+    const ancestry = this.db.campaignAncestryRoot(session.id);
+    if (typeof ancestry !== "object" || !ancestry.hasPolicy || ancestry.id === session.id) return;
+    const now = Date.now();
+    const at = Math.min(now, eventTime + PROVIDER_FORGE_REFUSAL_CLOCK_SKEW_MS);
+    let decision: WorkflowDecisionView | null;
+    if (proof.kind === "managed" && typeof proof.occurrenceId === "string" && /^workflow_[\w-]{1,80}$/u.test(proof.occurrenceId) &&
+        typeof proof.resourceDigest === "string" && /^[a-f0-9]{64}$/u.test(proof.resourceDigest)) {
+      decision = this.db.workflowDecisionByOccurrence(proof.occurrenceId);
+      if (!decision || decision.resourceDigest !== proof.resourceDigest) return;
+    } else if (proof.kind === "command" && typeof proof.commandSha256 === "string" && /^[a-f0-9]{64}$/u.test(proof.commandSha256)) {
+      const matches = this.db.workflowForgeRefusalCandidates(session.id).filter((candidate) =>
+        pendingProviderForgeAction(candidate, at) && matchesProviderForgeCommand(candidate, proof.commandSha256));
+      decision = matches.length === 1 ? matches[0]! : null;
+    } else return;
+    if (!decision || decision.sessionId !== session.id || !pendingProviderForgeAction(decision, at) ||
+        !this.workflowDecisionRelationship(decision.controllingSessionId, session.id)) return;
+
+    const notice = this.db.recordCampaignProviderForgeRefusal({
+      campaignSessionId: ancestry.id,
+      subjectSessionId: session.id, occurrenceId: decision.occurrenceId, attemptedPath: proof.kind,
+      message: providerForgeRefusalNotice(decision, proof.kind), now,
+    });
+    if (!notice) return;
+    this.hub.sessionEvent(notice);
+    this.hub.sessionChangedById(ancestry.id);
+    this.log.info(JSON.stringify({ event: "provider_forge_action_refused", provider: "claude_code", sessionId: session.id,
+      campaignId: ancestry.id, occurrenceId: decision.occurrenceId, category: decision.category, attemptedPath: proof.kind, entryPoint }));
+  }
+
   /** Ingest one live runner event. The runner socket passes a staged large payload from
    * awaitStagedLiveSessionEvent; without one, a large payload is written on the calling thread. */
   onSessionEvent(
@@ -21832,6 +23446,11 @@ export class SessionsService {
       }
     }
 
+    // Persist the refusal before advancing the runner cursor. A crash before the cursor write
+    // leaves a replayable event, and the campaign receipt deduplicates the notice on replay.
+    if (fromRunnerId && payload.kind === "tool_call_update" && payload.providerForgeRefusal) {
+      this.recordProviderForgeRefusal(session(), payload, now, "live_event");
+    }
     const externalized = this.externalizeEventOrOriginal(sessionId, payload, now, prepared?.staged);
     let ev;
     if (runnerSeq != null && history?.historyEpoch != null && indexedHistory) {
@@ -23134,7 +24753,7 @@ export class SessionsService {
    * response as one that arrived live (#2940): otherwise a request parked while the runner was away
    * would wait for a response nobody owes it. Outside Full Control this settles nothing new. */
   private applyStandingCampaignResponses(sessionId: string): void {
-    for (const request of pendingRequests(this.db.getSession(sessionId)?.pendingApproval)) {
+    for (const request of pendingRequests(this.db.getSession(sessionId, { includeCampaignProjection: false })?.pendingApproval)) {
       if (request.kind === "workflow_decision" || isGuardrailApproval(request)) continue;
       this.executeStandingRootRequest(sessionId, request, Boolean(request.async));
     }
@@ -23406,6 +25025,11 @@ export class SessionsService {
 
         const activeLogEpoch = logEpoch;
         if (activeLogEpoch === undefined) return;
+        for (const event of res.events) {
+          if (event.payload.kind === "tool_call_update" && event.payload.providerForgeRefusal) {
+            this.recordProviderForgeRefusal(session, event.payload, event.ts, "history_hydration");
+          }
+        }
         const artifactIds: string[] = [];
         const preparedEvents = res.events.map((event, index) => {
           const prepared = this.externalizeEventOrOriginal(sessionId, event.payload, event.ts, staged[index]);

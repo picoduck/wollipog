@@ -1,9 +1,12 @@
+import { ModelPicker } from "../ModelPicker.js";
+import type { ModelPickerContext } from "../../model-picker.js";
 import React, { useId, useLayoutEffect, useRef, type ReactNode, type Ref } from "react";
 import { CopyButton, Spinner } from "../common.js";
 import { FieldError } from "../FieldError.js";
 import { CheckIcon, ChevronRightIcon } from "../Icons.js";
 import { Notice } from "../Notice.js";
 import { affixSuffixRef } from "./affix-suffix.js";
+import { BusyButton } from "./BusyButton.js";
 import { SegmentedControl, Select, type SelectOption } from "./ChoiceControls.js";
 
 /**
@@ -351,6 +354,7 @@ export function SelectRow({
   label,
   menuWidth,
   estimatedOptionHeight,
+  modelPicker,
   badge,
   busy,
   busyLabel,
@@ -373,6 +377,7 @@ export function SelectRow({
   label?: string;
   menuWidth?: number;
   estimatedOptionHeight?: number;
+  modelPicker?: ModelPickerContext;
 }) {
   // The trigger names the setting and its value; the sentence beside it is pointed at, so tabbing
   // straight to the control still reaches it. `useId` rather than the title: two pickers titled the
@@ -397,7 +402,8 @@ export function SelectRow({
       />
       {/* A `.field` while invalid, for the field's red edge (§8.5). */}
       <span className={error ? "setting-row-control field" : "setting-row-control"}>
-        <Select
+        {modelPicker ? <ModelPicker label={label ?? title} options={options} value={value}
+          onChange={onChange} describedBy={describedBy} disabled={disabled} invalid={Boolean(error)} context={modelPicker} /> : <Select
           label={label ?? title}
           options={options}
           value={value}
@@ -408,7 +414,7 @@ export function SelectRow({
           invalid={Boolean(error)}
           menuWidth={menuWidth ?? (options.some((option) => option.description) ? DESCRIBED_MENU_WIDTH_PX : undefined)}
           estimatedOptionHeight={estimatedOptionHeight}
-        />
+        />}
         {error && <FieldError id={errorId}>{error}</FieldError>}
         {reason &&<small id={reasonId} className="setting-row-reason">{reason}</small>}
       </span>
@@ -680,6 +686,7 @@ export function ActionRow({
   disabled,
   hasPopup,
   buttonRef,
+  pending,
 }: {
   title: string;
   description?: ReactNode;
@@ -695,9 +702,21 @@ export function ActionRow({
   disabled?: boolean;
   hasPopup?: "dialog";
   buttonRef?: Ref<HTMLButtonElement>;
+  pending?: { busy: boolean; progress: string };
 }) {
   const id = useId();
   const buttonId = actionId ?? `${id}-action`;
+  const buttonProps = {
+    ref: buttonRef,
+    id: buttonId,
+    type: "button" as const,
+    className: "btn",
+    disabled,
+    "aria-haspopup": hasPopup,
+    "aria-labelledby": `${buttonId} ${id}-title`,
+    "aria-describedby": description ? `${id}-desc` : undefined,
+    onClick: onAction,
+  };
   return (
     <div className={rowClass("setting-row setting-row-trailing", { disabled })}>
       <RowText
@@ -709,20 +728,9 @@ export function ActionRow({
         descriptionId={description ? `${id}-desc` : undefined}
       />
       <span className="setting-row-control">
-        <button
-          ref={buttonRef}
-          id={buttonId}
-          type="button"
-          className="btn"
-          disabled={disabled}
-          aria-haspopup={hasPopup}
-          aria-labelledby={`${buttonId} ${id}-title`}
-          aria-describedby={description ? `${id}-desc` : undefined}
-          onClick={onAction}
-        >
-          {actionIcon}
-          {actionLabel}
-        </button>
+        {pending
+          ? <BusyButton {...buttonProps} {...pending} icon={actionIcon}>{actionLabel}</BusyButton>
+          : <button {...buttonProps}>{actionIcon}{actionLabel}</button>}
       </span>
     </div>
   );

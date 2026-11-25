@@ -239,6 +239,22 @@ test("a merge time is stored when usable, and an unusable one is dropped without
   } finally { fixture.db.close(); }
 });
 
+test("the observer stores boolean check page completeness and drops malformed values", async () => {
+  const fixture = forgeFixture();
+  let now = Date.now();
+  try {
+    for (const value of [true, false, "true", undefined]) {
+      const result = observation({ checkContextsComplete: value as boolean });
+      await observer(fixture, fakeRunner(allOk(result)), { now: () => now }).refresh(fixture.root, [PR]);
+      const { fact } = detailFacts(fixture, now)[0]!;
+      assert.equal(fact.availability, "fresh");
+      if (fact.availability !== "fresh" || fact.value.forge === "gitlab") assert.fail("expected a fresh GitHub observation");
+      assert.equal(fact.value.checkContextsComplete, typeof value === "boolean" ? value : undefined);
+      now += CAMPAIGN_FORGE_OBSERVATION.minIntervalMs;
+    }
+  } finally { fixture.db.close(); }
+});
+
 test("every forge failure reason is stored per pull request and replaces nothing but availability", async () => {
   const reasons = ["forge_cli_missing", "forge_unauthenticated", "forge_unreachable", "forge_unsupported",
     "forge_not_found", "forge_rate_limited", "forge_error"] as const;

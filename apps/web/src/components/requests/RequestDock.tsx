@@ -116,9 +116,10 @@ export function RequestDock({
   /** The Sessions preview's dock (#2210): a question is not answered here but in its session, which
    * this opens with the question docked. */
   onAnswerInSession?: (requestId: string) => void;
-  /** The question the composer answers in Composer Response, and how to open Answer Mode for it
-   * (#2212): its card is then compact. While Answer Mode is open the caller leaves it out of
-   * `requests`, so the question shows once. */
+  /** The question the composer can answer, and how to open Answer Mode for it (#2212): in Composer
+   * Response its card is then compact, and in the form a touch phone types Something Else there
+   * (#4714). While Answer Mode is open the caller leaves it out of `requests`, so the question shows
+   * once. */
   composerAnswer?: { requestId: string; onAnswer: () => void };
 }) {
   const mobile = useIsMobileInEitherOrientation();
@@ -443,6 +444,7 @@ export function RequestDock({
             request={expanded}
             runnerOnline={runnerOnline}
             presentation="dock"
+            onOpenHandoff={onAnswerInSession ? () => onAnswerInSession(expanded.requestId) : undefined}
             owner={owner}
             createdAt={createdAt?.(expanded)}
             headTrailing={headTrailing}

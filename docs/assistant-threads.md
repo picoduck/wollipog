@@ -13,20 +13,28 @@ owner's own threads; another owner gets 404. Responses never carry a credential 
 | Route | Result |
 | --- | --- |
 | `GET /api/assistant-threads` | `{ threads }`, newest activity first. Archived threads appear only with `?includeArchived=true`. |
-| `GET /api/assistant-threads/defaults` | `{ harness, harnesses: [{ id, label, available, reason? }] }` |
-| `POST /api/assistant-threads` | Body `{ harness?, title?, runnerId?, workspaceId? }`, result `{ thread }`. |
+| `GET /api/assistant-threads/defaults` | The saved launch defaults and the harness and account choices currently available. |
+| `PUT /api/assistant-threads/defaults/launch` | Saves `{ harness, providerAccount }` for new threads. A null account uses Machine Policy. |
+| `POST /api/assistant-threads` | Body `{ harness?, title?, runnerId?, workspaceId?, providerAccountRef? }`, result `{ thread }`. |
 | `GET /api/assistant-threads/:threadId` | `{ thread }` |
+| `GET /api/assistant-threads/:threadId/harness` | Eligible target harness and account choices on the thread's current Machine. |
+| `POST /api/assistant-threads/:threadId/harness` | Body `{ expectedSessionId, harness, providerAccountRef }`, result `{ thread }`. Confirms a fresh conversation on the selected provider and account. |
 | `PATCH /api/assistant-threads/:threadId` | Body `{ title }`, result `{ thread }`. |
+| `PUT /api/assistant-threads/:threadId/delegation` | Body `{ revision, grant }`, result `{ thread }`. Use the current `decisionDelegation.revision` and set `grant` to null to revoke. |
+| `GET /api/assistant-decision-history` | The owner's delegated decisions. Accepts `threadId`, `campaignId` and the previous page's `nextBefore` as `before`. |
 | `POST /api/assistant-threads/:threadId/archive` | `{ thread }`. Archives the backing session through the ordinary session archive. |
 | `POST /api/assistant-threads/:threadId/confirmations/:confirmationId/approve` | `{ confirmation, thread }`. Approve Once: runs the bound command, then answers with how it ended. See Owner Confirmations. |
 | `POST /api/assistant-threads/:threadId/confirmations/:confirmationId/deny` | `{ confirmation, thread }`. Refuses the bound command. |
 
-`harness` defaults to the owner's saved Orchestrator Child Harness: Codex when it names a Codex
-driver, otherwise Claude Code. Without `runnerId`, the first online Machine the owner can use that
-supports the role, has the harness installed natively and has a Location is chosen; without
-`workspaceId`, that Machine's first Location. A Machine whose runner predates protocol v383, or one
-without the harness, is refused with HTTP 409 and guidance. Nothing is launched in that case, and
-never an ordinary session in its place.
+`harness` uses the owner's Assistant default. On upgrade, it starts with the former effective
+choice. New owners start with Claude Code. A saved provider account is tied to its Machine and
+harness. An explicit null account uses Machine Policy. Without a saved account or selected Machine,
+Wollipog chooses the first online Machine the owner can use that supports the role, has the harness
+installed natively and has a Location. Without `workspaceId`, it uses that Machine's first Location.
+A Machine whose runner predates protocol v383, or one without the harness, is refused with HTTP 409
+and guidance.
+If the saved account's Machine is unavailable, choose an account on another Machine or explicitly
+use Machine Policy for that thread.
 
 Without a `title`, the thread shows "New Thread" until its session is named by the first message.
 
@@ -38,9 +46,24 @@ archived or its session is archived or deleted outside it.
 Each change is published to the owner's dashboards as the `assistant_thread_upsert` web event
 (`{ type, userId, thread }`), including every published change of the backing session.
 
+### Changing Harnesses
+
+**Change Harness** in Thread Settings requires a compatible control plane, runner protocol v402,
+and an eligible native harness and account on the thread's Machine. The owner reviews the target
+provider and account before confirming. The thread keeps its links, grant scope, usage and limits.
+Each **Earlier Conversation** opens its original transcript from the thread. Future prompts start
+a fresh provider conversation with no transfer of prior messages or credentials.
+
+Migration requires an idle conversation and fences prompts and Assistant commands during staging.
+The new credential becomes valid in the same database transaction that switches the backing session.
+A failed staging attempt preserves the old credential and backing session. Cancel closes the picker
+before staging begins. Work already launched by the thread continues. The new backing session only
+receives the budget left after prior spend and the work it holds. UI Evidence Approval requires
+confirmation of the new provider disclosure in Decision Delegation before evidence can be shared.
+
 ## The Assistant Role
 
-- Only thread creation makes an `assistant`-role session. `role: "assistant"` in session request
+- Only thread creation and harness migration make an `assistant`-role session. `role: "assistant"` in session request
   JSON is refused, and the role is never converted to another one.
 - The control plane sends `SessionLaunchSpec.assistant` (`{ threadId }`) on every start and
   restart. The runner (capability `assistantRole`) launches it with the role instructions and
@@ -57,25 +80,43 @@ Each change is published to the owner's dashboards as the `assistant_thread_upse
 
 ## Thread Limits
 
-`ASSISTANT_THREAD_LIMITS` bounds what one thread does, so a runaway or recursive assistant stops:
+Owners can set a default harness, provider account, cost budget, and session launch limit under
+**Settings → Assistant → Thread Defaults**. The starting limits are $25 and 10 launches. Each
+thread keeps the limits it starts with, including threads created before limits were editable.
+The same section manages Assistant Connections.
 
-- The backing session's own cost budget is the thread budget ($25).
+To edit an existing thread, open **Thread Settings** from its header. The settings show what the
+thread has spent and launched. Choose **No Limit** to remove either limit, or set the launch limit
+to zero to pause new launches. A budget below spend and outstanding commitments is refused. Setting a
+finite budget again requires that any work launched without a cap and its descendants have been
+deleted. These settings are owner-only.
+
+- The backing session's **Guardrails** editor reads and updates the same thread budget. Its
+  enforcement threshold is calculated from that budget after subtracting reservations for work
+  the thread has launched.
+- On upgrade, a previously set backing-session cost ceiling folds into the thread budget. The
+  smaller finite value wins. Existing work keeps its reservations, so an already committed thread
+  can require an explicit budget increase before another launch.
 - While a thread's Assistant call executes, every session it creates counts as a launch of that
   thread. This covers `session_launch`, side chats and every other operation that passes through
   session creation inside the call. A launch is refused with a message to the
-  assistant once the thread has launched 10 sessions, or once its budget is spent or held.
-  - Each launch is capped at whatever the backing assistant has not spent and launched work does
-    not hold, rounded down to whole cents. A missing, zero or negative requested budget gets that
-    cap too, never "no budget".
+  assistant when the thread reaches its launch limit or its remaining budget is spent or held.
+  - With a budget, each launch is capped at the remaining budget the backing assistant can use,
+    rounded down to whole cents. The launch result tells the assistant what cap was applied when
+    the request did not set one or set a higher one.
+  - Without a thread budget, the launch keeps any explicit session cap. If none was requested it
+    has no cost cap, and the launch result tells the assistant why.
   - The backing session's own cap is lowered by the same amount once every other check has passed,
     just before the session is created. The launch is refused if the cap cannot be lowered. All
     of the thread's caps together therefore never exceed its budget.
   - Each admission first settles the backing cap to what launched work holds. A reservation whose
-    launch then failed, or the unspent cap of a deleted launch, goes back to the assistant. A cap
-    the owner changed is only ever lowered.
+    launch then failed, or the unspent cap of a deleted launch, goes back to the assistant.
   - Each launched tree holds the larger of its spend and its root's launch cap (or its current cap,
     if the owner raised it), even after the root's own cap is carved down for its children. A tree
-    is the launched session and every descendant, recorded when each is created.
+    is the launched session and its children at every depth, recorded when each is created.
+    Cross-model reviews have display ancestry only and contribute no spend or held budget to the
+    thread. Delegated image reviewers are created as children of the session that requests them
+    and count when that session belongs to a launched tree.
   - A child created anywhere in a launched tree is carved out of its creator's own cap (#4671).
     The creator's allowance is the cap it was launched or created with. Its own cap is that
     allowance less what its children hold, settled at each child creation and restart, so a
@@ -89,22 +130,129 @@ Each change is published to the owner's dashboards as the `assistant_thread_upse
     cost budget but never raise or clear it.
   - Deleting a session never refunds its spend, whether one at a time or with its Machine: the
     thread keeps the deleted session's final cost inside its own tree.
-- A thread cannot start runs or Orchestrators, whose children it could not count.
-  This holds even when an Orchestrator would come from a saved default. Its connection also
+- An ordinary thread launch cannot select the Orchestrator role, including from a saved default.
+  To propose an independent campaign, use `campaign_start` with a Project Location, a first
+  message and explicit Custom or Full Control mode. Only the thread's owner can start it from
+  the **Start Campaign** confirmation card. The root counts as one launch against the thread's
+  launch limit. The root and its workers spend from their own campaign allowance.
+- A thread cannot start scheduled runs. Its connection also
   cannot call `auto_create`, `auto_update`, `auto_enable`, `auto_test`,
   `session_role`, `session_adopt` or `session_fork`, since scheduled work, a converted role, an
   adopted session or a fork (materialized on the runner without that session creation) would run
   outside these limits. The owner can still do any of these directly.
 - `usage` on the thread view reports both limits and what the thread has used of them.
-  `launchedSessionIds` lists the sessions it launched.
+  `launchedSessionIds` lists the thread-budgeted work, and `launchedCampaignIds` lists its
+  independent campaign roots.
 
 ## The Shared `wollipog` Skill
 
 Every thread's session receives the shared `wollipog` assistant skill with its role instructions,
 through `SessionLaunchSpec.assistant.guide`. It covers discovery, command IDs and receipts,
-reporting, and never confirming or approving on the owner's behalf. Outside assistants read the
+reporting, and when to use a thread's explicit Decision Delegation grant. Outside assistants read the
 same text from `assistant_discover` (`skill`). It is not a Skill Library entry: it guides an
 assistant acting through Assistant tools, not coding agents in ordinary sessions.
+
+## Decision Delegation
+
+Open **Decision Delegation** from **Thread Settings** or **Thread Actions** to grant categories to one
+thread. **Settings → Assistant → Delegation** lists saved grants, including expired ones, and opens
+the same editor. New and existing
+threads start without a grant. Select all or specific projects and campaigns, and optionally set
+an expiry in your device's local time. When both scopes are limited, the decision must match both.
+All Campaigns includes future campaigns, including those the owner confirms from this thread.
+**Revoke Grant** immediately stops later resolutions. An already recorded decision still follows
+the ordinary, exact-snapshot checks when the requester acts on it.
+Archiving a thread or its backing session clears the grant.
+
+A grant covers Owner Questions from campaigns, PR merges, typed CI reruns, release tags, release
+publications, merged branch deletions,
+follow-up issue publication, issue closure, review round extensions, and separate UI Evidence Denial
+and UI Evidence Approval categories. Existing denial grants still permit denial. Generic provider
+permissions and Assistant command confirmations stay with the owner.
+Credentials, sign-in, governance or policy changes, budgets, persistent permissions, connection
+and delegation changes, and occurrences explicitly kept for a person stay human-only. Campaign
+boundaries and Human Required rules continue to apply. Wollipog's own handoff and forge recovery
+reports require the owner's direct acknowledgement.
+
+The Assistant lists decisions for a session with `assistant_decisions_list`, reads the exact
+occurrence with `assistant_decision_get`, then supplies that occurrence and its `resourceDigest`
+to `assistant_decision_resolve`, with a reason. For an Owner Question it can select an offered
+option, give a free-text answer, or dismiss it. Wollipog reads the live grant immediately before
+resolving and uses the normal owner decision path to wake the requester. The Assistant cannot
+change the pending request through a resolution. Its connection restrictions still apply.
+
+UI Evidence Approval requires control plane and runner protocol 397 and a thread whose harness and
+model support image tool results. The owner sees the thread's provider, model and retention disclosure
+when opting in. A provider, model or account change requires a new grant. A capable thread uses
+`assistant_evidence_inspect` to inspect each of the requesting Session's screenshot artifacts.
+Wollipog hashes the exact bytes and counts a receipt after the runner verifies and acknowledges
+delivery. Direct inspection is part of the thread's ordinary usage. Videos and external-only
+evidence continue through the original owner route.
+
+On native Claude Code, a thread can use `assistant_evidence_prepare` to launch a restricted
+reviewer using the same provider, model and account. The reviewer uses the target campaign's
+managed allowance and must acknowledge every image before submitting its verdict. For an
+owner-confirmed Custom campaign or Custom schedule, the thread must run on the campaign root's
+Machine and workspace. If that Location, allowance or exact provider is unavailable, the thread
+can inspect the screenshots directly.
+Use `assistant_evidence_get` to read the result, then pass its exact `delegatedImageReview`
+reference when approving. Both paths require current proof for every item and bind it to the
+thread, grant revision and exact occurrence. Replacing a grant or decision requires fresh evidence
+review. The decision history and connection activity store references and digests. Providers may
+retain delivered images under the selected account's terms.
+
+The decision record identifies the Assistant thread, grant revision and reason. Open
+**Delegated Decisions** from the thread menu, Inbox's **More Actions** menu or Campaign Status to
+see the outcome, thread and reason. The control plane advertises `assistantDecisionHistory` in
+the dashboard snapshot for the authenticated owner. The grant and resolution tools are absent on
+older control planes. Outside Assistant connections cannot use a thread grant.
+
+### CI Reruns
+
+Typed GitHub Actions reruns require control-plane and runner protocol 399 or later. Start from a
+session in the repository's registered Project Location. Read the workflow run's ID, head SHA
+and current attempt in GitHub before requesting a decision. Include the job ID to rerun a job and
+its dependent jobs. Omitting the job ID reruns the entire workflow.
+
+Use `request_workflow_decision` (CLI `wollipog decision request`) with a unique request ID, the
+resource key `ci_rerun:owner/repo:runId:attempt` using a lowercase repository, and the snapshot
+`{ "category": "ci_rerun", "repository": "owner/repo", "runId": 123, "headSha": "<40 hex characters>", "attempt": 2, "jobId": 456 }`.
+The decision belongs to the owner. An Assistant thread with the **CI Rerun** grant can resolve
+it within the grant's scope.
+
+The requesting session calls `execute_workflow_decision` (CLI `wollipog decision execute`) with
+the approved occurrence ID and resource digest. Wollipog rechecks the repository, run, commit,
+current attempt and optional job before asking GitHub to rerun it. An accepted rerun consumes the
+approval. If the target changed, request a new approval for the updated target. If the outcome
+is uncertain, inspect the GitHub run before proceeding. Wollipog blocks another typed write for
+the same attempt across sessions on the installation. If GitHub confirms it never started,
+the owner can rerun it manually. GitHub's rerun API accepts a run or job ID and has no attempt precondition, so an
+external rerun racing the final check can still affect the result. Older peers keep the manual
+owner approval path.
+
+### Release Tags and Publications
+
+Typed release decisions require control plane and runner protocol 401 or later and a registered
+GitHub Project Location. The **Release Tag** and **Release Publication** categories are separate
+grants. Tagging creates an absent stable `vX.Y.Z` tag on the approved commit. Publication updates
+the exact approved draft to become the latest stable release. Generic shell and tool permissions
+remain owner-held. Older peers can use the manual release procedure.
+
+To use the typed path with the release script, run
+`node scripts/release.mjs resume --state /path/to/checkpoint.json --typed-decisions`. At the
+tag or publication gate the script prints its `resourceKey` and `resourceSnapshot`. Request
+that snapshot with `request_workflow_decision` or `wollipog decision request`. Once approved,
+resume with `--typed-decisions --reviewed-head <sha>` and either `--tag-decision <occurrence>`
+or `--publish-decision <occurrence>`, as appropriate. The script refreshes its release
+checks before executing the approval and keeps decision IDs out of the checkpoint. The release
+certification, workflow, signed-asset and latest-stable checks apply.
+
+The requester executes with `execute_workflow_decision` or `wollipog decision execute`, using
+the approved occurrence and its resource digest. Wollipog checks the exact repository, commit,
+tag, draft metadata and asset identities and digests immediately before the write. A stale
+target requires a new approval. After an uncertain write, check GitHub before doing anything
+else. Wollipog will not replay it. GitHub does not offer a conditional release update, so
+manual writes to the same tag or draft should wait until the typed action finishes.
 
 ## Thread Credential and Runner Proxy
 
@@ -185,3 +333,28 @@ agrees. A thread's assistant could repeat it alone, so a thread's connection nev
   `none`.
 
 External Assistant connections keep the preview-and-confirm behavior above, unchanged.
+
+### Starting a Campaign
+
+1. The thread uses `project_list` and `runner_list` to select a Location and an Orchestrator
+   installation, then calls `campaign_start`. It can propose the root and child model and effort,
+   and name explicit issue numbers in Full Control. It cannot set a budget, supply a delegation
+   policy, or approve a request.
+2. On the **Start Campaign** card, select **Review Campaign**. You can open it from the thread
+   or from **Inbox → Assistant Approvals → Review**. The review shows the first message,
+   Location, mode, root and child settings, budget and scope.
+   Full Control uses the same inspected boundary as New Session, including delegated operations
+   and human-required gates. A Custom campaign uses normal Custom issue admission.
+3. The card starts with the owner's saved campaign budget. If there is no saved budget, choose
+   **Set Budget**. To replace the displayed budget for this launch, choose **Change Budget**.
+   Enter **Cost Budget (USD)** and **Tool Call Limit**, then select **Update Preview**.
+   The revised preview does not change the saved defaults.
+4. **Approve Once** approves those exact settings. If the Location, inspected scope, effective
+   settings or Assistant grant changed, the launch is refused. **Deny** and expiry also leave
+   no campaign. The thread hears the outcome and can read the campaign Session ID in its
+   `command_get` receipt. Open the work card marked **Campaign** for live status and
+   campaign questions. Answering on the owner's behalf requires a separate Decision Delegation grant.
+
+An older control plane has no `campaign_start` operation. The command refuses a Location on a
+runner below protocol v391. An older web client cannot approve a campaign through the legacy
+confirmation endpoint.

@@ -19,6 +19,25 @@ function fixtureTransport(instanceId: string, calls: string[]): ApiTransport {
   };
 }
 
+test("answer requests default to explicit submit and reserve dismissal for explicit intent (#4917)", async () => {
+  const bodies: unknown[] = [];
+  const client = createApiClient({ ...fixtureTransport("answers", []), async request(_path, init) {
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response("{}", { headers: { "content-type": "application/json" } });
+  } });
+  const requests: Array<Parameters<typeof client.answerQuestion>[1]> = [
+    { requestId: "owner", answers: {} },
+    { requestId: "owner", answers: { owner_question_answer: "Chosen Option", owner_question_note: "Keep my words." } },
+    { requestId: "owner", answers: {}, action: "dismiss" as const },
+  ];
+  for (const body of requests) await client.answerQuestion("session", body);
+  assert.deepEqual(bodies, [
+    { requestId: "owner", answers: {}, action: "submit" },
+    { requestId: "owner", answers: { owner_question_answer: "Chosen Option", owner_question_note: "Keep my words." }, action: "submit" },
+    { requestId: "owner", answers: {}, action: "dismiss" },
+  ]);
+});
+
 test("API clients remain bound to their instance when logical resource paths are identical", async () => {
   const callsA: string[] = [];
   const callsB: string[] = [];

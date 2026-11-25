@@ -158,7 +158,7 @@ for (const theme of ["light", "dark"] as const) {
         await policy.getByRole("button", { name: /Child Harness: Automatic/ }).click();
         await page.getByRole("option", { name: /Codex App Server · Native/ }).click();
         await policy.getByRole("button", { name: /Child Model: Automatic/ }).click();
-        await page.getByRole("option", { name: /GPT-5.6 Sol/ }).click();
+        await page.getByRole("radio", { name: /GPT-5.6 Sol/ }).click();
         await policy.getByRole("button", { name: /Child Effort: Automatic/ }).click();
         await page.getByRole("option", { name: /High/ }).click();
         await expect(policy.getByRole("tab", { name: /^Behavior/ })).toHaveText("Behavior4 Changed");

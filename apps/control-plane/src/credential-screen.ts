@@ -102,6 +102,7 @@ export interface CredentialScreenInput {
   requestId: string;
   data: string;
   automaticHarness: DecisionAutomaticHarness | null;
+  retryUnavailableHarness?: boolean;
   /** The caller's one person-owned request for an uncertain or failed screen, idempotent per
    * occurrence; null when the affected request itself is that request. */
   routeToHuman?: (occurrence: DecisionOccurrenceRecord) => string | null;
@@ -139,6 +140,7 @@ export async function screenCredentialRequest(db: ControlPlaneDb, runtime: Decis
       campaignSessionId: input.campaignSessionId,
       occurrenceKey,
       automaticHarness: input.automaticHarness,
+      ...(input.retryUnavailableHarness ? { retryUnavailableHarness: true } : {}),
       inputs,
       routeToHuman: (occurrence) => {
         subject(occurrence.occurrenceId);

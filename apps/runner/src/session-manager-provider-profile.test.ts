@@ -128,7 +128,7 @@ async function launchAgainstHome(t: { after(fn: () => unknown): void }, marker: 
   const meta: SessionMeta = {
     ...baseMeta({ sessionId: "profile-launch", repoPath: root, agentId: "claude", driver: "claude-code", command: "claude",
       status: "starting", title: "Profile Launch" }),
-    env: { CLAUDE_CONFIG_DIR: home }, providerAccountId: "work", providerAccountLabel: "Work", providerAccountProvider: "claude",
+    providerAccountId: "work", providerAccountLabel: "Work", providerAccountProvider: "claude",
     providerCredentialHome: home, ...(recorded ? { providerProfileId: recorded } : {}),
   };
   store.create(meta);
@@ -139,7 +139,8 @@ async function launchAgainstHome(t: { after(fn: () => unknown): void }, marker: 
     (() => { driversCreated++; throw new Error("provider construction reached"); }) as never,
     join(root, "runner-data"), 1, undefined, undefined, undefined,
     { mode: "provider", network: "inherit" }, async () => undefined,
-    undefined, undefined, async () => {}, undefined, [], undefined, undefined, undefined, undefined,
+    undefined, undefined, async () => {}, undefined, [],
+    (launch) => { launch.env = { CLAUDE_CONFIG_DIR: home }; }, undefined, undefined, undefined,
     undefined, "a".repeat(64), undefined, undefined, [], undefined, undefined, undefined, undefined,
     () => [], () => [], INSTANCE,
   );

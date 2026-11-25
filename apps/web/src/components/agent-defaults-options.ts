@@ -1,4 +1,6 @@
 import {
+  isManagedModelChoice,
+  managedModelChoiceLabel,
   modelResolutionDrift,
   type AgentDriverKind,
   type AgentHarnessDefaultConfig,
@@ -34,8 +36,38 @@ export function uniqueModels(option: AgentHarnessDefaultOption): AgentModel[] {
       } : model);
     }
   }
-  return [...models.values()].sort((left, right) =>
+  return [...models.values()].map(model => {
+    const resolution = managedModelDriftText(option, model.id);
+    return resolution ? {
+      ...model,
+      description: `Wollipog chooses the latest available release when a new session starts. ${resolution}`,
+    } : model;
+  }).sort((left, right) =>
     (left.displayName ?? left.id).localeCompare(right.displayName ?? right.id) || left.id.localeCompare(right.id));
+}
+
+export function managedModelDriftText(option: AgentHarnessDefaultOption, modelId: string | undefined): string | null {
+  if (!modelId || !isManagedModelChoice(modelId)) return null;
+  const resolutions = new Map<string, Set<string>>();
+  let label = modelId;
+  const installations = option.installations.flatMap(({ machineName, models }) => {
+    const choice = models.find(model => model.id === modelId);
+    if (!choice?.resolvedModelId) return [];
+    label = choice.displayName ?? label;
+    const id = choice.resolvedModelId;
+    const displayName = models.find(model => model.id === id)?.displayName ?? id;
+    resolutions.set(displayName, (resolutions.get(displayName) ?? new Set()).add(id));
+    return [{ machineName, displayName, id }];
+  });
+  if (new Set(installations.map(installation => installation.id)).size < 2) return null;
+  return modelDriftText({
+    modelId: label,
+    machines: installations.map(({ machineName, displayName, id }) => ({
+      machineName,
+      displayName: resolutions.get(displayName)!.size > 1 ? `${displayName} (${id})` : displayName,
+    })),
+    pinned: [],
+  });
 }
 
 export function effortsForModel(option: AgentHarnessDefaultOption, modelId: string): string[] {
@@ -137,7 +169,8 @@ export function agentDefaultsDescription(option: AgentHarnessDefaultOption): str
   const preference = option.preference;
   const parts = preference ? [
     preference.model
-      ? uniqueModels(option).find((model) => model.id === preference.model)?.displayName ?? preference.model
+      ? uniqueModels(option).find((model) => model.id === preference.model)?.displayName ??
+        managedModelChoiceLabel(preference.model) ?? preference.model
       : undefined,
     preference.effort ? `${effortLabel(preference.effort).toLowerCase()} effort` : undefined,
     preference.permissionMode ? permissionModeDisplayLabel(preference.permissionMode, option.driver) : undefined,
@@ -149,11 +182,12 @@ export function agentDefaultsDescription(option: AgentHarnessDefaultOption): str
     : preference?.model ? listed : `${listed.charAt(0).toUpperCase()}${listed.slice(1)}`;
   // A saved alias that resolves to different models on different machines says so (#3248).
   const drift = preference?.model ? modelResolutionDrift(option.installations, preference.model) : null;
-  const driftText = drift ? ` ${modelDriftText(drift)}` : "";
+  const resolution = managedModelDriftText(option, preference?.model) ?? (drift ? modelDriftText(drift) : "");
+  const driftText = resolution ? ` ${resolution}` : "";
   if (option.compatibleInstallations === 0) return `${summary}. Not available on any machine.${driftText}`;
   if (option.compatibleInstallations < option.installations.length) {
     const total = option.installations.length;
     return `${summary}. Available on ${option.compatibleInstallations} of ${total} machine${total === 1 ? "" : "s"}.${driftText}`;
   }
-  return drift ? `${summary}.${driftText}` : summary;
+  return resolution ? `${summary}.${driftText}` : summary;
 }

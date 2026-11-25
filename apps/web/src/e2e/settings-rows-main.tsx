@@ -13,12 +13,16 @@ import {
 import {
   ARCHIVED_HISTORY_RETENTION_LIMITS,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
+  managedModelChoices,
   type AgentHarnessDefaultConfig,
   type AgentHarnessDefaultsView,
   type ArchivedHistoryRetentionView,
   type VideoReviewSettingsStatus,
 } from "@wollipog/protocol";
 import { AgentDefaultsPanel } from "../components/AgentDefaultsPanel.js";
+import { AssistantConnectionsGroup } from "../components/AssistantConnectionsGroup.js";
+import { AssistantDelegationPanel } from "../components/AssistantDelegationPanel.js";
+import { AssistantThreadDefaultsPanel } from "../components/AssistantThreadDefaultsPanel.js";
 import { ArchivedHistoryRetentionPanel } from "../components/ArchivedHistoryRetentionPanel.js";
 import { OrchestratorSettingsPanel } from "../components/OrchestratorSettingsPanel.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
@@ -307,6 +311,18 @@ const harnessDefaultsTransport: ApiTransport = {
   publicOrigin: window.location.origin,
   close() {},
   async request(path, init) {
+    if (path === "/api/assistant-threads") return Response.json({ threads: [] });
+    if (path === "/api/assistant-threads/defaults") return Response.json({
+      harness: "claude-code",
+      launchDefaults: { harness: "claude-code", providerAccount: null },
+      decisionDefault: null,
+      harnesses: [{ id: "claude-code", label: "Claude Code", available: true }, { id: "codex", label: "Codex", available: true }],
+    });
+    if (path === "/api/assistant-threads/defaults/limits") return Response.json({ costUsd: 25, launchedSessions: 10 });
+    if (path === "/api/assistant-connections") return Response.json({
+      connections: [], installation: { id: "settings-fixture", name: "Home Studio", canRename: true },
+      operations: [], projects: [],
+    });
     // Behavior › Evidence (#3023). Unstubbed, the read fell through to the agent defaults below and
     // every Behavior capture showed a load failure. `artifact=save-fails` makes a change fail the way
     // a dropped connection does, for the danger notice and its Retry.
@@ -415,7 +431,11 @@ const harnessDefaultsTransport: ApiTransport = {
       if (mode === "machines") {
         const models = [
           { id: "opus", displayName: "Opus 5.5", efforts: ["high", "max"] },
-          { id: "claude-opus-5", displayName: "Opus 5", efforts: ["high", "max"] },
+          { id: "claude-opus-5-5", displayName: "Opus 5.5", efforts: ["high", "max"] },
+          ...[
+            ["5", "5"], ["4-8", "4.8"], ["4-7", "4.7"], ["4-6", "4.6"], ["4-5", "4.5"],
+          ].map(([id, release]) => ({ id: "claude-opus-" + id, displayName: "Opus " + release, efforts: ["high", "max"] })),
+          { id: "provider-new-model", displayName: "New Agentic Coding Model With a Very Long Name", efforts: ["high"] },
         ];
         return new Response(JSON.stringify({
           defaults,
@@ -504,6 +524,31 @@ const harnessDefaultsTransport: ApiTransport = {
     const body = mode === "agent-repair" && window.location.hash === "#repair"
       ? harnessDefaultsRepairedView
       : harnessDefaultsState;
+    if (mode === "agent-managed" || mode === "agent-managed-skew") {
+      const view = structuredClone(body);
+      const option = view.defaults[0];
+      const installation = option?.installations[0];
+      if (installation) {
+        const models = [
+          { id: "gpt-6.2-sol", displayName: "GPT-6.2 Sol", efforts: ["high"] },
+          { id: "gpt-6.1-sol", displayName: "GPT-6.1 Sol", efforts: ["high"] },
+        ];
+        installation.models.push(...models, ...managedModelChoices("codex-app-server", { models, modelSource: "live" }));
+        if (option && mode === "agent-managed-skew") {
+          const older = models.slice(1);
+          const machineNames = ["Laptop", "Design Workstation", "Mobile Testing Machine", "Backend Build Machine",
+            "Integration Test Workstation", "Remote Development Machine", "Release Validation Machine"];
+          option.installations.push(...machineNames.map((machineName, index) => ({
+            ...installation,
+            runnerId: `fixture-machine-${index}`,
+            machineName,
+            models: [...older, ...managedModelChoices("codex-app-server", { models: older, modelSource: "live" })],
+          })));
+          if (option.preference?.model === "wollipog:latest:sol") option.compatibleInstallations = option.installations.length;
+        }
+      }
+      return Response.json(view);
+    }
     return new Response(JSON.stringify(body), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -542,7 +587,7 @@ function Harness() {
   const askedFor = params.get("topology") as Topology | null;
   const topology: Topology = askedFor && TOPOLOGIES.includes(askedFor) ? askedFor : "full";
   const requestedSection = params.get("section") as SettingsSection | null;
-  const showAgentDefaults = ["agent", "agent-missing", "agent-repair", "agent-loading", "agent-empty", "agent-save-fails"]
+  const showAgentDefaults = ["agent", "agent-missing", "agent-repair", "agent-loading", "agent-empty", "agent-save-fails", "agent-managed", "agent-managed-skew"]
     .includes(params.get("defaults") ?? "");
   // #1646's and #3028's desktop update states; absent, the About panel renders as it does in a browser.
   const requestedUpdates = params.get("updates");
@@ -724,6 +769,11 @@ function Harness() {
                   <ApiProvider client={harnessDefaultsApi}><OrchestratorSettingsPanel /><DecisionModelPanel /></ApiProvider>
                 </FeedbackProvider>
               ),
+              assistant: <FeedbackProvider><ApiProvider client={harnessDefaultsApi}>
+                <AssistantThreadDefaultsPanel />
+                <AssistantDelegationPanel />
+                <AssistantConnectionsGroup onNavigate={navigate} />
+              </ApiProvider></FeedbackProvider>,
               network: (
                 <ApiProvider client={harnessDefaultsApi}><NetworkPanel
                   tailnet={tailnetState === "write-retry" ? {

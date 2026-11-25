@@ -1,6 +1,7 @@
 import { MAX_LIVE_CHILD_LIMIT, WORKFLOW_DECISION_CATEGORIES, agentHarnessIdentityKey,
   type OrchestratorDefaults, type OrchestratorSettingsCapabilities } from "@wollipog/protocol";
 import { agentHarnessOptionLabel, modelOptionLabel } from "../agent-presentation.js";
+import { ModelPicker } from "./ModelPicker.js";
 import { Select, type SelectOption } from "./ui/ChoiceControls.js";
 import { effortLabel } from "../format.js";
 import { DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE } from "../ui-evidence-disclosure.js";
@@ -58,11 +59,12 @@ export function SessionRoleSettings({ value, capabilities, disabled, onChange }:
         behavior({ childHarness: harness ? { agentId: harness.agentId, driver: harness.driver, context: harness.context } : null,
           childModel: null, childEffort: null });
       }} />
-    <RoleSelect label="Child Model" disabled={disabled} value={value.behavior.childModel ?? ""}
+    <div className="field"><span className="field-label">Child Model</span>
+    <ModelPicker context={{ mode: "launch", driver: selected?.driver }} label="Child Model" disabled={disabled} value={value.behavior.childModel ?? ""}
       options={[{ value: "", label: "Automatic" }, ...models.map((model) => ({ value: model.id, label: modelOptionLabel(model, models) })),
         ...(value.behavior.childModel && !models.some((model) => model.id === value.behavior.childModel)
           ? [{ value: value.behavior.childModel, label: value.behavior.childModel, disabled: true, disabledReason: "This saved model is unavailable." }] : [])]}
-      onChange={(childModel) => behavior({ childModel: childModel || null, childEffort: null })} />
+      onChange={(childModel) => behavior({ childModel: childModel || null, childEffort: null })} /></div>
     <RoleSelect label="Child Effort" disabled={disabled} value={value.behavior.childEffort ?? ""}
       options={[{ value: "", label: "Automatic" }, ...efforts.map((effort) => ({ value: effort, label: effortLabel(effort) })),
         ...(value.behavior.childEffort && !efforts.includes(value.behavior.childEffort)

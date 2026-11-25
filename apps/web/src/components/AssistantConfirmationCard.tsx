@@ -1,123 +1,196 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AssistantOwnerConfirmation, AssistantOwnerConfirmationResponse, AssistantThread } from "@wollipog/protocol";
-import { ApiError } from "../api.js";
+import { useRef, useState } from "react";
+import { validOrchestratorCampaignBudgetDefault, type AssistantOwnerConfirmation, type AssistantOwnerConfirmationResponse } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import {
   assistantConfirmationOutcome,
-  assistantThreadPendingKey,
-  onAssistantThreadUpsert,
-  pendingAssistantConfirmationsByThread,
+  announceAssistantThread,
+  type AssistantThreadConfirmations,
 } from "../assistant-confirmations.js";
 import { assistantThreadTitle } from "../assistant-threads.js";
-import { formatClock } from "../format.js";
-import { useStoreActions, useStoreSelector } from "../store.js";
+import { effortLabel, formatClock } from "../format.js";
+import { useStoreActions } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
+import { CopyButton } from "./common.js";
+import { Modal } from "./Modal.js";
+import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
 type Answered = (response: AssistantOwnerConfirmationResponse) => void;
+type ConfirmationIntent = "approve" | "deny";
+type ConfirmationAnswer = (response: AssistantOwnerConfirmationResponse, intent: ConfirmationIntent) => void;
 
 /** Approve Once and Deny for one request, with the toast that reports how it ended. */
-function useConfirmationAnswer(confirmation: AssistantOwnerConfirmation, onAnswered?: Answered) {
+function useConfirmationAnswer(confirmation: AssistantOwnerConfirmation, onAnswered: ConfirmationAnswer) {
   const api = useApi();
   const { showToast } = useFeedback();
-  const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
-  const answer = async (intent: "approve" | "deny") => {
-    if (busy) return;
+  const [busy, setBusy] = useState<ConfirmationIntent | null>(null);
+  const inFlight = useRef(false);
+  const [failure, setFailure] = useState<{ message: string; detail: string }>();
+  const answer = async (intent: ConfirmationIntent, button: HTMLButtonElement) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    button.focus();
     setBusy(intent);
     try {
-      const response = intent === "approve"
-        ? await api.approveAssistantConfirmation(confirmation.threadId, confirmation.id)
-        : await api.denyAssistantConfirmation(confirmation.threadId, confirmation.id);
+      const response = await answerAssistantConfirmation(api, confirmation, intent);
       const outcome = assistantConfirmationOutcome(response.confirmation);
       showToast(outcome.message, { tone: outcome.tone });
-      onAnswered?.(response);
+      if (confirmation.campaign) announceAssistantThread(response.thread);
+      onAnswered(response, intent);
     } catch (cause) {
-      showToast(intent === "approve" ? "Couldn't approve the request." : "Couldn't deny the request.", {
-        tone: "error",
+      setFailure({
+        message: intent === "approve" ? "Couldn't approve the request." : "Couldn't deny the request.",
         detail: cause instanceof Error ? cause.message : String(cause),
       });
+      button.focus({ preventScroll: true });
     } finally {
+      inFlight.current = false;
       setBusy(null);
     }
   };
-  return { busy, answer };
+  return { busy, answer, failure };
 }
 
-/** The request's exact target, its previewed impact, and every argument the approved run uses. */
-function ConfirmationFacts({ confirmation }: { confirmation: AssistantOwnerConfirmation }) {
-  const { target } = confirmation;
-  return (
-    <>
-      <p className="assistant-confirmation-summary">{confirmation.summary}</p>
-      <dl className="facts" aria-label="Impact">
-        <div><dt>Target</dt><dd>{target.label === target.id ? target.id : `${target.label} (${target.id})`}</dd></div>
-        {confirmation.impact.map((line, index) => <div key={`${line.label}-${index}`}><dt>{line.label}</dt><dd>{line.value}</dd></div>)}
-      </dl>
-      {confirmation.arguments.length > 0 && (
-        // Exactly what runs: each argument by its own name, with its whole value.
-        <dl className="facts assistant-confirmation-arguments" aria-label="Arguments">
-          {confirmation.arguments.map((line) => <div key={line.label}><dt><code>{line.label}</code></dt><dd><code>{line.value}</code></dd></div>)}
-        </dl>
-      )}
-      <p className="request-card-reasons">Your assistant asked to run this. It runs once, exactly as shown, only if you approve it.</p>
-    </>
-  );
+export function answerAssistantConfirmation(api: ReturnType<typeof useApi>, confirmation: AssistantOwnerConfirmation, intent: "approve" | "deny") {
+  const { threadId, id, campaign } = confirmation;
+  if (intent === "deny") return api.denyAssistantConfirmation(threadId, id);
+  return campaign
+    ? api.approveAssistantCampaign(threadId, id, campaign.digest)
+    : api.approveAssistantConfirmation(threadId, id);
 }
 
-/** Opens the target session, when the request has one. */
-function OpenTarget({ confirmation, disabled }: { confirmation: AssistantOwnerConfirmation; disabled: boolean }) {
-  const { navigate } = useStoreActions();
-  if (confirmation.target.kind !== "session") return null;
-  return (
-    <button type="button" className="btn sm request-card-tertiary" disabled={disabled}
-      onClick={() => navigate({ name: "session", id: confirmation.target.id })}>
-      Open Session
-    </button>
-  );
-}
-
-function ConfirmationActions({ busy, answer }: {
-  busy: "approve" | "deny" | null;
-  answer: (intent: "approve" | "deny") => Promise<void>;
+function ConfirmationActions({ busy, answer, approveDisabled = false }: {
+  busy: ConfirmationIntent | null;
+  answer: (intent: ConfirmationIntent, button: HTMLButtonElement) => Promise<void>;
+  approveDisabled?: boolean;
 }) {
   return (
     <>
-      <BusyButton className="btn sm" busy={busy === "deny"} progress="Denying…" disabled={busy !== null}
-        onClick={() => void answer("deny")}>
+      <BusyButton className="btn sm ghost danger" busy={busy === "deny"} progress="Denying the request…" aria-disabled={busy !== null || undefined}
+        onClick={event => void answer("deny", event.currentTarget)}>
         Deny
       </BusyButton>
-      <BusyButton className="btn sm primary" busy={busy === "approve"} progress="Approving…" disabled={busy !== null}
-        onClick={() => void answer("approve")}>
+      <BusyButton className="btn sm primary" busy={busy === "approve"} progress="Approving the request…"
+        aria-disabled={busy !== null || approveDisabled || undefined}
+        onClick={event => { if (!approveDisabled) void answer("approve", event.currentTarget); }}>
         Approve Once
       </BusyButton>
     </>
   );
 }
 
-/**
- * One owner confirmation of a Wollipog Assistant thread (#4665), drawn whole: the destructive
- * command its assistant asked to run, with its exact target, impact and arguments, and Approve
- * Once and Deny. Only the owner can answer, and the assistant hears the outcome in its thread.
- * A list item, for the thread's own work cards.
- */
-export function AssistantConfirmationCard({ confirmation, onAnswered }: {
-  confirmation: AssistantOwnerConfirmation;
-  onAnswered?: Answered;
+function CampaignBudgetEditor({ confirmation, onSaved, onCancel }: {
+  confirmation: AssistantOwnerConfirmation & { campaign: NonNullable<AssistantOwnerConfirmation["campaign"]> };
+  onSaved: Answered;
+  onCancel: () => void;
 }) {
-  const { busy, answer } = useConfirmationAnswer(confirmation, onAnswered);
+  const api = useApi();
+  const [cost, setCost] = useState(confirmation.campaign.budget?.costUsd.toString() ?? "");
+  const [calls, setCalls] = useState(confirmation.campaign.budget?.toolCalls.toString() ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const budget = { costUsd: Number(cost), toolCalls: Number(calls) };
+  const save = async () => {
+    if (saving || !validOrchestratorCampaignBudgetDefault(budget)) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await api.reviseAssistantCampaignBudget(confirmation.threadId, confirmation.id, confirmation.campaign.digest, budget);
+      announceAssistantThread(response.thread);
+      onSaved(response);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Couldn't update the campaign budget.");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div className="form">
+      <label className="field">Cost Budget (USD)
+        <span className="input-affix">
+          <span className="input-affix-text" aria-hidden="true">$</span>
+          <input type="number" min="0.01" step="any" value={cost} onChange={event => setCost(event.target.value)} disabled={saving} />
+        </span>
+      </label>
+      <label className="field">Tool Call Limit
+        <input type="number" min="1" step="1" value={calls} onChange={event => setCalls(event.target.value)} disabled={saving} />
+      </label>
+      {error && <p role="alert">{error}</p>}
+      <div className="request-card-foot">
+        <button type="button" className="btn sm ghost" onClick={onCancel} disabled={saving}>Cancel</button>
+        <BusyButton className="btn sm primary" busy={saving} progress="Updating…" disabled={!validOrchestratorCampaignBudgetDefault(budget)}
+          onClick={() => void save()}>Update Preview</BusyButton>
+      </div>
+    </div>
+  );
+}
+
+export function CampaignReviewDialog({ confirmation, onClose, onAnswered }: {
+  confirmation: AssistantOwnerConfirmation;
+  onClose: () => void;
+  onAnswered?: ConfirmationAnswer;
+}) {
+  const [editingBudget, setEditingBudget] = useState(false);
+  const [changed, setChanged] = useState<{ previousDigest: string; confirmation: AssistantOwnerConfirmation } | null>(null);
+  const shown = changed && changed.previousDigest === confirmation.campaign?.digest ? changed.confirmation : confirmation;
+  const campaign = shown.campaign;
+  const { busy, answer, failure } = useConfirmationAnswer(shown, (response, intent) => { onClose(); onAnswered?.(response, intent); });
+  if (!campaign) return null;
+  return (
+    <Modal title={editingBudget ? "Campaign Budget" : shown.title}
+      onClose={() => { if (!busy) onClose(); }}
+      size="lg" phoneSheet="full"
+      headerActions={!editingBudget && <button type="button" className="btn sm ghost"
+        aria-disabled={busy !== null || undefined} onClick={() => { if (!busy) setEditingBudget(true); }}>
+        {campaign.budget ? "Change Budget" : "Set Budget"}
+      </button>}
+      footer={!editingBudget && <ConfirmationActions busy={busy} answer={answer} approveDisabled={!campaign.budget} />}>
+      {editingBudget ? (
+        <CampaignBudgetEditor confirmation={{ ...shown, campaign }} onCancel={() => setEditingBudget(false)} onSaved={response => {
+          setChanged({ previousDigest: confirmation.campaign?.digest ?? campaign.digest, confirmation: response.confirmation });
+          setEditingBudget(false);
+        }} />
+      ) : (
+        <div className="assistant-campaign-review">
+          {failure && <Notice tone="danger" role="alert" details={<div className="code-well"><pre>{failure.detail}</pre></div>}>
+            {failure.message}
+          </Notice>}
+          <dl className="facts" aria-label="Campaign Details">
+            <div><dt>Location</dt><dd>{shown.target.label}{" "}
+              <CopyButton text={shown.target.id} className="icon-btn sm" iconOnly ariaLabel="Copy Location ID" />
+            </dd></div>
+            {shown.impact.map(({ label, value }) => <div key={label}><dt>{label}</dt><dd>
+              {label === "Orchestrator Effort" || label === "Child Effort" ? effortLabel(value) : value}
+            </dd></div>)}
+          </dl>
+          {shown.arguments.map(({ label, value }) => (
+            <section className="assistant-campaign-message" key={label} aria-label={label}>
+              <h3>{label}</h3>
+              <p>{value}</p>
+            </section>
+          ))}
+          <p className="request-card-reasons">{shown.summary} It runs once if you approve it.</p>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function CampaignApprovalCard({ confirmation }: { confirmation: AssistantOwnerConfirmation }) {
+  const [review, setReview] = useState(false);
   const headingId = `assistant-confirmation-${confirmation.id}`;
   return (
     <li className="request-card" aria-labelledby={headingId}>
       <div className="request-card-head">
         <span className="request-card-kind">Approval Needed</span>
-        <span className="request-card-meta"><span>Expires {formatClock(confirmation.expiresAt)}</span></span>
+        <span className="request-card-meta">Expires {formatClock(confirmation.expiresAt)}</span>
       </div>
       <p className="request-card-title" id={headingId}>{confirmation.title}</p>
-      <div className="request-card-body"><ConfirmationFacts confirmation={confirmation} /></div>
+      <p className="assistant-confirmation-summary">{confirmation.target.label}</p>
       <div className="request-card-foot">
-        <OpenTarget confirmation={confirmation} disabled={busy !== null} />
-        <ConfirmationActions busy={busy} answer={answer} />
+        <button type="button" className="btn sm primary" onClick={() => setReview(true)}>Review Campaign</button>
       </div>
+      {review && <CampaignReviewDialog confirmation={confirmation} onClose={() => setReview(false)} />}
     </li>
   );
 }
@@ -125,73 +198,12 @@ export function AssistantConfirmationCard({ confirmation, onAnswered }: {
 /** How many threads the Inbox names; the rest wait behind "+N More", in the Assistants section. */
 const NOTICE_THREADS = 3;
 
-/**
- * Every Assistant thread's pending owner confirmations, summed up at the top of the Inbox (#4665):
- * one line for each of at most three threads, with how many requests it has waiting, when the first
- * expires, and Review, which opens the thread, where each request is drawn whole to be answered.
- * However many requests wait, the block keeps the same small bound, so the sessions keep their room.
- *
- * The Thread API's list is the only source of what is shown, and only the answer to the most
- * recently started read is applied. A read starts whenever what is shown may have fallen behind:
- * the connection comes (back) online, or a thread event changes that thread's pending requests (an
- * answer in the thread view publishes one). Each such change therefore has a read that started
- * after it, and an older read's late answer is discarded, so stale state can never replace newer
- * state. A control plane without the Thread API shows nothing.
- */
-export function AssistantConfirmationsNotice() {
-  const api = useApi();
+/** A bounded preview of the owner's pending Assistant confirmations. */
+export function AssistantConfirmationsNotice({ waiting }: { waiting: readonly AssistantThreadConfirmations[] }) {
   const { navigate } = useStoreActions();
-  const online = useStoreSelector((state) => state.conn === "online");
-  const [threads, setThreads] = useState<readonly AssistantThread[]>([]);
-  const [now, setNow] = useState(() => Date.now());
-  const latestRead = useRef(0);
-  const retry = useRef<number | null>(null);
-  const cancelRetry = () => {
-    if (retry.current !== null) window.clearTimeout(retry.current);
-    retry.current = null;
-  };
-  const refresh = useCallback(() => {
-    cancelRetry();
-    const read = ++latestRead.current;
-    // The invariant: only the most recently started read (`latestRead`) may change what is shown or
-    // schedule more work. A newer read or unmounting advances `latestRead`, which retires every
-    // older answer, failure and retry, whatever order they arrive in.
-    // The latest read is retried, backing off to 30 seconds, until it succeeds or is superseded: a
-    // request whose read failed must not stay hidden until it expires. A control plane without the
-    // Thread API answers 404, 405 or 501, and then the Inbox stays as it was.
-    const current = () => read === latestRead.current;
-    const attempt = (delay: number) => void api.assistantConfirmationThreads().then(
-      ({ threads: listed }) => { if (current()) setThreads(listed); },
-      (error: unknown) => {
-        if (!current()) return;
-        if (error instanceof ApiError && [404, 405, 501].includes(error.status)) return;
-        retry.current = window.setTimeout(() => {
-          retry.current = null;
-          if (current()) attempt(Math.min(delay * 2, 30_000));
-        }, delay);
-      },
-    );
-    attempt(2_000);
-  }, [api]);
-  // Unmounting supersedes any read still in flight, so its late answer or failure does nothing.
-  useEffect(() => () => { latestRead.current += 1; cancelRetry(); }, []);
-  // Events are not replayed after a disconnect, so the list is read whenever the connection is up.
-  useEffect(() => { if (online) refresh(); }, [online, refresh]);
-  // Thread events arrive in order, so a thread's latest event names its pending requests as of
-  // then. Activity that leaves them unchanged needs no read.
-  const pendingByThread = useRef(new Map<string, string>());
-  useEffect(() => onAssistantThreadUpsert((thread) => {
-    const key = assistantThreadPendingKey(thread);
-    if (pendingByThread.current.get(thread.id) === key) return;
-    pendingByThread.current.set(thread.id, key);
-    refresh();
-  }), [refresh]);
-  useEffect(() => {
-    // An unanswered request leaves the list when it expires, even without another event.
-    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
-    return () => window.clearInterval(timer);
-  }, []);
-  const waiting = useMemo(() => pendingAssistantConfirmationsByThread(threads, now), [threads, now]);
+  const [reviewThreadId, setReviewThreadId] = useState<string | null>(null);
+  const reviewThread = waiting.find(thread => thread.threadId === reviewThreadId);
+  const campaigns = reviewThread?.confirmations.filter(confirmation => confirmation.campaign) ?? [];
   if (!waiting.length) return null;
   const more = waiting.length - NOTICE_THREADS;
   return (
@@ -206,8 +218,10 @@ export function AssistantConfirmationsNotice() {
               <span className="assistant-approvals-meta">
                 <span className="request-card-kind">{thread.confirmations.length} {thread.confirmations.length === 1 ? "Approval" : "Approvals"}</span>
                 <span className="assistant-approvals-expiry">Expires {formatClock(thread.expiresAt)}</span>
-                <button type="button" className="btn sm primary" aria-describedby={titleId}
-                  onClick={() => navigate({ name: "assistants", threadId: thread.threadId })}>
+                <button type="button" className="btn sm ghost" aria-describedby={titleId}
+                  onClick={() => thread.confirmations.some(confirmation => confirmation.campaign)
+                    ? setReviewThreadId(thread.threadId)
+                    : navigate({ name: "assistants", threadId: thread.threadId })}>
                   Review
                 </button>
               </span>
@@ -219,6 +233,17 @@ export function AssistantConfirmationsNotice() {
         <button type="button" className="btn sm ghost assistant-approvals-more" onClick={() => navigate({ name: "assistants" })}>
           +{more} More
         </button>
+      )}
+      {reviewThread && campaigns.length > 0 && (
+        <Modal title="Campaign Approvals" onClose={() => setReviewThreadId(null)}
+          footer={<button type="button" className="btn ghost" onClick={() => {
+            setReviewThreadId(null);
+            navigate({ name: "assistants", threadId: reviewThread.threadId });
+          }}>Open Thread</button>}>
+          <ul className="assistant-inbox-campaigns" aria-label="Campaign Approvals">
+            {campaigns.map(confirmation => <CampaignApprovalCard key={confirmation.id} confirmation={confirmation} />)}
+          </ul>
+        </Modal>
       )}
     </section>
   );

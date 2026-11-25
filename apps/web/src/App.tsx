@@ -90,6 +90,7 @@ import { useInstanceScope } from "./instance-scope.js";
 import { sessionsDestination } from "./sessions-view-mode.js";
 import { railViewForDigit, visibleRailViews } from "./rail-preferences.js";
 import { machineAttention } from "./rail-attention.js";
+import { useAssistantAttention } from "./use-assistant-attention.js";
 import { useRailPreferences } from "./use-rail-preferences.js";
 import { useSessionsViewModeMemory } from "./use-sessions-view-mode-memory.js";
 import { recordRecentSession } from "./recent-sessions.js";
@@ -135,6 +136,10 @@ const AboutPanel = lazy(() => import("./components/SettingsView.js").then((modul
 const AppearancePanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.AppearancePanel })));
 const NavigationRailPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NavigationRailPanel })));
 const BehaviorPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.BehaviorPanel })));
+const AssistantThreadDefaultsPanel = lazy(() => import("./components/AssistantThreadDefaultsPanel.js").then((module) => ({ default: module.AssistantThreadDefaultsPanel })));
+const AssistantConnectionsGroup = lazy(() => import("./components/AssistantConnectionsGroup.js").then((module) => ({ default: module.AssistantConnectionsGroup })));
+const AssistantConnectionsPages = lazy(() => import("./components/AssistantConnectionsPages.js").then((module) => ({ default: module.AssistantConnectionsPages })));
+const AssistantDelegationPanel = lazy(() => import("./components/AssistantDelegationPanel.js").then((module) => ({ default: module.AssistantDelegationPanel })));
 const AgentDefaultsPanel = lazy(() => import("./components/AgentDefaultsPanel.js").then((module) => ({ default: module.AgentDefaultsPanel })));
 const NetworkPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NetworkPanel })));
 const NotificationsPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NotificationsPanel })));
@@ -261,6 +266,8 @@ export function Shell() {
   const view = useStoreSelector((s) => s.view);
   const [reportedEntityTitle, reportEntityTitle] = useEntityTitleState();
   const entityTitle = reportedTitleFor(reportedEntityTitle, view);
+  // The thread reports its title after loading, so its shortcuts are described on the thread only.
+  const assistantThreadOpen = view.name === "assistants" && view.threadId !== undefined && entityTitle !== undefined;
   const viewRef = useRef(view);
   viewRef.current = view;
   const settingsReturnView = useStoreSelector((s) => s.settingsReturnView);
@@ -696,12 +703,11 @@ export function Shell() {
     return () => window.removeEventListener("keydown", onKey);
   }, [openShortcutReference]);
 
-  // Session-view panel shortcuts (Codex bindings). Registered without deps on purpose: the
-  // handler closes over this render's view/rightPanel, and re-registering per render keeps the
-  // mode toggle's "same mode → close" check reading fresh state.
+  // Session-view panel shortcuts. Register against each render's view and panel state.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || shortcutLayerActive(document, false, e) || xtermOwnsKey(e.target) || view.name !== "session") return;
+      if (e.defaultPrevented || shortcutLayerActive(document, false, e) || xtermOwnsKey(e.target)) return;
+      if (view.name !== "session") return;
       // Go to File: opens the panel on Files when needed and never closes it (#2852).
       if (matchesShortcut(e, "open-files")) {
         e.preventDefault();
@@ -735,6 +741,7 @@ export function Shell() {
       sessionVisibleForReminderMode(session, reminders.get(session.id), "ordinary")),
     [reminders, sessions],
   );
+  const assistantAttention = useAssistantAttention();
   const blockedSessions = useMemo(
     () => activeSessions.filter(isInboxBlocked).length,
     [activeSessions],
@@ -782,10 +789,12 @@ export function Shell() {
   const dialogTitle = dialog?.kind === "session" ? "New Session"
     : palette !== null ? "Search" : "Keyboard Shortcuts";
   const shell = (
-    <RemoteAccessProvider><div className={`app${rightPanel.dragging ? " panel-dragging" : ""}`}>
+    <RemoteAccessProvider><div className={`app${rightPanel.dragging ? " panel-dragging" : ""}`}
+      data-assistant-composing={view.name === "assistants" && view.newThread ? "" : undefined}>
       <Rail
         view={view}
         blockedCount={blockedSessions}
+        assistantAttentionCount={assistantAttention.count}
         machines={railMachines}
         onNavigate={navigate}
         {...(isMobile ? {} : {
@@ -856,6 +865,7 @@ export function Shell() {
             /* InboxView draws the Sessions page header, whose controls are its state (#2159). */
             <div className="page full fill">
             <InboxView
+              assistantConfirmations={assistantAttention.confirmations}
               viewMode={view.name === "board" ? "board" : "list"}
               routeSplit={view.name === "inbox" || view.name === "board" ? view.split : undefined}
               expandedSessionId={view.name === "session" ? view.id : null}
@@ -889,7 +899,8 @@ export function Shell() {
               </State>
             </div>
           )}
-          {view.name === "assistants" && <AssistantsView threadId={view.threadId} rightPanel={rightPanel} />}
+          {view.name === "assistants" && <AssistantsView threadId={view.threadId} limits={view.limits}
+            delegation={view.delegation} newThread={view.newThread} rightPanel={rightPanel} />}
           {view.name === "automations" && (view.editor ? <AutomationEditor key={viewPath(view)} route={view.editor} /> : <AutomationsView />)}
           {view.name === "automation" && <AutomationDetail key={view.id} automationId={view.id} />}
           {view.name === "skills" && <SkillsView route={view} />}
@@ -901,7 +912,9 @@ export function Shell() {
             />
           )}
           {view.name === "archived" && <ArchivedSessionsView key={view.browseVisit?.activationId} restoreBrowse={view.browseVisit?.restore} initialSearch={view.archiveSearch} />}
-          {view.name === "settings" && (
+          {view.name === "settings" && (view.assistantConnections ? (
+            <AssistantConnectionsPages route={view.assistantConnections} onNavigate={navigate} />
+          ) : (
             <SettingsView
               section={view.section}
               onNavigate={navigate}
@@ -931,27 +944,34 @@ export function Shell() {
                 ),
                 notifications: <NotificationsPanel notify={notify} push={push} />,
                 behavior: (
-                  <BehaviorPanel
-                    agentHarnessDefaults={(
-                      <AgentDefaultsPanel
-                        discoveryRevision={runners}
-                        onOpenConnections={() => navigate({ name: "runners", section: "machines" })}
-                      />
-                    )}
-                    sessionNaming={<SessionTitlesPanel />}
-                    onOpenShortcuts={openShortcutReference}
-                    focus={view.focus}
-                  />
+                  <>
+                    <BehaviorPanel
+                      agentHarnessDefaults={(
+                        <AgentDefaultsPanel
+                          discoveryRevision={runners}
+                          onOpenConnections={() => navigate({ name: "runners", section: "machines" })}
+                        />
+                      )}
+                      sessionNaming={<SessionTitlesPanel />}
+                      onOpenShortcuts={openShortcutReference}
+                      focus={view.focus}
+                    />
+                  </>
                 ),
                 approvals: <ApprovalsPanel policyId={view.policyId} />,
                 orchestrator: <><OrchestratorSettingsPanel discoveryRevision={runners} /><DecisionModelPanel /></>,
+                assistant: <>
+                  <AssistantThreadDefaultsPanel />
+                  <AssistantDelegationPanel />
+                  <AssistantConnectionsGroup onNavigate={navigate} />
+                </>,
                 reviews: <ReviewSettingsPanel />,
                 network: <NetworkPanel tailnet={tailnet} onNavigate={navigate} />,
                 storage: <ArchivedHistoryRetentionPanel />,
                 about: <AboutPanel update={desktopUpdate} />,
               }}
             />
-          )}
+          ))}
           {view.name === "projects" && (
             <ProjectsView
               selectedProjectId={view.id}
@@ -1008,6 +1028,7 @@ export function Shell() {
             sessionReading: view.name === "session" && !isMobile,
           })}
           sessionOpen={view.name === "session"}
+          assistantThreadOpen={assistantThreadOpen}
           terminalSupported={terminalSupported}
           filesSupported={filesSupported}
           conversationSteeringSupported={conversationSteeringSupported}

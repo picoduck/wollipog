@@ -151,7 +151,8 @@ jobs:
 
       - name: Verify Successor Election Five Times Under Windows Load
         if: github.event_name == 'workflow_dispatch' && inputs.successor_election_load && startsWith(matrix.os, 'windows-')
-        timeout-minutes: 5
+        # Five 145-second outer bounds plus worker startup/cleanup and scheduling margin.
+        timeout-minutes: 15
         run: node apps/runner/scripts/verify-successor-election-load.mjs
 
       - name: Verify Source Provider-HOME Worker

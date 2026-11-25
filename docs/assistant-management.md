@@ -80,6 +80,30 @@ A later non-Assistant save clears the schedule's current Assistant binding atomi
 human edits do not inherit an old connection's restrictions. Previously authorized occurrences
 retain their own Assistant identity and launcher attribution during recovery.
 
+`auto_create` and `auto_update` advertise the scheduled campaign request the server accepts:
+`request.orchestrator` with optional `behavior` (Child Harness, Model and Effort, concurrency,
+follow-ups, completion and review policy), `delegation` and `execution` overrides, and
+`request.campaign` with `controlMode`, `repository`, keyed `tasks` and the Full Control launch
+overrides. Omitted overrides use the owner's Orchestrator defaults; a null `parentControl`
+inherits the saved one. The schema and the save validator accept the same values (the schema
+describes the ordering and repository rules it cannot express), and an invalid field is refused at
+save with a message naming it. Cost checkpoints must stay within the smaller of `limits.maxCostUsd`
+and `fullControl.budget.costUsd`. Full Control budget and issue values are checked when they or the
+automation's cost limit change, so a schedule saved before these checks can still be paused,
+renamed or saved unchanged; each occurrence still validates its effective limits, and the
+readback reports a stored value the next occurrence would refuse. For a scheduled campaign,
+`auto_get.effectiveCampaign` reports what the next occurrence would launch with now: the root
+Machine, installation, model and effort, the resolved behavior, delegation and execution, the tasks
+and the aggregate allowance. It uses the target the scheduler would choose now, including an
+alternate when the primary is unavailable, and the principal launch would act as: the schedule's
+still-authorized Assistant owner or its sole human author, never the reader. Because omitted
+overrides resolve from that person's own Orchestrator defaults, only that person sees the settings;
+another reader of the schedule gets an explanation instead. It is derived by the
+same preparation as save, without inspecting the repository, sending a runner message, launching
+or persisting anything, and grants nothing. When the occurrence would be refused (for example, the
+authorizing connection lost the operation, or no target is available), it reads `{error}` with
+the reason instead.
+
 Skill impact reports potentially affected machines within the skill's ownership audience, including
 offline targets. Reported state is the last runner report, not a promise that an offline machine
 has synchronized. Shared push-on-change logic sends the desired state to online compatible runners;

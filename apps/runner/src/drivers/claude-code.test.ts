@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -144,6 +145,26 @@ test("a review session records the root result's permission denials, including o
   (h.driver as unknown as { lastPermissionDenials: number }).lastPermissionDenials = 0;
   h.feed({ type: "result", subtype: "success", parent_tool_use_id: "toolu_2", ...denied });
   assert.deepEqual(h.driver.reviewDiagnostics(), { permissionDenials: 0 });
+});
+
+test("Claude forge refusals carry structured coordinates and omit tool output", () => {
+  const h = makeHarness();
+  const digest = "a".repeat(64);
+  const managed = { tool_name: "mcp__wollipog__execute_workflow_decision", tool_use_id: "tu_managed",
+    tool_input: { occurrenceId: "workflow_123", resourceDigest: digest, other: "private provider data" } };
+  const bash = { tool_name: "Bash", tool_use_id: "tu_command",
+    tool_input: { command: "git push origin --delete agent/child", description: "private provider data" } };
+  h.feed({ type: "result", subtype: "success", parent_tool_use_id: "tu_parent", permission_denials: [managed] });
+  h.feed({ type: "result", subtype: "success", permission_denials: [managed, bash,
+    { ...managed, tool_use_id: "invalid", tool_input: { occurrenceId: "bad\nvalue", resourceDigest: digest } },
+    { ...bash, tool_use_id: "unrelated", tool_input: { command: "echo private provider data" } }] });
+  const refusals = h.events.filter((event) => event.kind === "tool_call_update" && "providerForgeRefusal" in event);
+  assert.deepEqual(refusals, [
+    { kind: "tool_call_update", toolCallId: "tu_managed", status: "failed",
+      providerForgeRefusal: { kind: "managed", occurrenceId: "workflow_123", resourceDigest: digest } },
+    { kind: "tool_call_update", toolCallId: "tu_command", status: "failed",
+      providerForgeRefusal: { kind: "command", commandSha256: createHash("sha256").update(bash.tool_input.command).digest("hex") } },
+  ]);
 });
 
 test("a top-level result with provider tokens reports that the account answered", () => {
@@ -4207,6 +4228,24 @@ test("user tool_result (success) -> tool_call_update completed", () => {
   assert.deepEqual(h.events, [
     { kind: "tool_call_update", toolCallId: "tu_edit", status: "completed", text: "ok done" },
   ]);
+});
+
+test("Claude reports the Assistant receipt key even when tool results finish out of order", () => {
+  const h = makeHarness();
+  const keys = ["340ec764-4c57-4f9f-ac49-a6da63c401e5", "c0557b50-856a-443e-9d14-c5cc3f79807a"];
+  const call = (id: string, name: string) => ({ type: "tool_use", id, name, input: {} });
+  const result = (id: string, key: string, failed = false) => ({ type: "tool_result", tool_use_id: id, is_error: failed,
+    content: [{ type: "text", text: JSON.stringify({ wollipogTranscriptReceipt: key, filler: "x".repeat(800) }) }] });
+  h.feed({ type: "assistant", message: { content: [
+    call("launch", "mcp__wollipog_assistant__session_launch"),
+    call("request", "mcp__wollipog_assistant__session_stop"),
+    call("ordinary", "Bash"), call("failed", "mcp__wollipog_assistant__session_launch"),
+  ] } });
+  h.feed({ type: "user", message: { content: [
+    result("request", keys[1]!), result("ordinary", keys[1]!), result("failed", keys[1]!, true), result("launch", keys[0]!),
+  ] } });
+  assert.deepEqual(h.events.flatMap((event) => event.kind === "tool_call_update" && event.assistantReceiptKey
+    ? [[event.toolCallId, event.assistantReceiptKey]] : []), [["request", keys[1]], ["launch", keys[0]]]);
 });
 
 test("user tool_result error -> failed; array content is flattened", () => {

@@ -1,3 +1,4 @@
+import { ModelPicker } from "./ModelPicker.js";
 import React, { useId, useRef, useState } from "react";
 import type { ConfigureSessionNamingHarnessRequest, SessionNamingHarnessMachine } from "@wollipog/protocol";
 import { effortLabel } from "../format.js";
@@ -213,7 +214,8 @@ export function HarnessTargetDialog({
             ))}
             <div className="field-row">
               {field("model", "Model", (
-                <Select
+                <ModelPicker
+                  context={{ mode: "launch", driver: agent?.driver }}
                   label="Model"
                   value={draft.model || null}
                   disabled={busy || !agent}

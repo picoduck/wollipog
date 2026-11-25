@@ -63,6 +63,7 @@ test("a merge-queue wait reads open, queued with its position, required checks p
         state: "open", draft: false, headSha: HEAD, baseRef: "main", reviewDecision: "none",
         checks: { state: "pending", passing: 2, failing: 0, pending: 1 },
         requiredChecks: { state: "passing", passing: 1, failing: 0, pending: 0 },
+        checkContextsComplete: true,
         mergeQueue: { state: "awaiting_checks", position: 2 },
         mergeCommitSha: null,
       },
@@ -378,6 +379,18 @@ test("required checks read passing only when GitHub's merge state confirms none 
   assert.equal(pending.ok && pending.results[0]!.ok && (pending.results[0]!.observation as CampaignForgePullRequestObservation).requiredChecks.state, "pending");
   const none = await observeForgeStatus([REF], stub(answer({ r0: { pullRequest: pr({ mergeStateStatus: "BLOCKED" }, [check("Unit", "SUCCESS", false)]) } })));
   assert.equal(none.ok && none.results[0]!.ok && (none.results[0]!.observation as CampaignForgePullRequestObservation).requiredChecks.state, "none");
+});
+
+test("check observations distinguish complete and truncated pages with the same unknown required rollup", async () => {
+  for (const hasNextPage of [false, true]) {
+    const outcome = await observeForgeStatus([REF], stub(answer({ r0: {
+      pullRequest: pr({ mergeStateStatus: "UNKNOWN" }, [check("Required", "SUCCESS", true)], "FAILURE", hasNextPage),
+    } })));
+    assert.ok(outcome.ok && outcome.results[0]!.ok);
+    const observation = outcome.results[0]!.observation as CampaignForgePullRequestObservation;
+    assert.deepEqual(observation.requiredChecks, { state: "unknown", passing: 1, failing: 0, pending: 0 });
+    assert.equal(observation.checkContextsComplete, !hasNextPage);
+  }
 });
 
 test("gh runs with the Orchestrator's agent environment, so its configured login is the one used", { skip: process.platform === "win32" }, async () => {

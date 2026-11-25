@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { AUTOMATION_TARGET_INSTALLATION_UNAVAILABLE, AUTOMATION_TARGET_UNAVAILABLE, pendingRequests, runnerSupportsProtocol } from "@wollipog/protocol";
+import { AUTOMATION_TARGET_INSTALLATION_UNAVAILABLE, AUTOMATION_TARGET_UNAVAILABLE, isManagedModelChoice, launchModelChoice,
+  pendingRequests, runnerSupportsProtocol, usesOrchestratorPresetPermissions } from "@wollipog/protocol";
 import type {
   AutomationAction,
   AutomationAuditEvent,
@@ -36,7 +37,8 @@ import {
 } from "./sessions.js";
 import { nextCronFire, parseCron, validateTimeZone } from "@wollipog/protocol/cron-schedule";
 import { automationCommandDigest, AutomationCommandOutbox } from "./automation-command-outbox.js";
-import { validAutomationCampaign, type ScheduledCampaignRuntime } from "./scheduled-campaigns.js";
+import { automationCampaignError, type ScheduledCampaignPreview, type ScheduledCampaignRuntime } from "./scheduled-campaigns.js";
+import type { HumanPrincipal } from "./identity.js";
 import { authorizeAssistantAutomation, scheduledAssistantOwner,
   auditAssistantAutomationOccurrence, type AssistantAutomationOperation } from "./assistant-automation-authority.js";
 import { AssistantRefusal } from "./assistant-connections.js";
@@ -220,7 +222,7 @@ function optionalString(value: unknown, max: number): boolean {
   return value === undefined || (typeof value === "string" && value.length <= max);
 }
 
-function validateAction(value: unknown): string | null {
+function validateAction(value: unknown, previous?: AutomationSchedule, maxCostUsd?: unknown, deferCampaignLimits = false): string | null {
   if (!object(value) || !boundedString(value.kind, 32)) return "automation action is malformed";
   if (value.kind === "workflow_run" || value.kind === "retired") {
     return "Workflow runs were removed. Create a campaign automation instead.";
@@ -238,11 +240,13 @@ function validateAction(value: unknown): string | null {
         (request.role !== undefined && request.role !== "normal" && request.role !== "orchestrator") ||
         (request.providerAccountId !== undefined && !boundedString(request.providerAccountId)) ||
         (request.executionTargetId !== undefined && !boundedString(request.executionTargetId)) ||
-        !validAutomationCampaign(request) ||
         !optionalString(request.title, 120) || !optionalString(request.prompt, 65_536) ||
         (request.useWorktree !== undefined && typeof request.useWorktree !== "boolean") || !validConfig(request.config)) {
       return "create-session action requires a secret-free runner/workspace/agent request, an exact Project assignment when supplied, and cannot persist images or ACP context";
     }
+    const campaignError = automationCampaignError(request,
+      { maxCostUsd, deferLimits: deferCampaignLimits, stored: previous?.action.kind === "create_session" ? { fullControl: previous.action.request.campaign?.fullControl, maxCostUsd: previous.limits.maxCostUsd } : undefined });
+    if (campaignError) return campaignError;
   } else if (value.kind === "prompt_session") {
     if (!keysOnly(value, ["kind", "sessionId", "request"]) || !boundedString(value.sessionId) || !object(value.request) ||
         !keysOnly(value.request, ["text", "slashCommand", "config"]) ||
@@ -261,7 +265,10 @@ function validateAction(value: unknown): string | null {
   return null;
 }
 
-export function validateAutomationSpec(value: unknown): ServiceResult<AutomationSpec> {
+/** `previous` is the stored schedule an update replaces: values it already holds were admitted
+ * under earlier rules, so an unchanged action still saves (for example, to pause it). */
+export function validateAutomationSpec(value: unknown, previous?: AutomationSchedule,
+  options: { deferCampaignLimits?: boolean } = {}): ServiceResult<AutomationSpec> {
   if (!object(value) || !keysOnly(value, [
     "name", "cron", "timezone", "enabled", "misfirePolicy", "runnerPolicy", "concurrencyPolicy",
     "limits", "notifications", "action",
@@ -274,7 +281,8 @@ export function validateAutomationSpec(value: unknown): ServiceResult<Automation
   } catch (error) {
     return fail((error as Error).message);
   }
-  const actionError = validateAction(value.action);
+  const actionError = validateAction(value.action, previous, object(value.limits) ? value.limits.maxCostUsd : undefined,
+    options.deferCampaignLimits === true);
   if (actionError) return fail(actionError);
   if (!object(value.misfirePolicy) || !keysOnly(value.misfirePolicy, ["kind", "maxRuns"]) ||
       !["skip", "fire_once", "catch_up"].includes(String(value.misfirePolicy.kind)) ||
@@ -339,19 +347,34 @@ export function automationCapabilityError(
     const request = spec.action.request;
     const config = request.config;
     if (!config) return null;
+    const managed = isManagedModelChoice(config.model);
+    if (managed && (request.campaign || request.role === "orchestrator" || request.orchestrator ||
+        usesOrchestratorPresetPermissions(config))) {
+      return "Choose a specific model for this campaign automation.";
+    }
     const targets = [
       { runnerId: request.runnerId, workspaceId: request.workspaceId, agentId: request.agentId,
         installationBindings: spec.action.installationBindings },
       ...(spec.runnerPolicy.kind === "alternate" ? spec.runnerPolicy.targets : []),
     ];
     for (const target of targets) {
+      const runner = db.getRunner(target.runnerId);
+      if (managed && request.executionTargetId &&
+          !runner?.executionTargets?.some(target => target.id === request.executionTargetId && target.adapter === "host")) {
+        return "Choose a specific model for a non-host automation target.";
+      }
       const agentId = target.installationBindings?.agent
         ? db.resolveSavedHarnessInstallation(target.runnerId, target.installationBindings.agent)
         : target.agentId;
-      if (!agentId) continue; // Shape validation requires this for create-session targets.
-      const agent = db.getRunner(target.runnerId)?.agents.find((candidate) => candidate.id === agentId);
+      const agent = runner?.agents.find((candidate) => candidate.id === agentId);
+      const resolved = managed ? launchModelChoice(agent?.driver, agent?.capabilities, config.model) : undefined;
+      if (managed && !resolved) {
+        return "The selected Latest family is unavailable on an automation target. Choose a specific model or rediscover its harness.";
+      }
       if (!agent) continue;
-      const validationConfig = claudeModelConfigForValidation(config, agent.capabilities, agent.driver ?? "acp");
+      const validationConfig = claudeModelConfigForValidation(
+        resolved ? { ...config, model: resolved.id } : config, agent.capabilities, agent.driver ?? "acp",
+      );
       const error = capabilityConfigError(validationConfig, agent.capabilities);
       if (error) {
         const identity = `${target.runnerId}/${target.workspaceId}/${agentId}`;
@@ -575,7 +598,7 @@ export class AutomationsService {
   ): ServiceResult<AutomationSchedule> {
     const previous = this.db.getAutomation(automationId);
     if (!previous) return fail("automation not found", 404);
-    const parsed = validateAutomationSpec(input);
+    const parsed = validateAutomationSpec(input, previous);
     if (!parsed.ok) return fail(parsed.error ?? "automation request is malformed", parsed.status);
     const spec = pinAutomationSpec(this.db, parsed.data!, previous);
     const assistant = actor.kind === "agent" && actor.id?.startsWith("asst_");
@@ -608,6 +631,23 @@ export class AutomationsService {
   delete(automationId: string, actor: GovernanceActor, now = Date.now()): ServiceResult<{ deleted: true }> {
     if (!this.db.deleteAutomation(automationId, actor, now)) return fail("automation not found", 404);
     return ok({ deleted: true });
+  }
+
+  /** Effective settings a scheduled campaign's next occurrence would launch with now, or null for
+   * other automations. The target is the scheduler's own current choice among the primary and
+   * alternates, and the principal is the one launch would act as; only that principal, as
+   * `reader`, sees the settings. Read-only: nothing is launched, inspected or persisted, and no
+   * runner message is sent. */
+  campaignPreview(automation: AutomationSchedule, reader: HumanPrincipal): ScheduledCampaignPreview | { error: string } | null {
+    if (automation.action.kind !== "create_session" || !automation.action.request.campaign) return null;
+    if (!this.campaigns) return { error: "Scheduled campaigns are unavailable on this server" };
+    // Dispatch first pins a legacy plain agent id to its sole installation, then picks the target.
+    // Do the same in memory; only dispatch persists the pin.
+    const pinned = pinAutomationSpec(this.db, { ...automation, action: automation.action }, automation);
+    const schedule = { ...automation, action: pinned.action, runnerPolicy: pinned.runnerPolicy };
+    const target = this.resolveTarget(schedule);
+    if (!target.ok) return { error: target.error ?? AUTOMATION_TARGET_UNAVAILABLE };
+    return this.campaigns.preview(schedule, target.data!.target, reader);
   }
 
   private campaignError(spec: AutomationSpec, actor: GovernanceActor, operation?: AssistantAutomationOperation): string | null {
@@ -1624,7 +1664,12 @@ export class AutomationsService {
           maxToolCalls: automation.limits.maxToolCalls,
         },
       }, this.deliveryOptions(automation, execution, { sessionId: `s_auto_${execution.executionId}` }, now, target, commandSnapshots),
-      undefined, false, false, false, automationLauncher(this.db, automation, execution.executionId));
+      undefined, false, false, false, {
+        // Attribution only. A saved schedule uses its own launch configuration and does not
+        // inherit its author's personal Agent Defaults.
+        ...automationLauncher(this.db, automation, execution.executionId),
+        allowManagedModelChoice: true,
+      });
       result = created;
     } else if (automation.action.kind === "prompt_session") {
       const session = this.db.getSession(automation.action.sessionId)!;

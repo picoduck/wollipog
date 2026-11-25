@@ -385,6 +385,104 @@ function sessionSnapshot(id: string) {
   };
 }
 
+test("only the requester can stop and archive its terminal review sessions", { timeout: 45_000 }, async (t) => {
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-review-cleanup-"));
+  const databasePath = join(temp, "control-plane.db");
+  const port = await reservePort();
+  const seed = ControlPlaneDb.open(databasePath);
+  const headSha = "a".repeat(40);
+  const findings = [{ severity: "high", blocking: true, file: "src/a.ts", line: 3, title: "Wrong result",
+    scenario: "Calling the fixture", evidence: "The test fails", verify: "Run the fixture test" }];
+  const output = JSON.stringify({ schema_version: 2, reviewed_head: headSha, vote: "DOWNVOTE", summary: "One blocker",
+    findings, examined_changed_files: ["src/a.ts"], not_examined_changed_files: [], context_files_examined: [],
+    commands_run: [], verification_requests: [] });
+  try {
+    seed.registerRunner({ runnerId: "r", hostname: "fixture", os: "linux", version: "fixture", agents: [], workspaces: [] },
+      Date.now(), PROTOCOL_VERSION);
+    for (const id of ["requester", "unrelated", "review-to-stop", "review-to-archive", "active-review"]) {
+      seed.createSession({ id, runnerId: "r", workspaceId: null, agentId: null, title: id, useWorktree: false,
+        driver: "codex-app-server", config: {}, now: Date.now() });
+      if (id === "requester" || id === "unrelated") {
+        assert.equal(seed.setAgentControlCredential(id, "r", hashToken(`token-${id}`), Date.now()), true);
+        continue;
+      }
+      seed.reviewSessions.record({ reviewSessionId: id, requesterSessionId: "requester", runnerId: "r",
+        pullRequest: { repository: "example/repo", number: 42 }, headSha, reviewer: "claude-code" }, Date.now());
+      seed.linkReviewSession(id);
+      if (id === "active-review") continue;
+      assert.ok(seed.reviewSessions.accept("r", { type: "review_session_update", sessionId: id, state: "completed", output,
+        round: { epoch: 1, round: 1, attempt: 1, mode: "full", baseSha: "b".repeat(40), scopeFiles: ["src/a.ts"] },
+        verdict: { valid: true, consumed: true, effectiveVote: "DOWNVOTE", failureClass: null, validationErrors: [] },
+      }, Date.now()));
+      seed.updateSessionStatus(id, "stopped", Date.now());
+    }
+  } finally { seed.close(); }
+
+  let logs = "";
+  const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
+    cwd: REPO_ROOT,
+    env: { ...process.env, CONTROL_PLANE_HOST: "127.0.0.1", CONTROL_PLANE_PORT: String(port),
+      CONTROL_PLANE_DB: databasePath, CONTROL_PLANE_TOKEN, CONTROL_PLANE_USAGE_PRICING_URL: "off" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout?.on("data", (chunk) => { logs += chunk; });
+  child.stderr?.on("data", (chunk) => { logs += chunk; });
+  t.after(async () => { await stopChild(child); rmSync(temp, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${port}`;
+  await waitForHealth(base, child, () => logs);
+  const live = ControlPlaneDb.attach(databasePath);
+  try {
+    for (const id of ["requester", "unrelated", "review-to-stop", "active-review"]) {
+      live.updateSessionStatus(id, "running", Date.now());
+    }
+  } finally { live.close(); }
+
+  const call = (actor: string, path: string, method = "GET", body?: object) => fetchWithBearer(
+    `${base}/api/sessions${path}`, `token-${actor}`, {
+      method, headers: { [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: actor,
+        ...(body ? { "content-type": "application/json" } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+  const reviewPath = "/requester/review-sessions";
+  const readReview = () => call("requester", `${reviewPath}/review-to-archive`);
+  const readBefore = await readReview();
+  assert.equal(readBefore.status, 200);
+  const before = await readBefore.json();
+  assert.equal(before.terminal, true);
+  assert.equal(before.continuation, "pending");
+  assert.equal(before.verdict.valid, true);
+  assert.deepEqual(before.findings, findings);
+  for (const actor of ["requester", "unrelated"]) {
+    const read = await call(actor, "/review-to-archive");
+    assert.equal(read.status, 200, "both credentials can read the review Session");
+    const { commandPermissions } = (await read.json()).session;
+    assert.equal(commandPermissions.stop.allowed, actor === "requester");
+    assert.equal(commandPermissions.archive.allowed, actor === "requester");
+    assert.equal(commandPermissions.restart.allowed, false);
+    assert.equal(commandPermissions.unarchive.allowed, false);
+  }
+  assert.equal((await call("unrelated", "/review-to-stop/stop", "POST")).status, 404);
+  assert.equal((await call("unrelated", "/review-to-archive/archive", "POST", { archived: true })).status, 404);
+  assert.equal((await call("requester", "/active-review/stop", "POST")).status, 404);
+  assert.equal((await call("requester", "/active-review/archive", "POST", { archived: true })).status, 404);
+  assert.equal((await call("requester", "/review-to-stop/restart", "POST")).status, 404);
+
+  const stopped = await call("requester", "/review-to-stop/stop", "POST");
+  assert.equal(stopped.status, 200, "the original requester can stop a terminal review's still-running Session");
+  assert.equal((await stopped.json()).status, "stopped");
+  const archived = await call("requester", "/review-to-archive/archive", "POST", { archived: true });
+  assert.equal(archived.status, 200);
+  assert.equal((await archived.json()).archived, true);
+  assert.equal((await call("requester", "/review-to-archive/archive", "POST", { archived: false })).status, 404);
+  const after = await readReview();
+  assert.equal(after.status, 200);
+  assert.deepEqual(await after.json(), before, "archival does not change the verdict, findings or pending continuation");
+  const reviews = await call("requester", reviewPath);
+  assert.equal(reviews.status, 200);
+  assert.deepEqual((await reviews.json()).reviews.find((review: { reviewSessionId: string }) =>
+    review.reviewSessionId === "review-to-archive"), before);
+});
+
 function runnerRegistration(runnerId: string, token: string) {
   return {
     type: "register",
@@ -401,6 +499,81 @@ function runnerRegistration(runnerId: string, token: string) {
     sessionSnapshots: [],
   };
 }
+
+test("Add Account completes its profile grant after the start reply is lost", { timeout: 45_000 }, async (t) => {
+  const port = await reservePort();
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-add-account-"));
+  const databasePath = join(temp, "control-plane.db");
+  const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
+  const runnerId = "runner-add-account";
+  const token = `wollipogr_${"a".repeat(43)}`;
+  const registration = { ...runnerRegistration(runnerId, token), providerProfileIds: [] };
+  const seed = ControlPlaneDb.open(databasePath);
+  const identity = seed.localIdentityContext();
+  seed.issueRunnerCredential({
+    credentialId: "rcred_11111111111111111111111111111111",
+    runnerId, organizationId: identity.organizationId,
+    ownerKind: "organization", ownerId: identity.organizationId,
+    label: "Add Account Fixture", tokenHash: hashToken(token), createdByUserId: identity.userId,
+    now: Date.now(), expiresAt: Date.now() + 60_000,
+  });
+  seed.close();
+  const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
+    cwd: REPO_ROOT,
+    env: { ...process.env, CONTROL_PLANE_HOST: "127.0.0.1", CONTROL_PLANE_PORT: String(port),
+      CONTROL_PLANE_DB: databasePath, CONTROL_PLANE_TOKEN, CONTROL_PLANE_USAGE_PRICING_URL: "off" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  const capture = (chunk: unknown) => { output = (output + String(chunk)).slice(-32_768); };
+  child.stdout?.on("data", capture);
+  child.stderr?.on("data", capture);
+  t.after(async () => { await stopChild(child); rmSync(temp, { recursive: true, force: true }); });
+  const httpBase = `http://127.0.0.1:${port}`;
+  await waitForHealth(httpBase, child, () => output);
+  const { socket, inbox } = await openSocketWithInbox(`ws://127.0.0.1:${port}/runner`);
+  t.after(() => socket.close());
+  socket.send(JSON.stringify(registration));
+  await inbox.take((message) => message.type === "registered");
+
+  const startLogin = () => fetchWithBearer(`${httpBase}/api/runners/${runnerId}/provider-logins`, ownerToken, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "claude", label: "Work" }),
+  });
+  const db = ControlPlaneDb.attach(databasePath);
+  t.after(() => db.close());
+  const start = startLogin();
+  const command = await inbox.take((message) => message.type === "start_provider_login");
+  const grantId = String(command.profileGrantId);
+  assert.equal(command.accountId, undefined, "Add Account sends no repair target");
+  const accountId = String(command.newAccountId);
+  assert.match(accountId, /^login-[0-9a-f]{8}$/u);
+  const enrolledGrant = db.getProviderProfileGrant(grantId);
+  assert.equal(enrolledGrant?.providerAccountId, accountId, "the grant is bound before RPC delivery");
+  assert.equal(enrolledGrant?.status, "pending");
+  // The fixture runner receives the command and loses its start reply. Its later inventory still arrives.
+  const response = await start;
+  assert.equal(response.status, 504, await response.clone().text());
+  assert.deepEqual(await response.json(), { error: "runner did not respond in time" });
+  const profileId = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
+  socket.send(JSON.stringify({ type: "agents_updated", runnerId, agents: [],
+    providerAccounts: [{ id: accountId, label: "Work", provider: "claude", authStatus: "authenticated",
+      profile: { id: profileId, access: "pending" } }] }));
+  await waitForValue(() => output, (log) => log.includes(`runner ${runnerId} agents: []`), "account report reconciliation");
+  const grant = db.getProviderProfileGrant(grantId);
+  assert.deepEqual(
+    { status: grant?.status, accountId: grant?.providerAccountId, profileId: grant?.profileId },
+    { status: "active", accountId, profileId },
+  );
+
+  const refused = startLogin();
+  const refusedCommand = await inbox.take((message) => message.type === "start_provider_login");
+  const refusedGrantId = String(refusedCommand.profileGrantId);
+  assert.equal(db.getProviderProfileGrant(refusedGrantId)?.providerAccountId, refusedCommand.newAccountId);
+  socket.send(JSON.stringify({ type: "provider_login_result", requestId: refusedCommand.requestId,
+    action: "start", ok: false, error: "The new account's id is unavailable on this Machine." }));
+  assert.equal((await refused).status, 409);
+  assert.equal(db.getProviderProfileGrant(refusedGrantId)?.status, "revoked", "an explicit id refusal spends the grant");
+});
 
 test("real /ui route advertises and acknowledges targeted bounded subscriptions", { timeout: 45_000 }, async (t) => {
   const port = await reservePort();
@@ -656,7 +829,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   runner.send(JSON.stringify({
     type: "register",
     token: runnerUiToken,
-    protocolVersion: PROTOCOL_VERSION,
+    protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.providerLoginNewAccountId - 1,
     runner: {
       runnerId: "runner-ui-route",
       hostname: "integration-host",
@@ -822,6 +995,10 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   assert.match(loginTicket.ticket, /^[a-f0-9]{64}$/u);
   assert.equal(providerLoginCommand.provider, "claude");
   assert.equal(providerLoginCommand.label, "Work");
+  assert.equal(providerLoginCommand.newAccountId, undefined, "a legacy runner receives no proposed id");
+  const grantAccountId = () => (publications.prepare("SELECT provider_account_id FROM provider_profile_grants WHERE grant_id=?")
+    .get(loginTicket.grantId) as { provider_account_id: string }).provider_account_id;
+  assert.equal(grantAccountId(), `login:${loginTicket.grantId}`);
   assert.match(String(providerLoginCommand.profileGrantId), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
     "a v225 runner creates the new account as a managed profile granted to this control plane (#3239)");
   const providerLogin = {
@@ -843,6 +1020,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   }));
   const startedProviderLogin = await providerLoginResponse;
   assert.equal(startedProviderLogin.status, 201, await startedProviderLogin.clone().text());
+  assert.equal(grantAccountId(), providerLogin.accountId, "the reply binds the legacy placeholder");
 
   const submitCodeResponse = fetchWithBearer(
     `${httpBase}/api/runners/runner-ui-route/provider-logins/${providerLogin.operationId}/code`,
@@ -1456,6 +1634,10 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     stopBeforeArchive: true,
     unarchiveAndRestart: true,
     sessionReminders: true,
+    assistantDecisionHistory: true,
+    assistantCiRerunDecisions: true,
+    assistantReleaseDecisions: true,
+    assistantThreadHarnessChange: true,
     indefiniteSessionReminders: true,
     worktreeSetupConfig: true,
     renameProjectLocations: true,
@@ -1488,11 +1670,10 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     authenticatedUiUrl(wsBase, operatorToken),
   );
   sockets.add(operatorUi);
-  assert.equal(
-    (await operatorUiInbox.take((message) => message.type === "snapshot")).type,
-    "snapshot",
-    "a paired device can authenticate the real /ui WebSocket route",
-  );
+  const operatorSnapshot = await operatorUiInbox.take((message) => message.type === "snapshot");
+  assert.equal(operatorSnapshot.type, "snapshot", "a paired device can authenticate the real /ui WebSocket route");
+  assert.equal((operatorSnapshot.capabilities as JsonObject)?.assistantDecisionHistory, undefined,
+    "only the owner receives the Assistant decision history capability");
 
   // A dashboard can clear only the exact blocked snapshots it saw, with no provider command.
   const blockedJobs = ["turn-blocked", "unknown"].flatMap((parentTurnId) => [{

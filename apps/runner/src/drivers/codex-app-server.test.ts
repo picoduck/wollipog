@@ -30,6 +30,7 @@ import type { StagedPromptImages } from "./prompt-images.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import { parseCodexRolloutCompletedCommand } from "./codex-rollout-proof.js";
 import { codexReviewWorkingDirectory } from "../review-sessions.js";
+import { quote } from "shell-quote";
 import type { AgentProcess } from "../spawn.js";
 
 function fakeAgentProcess(): AgentProcess {
@@ -44,6 +45,61 @@ function fakeAgentProcess(): AgentProcess {
 function nextTask(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
+
+test("action arming accepts only current provider-owned MCP or literal CLI admission input", () => {
+  const h = makeHarness();
+  const notifications = notificationHandlers(h.driver);
+  (h.driver as any).threadId = "thread-arm";
+  (h.driver as any).setSteeringTurn("turn-arm");
+  const command = "gh pr merge https://github.com/o/r/pull/1 --squash --match-head-commit " + "a".repeat(40);
+  const action = { kind: "pr_merge_enqueue", command };
+  // The control plane's auditDigest binds the normalized action object, not command text.
+  const digest = createHash("sha256").update(JSON.stringify(action)).digest("hex");
+  const literal = `"$WOLLIPOG_CLI" decision consume workflow-arm --snapshot '{"category":"pr_merge"}' --action '${JSON.stringify(action)}' --json`;
+  const refuse = () => h.driver.workflowActionAdmissionRefusal("workflow-arm", digest);
+  const start = (item: any, turnId = "turn-arm", threadId = "thread-arm") =>
+    notifications.get("item/started")!({ threadId, turnId, item: { id: "arm-item", ...item } });
+  const finish = () => notifications.get("item/completed")!({ threadId: "thread-arm", turnId: "turn-arm", item: { id: "arm-item", type: "commandExecution", exitCode: 1 } });
+  assert.match(refuse()!, /consume_workflow_decision MCP tool/);
+  for (const script of [
+    literal.replace(`'{"category":"pr_merge"}'`, '"$(cat snapshot.json)"'),
+    literal.replace(`'{"category":"pr_merge"}'`, '"$snapshot"'),
+    literal.replace(`'{"category":"pr_merge"}'`, '@snapshot.json'),
+    `cat <<'EOF' | sh\n${literal}\nEOF`,
+    `printf '%s' '${literal}' | sh`,
+    `sh -c '${literal}'`,
+  ]) {
+    start({ type: "commandExecution", command: script });
+    assert.match(refuse()!, /standalone literal/, script);
+    finish();
+  }
+  for (const script of [literal, quote(["/bin/zsh", "-lc", literal]),
+    literal.replace(` --action '${JSON.stringify(action)}'`, "")]) {
+    start({ type: "commandExecution", command: script });
+    assert.equal(refuse(), null, script);
+    finish();
+  }
+  start({ type: "mcpToolCall", server: "wollipog", tool: "consume_workflow_decision", arguments: { occurrenceId: "workflow-arm", action } });
+  assert.equal(refuse(), null);
+  notifications.get("item/started")!({ threadId: "thread-arm", turnId: "turn-arm", item: {
+    id: "other-command", type: "commandExecution", command: "npm run dev",
+  } });
+  assert.match(refuse()!, /ambiguous.*wait for the other tools to finish/);
+  notifications.get("item/completed")!({ threadId: "thread-arm", turnId: "turn-arm", item: {
+    id: "other-command", type: "commandExecution", exitCode: 0,
+  } });
+  assert.equal(refuse(), null, "completion of the concurrent tool permits retry in the same turn");
+  assert.match(h.driver.workflowActionAdmissionRefusal("other", digest)!, /consume_workflow_decision/);
+  assert.match(h.driver.workflowActionAdmissionRefusal("workflow-arm", "b".repeat(64))!, /consume_workflow_decision/);
+  finish();
+  start({ type: "commandExecution", command: literal }, "stale-turn");
+  assert.ok(refuse(), "stale turn cannot supply admission input");
+  start({ type: "commandExecution", command: literal }, "turn-arm", "other-thread");
+  assert.ok(refuse(), "another thread cannot supply admission input");
+  start({ type: "commandExecution", command: literal });
+  (h.driver as any).setSteeringTurn(null);
+  assert.ok(refuse(), "settled input cannot arm a later turn");
+});
 
 async function waitForCondition(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -2043,6 +2099,21 @@ test("commandExecution: started -> tool_call, completed -> tool_call_update + co
   assert.deepEqual(kinds, ["tool_call", "tool_call_update", "command_output"]);
   assert.equal((h.events[0] as { status: string }).status, "in_progress");
   assert.equal((h.events[1] as { status: string }).status, "completed");
+});
+
+test("Codex reports the Assistant receipt key on the exact completed provider call", () => {
+  const h = makeHarness();
+  const key = "340ec764-4c57-4f9f-ac49-a6da63c401e5";
+  const result = { content: [{ type: "text", text: JSON.stringify({ wollipogTranscriptReceipt: key }) }] };
+  const call = { type: "mcpToolCall", server: "wollipog_assistant", tool: "session_launch" };
+  h.onItem({ ...call, id: "launch" }, false);
+  h.onItem({ ...call, id: "ordinary", server: "outside", result }, true);
+  h.onItem({ ...call, id: "old", result: { content: [{ type: "text", text: "{}" }] } }, true);
+  h.onItem({ ...call, id: "failed", result: { ...result, isError: true } }, true);
+  h.onItem({ ...call, id: "launch", result }, true);
+  assert.deepEqual(h.events.filter((event) => "assistantReceiptKey" in event), [
+    { kind: "tool_call_update", toolCallId: "launch", status: "completed", assistantReceiptKey: key },
+  ]);
 });
 
 const skillRead = (path: string) => [{ type: "read", command: `sed -n '1,260p' ${path}`, name: "SKILL.md", path }];

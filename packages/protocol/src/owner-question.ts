@@ -1,4 +1,4 @@
-import type { AgentQuestion, OwnerDecisionSnapshot, PendingApproval, WorkflowDecisionResourceSnapshot } from "./index.js";
+import type { AgentQuestion, OwnerDecisionSnapshot, PendingApproval, WorkflowDecisionResourceSnapshot, WorkflowDecisionView } from "./index.js";
 import { presentScopeProposalRequest, scopeProposalOfRequest } from "./scope-proposal.js";
 
 /**
@@ -36,6 +36,15 @@ export const OWNER_QUESTION_RECOMMENDED_SUFFIX = " (Recommended)";
 
 export function isOwnerQuestionSnapshot(snapshot: WorkflowDecisionResourceSnapshot | null | undefined): snapshot is OwnerQuestionSnapshot {
   return snapshot?.category === "owner_decision" && snapshot.kind === "question";
+}
+
+export const CAMPAIGN_HANDOFF_TITLE = "Campaign Handoffs";
+
+/** Reserved for the server's consolidated campaign handoff notice. */
+export const CAMPAIGN_HANDOFF_QUESTION_KEY = "campaign_handoffs:owner";
+
+export function isCampaignHandoffQuestion(decision: Pick<WorkflowDecisionView, "resourceKey" | "resourceSnapshot"> | null | undefined): boolean {
+  return decision?.resourceKey === CAMPAIGN_HANDOFF_QUESTION_KEY && isOwnerQuestionSnapshot(decision.resourceSnapshot);
 }
 
 /** A stored question card: a root's Owner Question or an explicit child clarification (#4359).
@@ -124,6 +133,10 @@ export function ownerQuestionAnswer(snapshot: WorkflowQuestionSnapshot, answers:
  * route, which the control plane resolves as the owner's answer.
  */
 export function presentOwnerQuestionRequest(request: PendingApproval): PendingApproval {
+  // Keep the stored question snapshot so existing occurrences retain their acknowledgment state.
+  if (isCampaignHandoffQuestion(request.workflowDecision)) {
+    return { ...request, title: CAMPAIGN_HANDOFF_TITLE, options: [] };
+  }
   if (scopeProposalOfRequest(request)) return presentScopeProposalRequest(request);
   const snapshot = ownerQuestionOfRequest(request);
   // A question the Decision Model could not screen is classified on its own card first (#4104).
@@ -132,5 +145,5 @@ export function presentOwnerQuestionRequest(request: PendingApproval): PendingAp
   // Composer Answer Mode from taking over, while request metadata still labels them Question.
   if (isChildQuestionSnapshot(snapshot) && request.workflowDecision?.authority !== "human") return request;
   return { ...request, kind: "question", title: isChildQuestionSnapshot(snapshot) ? "Question" : "Owner Question",
-    ...(isOwnerQuestionSnapshot(snapshot) ? { async: true } : {}), questions: ownerQuestionAgentQuestions(snapshot) };
+    ...(request.async ? { async: true } : {}), questions: ownerQuestionAgentQuestions(snapshot) };
 }

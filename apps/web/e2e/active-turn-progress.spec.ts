@@ -37,14 +37,19 @@ async function expectWorkingLine(progress: Locator) {
   await expect(line.locator(".tl-working-elapsed")).toHaveText("7m 0s");
   await expect(line.getByRole("button", { name: "Coordinate Release Audit" })).toBeVisible();
   await expect(line.getByRole("button", { name: "Open Agent" })).toBeVisible();
-  // The tooltip is hidden text inside the line; only the visible copy must stay count-free.
-  await expect.poll(() => line.evaluate((element) => element.innerText)).not.toMatch(/Completed|Failed|Last Activity|Plan Step|\b0\b/i);
+  // The tooltip is hidden text inside the line; only the visible copy must stay count-free. The one
+  // count it shows is the failure count, a fact about the turn rather than tooltip detail (#4713).
+  await expect.poll(() => line.evaluate((element) => {
+    const failed = element.querySelector<HTMLElement>(".tl-working-failed")?.innerText ?? "";
+    return element.innerText.replace(failed, "");
+  })).not.toMatch(/Completed|Failed|Last Activity|Plan Step|\b0\b/i);
   await expect(progress.locator("[role='tooltip']")).toHaveText("Show this step in the transcript. 1 completed. Plan step: Validate compatibility release");
 }
 
 async function expectFailureNote(progress: Locator) {
   const note = progress.locator(".tl-working-note");
-  await expect(note.locator(".tl-working-failed")).toHaveText("3 failed");
+  // The count sits on the working line it counts; only the retry takes the second line (#4713).
+  await expect(progress.locator(".tl-working-line > .tl-working-failed")).toHaveText("3 failed");
   await expect(note.locator(".tl-working-retry")).toContainText("Retried 2 times: Release validation failed");
 }
 

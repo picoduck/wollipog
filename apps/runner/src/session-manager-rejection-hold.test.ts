@@ -501,3 +501,43 @@ test("a rejection that settles after Restart replaced its provider does not coun
     h.cleanup();
   }
 });
+
+test("Assistant notices correlate rejected and failed turns with their own transcript errors and clear on recovery", { skip: !haveGit() }, async () => {
+  const provider = fakeProvider();
+  const h = setup("assistant-health", provider);
+  try {
+    await h.manager.start(h.spec);
+    h.store.patchMeta(h.spec.sessionId, { assistant: { threadId: "thr_health" } });
+    const health = () => h.sent.filter((message) => message.type === "session_runtime_updated" &&
+      message.snapshot.id === h.spec.sessionId && message.snapshot.assistantThreadHealth !== undefined).at(-1);
+    await engageHold(h);
+    const held = health();
+    assert.ok(held?.type === "session_runtime_updated");
+    const { turn, automaticTurnsHeld } = held.snapshot.assistantThreadHealth!;
+    assert.equal(turn?.kind, "rejected");
+    assert.ok(automaticTurnsHeld);
+    assert.notEqual(turn?.errorId, automaticTurnsHeld);
+    const errors = h.store.readEvents(h.spec.sessionId).flatMap(({ payload }) => payload.kind === "error" ? [payload] : []);
+    assert.equal(errors.find((error) => error.assistantThreadErrorId === turn?.errorId)?.message, PROVIDER_ERROR);
+    assert.match(errors.find((error) => error.assistantThreadErrorId === automaticTurnsHeld)?.message ?? "", /Automatic turns are held/);
+
+    provider.setOutcome("uncertain");
+    h.message("uncertain");
+    await waitFor(() => h.settled("uncertain"), "the failed message did not settle");
+    const failed = health();
+    assert.ok(failed?.type === "session_runtime_updated");
+    assert.equal(failed.snapshot.assistantThreadHealth?.automaticTurnsHeld, undefined);
+    assert.equal(failed.snapshot.assistantThreadHealth?.turn?.kind, "failed");
+    const prompt = h.store.readEvents(h.spec.sessionId).find(({ payload }) =>
+      payload.kind === "user_message" && payload.commandId === "uncertain")?.payload;
+    assert.ok(prompt?.kind === "user_message" && prompt.turnId);
+    assert.equal(failed.snapshot.assistantThreadHealth?.turn?.promptTurnId, prompt.turnId);
+
+    provider.setOutcome("accept");
+    h.message("recovery");
+    await waitFor(() => h.settled("recovery"), "the next message did not settle");
+    const recovered = health();
+    assert.ok(recovered?.type === "session_runtime_updated");
+    assert.deepEqual(recovered.snapshot.assistantThreadHealth, {});
+  } finally { h.cleanup(); }
+});

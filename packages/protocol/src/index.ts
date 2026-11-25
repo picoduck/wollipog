@@ -64,7 +64,11 @@ export * from "./review-session.js";
 export * from "./pull-request-watch.js";
 export * from "./session-waits.js";
 export * from "./workspace-removal.js";
+export * from "./antigravity-setup.js";
+export * from "./managed-worktree-agents.js";
+import { ANTIGRAVITY_FULL_PERMISSIONS_MODE } from "./antigravity-setup.js";
 export * from "./forge-decision-action.js";
+export * from "./release-decision.js";
 export * from "./merge-closure-watch.js";
 export * from "./campaign-activity.js";
 export * from "./review-retirement.js";
@@ -89,6 +93,7 @@ export {
   campaignLaunchDisclosure, validCampaignLaunchDisclosure,
 } from "./campaign-control-launch.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
+export const SESSION_UPSERT_BACKGROUND_REUSE_UI_PROTOCOL = 411;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
 export const MAX_SKILL_REPORT_REQUESTS = 64;
 export { boundedIssueNumbers, campaignIssueForgeUrl, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot, validIssueAdmission, validIssueLineage,
@@ -183,7 +188,7 @@ import type {
 } from "./campaign-work-ledger.js";
 export type { ConversationHandoffDraft, InPlaceHandoffTurn } from "./conversation-handoff.js";
 import { pendingRequests, prioritizedPendingRequests } from "./worker-attention.js";
-import { isChildQuestionSnapshot, isOwnerQuestionCard, isOwnerQuestionRequest } from "./owner-question.js";
+import { isCampaignHandoffQuestion, isChildQuestionSnapshot, isOwnerQuestionCard, isOwnerQuestionRequest } from "./owner-question.js";
 export {
   attentionRequestRank,
   pendingRequests,
@@ -282,6 +287,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * forge observations report the head branch that merged-branch cleanup tracks. Checked against
    * the child's runner, and against the control plane by the runner's tools. */
   forgeDecisionActions: 284,
+  /** v399 adds exact, requester-executed GitHub Actions rerun decisions. */
+  typedCiRerun: 399,
+  /** v401 adds exact GitHub release tag and draft publication decisions. */
+  typedReleaseDecisions: 401,
   /** v275 campaign handoffs and recorded delivery (#4070). Gates the `complete_with_handoffs`
    * status for dashboards and the delivery and handoff ledger writes for runner tools. */
   campaignHandoffs: 275,
@@ -323,6 +332,12 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v338 (#4353): a run names an account per member. An older control plane ignores it on a run. */
   // Capability floor 338 for per-run-member account choice is retired.
   providerLogin: 171,
+  /** v403 (Refs #4780): Google Antigravity runtime and sign-in setup from Connections. */
+  antigravitySetup: 403,
+  /** Peers distinguish server-authored prompts from ordinary text matching the legacy prefix. */
+  wollipogPromptOrigin: 405,
+  /** v404 (Refs #4780): a managed Google Antigravity install and update from Connections. */
+  antigravityManagedInstall: 404,
   providerAccountRemoval: 188,
   accountScopedAgentSkills: 172,
   piHarness: 155,
@@ -348,6 +363,11 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * through a runner-side MCP proxy that holds the thread credential in memory, and refuses it on
    * an unsupported harness. v383 runners launched the role without the proxy. */
   assistantRole: 384,
+  assistantThreadProviderAccount: 388,
+  assistantEvidenceReview: 397,
+  assistantThreadHarnessChange: 402,
+  assistantThreadHealth: 409,
+  assistantCampaignLaunch: 391,
   automationCommandReceipts: 53,
   runnerLocalAgentEnv: 54,
   indexedHistory: 55,
@@ -400,6 +420,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v260 runner imports a Codex API-key sign-in into a new managed profile (#3719). The runner
    * must also report `runtime.providerCredentialImport`, which only supported hosts do. */
   providerCredentialImport: 260,
+  /** Add Account accepts a control-plane-chosen new-account id. */
+  providerLoginNewAccountId: 394,
   /** Session-scoped assertion that Restart retains an established provider conversation (#2515). */
   sessionRestartResume: 263,
   /** v255 runner continues a session's own mid-turn worktree switch after its relaunch (#3810). */
@@ -475,6 +497,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v269 control plane withdraws a pending or approved, unconsumed workflow decision (#3917). */
   workflowDecisionWithdrawal: 269,
   workflowDecisionRetirement: 369,
+  workflowDecisionExternalMergeReconciliation: 390,
   /** v281 owner decisions (#4064): a Full Control root's typed question for its campaign's owner,
    * and a one-way handoff of an Orchestrator-owned occurrence to that owner. Checked against the
    * root's runner by the control plane and against the control plane by the runner. */
@@ -483,6 +506,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * the control plane by the runner, because an older control plane would ignore the field and ask
    * the question as an approval, and against the root's runner by the control plane. */
   ownerQuestions: 303,
+  /** v412 (#4894): Standalone sessions and Custom campaign roots request human-owned structured
+   * approvals (PR merge, merged-branch deletion, issue publication, UI evidence, issue closure),
+   * generic Owner Approvals, and free-text Owner Questions. */
+  standaloneOwnerDecisions: 412,
   issueClosureReconciliation: 355,
   /** v332 (#4359): explicit child clarifications, with free text and no consumable action grant. */
   childQuestions: 332,
@@ -501,6 +528,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** (#4138) A same-runner Location switch of the live session: `session_location_switch` moves it
    * at its next turn boundary and resumes the same conversation in the target repository. */
   sessionLocationSwitchLive: 289,
+  /** The runner can check the live registration of an approved destination absent from its config. */
+  registeredLocationSwitch: 395,
   /** v239 runner answers `gitlab_merge_preflight`, which a GitLab `pr_merge` consume requires (#3602). */
   gitlabMergeDecisions: 239,
   /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
@@ -1682,6 +1711,10 @@ export interface AgentCapabilities {
   claudeMutableSystemPromptFlag?: "--system-prompt-recording" | "--system-prompt-snapshot";
   /** Approval presets (claude: default|acceptEdits|plan|…; codex: untrusted|on-request|never). */
   permissionModes?: string[];
+  /** ACP only (#4779): the agent's own bounded name and description for each advertised mode, from
+   * its live session. Mode ids belong to the agent, so a client names an ACP mode from here rather
+   * than from a native harness's meaning for the same id. Additive; older peers ignore it. */
+  agentPermissionModes?: Array<{ id: string; name: string; description?: string }>;
   /** How approvals reach the UI per permission mode. Absent = not probed (unknown, not false). */
   elicitation?: Partial<Record<string, ElicitationTransport[]>>;
   /**
@@ -2104,7 +2137,8 @@ export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEG
  * server inspects that Location; always the campaign owner's, in Full Control and Custom alike, and
  * the Orchestrator carries out only the exact approved Location. */
 export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope" | "automation_creation" |
-  "campaign_follow_up_admission" | "owner_decision" | "location_switch" | "campaign_repository_addition";
+  "campaign_follow_up_admission" | "owner_decision" | "location_switch" | "campaign_repository_addition" |
+  import("./forge-decision-action.js").RequesterForgeDecisionCategory;
 export type WorkflowDecisionAuthority = "human" | "orchestrator";
 
 export type ParentControlDecisionPolicy = Record<DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority>;
@@ -2459,8 +2493,8 @@ export interface CampaignOwnerDecision {
   /** The current campaign supports a human-only return of future requests. */
   returnableOwnerResource?: true;
   occurrenceId: string;
-  /** v332: a question is presented as input, never as an action approval. */
-  kind?: "question";
+  /** Which informational presentation to use when the request asks for no approval. */
+  kind?: "question" | "handoff";
   /** The session whose request it is: the root for an owner decision, else the requester. */
   sessionId: string;
   category: WorkflowDecisionCategory | "runner_recovery";
@@ -2501,6 +2535,8 @@ export interface UiEvidenceReviewReceipt {
   artifactId: string;
   sha256: string;
   deliveredAt: number;
+  /** Present for a delivery scoped to one Assistant grant and occurrence. */
+  assistantBinding?: string;
   /** Server-assigned order for a video-frame delivery within this occurrence, including redeliveries. */
   deliveryOrder?: number;
   /** Present only for a trusted, complete source-video manifest frame. */
@@ -3474,6 +3510,8 @@ export interface RunnerMetadata {
   providerAccounts?: ProviderAccountDefinition[];
   /** Protocol v171 active/recent runner-owned login operations. */
   providerLogins?: ProviderLoginView[];
+  /** Protocol v403 Google Antigravity setup (Refs #4780). */
+  antigravitySetup?: import("./antigravity-setup.js").AntigravitySetupView;
   workspaces: WorkspaceInfo[];
   /** Editors found on the host (discovery fills this; absent on pre-v22 runners). */
   editors?: EditorInfo[];
@@ -3697,6 +3735,8 @@ export interface RunnerView {
   /** Saved choices remain visible if an account disappears, so the UI can explain the conflict. */
   providerAccountDefaults?: RunnerProviderAccountDefault[];
   providerLogins?: ProviderLoginView[];
+  /** v403 Google Antigravity setup. Only principals who can manage the Machine receive it. */
+  antigravitySetup?: import("./antigravity-setup.js").AntigravitySetupView;
   workspaces: WorkspaceInfo[];
   /** Editors found on the host (for "Open in …"); absent/empty hides the control. */
   editors?: EditorInfo[];
@@ -4344,13 +4384,24 @@ function singleSessionAttentionStatus(
   const pending = requests[0] ?? session.pendingApproval;
   if (requests.length > 1) {
     const children = requests.filter((request) => request.ownerToolUseId).length;
-    const questions = requests.filter((request) => request.kind === "question" || isOwnerQuestionRequest(request)).length;
+    const handoffs = requests.filter((request) => isCampaignHandoffQuestion(request.workflowDecision)).length;
+    const questions = requests.filter((request) => !isCampaignHandoffQuestion(request.workflowDecision) &&
+      (request.kind === "question" || isOwnerQuestionRequest(request))).length;
     const authentication = requests.filter((request) => request.kind === "authentication").length;
-    const approvals = requests.length - questions - authentication;
+    const approvals = requests.length - questions - authentication - handoffs;
     return {
       kind: "input_required",
       label: `${requests.length} Actions Required`,
-      description: `${requests.length} unresolved requests: ${approvals} approvals, ${questions} questions, ${authentication} authentication requests; ${children} belong to child agents. Open Agents to inspect each request.`,
+      description: handoffs === 0
+        ? `${requests.length} unresolved requests: ${approvals} approvals, ${questions} questions, ${authentication} authentication requests; ${children} belong to child agents. Open Agents to inspect each request.`
+        : `${approvals} approvals, ${questions} questions, and ${authentication} authentication requests remain open. ${handoffs} handoff notice${handoffs === 1 ? " needs" : "s need"} acknowledgment. Of the ${requests.length} open requests, ${children} belong to child agents. Open Agents to inspect each request.`,
+    };
+  }
+  if (isCampaignHandoffQuestion(pending?.workflowDecision)) {
+    return {
+      kind: "input_required",
+      label: "Handoffs to Acknowledge",
+      description: "Review and acknowledge the campaign handoffs. The work stays listed in Campaign Status.",
     };
   }
   if (isOwnerQuestionCard(pending)) {
@@ -5216,6 +5267,8 @@ export type WorkflowDecisionResourceSnapshot =
       recommendedOptionId?: string;
     }
   | OwnerDecisionSnapshot
+  | import("./forge-decision-action.js").CiRerunDecisionSnapshot
+  | import("./release-decision.js").ReleaseDecisionSnapshot
   | {
       category: "pr_merge";
       /** A GitHub `owner/repo`, or (v239, #3602) a GitLab project with its host and full namespace. */
@@ -5420,6 +5473,8 @@ export interface WorkflowDecisionView {
   delegatedImageReview?: import("./delegated-image-review.js").DelegatedImageReviewReference;
   createdAt: number;
   resolvedAt?: number;
+  /** Present when an Assistant thread resolved the occurrence under an explicit owner grant. */
+  assistantDelegation?: import("./assistant-threads.js").RecordedAssistantDecisionResolution;
   /** v329 (#4301): durable issue-closure approval provenance; informational, never a grant. */
   approval?: { actor: GovernanceActor; at: number };
   /** (#4332) An applied scope change: exactly the decisions it revoked, which a person's Full Control
@@ -5527,6 +5582,12 @@ export interface ConsumeWorkflowDecisionRequest {
   /** Required for PR merge. The approved grant remains unconsumed until this exact command's
    * correlated provider decision evidence arrives; other decision categories consume directly. */
   action?: WorkflowDecisionAction;
+}
+
+export interface ReconcileWorkflowDecisionRequest {
+  resourceSnapshot: WorkflowDecisionResourceSnapshot;
+  /** Observe a merge completed outside the session without arming or running an enqueue. */
+  externalMerge?: true;
 }
 
 /** v269 (#3917): retire one pending or approved, unconsumed and unarmed occurrence. It never
@@ -5861,6 +5922,8 @@ export interface GovernanceAuditEntry {
   optionId?: string;
   /** Typed workflow provenance. Resource content and rationale are represented only by digests. */
   workflowDecision?: {
+    /** An Assistant resolved on the owner's behalf. The raw reason stays on the decision. */
+    assistantDelegation?: Pick<import("./assistant-threads.js").AssistantDecisionResolution, "threadId" | "ownerUserId" | "grantRevision">;
     /** Explicit withdrawal, distinct from a server revocation; raw reason stays on the decision. */
     withdrawal?: { reasonDigest: string };
     /** Additive in v142 so a matching action audit identifies the exact authorizing occurrence. */
@@ -6457,6 +6520,8 @@ export type SessionEventPayload =
   | {
       kind: "user_message";
       text: string;
+      /** Null explicitly identifies ordinary input matching the legacy notice prefix. */
+      promptOrigin?: WollipogPromptOrigin | null;
       images?: PromptImageInput[];
       /** Runner-authenticated automatic campaign or review turn; preserves earlier async questions.
        * The historical field name is retained for persisted event compatibility. */
@@ -6519,6 +6584,12 @@ export type SessionEventPayload =
       subagentLifecycle?: AuthoritativeSubagentLifecycle;
       /** v207: the integer exit code the provider reported; replaces any earlier value. */
       exitCode?: number;
+      /** v393: content-safe evidence from the provider's structured permission-denial result. */
+      providerForgeRefusal?: import("./forge-decision-action.js").ProviderForgeRefusal;
+      /** Opaque key echoed from the authenticated Assistant MCP result (v410). */
+      assistantReceiptKey?: string;
+      /** Control-plane-authored, after checking the key against this backing session. */
+      assistantReceipt?: import("./assistant-threads.js").AssistantTranscriptReceipt;
     }
   | { kind: "plan"; entries: PlanEntry[]; parentToolUseId?: string }
   | { kind: "command_output"; text: string; textRefs?: EventPayloadReference[]; parentToolUseId?: string }
@@ -6529,6 +6600,8 @@ export type SessionEventPayload =
       textRefs?: EventPayloadReference[];
       /** Authenticated runner-only durable marker. Provider stderr can never set this field. */
       runnerMarker?: "background_continuation_delivery";
+      /** Managed background turns retain their diagnostic event on older UIs. */
+      backgroundPrompt?: { origin: { kind: "background_result" }; text: string };
     }
   | {
       kind: "background_continuation_delivered";
@@ -6545,6 +6618,14 @@ export type SessionEventPayload =
       /** A problem the driver reported while the turn kept running (#3806), not a failed turn: a
        * dashboard shows it without Retry Turn. Older peers ignore the flag and show a failed turn. */
       nonFatal?: true;
+      /** A non-fatal warning that can be shown before the first turn. */
+      source?: "worktree_base_fallback" | "antigravity_auto_mode_fallback";
+      /** The exact shell command, run on the runner's host, that fixes what the message reports
+       * (Antigravity's Auto Mode on an AppArmor-restricted host). Older dashboards show only the
+       * message, which still says what to do. */
+      fixCommand?: string;
+      /** Correlates a promoted notice with this authorized transcript entry. */
+      assistantThreadErrorId?: string;
     }
   | {
       kind: "policy_transport";
@@ -7310,7 +7391,7 @@ export interface AgentHarnessDefaultInstallation {
   runnerId: string;
   machineName: string;
   online: boolean;
-  models: AgentModel[];
+  models: Array<AgentModel & { resolvedModelId?: string }>;
   effortLevels: string[];
   permissionModes: string[];
 }
@@ -7332,6 +7413,7 @@ export function installationSupportsDefault(
   installation: Pick<AgentHarnessDefaultInstallation, "models" | "effortLevels" | "permissionModes">,
   config: AgentHarnessDefaultConfig,
 ): boolean {
+  if (config.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) return false;
   const model = config.model ? installation.models.find((candidate) => candidate.id === config.model) : undefined;
   if (config.model && !model) return false;
   const efforts = model?.efforts?.length ? model.efforts : installation.effortLevels;
@@ -8477,6 +8559,8 @@ export interface SessionView {
   /** Current session role. Omitted by control planes predating v160; use `sessionRole()` to read
    * it so the legacy coupled preset in `permissionMode` still resolves to the Orchestrator role. */
   role?: SessionRole;
+  /** The total budget shared by this backing Assistant session and its launched work. */
+  assistantThreadBudget?: { threadId: string; limitUsd: number | null };
   /** v226: immutable session kind. Omitted for ordinary sessions and by older control planes. */
   kind?: import("./review-session.js").SessionKind;
   /** v226: present on a review session (#3368): what it reviews and for whom. */
@@ -8541,6 +8625,7 @@ export interface SessionView {
    * policy change or usage-limit switch leaves it describing the launch. Names no account. */
   providerAccountSelection?: import("./provider-account-selection.js").ProviderAccountSelectionRecord;
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
+  assistantThreadHealth?: import("./assistant-threads.js").AssistantThreadHealth;
   /** (#4138) An approved Location switch waiting for the provider's turn to end, or one that failed
    * and left the session in its previous Location. */
   locationSwitch?: import("./location-switch.js").LocationSwitchStateView;
@@ -8770,6 +8855,7 @@ export interface SessionSnapshot {
   providerAccountAutomaticallySelected?: boolean;
   /** Three-valued: undefined is an older peer; null explicitly clears an earlier failure. */
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView | null;
+  assistantThreadHealth?: import("./assistant-threads.js").AssistantThreadHealth;
   /** (#4138) Three-valued like the account switch failure: null clears an earlier state. */
   locationSwitch?: import("./location-switch.js").LocationSwitchStateView | null;
   /** Protocol v233 (#3240). Three-valued: undefined is an older peer; null clears an earlier
@@ -8874,6 +8960,8 @@ export interface SessionWorktreeView {
   branch: string;
   /** Caller-selected creation ref. Attached and legacy worktrees may omit it. */
   baseRef?: string;
+  /** The automatic remote-base check failed, so creation used local HEAD. */
+  baseFallback?: "remote_check_failed";
   /**
    * The repository's default branch, as a plain branch name with no remote prefix.
    *
@@ -9708,16 +9796,22 @@ export type GithubIssueClosureMessage = {
   requestId: string;
   sessionId: string;
   location?: GithubIssueClosureLocation;
+  /** v412 (#4894): human-owned closure for a standalone Normal session (never an Orchestrator). */
+  standalone?: true;
 } & (
   | { operation: "inspect"; issue: number; scopeRevision?: number; deliveryPullRequests?: Array<{ number: number; headSha: string }>;
       campaignPullRequests?: number[] | null;
       /** v278 (#4060): also read the issue's epic members into the inspection and its digest. */
-      epicMembers?: true }
+      epicMembers?: true;
+      /** v412 (#4894): verified Project Location repository for a standalone session. */
+      expectedRepository?: string }
   | { operation: "execute"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot;
       /** v360: fresh server-derived campaign context. Null relates every open PR. */
       campaignPullRequests?: number[] | null;
       /** v360: root execution also stops at the forge fence for a final control-plane recheck. */
-      prepare?: true }
+      prepare?: true;
+      /** v412 (#4894): verified Project Location repository for a standalone session. */
+      expectedRepository?: string }
   | { operation: "reconcile"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot; consumedAt: number }
   /** v323 (#4119): only with `location`. A Location's runner holds no copy of the campaign's scope,
    * so its `execute` stops at the mutation fence and answers `prepared`. The control plane rechecks
@@ -10426,6 +10520,8 @@ export type RunnerToControlPlane =
   | AgentsUpdatedMessage
   | ProviderLoginsUpdatedMessage
   | ProviderLoginResultMessage
+  | import("./antigravity-setup.js").AntigravitySetupUpdatedMessage
+  | import("./antigravity-setup.js").AntigravitySetupResultMessage
   | RemoveProviderAccountResultMessage
   | import("./workspace-removal.js").RemoveWorkspaceResultMessage
   | AdoptProviderProfileResultMessage
@@ -10458,8 +10554,10 @@ export type RunnerToControlPlane =
   | SessionWorktreeResultMessage
   | WorkspaceWorktreeSetupResultMessage
   | LogoutAgentResultMessage
+  | AssistantHarnessReadinessResult
   | SwitchSessionProviderAccountResultMessage
   | import("./location-switch.js").SessionLocationSwitchResultMessage
+  | import("./location-switch.js").RegisteredLocationSwitchLookupMessage
   | SessionRoleResultMessage
   | InspectProviderAuthenticationResultMessage
   | SelectProviderAuthenticationAccountResultMessage
@@ -10589,7 +10687,24 @@ export interface StartSessionMessage {
   initialImages?: PromptImageInput[];
 }
 
+export const OWNER_CONFIRMATION_NOTICE_PREFIX = "[Wollipog Owner Confirmation]";
+
+/** Display metadata for a prompt authored by Wollipog, never input to the provider. */
+export type WollipogPromptOrigin =
+  | {
+      kind: "owner_confirmation";
+      confirmationId: string;
+      outcome: "approved" | "denied" | "expired" | "refused";
+      title: string;
+      target: { kind: string; id: string; label: string };
+      receiptStatus?: NonNullable<import("./assistant-threads.js").AssistantOwnerConfirmation["outcome"]>["receiptStatus"];
+      resolvedAt?: number;
+    }
+  | { kind: "background_result" | "delegation_notice" | "scheduled_wake" | "system_notice" };
+
 export interface PromptSessionMessage {
+  /** Set only by the control plane for server-authored prompts. */
+  promptOrigin?: WollipogPromptOrigin;
   /** v360: server-created approved root issue-closure notification. This marks only its durable
    * receipt as eligible for safe queue promotion; public prompt APIs never accept this field. */
   issueClosureResume?: true;
@@ -11340,11 +11455,32 @@ export interface LogoutAgentResultMessage {
   error?: string;
 }
 
+export interface AssistantHarnessReadinessRequest {
+  type: "assistant_harness_readiness";
+  requestId: string;
+  threadId: string;
+  sourceSessionId: string;
+  targetSessionId: string;
+  providerAccountId: string;
+}
+
+export interface AssistantHarnessReadinessResult {
+  type: "assistant_harness_readiness_result";
+  requestId: string;
+  ok: boolean;
+}
+
 export interface SwitchSessionProviderAccountMessage {
   type: "switch_session_provider_account";
   requestId: string;
   sessionId: string;
   providerAccountId: string;
+  /** Thread-account handoff. Gate on assistantThreadProviderAccount before sending. */
+  assistantThread?: {
+    threadId: string;
+    expectedProviderAccountId: string | null;
+    freshConversation: boolean;
+  };
 }
 
 export interface SwitchSessionProviderAccountResultMessage {
@@ -11403,6 +11539,9 @@ export interface StartProviderLoginMessage {
   provider?: "claude" | "codex";
   label?: string;
   accountId?: string;
+  /** With a pending profile grant, record the new account under this `login-<8 hex>` id.
+   * Never sent with the existing-account repair target `accountId`. */
+  newAccountId?: string;
   /** Exact Machine choices from the control plane. Missing chosen targets fail closed on runner. */
   installationSelections?: Array<{ context: AgentContext; installationId: string }>;
   /** Protocol v225 (#3239): the pending grant the control plane recorded for a new account. The
@@ -12605,8 +12744,10 @@ export type ControlPlaneToRunner =
   | DeleteSessionNamingCustomModelKeyMessage
   | TestSessionNamingCustomModelMessage
   | LogoutAgentMessage
+  | AssistantHarnessReadinessRequest
   | SwitchSessionProviderAccountMessage
   | import("./location-switch.js").SessionLocationSwitchMessage
+  | import("./location-switch.js").RegisteredLocationSwitchLookupResultMessage
   | PrepareSessionRoleMessage
   | CommitSessionRoleMessage
   | InspectProviderAuthenticationMessage
@@ -12614,6 +12755,7 @@ export type ControlPlaneToRunner =
   | StartProviderLoginMessage
   | SubmitProviderLoginCodeMessage
   | CancelProviderLoginMessage
+  | import("./antigravity-setup.js").AntigravitySetupCommandMessage
   | RemoveProviderAccountMessage
   | import("./workspace-removal.js").RemoveWorkspaceMessage
   | AdoptProviderProfileMessage
@@ -12684,6 +12826,12 @@ export interface UiSnapshotMessage {
     unarchiveAndRestart?: boolean;
     /** Per-user durable session reminders and scoped live reminder events are available. */
     sessionReminders?: boolean;
+    /** The current owner can read their delegated Assistant decision history. */
+    assistantDecisionHistory?: true;
+    /** The owner can grant typed GitHub Actions rerun decisions on this control plane. */
+    assistantCiRerunDecisions?: true;
+    assistantReleaseDecisions?: true;
+    assistantThreadHarnessChange?: true;
     /** Session reminders support the explicit no-timer Someday schedule kind. */
     indefiniteSessionReminders?: boolean;
     /** Per-user worktree setup notices and runner-owned generation are available. */
@@ -12734,6 +12882,9 @@ export interface UiBoxRemovedMessage {
 export interface UiSessionUpsertMessage {
   type: "session_upsert";
   session: SessionView;
+  /** Reuse backgroundJobs, backgroundJobsTruncated and backgroundDeliveries from the last
+   * inventory-bearing upsert for this session on this socket. Snapshots and HTTP reads are independent. */
+  reuseBackgroundInventory?: true;
 }
 
 /** v383 (#4663): an Assistant thread changed. Delivered only to the thread's owner. */
@@ -13373,3 +13524,6 @@ export type { MediaDispatchFenceIdentity, MediaNeverDispatchedFence } from "./me
 export type { MediaActiveStopIdentity, MediaActiveStopRequest, MediaActiveStopAcknowledgement } from "./media-active-stop.js";
 export { mediaActiveStopIdentityBody, mediaActiveStopRequestBody, mediaActiveStopAcknowledgementBody } from "./media-active-stop.js";
 export { validMediaDispatchFenceIdentity, mediaDispatchFenceBody, validMediaNeverDispatchedFence } from "./media-dispatch-fence.js";
+
+export { compareManagedModelVersions, isManagedModelChoice, launchModelChoice, managedModelChoiceId, managedModelChoiceLabel, managedModelChoices,
+  managedModelFamilyLabel, resolveManagedModelChoice } from "./managed-model-choice.js";

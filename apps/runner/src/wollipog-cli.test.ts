@@ -10,7 +10,7 @@ import {
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
 } from "@wollipog/protocol";
-import type { McpFetch } from "./session-management-mcp.js";
+import type { McpDeps, McpFetch } from "./session-management-mcp.js";
 import {
   AGENT_CONTROL_RELAY_ENDPOINT_ENV,
   AGENT_CONTROL_RELAY_KEY_ENV,
@@ -156,6 +156,7 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
     ["decision", ["decision request", "decision get", "decision consume", "decision reconcile", "request_workflow_decision", "--snapshot"]],
     ["init", ["wollipog init", ".wollipog.json", "does not run", "never overwritten"]],
     ["pr", ["pr wait", "--repo", "--head", "--timeout", "--interval", "--any-failure", "pending, never passing", "124 timeout", "needs no control plane",
+      "GitHub reads stop at the deadline", "transientErrorCount", "forgeDegraded",
       "pr closures", "--intended", "--file", "does not close #N", "Refs #N", "intendedClosures"]],
   ];
   for (const [topic, expected] of topics) {
@@ -211,11 +212,11 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
     };
     return { gh, calls };
   };
-  const run = async (args: string[], gh: GhRunner, graceMs?: number) => {
+  const run = async (args: string[], gh: GhRunner, graceMs?: number, timing?: Pick<McpDeps, "now" | "sleep">) => {
     let stdout = "";
     let stderr = "";
     const code = await runPullRequestCli(args, true, { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
-      gh, undefined, graceMs);
+      gh, undefined, graceMs, undefined, timing);
     return { code, stdout, stderr };
   };
 
@@ -235,7 +236,7 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
   assert.equal(pending.code, 124);
   assert.equal(JSON.parse(pending.stdout).outcome, "timeout");
 
-  const skipped = await run(["pr", "wait", "picoduck/wollipog#7", "--head", head, "--timeout", "1", "--json"], fakeGh("SKIPPED").gh);
+  const skipped = await run(["pr", "wait", "picoduck/wollipog#7", "--head", head, "--timeout", "250", "--json"], fakeGh("SKIPPED").gh);
   assert.equal(skipped.code, 124, "an old skipped draft check cannot certify newly admitted CI");
   assert.equal(JSON.parse(skipped.stdout).outcome, "timeout");
   assert.deepEqual(JSON.parse(skipped.stdout).checks.required, [{ name: "CI", state: "pending", reported: true }]);
@@ -256,19 +257,35 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
   assert.equal(unreadable.code, 1);
   assert.match(JSON.parse(unreadable.stdout).error, /forge_unauthenticated/u);
 
-  // Resolving the repository is one more read in the wait's budget of the timeout plus the grace.
-  // A lookup slower than the timeout but within the grace still yields one snapshot (#3121).
+  // The retry sleep is capped at the deadline. Real timers can wake before Date.now()
+  // reaches it, allowing another poll; advance a virtual clock by the requested sleep.
+  let degradedTime = 0;
+  let degradedReads = 0;
+  const degradedSleeps: number[] = [];
+  const degraded = await run(["pr", "wait", "picoduck/wollipog#7", "--timeout", "100", "--json"],
+    async () => {
+      degradedReads++;
+      return { stdout: "", stderr: "gh: HTTP 504", code: 1, timedOut: false };
+    }, undefined, {
+      now: () => degradedTime,
+      sleep: async (milliseconds) => { degradedSleeps.push(milliseconds); degradedTime += milliseconds; },
+    });
+  assert.equal(degraded.code, 124);
+  assert.equal(degradedReads, 1, "no forge read after the deadline");
+  assert.deepEqual(degradedSleeps, [100], "retry sleep is bounded by the remaining timeout");
+  const { waitedMs, ...degradedSummary } = JSON.parse(degraded.stdout);
+  assert.equal(waitedMs, 100);
+  assert.deepEqual(degradedSummary, {
+    outcome: "timeout", repository: "picoduck/wollipog", number: 7, observation: null,
+    polls: 1, transientErrorCount: 1, forgeDegraded: true,
+  });
+
+  // A bare PR number's repository lookup spends the same budget as the wait.
   const slowLookup = (milliseconds: number, rest: GhRunner): GhRunner => async (args, signal) => {
     if (args[0] !== "repo") return rest(args, signal);
-    await new Promise((resolve) => setTimeout(resolve, milliseconds));
+    if (milliseconds > 0) await new Promise((resolve) => setTimeout(resolve, milliseconds));
     return { stdout: "picoduck/wollipog\n", stderr: "", code: null, timedOut: false };
   };
-  const snapshot = await run(["pr", "wait", "7", "--timeout", "1", "--json"], slowLookup(150, fakeGh(null).gh));
-  assert.equal(snapshot.code, 124);
-  assert.equal(JSON.parse(snapshot.stdout).outcome, "timeout");
-  assert.equal(JSON.parse(snapshot.stdout).repository, "picoduck/wollipog");
-
-  // A lookup outlasting the timeout and the grace is killed with the existing --repo guidance.
   let startedAt = Date.now();
   let discoveryKilled = false;
   const hungDiscovery: GhRunner = (_args, signal) => new Promise((resolve) => {
@@ -277,24 +294,27 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
       resolve({ stdout: "", stderr: "killed", code: "ABORT_ERR", timedOut: true });
     }, { once: true });
   });
-  const slow = await run(["pr", "wait", "7", "--timeout", "100", "--json"], hungDiscovery, 100);
-  assert.equal(slow.code, 1);
+  const slow = await run(["pr", "wait", "7", "--timeout", "100", "--json"], hungDiscovery, 500);
+  assert.equal(slow.code, 124);
   assert.match(JSON.parse(slow.stdout).error, /pass --repo/u);
+  assert.equal(JSON.parse(slow.stdout).outcome, "timeout");
+  assert.equal(JSON.parse(slow.stdout).forgeDegraded, false);
   assert.equal(discoveryKilled, true);
   const slowMs = Date.now() - startedAt;
-  assert.ok(slowMs >= 190 && slowMs < 1_500, `discovery ran until the timeout plus the grace: ${slowMs} ms`);
+  assert.ok(slowMs >= 90 && slowMs < 500, `discovery should end at the deadline: ${slowMs} ms`);
 
-  // The wait gets only what discovery left of both, so a hung read after it still ends in time.
+  // A GitHub read after discovery shares the original deadline.
   startedAt = Date.now();
   let readKilled = false;
   const hungRead: GhRunner = (_args, signal) => new Promise(() => {
     signal?.addEventListener("abort", () => { readKilled = true; }, { once: true });
   });
-  const spent = await run(["pr", "wait", "7", "--timeout", "100", "--json"], slowLookup(150, hungRead), 200);
-  assert.equal(spent.code, 1);
+  const spent = await run(["pr", "wait", "7", "--timeout", "250", "--json"], slowLookup(75, hungRead), 500);
+  assert.equal(spent.code, 124);
   assert.equal(readKilled, true);
+  assert.equal(JSON.parse(spent.stdout).outcome, "timeout");
   const spentMs = Date.now() - startedAt;
-  assert.ok(spentMs >= 290 && spentMs < 1_500, `the command ended at the timeout plus the grace: ${spentMs} ms`);
+  assert.ok(spentMs >= 240 && spentMs < 680, `the command should end at the original deadline: ${spentMs} ms`);
   const fractional = await run(["pr", "wait", "7", "--timeout", "100.5", "--json"], passed.gh);
   assert.equal(fractional.code, 0, "a fractional timeout is floored, never a crash");
   assert.equal(JSON.parse(fractional.stdout).outcome, "checks_passed");
@@ -1509,10 +1529,10 @@ test("CLI reconciliation forwards only the original snapshot and preserves the s
   const env = {
     WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "child-token", WOLLIPOG_SESSION_ID: "codex-child",
   };
-  const run = async (): Promise<{ code: number; result: { decision?: unknown; error?: string } }> => {
+  const run = async (...flags: string[]): Promise<{ code: number; result: { decision?: unknown; error?: string } }> => {
     let stdout = "";
     const code = await runWollipogCli(
-      ["node", "cli.js", "--wollipog-cli", "decision", "reconcile", "workflow_1", "--snapshot", JSON.stringify(snapshot), "--json"],
+      ["node", "cli.js", "--wollipog-cli", "decision", "reconcile", "workflow_1", "--snapshot", JSON.stringify(snapshot), ...flags, "--json"],
       env,
       { stdout: (text) => { stdout += text; }, stderr: () => assert.fail("JSON output belongs on stdout") },
       fetch,
@@ -1531,6 +1551,9 @@ test("CLI reconciliation forwards only the original snapshot and preserves the s
     call.headers?.authorization === "Bearer child-token"));
   assert.ok(requests.every((call) => call.body === JSON.stringify({ resourceSnapshot: snapshot })),
     "reconciliation forwards no action or new admission");
+  refused = false;
+  assert.equal((await run("--external-merge")).code, 0);
+  assert.equal(calls.at(-1)?.body, JSON.stringify({ resourceSnapshot: snapshot, externalMerge: true }));
 });
 
 test("CLI typed-decision help is discoverable and malformed or cross-session commands make no request", async () => {
@@ -1561,6 +1584,7 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
     ["decision", "reconcile", "workflow_1", "--snapshot", "[]"],
     ["decision", "reconcile", "workflow_1", "--snapshot", "not-json"],
     ["decision", "reconcile", "workflow_1", "--snapshot", "{}", "--action", "{}"],
+    ["decision", "reconcile", "workflow_1", "--snapshot", "{}", "--external-merge=false"],
     ["decision", "reconcile", "workflow_1", "--session", "other", "--snapshot", "{}"],
     ["decision", "get", "workflow_1", "--session"],
     ["decision", "list", "--limit", "101"],
@@ -1758,6 +1782,49 @@ test("CLI issue closure preserves the exact proposal and refuses other sessions 
   version = 193;
   assert.equal(await invoke(["issue-closure", "request", "--proposal", JSON.stringify(proposal), "--json"]), 1);
   assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
+
+  // Standalone Normal sessions require control plane protocol v412 for issue closure and ask-owner (#4894).
+  const standaloneEnv = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token",
+    WOLLIPOG_SESSION_ID: "solo" };
+  const invokeStandalone = (args: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", ...args], standaloneEnv, io, fetch);
+  calls.length = 0;
+  version = RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions - 1;
+  assert.equal(await invokeStandalone(["issue-closure", "request", "--proposal", JSON.stringify(proposal), "--json"]), 1);
+  assert.equal(await invokeStandalone(["decision", "ask-owner", "--request-id", "q1", "--resource-key", "k1",
+    "--kind", "question", "--question", "Which format?", "--options", "[]", "--json"]), 1);
+  assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")), "older peer never receives standalone calls");
+  version = PROTOCOL_VERSION;
+  assert.equal(await invokeStandalone(["issue-closure", "request", "--proposal", JSON.stringify(proposal), "--json"]), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/solo/github-issue-closures");
+  assert.equal(await invokeStandalone(["decision", "ask-owner", "--request-id", "q1", "--resource-key", "k1",
+    "--kind", "question", "--question", "Which format?", "--options", "[]", "--json"]), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/solo/owner-decisions");
+
+  // Custom Orchestrator root asking the owner against a v411 control plane gets v412 upgrade guidance
+  // before posting to /owner-decisions, while a Full Control root on v411 keeps working (#4894).
+  let orchestratorMode: "custom" | "full_control" = "custom";
+  const customFetch: McpFetch = async (url, init) => {
+    calls.push({ url, body: init?.body });
+    if (url.endsWith("/api/compatibility")) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions - 1 }) };
+    }
+    if (url.endsWith("/api/sessions/parent")) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ session: { id: "parent", orchestratorPolicy: { control: { mode: orchestratorMode } } } }) };
+    }
+    return { ok: true, status: 201, text: async () => JSON.stringify({ ok: true }) };
+  };
+  let customOut = "";
+  const customIo = { stdout: (s: string) => { customOut += s; }, stderr: (s: string) => { customOut += s; } };
+  calls.length = 0;
+  assert.equal(await runWollipogCli(["node", "cli.js", "--wollipog-cli", "decision", "ask-owner",
+    "--request-id", "cq1", "--resource-key", "ck1", "--kind", "question", "--question", "Proceed?", "--options", "[]", "--json"], env, customIo, customFetch), 1);
+  assert.match(customOut, /v412|Update Wollipog/u);
+  assert.ok(!calls.some((c) => c.url.endsWith("/owner-decisions")), "Custom root on v411 never posts to /owner-decisions");
+  orchestratorMode = "full_control";
+  calls.length = 0;
+  assert.equal(await runWollipogCli(["node", "cli.js", "--wollipog-cli", "decision", "ask-owner",
+    "--request-id", "fq1", "--resource-key", "fk1", "--kind", "question", "--question", "Proceed?", "--options", "[]", "--json"], env, io, customFetch), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/parent/owner-decisions");
 });
 
 test("CLI Location switch requests act only on the injected session and expose no approval command", async () => {

@@ -194,6 +194,7 @@ export function CampaignBehaviorEditor({ session, fullControl, onCancel, onSaved
         />
         <SelectRow
           title="Child Model"
+          modelPicker={{ mode: fullControl ? "exact" : "launch", driver: draftHarness?.driver }}
           description="Automatic lets each child's agent choose."
           options={evaluation.model.options}
           value={evaluation.model.value}

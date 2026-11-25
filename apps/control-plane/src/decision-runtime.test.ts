@@ -26,6 +26,7 @@ import {
   DECISION_MAX_ATTEMPTS,
   DECISION_TOTAL_BOUND_MS,
   DecisionRuntime,
+  type DecisionRequest,
   decisionOccurrenceView,
   hubDecisionTransport,
   sanitizeRunDecisionResult,
@@ -59,7 +60,7 @@ function failure(errorClass: DecisionErrorClass, retryAfterMs?: number): Step {
 }
 
 /** A runtime on a real database with a scripted fake harness and a controllable clock. */
-function harness(steps: Step[], options: { resolution?: DecisionTargetResolution; rateTable?: RateTable | null } = {}) {
+function harness(steps: Step[], options: { resolution?: DecisionTargetResolution | (() => DecisionTargetResolution); rateTable?: RateTable | null } = {}) {
   const db = ControlPlaneDb.open(":memory:");
   let clock = 1_000_000;
   const sent: RunDecisionMessage[] = [];
@@ -67,7 +68,8 @@ function harness(steps: Step[], options: { resolution?: DecisionTargetResolution
   const routed: DecisionOccurrenceRecord[] = [];
   const runtime = new DecisionRuntime({
     db,
-    settings: { resolve: () => options.resolution ?? { ok: true, target: TARGET } },
+    settings: { resolve: () => typeof options.resolution === "function"
+      ? options.resolution() : options.resolution ?? { ok: true, target: TARGET } },
     transport: async (_runnerId, message) => {
       sent.push(message);
       const step = steps.shift();
@@ -84,7 +86,7 @@ function harness(steps: Step[], options: { resolution?: DecisionTargetResolution
     },
     random: () => 0.5,
   });
-  const decide = (overrides: { occurrenceKey?: string; campaignSessionId?: string } = {}) => runtime.decide({
+  const decide = (overrides: Pick<DecisionRequest, "occurrenceKey" | "campaignSessionId" | "retryUnavailableHarness"> = {}) => runtime.decide({
     organizationId: ORG,
     kind: "probe",
     inputs: DECISION_PROBE_INPUTS,
@@ -168,6 +170,20 @@ test("a runner that cannot host Decision calls fails non-transiently, never a si
   assert.equal(run.sent.length, 0, "no provider is asked");
   assert.equal(run.routed.length, 1);
   assert.deepEqual(run.runtime.view(outcome.occurrenceId)!.attempts, [{ attempt: 1, errorClass: "runner_incapable", latencyMs: 0 }]);
+});
+
+test("harness recovery rechecks Decision Model availability after an audited preflight failure", async () => {
+  let resolutions = 0;
+  const run = harness([verdict("confirm")], { resolution: () => ++resolutions === 1
+    ? { ok: false, errorClass: "harness_unavailable" } : { ok: true, target: TARGET } });
+  try {
+    const result = await run.decide({ retryUnavailableHarness: true });
+    assert.equal(result.outcome, "verdict");
+    assert.deepEqual(run.sleeps, [5_000]);
+    assert.deepEqual(run.sent.map(message => message.attempt), [2]);
+    assert.deepEqual(run.db.listDecisionAttempts(result.occurrenceId).map(attempt => attempt.errorClass), ["harness_unavailable", null]);
+    assert.equal(run.routed.length, 0);
+  } finally { run.db.close(); }
 });
 
 test("a provider Retry-After is honored within the total bound", async () => {

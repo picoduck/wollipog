@@ -92,10 +92,15 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // A fenced block's Wrap Lines button (#2152): one on/off toggle per block, not one of N options.
   ["components/Markdown.tsx", "aria-pressed", 1],
   ["components/SessionDetail.tsx", "aria-pressed", 2],
+  // Answer Mode's dictation mic while a touch phone types Something Else (#4714), the composer bar's
+  // mic over again: listening or not, one toggle.
+  ["components/ComposerQuestionResponse.tsx", "aria-pressed", 1],
   ["components/SessionPanelToggles.tsx", "aria-pressed", 3],
   // Instructions' file chips (#1980): §11.3 meta chips (`button.chip` with `aria-pressed`, as the
   // issue specifies) that choose which file the one view shows. A view switch, not a form choice.
   ["components/SkillInstructions.tsx", "aria-pressed", 1],
+  // Outcome chips switch the rows shown in the same paged decision log, like the file chips above.
+  ["components/AssistantDecisionHistory.tsx", "aria-pressed", 1],
   // A page-header toggle secondary (§3.1), Sessions' Snoozed (#2159): one on/off filter, never one
   // of N options. The view switch beside it is the SegmentedControl.
   ["components/PageHeader.tsx", "aria-pressed", 1],
@@ -134,6 +139,8 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // with the trailing check, as radios in labelled radio groups. It is a dialog rather than a menu
   // because its Context Window is a SegmentedControl, which a menu cannot hold.
   ["components/ComposerControls.tsx", "raw-radiogroup", 3],
+  // The named group in the shared expandable model picker. Its rows use the MenuItem primitive.
+  ["components/ModelPicker.tsx", "raw-radiogroup", 2],
   // View Options (#1961) is §9.1's radio-like menu: MenuItem rows with the trailing check, one per
   // Show and Group By choice, which reset with the page. A view switch in a menu, not a form choice.
   ["components/SkillList.tsx", "raw-radiogroup", 2],

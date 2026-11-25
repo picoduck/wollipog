@@ -247,7 +247,13 @@ for (const viewport of [
     await expect(save).toBeDisabled();
     const choose = async (select: string, option: RegExp) => {
       await form.locator(`[aria-label^="${select}:"]`).click();
-      await page.getByRole("option", { name: option }).click();
+      if (select === "Child Model") {
+        const picker = page.getByRole("dialog", { name: "Child Model" });
+        await picker.getByRole("searchbox", { name: "Search Models" }).fill("opus 5.5");
+        await picker.getByRole("radio", { name: option }).click();
+      } else {
+        await page.getByRole("option", { name: option }).click();
+      }
     };
     await choose("Child Harness", /^Claude Code/);
     await choose("Child Model", /^Claude Opus 5\.5/);

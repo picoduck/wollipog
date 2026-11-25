@@ -119,6 +119,64 @@ test("Decline classifies once and refreshes the authoritative request", async ()
   } finally { await view.unmount(); }
 });
 
+test("a held campaign handoff can be acknowledged without classifying it", async () => {
+  const request = heldQuestionCard();
+  request.workflowDecision = { ...request.workflowDecision!, category: "owner_decision", resourceKey: "campaign_handoffs:owner",
+    resourceSnapshot: { category: "owner_decision", kind: "question", question: "What should happen next?", options: [] } };
+  const session = sessionWith(request);
+  const cleared = sessionWith(null);
+  const answers: unknown[] = [];
+  const updates: SessionView[] = [];
+  const view = await render(<RequestCard session={session} request={request} runnerOnline presentation="panel"
+    onSessionUpdate={(updated) => updates.push(updated)} />, {
+    campaignDecisions: async () => ({ campaignSessionId: session.id, canClassify: true, decisions: [],
+      usage: { calls: 0, unpricedCalls: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0 } }),
+    classifyCampaignDecision: async () => { throw new Error("Acknowledgment must not classify the screen"); },
+    answerQuestion: async (...args) => { answers.push(args); return cleared; },
+  });
+  try {
+    const acknowledge = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Acknowledge");
+    assert.ok(acknowledge);
+    await act(async () => { acknowledge.click(); acknowledge.click(); await tick(); });
+    assert.deepEqual(answers, [[session.id, { requestId: request.requestId, occurrenceId: request.occurrenceId, answers: {}, action: "dismiss" }]]);
+    assert.deepEqual(updates, [cleared]);
+  } finally { await view.unmount(); }
+});
+
+test("the handoff preview opens on A and acknowledges once on D", async () => {
+  const base = heldQuestionCard();
+  const request: PendingApproval = {
+    ...base,
+    options: [],
+    workflowDecision: {
+      ...base.workflowDecision!,
+      category: "owner_decision",
+      resourceKey: "campaign_handoffs:owner",
+      authorityEvaluation: { ...base.workflowDecision!.authorityEvaluation!, reason: "owner_kept" },
+      resourceSnapshot: { category: "owner_decision", kind: "question", question: "What should happen next?", options: [] },
+    },
+  };
+  const session = sessionWith(request);
+  const intentRef = { current: null as RequestIntentHandler | null };
+  const answers: unknown[] = [];
+  let opened = 0;
+  const view = await render(<RequestCard session={session} request={request} runnerOnline presentation="dock"
+    intentRef={intentRef} onOpenHandoff={() => { opened++; }} />, {
+    answerQuestion: async (...args) => { answers.push(args); return sessionWith(null); },
+  });
+  try {
+    assert.equal(intentRef.current?.("approve"), true);
+    assert.equal(opened, 1);
+    assert.deepEqual(answers, []);
+    await act(async () => {
+      assert.equal(intentRef.current?.("deny"), true);
+      assert.equal(intentRef.current?.("deny"), true);
+      await tick();
+    });
+    assert.deepEqual(answers, [[session.id, { requestId: request.requestId, occurrenceId: request.occurrenceId, answers: {}, action: "dismiss" }]]);
+  } finally { await view.unmount(); }
+});
+
 test("an owner-rule question offers Let Me Answer and retries only the read after classification succeeds", async () => {
   const request = heldQuestionCard();
   request.workflowDecision!.ownerRule = { source: "personal instructions", quote: "Keep this question for me." };
@@ -497,6 +555,50 @@ test("a trust request's primary takes a click, not A, and D names only a one-tim
     }
   }
 });
+
+for (const scenario of [
+  { name: "D dismisses a docked campaign handoff exactly once with empty answers", intent: "deny", held: false },
+  { name: "A opens a docked campaign handoff without sending a response", intent: "approve", held: false },
+  { name: "D opens a classification-held docked campaign handoff without sending a response", intent: "deny", held: true },
+] as const) {
+  test(scenario.name, async () => {
+    const request = { ...heldQuestionCard(), requestId: "campaign-handoff", occurrenceId: "handoff-occurrence", options: [] };
+    request.workflowDecision = {
+      ...request.workflowDecision!, occurrenceId: request.occurrenceId, category: "owner_decision", resourceKey: "campaign_handoffs:owner",
+      authorityEvaluation: { ...request.workflowDecision!.authorityEvaluation!,
+        reason: scenario.held ? "credential_screen_review" : "owner_kept" },
+      resourceSnapshot: { category: "owner_decision", kind: "question", options: [],
+        question: "This campaign handed work to you. What should happen next?" },
+    };
+    const session = sessionWith(request);
+    const answers: unknown[] = [];
+    const approvals: unknown[] = [];
+    const opened: string[] = [];
+    const view = await render(<RequestDock session={session} requests={[request]} runnerOnline
+      onAnswerInSession={(requestId) => opened.push(requestId)} />, {
+      campaignDecisions: async () => ({ campaignSessionId: session.id, canClassify: false, decisions: [],
+        usage: { calls: 0, unpricedCalls: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0 } }),
+      answerQuestion: async (...args) => { answers.push(args); return sessionWith(null); },
+      approve: async (...args) => { approvals.push(args); return sessionWith(null); },
+    });
+    try {
+      assert.match(view.container.querySelector(".request-card")?.textContent ?? "", /Campaign Handoffs/u);
+      await act(async () => {
+        assert.equal(decideDockedRequest(session.id, scenario.intent), true);
+        // A repeated D before the response settles must not send a second dismissal.
+        if (!scenario.held && scenario.intent === "deny") {
+          assert.equal(decideDockedRequest(session.id, scenario.intent), true);
+        }
+        await tick();
+      });
+      assert.deepEqual(answers, !scenario.held && scenario.intent === "deny" ? [[session.id, {
+        requestId: request.requestId, occurrenceId: request.occurrenceId, answers: {}, action: "dismiss",
+      }]] : []);
+      assert.deepEqual(opened, scenario.held || scenario.intent === "approve" ? [request.requestId] : []);
+      assert.deepEqual(approvals, [], "handoff intents never send a permission decision");
+    } finally { await view.unmount(); }
+  });
+}
 
 test("a trust request's primary sends its trust option", async () => {
   const decisions: unknown[] = [];
@@ -1319,6 +1421,78 @@ test("a workflow decision shows everything it approves: the exact issue body, an
     const details = view.container.querySelector<HTMLDetailsElement>(".request-card-body details.disclosure")!;
     assert.match(details.querySelector("summary")?.textContent ?? "", /^Request Details$/u);
     assert.equal(details.querySelector("pre")?.textContent, JSON.stringify(snapshot));
+  } finally {
+    await view.unmount();
+  }
+});
+
+function ownerKeptMerge(ownerRule = false): PendingApproval {
+  return {
+    requestId: "merge", occurrenceId: "merge", kind: "workflow_decision", title: "PR Merge Approval Required",
+    options: [
+      { optionId: "approve", name: "Approve", kind: "allow_once" },
+      { optionId: "deny", name: "Deny", kind: "reject_once" },
+    ],
+    workflowDecision: {
+      requestId: "merge", occurrenceId: "merge", sessionId: "session-dock", controllingSessionId: "parent",
+      category: "pr_merge", resourceKey: "pr-64",
+      resourceSnapshot: { category: "pr_merge", repository: "example/project", pullRequest: 64, headSha: "a".repeat(40), reviewResult: "merge",
+        requiredChecks: { headSha: "a".repeat(40), status: "passed", checkedAt: 1, checks: [] } },
+      resourceDigest: "d".repeat(64), policyRevision: 1, authority: "human", status: "pending", createdAt: 1,
+      returnableOwnerResource: true,
+      ...(ownerRule ? { ownerRule: { source: "AGENTS.md", quote: "Ask me before merging." } } : {}),
+    },
+  } as PendingApproval;
+}
+
+test("an owner-kept resource is one line inside the card, above Deny and Approve, with an in-place confirmation (#4713)", async () => {
+  const returned: unknown[] = [];
+  const request = ownerKeptMerge();
+  const view = await render(<RequestCard session={sessionWith(request)} request={request} runnerOnline presentation="dock" />, {
+    returnOwnerResource: async (...args) => { returned.push(args); return request.workflowDecision!; },
+  });
+  try {
+    const card = view.container.querySelector<HTMLElement>("section.request-card")!;
+    assertNoDomNode(card.nextElementSibling, "nothing renders beside the card to share the dock's column with it");
+    const footnote = () => card.querySelector<HTMLElement>(".owner-resource-footnote");
+    assert.equal(footnote()?.textContent, "The Orchestrator handed this PR to you. Return to the Orchestrator");
+    assertNoDomNode(footnote()!.querySelector("h4, h3"), "the card's facts already name the pull request");
+    const order = [...card.children].map((child) => child.className);
+    assert.ok(order.indexOf("request-card-body") < order.indexOf("owner-resource-footnote"));
+    assert.ok(order.indexOf("owner-resource-footnote") < order.indexOf("request-card-foot"));
+    const button = (name: string) => [...card.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent === name)!;
+
+    await act(async () => { button("Return to the Orchestrator").click(); await tick(); });
+    assert.match(footnote()?.textContent ?? "",
+      /^Send future requests for PR #64 in example\/project to the Orchestrator\? This request stays yours\./u);
+    assert.ok((domWindow.document.activeElement as unknown) === button("Cancel"), "focus moves to the confirmation");
+    assert.deepEqual(footer(view.container), ["Deny", "Approve (primary)"], "the decision stays answerable");
+    await act(async () => { button("Cancel").click(); await tick(); });
+    assert.ok((domWindow.document.activeElement as unknown) === button("Return to the Orchestrator"), "focus comes back to the link");
+    assert.equal(returned.length, 0);
+
+    await act(async () => { button("Return to the Orchestrator").click(); await tick(); });
+    await act(async () => { button("Return").click(); await tick(); });
+    assert.deepEqual(returned, [["session-dock", "merge"]]);
+    assert.equal(card.querySelector("[role='status']")?.textContent,
+      "PR #64 in example/project returned to the Orchestrator for future requests. Pending requests remain yours.");
+    assert.ok((domWindow.document.activeElement as unknown) === card.querySelector("[role='status']"),
+      "the result takes focus from the confirmation it replaced");
+    assert.deepEqual(footer(view.container), ["Deny", "Approve (primary)"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a rule-kept resource says so, and a read-only card offers no return (#4713)", async () => {
+  const request = ownerKeptMerge(true);
+  const view = await render(<RequestCard session={sessionWith(request)} request={request} runnerOnline presentation="dock" />);
+  try {
+    assert.equal(view.container.querySelector(".owner-resource-footnote")?.textContent,
+      "A rule keeps this PR with you. Return to the Orchestrator");
+    await view.rerender(<RequestCard session={sessionWith(request)} request={request} runnerOnline presentation="panel"
+      readOnlyNotice="The Orchestrator decides this request." />);
+    assertNoDomNode(view.container.querySelector(".owner-resource-footnote"), "a read-only card offers no return");
   } finally {
     await view.unmount();
   }

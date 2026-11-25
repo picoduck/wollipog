@@ -1,8 +1,10 @@
 import { createSessionGitManagement } from "./session-git-management.js";
+import { registerQuestionAnswerRoute } from "./question-answer-route.js";
 import { withoutProviderAccountNames } from "./agent-account-view.js";
 import { AssistantPromptImages } from "./assistant-prompt-images.js";
 import { createCampaignReviewManagement } from "./campaign-review-management.js";
 import { registerAssistantCampaignManagement } from "./assistant-campaign-management.js";
+import { registerAssistantCampaignStart } from "./assistant-campaign-start.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 import { providerLoginStartFailure } from "./provider-login-start-failure.js";
 import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
@@ -91,6 +93,7 @@ import {
   type DescendantRequestResolution,
   type CreateWorkflowDecisionRequest,
   type ConsumeWorkflowDecisionRequest,
+  type ReconcileWorkflowDecisionRequest,
   type WithdrawWorkflowDecisionRequest,
   type ExecuteWorkflowDecisionRequest,
   type CreateOwnerDecisionRequest,
@@ -271,6 +274,7 @@ import { ShellRegistry } from "./shell-registry.js";
 import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
 import { registerAssistantRoutes } from "./assistant-routes.js";
 import { registerAssistantThreadRoutes } from "./assistant-thread-routes.js";
+import { registerAssistantDecisionHistory, registerAssistantDecisionOperations } from "./assistant-decision-operations.js";
 import { createAssistantOwnerConfirmationService, createAssistantThreads } from "./assistant-threads.js";
 import { registerAssistantConnectionOperations } from "./assistant-connection-operations.js";
 import { createSessionWorktreeManagement } from "./session-worktree-management.js";
@@ -287,6 +291,7 @@ import { registerAssistantSessionLifecycle } from "./assistant-session-lifecycle
 import { registerAssistantSessionContent } from "./assistant-session-content.js";
 import { createOwnerRunnerManagement } from "./owner-runner-management.js";
 import { createOwnerMachineManagement } from "./owner-machine-management.js";
+import { registerAntigravitySetupRoutes } from "./antigravity-setup-routes.js";
 import { readProviderAccountSelection } from "./owner-provider-selection.js";
 import { createOwnerProjectManagement } from "./owner-project-management.js";
 import { projectName, requestedAccessScope, accessScopeOwnerFromQuery,
@@ -774,8 +779,12 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   const sessionId = typeof params.id === "string" && routePath.startsWith("/api/sessions/") ? params.id
     : typeof params.sessionId === "string" ? params.sessionId : null;
   if (sessionId && principal.kind === "agent") {
+    const credentialSessionId = principal.credentialSessionId;
     const credentialTargetError = agentCredentialSessionTargetError(routePath, principal, sessionId,
-      Boolean(principal.credentialSessionId && db.isSessionDescendant(principal.credentialSessionId, sessionId)));
+      Boolean(credentialSessionId && db.isSessionDescendant(credentialSessionId, sessionId)),
+      () => Boolean(credentialSessionId && req.method === "POST" &&
+        (routePath !== "/api/sessions/:id/archive" || (req.body as { archived?: unknown } | null)?.archived === true) &&
+        db.reviewSessions.isTerminalForRequester(sessionId, credentialSessionId)));
     if (credentialTargetError) return { statusCode: 404, error: "session not found" };
   }
   if (sessionId && !db.canAccessSession(principal, sessionId)) {
@@ -1362,6 +1371,13 @@ app.register(async (instance) => {
         send(socket, { type: "runner_processing_ack", barrierId: msg.barrierId });
         break;
       }
+      case "registered_location_switch_lookup": {
+        if (!runnerId || !runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "registeredLocationSwitch") ||
+            typeof msg.requestId !== "string" || !/^[a-f0-9-]{36}$/u.test(msg.requestId)) break;
+        send(socket, { type: "registered_location_switch_lookup_result", requestId: msg.requestId,
+          workspacePath: locationSwitchService.lookupRegisteredSwitch(runnerId, msg) });
+        break;
+      }
       case "register": {
         if (runnerId) {
           send(socket, { type: "register_rejected", reason: "socket is already registered" });
@@ -1738,6 +1754,20 @@ app.register(async (instance) => {
           );
         }
         break;
+      case "antigravity_setup_updated":
+        if (runnerId !== msg.runnerId) {
+          app.log.warn(`runner ${runnerId} sent a mismatched Google Antigravity setup`);
+          break;
+        }
+        try {
+          db.updateRunnerAntigravitySetup(msg.runnerId, msg.setup, Date.now());
+          hub.runnerChanged(msg.runnerId);
+        } catch (error) {
+          app.log.warn(
+            `runner ${runnerId} sent an unusable Google Antigravity setup — ${error instanceof Error ? error.message : "ignored"}`,
+          );
+        }
+        break;
       case "runner_capacity_status":
         if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "machineRunnerCapacity")) {
           app.log.warn(`runner ${runnerId} sent capacity status without negotiated support`);
@@ -1912,6 +1942,7 @@ app.register(async (instance) => {
       case "session_worktree_result":
       case "workspace_worktree_setup_result":
       case "logout_agent_result":
+      case "assistant_harness_readiness_result":
       case "switch_session_provider_account_result":
       case "session_location_switch_result":
       case "session_role_result":
@@ -1925,6 +1956,7 @@ app.register(async (instance) => {
       case "read_queued_prompt_result":
       case "edit_queued_prompt_result":
       case "provider_login_result":
+      case "antigravity_setup_result":
       case "remove_provider_account_result":
       case "remove_workspace_result":
       case "adopt_provider_profile_result":
@@ -2473,6 +2505,9 @@ app.get("/api/onboarding", async (): Promise<OnboardingInfo> => {
 
 registerRunnerCredentialRoutes(app, { db, hub, requestHuman });
 const {operations: assistantOperations, ingress: assistantDiscordIngress, receipts: assistantCommandReceipts} = createAssistantManagement(db, svc);
+const reviseAssistantCampaign = registerAssistantCampaignStart(assistantOperations, { db, hub, sessions: svc,
+  settings: orchestratorSettings, evidenceDisclosures: evidenceAuthorityDisclosures,
+  videoCertification: (runnerId) => videoEvidence.launchCertification(runnerId) }, assistantCommandReceipts);
 export { assistantOperations };
 const assistantManagementMutations = new ManagementMutations(assistantCommandReceipts, db.instanceId(), assistantRequestDigest,
   id => db.assistantConnections.get(id)!, id => db.assistantConnections.destructiveConfirmation(id),
@@ -2484,10 +2519,12 @@ const extendedSkillsDeps = {db, hub, requestHuman, requestPrincipal, pushSkillsS
 const extendedSkillsManagement = createExtendedSkillsManagement(extendedSkillsDeps);
 registerAssistantSkillParity(assistantOperations, extendedSkillsDeps, extendedSkillsManagement, assistantManagementMutations);
 registerAssistantConnectionOperations(assistantOperations, {db, outbound: outboundEvents, receipts: assistantCommandReceipts});
+registerAssistantDecisionOperations(assistantOperations, db, svc);
+registerAssistantDecisionHistory(app, db, requestHuman);
 registerAssistantRoutes(app, { db, operations: assistantOperations, requestHuman });
 const assistantThreads = createAssistantThreads(db, hub, svc);
 const assistantOwnerConfirmations = createAssistantOwnerConfirmationService(db, svc, assistantOperations);
-registerAssistantThreadRoutes(app, { threads: assistantThreads, confirmations: assistantOwnerConfirmations, requestHuman });
+registerAssistantThreadRoutes(app, { threads: assistantThreads, confirmations: assistantOwnerConfirmations, requestHuman, reviseCampaign: reviseAssistantCampaign });
 registerAssistantWorkOwnerRoutes(app, { db, outboundEvents, requestHuman });
 registerAssistantDiscordIngress(app, { db, ingress: assistantDiscordIngress, requestHuman });
 
@@ -2871,9 +2908,9 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
   const requestId = `provider_login_${randomUUID()}`;
   // #3239: the control plane that creates an account on a v225 runner is granted its new managed
   // provider profile; adoption and revocation stay Owner/Admin only.
-  let profileGrantId: string | undefined;
+  let profileGrant: ReturnType<typeof authorizeCreatedProviderProfileGrant>;
   try {
-    profileGrantId = hasAccountId ? undefined
+    profileGrant = hasAccountId ? undefined
       : authorizeCreatedProviderProfileGrant(db, runner, principal, body.provider as "claude" | "codex", Date.now(), requestId);
   } catch (error) {
     // Only unsupported peers/non-human/no-scope callers get the existing no-grant compatibility
@@ -2883,7 +2920,7 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
     return reply.code(503).send({ error: error.message, code: error.code });
   }
   const observe = (observation: PublicationObservation) => {
-    if (!profileGrantId) return;
+    if (!profileGrant) return;
     try { db.observeProviderProfileDispatch(requestId, observation); }
     catch {
       app.log.warn({ event: "provider_publication_observation_unavailable", entryPoint: "add_account", requestId },
@@ -2891,8 +2928,8 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
     }
   };
   const settleProfileGrant = (outcome: Parameters<typeof settleCreatedProviderProfileGrantStart>[2]) => {
-    if (profileGrantId && principal.kind === "human") {
-      settleCreatedProviderProfileGrantStart(db, profileGrantId, outcome, principal, Date.now());
+    if (profileGrant && principal.kind === "human" && (!outcome.started || !profileGrant.newAccountId)) {
+      settleCreatedProviderProfileGrantStart(db, profileGrant.profileGrantId, outcome, principal, Date.now());
     }
   };
   try {
@@ -2907,7 +2944,7 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
       ...(hasAccountId
         ? { accountId: body.accountId as string }
         : { provider: body.provider as "claude" | "codex", label: (body.label as string).trim(),
-          ...(profileGrantId ? { profileGrantId } : {}) }),
+          ...profileGrant }),
     });
     observe("reply");
     if (result.type !== "provider_login_result" || result.action !== "start") {
@@ -2917,6 +2954,10 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
     if (!result.ok || !result.login) {
       settleProfileGrant({ started: false });
       return reply.code(409).send(providerLoginStartFailure(result));
+    }
+    if (profileGrant?.newAccountId && result.login.accountId !== profileGrant.newAccountId) {
+      // The report of the bound account decides whether the grant can complete.
+      return reply.code(502).send({ error: "unexpected runner reply" });
     }
     settleProfileGrant({ started: true, accountId: result.login.accountId });
     return reply.code(201).send({ login: result.login });
@@ -3027,6 +3068,8 @@ app.delete("/api/runners/:id/provider-logins/:operationId", async (req, reply) =
     return reply.code(504).send({ error: (error as Error).message });
   }
 });
+
+registerAntigravitySetupRoutes(app, db, hub, requestHuman);
 
 app.delete("/api/runners/:id/provider-accounts/:accountId", async (req, reply) => {
   const { id, accountId } = req.params as { id: string; accountId: string };
@@ -4155,7 +4198,7 @@ registerCampaignRepositoryAdditionRoutes(app, { requestPrincipal, additions: new
   // The same verified-Location inspection as a launch (#4117), on a runner that can hold the boundary.
   inspect: (locationId, options) => inspectProjectLocation({ db, hub }, locationId, { ...options, requireProtocol: "campaignRepositoryBoundary" }),
   synchronize: (rootId) => svc.synchronizeCampaignIssueScope(rootId) }) });
-registerLocationSwitchRoutes(app, { requestPrincipal, service: new LocationSwitchService(db, svc, hub, {
+const locationSwitchService = new LocationSwitchService(db, svc, hub, {
   // The shared verified-Location inspection (#4117): by Location id, in the Location's own path.
   inspect: (locationId, options) => inspectProjectLocation({ db, hub }, locationId, options),
   // The approving owner creates the session, under the ordinary creation route's ownership rules.
@@ -4172,7 +4215,8 @@ registerLocationSwitchRoutes(app, { requestPrincipal, service: new LocationSwitc
     }
     return { ok: reply.ok, ...(reply.error ? { error: reply.error } : {}) };
   },
-}) });
+});
+registerLocationSwitchRoutes(app, { requestPrincipal, service: locationSwitchService });
 
 app.post("/api/sessions/:id/github-issue-closures", async (req, reply) => {
   const { id } = req.params as { id: string };
@@ -4239,7 +4283,7 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/reconcile", async (
   return respond(reply, await svc.reconcileWorkflowDecision(
     id,
     occurrenceId,
-    req.body as Pick<ConsumeWorkflowDecisionRequest, "resourceSnapshot">,
+    req.body as ReconcileWorkflowDecisionRequest,
     (sessionId) => db.canAccessSession(principal, sessionId),
   ));
 });
@@ -4310,14 +4354,14 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/retire", async (req
   ));
 });
 
-// #4064: a Full Control root's question for its campaign's owner. `:id` is the caller's own
-// credential session; the service checks that it is the campaign's root and that only a person
-// can answer.
+// #4064, #4894: a standalone session's or root Orchestrator's Owner Question or Owner Approval.
+// `:id` is the caller's own credential session; the service verifies requester eligibility and
+// ensures only the authenticated owner can answer or decide.
 app.post("/api/sessions/:id/owner-decisions", async (req, reply) => {
   const { id } = req.params as { id: string };
   const principal = requestPrincipal(req);
-  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || principal.orchestrator !== true) {
-    return reply.code(403).send({ error: "a matching root Orchestrator credential is required" });
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching session credential is required" });
   }
   if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
   return respond(reply, await svc.createOwnerDecision(id, req.body as CreateOwnerDecisionRequest,
@@ -4832,6 +4876,7 @@ app.post("/api/sessions", async (req, reply) => {
       defaultOwnerUserId: principal?.userId,
       parentSessionId,
       ...(principal ? {
+        allowManagedModelChoice: !initialNativeTui,
         orchestratorDefaults: orchestratorSettings.view(principal),
         validateOrchestratorDefaults: (defaults: import("@wollipog/protocol").OrchestratorCampaignPolicy) =>
           orchestratorSettings.compatibilityError(principal, defaults),
@@ -5383,26 +5428,9 @@ app.post("/api/sessions/:id/fork", async (req, reply) => sessionLifecycleManagem
 
 // Structured agent questions (AskUserQuestion): a sibling of /approve because the shapes
 // differ — N answers keyed by question id vs one optionId decision.
-app.post("/api/sessions/:id/answer", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const body = req.body as { requestId?: string; occurrenceId?: string; answers?: Record<string, string | string[]>; action?: "submit" | "dismiss" };
-  if (
-    typeof body?.requestId !== "string" ||
-    (body.occurrenceId != null && typeof body.occurrenceId !== "string") ||
-    body.answers == null ||
-    typeof body.answers !== "object" ||
-    Array.isArray(body.answers) ||
-    (body.action != null && body.action !== "submit" && body.action !== "dismiss")
-  ) {
-    return reply.code(400).send({ error: "requestId and answers are required; action must be submit or dismiss" });
-  }
-  const action = body.action ?? (Object.keys(body.answers).length > 0 ? "submit" : "dismiss");
-  const human = requestHuman(req);
-  return respond(reply, svc.answerQuestion(id, body.requestId, body.answers, {
-    kind: "human",
-    id: humanActorId(req),
-  }, action, undefined, body.occurrenceId, undefined,
-  (sessionId) => human ? db.canAccessSession(human, sessionId) : false));
+registerQuestionAnswerRoute(app, {
+  service: svc, requestHuman, humanActorId,
+  canAccessSession: (human, sessionId) => db.canAccessSession(human, sessionId),
 });
 
 // Host actions: open the session's working directory in a local editor on the runner host,

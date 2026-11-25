@@ -103,6 +103,23 @@ test("an owner decision whose screen failed stays the owner's: they decline it o
   }
 });
 
+test("a dismissed handoff screen stays in the audit without asking for classification", async () => {
+  const read = api.campaignDecisions;
+  api.campaignDecisions = async (id) => ({ canClassify: true, campaignSessionId: id, decisions: [decision("handoff-screen", {
+    state: "failed", failureClass: "harness_unavailable", subject: { sessionId: id, surface: "owner_decision",
+      requestId: "handoff", classificationPending: false },
+  })], usage: { ...usage, calls: 1, unpricedCalls: 0 } });
+  const attention: boolean[] = [];
+  const view = await render(<CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}}
+    onAttentionChange={(needsAttention) => attention.push(needsAttention)} />);
+  try {
+    const item = view.container.querySelector("li")!;
+    assert.equal(facts(item)["Owner Decision"], "No classification is pending for this request.");
+    assert.deepEqual([...item.querySelectorAll("button")].map(node => node.textContent), ["Open Session"]);
+    assert.deepEqual(attention, [false]);
+  } finally { view.unmount(); api.campaignDecisions = read; }
+});
+
 test("follow-up relatedness and closure-reason checks show their verdict beside the request, and never offer classification (#4104)", async () => {
   const read = api.campaignDecisions;
   const followUp = { sessionId: "child-1", surface: "follow_up_publication" as const, requestId: "rec_1" };

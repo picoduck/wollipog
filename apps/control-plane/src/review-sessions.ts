@@ -235,6 +235,13 @@ export class ReviewSessions {
     return !!this.sql.prepare("SELECT 1 FROM review_sessions WHERE review_session_id=?").get(sessionId);
   }
 
+  /** Cleanup belongs to the recorded requester once the review result is final. */
+  isTerminalForRequester(sessionId: string, requesterSessionId: string): boolean {
+    const row = this.sql.prepare("SELECT state FROM review_sessions WHERE review_session_id=? AND requester_session_id=?")
+      .get(sessionId, requesterSessionId) as Pick<Row, "state"> | undefined;
+    return row !== undefined && TERMINAL.has(row.state);
+  }
+
   link(sessionId: string): ReviewSessionLink | null {
     const row = this.row(sessionId);
     return row ? {

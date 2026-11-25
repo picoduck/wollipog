@@ -21,6 +21,7 @@ import {
 } from "./shortcuts.js";
 import { GLOBAL_VIEW_ITEMS } from "./navigation.js";
 import { SESSION_TOOLS } from "./session-tools.js";
+import { SIDE_PANEL_CHORDS } from "./components/right-panel-state.js";
 
 function key(
   value: string,
@@ -365,6 +366,25 @@ test("the reference puts the current page's group first and marks only that one"
   assert.equal(shortcutGroupForScope("Run dialog"), null);
 });
 
+test("an Assistant thread documents its available shortcuts in its own group", () => {
+  const groups = shortcutReferenceGroups({
+    scope: "Global",
+    availability: { ...AVAILABLE, sessionOpen: false, assistantThreadOpen: true },
+    keys: referenceKeys,
+  });
+  const thread = groups[0]!;
+  assert.equal(thread.group, "Assistant Thread");
+  assert.equal(thread.note, null);
+  assert.deepEqual(thread.rows.map(({ label, reason, description }) => [label, reason, description]), [
+    ["Steer Active Turn", null, "While the assistant is working, sends your message into its current turn."],
+    ["Stop Turn", null, "Stops the assistant's current turn. Sessions it launched keep running."],
+    ["Side Panel", null, "Opens or closes the thread's side panel and remembers the last tab."],
+  ]);
+  const session = groups.find((group) => group.group === "Session")!;
+  assert.deepEqual(session.rows, []);
+  assert.equal(session.note, "Session tools are available after Open as Session.");
+});
+
 test("without a session the Session groups carry one note and no per-row session reason", () => {
   const groups = shortcutReferenceGroups({
     scope: "Global",
@@ -521,6 +541,7 @@ test("the Side Panel toggle and every tool have one chord in the reference that 
     .find((group) => group.group === "Session")!;
   for (const tool of SESSION_TOOLS) {
     // Session Tools is the launcher, which the toggle reaches; the issue leaves its own chord optional.
+    // Launched Sessions exists only on an Assistant thread, whose header toggle opens it (#4776).
     if (tool.id !== "launcher") assert.ok(tool.shortcut, `${tool.name} has a chord`);
   }
   const chords: ShortcutId[] = ["toggle-side-panel", ...SESSION_TOOLS.flatMap((tool) => tool.shortcut ? [tool.shortcut] : [])];

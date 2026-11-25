@@ -119,11 +119,16 @@ import {
 } from "./common.js";
 import { SessionPreviewBar, type PreviewSessionMenuOpener } from "./SessionPreviewBar.js";
 import { Notice } from "./Notice.js";
+import { RequestCard } from "./requests/RequestCard.js";
+import { ProviderLoginCard } from "./ProviderLoginCard.js";
+import { AssistantThreadProblemNotice } from "./AssistantThreadProblemNotice.js";
+import type { AssistantThreadProblem } from "../assistant-thread-health.js";
 import { LaterActivityControl } from "./LaterActivityControl.js";
 import { QueuedMessages, queuedMessageExcerpt } from "./QueuedMessages.js";
 import { sessionArchivedAtRest } from "../status-meta.js";
 import {
   EventTimeline,
+  TurnFailedNotice,
   type TimelineReadingState,
   TranscriptErrorAlert,
   transcriptTurnsById,
@@ -156,7 +161,7 @@ import {
   useOffscreenReceipts,
   useRecoveryAnnouncement,
 } from "./TranscriptTailControl.js";
-import { ApprovalsControl, ComposerButton, ModelEffortControl, useModelSettingsAvailable } from "./ComposerControls.js";
+import { agentOwnsPermissionModes, nativePlanModeActive, ApprovalsControl, ComposerButton, ModelEffortControl, useModelSettingsAvailable } from "./ComposerControls.js";
 import { reportRenderProbe, SESSION_DETAIL_PROBE, SESSION_VIEW_PROBE, TRANSCRIPT_PROBE } from "./render-probe.js";
 import {
   ComposerIdlePreview,
@@ -248,7 +253,7 @@ import { decideDockedRequest, registerRequestRevealer } from "./requests/request
 import { useRemovedFocus } from "./useRemovedFocus.js";
 import { useBodyWidth } from "./useBodyWidth.js";
 import { CampaignHeldChildren, type CampaignHeldChild } from "./CampaignHeldChildren.js";
-import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
+import { ComposerQuestionResponse, type AnswerField } from "./ComposerQuestionResponse.js";
 import { withPresentedOwnerQuestions } from "../owner-question-presentation.js";
 import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.js";
 import {
@@ -344,6 +349,7 @@ import {
   composerAgentName,
   composerPlaceholder as composerPlaceholderText,
   composerUnavailableReason,
+  workflowDecisionPause,
 } from "../composer-placeholder.js";
 import { IncrementalActiveTurnProgress } from "../turn-progress.js";
 import { IncrementalSubagentProjector } from "../subagents.js";
@@ -643,6 +649,19 @@ export type SessionDetailProps = {
   /** Replaces the expanded session bar with the host's own (#4664): an assistant thread shows its
    * transcript, requests and composer under the thread's header. The host then owns the page title. */
   header?: ReactNode;
+  /** The Assistant thread's panel, rendered in the same row as the conversation. */
+  assistantPanel?: (onOverlayChange: (overlay: boolean) => void) => ReactNode;
+  /** A host-owned request dock between the reader and the composer notice slot. */
+  assistantRequestDock?: (focusComposer: () => void) => ReactNode;
+  /** The thread's archive takes effect even while its backing session is still stopping. */
+  archivedAssistantThread?: boolean;
+  /** Usage warnings from the Assistant thread that owns this conversation. */
+  assistantSpendingNotices?: readonly SessionNoticeEntry[];
+  assistantThreadHealth?: {
+    thread: import("@wollipog/protocol").AssistantThread;
+    problems: readonly AssistantThreadProblem[];
+    onSwitchAccount: () => void;
+  };
   /** Transport-owned policy seam. Native passthrough commands default to the existing send path. */
   providerCommandAttachmentPolicy?: ProviderComposerCommand["attachmentPolicy"];
   /** Registers preview-only paging ownership and live-follow actions with the Inbox key layer. */
@@ -1090,12 +1109,22 @@ function sameComposerTriggers(left: ComposerTriggers, right: ComposerTriggers): 
  * shows the chunks streamed into the trailing reply since `items` was derived from
  * `itemsDerivedFrom`, which render the transcript without the session view around it (#2763).
  */
-const ProfiledEventTimeline = memo(function ProfiledEventTimeline({ liveSessionId, itemsDerivedFrom, readLocal, items, ...props }:
-  ComponentProps<typeof EventTimeline> & { liveSessionId: string; itemsDerivedFrom: SessionEvent[] | undefined; readLocal?: boolean }) {
+const ProfiledEventTimeline = memo(function ProfiledEventTimeline({ liveSessionId, itemsDerivedFrom, readLocal, items,
+  assistantTurnErrorId, assistantHoldErrorId, ...props }:
+  ComponentProps<typeof EventTimeline> & {
+    liveSessionId: string; itemsDerivedFrom: SessionEvent[] | undefined; readLocal?: boolean;
+    assistantTurnErrorId?: string; assistantHoldErrorId?: string;
+  }) {
   const liveItems = useLiveTimelineTail(liveSessionId, readLocal ? undefined : itemsDerivedFrom, items);
+  const visibleItems = useMemo(() => {
+    const source = readLocal ? items : liveItems;
+    if (readLocal || (!assistantTurnErrorId && !assistantHoldErrorId)) return source;
+    return source.filter((item) => item.kind !== "error" || !item.assistantThreadErrorId ||
+      (item.assistantThreadErrorId !== assistantTurnErrorId && item.assistantThreadErrorId !== assistantHoldErrorId));
+  }, [readLocal, items, liveItems, assistantTurnErrorId, assistantHoldErrorId]);
   return (
     <Profiler id={TRANSCRIPT_PROBE} onRender={reportRenderProbe}>
-      <EventTimeline {...props} items={readLocal ? items : liveItems} />
+      <EventTimeline {...props} items={visibleItems} />
     </Profiler>
   );
 });
@@ -1165,6 +1194,11 @@ function SessionDetailLoaded({
   onOpenRequest,
   topbarControls,
   header,
+  assistantPanel,
+  assistantRequestDock,
+  archivedAssistantThread = false,
+  assistantSpendingNotices = [],
+  assistantThreadHealth,
   providerCommandAttachmentPolicy = "send",
   onPreviewNavigationReady,
   onPreviewForkReady,
@@ -1174,6 +1208,8 @@ function SessionDetailLoaded({
 }: SessionDetailProps & { session: SessionView }) {
   const privacy = useAccountEmailPrivacy();
   const api = useApi();
+  const guardrailsRoute = useStoreSelector((state) =>
+    state.view.name === "session" && state.view.id === sessionId && state.view.guardrails === true);
   const isMobile = useIsMobile();
   const isMobileRef = useRef(isMobile);
   isMobileRef.current = isMobile;
@@ -1357,7 +1393,10 @@ function SessionDetailLoaded({
   // composer (#2179, #2205), in attention priority order; a worker's stay in the Agents panel.
   const prioritizedRequests = useMemo(() => prioritizedPendingRequests(session.pendingApproval),
     [session.pendingApproval]);
-  const dockedRequests = useMemo(() => dockRequests(prioritizedRequests), [prioritizedRequests]);
+  const signInNeededInSlot = assistantThreadHealth?.problems.some((problem) => problem.key === "sign_in_needed") ?? false;
+  const dockedRequests = useMemo(() => dockRequests(signInNeededInSlot
+    ? prioritizedRequests.filter((request) => request.kind !== "authentication")
+    : prioritizedRequests), [prioritizedRequests, signInNeededInSlot]);
   const topRequestDocked = prioritizedRequests[0] !== undefined && dockedRequests.includes(prioritizedRequests[0]);
   useEvidenceDraftRetirement(session.id, dockedRequests);
   const chatReadingRef = useRef<HTMLDivElement>(null);
@@ -1657,7 +1696,7 @@ function SessionDetailLoaded({
   const dragDepth = useRef(0); // enter/leave bubble from children — count depth so the overlay doesn't stick
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const answerInputRef = useRef<HTMLInputElement>(null);
+  const answerInputRef = useRef<AnswerField>(null);
   // While a question is answered in the composer it is shown there alone, not on the dock (#2212):
   // bringing it up opens the answer panel and focuses its field. Registered with the shared request
   // revealer, so every control that brings a request up (Jump to Question, an attention link, the
@@ -3600,7 +3639,8 @@ function SessionDetailLoaded({
   // A phone's side panel sheet hides the composer (#2843), and so does a phone's terminal sheet, which
   // takes the composer's place (#2866). A draft that changed while it was hidden had no width to
   // measure, so revealing it grows it again.
-  const phonePanelOpen = isMobile && rightPanel.open;
+  const [panelOverlay, setPanelOverlay] = useState(false);
+  const phonePanelOpen = isMobile && (assistantPanel ? panelOverlay : rightPanel.open);
   const composerHiddenOnPhone = phonePanelOpen || phoneTerminalOpen;
   const toastComposerRef = useToastChrome<HTMLDivElement>();
   useLayoutEffect(() => {
@@ -3757,12 +3797,14 @@ function SessionDetailLoaded({
   // An archived session is also stopped; its notice is in the slot, so the slot's order decides.
   const promptUnavailableReason = composerUnavailableReason({
     refusal: promptRefusal,
-    archivedReason: archivedOrder ? sessionNoticeReason : undefined,
+    archivedReason: archivedAssistantThread ? "This thread is archived and read-only."
+      : archivedOrder ? sessionNoticeReason : undefined,
     status: session.status,
     runnerOnline,
     machineName: runnerDisp.name,
     noticeReason: sessionNoticeReason,
     policyPaused,
+    workflowDecision: workflowDecisionPause(session.pendingApproval),
   });
   const canPrompt = promptUnavailableReason === null;
   const composerAgent = composerAgentName(session.driver, session.agentName, session.agentId);
@@ -4663,7 +4705,7 @@ function SessionDetailLoaded({
   }, [api, busy, composerRestartOffered, loadSession, restartPending, restartRefusal, runnerOnline, session.id]);
   // The launch refusal notice's Restart Session (#3240): the same restart as the header's, for the
   // failed or stopped session the refusal left.
-  const restartFromRefusal = useCallback(async (waitForProviderHome = false) => {
+  const restartFromRefusal = useCallback(async (waitForProviderHome = false, onFailure?: (error: ComposerActionError) => void) => {
     if (!runnerOnline || busy || restartPending || restartRefusal !== null || session.archived ||
         turnRetryInFlightRef.current) return;
     const generation = viewGenerationRef.current;
@@ -4674,7 +4716,10 @@ function SessionDetailLoaded({
     try {
       loadSession(await api.restart(session.id, waitForProviderHome ? { waitForProviderHome } : undefined));
     } catch (cause) {
-      if (viewGenerationRef.current === generation) showActionError("restart", cause);
+      if (viewGenerationRef.current === generation) {
+        if (onFailure) onFailure(composerActionError("restartThread", cause, actionMachineNameRef.current));
+        else showActionError("restart", cause);
+      }
     } finally {
       if (viewGenerationRef.current === generation) {
         setRestartPending(false);
@@ -5032,7 +5077,92 @@ function SessionDetailLoaded({
   const runnerOfflineReason = runnerOnline ? null : `${runnerDisp.name || "This machine"} is offline.`;
   const accountSwitchApplicable = sessionAccountSwitchApplicable(session);
   const accountSwitchSupported = runnerSupportsProtocol(runner?.protocolVersion, "sessionProviderAccountSwitch");
-  const sessionNotices: SessionNoticeEntry[] = [];
+  const sessionNotices: SessionNoticeEntry[] = [...assistantSpendingNotices];
+  const noticesBelowDock = assistantSpendingNotices.length > 0 || assistantThreadHealth !== undefined;
+  const assistantHealth = assistantThreadHealth?.thread.health;
+  const assistantReconnecting = assistantThreadHealth?.problems.some((problem) => problem.key === "reconnecting");
+  const assistantTurnErrorId = assistantHealth?.turn?.errorId;
+  const assistantPromptTurnId = assistantHealth?.turn?.promptTurnId;
+  const assistantHoldErrorId = assistantHealth?.automaticTurnsHeld;
+  const assistantTurnItems = useMemo(() => {
+    if (!assistantTurnErrorId && !assistantHoldErrorId) return {};
+    const error = items.find((item): item is Extract<TimelineItem, { kind: "error" }> =>
+      item.kind === "error" && item.assistantThreadErrorId === assistantTurnErrorId);
+    const hold = items.find((item): item is Extract<TimelineItem, { kind: "error" }> =>
+      item.kind === "error" && item.assistantThreadErrorId === assistantHoldErrorId);
+    const prompt = assistantPromptTurnId === undefined ? undefined
+      : items.find((item): item is Extract<TimelineItem, { kind: "user_message" }> =>
+        item.kind === "user_message" && item.turnId === assistantPromptTurnId && item.deliveryIntent !== "steer");
+    return { error, hold, prompt };
+  }, [items, assistantTurnErrorId, assistantHoldErrorId, assistantPromptTurnId]);
+  const authenticationRequest = signInNeededInSlot
+    ? prioritizedRequests.find((request) => request.kind === "authentication") : undefined;
+  const [assistantSignInOpen, setAssistantSignInOpen] = useState(false);
+  const [assistantSignInError, setAssistantSignInError] = useState<string>();
+  const [assistantRestartError, setAssistantRestartError] = useState<ComposerActionError>();
+  const [assistantSignInPending, setAssistantSignInPending] = useState(false);
+  const assistantSignInFlight = useRef(false);
+  const openThreadMachine = () => navigate({ name: "runners", section: "machines", machineId: session.runnerId });
+  const assistantLogin = runner?.providerLogins?.find((login) =>
+    (login.sessionId === session.id || (!authenticationRequest && login.accountId === session.providerAccountId)) &&
+    login.status !== "succeeded" && login.status !== "cancelled");
+  const signInToThread = async () => {
+    if (assistantSignInFlight.current || !runnerOnline) return;
+    setAssistantSignInError(undefined);
+    if (assistantLogin || (authenticationRequest && !authenticationRequest.options.some((option) => option.optionId === "auth:login"))) {
+      setAssistantSignInOpen(true);
+      return;
+    }
+    assistantSignInFlight.current = true;
+    setAssistantSignInPending(true);
+    try {
+      if (authenticationRequest) {
+        loadSession(await api.approve(session.id, { requestId: authenticationRequest.requestId, optionId: "auth:login" }));
+      } else if (session.providerAccountId) {
+        await api.startProviderLogin(session.runnerId, { accountId: session.providerAccountId });
+      }
+      setAssistantSignInOpen(true);
+    } catch {
+      setAssistantSignInError("The sign-in couldn’t start. Try again.");
+    } finally {
+      assistantSignInFlight.current = false;
+      setAssistantSignInPending(false);
+    }
+  };
+  if (assistantThreadHealth) {
+    const { thread, problems, onSwitchAccount } = assistantThreadHealth;
+    for (const problem of problems) {
+      sessionNotices.push({
+        ...problem,
+        title: problem.key === "machine_offline" ? runnerDisp.name + " Is Offline" : problem.title,
+        render: ({ trailing }) => problem.key === "turn_failed" ? (
+          <TurnFailedNotice message={assistantTurnItems.error?.message ?? ""}
+            prompt={assistantTurnItems.prompt} retryControl={turnRetry} trailing={trailing} kept={Boolean(assistantPromptTurnId)} />
+        ) : (
+          <AssistantThreadProblemNotice key={problem.key} problem={problem} thread={thread} machine={runnerDisp.name}
+            trailing={trailing} details={problem.key === "automatic_turns_held"
+              ? assistantTurnItems.hold?.message : assistantTurnItems.error?.message}
+            switchAccount={<button type="button" className={problem.key === "usage_limit" ? "btn sm primary" : "btn sm ghost"}
+              disabled={!runnerOnline || busy || assistantSignInPending || thread.accountChangeSupported !== true}
+              onClick={onSwitchAccount}>Switch Account…</button>}
+            signIn={<BusyButton className="btn sm primary" busy={assistantSignInPending} progress="Starting sign-in…"
+              disabled={!runnerOnline || runner?.canManage === false || (!authenticationRequest && !session.providerAccountId)}
+              onClick={event => { event.currentTarget.focus({ preventScroll: true }); void signInToThread(); }}>Sign In…</BusyButton>}
+            restart={<BusyButton className="btn sm primary" busy={restartPending} progress="Restarting the thread…"
+              disabled={!runnerOnline || (busy && !restartPending) || restartRefusal !== null || headerRestartPending}
+              onClick={event => {
+                event.currentTarget.focus({ preventScroll: true });
+                setAssistantRestartError(undefined);
+                void restartFromRefusal(false, setAssistantRestartError);
+              }}>Restart Thread</BusyButton>}
+            openMachine={<button type="button" className="btn sm ghost" onClick={openThreadMachine}>Open Machine</button>}
+            actionError={problem.key === "sign_in_needed" ? assistantSignInError
+              : problem.key === "tools_unavailable" ? assistantRestartError?.message : undefined}
+            actionErrorDetail={problem.key === "tools_unavailable" ? assistantRestartError?.detail : undefined} />
+        ),
+      });
+    }
+  }
   if (worktreeRecovery && worktreeMissingOrder) {
     sessionNotices.push({
       ...worktreeMissingOrder,
@@ -5541,7 +5671,10 @@ function SessionDetailLoaded({
   // Plan mode is only safe where the driver actually advertises the `plan` approval mode (Claude).
   // Codex silently falls back to a writable sandbox for an unknown mode, so exposing it there would
   // let "plan" edit files despite the "no edits" copy — only offer it when the driver supports it.
-  const planSupported = (agentCaps?.permissionModes ?? []).includes("plan");
+  // An ACP agent's own `plan` mode (#4779) is one of its modes in the Permission Mode menu, described
+  // in its words; it is never offered as Wollipog's read-only Plan Mode.
+  const planSupported = (agentCaps?.permissionModes ?? []).includes("plan") &&
+    !agentOwnsPermissionModes(session.driver, agentCaps);
   const composerAgentLabel = sessionAgentLabel(session.agentName, session.driver, session.agentId);
   const composerCommands = useMemo(() => buildComposerCommandRegistry({
     context: { planSupported, canStopTurn, canRespond: canAnswerPendingQuestion, agentLabel: composerAgentLabel },
@@ -5963,7 +6096,7 @@ function SessionDetailLoaded({
     onFailure: showHiddenColumnFailure,
   });
   const composerIdleCollapsed = isMobile && !composerExpanded && !composerMultiline &&
-    images.length === 0 && session.pendingApproval == null &&
+    images.length === 0 && session.pendingApproval == null && queuedPromptControls.length === 0 &&
     !historyQuarantine && !queuedEdit && composerErrorEntries.length === 0 && !retitleFeedback && !dictation.recording &&
     !dragActive && !paletteOpen && !workspacePickerOpen;
   // Where focus goes when the notice slot or the queue tray removes the control that held it: the
@@ -6123,12 +6256,13 @@ function SessionDetailLoaded({
     async (patch: Partial<SessionConfig>) => {
       if (configRefusal !== null) throw new Error(configRefusal);
       await api.setConfig(sessionId, patch);
-      pendingConfig.current = { ...pendingConfig.current, ...patch };
+      const { costBudgetUsd: _threadBudget, ...other } = patch;
+      pendingConfig.current = { ...pendingConfig.current, ...(session.assistantThreadBudget ? other : patch) };
     },
-    [api, configRefusal, sessionId],
+    [api, configRefusal, session.assistantThreadBudget, sessionId],
   );
 
-  const planActive = session.permissionMode === "plan";
+  const planActive = nativePlanModeActive(session, agentCaps);
   const togglePlan = (on = !planActive) => {
     if (!planSupported) return; // never set an unsupported "plan" mode (would map to a writable sandbox)
     applyConfig({ permissionMode: on ? "plan" : "" });
@@ -7056,9 +7190,12 @@ function SessionDetailLoaded({
     : dockedRequests, [answeringInComposer, dockedRequests, pendingQuestion?.requestId]);
   // Composer Response answers the session's question in the composer, so its card is compact. A
   // preview has no composer: its question is the preview's own card, answered in the session (#2210).
-  const dockComposerAnswer = useMemo(() => mode === "expanded" && questionResponseStyle === "composer" &&
-    pendingQuestion && composerQuestions.length > 0 ? { requestId: pendingQuestion.requestId, onAnswer: enterAnswerMode } : undefined,
-  [composerQuestions.length, enterAnswerMode, mode, pendingQuestion, questionResponseStyle]);
+  // The form keeps its card, and on a touch phone types Something Else in the composer, which needs
+  // Answer Mode to be open to this person (#4714).
+  const dockComposerAnswer = useMemo(() => mode === "expanded" && pendingQuestion && composerQuestions.length > 0 &&
+    (questionResponseStyle === "composer" || canAnswerPendingQuestion)
+    ? { requestId: pendingQuestion.requestId, onAnswer: enterAnswerMode } : undefined,
+  [canAnswerPendingQuestion, composerQuestions.length, enterAnswerMode, mode, pendingQuestion, questionResponseStyle]);
   useLayoutEffect(() => {
     const had = dockHadRequestsRef.current;
     dockHadRequestsRef.current = dockShownRequests.length > 0;
@@ -7227,6 +7364,7 @@ function SessionDetailLoaded({
       )}    </>
   ) : null;
 
+  const canActOnTranscript = mode === "expanded" && !historyPreview.active && !archivedAssistantThread;
   return (
     <div className={`session-detail ${mode}`} data-session-surface-id={session.id}>
       {/* Reports each render of this view itself, never one of the transcript alone (#2763). */}
@@ -7341,7 +7479,7 @@ function SessionDetailLoaded({
         {/* The session body: the reader column, then the docked Pinned Summary (#2147). It is the
             `session-body` container, so docking follows the room the right panel leaves. A phone's
             side panel sheet covers it, so it is inert while the sheet is open (#2888). */}
-        <div className="detail-body" ref={setDetailBody} inert={phonePanelOpen || undefined}>
+        <div className="detail-body" ref={setDetailBody} inert={phonePanelOpen || (assistantPanel && panelOverlay) || undefined}>
         <div className="detail-chat" ref={detailChatRef}>
           {/* A preview has no composer to dock above, so its requests head the preview, right under
               the meta line, where Approve and Deny sit under the cursor that selected the row (#2210). */}
@@ -7395,6 +7533,7 @@ function SessionDetailLoaded({
           <div className="chat-reading" ref={chatReadingRef}>
           <div
             className="detail-main"
+            data-assistant-transcript={assistantRequestDock ? true : undefined}
             data-active-pane={activePane}
             onFocusCapture={() => setActivePane("reader")}
             onPointerDownCapture={(event) => {
@@ -7424,7 +7563,7 @@ function SessionDetailLoaded({
                 Recent activity is readable as a snapshot while full history loads. Refresh to check for new activity.
               </div>
             )}
-            {!historyPreview.active && (transcript.notice === "stale" || transcript.notice === "error") && (
+            {!historyPreview.active && ((transcript.notice === "stale" && !assistantReconnecting) || transcript.notice === "error") && (
               <div className="transcript-history-band">
                 <LiveTranscriptHistoryNotice
                   sessionId={sessionId}
@@ -7543,7 +7682,7 @@ function SessionDetailLoaded({
                 // or is cached while disconnected is its notice alone, never the notice above "Start
                 // the Conversation" or "Starting {Agent}".
                 transcript.notice !== "error" && transcript.notice !== "stale" && <TranscriptEmptyState
-                  kind={transcriptEmptyKind(session)}
+                  kind={transcriptEmptyKind(archivedAssistantThread ? { ...session, archived: true } : session)}
                   agent={sessionAgentLabel(session.agentName, session.driver, session.agentId)}
                   project={currentProjectName ?? undefined}
                   machine={runnerDisp.name || undefined}
@@ -7561,6 +7700,8 @@ function SessionDetailLoaded({
                         driver={session.driver}
                         items={timelineItems}
                         itemsDerivedFrom={evs}
+                        assistantTurnErrorId={assistantTurnErrorId}
+                        assistantHoldErrorId={assistantHoldErrorId}
                         liveSessionId={sessionId}
                         sessionActive={isTimelineSessionActive(session.status) ||
                           (eventWindow?.openingStartSeq !== undefined && eventWindow.laterGap !== undefined)}
@@ -7583,19 +7724,19 @@ function SessionDetailLoaded({
                         onAnchorLost={followTail.onAnchorLost}
                         // Keep checkpoint actions discoverable when the runner or worktree cannot
                         // currently satisfy them; activation still uses the existing API contract.
-                        onRewind={mode === "expanded" && !historyPreview.active ? onRewind : undefined}
+                        onRewind={canActOnTranscript ? onRewind : undefined}
                         rewindUnavailableReason={rewindUnavailableReason}
-                        onFork={mode === "expanded" && !historyPreview.active ? onFork : undefined}
-                        handoff={mode === "expanded" && !historyPreview.active ? handoffControls : undefined}
-                        turnRetry={mode === "expanded" && !historyPreview.active ? turnRetry : undefined}
-                        onEditAndResend={mode === "expanded" && !historyPreview.active ? openResendAction : undefined}
+                        onFork={canActOnTranscript ? onFork : undefined}
+                        handoff={canActOnTranscript ? handoffControls : undefined}
+                        turnRetry={canActOnTranscript ? turnRetry : undefined}
+                        onEditAndResend={canActOnTranscript ? openResendAction : undefined}
                         editAndResendUnavailableReason={promptUnavailableReason ?? undefined}
-                        onEditInFork={mode === "expanded" && !historyPreview.active ? openForkEditAction : undefined}
+                        onEditInFork={canActOnTranscript ? openForkEditAction : undefined}
                         editInForkAvailabilityByItem={mode === "expanded" ? editInForkAvailabilityByItem : undefined}
                         forkAvailabilityByTurn={mode === "expanded" ? forkAvailabilityByTurn : undefined}
                         revealRequest={timelineRevealRequest}
                         onRevealHandled={handleTimelineReveal}
-                        questionContext={historyPreview.active ? undefined : timelineQuestionContext}
+                        questionContext={historyPreview.active || archivedAssistantThread ? undefined : timelineQuestionContext}
                         subagentStatus={timelineSubagentStatus}
                       />
                     </Profiler>
@@ -7605,7 +7746,7 @@ function SessionDetailLoaded({
               {/* One place for every transcript state, so a pending prompt or receipt never remounts
                   (and drops the focus it holds) when history arrives; while history loads or fails, a
                   failed message and the recovery receipts still keep their actions (#2171, #2500). */}
-              <PendingPromptBubbles
+              {!archivedAssistantThread && <PendingPromptBubbles
                 prompts={session.pendingPrompts ?? []}
                 deliveredCommandIds={deliveredPromptCommandIds}
                 liveQueueIds={liveQueueIds}
@@ -7617,7 +7758,7 @@ function SessionDetailLoaded({
                 onCancelLive={(commandId) => void cancelLivePendingPrompt(commandId)}
                 onDismiss={(commandId) => void resolvePendingPrompt(commandId, "dismiss")}
                 onRetry={(commandId) => void resolvePendingPrompt(commandId, "retry")}
-              />
+              />}
               {showOptimistic && pending && (
                 <div className="tl-row user">
                   <div className="tl-bubble">
@@ -7668,12 +7809,12 @@ function SessionDetailLoaded({
             {/* The one polite live region for recovery, whatever the control is showing. */}
             <span className="sr-only" role="status" data-transcript-recovery-status>{recoveryAnnouncement}</span>
           </div>
-          {/* While a request is pending it takes the notice slot ahead of every notice, which wait
-              behind the "+N More" in its card's head line (§13.2). */}
-          {mode === "expanded" && requestDockLead && (
+          {assistantRequestDock?.(focusComposerOrTitle)}
+          {/* In Assistant threads requests stay above the composer's notice slot. */}
+          {mode === "expanded" && requestDockLead && !archivedAssistantThread && (
             <SessionNoticeSlot
               sessionId={session.id}
-              entries={sessionNotices}
+              entries={noticesBelowDock ? [] : sessionNotices}
               lead={requestDockLead}
               onFocusLost={focusComposerOrTitle}
             />
@@ -7685,7 +7826,12 @@ function SessionDetailLoaded({
               (#2843). A phone's terminal sheet takes the composer's place, so it hides it too (#2866).
               It stays mounted: the draft returns with it, and Answer Mode keeps a secret answer only
               in its own state. */}
-          {mode === "expanded" && (
+          {archivedAssistantThread && (
+            <Notice tone="info" title="Thread Archived" className="assistant-thread-archive-notice">
+              This thread is read-only.
+            </Notice>
+          )}
+          {mode === "expanded" && !archivedAssistantThread && (
             <div
               className="composer"
               hidden={composerHiddenOnPhone}
@@ -7695,8 +7841,18 @@ function SessionDetailLoaded({
             >
             {/* The one notice slot (§13.2): the most severe session condition, the rest behind
                 "+N More". Session notices are entries of it, never banners of their own. */}
-            {!requestDockLead && (
-              <SessionNoticeSlot sessionId={session.id} entries={sessionNotices} onFocusLost={focusComposerOrTitle} />
+            {(!requestDockLead || noticesBelowDock) && (
+              <SessionNoticeSlot sessionId={session.id} entries={sessionNotices} onFocusLost={focusComposerOrTitle}
+                className={assistantThreadHealth ? "assistant-thread-notice-slot" : undefined}
+                menuClassName={assistantThreadHealth ? "assistant-thread-notice-slot" : undefined} />
+            )}
+            {assistantSignInOpen && signInNeededInSlot && (
+              <Modal title="Provider Sign-In" onClose={() => setAssistantSignInOpen(false)}>
+                {authenticationRequest ? <RequestCard session={session} request={authenticationRequest}
+                  runnerOnline={runnerOnline} presentation="panel" onSessionUpdate={loadSession} />
+                  : assistantLogin ? <ProviderLoginCard runnerId={session.runnerId} login={assistantLogin} embedded />
+                  : <p>Starting sign-in…</p>}
+              </Modal>
             )}
             {switchAccountOpen && (
               <SwitchAccountDialog
@@ -7718,26 +7874,6 @@ function SessionDetailLoaded({
                   ? "Rename failed. Couldn't rename this session."
                   : ""}
             </span>
-            <QueuedMessages
-              sessionId={session.id}
-              prompts={queuedPromptControls}
-              queueHeld={session.queueHeld === true}
-              queueHold={queueHoldTrayView(session, runnerOnline)}
-              agent={composerAgent}
-              steering={steeringAvailabilityInput}
-              requestBusy={composerRequestBusy}
-              refusal={queueRefusal}
-              steeringPending={queueSteeringPending}
-              editingPromptId={queuedEdit?.promptId ?? null}
-              editOpen={queuedEdit !== null}
-              pendingAction={pendingPromptAction}
-              onSteer={(prompt) => void promoteQueuedPrompt(prompt)}
-              onEdit={(prompt) => void beginQueuedPromptEdit(prompt)}
-              onCancel={(prompt) => void api.cancelQueuedPrompt(session.id, prompt.id)
-                .catch((cause: unknown) => showActionError("cancelQueuedMessage", cause))}
-              onDismiss={(prompt) => void resolvePendingPrompt(prompt.id, "dismiss")}
-              onFocusLost={focusComposerOrTitle}
-            />
             <div
               ref={composerBoxRef}
               className={`composer-box${dragActive ? imagesRefused ? " is-drop is-refused" : " is-drop" : ""}${composerAnswerActive ? " answer-mode" : ""}${composerIdleCollapsed ? " idle-collapsed" : ""}${canPrompt ? "" : " is-disabled"}`}
@@ -7786,7 +7922,7 @@ function SessionDetailLoaded({
             >
               {queuedEdit && !composerAnswerActive && (
                 /* Editing is a mode of the card (#2194): a 40px strip at its top names the mode and
-                   holds the way out. The tray marks which row is being edited, so this doesn't. */
+                   holds the way out. The queue below marks the row being edited. */
                 <div className={`composer-mode${queuedEditRecovered ? " is-recovered" : ""}`} role="status">
                   <span className="composer-mode-icon" aria-hidden="true">
                     {queuedEditRecovered ? <WarningIcon size={16} /> : <EditIcon size={16} />}
@@ -7829,6 +7965,26 @@ function SessionDetailLoaded({
                   )}
                 </div>
               )}
+              <QueuedMessages
+                sessionId={session.id}
+                prompts={queuedPromptControls}
+                queueHeld={session.queueHeld === true}
+                queueHold={queueHoldTrayView(session, runnerOnline)}
+                agent={composerAgent}
+                steering={steeringAvailabilityInput}
+                requestBusy={composerRequestBusy}
+                refusal={queueRefusal}
+                steeringPending={queueSteeringPending}
+                editingPromptId={queuedEdit?.promptId ?? null}
+                editOpen={queuedEdit !== null}
+                pendingAction={pendingPromptAction}
+                onSteer={(prompt) => void promoteQueuedPrompt(prompt)}
+                onEdit={(prompt) => void beginQueuedPromptEdit(prompt)}
+                onCancel={(prompt) => void api.cancelQueuedPrompt(session.id, prompt.id)
+                  .catch((cause: unknown) => showActionError("cancelQueuedMessage", cause))}
+                onDismiss={(prompt) => void resolvePendingPrompt(prompt.id, "dismiss")}
+                onFocusLost={focusComposerOrTitle}
+              />
               {pendingQuestion && (
                 <ComposerQuestionResponse
                   sessionId={session.id}
@@ -8205,7 +8361,7 @@ function SessionDetailLoaded({
         )}
         </div>
 
-        {mode === "expanded" && <RightPanel
+        {mode === "expanded" && (assistantPanel ? assistantPanel(setPanelOverlay) : <RightPanel
           state={rightPanel}
           session={session}
           earlierActivityUnloaded={isPartialHistory(eventWindow)}
@@ -8267,7 +8423,7 @@ function SessionDetailLoaded({
           onOpenMachine={() => navigate({ name: "runners", section: "machines" })}
           backgroundInventoryError={backgroundInventoryError}
           onRetryBackgroundInventory={retryBackgroundInventory}
-        />}
+        />)}
       </div>
       {/* A phone opens the summary as a bottom sheet (§7.5, §9.2), so the transcript never sits
           behind a nested scroll box. */}
@@ -8280,6 +8436,10 @@ function SessionDetailLoaded({
         >
           {pinnedSummaryContent}
         </Modal>
+      )}
+      {guardrailsRoute && mode === "expanded" && (
+        <GuardrailsDialog session={session} configRefusal={configRefusal} onSave={saveGuardrails}
+          onClose={() => navigate({ name: "session", id: sessionId }, { replace: true })} />
       )}
       {orchestratorControlsOpen && sessionRole(session) === "orchestrator" && (
         <OrchestratorControlsDialog

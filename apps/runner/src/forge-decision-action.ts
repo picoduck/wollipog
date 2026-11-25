@@ -26,7 +26,12 @@ import type {
   ForgeDecisionActionOutcome,
   ForgeDecisionActionRefusalReason,
 } from "@wollipog/protocol";
-import { forgeActionBranchName } from "@wollipog/protocol";
+import { createHash } from "node:crypto";
+import {
+  forgeActionBranchName, normalizeCiRerunTarget, normalizeReleaseAssets, normalizeReleaseDecision,
+  releaseDecisionPayloadBytes, releasePublishMutation, releaseTagPayload,
+  type ReleaseForgeAction, type ReleasePublishDecisionSnapshot,
+} from "@wollipog/protocol";
 import { classifyGhFailure, type GhRunner } from "./campaign-forge-status.js";
 
 const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/u;
@@ -51,6 +56,225 @@ const UNAVAILABLE_WORDS: Record<string, string> = {
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+const CI_API = ["api", "--hostname", "github.com"];
+
+async function readCiTarget(gh: GhRunner, path: string): Promise<Record<string, unknown> | null> {
+  const result = await gh(CI_API.concat("--method", "GET", path));
+  if (result.code !== null || result.timedOut) return null;
+  try { return record(JSON.parse(result.stdout)); } catch { return null; }
+}
+
+async function readCiJob(
+  gh: GhRunner, target: NonNullable<ReturnType<typeof normalizeCiRerunTarget>>,
+): Promise<{ job: Record<string, unknown> } | { refusal: ForgeDecisionActionResult }> {
+  const { repository, runId, headSha, jobId, attempt } = target;
+  const job = await readCiTarget(gh, `repos/${repository}/actions/jobs/${jobId}`);
+  if (!job) return { refusal: refused("forge_unavailable", "GitHub could not verify the approved CI job.") };
+  if (job.id !== jobId || job.run_id !== runId || job.run_attempt !== attempt || job.head_sha !== headSha ||
+      typeof job.html_url !== "string" ||
+      job.html_url.toLowerCase() !== `https://github.com/${repository}/actions/runs/${runId}/job/${jobId}`) {
+    return { refusal: refused("ci_target_mismatch", "The CI job does not match the approved repository, run, head or attempt.") };
+  }
+  return { job };
+}
+
+export async function inspectCiRerunJob(
+  action: Extract<ForgeDecisionAction, { kind: "ci_rerun_inspect_job" }>, gh: GhRunner,
+): Promise<ForgeDecisionActionResult & { jobName?: string }> {
+  const target = normalizeCiRerunTarget(action);
+  if (!target || target.jobId === undefined) return refused("ci_target_mismatch", "The CI job target is invalid.");
+  const result = await readCiJob(gh, target);
+  if ("refusal" in result) return result.refusal;
+  const name = typeof result.job.name === "string" ? result.job.name.trim() : "";
+  return { outcome: "ci_job_inspected", ...(name && name.length <= 200 && !/[\p{Cc}\p{Cf}]/u.test(name) ? { jobName: name } : {}) };
+}
+
+export async function executeCiRerun(
+  action: Extract<ForgeDecisionAction, { kind: "ci_rerun" }>,
+  gh: GhRunner,
+  writeFence: { begin: () => boolean; release: () => void },
+): Promise<ForgeDecisionActionResult> {
+  const target = normalizeCiRerunTarget(action);
+  if (!target) return refused("ci_target_mismatch", "The approved CI target is invalid.");
+  const { repository, runId, jobId, headSha, attempt } = target;
+  const runs = `repos/${repository}/actions/runs/${runId}`;
+  const jobs = `repos/${repository}/actions/jobs/${jobId}`;
+  if (jobId !== undefined) {
+    const result = await readCiJob(gh, target);
+    if ("refusal" in result) return result.refusal;
+    if (result.job.status !== "completed") return refused("forge_refused", "The CI job is not complete.");
+  }
+  // Read the run last. GitHub's write is addressed by immutable run or job ID and does not
+  // accept an attempt precondition. The fence excludes other Wollipog writes to this attempt.
+  const run = await readCiTarget(gh, runs);
+  if (!run) return refused("forge_unavailable", "GitHub could not verify the approved CI run.");
+  const reportedRepository = record(run.repository)?.full_name;
+  if (run.id !== runId || run.head_sha !== headSha || run.run_attempt !== attempt ||
+      typeof reportedRepository !== "string" || reportedRepository.toLowerCase() !== repository) {
+    return refused("ci_target_mismatch", "The CI run does not match the approved repository, run, head or attempt.");
+  }
+  if (run.status !== "completed") return refused("forge_refused", "The CI run is not complete.");
+  if (!writeFence.begin()) return { outcome: "uncertain" };
+  const written = await gh(CI_API.concat("--include", "--method", "POST", `${jobId === undefined ? runs : jobs}/rerun`));
+  if (written.timedOut) return { outcome: "uncertain" };
+  const status = Number(/^HTTP\/\S+ (\d{3})\b/u.exec(written.stdout)?.[1]);
+  if (written.code === null && status === 201) return { outcome: "rerun_requested" };
+  if ([400, 401, 403, 404, 409, 422, 429].includes(status)) {
+    writeFence.release();
+    return refused("forge_refused", "GitHub refused the CI rerun.");
+  }
+  return { outcome: "uncertain" };
+}
+
+const RELEASE_REF_QUERY = `query($owner:String!,$name:String!,$ref:String!){
+  repository(owner:$owner,name:$name){ nameWithOwner defaultBranchRef{target{oid}}
+    ref(qualifiedName:$ref){target{oid __typename}} } }`;
+
+const releaseStale = (summary: string) => refused("release_target_mismatch", summary);
+const releaseUnavailable = () => refused("forge_unavailable", "GitHub could not verify the release state.");
+
+function stableBefore(previous: string, next: string): boolean {
+  const left = previous.slice(1).split(".").map(Number);
+  const right = next.slice(1).split(".").map(Number);
+  for (let index = 0; index < left.length; index++) {
+    if (left[index] !== right[index]) return left[index]! < right[index]!;
+  }
+  return false;
+}
+
+async function observedPublishPreconditions(target: ReleasePublishDecisionSnapshot, gh: GhRunner): Promise<ForgeDecisionActionResult | null> {
+  const { repository, releaseId, releasePayload, commitSha, tag } = target;
+  const root = `repos/${repository}`;
+  if (releasePayload.workflow) {
+    const { runId, attempt } = releasePayload.workflow;
+    const run = await readCiTarget(gh, `${root}/actions/runs/${runId}`);
+    if (!run) return releaseUnavailable();
+    const runRepository = record(run.repository)?.full_name;
+    if (run.id !== runId || run.run_attempt !== attempt || run.head_sha !== commitSha || run.head_branch !== tag ||
+        run.status !== "completed" || run.conclusion !== "success" || typeof runRepository !== "string" ||
+        runRepository.toLowerCase() !== repository) return releaseStale("The approved release workflow attempt changed.");
+  }
+  const latest = await gh(CI_API.concat(`${root}/releases/latest`));
+  const expected = releasePayload.previousStable;
+  if (latest.code !== null) {
+    if (latest.timedOut || !/\(HTTP 404\)/u.test(latest.stderr)) return releaseUnavailable();
+    if (expected) return releaseStale("The latest stable release no longer matches the approval.");
+  } else {
+    const found = record(parseJsonOrNull(latest.stdout));
+    if (!found) return releaseUnavailable();
+    if (!expected || found.id !== expected.id || found.tag_name !== expected.tag || found.draft !== false ||
+        found.prerelease !== false || !stableBefore(expected.tag, tag)) {
+      return releaseStale("The latest stable release changed or is newer than the approved release.");
+    }
+  }
+  const rows: unknown[] = [];
+  for (const page of [1, 2]) {
+    const result = await gh(CI_API.concat(`${root}/releases/${releaseId}/assets?per_page=100&page=${page}`));
+    const assets = result.code === null && !result.timedOut ? parseJsonOrNull(result.stdout) : null;
+    if (!Array.isArray(assets) || assets.length > 100) return releaseUnavailable();
+    rows.push(...assets);
+    if (assets.length < 100) break;
+  }
+  const inventory = normalizeReleaseAssets(rows);
+  if (!inventory || JSON.stringify(inventory) !== JSON.stringify(releasePayload.assets)) {
+    return releaseStale("The approved release asset identities or digests changed.");
+  }
+  const draft = await readCiTarget(gh, `${root}/releases/${releaseId}`);
+  if (!draft) return releaseUnavailable();
+  if (draft.id !== releaseId || draft.tag_name !== tag || draft.draft !== true || draft.prerelease !== false ||
+      draft.name !== releasePayload.draft.name || draft.body !== releasePayload.draft.body ||
+      draft.target_commitish !== releasePayload.draft.targetCommitish) {
+    return releaseStale("The approved draft or its metadata changed.");
+  }
+  return null;
+}
+
+/** GitHub has no conditional release update. Check the draft, inventory and tag immediately before
+ * the one write and fence the target across occurrences. Never retry a write with an unclear result. */
+export async function executeReleaseDecision(
+  action: ReleaseForgeAction,
+  runGh: GhRunner,
+  writeFence: { begin: () => boolean; release: () => void },
+): Promise<ForgeDecisionActionResult> {
+  const { kind, ...input } = action;
+  const target = normalizeReleaseDecision({ ...input, category: kind });
+  if (!target || createHash("sha256").update(releaseDecisionPayloadBytes(target)).digest("hex") !== target.releasePayloadDigest) {
+    return releaseStale("The release payload does not match its approved digest.");
+  }
+  // Leave time to report the outcome before the control plane's dispatch timeout.
+  const deadline = AbortSignal.timeout(90_000);
+  const gh: GhRunner = (args, _signal, stdin) => runGh(args, deadline, stdin);
+  const { repository, tag, commitSha } = target;
+  const root = `repos/${repository}`;
+  const ref = `refs/tags/${tag}`;
+  const readRef = () => readRepository(gh, RELEASE_REF_QUERY, repository, [["ref", ref]]);
+  let endpoint: string;
+  let method: string;
+  let payload: object;
+  if (target.category === "release_tag") {
+    const before = await readRef();
+    if ("refusal" in before) return before.refusal;
+    const defaultTip = record(record(before.data.defaultBranchRef)?.target)?.oid;
+    if (typeof defaultTip !== "string" || !SHA.test(defaultTip) || before.data.ref === undefined) return releaseUnavailable();
+    if (before.data.ref !== null) return releaseStale("The approved release tag already exists.");
+    const contained = await readCiTarget(gh, `${root}/compare/${commitSha}...${defaultTip}?per_page=1`);
+    if (!contained) return releaseUnavailable();
+    if ((contained.status !== "ahead" && contained.status !== "identical") || contained.behind_by !== 0 ||
+        record(contained.merge_base_commit)?.sha !== commitSha) {
+      return releaseStale("The approved commit is no longer on the default branch.");
+    }
+    const current = await readRef();
+    if ("refusal" in current) return current.refusal;
+    if (current.data.ref !== null || record(record(current.data.defaultBranchRef)?.target)?.oid !== defaultTip) {
+      return releaseStale("The release tag or default branch changed during verification.");
+    }
+    endpoint = `${root}/git/refs`;
+    method = "POST";
+    payload = releaseTagPayload(target);
+  } else {
+    const problem = await observedPublishPreconditions(target, gh);
+    if (problem) return problem;
+    const current = await readRef();
+    if ("refusal" in current) return current.refusal;
+    let tagObject = record(record(current.data.ref)?.target);
+    if (tagObject?.__typename === "Tag") {
+      for (let depth = 0; depth < 5 && tagObject?.__typename === "Tag"; depth++) {
+        if (typeof tagObject.oid !== "string" || !SHA.test(tagObject.oid)) return releaseUnavailable();
+        const annotated = await readCiTarget(gh, `${root}/git/tags/${tagObject.oid}`);
+        const object = record(annotated?.object);
+        if (!object) return releaseUnavailable();
+        tagObject = { oid: object.sha, __typename: object.type === "tag" ? "Tag" : object.type === "commit" ? "Commit" : "" };
+      }
+    }
+    if (tagObject?.__typename !== "Commit" || tagObject.oid !== commitSha) {
+      return releaseStale("The release tag no longer points to the approved commit.");
+    }
+    endpoint = `${root}/releases/${target.releaseId}`;
+    method = "PATCH";
+    payload = releasePublishMutation(target);
+  }
+  if (deadline.aborted) return releaseUnavailable();
+  if (!writeFence.begin()) return { outcome: "uncertain" };
+  const written = await gh(CI_API.concat("--method", method, endpoint, "--input", "-"), undefined, JSON.stringify(payload));
+  if (written.timedOut) return { outcome: "uncertain" };
+  if (written.code === null) {
+    const result = record(parseJsonOrNull(written.stdout));
+    if (target.category === "release_tag" && result?.ref === ref && record(result.object)?.sha === commitSha &&
+        record(result.object)?.type === "commit") return { outcome: "release_tagged" };
+    if (target.category === "release_publish" && result?.id === target.releaseId && result.tag_name === tag &&
+        result.draft === false && result.prerelease === false && result.name === target.releasePayload.name &&
+        result.body === target.releasePayload.body && typeof result.published_at === "string" && result.published_at) {
+      return { outcome: "release_published" };
+    }
+    return { outcome: "uncertain" };
+  }
+  if (/\(HTTP (?:400|401|403|404|409|422|429)\)/u.test(written.stderr) && !/connection|timeout|EOF/u.test(written.stderr)) {
+    writeFence.release();
+    return refused("forge_refused", "GitHub refused the approved release write.");
+  }
+  return { outcome: "uncertain" };
 }
 
 /** One GraphQL read; the repository object, or a refusal. */
@@ -173,6 +397,7 @@ async function branchTip(gh: GhRunner, action: Extract<ForgeDecisionAction, { ki
 export async function executeBranchDeletion(
   action: Extract<ForgeDecisionAction, { kind: "branch_deletion" }>,
   gh: GhRunner,
+  beforeWrite?: () => Promise<ForgeDecisionActionResult | null>,
 ): Promise<ForgeDecisionActionResult> {
   if (!REPOSITORY.test(action.repository) || !forgeActionBranchName(action.branch) || !Number.isSafeInteger(action.pullRequest) ||
       action.pullRequest < 1 || !SHA.test(action.headSha) || !SHA.test(action.mergeCommitSha)) {
@@ -201,6 +426,10 @@ export async function executeBranchDeletion(
   if (current === null) return { outcome: "already_deleted" };
   if (tip !== action.headSha) {
     return refused("tip_moved", "The branch tip is no longer the approved merged head, so it was left alone.");
+  }
+  if (beforeWrite) {
+    const refusal = await beforeWrite();
+    if (refusal) return refusal;
   }
   // GitHub applies `beforeOid` atomically: the deletion happens only while the tip is the head.
   const deleted = await gh(["api", "graphql", "--hostname", "github.com", "-f", `query=${DELETION_MUTATION}`,
@@ -235,8 +464,9 @@ const ENQUEUE_QUERY = `query($owner:String!,$name:String!,$number:Int!){
 export async function executePullRequestEnqueue(
   action: Extract<ForgeDecisionAction, { kind: "pr_merge_enqueue" }>,
   gh: GhRunner,
+  beforeWrite?: () => Promise<ForgeDecisionActionResult | null>,
 ): Promise<ForgeDecisionActionResult> {
-  return pullRequestEnqueue(action, gh, true);
+  return pullRequestEnqueue(action, gh, true, false, beforeWrite);
 }
 
 /** A reconciliation read (#4067): the same read as an enqueue, then stop. `already_merged` only for
@@ -259,6 +489,7 @@ async function pullRequestEnqueue(
   gh: GhRunner,
   write: boolean,
   retirement = false,
+  beforeWrite?: () => Promise<ForgeDecisionActionResult | null>,
 ): Promise<ForgeDecisionActionResult> {
   if (!REPOSITORY.test(action.repository) || !Number.isSafeInteger(action.pullRequest) || action.pullRequest < 1 || !SHA.test(action.headSha)) {
     return refused("pull_request_mismatch", "The decision does not name a GitHub pull request this runner can enqueue.");
@@ -280,6 +511,10 @@ async function pullRequestEnqueue(
   if (!write) return refused("pull_request_mismatch", "The pull request has not merged; nothing was enqueued.");
   if (pr.state !== "OPEN") return refused("pull_request_mismatch", "The pull request is closed.");
   if (record(pr.mergeQueueEntry)) return { outcome: "already_queued" };
+  if (beforeWrite) {
+    const refusal = await beforeWrite();
+    if (refusal) return refusal;
+  }
   const url = `https://github.com/${action.repository}/pull/${action.pullRequest}`;
   // The canonical approved command: pinned to the head, never --delete-branch.
   const merged = await gh(["pr", "merge", url, "--squash", "--match-head-commit", action.headSha]);

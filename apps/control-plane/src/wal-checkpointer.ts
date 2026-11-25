@@ -1,6 +1,7 @@
 import { stat } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { Worker } from "node:worker_threads";
+import { FILE_BACKED_PAGE_CACHE_PRAGMA } from "./sqlite-page-cache.js";
 
 /**
  * Checkpoints the control plane's write-ahead log from a worker thread (#2761).
@@ -66,6 +67,7 @@ const done = new Int32Array(workerData.done);
 const passes = new Int32Array(workerData.passes);
 const hold = workerData.hold ? new Int32Array(workerData.hold) : null;
 const db = new DatabaseSync(workerData.location);
+db.exec("${FILE_BACKED_PAGE_CACHE_PRAGMA}");
 // A checkpoint that copies frames flushes the log first and the database after. Set explicitly: it
 // is what makes such a pass end the exposure of commits relaxed to synchronous=NORMAL.
 db.exec("PRAGMA synchronous = FULL");

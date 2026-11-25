@@ -19,8 +19,6 @@ import {
   RIGHT_PANEL_MAX_WIDTH,
   RIGHT_PANEL_MIN_WIDTH,
   clampRightPanelWidth,
-  rightPanelDragCeiling,
-  rightPanelOverlays,
   resolveRightPanelDrag,
   type RightPanelMode,
 } from "../right-panel.js";
@@ -49,6 +47,7 @@ import { BackgroundWorkPanel, type BackgroundJobPageRequest } from "./Background
 import type { BackgroundParentTurn } from "../background-work.js";
 import { SessionRequestPanel, sessionRequestPanelKey, type DescendantRequestStatus } from "./SessionRequestPanel.js";
 import { CampaignStatusPanel } from "./CampaignStatusPanel.js";
+import { useSidePanelLayout } from "./useSidePanelLayout.js";
 import { useIsCoarsePointer, useIsMobile } from "./useIsMobile.js";
 import type { CampaignStatusAvailability } from "../campaign-status.js";
 import { useAccessibleMenu } from "./interactions.js";
@@ -375,6 +374,7 @@ export function RightPanel({
   onOpenSession?: (sessionId: string) => void;
   /** Opens another session at one of its own requests (#4337); without it, the session alone opens. */
   onOpenSessionRequest?: (sessionId: string, requestId: string) => void;
+
 }) {
   // The panels show ages that read the clock as they render (requests, decisions, background work),
   // and moved on with every paced upsert while the session view rendered for them (#2872).
@@ -433,37 +433,11 @@ export function RightPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phone, state.open]);
 
-  // The row the chat column and the panel share (`.detail-columns`), measured before paint so the
-  // panel never shows docked for a frame where it overlays (§15.2; #2725). Its width does not depend
-  // on the panel's presentation, so overlaying cannot flip the answer back.
-  const asideRef = useRef<HTMLElement>(null);
+  const { asideRef, ceiling, effectiveWidth, overlaysAtWidth } = useSidePanelLayout(state.open, phone, state.width);
   const closeRef = useRef<HTMLButtonElement>(null);
-  // Whether keyboard focus is on the resize handle, which an overlay removes (#2725). A blur that
-  // comes from the handle being removed leaves this set, so focus can move on to Close Panel.
+  // When a resize handle disappears, move its focus to Close Panel.
   const resizerFocused = useRef(false);
-  const [columnsWidth, setColumnsWidth] = useState<number | null>(null);
-  useLayoutEffect(() => {
-    const columns = asideRef.current?.parentElement;
-    if (!state.open || !columns) return;
-    // A row with no width has not been laid out (or is hidden); it docks, as before measuring.
-    const measure = () => setColumnsWidth(columns.getBoundingClientRect().width || null);
-    measure();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(measure);
-    observer.observe(columns);
-    return () => observer.disconnect();
-  }, [state.open]);
-  // The drag ceiling as derived state (the rendered width and the separator's ARIA range both
-  // re-derive from it): what the 480px rule leaves in the measured row (#2845). The stored width
-  // PREFERENCE is left untouched, so a temporary window shrink never clobbers the size the user
-  // chose. Same stance as the shell dock's height.
-  const ceiling = rightPanelDragCeiling(columnsWidth);
-  // Expanded, the panel fills the row in place of the chat column (#2845); phones have no Expand.
   const expanded = state.open && state.expanded && !phone;
-  // Every mode docks or overlays by the same rule; a phone's panel is full-screen (styles.css).
-  // Expanded, the panel still knows which it would be, so Restore returns there.
-  const overlaysAtWidth = !phone && columnsWidth !== null &&
-    rightPanelOverlays(columnsWidth, clampRightPanelWidth(state.width, ceiling));
   const overlay = state.open && !expanded && overlaysAtWidth;
   // Only a docked panel has a resize handle.
   const handleShown = !overlay && !expanded;
@@ -649,7 +623,6 @@ export function RightPanel({
 
   // What actually renders: the preference clamped to the live viewport ceiling. Gestures
   // start from THIS (what the user sees), and only gestures write the preference back.
-  const effectiveWidth = clampRightPanelWidth(state.width, ceiling);
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;

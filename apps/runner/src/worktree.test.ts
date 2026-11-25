@@ -509,6 +509,7 @@ test("a session worktree starts at the fetched remote default when the primary c
     const handle = await createWorktree(repo, "s_stale_primary", { dataDir });
     assert.equal(handle.created, true);
     assert.equal(handle.baseRef, "origin/main");
+    assert.equal(handle.baseFallbackWarning, undefined);
     assert.equal(execFileSync("git", ["-C", handle.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), remoteTip);
     // The primary checkout itself is left exactly where it was.
     assert.equal(execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), staleHead);
@@ -526,29 +527,75 @@ test("a session worktree starts at the fetched remote default when the primary c
   }
 });
 
-test("a session worktree keeps the primary checkout's HEAD when it is not merely behind the remote", { skip: !haveGit() }, async () => {
-  const root = mkdtempSync(join(tmpdir(), "wollipog-wt-diverged-primary-"));
-  const dataDir = join(root, "runner-data");
-  try {
-    const { repo } = primaryBehindRemote(root);
-    // A local commit the remote lacks makes HEAD a deliberate starting point, not a stale one.
-    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-q", "-m", "local work"]);
+for (const relation of ["equal", "ahead", "diverged", "no-origin"] as const) {
+  test(`automatic worktree keeps a deliberate HEAD without a fallback when ${relation}`, { skip: !haveGit() }, async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-wt-local-primary-"));
+    const dataDir = join(root, "runner-data");
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const { repo } = primaryBehindRemote(root, relation === "diverged" ? 1 : 0);
+    if (relation === "ahead" || relation === "diverged") {
+      execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-q", "-m", "local work"]);
+    }
+    if (relation === "no-origin") execFileSync("git", ["-C", repo, "remote", "remove", "origin"]);
     const localHead = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-    const handle = await createWorktree(repo, "s_diverged_primary", { dataDir });
+    const handle = await createWorktree(repo, "s_local_primary", { dataDir });
     assert.equal(handle.baseRef, undefined);
+    assert.equal(handle.baseFallbackWarning, undefined);
     assert.equal(execFileSync("git", ["-C", handle.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), localHead);
     await removeWorktree(repo, handle, { dataDir });
+  });
+}
 
-    // An unreachable remote falls back to HEAD instead of failing the session's launch.
-    execFileSync("git", ["-C", repo, "remote", "set-url", "origin", join(root, "missing.git")]);
-    const offline = await createWorktree(repo, "s_offline_primary", { dataDir });
-    assert.equal(offline.baseRef, undefined);
-    assert.equal(execFileSync("git", ["-C", offline.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), localHead);
-    await removeWorktree(repo, offline, { dataDir });
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+for (const step of ["lookup", "fetch"] as const) {
+  test(`launch with a failed remote ${step} records a HEAD fallback and emits a safe warning`, { skip: !haveGit() }, async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-wt-fallback-"));
+    const dataDir = join(root, "runner-data");
+    const { repo, staleHead } = primaryBehindRemote(root);
+    const secret = "fixture-credential-do-not-display";
+    if (step === "lookup") {
+      execFileSync("git", ["-C", repo, "remote", "set-url", "origin", join(root, `missing-${secret}.git`)]);
+    } else {
+      // ls-remote still succeeds. Only updating the fetched tracking ref is blocked.
+      writeFileSync(join(repo, ".git", "refs", "remotes", "origin", "main.lock"), "");
+    }
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const messages: RunnerToControlPlane[] = [];
+    const manager = new SessionManager(
+      (message) => messages.push(message), () => {}, store, "runner", undefined,
+      (() => ({
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
+        setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => null,
+      })) as never, dataDir, 1,
+    );
+    t.after(() => {
+      manager.shutdownAll();
+      rmSync(root, { recursive: true, force: true });
+    });
+
+    const sessionId = "s_worktree_fallback";
+    assert.equal(await manager.start({
+      sessionId, workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: true, driver: "claude-code",
+      context: { kind: "native" },
+    }), true);
+
+    const warning = messages.flatMap((message) => message.type === "session_event" && message.payload.kind === "error" &&
+      message.payload.source === "worktree_base_fallback" ? [message.payload] : []);
+    assert.equal(warning.length, 1);
+    assert.equal(warning[0]?.nonFatal, true);
+    assert.match(warning[0]!.message, /local HEAD.*may be behind/i);
+    assert.match(warning[0]!.message, step === "lookup" ? /resolving the remote default branch.*not a Git repository/i
+      : /fetching the remote default branch.*could not lock a ref/i);
+    assert.ok(!warning[0]!.message.includes(secret));
+    assert.ok(!warning[0]!.message.includes(root));
+    const worktree = store.readMeta(sessionId)?.worktrees?.[0];
+    assert.equal(worktree?.baseRef, "HEAD");
+    assert.equal(worktree?.baseCommit, staleHead);
+    assert.equal(worktree?.baseFallback, "remote_check_failed");
+    assert.equal(execFileSync("git", ["-C", worktree!.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), staleHead);
+  });
+}
 
 test("forced cleanup refuses a replacement at a persisted worktree path", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-wt-cleanup-identity-"));

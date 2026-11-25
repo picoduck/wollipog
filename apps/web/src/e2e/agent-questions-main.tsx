@@ -1,12 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ownerQuestionAgentQuestions, presentOwnerQuestionRequest, scopeProposalAgentQuestions, summarizeQuestionAnswers, type AgentQuestion,
+import { CAMPAIGN_HANDOFF_QUESTION_KEY, ownerQuestionAgentQuestions, presentOwnerQuestionRequest, scopeProposalAgentQuestions, summarizeQuestionAnswers, type AgentQuestion,
   type CampaignIssueScopeSnapshot, type CampaignScopeProposal, type OwnerDecisionSnapshot,
   type PendingApproval, type SessionView, type WorkflowDecisionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { focusSessionRequest, useQuestionDraftRetirement } from "../components/SessionApproval.js";
-import { ComposerQuestionResponse } from "../components/ComposerQuestionResponse.js";
+import { ComposerQuestionResponse, type AnswerField } from "../components/ComposerQuestionResponse.js";
 import { QueuedMessages } from "../components/QueuedMessages.js";
 import { EventTimeline, type TimelineRevealRequest } from "../components/EventTimeline.js";
 import { SESSION_NOTICE_RANK, SessionNoticeSlot, type SessionNoticeEntry } from "../components/SessionNoticeSlot.js";
@@ -34,6 +34,7 @@ declare global {
   interface Window {
     agentQuestionCalls: AnswerCall[];
     replaceAgentQuestion(): void;
+    rerenderAgentQuestion(): void;
     clearAgentQuestion(): void;
     releaseAgentQuestion(): void;
     setAgentQuestionOnline(online: boolean): void;
@@ -184,6 +185,24 @@ const longChoiceQuestions: AgentQuestion[] = [{
   options: ["Proceed", "Hold", "Split the Plan", "Ask Again Later", "Escalate", "Close It"].map((label) => ({ label })),
 }];
 
+// A phone types Something Else in the composer (#4714): a waiting child, as reported, then a note.
+const somethingElseQuestions: AgentQuestion[] = [{
+  id: "runner",
+  header: "Runner",
+  question: "The runner hasn't picked up the child session yet. What should I do?",
+  context: "It has waited in the runner's queue for two hours.",
+  options: [
+    { label: "I'll Check the Runner (Recommended)", description: "You inspect or restart the runner; I wait for it to pick up the child." },
+    { label: "Replace the Child", description: "I stop the waiting child and start a fresh one from the same pull request." },
+    { label: "Keep Waiting", description: "Leave it queued; I check again on each wake." },
+  ],
+}, {
+  id: "after",
+  header: "Afterwards",
+  question: "Once it runs, should I merge the pull request myself?",
+  options: [{ label: "Yes, Merge It" }, { label: "No, Ask Me First" }],
+}];
+
 // Complete Markdown drafts taller than the composer viewport (#3256).
 const issueDraftQuestions: AgentQuestion[] = [{
   id: "review", header: "Review",
@@ -212,12 +231,19 @@ const ownerDecision: OwnerDecisionSnapshot = {
     { optionId: "stop", label: "Stop and Report", description: "Fail the child's step at once." },
   ],
 };
-const ownerQuestionSnapshot = params.get("handoffs") === "true" ? {
+const campaignHandoff = params.get("handoffs") === "true";
+const handoffItems = params.has("handoffStress") ? Array.from({ length: 8 }, (_, index) =>
+  `- Review Work Item ${index + 1} (human)\n` +
+    "  Reason: A prerequisite needs the owner to review the remaining work against the existing design.\n" +
+    "  Next action: Confirm the delivery plan and record the next step in Campaign Status."
+) : [
+  "- picoduck/wollipog#4541: Owner Handoff (human)\n  Reason: A design decision is outside campaign authority.\n  Next action: Choose the supported delivery path.",
+  "- picoduck/wollipog#4540: External Review (external)\n  Reason: Awaiting the maintainer's review.\n  Next action: Review the proposed change.",
+];
+const ownerQuestionSnapshot = campaignHandoff ? {
   category: "owner_decision" as const, kind: "question" as const,
   question: "This campaign handed work to you. What should happen next?", options: [],
-  material: "- picoduck/wollipog#4541: Owner Handoff (human)\n  Reason: A design decision is outside campaign authority.\n  Next action: Choose the supported delivery path.\n\n" +
-    "- picoduck/wollipog#4540: External Review (external)\n  Reason: Awaiting the maintainer's review.\n  Next action: Review the proposed change.\n\n" +
-    "This question authorizes nothing. Your answer grants no action authority.",
+  material: [...handoffItems, "This question authorizes nothing. Your answer grants no action authority."].join("\n\n"),
 } : { ...ownerDecision, kind: "question" as const };
 const ownerQuestionSet = ownerQuestionAgentQuestions(ownerQuestionSnapshot);
 const ownerRaw = params.get("set") === "owner-raw";
@@ -282,7 +308,7 @@ function ownerRawCard(requestId: string, snapshot: OwnerDecisionSnapshot = owner
     ],
     context: { toolName: "Typed Workflow Decision", input: JSON.stringify(snapshot, null, 2) },
     workflowDecision: { occurrenceId, requestId, sessionId: "agent-question-session", controllingSessionId: "agent-question-session",
-      resourceKey: "bridge-retry", category: "owner_decision", status: "pending", authority: "human", policyRevision: 1,
+      resourceKey: campaignHandoff ? CAMPAIGN_HANDOFF_QUESTION_KEY : "bridge-retry", category: "owner_decision", status: "pending", authority: "human", policyRevision: 1,
       resourceDigest: "digest", createdAt: askedAt, authorityEvaluation: { owner: "human", reason: "owner_kept" },
       resourceSnapshot: snapshot } as unknown as WorkflowDecisionView,
   };
@@ -410,6 +436,8 @@ function Fixture() {
       ? scopeProposalAgentQuestions(scopeProposalSnapshot)
       : params.get("set") === "issue-drafts"
       ? issueDraftQuestions
+      : params.get("set") === "something-else"
+      ? somethingElseQuestions
       : params.get("set") === "long"
       ? longQuestions
       : params.get("set") === "long-text"
@@ -435,8 +463,20 @@ function Fixture() {
   const [runnerOnline, setRunnerOnline] = useState(initialOnline);
   const [resolved, setResolved] = useState(false);
   const [answerActive, setAnswerActive] = useState(responseStyle === "composer");
-  const answerInputRef = useRef<HTMLInputElement>(null);
+  const answerInputRef = useRef<AnswerField>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // As the session does, a card's Answer (or a phone's Something Else, #4714) hands focus to the
+  // answer field in the commit that opens Answer Mode.
+  const focusAnswerRef = useRef(false);
+  const enterAnswerMode = useCallback(() => {
+    focusAnswerRef.current = true;
+    setAnswerActive(true);
+  }, []);
+  useLayoutEffect(() => {
+    if (!answerActive || !focusAnswerRef.current) return;
+    focusAnswerRef.current = false;
+    answerInputRef.current?.focus();
+  }, [answerActive]);
 
   useEffect(() => {
     if (!resolved && responseStyle === "composer") setAnswerActive(true);
@@ -447,6 +487,8 @@ function Fixture() {
     setQuestions(replacementQuestions);
     setResolved(false);
   };
+  window.rerenderAgentQuestion = () => setQuestions((current) => current.map((question) => ({ ...question,
+    options: question.options.map((option) => ({ ...option })) })));
   window.releaseAgentQuestion = () => releasePending?.();
   window.clearAgentQuestion = () => setResolved(true);
   window.setAgentQuestionOnline = (online) => setRunnerOnline(online);
@@ -466,6 +508,7 @@ function Fixture() {
         answers: body.answers,
         action: (body as { action?: "submit" | "dismiss" }).action,
       });
+      if (params.has("wire")) return api.answerQuestion(sessionId, body);
       if (shouldHold) {
         shouldHold = false;
         await new Promise<void>((resolve) => { releasePending = resolve; });
@@ -480,7 +523,7 @@ function Fixture() {
   const dismissed = lastCall?.action === "dismiss";
   const items = useMemo<TimelineItem[]>(() => [
     ...Array.from({ length: rowsBefore }, (_, index) => transcriptRow(index + 1, index, "Earlier")),
-    ...(questionUnloaded ? [] : [{
+    ...(questionUnloaded || campaignHandoff ? [] : [{
       kind: "question" as const,
       id: QUESTION_EVENT_ID,
       requestId,
@@ -495,6 +538,7 @@ function Fixture() {
     ...Array.from({ length: rowsAfter }, (_, index) => transcriptRow(QUESTION_EVENT_ID + 1 + index, index, "Later")),
   ], [dismissed, lastCall, questions, requestId, resolved]);
   const request = useMemo<PendingApproval | null>(() => resolved ? null : ownerRaw ? ownerRawCard(requestId)
+    : campaignHandoff ? presentOwnerQuestionRequest(ownerRawCard(requestId, ownerQuestionSnapshot))
     : childRaw ? childQuestionCard(requestId) : childQuestion ? presentOwnerQuestionRequest(childQuestionCard(requestId))
     : scopeProposalRaw ? scopeProposalCard(requestId) : scopeProposalSet ? presentOwnerQuestionRequest(scopeProposalCard(requestId)) : {
     kind: "question",
@@ -561,13 +605,34 @@ function Fixture() {
   }), [pendingRequestIds, selectedRequestId]);
 
   // Composer Response answers in the composer (#2212): the dock's card is compact, and while Answer
-  // Mode is open the question is shown there alone.
+  // Mode is open the question is shown there alone. The form's card can hand a touch phone's Something
+  // Else to the composer too (#4714), as the session does; `composer=1` offers it. Without it the form
+  // stands for a card no composer can answer (a worker's or a child's), which keeps its own field.
   const composerAnswers = request?.kind === "question" && !resolved && !ownerRaw && !childRaw &&
-    responseStyle === "composer" && (!recoveryRequired || recoveryCanResume);
+    (responseStyle === "composer" || params.get("composer") === "1") && (!recoveryRequired || recoveryCanResume);
   const answering = composerAnswers && answerActive;
-  const composerContent = answering ? (
-    <div className="composer-box answer-mode">
-      <ComposerQuestionResponse
+  const composerContent = (
+    <div className={answering ? "composer-box answer-mode" : "composer-box"}>
+      {queuedPrompts.length > 0 && (
+        <QueuedMessages
+          sessionId={SESSION_ID}
+          prompts={queuedPrompts}
+          queueHeld={false}
+          agent="Claude Code"
+          steering={queuedSteering}
+          requestBusy={false}
+          refusal={null}
+          steeringPending={new Set()}
+          editingPromptId={null}
+          editOpen={false}
+          pendingAction={undefined}
+          onSteer={() => {}}
+          onEdit={() => {}}
+          onCancel={() => {}}
+          onDismiss={() => {}}
+        />
+      )}
+      {answering ? <ComposerQuestionResponse
         sessionId={SESSION_ID}
         requestId={requestId}
         occurrenceId={request?.occurrenceId}
@@ -579,10 +644,8 @@ function Fixture() {
         inputRef={answerInputRef}
         onExit={() => setAnswerActive(false)}
         onSessionUpdate={() => setResolved(true)}
-      />
+      /> : <textarea className="composer-input" aria-label="Composer" placeholder="Do anything" />}
     </div>
-  ) : (
-    <div className="composer-box"><textarea className="composer-input" aria-label="Composer" placeholder="Do anything" /></div>
   );
 
   return (
@@ -627,7 +690,7 @@ function Fixture() {
                         onRevealHandled={handleRevealed}
                         questionContext={questionContext}
                       />
-                      {resolved && <p role="status">Question Answered</p>}
+                      {resolved && <p role="status">{campaignHandoff ? "Handoffs Acknowledged" : "Question Answered"}</p>}
                     </div>
                   </div>
                 </div>
@@ -653,32 +716,13 @@ function Fixture() {
                         readerRef={scrollRef}
                         onConceal={concealTrailing}
                         whereAsked={whereAsked}
-                        composerAnswer={composerAnswers ? { requestId, onAnswer: () => setAnswerActive(true) } : undefined}
+                        composerAnswer={composerAnswers ? { requestId, onAnswer: enterAnswerMode } : undefined}
                       />
                     ),
                   }} />
                 )}
               </div>
               <div className="composer">
-                {queuedPrompts.length > 0 && (
-                  <QueuedMessages
-                    sessionId={SESSION_ID}
-                    prompts={queuedPrompts}
-                    queueHeld={false}
-                    agent="Claude Code"
-                    steering={queuedSteering}
-                    requestBusy={false}
-                    refusal={null}
-                    steeringPending={new Set()}
-                    editingPromptId={null}
-                    editOpen={false}
-                    pendingAction={undefined}
-                    onSteer={() => {}}
-                    onEdit={() => {}}
-                    onCancel={() => {}}
-                    onDismiss={() => {}}
-                  />
-                )}
                 {composerContent}
               </div>
             </div>

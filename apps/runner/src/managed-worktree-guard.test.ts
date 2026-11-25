@@ -1126,6 +1126,45 @@ test("a command with no operand is judged against the directory it would run in"
   assert.equal(commandTargetsGuardState(`ls ${home}; ls`, home, directory), null);
 });
 
+test("recursive commands are checked against their implicit working directory", (t) => {
+  const { home, data, directory, project } = guardLayout(t);
+  const cases = [
+    ["find -maxdepth 3", [true, true, false, true]],
+    ["find -maxdepth 3\n", [true, true, false, true]],
+    ["find . -maxdepth 3", [true, true, false, true]],
+    ["find -maxdepth 2", [false, true, false, true]],
+    ["find -maxdepth 1", [false, false, false, true]],
+    ["du -a", [true, true, false, true]],
+    ["du --max-depth=1", [true, true, false, true]],
+    ["grep -r example", [true, true, false, true]],
+    ["grep -r example .", [true, true, false, true]],
+    ["rg example", [true, true, false, true]],
+    ["ls -R", [true, true, false, true]],
+    ["tree", [true, true, false, true]],
+    ["du -a | wc -l", [true, true, false, true]],
+    ["ls", [false, false, false, true]],
+    ["stat .", [false, false, false, true]],
+  ] as const;
+  for (const [command, expected] of cases) {
+    for (const [index, cwd] of [home, data, project, directory].entries()) {
+      assert.equal(commandTargetsGuardState(command, cwd, directory) !== null, expected[index],
+        `${command} from fixture directory ${index}`);
+    }
+  }
+  for (const command of ["find ./project -maxdepth 3", "du -a ./project", "grep -r example ./project",
+    "rg example ./project", "ls -R ./project", "tree ./project"]) {
+    assert.equal(commandTargetsGuardState(command, home, directory), null, command);
+  }
+  for (const command of ["du -a", "grep -r example", "rg example", "ls -R", "tree"]) {
+    const redirected = `${command} 2>fixture.log`;
+    assertGuardRefused(commandTargetsGuardState(redirected, home, directory), redirected);
+    assert.equal(commandTargetsGuardState(redirected, project, directory), null);
+  }
+  const opaque = "du -a >fixture.log $UNSET";
+  assertGuardRefused(commandTargetsGuardState(opaque, home, directory), opaque);
+  assert.equal(commandTargetsGuardState(opaque, project, directory), null);
+});
+
 test("the reported home-directory listings are allowed while the file tools stay closed", () => {
   const directory = join(homedir(), ".wollipog-test-data", "hooks");
   for (const command of ["ls ~", "ls -la ~/", "ls /", "stat ~", "du -sh ~", "find ~ -maxdepth 1"]) {
@@ -1359,6 +1398,44 @@ test("a ${...} the tokenizer cannot parse is refused as a documented residual, n
 });
 
 const REFUSED_IN_1696 = new URL("./fixtures/guard-refusals-1632/", import.meta.url);
+
+test("quoted command substitutions are checked for guard-state operands", async (t) => {
+  const { project, directory } = guardLayout(t);
+  const relative = "../.wollipog-data/hooks/fixture.txt";
+  const absolute = join(directory, "fixture.txt").replaceAll("\\", "/");
+  // The inner builtin receives a path operand without opening it or producing output.
+  const cases = [
+    ["relative dollar form", `echo "$( : ${relative} )"`, true],
+    ["relative backtick form", `echo "\` : ${relative} \`"`, true],
+    ["absolute dollar form", `echo "$( : '${absolute}' )"`, true],
+    ["absolute backtick form", `echo "\` : '${absolute}' \`"`, true],
+    ["nested form", `echo "$( : "$( : ${relative} )" )"`, true],
+    ["destructive command argument", `rm -rf -- "$( : ${relative} )"`, true],
+    ["unquoted form", `echo $( : ${relative} )`, true],
+    ["unrelated dollar form", 'echo "$(date)"', false],
+    ["unrelated backtick form", 'echo "`date`"', false],
+    ["ordinary quoted arguments", `echo "$(printf '%s' hello)"`, false],
+    ["ordinary quoted escape", `echo "$(printf '%s\\n' hello)"`, false],
+    ["ordinary pipeline", 'echo "$(git ls-files | wc -l)"', false],
+    ["ordinary redirect", 'REV="$(git rev-parse HEAD 2>/dev/null)"', false],
+    ["ordinary quoted variable", 'echo "$(dirname "$0")"', false],
+    ["ordinary adjacent parameter names", 'echo "$(printf "%s" "$firstName${lastName}")"', false],
+    ["ordinary arithmetic", 'echo "$((n + 1))"', false],
+    ["literal heredoc body", `git commit -F - <<'EOF'\nUse "$(a | b)"\nEOF`, false],
+    ["substitution following a literal heredoc", `: <<'EOF'\nIt's literal.\nEOF\necho "$( : ${relative} )"`, true],
+    ["substitution in shell input", `bash <<'EOF'\necho "$( : ${relative} )"\nEOF`, true],
+    ["independent substitutions in one argument", `echo "$(date)$( : ${relative} )"`, true],
+    ["single-quoted literal", "echo '$(date)'", false],
+    ["escaped literal", 'echo "\\$(date)"', false],
+  ] as const;
+  for (const [name, command, refused] of cases) {
+    await t.test(name, () => {
+      const result = commandTargetsGuardState(command, project, directory);
+      if (refused) assertGuardRefused(result, command);
+      else assert.equal(result, null);
+    });
+  }
+});
 
 test("a single-command cat heredoc writing a worktree file is allowed; #1696 multi-command wrappers stay refused (#1734)", (t) => {
   const { project, directory } = guardLayout(t);

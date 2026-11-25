@@ -478,7 +478,7 @@ test("a view switch leads the actions, and a toggle secondary folds into ⋯ as 
   }
 });
 
-test("the detail bar names Back for its destination and keeps destructive actions last in ⋯", async () => {
+test("the detail bar names Back for its destination and groups ⋯ actions with destructive actions last", async () => {
   const calls: string[] = [];
   const view = await mount(
     <DetailBar
@@ -489,6 +489,7 @@ test("the detail bar names Back for its destination and keeps destructive action
       menu={[
         { label: "Close Pod", danger: true, onClick: () => calls.push("close") },
         { label: "Rename…", onClick: () => calls.push("rename") },
+        { label: "Open Pod", separatorBefore: true, onClick: () => calls.push("open") },
       ]}
     />,
   );
@@ -508,9 +509,12 @@ test("the detail bar names Back for its destination and keeps destructive action
     const items = [...domWindow.document.querySelectorAll('[role="menuitem"]')];
     assert.deepEqual(items.map((item) => [item.textContent, item.className]), [
       ["Rename…", "menu-item"],
+      ["Open Pod", "menu-item"],
       ["Close Pod", "menu-item danger"],
     ]);
     assert.equal(items[1]!.previousElementSibling?.getAttribute("role"), "separator",
+      "an explicit separator starts a new group");
+    assert.equal(items[2]!.previousElementSibling?.getAttribute("role"), "separator",
       "a separator sets the destructive item apart (§9.1)");
     await act(async () => back.click());
     assert.deepEqual(calls, ["back"]);

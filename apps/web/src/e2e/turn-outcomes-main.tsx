@@ -22,6 +22,12 @@ const event = (ts: number, payload: SessionEvent["payload"]): SessionEvent =>
   ({ id: ++seq, sessionId: "turn-outcomes", seq, ts, payload }) as SessionEvent;
 
 const events: SessionEvent[] = [
+  ...(params.get("problem") === "worktree-fallback" ? [event(start - 1_000, {
+    kind: "error",
+    nonFatal: true,
+    source: "worktree_base_fallback",
+    message: "The worktree started at local HEAD, which may be behind the remote. Git error while fetching the remote default branch. TLS certificate verification failed.",
+  })] : []),
   event(start, { kind: "user_message", text: "Find why the reader loses its place after a resize." }),
   event(start + 1_000, { kind: "checkpoint", turn: 1 } as SessionEvent["payload"]),
   event(start + 20_000, {

@@ -56,10 +56,11 @@ function ShortcutGroupSection({ group }: { group: ShortcutReferenceGroup }) {
       {group.note && <p id={`${id}-note`} className="shortcut-group-note">{group.note}</p>}
       <dl className="shortcut-list">
         {group.rows.map((row) => (
-          <div className={`shortcut-row${group.note || row.reason ? " is-unavailable" : ""}`} key={row.id}>
+          <div className={`shortcut-row${group.note || row.reason ? " is-unavailable" : ""}${row.description ? " has-description" : ""}`} key={row.id}>
             <dt>{row.label}</dt>
             {row.reason && <dd className="shortcut-reason" title={row.reason}>{row.reason}</dd>}
             <dd className="shortcut-keys"><kbd>{row.keys}</kbd></dd>
+            {row.description && <dd className="shortcut-description">{row.description}</dd>}
           </div>
         ))}
       </dl>
@@ -75,6 +76,7 @@ export function ShortcutReference({
   filesSupported,
   conversationSteeringSupported,
   turnInterruptionSupported,
+  assistantThreadOpen,
 }: {
   onClose: () => void;
   /** The shortcut scope of the page and focus the reference was opened from. */
@@ -84,6 +86,7 @@ export function ShortcutReference({
   filesSupported: boolean;
   conversationSteeringSupported: boolean;
   turnInterruptionSupported: boolean;
+  assistantThreadOpen?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
@@ -107,6 +110,7 @@ export function ShortcutReference({
       conversationSteeringSupported,
       turnInterruptionSupported,
       hiddenRailViews: railPreferences.hidden,
+      assistantThreadOpen,
     },
     keys,
     query,

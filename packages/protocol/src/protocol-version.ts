@@ -1514,30 +1514,66 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 387: Multi-agent runs are retired and their sessions become standalone (Refs #4693).
   387,
   // v388 slot
+  // 388: Owner-selected Assistant thread provider accounts and guarded account handoffs.
+  388,
   // v389 slot
   // v390 slot
+  // 390: Reconcile an externally completed PR merge using read-only forge evidence.
+  390,
   // v391 slot
+  // 391: Owner-confirmed Assistant campaign launch with a separate campaign allowance.
+  391,
   // v392 slot
   // v393 slot
+  // 393: Forward content-safe provider refusals of approved forge actions.
+  393,
   // v394 slot
+  // 394: Bind Add Account profile grants before dispatch with start_provider_login.newAccountId.
+  394,
   // v395 slot
+  // 395: Revalidate a control-plane-registered Location before accepting and applying a live switch (Refs #4557).
+  395,
   // v396 slot
   // v397 slot
+  // 397: Verify and acknowledge Assistant UI evidence image delivery at the runner relay (Refs #4762).
+  397,
   // v398 slot
   // v399 slot
+  // 399: Execute an approved, exact GitHub Actions rerun through the requesting runner (Refs #4761).
+  399,
   // v400 slot
   // v401 slot
+  // 401: Execute exact GitHub release tag and draft publication decisions (Refs #4761).
+  401,
   // v402 slot
+  // 402: Verify a prepared backing session before switching an Assistant thread’s harness (Refs #4765).
+  402,
   // v403 slot
+  // 403: Set up Google Antigravity from Connections: runtime check, remote sign-in and access verification (Refs #4780).
+  403,
   // v404 slot
+  // 404: Install and update a managed Google Antigravity CLI from Connections, verified against Google's release manifest (Refs #4780).
+  404,
   // v405 slot
+  // 405: Structured Wollipog prompt origins in session history (#4800).
+  405,
   // v406 slot
+  // 406: Preserve Assistant thread launch limits while new launches are paused (Refs #4811).
+  406,
   // v407 slot
   // v408 slot
   // v409 slot
+  // 409: Optional Assistant thread health and correlated transcript error notices (Refs #4813).
+  409,
   // v410 slot
+  // 410: Anchor Assistant transcript receipts to provider tool results (Refs #4814).
+  410,
   // v411 slot
+  // 411: UI session upserts can reuse the background inventory already sent on the same socket (Refs #4860).
+  411,
   // v412 slot
+  // 412: Standalone session and Custom campaign root structured owner approvals, issue closures, and owner questions (#4894).
+  412,
   // v413 slot
   // v414 slot
   // v415 slot

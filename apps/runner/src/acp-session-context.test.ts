@@ -77,6 +77,20 @@ test("MCP materialization resolves secret references only from runner env", () =
   ], negotiation(), {}), /requires runner environment variable 'MISSING'/);
 });
 
+test("reporting unsupported MCP servers preserves a remote transport the agent advertises", () => {
+  const omitted: Array<{ name: string; transport: string }> = [];
+  const wire = materializeAcpMcpServers([
+    { type: "sse", name: "activity", url: "https://mcp.example/events", headers: { Authorization: { fromEnv: "SSE_AUTH" } } },
+    { type: "http", name: "docs", url: "https://mcp.example/rpc", headers: { Authorization: { fromEnv: "HTTP_AUTH" } } },
+  ], negotiation({ mcpHttp: true, mcpSse: false }), { HTTP_AUTH: "Bearer fixture" }, (name, transport) => {
+    omitted.push({ name, transport });
+  });
+  assert.deepEqual(omitted, [{ name: "activity", transport: "SSE" }]);
+  assert.deepEqual(wire, [{
+    type: "http", name: "docs", url: "https://mcp.example/rpc", headers: [{ name: "Authorization", value: "Bearer fixture" }],
+  }]);
+});
+
 test("unsupported remote transports fail closed and draft MCP-over-ACP is rejected", () => {
   assert.throws(() => materializeAcpMcpServers([
     { type: "sse", name: "remote", url: "https://mcp.example/sse" },

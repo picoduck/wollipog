@@ -11,11 +11,13 @@ test("descendant checks use persisted ancestry and terminate on malformed cycles
       driver: "acp", useWorktree: false, config: {}, now: 2,
     });
     create("root"); create("child", "root"); create("grandchild", "child"); create("sibling", "root"); create("unrelated");
-    db.setPendingApproval("child", {
+    // Keep the intermediate child quiet: its own pending state must not prune the walk.
+    db.setPendingApproval("grandchild", {
       requestId: "question", kind: "question", title: "Question", options: [],
       questions: [{ id: "q", header: "Next", question: "What next?", options: [] }],
     });
-    const child = db.listSessionDescendantRequestCandidates("root").find((session) => session.id === "child");
+    db.setPendingApproval("sibling", { requestId: "sibling-question", kind: "question", title: "Question", options: [] });
+    const child = db.listSessionDescendantRequestCandidates("root").find((session) => session.id === "grandchild");
     assert.ok(child);
     // Only what a request row needs, plus the child's own harness and account for its card (#2714).
     assert.deepEqual(Object.keys(child).sort(), [
@@ -28,7 +30,7 @@ test("descendant checks use persisted ancestry and terminate on malformed cycles
     assert.equal(child.runnerId, "r");
     assert.equal(child.pendingApproval?.requestId, "question");
     assert.deepEqual(db.listSessionDescendantRequestCandidates("root").map((session) => session.id).sort(),
-      ["child", "grandchild", "sibling"]);
+      ["grandchild", "sibling"]);
     assert.equal(db.isSessionDescendant("root", "child"), true);
     assert.equal(db.isSessionDescendant("root", "grandchild"), true);
     for (const [parent, target] of [["root", "root"], ["child", "root"], ["child", "sibling"],

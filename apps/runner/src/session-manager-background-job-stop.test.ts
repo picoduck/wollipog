@@ -225,6 +225,9 @@ test("stopping a never-firing monitor clears Result Blocked, delivers the siblin
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
     const events = store.readEvents(spec.sessionId);
     assert.equal(events.filter((event) => event.payload.kind === "background_continuation_delivered").length, 1);
+    assert.deepEqual(events.flatMap(({ payload }) =>
+      payload.kind === "stderr" && payload.backgroundPrompt ? [payload.backgroundPrompt] : []),
+    [{ origin: { kind: "background_result" }, text: continuation.text }]);
     assert.equal(fake.prompts.filter((prompt) => prompt.text.startsWith(CONTINUATION_PREFIX)).length, 1);
 
     // Only the monitor ended, by the stop request and not by retiring the provider.
@@ -252,6 +255,40 @@ test("stopping a never-firing monitor clears Result Blocked, delivers the siblin
       event.payload.text === "Runner continued after managed background work completed.");
     assert.ok(noticeAt >= 0 && continuationAt > noticeAt, "the stop is recorded before the continuation");
     assert.equal(notices[0]!.includes("usr_owner"), false, "the transcript names the role, not the account");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a queued Wollipog notice records its origin and sends the original text to the provider", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-notice-"));
+  let manager: SessionManager | undefined;
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    const fake = fakeProvider({});
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, fake.factory as never, root, 1);
+    const spec = claudeSpec("s_notice", root);
+    await manager.start(spec);
+    manager.prompt(spec.sessionId, "First prompt");
+    const text = "The confirmation finished.\n\nPreserve this spacing.";
+    const promptOrigin = {
+      kind: "owner_confirmation", confirmationId: "aoc_example", outcome: "denied",
+      title: "Stop Session", target: { kind: "session", id: "s_target", label: "Target" },
+    } as const;
+    assert.ok(manager.promptFromControlPlane({ type: "prompt_session", sessionId: spec.sessionId, text, promptOrigin }));
+    await waitFor(() => fake.prompts.length === 2, "the queued notice did not reach the provider");
+    assert.deepEqual(fake.prompts.map((prompt) => prompt.text), ["First prompt", text]);
+    const messages = store.readEvents(spec.sessionId).flatMap(({ payload }) =>
+      payload.kind === "user_message" ? [{ text: payload.text, origin: payload.promptOrigin }] : []);
+    assert.deepEqual(messages, [{ text: "First prompt", origin: undefined }, { text, origin: promptOrigin }]);
+    const ordinaryText = "[Wollipog Owner Confirmation] is a label discussed in this test.";
+    manager.prompt(spec.sessionId, ordinaryText);
+    await waitFor(() => fake.prompts.length === 3, "the ordinary prompt did not reach the provider");
+    const lastMessage = store.readEvents(spec.sessionId).filter(({ payload }) => payload.kind === "user_message").at(-1)?.payload;
+    assert.equal(lastMessage?.kind, "user_message");
+    assert.equal(lastMessage.text, ordinaryText);
+    assert.equal(lastMessage.promptOrigin, null);
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

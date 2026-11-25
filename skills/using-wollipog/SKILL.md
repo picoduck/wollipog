@@ -193,6 +193,8 @@ earlier approval of it, and request again what you still need.
 A Codex App Server child must arm a `pr_merge` with the `consume_workflow_decision` tool or a
 standalone literal `"$WOLLIPOG_CLI" decision consume` command, never inside a script, heredoc,
 pipe, or other wrapper: only those two forms can be proven during reconciliation.
+The `--snapshot` value must be inline literal JSON in single quotes, not command substitution,
+a file, a variable, or a heredoc.
 If an exact armed PR merge command already succeeded but its approved occurrence remained
 unconsumed, use `reconcile_workflow_decision` (or `wollipog decision reconcile`) with that
 occurrence's unchanged resource snapshot.
@@ -203,9 +205,20 @@ forge reports the PR merged; its proof is that merged approved head. Treat any u
 mismatched proof as a blocker rather than requesting a replacement approval or replaying the action.
 Once the PR reads `MERGED`, report a failed reconciliation as a blocker and never call
 `execute_workflow_decision` for that `pr_merge`.
-After a same-head re-enqueue, reconcile the latest occurrence, whose admission preceded the enqueue
-that landed. Each other armed occurrence of the same command in the session then reads
-`superseded` and no longer blocks `verify_campaign_child`; do not withdraw or reconcile it.
+After a same-head re-enqueue, reconcile the occurrence whose admission preceded the enqueue
+that landed. If a replacement request superseded the original and stayed unarmed, reconcile the
+original with its unchanged snapshot. Wollipog settles the unused replacement when it records
+the original merge. When a later occurrence was also armed, reconcile that later occurrence.
+
+If a person enqueued the PR outside the session and the forge reports it merged, use
+`reconcile_workflow_decision` with `externalMerge: true` or `wollipog decision reconcile` with
+`--external-merge` (control plane v390). Pass the original approved snapshot. The forge must prove
+that exact head merged after approval. The tool records the completed merge without arming or
+executing any command. Use ordinary reconciliation for commands the child or Wollipog ran.
+
+When a Claude Code child stops with an armed merge, Wollipog revokes the approval and can keep
+observing that exact head for up to 24 hours. A merge that lands can be recorded without restarting
+the child.
 
 Your provider's own permission check can refuse an approved command (Claude Code's auto-mode
 classifier decides inline, for example). Never retry such a command through another shell, a
@@ -863,7 +876,9 @@ Never attempt to approve the current session's own permission or governance card
 
 ## Closing a GitHub Issue
 
-The root Orchestrator can propose closing an issue in its human-authorized campaign scope with
+A root Orchestrator (within its human-authorized campaign scope) or a standalone Normal session
+(within its verified Project Location repository, control plane and runner protocol v412+) can
+propose closing an issue with
 `request_github_issue_closure` (`requestId`, `issue`, `reason`: `completed` or `not_planned`,
 `explanation`, `evidence`, and an optional exact `comment`). In a campaign with several repositories,
 also pass `repository` for an issue outside the launch repository: the root still asks, and the
@@ -932,11 +947,21 @@ execution targets, or incomplete bounded conflict evidence refuse the operation 
 
 ## Decisions the Owner Kept
 
-Under Full Control the server dismisses a root Orchestrator's own questions, so asking in chat or
-with a question tool never reaches the person. When the campaign's owner kept a decision for
-themselves (for example a credential design, risk consent to merge a pull request, publishing
-follow-ups, or closing an epic), a root on control plane and runner protocol v281 hands it to them
-as a typed request instead:
+Root Orchestrators and standalone Normal sessions can ask their human owner structured questions or
+request generic Owner Approvals directly through Wollipog:
+
+- Standalone Normal sessions (protocol v412+) route their own dedicated typed approvals (`pr_merge`,
+  `merged_branch_deletion`, `follow_up_issue_publication`, `ui_evidence_approval`, `issue_closure`)
+  and `request_owner_decision` directly to their authenticated human owner in Inbox and the Session
+  Request Dock. Every standalone action approval is strictly human-owned and stays bound to the
+  session's verified Project Location repository (or session-owned artifacts for `ui_evidence_approval`).
+  Custom campaign roots with Strict Project Isolation disabled use the same owner-routed approach for
+  their own work.
+- Under Full Control the server dismisses a root Orchestrator's own questions, so asking in chat or
+  with a question tool never reaches the person. When the campaign's owner kept a decision for
+  themselves (for example a credential design, risk consent to merge a pull request, publishing
+  follow-ups, or closing an epic), a root on control plane and runner protocol v281 hands it to them
+  as a typed request instead:
 
 - `request_owner_decision` (CLI `wollipog decision ask-owner --request-id <id> --resource-key <key>
   --question <text> [--kind question|approval] --options '<json-array>' [--recommended <option-id>]

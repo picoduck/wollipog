@@ -30,6 +30,8 @@ export interface SessionCommandPermissionFacts {
   ownsSession: boolean;
   /** The session descends from the agent credential's own session. Read for agents only. */
   isDescendant: boolean;
+  /** The credential is the recorded requester of this terminal review. */
+  isTerminalReviewRequester?: boolean;
 }
 
 const STOP_ROUTE = "/api/sessions/:id/stop";
@@ -102,7 +104,8 @@ function routeRefusal(
   const roleError = mutationAuthorizationError(method, routePath, principal);
   if (roleError) return principal.kind === "human" && principal.role === "viewer" ? VIEWER_REASON : sentence(roleError);
   if (principal.kind !== "agent") return null;
-  const targetError = agentCredentialSessionTargetError(routePath, principal, target.id, facts.isDescendant);
+  const targetError = agentCredentialSessionTargetError(routePath, principal, target.id, facts.isDescendant,
+    () => facts.isTerminalReviewRequester === true);
   return targetError ? sentence(targetError) : null;
 }
 
@@ -165,7 +168,7 @@ export function sessionCommandPermissions(
     archive: permission(routeRefusal(ARCHIVE_ROUTE, principal, target, facts)),
     // Only plain Unarchive is available to the controlling Orchestrator; combined restart stays human-only.
     unarchive: permission(principal.kind === "agent"
-      ? principal.orchestrator && target.parentSessionId === principal.credentialSessionId && target.id !== principal.credentialSessionId
+      ? principal.orchestrator && facts.isDescendant && target.parentSessionId === principal.credentialSessionId && target.id !== principal.credentialSessionId
         ? routeRefusal(ARCHIVE_ROUTE, principal, target, facts) ??
           (facts.archivedWorktreeRecoveryError === null ? null : facts.archivedWorktreeRecoveryError ?? "Archived worktree recovery is unavailable.")
         : sentence(AGENT_UNARCHIVE_ERROR)
@@ -252,6 +255,7 @@ export function withHoldAdviceFor<T extends Pick<SessionView, "holds" | "queueHo
 
 /** The ownership lookups `withSessionCommandPermissions` needs from the database. */
 export interface SessionCommandPermissionSource {
+  reviewSessions?: { isTerminalForRequester(sessionId: string, requesterSessionId: string): boolean };
   campaignWorktreeRecoveryError?(sessionId: string): string | null;
   sessionAttentionForUser?(session: SessionView, userId: string | null): SessionView;
   campaignRequestsForPrincipal?(principal: AuthPrincipal, sessionId: string, includeArchived?: boolean): SessionView["campaignRequests"];
@@ -370,6 +374,7 @@ function permissionFacts(
 ): SessionCommandPermissionFacts {
   const credentialSessionId = principal.kind === "agent" ? principal.credentialSessionId : undefined;
   let ownsSession: boolean | undefined;
+  let isTerminalReviewRequester: boolean | undefined;
   return {
     // Looked up only when a verdict reads it (#1873). Only Stop Job does, behind the role gate, so a
     // Viewer's verdicts never look it up.
@@ -377,6 +382,10 @@ function permissionFacts(
       return ownsSession ??= principal.kind === "human" && source.isSessionOwner(principal, sessionId);
     },
     isDescendant: Boolean(credentialSessionId && source.isSessionDescendant(credentialSessionId, sessionId)),
+    get isTerminalReviewRequester() {
+      return isTerminalReviewRequester ??= Boolean(credentialSessionId &&
+        source.reviewSessions?.isTerminalForRequester(sessionId, credentialSessionId));
+    },
     get archivedWorktreeRecoveryError() {
       return source.campaignWorktreeRecoveryError?.(sessionId) ??
         (source.campaignWorktreeRecoveryError ? null : "Archived worktree recovery is unavailable.");

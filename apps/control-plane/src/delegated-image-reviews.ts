@@ -23,6 +23,7 @@ export interface NewDelegatedImageReview {
   resourceDigest: string;
   evidence: DelegatedImageReviewEvidence[];
   briefSha256: string;
+  assistant?: { threadId: string; binding: string };
 }
 
 export interface DelegatedImageReviewRecord extends NewDelegatedImageReview {
@@ -40,6 +41,7 @@ interface Row {
   child_session_id: string; policy_revision: number; resource_digest: string; evidence_json: string;
   brief_sha256: string; state: DelegatedImageReviewState; verdict_json: string | null;
   verdict_sha256: string | null; ended_reason: string | null; created_at: number; updated_at: number;
+  assistant_thread_id: string | null; assistant_binding: string | null;
 }
 
 const LIVE = "('running','verdict')";
@@ -133,7 +135,8 @@ export class DelegatedImageReviews {
       brief_sha256 TEXT NOT NULL,
       state TEXT NOT NULL CHECK (state IN ('running','verdict','consumed','ended')),
       verdict_json TEXT, verdict_sha256 TEXT, ended_reason TEXT,
-      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      assistant_thread_id TEXT, assistant_binding TEXT
     );
     CREATE UNIQUE INDEX IF NOT EXISTS delegated_image_reviews_one_live ON delegated_image_reviews(occurrence_id)
       WHERE state IN ${LIVE};
@@ -144,6 +147,11 @@ export class DelegatedImageReviews {
       FOREIGN KEY (occurrence_id) REFERENCES workflow_decisions(occurrence_id) ON DELETE CASCADE,
       FOREIGN KEY (review_id) REFERENCES delegated_image_reviews(review_id) ON DELETE CASCADE
     );`);
+    const columns = new Set((sql.prepare("PRAGMA table_info(delegated_image_reviews)").all() as Array<{ name: string }>)
+      .map((column) => column.name));
+    for (const name of ["assistant_thread_id", "assistant_binding"]) {
+      if (!columns.has(name)) sql.exec(`ALTER TABLE delegated_image_reviews ADD COLUMN ${name} TEXT`);
+    }
   }
 
   private stmt(text: string): ReturnType<DatabaseSync["prepare"]> {
@@ -158,10 +166,12 @@ export class DelegatedImageReviews {
   /** Runs inside the reviewer Session's insertion transaction. */
   record(review: NewDelegatedImageReview, reviewerSessionId: string, now: number): void {
     this.stmt(`INSERT INTO delegated_image_reviews (review_id, reviewer_session_id, occurrence_id, root_session_id,
-      child_session_id, policy_revision, resource_digest, evidence_json, brief_sha256, state, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`).run(
+      child_session_id, policy_revision, resource_digest, evidence_json, brief_sha256, state, created_at, updated_at,
+      assistant_thread_id, assistant_binding)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)`).run(
       review.reviewId, reviewerSessionId, review.occurrenceId, review.rootSessionId, review.childSessionId,
       review.policyRevision, review.resourceDigest, JSON.stringify(review.evidence), review.briefSha256, now, now,
+      review.assistant?.threadId ?? null, review.assistant?.binding ?? null,
     );
   }
 
@@ -177,6 +187,8 @@ export class DelegatedImageReviews {
       resourceDigest: row.resource_digest,
       evidence: JSON.parse(row.evidence_json) as DelegatedImageReviewEvidence[],
       briefSha256: row.brief_sha256,
+      ...(row.assistant_thread_id && row.assistant_binding
+        ? { assistant: { threadId: row.assistant_thread_id, binding: row.assistant_binding } } : {}),
       state: row.state,
       ...(row.verdict_json ? { verdict: JSON.parse(row.verdict_json) as DelegatedImageReviewVerdict } : {}),
       ...(row.verdict_sha256 ? { verdictSha256: row.verdict_sha256 } : {}),
@@ -230,6 +242,16 @@ export class DelegatedImageReviews {
         OR EXISTS (SELECT 1 FROM session_stop_intents WHERE session_id=session.id)
         OR (session.status='stopped' AND session.stop_confirmation IS NULL))`).all(rootSessionId) as unknown as Row[])
       .map((row) => this.parse(row)!);
+  }
+
+  /** Durable review rows drive retirement, including rows written before an upgrade. */
+  unsettled(runnerId?: string, after = ""): DelegatedImageReviewRecord[] {
+    return (this.stmt(`SELECT review.* FROM delegated_image_reviews review JOIN sessions session
+      ON session.id=review.reviewer_session_id
+      WHERE review.review_id>? AND (review.state IN ('running','verdict') OR session.archived=0
+        OR EXISTS (SELECT 1 FROM session_stop_intents WHERE session_id=session.id))
+      ${runnerId ? "AND session.runner_id=?" : ""} ORDER BY review.review_id LIMIT 64`)
+      .all(after, ...(runnerId ? [runnerId] : [])) as unknown as Row[]).map(row => this.parse(row)!);
   }
 
   liveForOccurrence(occurrenceId: string): DelegatedImageReviewRecord | null {

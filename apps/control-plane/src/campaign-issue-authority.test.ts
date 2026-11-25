@@ -100,6 +100,19 @@ test("#4403 campaign PR identities include other work, and incomplete ledger rea
   } finally { h.db.close(); }
 });
 
+test("#4792 a failed ledger page read returns unknown campaign PRs despite known history", () => {
+  const h = harness();
+  try {
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id,
+      stage: { stage: "in_review", pullRequests: [{ repository: "team/repo", number: 77 }, { repository: "team/repo", number: 88 }] } }).ok);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id, stage: null }).ok);
+    const root = h.db.getSession("root")!;
+    assert.deepEqual(closureCampaignPullRequests(h.db, root, "team/repo"), [77, 88], "a successful read returns the complete retained history");
+    h.db.campaignWorkLedger.page = () => ({ ok: false, status: 500, error: "Ledger page unavailable" });
+    assert.equal(closureCampaignPullRequests(h.db, root, "team/repo"), undefined, "a failed page read cannot return partial history or an empty array");
+  } finally { h.db.close(); }
+});
+
 test("#4403 an upgraded campaign cannot exclude an outside PR when historical membership is unknown", async () => {
   const h = harness(true, 5, [100, 101]);
   try {
@@ -3378,10 +3391,10 @@ test("#3919 a root's own publication leaves child, nested and non-campaign reque
     const nested = await h.svc.createWorkflowDecisionWithVideo("nested", { requestId: "nested", resourceKey: "nested", resourceSnapshot: snapshot("Nested repair") });
     assert.ok(nested.ok, nested.error ?? "nested");
     assert.equal(nested.data!.controllingSessionId, "root"); assert.equal(nested.data!.authority, "orchestrator");
-    // A session outside any campaign still has nobody to control its publication.
+    // A standalone session without a verified Project Location cannot publish (#4894).
     const solo = await h.svc.createWorkflowDecisionWithVideo("solo", { requestId: "solo", resourceKey: "solo", resourceSnapshot: snapshot("Solo repair") });
     assert.equal(solo.ok, false); assert.equal(solo.status, 409);
-    assert.match(solo.error!, /no controlling Orchestrator ancestor/);
+    assert.match(solo.error!, /Project Location|too old to verify/u);
   } finally { h.db.close(); }
 });
 

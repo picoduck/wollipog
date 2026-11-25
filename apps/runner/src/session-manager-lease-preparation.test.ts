@@ -83,7 +83,7 @@ function fixture() {
   const callback = index.slice(start, end) + "effects.preparation++; }";
   internals.prepareLaunch = vm.runInNewContext(transformSync(`(${callback})`, { loader: "ts" }).code, {
     sessions: manager, effects,
-    runnerLocalAgentEnv: () => ({}), adoptedLaunchEnvironment: () => ({}),
+    sessionAgentEnvironment: () => ({}),
     providerAccountEnvironment: (account: { credentialHome: string }) => ({ CLAUDE_CONFIG_DIR: account.credentialHome }),
     pluginProviderForDriver: () => "claude",
     inheritProviderPlugins: () => {

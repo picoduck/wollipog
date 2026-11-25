@@ -38,7 +38,7 @@ export interface GhOutcome {
 }
 
 /** Runs `gh`; aborting `signal` kills the process. */
-export type GhRunner = (args: string[], signal?: AbortSignal) => Promise<GhOutcome>;
+export type GhRunner = (args: string[], signal?: AbortSignal, stdin?: string) => Promise<GhOutcome>;
 
 /** `gh` in the root Orchestrator's agent context and repository, with the environment its agent is
  * launched with (`agentEnv`: the runner-local agent configuration, never persisted), so a
@@ -50,7 +50,7 @@ export function contextGhRunner(
   agentEnv: Record<string, string> = {},
   run: typeof runContextCommand = runContextCommand,
 ): GhRunner {
-  return async (args, signal) => {
+  return async (args, signal, stdin) => {
     try {
       const { stdout, stderr } = await run(context, "gh", args, {
         cwd,
@@ -58,6 +58,7 @@ export function contextGhRunner(
         maxBuffer: 4 * 1024 * 1024,
         env: { ...agentEnv, GH_PROMPT_DISABLED: "1", GH_PAGER: "cat", NO_COLOR: "1" },
         ...(signal ? { signal } : {}),
+        ...(stdin === undefined ? {} : { stdin }),
       });
       return { stdout, stderr, code: null, timedOut: false };
     } catch (error) {
@@ -153,7 +154,7 @@ const REQUIREMENTS_MET = new Set(["CLEAN", "HAS_HOOKS", "UNSTABLE"]);
 export function checkRollups(
   rollup: unknown,
   requirementsMet = false,
-): { checks: CampaignForgeCheckRollup; requiredChecks: CampaignForgeCheckRollup } | null {
+): Pick<CampaignForgePullRequestObservation, "checks" | "requiredChecks" | "checkContextsComplete"> | null {
   if (rollup === null) {
     const none: CampaignForgeCheckRollup = { state: "none", passing: 0, failing: 0, pending: 0 };
     return { checks: none, requiredChecks: none };
@@ -192,6 +193,7 @@ export function checkRollups(
   else if (github === "SUCCESS" || explainedFailure && all.passing > 0) overall = "passing";
   else overall = "unknown";
   return {
+    checkContextsComplete: complete,
     checks: { state: overall, passing: all.passing, failing: all.failing, pending: all.pending },
     requiredChecks: {
       state: ((state) => state === "passing" && !requirementsMet ? "unknown" : state)(rollupState(required, complete)),

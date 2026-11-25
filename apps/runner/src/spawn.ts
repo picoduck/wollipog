@@ -182,6 +182,8 @@ export interface BwrapSpawnIsolation {
   network: "inherit" | "deny";
   /** Forced managed-worktree bwrap still writes the shared provider transcript/credential home. */
   preservesProviderHome?: true;
+  /** Empty private mount for Antigravity's generated shell helper. */
+  antigravityTerminalHelper?: string;
   /** Narrow durable state exceptions; source lives under runner data, target is the CLI's home path. */
   writableBinds?: Array<{ source: string; target: string }>;
   /** Exact operator-approved project runtime roots also admitted by the provider's inner sandbox. */
@@ -445,6 +447,7 @@ export function buildBwrapArgs(opts: Pick<SpawnAgentOptions, "command" | "args" 
         ...isolation.protectedWorktree.gitWritableRoots.flatMap((path) => ["--bind", path, path]),
       ]
       : []),
+    ...(isolation.antigravityTerminalHelper ? ["--tmpfs", isolation.antigravityTerminalHelper] : []),
     ...(isolation.readOnlyBinds ?? []).flatMap((path) => ["--ro-bind", path, path]),
     ...(isolation.claudeNamespace ? [
       "--dir", "/tmp/claude",

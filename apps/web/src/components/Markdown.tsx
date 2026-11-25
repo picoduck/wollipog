@@ -29,6 +29,7 @@ import {
 import { CopyButton } from "./common.js";
 import { markdownBlockStarts } from "./markdown-blocks.js";
 import { MarkdownContentCache, type MarkdownContentProfile } from "./markdown-content-cache.js";
+import { rehypeStreamingCaret, STREAMING_CARET_TAG, streamMarkdownTail } from "./markdown-streaming.js";
 import { CheckIcon, ImageIcon, ImageOffIcon, WrapLinesIcon } from "./Icons.js";
 import { ARTIFACT_REFERENCE_TAG, isArtifactId, rehypeArtifactReferences } from "../artifact-references.js";
 import { ArtifactReferenceContext } from "./artifact-reference-context.js";
@@ -505,8 +506,9 @@ function MarkdownLink({ href, children, inlineMedia, mediaSettled, compactUrls }
   );
 }
 
-function MarkdownAnchor({ href, children }: ComponentProps<"a">) {
+function MarkdownAnchor({ href, children, node }: ComponentProps<"a"> & { node?: { properties?: Record<string, unknown> } }) {
   const { inlineMedia, mediaSettled, compactUrls } = useContext(MarkdownContext);
+  if (node?.properties?.["data-streaming-link"]) return <span className="md-streaming-link">{children}</span>;
   return (
     <MarkdownLink href={href} inlineMedia={inlineMedia} mediaSettled={mediaSettled} compactUrls={compactUrls}>
       {children}
@@ -611,9 +613,14 @@ function MarkdownArtifactReference({ node, children }: { node?: { properties?: R
   return renderReference(id, code);
 }
 
+function StreamingCaret() {
+  return <span className="md-streaming-caret" aria-hidden="true" />;
+}
+
 const MARKDOWN_COMPONENTS: MarkdownComponents = {
   // Not an HTML tag, so react-markdown's types do not list it; it renders like any other.
   ...({ [ARTIFACT_REFERENCE_TAG]: MarkdownArtifactReference } as MarkdownComponents),
+  ...({ [STREAMING_CARET_TAG]: StreamingCaret } as MarkdownComponents),
   p: MarkdownParagraph,
   em: phrasingElement("em"),
   strong: phrasingElement("strong"),
@@ -667,10 +674,17 @@ interface CachedParseOptions {
   source: string;
   profile: MarkdownProfile;
   admit: boolean;
+  streaming: boolean;
   tree?: unknown;
 }
 
-function remarkCachedParser(this: { parser: (source: string, file: unknown) => unknown }, options: CachedParseOptions) {
+function remarkCachedParser(this: { parser: Parameters<typeof streamMarkdownTail>[2] }, options: CachedParseOptions) {
+  if (options.streaming) {
+    // Provisional Markdown must never be fetched from or written to the canonical cache.
+    const parse = this.parser;
+    this.parser = (source, file) => streamMarkdownTail(source, file, parse, parse(source, file));
+    return;
+  }
   options.tree = markdownContentCache.get(options.profile, options.source);
   // On a hit the canonical HAST is restored by the final rehype plugin below. The intervening
   // GFM/breaks/rehype passes see an empty root, avoiding a second parse of the unchanged source.
@@ -679,6 +693,7 @@ function remarkCachedParser(this: { parser: (source: string, file: unknown) => u
 
 function rehypeCachedTree(options: CachedParseOptions) {
   return (tree: unknown) => {
+    if (options.streaming) return tree;
     if (options.tree !== undefined) return structuredClone(options.tree);
     // react-markdown's final pass mutates URLs and raw nodes. Retain a private clone before that
     // pass, then let the original go through exactly the same security policy as before.
@@ -694,17 +709,19 @@ function rehypeCachedTree(options: CachedParseOptions) {
  * the original parser/plugins; hits skip parsing and clone the cached tree. react-markdown still
  * applies its unchanged URL/raw-HTML security policy and constructs fresh elements on every render.
  */
-const ParsedMarkdown = memo(function ParsedMarkdown({ source, profile, admit }: {
-  source: string; profile: MarkdownProfile; admit: boolean;
+const ParsedMarkdown = memo(function ParsedMarkdown({ source, profile, admit, streaming = false }: {
+  source: string; profile: MarkdownProfile; admit: boolean; streaming?: boolean;
 }) {
-  const options: CachedParseOptions = { source, profile, admit };
+  const options: CachedParseOptions = { source, profile, admit, streaming };
   const plugins: RemarkPlugins = [...(profile === "inline" ? INLINE_PLUGINS : DOCUMENT_PLUGINS),
     [remarkCachedParser as unknown as RemarkPlugins[number], options] as RemarkPlugins[number]];
   return <ReactMarkdown remarkPlugins={plugins}
-    rehypePlugins={[rehypeArtifactReferences, [rehypeCachedTree, options]]} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown>;
+    rehypePlugins={[rehypeArtifactReferences, [rehypeCachedTree, options], ...(streaming ? [rehypeStreamingCaret] : [])]}
+    components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown>;
 // Admission is a resource policy, not rendered content. A tail becoming stable must not parse
 // identical text again just to populate the LRU; its next natural render/remount may admit it.
-}, (previous, next) => previous.source === next.source && previous.profile === next.profile);
+}, (previous, next) => previous.source === next.source && previous.profile === next.profile
+  && previous.streaming === next.streaming);
 
 /**
  * Markdown renderer for agent messages, reasoning, user messages and markdown previews. GFM
@@ -731,6 +748,7 @@ export const Markdown = memo(function Markdown({
   highlightEligible = true,
   inlineMedia = false,
   settled = true,
+  streaming = false,
   compactUrls = false,
 }: {
   children: string;
@@ -744,6 +762,8 @@ export const Markdown = memo(function Markdown({
    * mounts only once the row completes.
    */
   settled?: boolean;
+  /** Preview incomplete syntax and mark the insertion point of a live document reply. */
+  streaming?: boolean;
   /** Replace generated absolute-URL text with a bounded, query-free label while retaining href. */
   compactUrls?: boolean;
 }) {
@@ -794,7 +814,12 @@ export const Markdown = memo(function Markdown({
             // A whole document separates its top-level blocks with a newline text node; keep it.
             <Fragment key={start}>
               {index > 0 ? "\n" : null}
-              <MarkdownBlock profile={profile} settled={settled || index < starts.length - 1}>{children.slice(start, starts[index + 1])}</MarkdownBlock>
+              <ParsedMarkdown
+                profile={profile}
+                admit={settled || index < starts.length - 1}
+                streaming={streaming && !settled && index === starts.length - 1}
+                source={children.slice(start, starts[index + 1])}
+              />
             </Fragment>
           ))
         ) : (
@@ -803,9 +828,4 @@ export const Markdown = memo(function Markdown({
       </MarkdownContext.Provider>
     </div>
   );
-});
-
-/** One block of a blockwise document, parsed again only when its own text changes. */
-const MarkdownBlock = memo(function MarkdownBlock({ children, profile, settled }: { children: string; profile: MarkdownProfile; settled: boolean }) {
-  return <ParsedMarkdown source={children} profile={profile} admit={settled} />;
 });

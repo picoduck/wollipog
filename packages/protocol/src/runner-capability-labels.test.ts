@@ -19,7 +19,7 @@ const SEED_SINKS = new Map([
 ]);
 /** Product, platform and harness names that stay capitalized in running prose. */
 const PROPER_NOUNS = new Set([
-  "Claude", "Codex", "Git", "GitHub", "GitLab", "Linux", "Orchestrator", "Pi", "Windows", "Wollipog", "macOS",
+  "Antigravity", "Claude", "Codex", "Git", "GitHub", "GitLab", "Google", "Linux", "Orchestrator", "Pi", "Windows", "Wollipog", "macOS",
 ]);
 /** Multi-word names whose first word is not a proper noun on its own. */
 const PROPER_PHRASES = ["Native TUI"];

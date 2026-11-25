@@ -142,7 +142,7 @@ async function selectOption(scope: HTMLElement, label: string, option: string): 
   const trigger = scope.querySelector<HTMLButtonElement>(`[aria-label^="${label}:"]`);
   assert.ok(trigger, `expected ${label} select`);
   await act(async () => trigger.click());
-  const choice = [...body().querySelectorAll<HTMLButtonElement>('[role="option"]')].find((candidate) =>
+  const choice = [...body().querySelectorAll<HTMLButtonElement>('[role="option"], [data-model-choice]')].find((candidate) =>
     (candidate.textContent ?? "").startsWith(option));
   assert.ok(choice, `expected ${option} option in ${label}`);
   await act(async () => choice.click());
@@ -178,7 +178,7 @@ test("a member who is not an administrator reads the setting but cannot change o
     const trigger = mounted.container.querySelector<HTMLButtonElement>('[aria-label^="Model Source:"]');
     assert.ok(trigger);
     await act(async () => trigger.click());
-    const choosable = [...body().querySelectorAll<HTMLElement>('[role="option"]')]
+    const choosable = [...body().querySelectorAll<HTMLElement>('[role="option"], [data-model-choice]')]
       .filter((option) => option.getAttribute("aria-disabled") !== "true" && !(option.textContent ?? "").startsWith("Chosen Agent"));
     assert.deepEqual(choosable, []);
     assert.deepEqual(calls.map((call) => `${call.method} ${call.path}`), ["GET /api/decision-model"]);
@@ -200,7 +200,7 @@ test("an administrator chooses an agent in the dialog, and Automatic saves at on
     const dialog = body().querySelector<HTMLElement>('[role="dialog"]');
     assert.ok(dialog?.textContent?.includes("Agent for Decisions"));
     // One machine with one agent preselects both; the model and effort are chosen.
-    await selectOption(dialog!, "Model", "Haiku");
+    await selectOption(dialog!, "Model", "Haiku Latest");
     await selectOption(dialog!, "Reasoning Effort", "Low");
     await act(async () => button(dialog!, "Save").click());
     await settle();

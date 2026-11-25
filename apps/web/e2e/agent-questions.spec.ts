@@ -1265,7 +1265,7 @@ test.describe("an expanded question reads across the whole reading column (#2786
       const card = dockedCard(page);
       await expect(page.locator(".request-dock-more")).toContainText("+1 More Request");
       // The queue tray is one summary line, so it never crowds the question (#2788).
-      await expect(page.locator(".queue-summary")).toHaveText("4 Queued Messages");
+      await expect(page.locator(".composer-box .queue-summary")).toHaveText("4 Queued Messages");
       const before = await readingPosition(page);
       await card.getByRole("radio", { name: /^Hold/ }).click();
 

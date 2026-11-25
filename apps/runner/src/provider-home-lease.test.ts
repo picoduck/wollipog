@@ -848,7 +848,10 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     signal: NodeJS.Signals | null; stderr: string; error?: string;
     timings: Record<string, number>; outcome?: string; checkpointFailures: string[]; overBudget?: string[];
   }> = [];
-  const readinessMs = options.readinessMs ?? 10_000;
+  // Native Windows contenders took 12.6–13.1s before readiness in #4718, including
+  // 2.8–4s of helper initialization. Allow startup headroom without changing the
+  // measured election/report budgets or explicit hung-readiness fault limits.
+  const readinessMs = options.readinessMs ?? (process.platform === "win32" ? 30_000 : 10_000);
   // Fixed when the start barrier is published, from the helper calls measured during readiness.
   let budget = successorBudget(0);
   const recordOverruns = () => {
@@ -1185,9 +1188,13 @@ test("successor election keeps slow startup out of the result deadline", async (
   // Startup must exceed the reporting window: removing only the readiness wait
   // must expire reporting before either contender can publish. Without readiness no
   // helper call has been measured, so that window is SUCCESSOR_REPORT_MS. Keep two seconds
-  // of separation plus the normal ten-second setup margin for native initialization.
+  // of separation. Windows exercises the default readiness allowance; other platforms
+  // add their normal ten-second setup margin for native initialization.
   const startupDelayMs = SUCCESSOR_REPORT_MS + 2_000;
-  await runSuccessorElectionRace(t, { startupDelayMs, readinessMs: startupDelayMs + 10_000 });
+  await runSuccessorElectionRace(t, {
+    startupDelayMs,
+    ...(process.platform !== "win32" && { readinessMs: startupDelayMs + 10_000 }),
+  });
 });
 
 test("successor election diagnoses startup failure without exposing fixture paths", async (t) => {
@@ -1206,7 +1213,7 @@ test("successor election bounds a hung readiness phase and reaps owned contender
 });
 
 // Readiness, the measured race deadline at its ceiling, and forced cleanup.
-test("successor election keeps its result deadline and reaps a stalled publisher", { timeout: 90_000 }, async (t) => {
+test("successor election keeps its result deadline and reaps a stalled publisher", { timeout: 120_000 }, async (t) => {
   await assert.rejects(runSuccessorElectionRace(t, {
     fault: "hang-in-publication", cleanupGraceMs: 50,
   }), (error: Error) => {

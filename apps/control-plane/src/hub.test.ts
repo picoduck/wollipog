@@ -494,7 +494,7 @@ test("child upserts refresh the parent only when live capacity changes", () => {
 
   messages.length = 0;
   parentProjections = 0;
-  for (let i = 0; i < 3; i++) hub.sessionChangedById(child.id);
+  for (let i = 0; i < 3; i++) hub.sessionChanged({ ...child, title: `Child Capacity ${i}` });
   assert.equal(parentProjections, 0, "repeated capacity-neutral upserts do not project the parent");
   assert.equal(
     messages.filter((message) => message.session?.id === child.id).length,
@@ -631,7 +631,9 @@ test("runner queue updates fan out to every dashboard and clear hold state autho
   db.close();
 });
 
-test("a held-back background result follows the live turn, and the bound sweep republishes it (#3073)", () => {
+test("a held-back background result follows the live turn, and the bound sweep republishes it (#3073)", (t) => {
+  const finishedAt = 1_000_000;
+  t.mock.timers.enable({ apis: ["Date"], now: finishedAt });
   const db = ControlPlaneDb.open(":memory:");
   const runnerId = "runner-held-result";
   db.registerRunner({ runnerId, hostname: "held-host", os: "linux", version: "1", agents: [], workspaces: [] }, 1);
@@ -639,7 +641,6 @@ test("a held-back background result follows the live turn, and the bound sweep r
     id: "session-held-result", runnerId, workspaceId: null, agentId: null, title: "Held Result",
     useWorktree: false, driver: "claude-code", config: {}, now: 2,
   });
-  const finishedAt = 1_000_000;
   const job = db.raw().prepare(`INSERT INTO managed_background_jobs
     (session_id,job_id,parent_turn_id,runner_id,launch_type,registered_at,last_observed_at,
      terminal_status,terminal_observed_at,continuation_required)
@@ -661,13 +662,14 @@ test("a held-back background result follows the live turn, and the bound sweep r
   hub.setSessionQueue(session.id, [{ id: "prompt-b", text: "B" }], false, "turn-a");
   assert.equal(db.sessionListRevision(), runningRevision, "a queue change within the turn keeps it");
   hub.setSessionQueue(session.id, [], false);
-  assert.deepEqual(shown(), [["turn-a", "continuation_blocked", 1]], "the turn ended long past the bound");
+  assert.deepEqual(shown(), [["turn-a", null, 1]], "the result waits until the bound elapses");
 
   const crossed = finishedAt + BACKGROUND_HANDOFF_WAIT_MAX_MS;
   const before = messages.length;
   assert.equal(hub.publishHeldResultsReachingBound(crossed + 1, crossed + 5_000), 0);
   assert.equal(messages.length, before, "nothing crossed the bound in that window");
   const sweptRevision = db.sessionListRevision();
+  t.mock.timers.setTime(crossed);
   assert.equal(hub.publishHeldResultsReachingBound(crossed - 5_000, crossed), 1);
   assert.notEqual(db.sessionListRevision(), sweptRevision, "a cached session list is rebuilt when a bound passes");
   assert.equal(messages.length, before + 1, "the session is republished when its bound passes");

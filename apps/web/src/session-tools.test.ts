@@ -73,7 +73,8 @@ test("every tool names its chord, for the keycap the switcher and Session Tools 
     ["Session Tools", null],
     ["Review", "open-review"], ["Files", "open-files"], ["Browser", "open-browser"], ["Terminal", "toggle-terminal"],
     ["Agents", "open-agents"], ["Side Chat", "open-side-chat"], ["Background Work", "open-background-work"],
-    ["Campaign Status", "open-campaign-status"], ["Requests", "open-requests"], ["Decision History", "open-decision-history"],
+    ["Campaign Status", "open-campaign-status"],
+    ["Requests", "open-requests"], ["Decision History", "open-decision-history"],
   ]);
 });
 

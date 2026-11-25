@@ -687,7 +687,8 @@ test("the Pinned Summary docks beside the reader only while the reader keeps 560
   assert.deepEqual(containerMedia.map((block) => block.params), ["(min-width: 761px)"]);
 
   // Docked from exactly the reader minimum plus the summary width, mirrored by the JS presentation.
-  const docked = containerBlocks(css).filter((block) => block.params.startsWith("session-body"));
+  const docked = containerBlocks(css).filter((block) =>
+    block.params.startsWith("session-body") && block.declarationsForSelector(".ps").has("grid-area"));
   assert.equal(docked.length, 1, "one docking rule");
   assert.equal(docked[0]!.params, `session-body (min-width: ${PINNED_SUMMARY_DOCK_MIN_PX}px)`);
   assert.deepEqual(docked[0]!.declarationsForSelector(".ps").get("grid-area"), ["1 / 2"],

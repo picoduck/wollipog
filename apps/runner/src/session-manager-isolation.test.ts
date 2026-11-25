@@ -15,7 +15,7 @@ import type {
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
-import { spawnAgent } from "./spawn.js";
+import { bwrapPathWritable, buildBwrapArgs, spawnAgent } from "./spawn.js";
 import { ProviderStateCleanupJournal } from "./provider-state-reconciliation.js";
 import { providerStateKey } from "./execution-isolation.js";
 import { wslBwrapSessionRoot } from "./wsl-bwrap-launcher.js";
@@ -189,6 +189,88 @@ test("a Linux managed worktree launch selects bwrap from provider mode and fails
   }
 });
 
+test("Antigravity gets a temporary terminal helper directory even when provider state is absent (#4896)", async () => {
+  if (process.platform !== "linux") return;
+  const root = mkdtempSync(join(tmpdir(), "wollipog-acp-managed-launch-"));
+  const home = mkdtempSync(join(tmpdir(), "wollipog-acp-managed-home-"));
+  let manager: SessionManager | undefined;
+  try {
+    const { repoPath, worktreePath } = hostWorktree(root, "s1");
+    const providerState = join(home, ".gemini", "antigravity-cli");
+    const helperDir = join(providerState, "bin");
+    const store = new SessionStore(join(root, "sessions"));
+    const acpMeta = (sessionId: string): SessionMeta => ({
+      ...meta(), sessionId, agentId: "google-antigravity", driver: "acp", command: "agy", args: ["acp"],
+      repoPath, worktreePath, worktreeBranch: "agent/s1", env: { HOME: home },
+      worktrees: [{ id: "legacy", path: worktreePath, branch: "agent/s1", source: "legacy" }],
+    });
+    store.create(acpMeta("s1"));
+    store.create({ ...acpMeta("s2"), agentId: "other-acp" });
+    let preservedProviderHome: boolean | undefined;
+    let options: DriverOptions | undefined;
+    const factory = (_driver: unknown, driverOptions: DriverOptions) => {
+      options = driverOptions;
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => "provider-1",
+        prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
+        setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-1",
+      };
+    };
+    manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never, join(root, "state"), 2,
+      undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "provider", network: "inherit" }, async (policy, context, _deps, state) => {
+        preservedProviderHome = state?.preserveProviderHome === true;
+        return resolveExecutionIsolation(policy, context, {
+          platform: "linux", uid: () => 1000, nativeEnvironment: () => ({ HOME: home }),
+          resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
+        }, state);
+      },
+      async () => {}, async () => {}, async () => {}, undefined, [],
+      (prepared: SessionMeta) => prepared.agentId === "google-antigravity"
+        ? { acpCompatibility: { profile: "antigravity" as const, resumable: true } }
+        : undefined,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = manager as any;
+    internals.verifySelectedWorktreeBeforeLaunch = async () => true;
+
+    // Another ACP agent keeps the existing refusal: its provider state cannot be preserved.
+    assert.equal(await internals.acquireAdmission("s2"), true);
+    assert.equal(await internals.launch(store.readMeta("s2")), false);
+    assert.equal(preservedProviderHome, true);
+    assert.equal(options, undefined);
+
+    assert.equal(await internals.acquireAdmission("s1"), true);
+    assert.equal(await internals.launch(store.readMeta("s1")), true);
+    assert.equal(preservedProviderHome, true, "agy's own state directory is preserved, as Claude's and Codex's are");
+    const isolation = options?.isolation;
+    assert.equal(isolation?.backend, "bwrap", "the managed worktree's forced bwrap still applies");
+    assert.ok(isolation?.backend === "bwrap");
+    const homeBinds = (isolation.writableBinds ?? []).map((bind) => bind.target)
+      .filter((target) => target === home || target.startsWith(`${home}/`));
+    assert.ok(homeBinds.includes(providerState));
+    assert.deepEqual(homeBinds.filter((target) => target !== providerState && !target.startsWith(`${providerState}/`))
+      .filter((target) => !/\/(\.cache|\.npm|\.cargo\/(registry|git)|\.local\/share\/pnpm\/store|go\/pkg\/mod)$/u.test(target)), [],
+      "nothing else in HOME but the build caches every preserved provider home shares");
+    assert.ok(lstatSync(helperDir).isDirectory());
+    assert.equal(lstatSync(providerState).mode & 0o077, 0, "new provider state is private to the runner user");
+    const args = buildBwrapArgs({ command: "agy", args: ["acp"], cwd: worktreePath }, isolation);
+    assert.ok(args.some((arg, i) => arg === "--tmpfs" && args[i + 1] === helperDir), "the helper stays session-private");
+    assert.equal(bwrapPathWritable(args, join(providerState, "conversations", "c.pb")), true,
+      "conversations persist, so a relaunch in the worktree resumes");
+    assert.equal(bwrapPathWritable(args, join(home, ".bashrc")), false, "the rest of HOME stays read-only");
+    assert.ok(args.lastIndexOf(providerState) < args.lastIndexOf(helperDir),
+      "the private helper tmpfs is rendered after, and so shadows, the shared state directory's bin");
+    assert.deepEqual(options?.acpCompatibility, { profile: "antigravity", resumable: true },
+      "resume follows the effective sandbox, which now keeps agy's state");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("strict Orchestrator scratch does not make its selected managed worktree writable", async () => {
   if (process.platform !== "linux") return;
   const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-selected-worktree-"));
@@ -283,7 +365,7 @@ test("Seatbelt attach notices keep the live launch roots after HOME or its trans
     symlinkSync(originalHome, homeLink, "dir");
 
     const store = new SessionStore(join(root, "sessions"));
-    store.create({ ...meta(), repoPath: repo, env: { HOME: homeLink } });
+    store.create({ ...meta(), repoPath: repo });
     const factory = () => ({
       pid: 1, initialize: async () => {}, newSession: async () => "provider-1",
       prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {},
@@ -305,6 +387,7 @@ test("Seatbelt attach notices keep the live launch roots after HOME or its trans
     );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const internals = manager as any;
+    internals.prepareLaunch = (launch: SessionMeta) => { launch.env = { HOME: homeLink }; };
     assert.equal(await internals.acquireAdmission("s1"), true);
     assert.equal(await internals.launch(store.readMeta("s1")), true);
     rmSync(homeLink);

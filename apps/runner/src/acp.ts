@@ -6,6 +6,7 @@
  * See docs/ACP-NOTES.md for the exact wire shapes.
  */
 
+import { realpathSync } from "node:fs";
 import type {
   AuthenticateRequest,
   CloseSessionRequest,
@@ -41,7 +42,12 @@ import type {
   McpServer,
   NewSessionRequest,
 } from "@agentclientprotocol/sdk";
-import type { AcpRuntimeCapabilities, AcpSessionContextConfig, AgentCapabilities, AgentContext, AgentSlashCommand, PermissionOption, PromptImage, SessionConfig, SessionEventPayload } from "@wollipog/protocol";
+import {
+  ANTIGRAVITY_AUTO_MODE,
+  ANTIGRAVITY_FULL_PERMISSIONS_MODE,
+  type AcpRuntimeCapabilities, type AcpSessionContextConfig, type AgentCapabilities, type AgentContext,
+  type AgentSlashCommand, type PermissionOption, type PromptImage, type SessionConfig, type SessionEventPayload,
+} from "@wollipog/protocol";
 import {
   acpInitializeRequest,
   negotiateAcpInitialize,
@@ -64,7 +70,21 @@ import {
   type SafeAcpModeState,
 } from "./acp-session-state.js";
 import { AcpFilesystemService, AcpTerminalService } from "./acp-client-services.js";
+import {
+  acpCompatibilityFailure,
+  acpClientFileWritesOffered,
+  acpLaunchRequestOptions,
+  acpRequestTimedOut,
+  antigravitySandboxSpawnDenied,
+  compatibleAcpInitializeRequest,
+  acpStderrMirrored,
+  compatibleAcpEnvironment,
+  compatibleAcpNegotiation,
+  resolveAcpLaunch,
+  type AcpCompatibility,
+} from "./acp-compatibility.js";
 import { materializeAcpMcpServers } from "./acp-session-context.js";
+import { antigravityAppArmorFix } from "./antigravity-apparmor.js";
 import {
   assertClaudeAgentAcpOrchestratorIdentity,
   orchestratorAcpSessionMeta,
@@ -84,6 +104,8 @@ export interface AcpEvents {
   onAuthStatus?: (status: "authenticated" | "unauthenticated") => void;
   onAcpCapabilities?: (capabilities: AcpRuntimeCapabilities) => void;
   onAcpSessionState?: (state: { capabilities: AgentCapabilities; config: SessionConfig }) => void;
+  /** The agent accepted the prompt that carried `conversationHandoff`. */
+  onConversationHandoffDelivered?: () => void;
   onAcpUsage?: (usage: { contextTokensUsed: number; contextWindow: number; costUsd?: number }) => void;
   onAcpSessionInfo?: (info: { title?: string | null; providerUpdatedAt?: string }) => void;
 }
@@ -91,6 +113,8 @@ export interface AcpEvents {
 interface AcpClientDeps {
   spawn: typeof spawnAgent;
   kill: typeof killTree;
+  /** The host command that would give agy its Auto Mode back (tests inject a host's answer). */
+  antigravityAppArmorFix: (executable: string | undefined) => string | undefined;
 }
 
 export interface AcpListedSession {
@@ -110,6 +134,8 @@ export class AcpClient {
   private transportClosed = false;
   private supportsImages = false;
   private readonly artifactGuidance?: string;
+  /** Pending until the first ordinary prompt carries it, then cleared. */
+  private conversationHandoff?: string;
   private suppressUpdates = false;
   private negotiation: AcpNegotiation | null = null;
   private modes: SafeAcpModeState | null = null;
@@ -125,6 +151,16 @@ export class AcpClient {
   private readonly terminals: AcpTerminalService;
   private readonly terminalEventOutput = new Map<string, { cursor: number }>();
   private readonly kill: typeof killTree;
+  /** Wollipog's Full Permissions Mode for Antigravity, as T3 Code runs full access: agy stays in its
+   * Default mode and this client approves each request it sends, so the mode changes between turns
+   * without a relaunch. agy has no ACP mode for it, and its Auto mode needs a terminal sandbox that
+   * many Linux hosts withhold (AppArmor-restricted user namespaces). */
+  private antigravityFullPermissions: boolean;
+  private readonly antigravitySandboxExecutable?: string;
+  private readonly antigravityHostExecutable?: string;
+  private readonly appArmorFix: AcpClientDeps["antigravityAppArmorFix"];
+  private antigravitySandboxDeniedInTurn = false;
+  private antigravityAutoModeRejected = false;
 
   constructor(
     opts: {
@@ -135,6 +171,8 @@ export class AcpClient {
       context?: AgentContext;
       initialCommands?: AgentSlashCommand[];
       artifactGuidance?: string;
+      /** See `DriverOptions.acpConversationHandoff`: sent once, ahead of the first prompt. */
+      conversationHandoff?: string;
       sessionContext?: AcpSessionContextConfig;
       isolation?: SpawnIsolation;
       reviewWriterCgroup?: import("./linux-cgroup.js").LinuxCgroupGroup;
@@ -151,30 +189,65 @@ export class AcpClient {
       /** Discovery probes negotiate only the ACP initialize response and must not expose client
        * filesystem, terminal, permission, or session-update services to the launched adapter. */
       initializeOnly?: boolean;
+      /** Inherited variables the agent process must not see (an agent's credential context). */
+      scrubInheritedEnv?: string[];
+      /** Narrow handling for one agent (see `acp-compatibility.ts`). */
+      compatibility?: AcpCompatibility;
+      initialPermissionMode?: string;
     },
     private readonly ev: AcpEvents,
     deps: Partial<AcpClientDeps> = {},
   ) {
     this.artifactGuidance = opts.artifactGuidance;
+    this.conversationHandoff = opts.conversationHandoff;
+    // Resolved at the spawn below, with no await between: what the launch runs is decided now, not
+    // when it was prepared. A refusal throws before anything is spawned.
+    const launch = resolveAcpLaunch(opts.command, opts.compatibility);
+    this.compatibility = launch.compatibility;
+    this.antigravityFullPermissions = launch.compatibility?.profile === "antigravity" &&
+      !opts.orchestrator && !opts.orchestratorRole &&
+      opts.initialPermissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id;
+    if (launch.compatibility?.profile === "antigravity" &&
+        opts.isolation?.backend === "bwrap" && opts.isolation.antigravityTerminalHelper) {
+      try { this.antigravitySandboxExecutable = realpathSync.native(launch.command); }
+      catch { /* The provider's spawn reports missing executables. */ }
+    }
+    // An AppArmor profile attaches to the path the kernel executes. Under bwrap agy runs inside
+    // bwrap's own profile, which that host fix would not change, so it is offered only outside it.
+    if (launch.compatibility?.profile === "antigravity" && opts.isolation?.backend !== "bwrap") {
+      try { this.antigravityHostExecutable = realpathSync.native(launch.command); }
+      catch { /* The provider's spawn reports missing executables. */ }
+    }
+    // The resolved executable is held until the agent answers the handshake (it has then opened
+    // it), so a launcher that opens it after this spawn (bwrap, the cgroup helper) still finds it.
+    this.releaseLaunch = launch.release;
     this.orchestrator = opts.orchestrator === true;
     // `||`, not `??`: the role can only ever widen the assertion. An explicit `false` alongside the
     // coupled preset must not be able to switch the pinned-identity check off.
     this.orchestratorRole = opts.orchestratorRole === true || this.orchestrator;
     this.commands = this.orchestrator ? [] : normalizeAcpCommands(opts.initialCommands);
     this.sessionContext = opts.sessionContext;
-    this.mcpEnvironment = { ...process.env, ...opts.env };
+    const env = compatibleAcpEnvironment(opts.env, launch.compatibility);
+    this.mcpEnvironment = { ...process.env, ...env };
     const context = opts.context ?? { kind: "native" as const };
     this.filesystem = new AcpFilesystemService(opts.cwd, context);
     this.terminals = new AcpTerminalService(this.filesystem, context, opts.isolation, { cgroup: opts.reviewWriterCgroup });
     this.kill = deps.kill ?? killTree;
-    this.child = (deps.spawn ?? spawnAgent)(opts);
+    this.appArmorFix = deps.antigravityAppArmorFix ?? ((executable) => antigravityAppArmorFix(executable));
+    try {
+      this.child = (deps.spawn ?? spawnAgent)({ ...opts, command: launch.command, env });
+    } catch (error) {
+      this.finishLaunch();
+      throw error;
+    }
+    this.child.once("close", () => this.finishLaunch());
     this.peer = new JsonRpcPeer(this.child.stdin, this.child.stdout, (err) =>
       this.ev.onStderr(`transport: ${err.message}`),
     );
 
     this.child.stderr.setEncoding("utf8");
     this.child.stderr.on("data", (t: string) => {
-      if (this.disposed) return;
+      if (this.disposed || !acpStderrMirrored(this.compatibility)) return;
       const text = String(t).trim();
       if (text) this.ev.onStderr(text);
     });
@@ -204,6 +277,8 @@ export class AcpClient {
   }
 
   private readonly sessionContext: AcpSessionContextConfig | undefined;
+  private readonly compatibility: AcpCompatibility | undefined;
+  private releaseLaunch: (() => void) | undefined;
   private readonly mcpEnvironment: NodeJS.ProcessEnv;
   private readonly orchestrator: boolean;
   private readonly orchestratorRole: boolean;
@@ -245,13 +320,40 @@ export class AcpClient {
   /* ----------------------------- Lifecycle ------------------------------- */
 
   async initialize(): Promise<void> {
-    const res = await this.peer.request("initialize", acpInitializeRequest());
-    this.negotiation = negotiateAcpInitialize(res);
+    try {
+      const res = await this.peer.request("initialize", compatibleAcpInitializeRequest(acpInitializeRequest(), this.compatibility) as unknown as Record<string, unknown>,
+        acpLaunchRequestOptions(this.compatibility, "handshake"));
+      this.negotiation = compatibleAcpNegotiation(negotiateAcpInitialize(res), this.compatibility);
+    } catch (error) {
+      // A profiled agent that cannot complete the handshake is an installation problem.
+      throw this.compatibilityError("start") ?? error;
+    } finally {
+      this.finishLaunch();
+    }
     // Keyed on the role, not the preset: only the exact audited adapter release may ever carry
     // Orchestrator authority, whichever launch shape asked for it.
     if (this.orchestratorRole) assertClaudeAgentAcpOrchestratorIdentity(this.negotiation.agentInfo);
     this.supportsImages = this.negotiation.stable.promptImage;
     this.ev.onAcpCapabilities?.(runtimeCapabilities(this.negotiation));
+  }
+
+  /** The launch no longer needs its resolved executable kept (answered, failed or gone). */
+  private finishLaunch(): void {
+    const release = this.releaseLaunch;
+    this.releaseLaunch = undefined;
+    release?.();
+  }
+
+  private compatibilityError(stage: "start" | "resume" | "turn", detail?: string): Error | undefined {
+    const message = acpCompatibilityFailure(this.compatibility, stage, detail);
+    return message ? new Error(message) : undefined;
+  }
+
+  /** A profiled agent signs in from the machine's setup, never from a session: report the
+   * session's agent as signed out and say where to sign in. */
+  private signInRequired(): Error {
+    this.ev.onAuthStatus?.("unauthenticated");
+    return new Error(acpCompatibilityFailure(this.compatibility, "sign_in"));
   }
 
   negotiatedCapabilities(): AcpNegotiation | null {
@@ -271,7 +373,8 @@ export class AcpClient {
       this.establishingSession = true;
       this.pendingSessionStateUpdates = [];
       try {
-        const res = (await this.peer.request("session/new", this.sessionRequest(cwd))) as NewSessionResponse;
+        const res = (await this.peer.request("session/new", this.sessionRequest(cwd),
+          acpLaunchRequestOptions(this.compatibility, "session"))) as NewSessionResponse;
         this.sessionId = res.sessionId;
         this.establishingSession = false;
         this.acceptSessionState(res.modes, res.configOptions);
@@ -281,6 +384,9 @@ export class AcpClient {
       } catch (error) {
         this.establishingSession = false;
         this.pendingSessionStateUpdates = [];
+        if (this.compatibility && !this.transportClosed && isAgentAuthRequiredError(error)) throw this.signInRequired();
+        // A profiled agent that never opens the session is a start failure, not a hang.
+        if (this.compatibility && acpRequestTimedOut(error)) throw this.compatibilityError("start")!;
         if (this.transportClosed || !isAgentAuthRequiredError(error) || !this.negotiation?.authMethods.length) throw error;
         await this.authenticate();
       }
@@ -298,7 +404,8 @@ export class AcpClient {
     try {
       if (this.negotiation?.stable.sessionResume) {
         const request: ResumeSessionRequest = { sessionId, ...this.sessionRequest(cwd) };
-        const response = await this.peer.request("session/resume", request) as ResumeSessionResponse;
+        const response = await this.peer.request("session/resume", request,
+          acpLaunchRequestOptions(this.compatibility, "session")) as ResumeSessionResponse;
         this.acceptSessionState(response.modes, response.configOptions);
       } else if (this.negotiation?.stable.loadSession) {
         const request: LoadSessionRequest = { sessionId, ...this.sessionRequest(cwd) };
@@ -320,6 +427,9 @@ export class AcpClient {
       this.sessionId = null;
       this.replaySuppressedStateUpdates = [];
       if (error instanceof Error && error.message.startsWith("ACP agent does not advertise")) throw error;
+      if (this.compatibility) {
+        throw isAgentAuthRequiredError(error) && !this.transportClosed ? this.signInRequired() : this.compatibilityError("resume");
+      }
       throw new Error(this.negotiation?.stable.sessionResume ? "ACP session resume failed" : "ACP session load failed");
     }
     this.reportAuthenticated();
@@ -332,7 +442,18 @@ export class AcpClient {
     if (additionalDirectories?.length && !this.negotiation.stable.sessionAdditionalDirectories) {
       throw new Error("ACP agent does not advertise additional-directory support");
     }
-    const mcpServers: McpServer[] = materializeAcpMcpServers(this.sessionContext?.mcpServers, this.negotiation, this.mcpEnvironment);
+    const omitted: string[] = [];
+    const mcpServers: McpServer[] = materializeAcpMcpServers(
+      this.sessionContext?.mcpServers,
+      this.negotiation,
+      this.mcpEnvironment,
+      this.compatibility?.profile === "antigravity"
+        ? (name, transport) => omitted.push(`${name} (${transport})`)
+        : undefined,
+    );
+    if (omitted.length) {
+      this.ev.onStderr(`Google Antigravity skipped ${omitted.join(", ")} because it does not advertise support for their MCP transports.`);
+    }
     return {
       cwd,
       mcpServers,
@@ -409,12 +530,35 @@ export class AcpClient {
 
   async setConfig(config: SessionConfig): Promise<void> {
     if (!this.sessionId) throw new Error("ACP session is not established");
+    const permissionMode = config.permissionMode;
     if (config.model !== undefined) await this.setSelectConfig("model", config.model);
     if (config.effort !== undefined) await this.setSelectConfig("thought_level", config.effort);
-    if (config.permissionMode !== undefined) {
-      if (this.modes) await this.setMode(config.permissionMode);
-      else await this.setSelectConfig("mode", config.permissionMode);
+    if (permissionMode === undefined) return;
+    if (permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) {
+      if (!this.offersAntigravityFullPermissions()) {
+        throw new Error("Full Permissions Mode is available only for normal Google Antigravity sessions");
+      }
+      await this.setPermissionMode("default");
+      this.antigravityFullPermissions = true;
+      this.emitSessionState();
+      return;
     }
+    await this.setPermissionMode(permissionMode);
+    if (this.antigravityFullPermissions) {
+      this.antigravityFullPermissions = false;
+      this.emitSessionState();
+    }
+  }
+
+  private offersAntigravityFullPermissions(): boolean {
+    return this.compatibility?.profile === "antigravity" && !this.orchestratorRole;
+  }
+
+  private setPermissionMode(mode: string): Promise<void> {
+    if (mode === ANTIGRAVITY_AUTO_MODE.id && this.antigravityAutoModeRejected) {
+      return Promise.reject(new Error("Auto Mode is unavailable in this Google Antigravity session"));
+    }
+    return this.modes ? this.setMode(mode) : this.setSelectConfig("mode", mode);
   }
 
   /** Reconcile persisted controls after new/resume/load. A provider may omit or narrow controls
@@ -431,7 +575,34 @@ export class AcpClient {
       supported.effort = config.effort;
     }
     const modeOption = optionForCategory(this.configOptions, "mode");
-    if (
+    // Set Auto independently of model and effort so a rejected model change cannot skip it.
+    if (this.compatibility?.profile === "antigravity" && config.permissionMode === ANTIGRAVITY_AUTO_MODE.id) {
+      try {
+        await this.setPermissionMode(ANTIGRAVITY_AUTO_MODE.id);
+      } catch {
+        this.antigravityAutoModeRejected = true;
+        this.emitSessionState();
+        const withheld = this.modes?.availableModes.some((mode) => mode.id === ANTIGRAVITY_AUTO_MODE.id) === false;
+        const fixCommand = withheld ? this.appArmorFix(this.antigravityHostExecutable) : undefined;
+        const meanwhile = "This session uses Default mode. Choose Full Permissions Mode to skip Antigravity’s approval prompts.";
+        this.ev.onEvent({
+          kind: "error",
+          nonFatal: true,
+          source: "antigravity_auto_mode_fallback",
+          message: fixCommand
+            ? "Google Antigravity does not offer Auto Mode on this machine: AppArmor blocks the user namespaces its terminal sandbox needs (kernel.apparmor_restrict_unprivileged_userns = 1). To allow them for Antigravity only, run the command below on this machine, then start a new Antigravity session. " + meanwhile
+            : withheld
+              ? "Google Antigravity does not offer Auto Mode on this machine: it needs Antigravity’s terminal sandbox, which this host does not provide. " + meanwhile
+              : "Google Antigravity could not enable Auto Mode. " + meanwhile,
+          ...(fixCommand ? { fixCommand } : {}),
+        });
+      }
+    } else if (this.antigravityFullPermissions) {
+      // A provider process always starts in agy's Default mode; only a resumed conversation may not.
+      try { await this.setPermissionMode("default"); }
+      catch { this.ev.onStderr("Google Antigravity kept its own mode; Wollipog still approves its requests"); }
+      this.emitSessionState();
+    } else if (
       config.permissionMode &&
       (this.modes?.availableModes.some((candidate) => candidate.id === config.permissionMode) ||
         (!this.modes && modeOption?.options.some((candidate) => candidate.value === config.permissionMode)))
@@ -456,7 +627,7 @@ export class AcpClient {
     this.modeBarrier = modeId;
     const request: SetSessionModeRequest = { sessionId: this.sessionId, modeId };
     try {
-      await this.peer.request("session/set_mode", request);
+      await this.peer.request("session/set_mode", request, acpLaunchRequestOptions(this.compatibility, "session"));
       this.modes = { ...this.modes, currentModeId: modeId };
       if (this.modeBarrier === modeId) this.modeBarrier = null;
       this.emitSessionState();
@@ -464,6 +635,18 @@ export class AcpClient {
       this.modeBarrier = null;
       throw new Error("ACP session mode update failed");
     }
+  }
+
+  private async fallBackFromAntigravitySandbox(): Promise<void> {
+    this.antigravityAutoModeRejected = true;
+    let message = "Google Antigravity’s terminal sandbox could not start inside this managed worktree.";
+    try {
+      await this.setPermissionMode("default");
+      message += " This session switched to Default mode and uses the provider’s approval settings.";
+    } catch {
+      message += " The provider could not switch this session to Default mode.";
+    }
+    this.ev.onEvent({ kind: "error", nonFatal: true, source: "antigravity_auto_mode_fallback", message });
   }
 
   private async setSelectConfig(
@@ -483,7 +666,8 @@ export class AcpClient {
       value,
     };
     try {
-      const response = await this.peer.request("session/set_config_option", request) as SetSessionConfigOptionResponse;
+      const response = await this.peer.request("session/set_config_option", request,
+        acpLaunchRequestOptions(this.compatibility, "session")) as SetSessionConfigOptionResponse;
       const next = normalizeAcpConfigOptions(response.configOptions);
       if (optionForCategory(next, category)?.currentValue !== value) {
         throw new Error("unconfirmed ACP session configuration");
@@ -568,6 +752,13 @@ export class AcpClient {
       throw new Error("ACP command is not available in this session");
     }
     const promptText = slashCommand ? `/${slashCommand}${text ? ` ${text}` : ""}` : text;
+    // The conversation so far, ahead of the first ordinary prompt only: a slash command keeps its
+    // native parse, so the handoff waits for the next prompt.
+    const handoff = !slashCommand && !promptText.trimStart().startsWith("/") ? this.conversationHandoff : undefined;
+    if (handoff) {
+      content.push({ type: "text", text: handoff });
+      this.conversationHandoff = undefined;
+    }
     if (promptText) content.push({ type: "text", text: promptText });
     // ACP providers differ in native slash parsing; command turns are not instruction updates.
     if (this.artifactGuidance && !slashCommand && !promptText.trimStart().startsWith("/")) {
@@ -587,17 +778,38 @@ export class AcpClient {
     }
     if (content.length === 0) content.push({ type: "text", text: "" });
     this.streamedAgentResponse = false;
+    this.antigravitySandboxDeniedInTurn = false;
     try {
-      const res = (await this.peer.request("session/prompt", {
-        sessionId: this.sessionId,
-        prompt: content,
-      })) as PromptResponse;
+      let res: PromptResponse;
+      try {
+        res = (await this.peer.request("session/prompt", {
+          sessionId: this.sessionId,
+          prompt: content,
+        })) as PromptResponse;
+      } catch (error) {
+        // Not accepted: the next ordinary prompt carries the handoff again.
+        if (handoff) this.conversationHandoff = handoff;
+        if (!this.compatibility || this.transportClosed) throw error;
+        throw isAgentAuthRequiredError(error) ? this.signInRequired()
+          : this.compatibilityError("turn", errorMessage(error)) ?? error;
+      }
+      // The agent answered this prompt, so it has the conversation so far. Recording that is the
+      // runner's bookkeeping: a failure there never fails the accepted turn or re-sends the seed.
+      if (handoff) {
+        try {
+          this.ev.onConversationHandoffDelivered?.();
+        } catch (error) {
+          this.ev.onStderr(`could not record the delivered conversation handoff: ${errorMessage(error)}`);
+        }
+      }
       const stopReason = res.stopReason as StopReason;
       // ACP publishes response text only as chunks. Mirror the native streaming drivers' durable,
       // content-free completion fence so transcript consumers can settle the last text item.
       if (stopReason === "end_turn" && this.streamedAgentResponse) {
         this.ev.onEvent({ kind: "agent_response_completed" });
       }
+      // Wait for the turn to settle before changing mode. Never replay the failed command.
+      if (this.antigravitySandboxDeniedInTurn && stopReason !== "cancelled") await this.fallBackFromAntigravitySandbox();
       return stopReason;
     } finally {
       // User-write barriers exist only to reject stale notifications racing the write/next turn.
@@ -616,6 +828,15 @@ export class AcpClient {
 
   cancel(): void {
     if (this.sessionId) this.peer.notify("session/cancel", { sessionId: this.sessionId });
+    // ACP: after session/cancel the client answers every pending permission request as
+    // `cancelled`, so the agent never waits on an approval for a stopped turn. Like the native
+    // drivers, nothing is emitted here: settling the turn settles its approval card. A sign-in
+    // choice is not part of a turn and stays pending.
+    for (const [requestId, resolve] of [...this.permPending]) {
+      if (!requestId.startsWith("perm_")) continue;
+      this.permPending.delete(requestId);
+      resolve(null);
+    }
   }
 
   resolvePermission(requestId: string, optionId: string | null): boolean {
@@ -629,6 +850,7 @@ export class AcpClient {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.finishLaunch();
     this.transportClosed = true;
     this.terminals.dispose();
     this.settlePendingPermissions();
@@ -685,9 +907,27 @@ export class AcpClient {
   }
 
   private emitSessionState(): void {
-    this.ev.onAcpSessionState?.(
-      acpSessionPresentation(this.modes, this.configOptions, this.commands, this.supportsImages),
-    );
+    const state = acpSessionPresentation(this.modes, this.configOptions, this.commands, this.supportsImages);
+    if (this.compatibility?.profile === "antigravity") {
+      if (this.antigravityAutoModeRejected && state.config.permissionMode !== ANTIGRAVITY_AUTO_MODE.id) {
+        const autoId = ANTIGRAVITY_AUTO_MODE.id;
+        state.capabilities.permissionModes = state.capabilities.permissionModes?.filter((mode) => mode !== autoId);
+        state.capabilities.agentPermissionModes = state.capabilities.agentPermissionModes?.filter((mode) => mode.id !== autoId);
+        if (state.capabilities.elicitation) delete state.capabilities.elicitation[autoId];
+      }
+      const auto = state.capabilities.agentPermissionModes?.find((mode) => mode.id === ANTIGRAVITY_AUTO_MODE.id);
+      if (auto) auto.name = ANTIGRAVITY_AUTO_MODE.name;
+      if (this.offersAntigravityFullPermissions()) {
+        const full = ANTIGRAVITY_FULL_PERMISSIONS_MODE;
+        state.capabilities.permissionModes = [...(state.capabilities.permissionModes ?? []), full.id];
+        state.capabilities.agentPermissionModes = [...(state.capabilities.agentPermissionModes ?? []), {
+          ...full, description: "Approve every Antigravity action without asking. Runner isolation still applies.",
+        }];
+        state.capabilities.elicitation = { ...state.capabilities.elicitation, [full.id]: ["none"] };
+        if (this.antigravityFullPermissions) state.config.permissionMode = full.id;
+      }
+    }
+    this.ev.onAcpSessionState?.(state);
   }
 
   private handleUpdate(params: SessionNotification): void {
@@ -747,6 +987,11 @@ export class AcpClient {
         this.emitTerminalOutputs(u.content);
         break;
       case "tool_call_update":
+        if (u.status === "completed" && this.antigravitySandboxExecutable &&
+            (this.modes?.currentModeId ?? optionForCategory(this.configOptions, "mode")?.currentValue) === ANTIGRAVITY_AUTO_MODE.id &&
+            antigravitySandboxSpawnDenied(u.rawOutput, this.antigravitySandboxExecutable)) {
+          this.antigravitySandboxDeniedInTurn = true;
+        }
         this.ev.onEvent({
           kind: "tool_call_update",
           toolCallId: u.toolCallId ?? "tool",
@@ -856,6 +1101,11 @@ export class AcpClient {
 
   private handlePermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
     if (this.disposed || this.orchestrator) return Promise.resolve({ outcome: { outcome: "cancelled" } });
+    if (this.antigravityFullPermissions && this.offersAntigravityFullPermissions()) {
+      const allow = params.options?.find((option) => option.kind === "allow_once") ??
+        params.options?.find((option) => option.kind === "allow_always");
+      if (allow) return Promise.resolve({ outcome: { outcome: "selected", optionId: allow.optionId } });
+    }
     const requestId = `perm_${++this.permCounter}`;
     const options: PermissionOption[] = (params.options ?? []).map((o) => ({
       optionId: o.optionId,
@@ -889,6 +1139,9 @@ export class AcpClient {
   private async handleWrite(params: WriteTextFileRequest): Promise<WriteTextFileResponse> {
     this.assertActiveSession(params.sessionId);
     this.assertOrchestratorClientServiceRefused("filesystem writes");
+    // The runner writes outside the agent's sandbox; a profile that withholds the service (it was
+    // never advertised to that agent) refuses any write the agent asks for anyway.
+    if (!acpClientFileWritesOffered(this.compatibility)) throw new Error("ACP filesystem writes are not offered to this agent");
     await this.filesystem.write(params.path, params.content);
     this.ev.onEvent({ kind: "file_edit", path: params.path });
     return {};
@@ -952,6 +1205,12 @@ export function isAgentAuthRequiredError(value: unknown): value is RpcError {
     (value as RpcError).code === -32000 &&
     (value as RpcError).transportFailure !== true
   );
+}
+
+/** The message of a thrown Error or JSON-RPC error object. */
+function errorMessage(error: unknown): string | undefined {
+  const message = error && typeof error === "object" ? (error as { message?: unknown }).message : undefined;
+  return typeof message === "string" ? message : undefined;
 }
 
 function runtimeCapabilities(negotiation: AcpNegotiation): AcpRuntimeCapabilities {

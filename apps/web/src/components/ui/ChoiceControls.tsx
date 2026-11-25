@@ -173,7 +173,7 @@ export function InlineListbox<T>({
  * check and the radio dot are siblings the stylesheet reveals from `input:checked`, which is how
  * the drawn state and the announced state come from one value.
  */
-function ChoiceMark({ type, className, inputRef, onRemovedWhileFocused, ...input }: {
+function ChoiceMark({ type, className, inputRef, onRemovedWhileFocused, indeterminate = false, ...input }: {
   type: "checkbox" | "radio";
   className?: string;
   /** The input, for an owner that moves focus to it. */
@@ -181,6 +181,7 @@ function ChoiceMark({ type, className, inputRef, onRemovedWhileFocused, ...input
   /** Called as the input is unmounted while it still has focus: the commit that removes it, before
    * the browser drops focus to <body>. */
   onRemovedWhileFocused?: () => void;
+  indeterminate?: boolean;
 } & Omit<React.InputHTMLAttributes<HTMLInputElement>, "type" | "className">) {
   const ownRef = useRef<HTMLInputElement | null>(null);
   const removedRef = useRef(onRemovedWhileFocused);
@@ -190,6 +191,9 @@ function ChoiceMark({ type, className, inputRef, onRemovedWhileFocused, ...input
     const node = ownRef.current;
     if (node && node.ownerDocument.activeElement === node) removedRef.current?.();
   }, []);
+  useLayoutEffect(() => {
+    if (ownRef.current) ownRef.current.indeterminate = indeterminate;
+  }, [indeterminate]);
   return (
     <span className={`${type === "checkbox" ? "checkbox-mark" : "radio-mark"}${className ? ` ${className}` : ""}`}>
       <input
@@ -220,6 +224,7 @@ function ChoiceMark({ type, className, inputRef, onRemovedWhileFocused, ...input
  */
 export function Checkbox({
   checked,
+  indeterminate,
   disabled,
   label,
   helper,
@@ -232,6 +237,8 @@ export function Checkbox({
   onChange,
 }: {
   checked: boolean;
+  /** The mixed state of a control that selects multiple items. */
+  indeterminate?: boolean;
   disabled?: boolean;
   /** The visible label; Title Case unless `consent`. */
   label: string;
@@ -256,13 +263,20 @@ export function Checkbox({
   onChange: (checked: boolean) => void;
 }) {
   const ids = useId();
-  const change = (event: React.ChangeEvent<HTMLInputElement>) => onChange(event.target.checked);
+  const change = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const next = event.currentTarget.checked;
+    // Activating a native checkbox clears indeterminate before dispatch. Preserve the
+    // controlled value when a group changes selection but is still mixed.
+    if (indeterminate) event.currentTarget.indeterminate = true;
+    onChange(next);
+  };
   if (labelHidden) {
     return (
       <ChoiceMark
         type="checkbox"
         className={className}
         checked={checked}
+        indeterminate={indeterminate}
         disabled={disabled}
         aria-label={ariaLabel ?? label}
         aria-describedby={describedBy}
@@ -281,6 +295,7 @@ export function Checkbox({
       <ChoiceMark
         type="checkbox"
         checked={checked}
+        indeterminate={indeterminate}
         disabled={disabled}
         aria-label={ariaLabel}
         aria-labelledby={ariaLabel ? undefined : labelId}
@@ -362,6 +377,7 @@ export function SegmentedControl<T extends string>({
   className,
   describedBy,
   invalid,
+  appearance = "segments",
 }: {
   options: readonly SegmentedOption<T>[];
   value: T | null;
@@ -373,6 +389,7 @@ export function SegmentedControl<T extends string>({
   describedBy?: string;
   /** A form's error is about this choice (§8.5); `describedBy` names it. */
   invalid?: boolean;
+  appearance?: "segments" | "chips";
 }) {
   // One stop for the whole group, computed by `rovingChoiceStop`. The rule was inline here across
   // three rounds and each round fixed one branch of it: nothing selected, then selected but
@@ -406,7 +423,7 @@ export function SegmentedControl<T extends string>({
   return (
     <>
       <div
-        className={`seg${className ? ` ${className}` : ""}`}
+        className={[appearance === "segments" ? "seg" : "choice-chips", className].filter(Boolean).join(" ")}
         role="radiogroup"
         aria-label={label}
         aria-invalid={invalid || undefined}
@@ -429,7 +446,7 @@ export function SegmentedControl<T extends string>({
               // `disabled` would remove it from the roving order, so a disabled option becomes
               // invisible to keyboard users rather than explained to them.
               tabIndex={index === stopAt ? 0 : -1}
-              className="seg-option"
+              className={appearance === "segments" ? "seg-option" : "btn"}
               title={option.disabled ? option.disabledReason ?? option.title : option.title}
               onClick={() => { if (!option.disabled) onChange(option.value); }}
             >

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import fc from "fast-check";
 import type {
@@ -694,8 +696,9 @@ function makeHarness(
   titleGenerationTimeoutMs = 1_000,
   titleGenerationEnabled?: (sessionId: string) => boolean,
   titleGenerationRevision?: (sessionId: string) => string,
+  dbPath = ":memory:",
 ) {
-  const db = ControlPlaneDb.open(":memory:");
+  const db = ControlPlaneDb.open(dbPath);
   db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
   const hub = new FakeHub();
   hub.requestHandler = (message) => {
@@ -1945,6 +1948,138 @@ test("Stop and Archive leaves old runners pending and retries an undelivered arc
     db.updateSessionStatus(parent.id, "idle", Date.now()); // The root's own turn is live work (#4146).
     assert.equal(db.campaignProjection(parent.id)?.status, "verified_complete");
   } finally {
+    db.close();
+  }
+});
+
+for (const failure of ["git", "forge"] as const) test(`archive retirement backs off and only publishes changes: ${failure}`, async (t) => {
+  const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  try {
+    const child = spawn(parent.id, "Deliver issue");
+    const path = `/worktrees/${child}/original`;
+    db.setWorktreePath(child, path);
+    db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify([
+      { id: "original", path, branch: "agent/original", source: "created" },
+    ]), child);
+    let attempts = 0;
+    let recovered = false;
+    hub.requestHandler = (message) => {
+      assert.equal(message.type, "session_worktree");
+      assert.equal(message.operation, "discard");
+      attempts++;
+      const reply = { type: "session_worktree_result", requestId: message.requestId,
+        sessionId: child, operation: "discard" } as const;
+      return recovered
+        ? { ...reply, ok: true, retirement: { status: "removed" },
+          snapshot: snapshot({ id: child, status: "stopped", worktreePath: null, worktrees: [] }) }
+        : { ...reply, ok: false, error: failure === "forge"
+          ? "worktree retained: forge state is temporarily unavailable"
+          : "worktree retained: Git state is unavailable or changed during cleanup" };
+    };
+    svc.onSessionStatus(child, "idle");
+    assert.ok(verify(child, report(child, "Delivered")).ok);
+    svc.onSessionStatus(child, "stopped");
+    const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+    hub.sessionChangedByIdCalls.length = 0;
+    await settle();
+    assert.equal(attempts, 1);
+    assert.deepEqual(hub.sessionChangedByIdCalls, failure === "forge" ? [child, parent.id] : [],
+      "only the first forge error changes the pending cleanup reason");
+    hub.sessionChangedByIdCalls.length = 0;
+
+    const delays = failure === "forge" ? [5, 10, 20, 40, 60, 60] : [1, 2, 4, 8, 16, 32, 60, 60];
+    for (const [index, minutes] of delays.entries()) {
+      t.mock.timers.tick(minutes * 60_000 - 1);
+      svc.reconcileArchivedCampaignWorktrees(RUNNER_ID);
+      assert.equal(attempts, index + 1, "reconnect cannot bypass the scheduled retry");
+      t.mock.timers.tick(1);
+      await settle();
+      assert.equal(attempts, index + 2);
+    }
+    assert.deepEqual(hub.sessionChangedByIdCalls, [], "unchanged failures publish neither child nor campaign upserts");
+    t.diagnostic(`${delays.length} unchanged retry attempts, 0 child/campaign publish calls (previously 2 per failure)`);
+
+    recovered = true;
+    t.mock.timers.tick(60 * 60_000);
+    await settle();
+    assert.deepEqual(hub.sessionChangedByIdCalls, [child, parent.id], "successful cleanup still publishes");
+    assert.deepEqual(db.campaignWorktreeCleanup(child), []);
+    t.mock.timers.tick(60 * 60_000);
+    assert.equal(attempts, delays.length + 2, "successful cleanup stops retrying");
+  } finally {
+    t.mock.timers.reset();
+    db.close();
+  }
+});
+
+test("retirement backoff leaves refused reconciliation and runner-owned deferred replay independent", async (t) => {
+  const { db, svc, hub, parent, spawn, report, verify } = await stopAndArchiveCampaignFixture();
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  try {
+    const child = spawn(parent.id, "Deliver issue");
+    const worktree = (id: string) => ({
+      id, path: `/worktrees/${child}/${id}`, branch: `agent/${id}`, source: "created" as const,
+    });
+    const pending = worktree("pending"), deferred = worktree("deferred"), refused = worktree("refused");
+    const worktrees = [pending, deferred, refused];
+    db.setWorktreePath(child, pending.path);
+    db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?").run(JSON.stringify(worktrees), child);
+    svc.onSessionStatus(child, "idle");
+    assert.ok(verify(child, report(child, "Delivered")).ok);
+    hub.online = false;
+    svc.onSessionStatus(child, "stopped");
+    db.recordCampaignWorktreeCleanup(child, deferred.path, deferred.id, "deferred", "provider_active", Date.now());
+    db.recordCampaignWorktreeCleanup(child, refused.path, refused.id, "refused", "uncommitted changes", Date.now());
+    hub.online = true;
+
+    let completeReconciliation: (() => void) | undefined;
+    let operatorRemoved = false;
+    const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+    hub.requestHandler = (message) => {
+      assert.equal(message.type, "session_worktree");
+      const base = { type: "session_worktree_result", requestId: message.requestId, sessionId: child } as const;
+      const view = (remaining: typeof worktrees) => snapshot({
+        id: child, status: "stopped", worktreePath: pending.path, worktrees: remaining,
+      });
+      if (message.operation === "reconcile_removal") {
+        assert.equal(message.path, refused.path);
+        const reply = { ...base, operation: "reconcile_removal", ok: true,
+          snapshot: view(operatorRemoved ? [pending, deferred] : worktrees) } as const;
+        if (!operatorRemoved) return reply;
+        return new Promise<RunnerRequestResult>((resolve) => {
+          completeReconciliation = () => resolve(reply);
+        });
+      }
+      assert.equal(message.operation, "discard");
+      return message.path === deferred.path
+        ? { ...base, operation: "discard", ok: true, retirement: { status: "deferred", reason: "provider_active" },
+          snapshot: view(worktrees) }
+        : { ...base, operation: "discard", ok: false, error: "worktree retained: Git state is unavailable or changed during cleanup" };
+    };
+    svc.reconcileArchivedCampaignWorktrees(RUNNER_ID);
+    await settle();
+    const requests = () => hub.sentOfType("session_worktree").map((message) => [message.operation, message.path]);
+    assert.deepEqual(requests(), [
+      ["discard", pending.path], ["discard", deferred.path], ["reconcile_removal", refused.path],
+    ]);
+    hub.sentToRunner.length = 0;
+
+    operatorRemoved = true;
+    t.mock.timers.tick(30_000);
+    svc.campaignProjection(parent.id);
+    await settle();
+    assert.deepEqual(requests(), [["reconcile_removal", refused.path]], "refusal reconciliation remains available during backoff");
+    t.mock.timers.tick(30_000);
+    assert.equal(requests().length, 1, "a due retry waits for the in-flight reconciliation");
+    assert.ok(completeReconciliation);
+    completeReconciliation();
+    await settle();
+    assert.deepEqual(requests(), [["reconcile_removal", refused.path], ["discard", pending.path]],
+      "the timed retry resumes without replaying the deferred worktree");
+    assert.deepEqual(db.campaignWorktreeCleanup(child).map((item) => item.status), ["pending", "deferred"]);
+  } finally {
+    t.mock.timers.reset();
     db.close();
   }
 });
@@ -7035,8 +7170,8 @@ test("resolving any Orchestrator-owned typed decision resumes the idle child wit
 });
 
 test("Guardian-direct merge receipts consume once and fail closed across every correlation boundary", async (t) => {
-  const setup = (agentId = CODEX_APP_AGENT_ID) => {
-    const { db, hub, svc } = makeHarness();
+  const setup = (agentId = CODEX_APP_AGENT_ID, dbPath?: string) => {
+    const { db, hub, svc } = makeHarness(undefined, undefined, undefined, undefined, dbPath);
     const meta = runnerMeta();
     const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
     orchestrator.capabilities = {
@@ -7563,6 +7698,206 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     return db.workflowDecisionByOccurrence(occurrenceId)?.status;
   };
 
+  await t.test("a same-head replacement without an admission leaves the original enqueue reconcilable", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      const original = await arm(4192);
+      const retry = svc.createWorkflowDecision(child.id, {
+        requestId: "retry-4192", resourceKey: original.decision.resourceKey, resourceSnapshot: original.snapshot,
+      });
+      assert.ok(retry.ok && retry.data, retry.error);
+      assert.equal(db.workflowDecisionByOccurrence(original.decision.occurrenceId)?.status, "superseded");
+      const reconcile = (occurrenceId: string) => svc.reconcileWorkflowDecision(child.id, occurrenceId,
+        { resourceSnapshot: original.snapshot });
+
+      let merged = false;
+      const proof = forgeProof(child, original, () => merged);
+      hub.requestHandler = proof;
+      assert.equal((await reconcile(original.decision.occurrenceId)).status, 409);
+      assert.equal((await reconcile(retry.data.occurrenceId)).status, 409);
+      assert.equal((await svc.consumeWorkflowDecision(child.id, original.decision.occurrenceId, {
+        resourceSnapshot: original.snapshot, action: { kind: "pr_merge_enqueue", command: original.command },
+      })).status, 409);
+
+      merged = true;
+      hub.requestHandler = (message) => ({ ...proof(message), forgeHeadSha: "f".repeat(40) });
+      assert.equal((await reconcile(original.decision.occurrenceId)).status, 409);
+      hub.requestHandler = proof;
+      const landed = await reconcile(original.decision.occurrenceId);
+      assert.equal(landed.data?.status, "consumed", landed.error);
+      const superseded = db.workflowDecisionByOccurrence(retry.data.occurrenceId);
+      assert.equal(superseded?.status, "superseded");
+      assert.equal(superseded?.supersededBy, original.decision.occurrenceId);
+      assert.equal((await reconcile(original.decision.occurrenceId)).status, 409);
+      assert.equal(svc.governanceAudit(child.id).filter((entry) =>
+        entry.requestId === original.decision.occurrenceId && entry.outcome === "consumed").length, 1);
+    } finally { db.close(); }
+  });
+
+  await t.test("a later armed same-key retry still has precedence over the superseded admission", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      const original = await arm(4193);
+      const retry = await arm(4193);
+      const seen: ReconcileWorkflowActionMessage[] = [];
+      hub.requestHandler = forgeProof(child, retry, () => true, seen);
+      const old = await svc.reconcileWorkflowDecision(child.id, original.decision.occurrenceId,
+        { resourceSnapshot: original.snapshot });
+      assert.equal(old.errorDetails?.code, "workflow_decision_superseded");
+      assert.equal(seen.length, 0);
+      const latest = await svc.reconcileWorkflowDecision(child.id, retry.decision.occurrenceId,
+        { resourceSnapshot: retry.snapshot });
+      assert.equal(latest.data?.status, "consumed", latest.error);
+    } finally { db.close(); }
+  });
+
+  const mergeObservation = (state: "open" | "merged" | "closed", headSha: string, mergedAt?: number) => ({
+    state, headSha, draft: false, baseRef: "main", reviewDecision: "approved" as const,
+    checks: { state: "passing" as const, passing: 1, failing: 0, pending: 0 },
+    requiredChecks: { state: "passing" as const, passing: 1, failing: 0, pending: 0 },
+    mergeQueue: state === "open" ? { state: "awaiting_checks" as const, position: 1 } : null,
+    mergeCommitSha: state === "merged" ? "c".repeat(40) : null, mergedAt,
+  });
+
+  await t.test("a human-run enqueue settles a Codex approval without a provider receipt or forge write", async () => {
+    const { db, hub, svc, parent, child, arm } = setup();
+    try {
+      const original = await arm(3492);
+      const occurrenceId = original.decision.occurrenceId;
+      const approved = db.workflowDecisionByOccurrence(occurrenceId)!;
+      const { headSha, repository, pullRequest } = original.snapshot;
+      const ref = { repository, number: pullRequest };
+      const reconcile = () => svc.reconcileWorkflowDecision(child.id, occurrenceId,
+        { resourceSnapshot: original.snapshot, externalMerge: true });
+      hub.requestHandler = (message) => {
+        assert.equal(message.type, "reconcile_workflow_action");
+        return { type: "workflow_action_reconciliation_result", requestId: message.requestId,
+          sessionId: child.id, occurrenceId, accepted: false, error: "no successful provider command" };
+      };
+      assert.equal((await svc.reconcileWorkflowDecision(child.id, occurrenceId, {
+        resourceSnapshot: original.snapshot,
+      })).status, 409, "normal reconciliation still requires a provider receipt");
+      hub.requestHandler = (message) => { throw new Error(`unexpected runner action ${message.type}`); };
+      let observation = mergeObservation("open", headSha);
+      svc.campaignForgeReadNow = async (_campaign, refs) => {
+        assert.deepEqual(refs, [ref]);
+        return [{ ref, observation }];
+      };
+
+      assert.equal((await reconcile()).status, 409, "an open pull request is not an external merge");
+      observation = mergeObservation("merged", "f".repeat(40), approved.resolvedAt);
+      assert.equal((await reconcile()).status, 409, "a different merged head is not the approved one");
+      observation = mergeObservation("merged", headSha, approved.resolvedAt! - 1);
+      assert.equal((await reconcile()).status, 409, "the approval cannot be credited for a prior merge");
+      observation = mergeObservation("merged", headSha, approved.resolvedAt! + 1_000);
+      const recorded = await reconcile();
+      assert.equal(recorded.data?.status, "consumed", recorded.error);
+      assert.deepEqual(recorded.data?.actionAdmission, approved.actionAdmission, "settlement does not re-arm");
+      assert.equal((await reconcile()).status, 409, "a later request cannot reuse the settlement");
+      assert.ok(svc.governanceAudit(child.id).some((entry) => entry.requestId === occurrenceId &&
+        entry.outcome === "consumed" && entry.actor.id === "workflow-decision-external-merge-reconciliation"));
+      svc.onSessionStatus(child.id, "idle");
+      const report = db.appendEvent(child.id, { kind: "agent_message", text: "Delivered.", final: true }, Date.now());
+      const verified = svc.verifyCampaignChild(parent.id, { childSessionId: child.id,
+        reportEventSeq: report.seq, followUpsAccounted: true });
+      assert.ok(verified.ok, verified.error);
+    } finally { db.close(); }
+  });
+
+  await t.test("a superseded Codex admission cannot also claim a merge recorded on its replacement", async () => {
+    const { db, hub, svc, parent, child, arm } = setup();
+    try {
+      const original = await arm(3492);
+      const retry = svc.createWorkflowDecision(child.id, {
+        requestId: "external-retry", resourceKey: original.decision.resourceKey, resourceSnapshot: original.snapshot,
+      });
+      assert.ok(retry.ok && retry.data, retry.error);
+      assert.ok(svc.resolveDescendantRequest(parent.id, child.id, retry.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+      const approved = db.workflowDecisionByOccurrence(retry.data.occurrenceId)!;
+      svc.campaignForgeReadNow = async (_campaign, [ref]) => [{ ref: ref!,
+        observation: mergeObservation("merged", original.snapshot.headSha, approved.resolvedAt! + 1_000) }];
+      const recorded = await svc.reconcileWorkflowDecision(child.id, approved.occurrenceId, {
+        resourceSnapshot: original.snapshot, externalMerge: true,
+      });
+      assert.equal(recorded.data?.status, "consumed", recorded.error);
+      let providerReads = 0;
+      hub.requestHandler = (message) => {
+        providerReads += 1;
+        assert.equal(message.type, "reconcile_workflow_action");
+        return { type: "workflow_action_reconciliation_result", requestId: message.requestId,
+          sessionId: child.id, occurrenceId: original.decision.occurrenceId, accepted: true,
+          commandDigest: createHash("sha256").update(original.command, "utf8").digest("hex"),
+          providerThreadId: "thread-1", providerTurnId: "provider-session-turn-1",
+          providerAdmissionItemId: "original-admission", providerItemId: "original-command",
+          forgeHeadSha: original.snapshot.headSha };
+      };
+      const replay = await svc.reconcileWorkflowDecision(child.id, original.decision.occurrenceId, {
+        resourceSnapshot: original.snapshot,
+      });
+      assert.equal(replay.errorDetails?.code, "workflow_decision_superseded");
+      assert.equal(providerReads, 0);
+    } finally { db.close(); }
+  });
+
+  await t.test("archiving a provisionally stopped child does not schedule unrecoverable merge checks", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      const original = await arm(1449);
+      hub.requestHandler = forgeProof(child, original, () => false);
+      db.updateSessionStatus(child.id, "stopped", Date.now());
+      assert.ok(svc.setArchived(child.id, true).ok);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(db.workflowDecisionByOccurrence(original.decision.occurrenceId)?.status, "revoked");
+      assert.deepEqual(db.dueLifecycleMergeChecks(Date.now() + 5 * 60_000), []);
+    } finally { db.close(); }
+  });
+
+  await t.test("lifecycle merge observation survives a service restart and never restores the grant", async () => {
+    for (const outcome of ["merged", "closed", "moved", "expired"] as const) {
+      const directory = mkdtempSync(join(tmpdir(), "wollipog-merge-settlement-"));
+      const path = join(directory, "control-plane.sqlite");
+      const { db, hub, svc, child, arm } = setup(AGENT_ID, path);
+      let openDb = db;
+      try {
+        const original = await arm(1449);
+        const occurrenceId = original.decision.occurrenceId;
+        const { repository, pullRequest, headSha } = original.snapshot;
+        const seen: ReconcileWorkflowActionMessage[] = [];
+        hub.requestHandler = forgeProof(child, original, () => false, seen);
+        assert.ok(svc.stop(child.id).ok);
+        assert.equal(db.workflowDecisionByOccurrence(occurrenceId)?.status, "revoked");
+        assert.equal(seen.length, 1, "the read at stop saw an open pull request");
+        await new Promise((resolve) => setImmediate(resolve));
+
+        db.close();
+        openDb = ControlPlaneDb.open(path);
+        const restarted = new SessionsService(openDb, hub as unknown as Hub, NOOP_LOG);
+        const now = Date.now();
+        const state = outcome === "closed" ? "closed" : "merged";
+        const observation = mergeObservation(state, outcome === "moved" ? "f".repeat(40) : headSha, now);
+        let reads = 0;
+        restarted.campaignForgeReadNow = async (_campaign, refs) => {
+          const ref = { repository, number: pullRequest };
+          assert.deepEqual(refs, [ref]);
+          reads += 1;
+          return [{ ref, observation }];
+        };
+        const due = outcome === "expired" ? now + 48 * 60 * 60_000 : now + 5 * 60_000;
+        await restarted.retryLifecycleMergeSettlements(due);
+        await restarted.retryLifecycleMergeSettlements(due + 5 * 60_000);
+        assert.equal(reads, outcome === "expired" ? 0 : 1);
+        assert.equal(openDb.workflowDecisionByOccurrence(occurrenceId)?.status, outcome === "merged" ? "consumed" : "revoked");
+        assert.equal((await restarted.consumeWorkflowDecision(child.id, occurrenceId, {
+          resourceSnapshot: original.snapshot, action: { kind: "pr_merge_enqueue", command: original.command },
+        })).status, 409);
+      } finally {
+        openDb.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  });
+
   await t.test("a Claude Code child's receipt-less merge is consumed by forge reconciliation (#1351)", async () => {
     const { db, hub, svc, child, createChild, arm } = setup(AGENT_ID);
     try {
@@ -7633,6 +7968,44 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     return { type: "forge_decision_action_result", requestId: message.requestId, sessionId: child.id,
       occurrenceId: message.occurrenceId, ...answer(message) };
   };
+
+  await t.test("a durable recheck cannot record the merge a newer provider admission settled", async () => {
+    const { db, hub, svc, child, arm } = setup();
+    try {
+      const original = await arm(1449);
+      const armOnRunner = hub.requestHandler;
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "uncertain" }));
+      const uncertain = await svc.executeWorkflowDecision(child.id, original.decision.occurrenceId,
+        { resourceDigest: original.decision.resourceDigest });
+      assert.equal(uncertain.data?.forgeAction?.outcome, "uncertain", uncertain.error);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "refused" }));
+      assert.ok(svc.restart(child.id).ok);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(db.workflowDecisionByOccurrence(original.decision.occurrenceId)?.status, "revoked");
+
+      db.updateSessionStatus(child.id, "running", Date.now());
+      hub.setSessionQueue(child.id, [], false, "session-turn-2");
+      hub.requestHandler = armOnRunner;
+      const replacement = await arm(1449);
+      hub.requestHandler = (message) => {
+        assert.equal(message.type, "reconcile_workflow_action");
+        return { type: "workflow_action_reconciliation_result", requestId: message.requestId,
+          sessionId: child.id, occurrenceId: replacement.decision.occurrenceId, accepted: true,
+          commandDigest: createHash("sha256").update(replacement.command, "utf8").digest("hex"),
+          providerThreadId: "thread-1", providerTurnId: "provider-session-turn-2",
+          providerAdmissionItemId: "replacement-admission", providerItemId: "replacement-command",
+          forgeHeadSha: replacement.snapshot.headSha };
+      };
+      const reconciled = await svc.reconcileWorkflowDecision(child.id, replacement.decision.occurrenceId,
+        { resourceSnapshot: replacement.snapshot });
+      assert.equal(reconciled.data?.status, "consumed", reconciled.error);
+
+      svc.campaignForgeReadNow = async (_campaign, [ref]) => [{ ref: ref!,
+        observation: mergeObservation("merged", original.snapshot.headSha, Date.now()) }];
+      await svc.retryLifecycleMergeSettlements(Date.now() + 5 * 60_000);
+      assert.equal(db.workflowDecisionByOccurrence(original.decision.occurrenceId)?.status, "revoked");
+    } finally { db.close(); }
+  });
 
   await t.test("an approved enqueue the provider refused is performed once by Wollipog itself (#4067)", async () => {
     const { db, hub, svc, child, arm } = setup(AGENT_ID);
@@ -11451,6 +11824,88 @@ test("createSession persists and launches the capability-dependent Claude permis
   assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, undefined);
 });
 
+test("a generic ACP agent is refused a managed worktree on a Linux provider runner before anything is created (#4901)", () => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const acp = { id: "gemini-cli", name: "Gemini CLI", command: "gemini", args: ["--acp"], env: {},
+      driver: "acp" as const, available: true, context: { kind: "native" as const } };
+    // The runner's setup-derived Antigravity row says where it came from (`antigravityAgentDefinition`).
+    meta.agents.push(acp, { ...acp, id: "google-antigravity", name: "Google Antigravity", command: "agy", args: ["acp"],
+      source: "discovered" as const });
+    meta.runtime = { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
+      admission: { agentLimits: {}, agentWeights: {} }, executionIsolation: { mode: "provider", network: "inherit" } };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const create = (agentId: string, useWorktree: boolean) =>
+      svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId, useWorktree });
+
+    const starts = hub.sentOfType("start_session").length;
+    const refused = create("gemini-cli", true);
+    assert.equal(refused.status, 409);
+    assert.match(refused.error ?? "", /^Gemini CLI can't run in a managed worktree on this machine: .* Start the session In Place instead\.$/u);
+    assert.equal(hub.sentOfType("start_session").length, starts, "the runner is never asked to create the worktree");
+    assert.equal(db.listSessions().some((session) => session.agentId === "gemini-cli"), false, "no session row is left behind");
+
+    assert.ok(create("gemini-cli", false).ok, "In Place stays available");
+    assert.ok(create("google-antigravity", true).ok, "Antigravity's state is preserved in managed worktrees (#4899)");
+    assert.ok(create(AGENT_ID, true).ok, "a driver with a known state directory is unaffected");
+    // An operator's own agent under Antigravity's id launches without Antigravity's profile.
+    meta.agents.find((agent) => agent.id === "google-antigravity")!.source = "config";
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    assert.equal(create("google-antigravity", true).status, 409);
+    meta.agents.find((agent) => agent.id === "google-antigravity")!.source = "discovered";
+    meta.runtime.executionIsolation = { mode: "bwrap", network: "inherit" };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    assert.ok(create("gemini-cli", true).ok, "a runner configured for bwrap already runs every agent with HOME read-only");
+  } finally { db.close(); }
+});
+
+test("createSession launches Antigravity in Auto Mode by default, persists an explicit Full Permissions Mode, and both stay switchable", () => {
+  const { db, hub, svc } = makeHarness();
+  const agent = {
+    ...runnerMeta().agents.find(({ id }) => id === AGENT_ID)!,
+    id: "google-antigravity",
+    driver: "acp" as const,
+    capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+      permissionModes: ["auto", "antigravity-full-permissions"],
+    },
+  };
+  const legacy = { ...agent, id: "legacy-acp", capabilities: { ...agent.capabilities, permissionModes: ["default", "auto"] } };
+  db.updateRunnerAgents(RUNNER_ID, [agent, legacy], Date.now());
+  const localUser = db.localIdentityContext().userId;
+  db.setAgentHarnessDefault(localUser, { agentId: agent.id, driver: "acp", context: { kind: "native" } },
+    { permissionMode: "antigravity-full-permissions" });
+  for (const { agentId, explicit, expected } of [
+    { agentId: agent.id, explicit: undefined, expected: "auto" },
+    { agentId: agent.id, explicit: "antigravity-full-permissions", expected: "antigravity-full-permissions" },
+    { agentId: legacy.id, explicit: undefined, expected: undefined },
+  ]) {
+    const result = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId,
+      ...(explicit ? { config: { permissionMode: explicit } } : {}),
+    }, undefined, undefined, false, false, false, { defaultOwnerUserId: localUser });
+    assert.ok(result.ok && result.data, JSON.stringify(result));
+    assert.equal(db.getSession(result.data.id)!.permissionMode, expected ?? null);
+    assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, expected);
+    if (agentId === agent.id) {
+      // Full Permissions Mode is a live Antigravity mode (agy stays in Default and the runner approves
+      // its requests), so a session moves in and out of it between turns like any other mode.
+      const otherMode = { permissionMode: explicit ? "auto" : "antigravity-full-permissions" };
+      const changed = svc.setConfig(result.data.id, otherMode);
+      assert.ok(changed.ok, JSON.stringify(changed));
+      const prompted = svc.prompt(result.data.id, "Change permissions", [], undefined, otherMode);
+      assert.doesNotMatch(prompted.error ?? "", /fixed at session creation/u);
+    }
+  }
+  const orchestrator = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: agent.id, role: "orchestrator",
+    config: { permissionMode: "antigravity-full-permissions" },
+  });
+  assert.equal(orchestrator.status, 409);
+  assert.match(orchestrator.error ?? "", /only for normal Antigravity sessions/u);
+});
+
 test("createSession persists and launches the resolved concrete model and effort", () => {
   const { db, hub, svc } = makeHarness();
   db.updateRunnerAgents(
@@ -11601,6 +12056,81 @@ test("ordinary createSession applies one capability-valid per-user Agent Harness
   assert.equal(mixedVersionConfig?.effort, undefined);
   assert.equal(mixedVersionConfig?.permissionMode, undefined,
     "a runner without current capability discovery fails closed instead of receiving the preference");
+});
+
+test("a managed Codex model default resolves at each launch and stores only the exact choice in the session", () => {
+  const { db, hub, svc } = makeHarness();
+  const model = "wollipog:latest:sol";
+  const identity = { agentId: CODEX_APP_AGENT_ID, driver: "codex-app-server", context: { kind: "native" } } as const;
+  const userId = db.localIdentityContext().userId;
+  db.setAgentHarnessDefault(userId, identity, { model, effort: "high" });
+  const advertise = (models: NonNullable<RunnerMetadata["agents"][number]["capabilities"]>["models"]) => {
+    db.updateRunnerAgents(RUNNER_ID, runnerMeta().agents.map(agent => agent.id === CODEX_APP_AGENT_ID ? {
+      ...agent,
+      capabilities: {
+        models, modelSource: "live" as const, effortLevels: ["high"], permissionModes: ["default", "orchestrator"],
+        slashCommands: [], supportsImages: true, supportsApprovals: true,
+      },
+    } : agent), Date.now());
+  };
+  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID };
+  const launch = () => svc.createSession(request, undefined, undefined, false, false, false, { defaultOwnerUserId: userId });
+
+  advertise([{ id: "gpt-6.2-sol" }, { id: "gpt-6.3-astra" }, { id: "gpt-6.4-sol", hidden: true }]);
+  const first = launch();
+  assert.ok(first.ok && first.data, first.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config?.model, "gpt-6.2-sol");
+  assert.equal(first.data.model, "gpt-6.2-sol");
+
+  advertise([{ id: "gpt-6.10-sol" }, { id: "gpt-6.2-sol" }]);
+  const second = launch();
+  assert.ok(second.ok && second.data, second.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config?.model, "gpt-6.10-sol");
+  assert.equal(db.getSession(first.data.id)?.model, "gpt-6.2-sol");
+  assert.equal(db.getAgentHarnessDefault(userId, identity)?.config.model, model);
+
+  advertise([{ id: "gpt-6.10-astra" }]);
+  assert.equal(launch().status, 409);
+  const explicit = svc.createSession({ ...request, config: { model: "gpt-6.10-astra", effort: "high" } },
+    undefined, undefined, false, false, false, { defaultOwnerUserId: userId });
+  assert.ok(explicit.ok, explicit.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config?.model, "gpt-6.10-astra");
+
+  db.setAgentHarnessDefault(userId, identity, { model: "gpt-6.10-astra", permissionMode: "orchestrator" });
+  const starts = hub.sentOfType("start_session").length;
+  const inferredOrchestrator = svc.createSession({ ...request, config: { model: "wollipog:latest:astra" } },
+    undefined, undefined, false, false, false, { defaultOwnerUserId: userId, allowManagedModelChoice: true });
+  assert.equal(inferredOrchestrator.status, 409);
+  assert.match(inferredOrchestrator.error ?? "", /specific model/i);
+  assert.equal(hub.sentOfType("start_session").length, starts);
+});
+
+test("an ordinary Pi launch pins managed Latest before validation and refuses unresolved or protected choices", () => {
+  const { db, hub, svc } = makeHarness();
+  const agentId = "pi";
+  const id = "wollipog:latest:opus";
+  const older = "anthropic/claude-opus-5";
+  const latest = "anthropic/claude-opus-5-5";
+  db.updateRunnerAgents(RUNNER_ID, [...runnerMeta().agents, {
+    id: agentId, name: "Pi", driver: "pi", available: true, command: "pi", args: [], env: {},
+    capabilities: {
+      models: [{ id: older, efforts: ["low"] }, { id: latest, efforts: ["high"] }],
+      modelSource: "live", effortLevels: ["low", "high"], permissionModes: [],
+      slashCommands: [], supportsImages: true, supportsApprovals: false,
+    },
+  }], Date.now());
+  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId, config: { model: id } };
+  const launch = (config: typeof request.config & { effort?: string }, allowed = true) => svc.createSession(
+    { ...request, config }, undefined, undefined, false, false, false, { allowManagedModelChoice: allowed },
+  );
+  assert.match(launch({ model: id }, false).error ?? "", /specific model/i);
+  assert.match(launch({ model: "wollipog:latest:sonnet" }).error ?? "", /unavailable/i);
+  assert.match(launch({ model: id, effort: "low" }).error ?? "", /effort/i);
+  const result = launch({ model: id, effort: "high" });
+  assert.ok(result.ok && result.data, result.error);
+  assert.equal(result.data.model, latest);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config?.model, latest);
+  assert.equal(hub.sentOfType("start_session").length, 1);
 });
 
 test("createSession online → 201 and sends start_session with the right launch spec", () => {
@@ -19726,6 +20256,29 @@ test("legacy reconnect inventory retries a durable stop and clears it only when 
   assert.equal(db.hasSessionStopIntent(id), false);
 });
 
+test("restart reports the initial prompt it leaves behind after stopping before admission", () => {
+  for (const mode of ["waiting", "unconfirmed-stop", "already-started", "no-prompt"] as const) {
+    const { db, hub, svc } = makeHarness();
+    try {
+      const id = seedSession(svc, hub, mode === "no-prompt" ? {} : { prompt: "Initial assignment" });
+      assert.equal(hub.sentOfType("start_session").at(-1)?.initialPrompt,
+        mode === "no-prompt" ? undefined : "Initial assignment");
+      if (mode === "already-started") db.appendEvent(id, { kind: "user_message", text: "Initial assignment" }, Date.now());
+      svc.onSessionStatus(id, "queued", undefined, undefined, RUNNER_ID, undefined, {
+        kind: "agent_quota", description: "Provider slots are full", usedUnits: 1, limitUnits: 1, requiredUnits: 1,
+      });
+      assert.ok(svc.stop(id).ok);
+      if (mode !== "unconfirmed-stop") svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+      const restarted = svc.restart(id);
+      assert.equal(restarted.status, 200, restarted.error);
+      assert.equal(hub.sentOfType("start_session").at(-1)?.initialPrompt, undefined);
+      if (mode === "waiting" || mode === "unconfirmed-stop") {
+        assert.match(restarted.data?.initialPromptWarning ?? "", /initial prompt.*resend/iu);
+      } else assert.equal(restarted.data?.initialPromptWarning, undefined, mode);
+    } finally { db.close(); }
+  }
+});
+
 test("restart retains a durable stop until correlated runner evidence proves replacement", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
@@ -25341,7 +25894,7 @@ for (const refusal of ["harness", "capacity", "placement"] as const) {
       assert.equal(reviewer.maxChildSessions, 0);
       assert.equal(reviewer.useWorktree, false);
       assert.deepEqual(h.db.campaignDescendantIds(h.parent.id), [child.id]);
-      assert.equal(h.db.campaignProjection(h.parent.id)!.children.total, 1);
+      assert.equal(h.db.campaignProjection(h.parent.id)!.children.total, 2, "a live review blocks completion without using implementation capacity");
       assert.equal(h.svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID },
         undefined, undefined, false, false, false, { parentSessionId: reviewer.id }).status, 409);
       assert.equal(h.db.childSessionAllocations(h.parent.id).liveCount, 1);
@@ -25509,6 +26062,191 @@ const passingVerdict = (ids: string[]) => ({
   recommendation: "approve", summary: "Every image matches the claims.",
   items: ids.map((evidenceId) => ({ evidenceId, outcome: "pass", defects: [] })),
 });
+
+test("#4187 terminal image reviewers are automatically stopped and archived", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const decision = h.request(child.id, "retire", [h.screenshot(child.id, "image").item]);
+    assert.ok(decision.data);
+    const review = prepareImageReview(h, child.id, decision.data.occurrenceId).data!;
+    h.db.updateSessionStatus(review.reviewerSessionId, "running", Date.now());
+    assert.ok(h.svc.resolveDescendantRequest(h.parent.id, child.id, decision.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "deny", reason: "Recapture required" }, () => true).ok);
+    h.svc.retryDuePrompts();
+    const reviewer = h.db.getSession(review.reviewerSessionId)!;
+    assert.equal(reviewer.archiveStatus, "stop_pending", "retirement must await runner confirmation");
+    assert.equal(reviewer.archived, false);
+    h.svc.onSessionStatus(reviewer.id, "stopped");
+    h.svc.retryDuePrompts();
+    assert.equal(h.db.getSession(reviewer.id)!.archived, true);
+    assert.equal(h.db.delegatedImageReviews.get(review.reviewId)!.state, "ended");
+  } finally { h.db.close(); }
+});
+
+test("#4187 live reviews block completion and terminal reviewers need no report verification", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    h.db.updateSessionOrchestratorBehavior(h.parent.id, { completion: "stop_and_archive" }, Date.now());
+    const reviewers: string[] = [];
+    for (let round = 0; round < 2; round++) {
+      const decision = h.request(child.id, `review-${round}`, [h.screenshot(child.id, `image-${round}`).item]).data!;
+      const prepared = prepareImageReview(h, child.id, decision.occurrenceId);
+      assert.ok(prepared.ok && prepared.data, prepared.error);
+      const review = prepared.data;
+      reviewers.push(review.reviewerSessionId);
+      h.db.updateSessionStatus(review.reviewerSessionId, "running", Date.now());
+      assert.equal(h.db.campaignProjection(h.parent.id)!.children.total, 2);
+      h.svc.maintainImageReviewerRetirement(Date.now());
+      assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, undefined, "live review is preserved");
+      assert.ok(reviewerLook(h, review.reviewerSessionId, `image-${round}`).ok);
+      assert.ok(reviewerVerdict(h, review.reviewerSessionId, passingVerdict([`image-${round}`])).ok);
+      const ref = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, review.reviewId, () => true).data!.delegatedImageReview!;
+      h.svc.maintainImageReviewerRetirement(Date.now());
+      assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, undefined, "unconsumed verdict is preserved");
+      assert.ok(h.svc.resolveDescendantRequest(h.parent.id, child.id, decision.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: [`image-${round}`], delegatedImageReview: ref }, () => true).ok);
+      h.svc.onSessionEvent(review.reviewerSessionId, { kind: "token_usage", model: "vision", costUsd: 1.25 });
+      const costBefore = h.db.campaignWorkLedger.accounting.costSummary(h.parent.id, h.parent.createdAt).total;
+      h.svc.maintainImageReviewerRetirement(Date.now());
+      assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, "stop_pending");
+      assert.ok(!h.db.campaignContinuationChildCandidates(h.parent.id).some(c => c.sessionId === review.reviewerSessionId));
+      assert.equal(h.db.campaignRecoveryCompletion(h.parent.id).state, "children_unfinished");
+      h.svc.onSessionStatus(review.reviewerSessionId, "stopped");
+      h.svc.maintainImageReviewerRetirement(Date.now());
+      assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, true);
+      assert.equal(h.db.getSession(review.reviewerSessionId)!.costUsd, 1.25);
+      assert.deepEqual(h.db.campaignWorkLedger.accounting.costSummary(h.parent.id, h.parent.createdAt).total, costBefore);
+      assert.equal(h.db.delegatedImageReviews.get(review.reviewId)!.state, "consumed");
+      assert.ok(h.svc.verifyCampaignChild(h.parent.id, { childSessionId: review.reviewerSessionId,
+        reportEventSeq: 1, followUpsAccounted: true }).ok, "older skills get an already-handled result");
+      assert.ok(h.svc.setArchived(review.reviewerSessionId, true).ok);
+    }
+    h.svc.onSessionStatus(child.id, "completed");
+    const report = h.db.appendEvent(child.id, { kind: "agent_message", text: "Delivered", final: true }, Date.now());
+    assert.ok(h.svc.verifyCampaignChild(h.parent.id, { childSessionId: child.id, reportEventSeq: report.seq,
+      followUpsAccounted: true }).ok);
+
+    // Complete the coordination wake, as the fake runner would after receiving the final events.
+    h.db.updateSessionStatus(h.parent.id, "idle", Date.now());
+    h.svc.retryDuePrompts();
+    const wake = h.db.latestCampaignContinuation(h.parent.id);
+    if (wake) h.db.updateCampaignContinuationForCommand(wake.commandId, "completed", Date.now());
+    h.db.updateSessionStatus(h.parent.id, "idle", Date.now());
+    assert.equal(h.db.campaignProjection(h.parent.id)!.status, "verified_complete", JSON.stringify(h.db.campaignProjection(h.parent.id)));
+    assert.equal(h.db.campaignRecoveryCompletion(h.parent.id).state, "complete");
+    assert.equal(reviewers.length, 2);
+  } finally { h.db.close(); }
+});
+
+test("#4187 old ended reviewers retire on reconnect; provisional stops never prove archival", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const decision = h.request(child.id, "old", [h.screenshot(child.id, "old").item]).data!;
+    const review = prepareImageReview(h, child.id, decision.occurrenceId).data!;
+    h.db.delegatedImageReviews.end(review.reviewId, "decision_revoked", Date.now() - 1000);
+    h.db.updateSessionStatus(review.reviewerSessionId, "stopped", Date.now());
+    // Stored state from an earlier control plane is enough; no in-memory retirement queue.
+    const svc = new SessionsService(h.db, h.hub as unknown as Hub, NOOP_LOG);
+    svc.retryDuePrompts(Date.now(), RUNNER_ID);
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, false);
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, "stop_pending");
+    svc.onSessionStatus(review.reviewerSessionId, "stopped");
+    svc.retryDuePrompts();
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, true);
+    assert.equal(h.db.delegatedImageReviews.get(review.reviewId)!.endedReason, "decision_revoked");
+  } finally { h.db.close(); }
+});
+
+test("#4187 a provisional Stop preserves a live review until runner reconciliation", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const decision = h.request(child.id, "disconnect", [h.screenshot(child.id, "disconnect").item]).data!;
+    const review = prepareImageReview(h, child.id, decision.occurrenceId).data!;
+    h.svc.failRunnerSessions(RUNNER_ID);
+    h.svc.retryDuePrompts();
+    assert.equal(h.db.delegatedImageReviews.get(review.reviewId)!.state, "running");
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, undefined);
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, false);
+    h.svc.onSessionStatus(review.reviewerSessionId, "stopped");
+    h.svc.maintainImageReviewerRetirement(Date.now());
+    assert.equal(h.db.delegatedImageReviews.get(review.reviewId)!.state, "ended");
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, true);
+  } finally { h.db.close(); }
+});
+
+test("#4187 failed automatic retirement stays pending and recovers on reconnect", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const decision = h.request(child.id, "offline", [h.screenshot(child.id, "offline").item]).data!;
+    const review = prepareImageReview(h, child.id, decision.occurrenceId).data!;
+    h.db.updateSessionStatus(review.reviewerSessionId, "running", Date.now());
+    assert.ok(h.svc.resolveDescendantRequest(h.parent.id, child.id, decision.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "deny", reason: "Recapture required" }, () => true).ok);
+    h.hub.online = false;
+    h.svc.maintainImageReviewerRetirement(Date.now());
+    h.svc.maintainSessionStopIntents(Date.now() + 60 * 60_000);
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, "stop_failed");
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, false);
+    const report = h.db.appendEvent(child.id, { kind: "agent_message", text: "Done", final: true }, Date.now());
+    h.db.updateSessionStatus(child.id, "completed", Date.now());
+    h.db.setSessionArchived(child.id, true, Date.now());
+    h.db.verifyCampaignChildReport(h.parent.id, child.id, report.seq, Date.now());
+    h.db.updateSessionStatus(h.parent.id, "idle", Date.now());
+    const cleanup = h.db.campaignProjection(h.parent.id)!.cleanup?.items.find(item => item.kind === "image_reviewer");
+    assert.equal(cleanup?.action.kind, "person");
+    if (cleanup?.action.kind === "person") assert.match(cleanup.action.text, /Retry Stop/);
+    h.hub.online = true;
+    h.svc.maintainImageReviewerRetirement(Date.now(), RUNNER_ID);
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, "stop_pending");
+    h.svc.onSessionStatus(review.reviewerSessionId, "stopped");
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, true);
+  } finally { h.db.close(); }
+});
+
+test("#4187 legacy reviewer verification respects campaign pause", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const decision = h.request(child.id, "pause", [h.screenshot(child.id, "pause").item]).data!;
+    const review = prepareImageReview(h, child.id, decision.occurrenceId).data!;
+    h.db.delegatedImageReviews.end(review.reviewId, "decision_revoked", Date.now());
+    const local = h.db.localIdentityContext();
+    assert.ok(h.svc.setCampaignPause(h.parent.id, { action: "pause" },
+      { ...local, kind: "human", actorId: local.userId }).ok);
+    assert.equal(h.svc.verifyCampaignChild(h.parent.id, { childSessionId: review.reviewerSessionId,
+      reportEventSeq: 1, followUpsAccounted: true }).status, 409);
+    assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, false);
+  } finally { h.db.close(); }
+});
+
+for (const failure of ["no_verdict", "deadline", "expired_verdict"] as const) {
+  test(`#4187 ${failure} reviews retire without an Orchestrator read`, () => {
+    const h = uiEvidenceReviewHarness();
+    try {
+      const child = h.createChild("UI Child");
+      const decision = h.request(child.id, failure, [h.screenshot(child.id, failure).item]).data!;
+      const review = prepareImageReview(h, child.id, decision.occurrenceId).data!;
+      h.db.updateSessionStatus(review.reviewerSessionId, "running", Date.now());
+      if (failure === "no_verdict") h.svc.onSessionStatus(review.reviewerSessionId, "idle");
+      if (failure === "deadline") h.db.raw().prepare("UPDATE delegated_image_reviews SET created_at=0 WHERE review_id=?").run(review.reviewId);
+      if (failure === "expired_verdict") {
+        assert.ok(reviewerLook(h, review.reviewerSessionId, failure).ok);
+        assert.ok(reviewerVerdict(h, review.reviewerSessionId, passingVerdict([failure])).ok);
+        h.db.raw().prepare("UPDATE ui_evidence_review_receipts SET expires_at=0 WHERE reviewer_session_id=?").run(review.reviewerSessionId);
+      }
+      h.svc.maintainImageReviewerRetirement(Date.now());
+      assert.equal(h.db.delegatedImageReviews.get(review.reviewId)!.state, "ended");
+      assert.equal(h.db.getSession(review.reviewerSessionId)!.archiveStatus, "stop_pending");
+      h.svc.onSessionStatus(review.reviewerSessionId, "stopped");
+      assert.equal(h.db.getSession(review.reviewerSessionId)!.archived, true);
+    } finally { h.db.close(); }
+  });
+}
 
 test("a delegated image reviewer approves N images without any reaching the Orchestrator (#4074)", () => {
   const h = uiEvidenceReviewHarness();

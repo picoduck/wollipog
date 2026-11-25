@@ -160,7 +160,7 @@ const measureLineOne = (shells: Element[]) => shells.map((shell) => {
     const row = shell.querySelector<HTMLElement>(".inbox-row")!;
     const box = row.getBoundingClientRect();
     const style = getComputedStyle(row);
-    // A phone card's line one (#2209): the sender and, trailing, the flags.
+    // A phone card's line one (#2209, #4791): the sender and, trailing, the time and the flags.
     const signals = row.querySelector<HTMLElement>(".inbox-row-sender-line")!.getBoundingClientRect();
     const time = row.querySelector<HTMLElement>("time")!;
     const sender = row.querySelector<HTMLElement>(".inbox-row-sender")!.getBoundingClientRect();
@@ -183,8 +183,9 @@ const measureLineOne = (shells: Element[]) => shells.map((shell) => {
       pills: row.querySelectorAll(".status").length,
       pillsOnLineOne: row.querySelectorAll(".inbox-row-sender-line .status").length,
       timeCount: row.querySelectorAll("time").length,
-      timeOnLineThree: time.parentElement!.classList.contains("inbox-row-status-line") &&
-        time.parentElement === row.lastElementChild,
+      timeOnLineOne: time.parentElement!.classList.contains("inbox-row-trail") &&
+        time.parentElement!.parentElement === row.firstElementChild &&
+        time.parentElement!.parentElement!.classList.contains("inbox-row-sender-line"),
       timeText: time.textContent,
       timeHeight: time.getBoundingClientRect().height,
       timeOverflowRight: time.getBoundingClientRect().right - (box.right - parseFloat(style.paddingRight)),
@@ -213,19 +214,20 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
   await expect(approval.locator(".status").last()).toHaveAttribute("aria-label", "Status: Answer Required");
   await expect(approval.locator(".row-status-more > [aria-hidden='true']")).toHaveText("+1");
   const geometry = await page.locator(".inbox-row-shell").evaluateAll(measureLineOne);
-  // Dense cards may grow while preserving touch targets and thread indentation.
-  expect(geometry.every((row) => row.height >= 44), "dense cards may grow while preserving touch targets").toBe(true);
+  // Every card is three lines, dense or not (#4791): its status line gives way rather than wraps.
+  expect(geometry.every((row) => row.height >= 44), "cards keep their touch targets").toBe(true);
+  expect(new Set(geometry.map((row) => row.height)).size, "every card is one height").toBe(1);
   for (const row of geometry) expect(row.left - geometry[0]!.left).toBe(row.child ? 14 : 0);
-  // The time moved to line three's trailing edge (#934), once per card and with its suffix back.
+  // The time trails line one at the card's right edge, above ⋯ (#4791), once per card with its suffix.
   for (const row of geometry) {
     expect(row.timeCount, "one time element per card").toBe(1);
-    expect(row.timeOnLineThree, `${row.title} keeps its time on line three`).toBe(true);
+    expect(row.timeOnLineOne, `${row.title} keeps its time on line one`).toBe(true);
     expect(row.timeText).toMatch(/ ago$|^just now$|^—$/);
     expect(row.timeHeight, "the time is on one line").toBeLessThanOrEqual(20);
     expect(row.timeOverflowRight).toBeLessThanOrEqual(0.5);
   }
-  // Line one carries only the sender and its flags, so even a quiet child with an approval (#603) shows
-  // the agent's whole first word beside the icon. Asserted against the word's own rendered width, so
+  // Line one carries only the sender, the time and the flags, so even a quiet child with an approval
+  // (#603) shows the agent's whole first word beside the icon. Asserted against the word's own rendered width, so
   // CI's wider fallback face cannot make it a pixel argument.
   const three = geometry.find((row) => row.title?.startsWith("#603"))!;
   expect(three.pills).toBe(2);

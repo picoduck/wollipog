@@ -120,6 +120,17 @@ test("notification dispatch preserves frame order around a response in one chunk
   }
 });
 
+test("JSON values that are not message objects are skipped instead of throwing in the stdout listener", async () => {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const peer = new JsonRpcPeer(stdin, stdout);
+  const response = peer.request("survive_values");
+  const sent = JSON.parse(String(stdin.read()).trim());
+  // Before the guard, `null` threw a TypeError from the data listener: an uncaught exception.
+  stdout.write(`null\n42\n"text"\n[1,2]\n${JSON.stringify({ jsonrpc: "2.0", id: sent.id, result: "alive" })}\n`);
+  assert.equal(await response, "alive");
+});
+
 test("an oversized stdout record is isolated and the next JSON-RPC response still resolves", async () => {
   const stdin = new PassThrough();
   const stdout = new PassThrough();

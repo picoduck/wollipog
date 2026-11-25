@@ -47,7 +47,7 @@ export function OwnerRuleSummary({ rule }: { rule: WorkflowDecisionOwnerRule }) 
 
 /** What a workflow decision decides, as facts (§5.4): the Request Card's body for the kinds without
  * a review of their own, and the read-only summary of a decision the Orchestrator owns. */
-export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scopeMaxIssuesIncrease, authority, authorityReason, scopeDecisionDetails }: {
+export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scopeMaxIssuesIncrease, authority, authorityReason, scopeDecisionDetails, nonBlocking = true }: {
   snapshot: WorkflowDecisionResourceSnapshot;
   authority?: "human" | "orchestrator";
   authorityReason?: CampaignAuthorityEvaluation["reason"];
@@ -56,6 +56,9 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
   scopeDecisionDetails?: PendingApproval["scopeDecisionDetails"];
   /** The server-recorded closing-reference read of a GitHub merge, when there was one. */
   closingReferenceCheck?: PullRequestClosingReferenceCheck;
+  /** Whether the requesting session keeps working while waiting (Orchestrator roots) rather than
+   * parking on this card (standalone Normal sessions). */
+  nonBlocking?: boolean;
 }) {
   const delegationFailure = (authorityReason && TEMPORARY_DELEGATION_FAILURE_COPY[authorityReason]) ??
     "Your approval is required for this deletion; a creation receipt does not delegate the decision.";
@@ -95,8 +98,12 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
           {option.description ? <>: {option.description}</> : null}
         </li>)}</ul>}
         {authorityReason !== "credential_screen_review" && <p>{snapshot.kind === "question"
-          ? "The Orchestrator asked you this question. Only you can answer it, in your own words, and it keeps working while it waits."
-          : "You kept this decision, so only you can make it. The Orchestrator keeps working while it waits."}</p>}
+          ? nonBlocking
+            ? "The Orchestrator asked you this question. Only you can answer it, in your own words, and it keeps working while it waits."
+            : "This session asked you this question. Only you can answer it, in your own words."
+          : nonBlocking
+            ? "You kept this decision, so only you can make it. The Orchestrator keeps working while it waits."
+            : "Only you can make this decision."}</p>}
       </>;
     case "campaign_issue_scope":
       return <CampaignIssueScopeSummary snapshot={snapshot} decisionDetails={scopeDecisionDetails} {...(scopeMaxIssuesIncrease ? { derivedIncrease: scopeMaxIssuesIncrease } : {})} />;
@@ -132,6 +139,63 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
             {...(closingReferenceCheck ? { check: closingReferenceCheck } : {})} />
         </dd></div>
       </dl>;
+    case "ci_rerun": {
+      const runUrl = `https://github.com/${snapshot.repository}/actions/runs/${snapshot.runId}`;
+      const runNumber = `#${snapshot.runId}`;
+      return <dl className="facts ci-rerun-target" aria-label="CI Rerun Target">
+        <div className="ci-rerun-repository"><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
+        <div><dt>Workflow Run</dt><dd><a className="ci-rerun-token" href={runUrl} title={runNumber}
+          target="_blank" rel="noreferrer">{runNumber}</a></dd></div>
+        <div><dt>Attempt</dt><dd>{snapshot.attempt}</dd></div>
+        <div className="ci-rerun-phone-wide"><dt>Head Commit</dt><dd><a className="ci-rerun-token"
+          href={`https://github.com/${snapshot.repository}/commit/${snapshot.headSha}`}
+          title={snapshot.headSha} aria-label={`Head Commit ${snapshot.headSha}`} target="_blank" rel="noreferrer">
+          <code>{snapshot.headSha.slice(0, 10)}</code>
+        </a></dd></div>
+        <div className="ci-rerun-phone-wide"><dt>{snapshot.jobId === undefined ? "Job" : "Job and Dependents"}</dt>
+          <dd>{snapshot.jobId === undefined ? "Entire Run" :
+          <a className={snapshot.jobName ? undefined : "ci-rerun-token"}
+            href={`${runUrl}/job/${snapshot.jobId}`} target="_blank" rel="noreferrer"
+            title={`Job #${snapshot.jobId}`}
+            aria-label={snapshot.jobName ? `${snapshot.jobName} (#${snapshot.jobId})` : undefined}>
+            {snapshot.jobName ?? `#${snapshot.jobId}`}
+          </a>}</dd></div>
+      </dl>;
+    }
+    case "release_tag":
+    case "release_publish": {
+      const repository = `https://github.com/${snapshot.repository}`;
+      return <dl className="facts" aria-label="Release Target">
+        <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
+        <div><dt>Tag</dt><dd>{snapshot.tag}</dd></div>
+        <div><dt>Commit</dt><dd><a href={`${repository}/commit/${snapshot.commitSha}`} target="_blank" rel="noreferrer">
+          <code>{snapshot.commitSha}</code>
+        </a></dd></div>
+        {snapshot.category === "release_tag" ? <div><dt>Action</dt><dd>Create the tag if it is absent.</dd></div> : <>
+          <div><dt>Draft ID</dt><dd>#{snapshot.releaseId}</dd></div>
+          <div><dt>Release Name</dt><dd>{snapshot.releasePayload.name}</dd></div>
+          <div><dt>Action</dt><dd>Publish this draft as the latest stable release.</dd></div>
+          {snapshot.releasePayload.workflow && <div><dt>Workflow Attempt</dt><dd>
+            <a href={`${repository}/actions/runs/${snapshot.releasePayload.workflow.runId}/attempts/${snapshot.releasePayload.workflow.attempt}`}
+              target="_blank" rel="noreferrer">Run {snapshot.releasePayload.workflow.runId}, attempt {snapshot.releasePayload.workflow.attempt}</a>
+          </dd></div>}
+          <div><dt>Previous Stable Release</dt><dd>{snapshot.releasePayload.previousStable?.tag ?? "None"}</dd></div>
+          <div className="release-payload-detail"><dt>Release Notes</dt><dd><details>
+            <summary>Show Release Notes</summary>
+            <div className="code-well"><pre>{snapshot.releasePayload.body}</pre></div>
+          </details></dd></div>
+          <div className="release-payload-detail"><dt>Assets</dt><dd><details>
+            <summary>Show Assets ({snapshot.releasePayload.assets.length})</summary>
+            <ul>{snapshot.releasePayload.assets.map((asset) => <li key={asset.id}>{asset.name} · #{asset.id} · {asset.size} bytes
+              <code className="release-payload-digest">{asset.digest}</code>
+            </li>)}</ul>
+          </details></dd></div>
+        </>}
+        <div><dt>Payload Digest</dt><dd><code className={snapshot.category === "release_publish" ? "release-payload-digest" : undefined}>
+          {snapshot.releasePayloadDigest}
+        </code></dd></div>
+      </dl>;
+    }
     case "review_round_extension":
       // What the person is asked to grant: more cross-model review rounds, and why (#3369).
       return <dl className="facts">

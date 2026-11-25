@@ -418,7 +418,7 @@ export class ProviderLoginSupervisor {
   }
 
   async startAccount(
-    input: { provider: "claude" | "codex"; label: string; profileGrantId?: string } | { accountId: string },
+    input: { provider: "claude" | "codex"; label: string; profileGrantId?: string; newAccountId?: string } | { accountId: string },
     installationSelections: Array<{ context: AgentContext; installationId: string }> = [],
   ): Promise<ProviderLoginView> {
     let account: RunnerProviderAccount;
@@ -434,7 +434,11 @@ export class ProviderLoginSupervisor {
       if (input.profileGrantId !== undefined && !isProviderProfileGrantId(input.profileGrantId)) {
         throw new Error("The profile grant is invalid.");
       }
-      const id = this.newAccountId(label);
+      if (input.newAccountId !== undefined && (typeof input.newAccountId !== "string" ||
+          !/^login-[0-9a-f]{8}$/u.test(input.newAccountId) || this.accountIdInUse(input.newAccountId))) {
+        throw new Error("The new account's id is unavailable on this Machine.");
+      }
+      const id = input.newAccountId ?? this.newAccountId(label);
       // #3239: with this control plane's grant the account becomes a managed profile at the
       // SSH-account-level root; markers cannot be verified on Windows, which keeps today's path.
       const profiles = (this.options.platform ?? process.platform) !== "win32" ? this.options.profiles : undefined;
@@ -525,8 +529,14 @@ export class ProviderLoginSupervisor {
   private newAccountId(label: string): string {
     let id: string;
     do id = `${accountSlug(label)}-${randomUUID().slice(0, 8)}`;
-    while (this.options.accounts.some((candidate) => candidate.id === id) || this.importing.has(id));
+    while (this.accountIdInUse(id));
     return id;
+  }
+
+  private accountIdInUse(id: string): boolean {
+    return this.options.accounts.some((candidate) => candidate.id === id) ||
+      this.reserved.has(id) || this.pending.has(id) || this.importing.has(id) ||
+      [...this.active.values()].some((operation) => operation.resolved.accountId === id);
   }
 
   /**
@@ -583,7 +593,7 @@ export class ProviderLoginSupervisor {
       throw new ProviderCredentialImportError("LABEL_IN_USE", error instanceof Error ? error.message : "The account label is unavailable.");
     }
     if (input.accountId !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(input.accountId) ||
-        this.options.accounts.some((candidate) => candidate.id === input.accountId) || this.importing.has(input.accountId))) {
+        this.accountIdInUse(input.accountId))) {
       throw new ProviderCredentialImportError("FAILED", "The new account's id is unavailable on this Machine.");
     }
     const accountId = input.accountId ?? this.newAccountId(label);

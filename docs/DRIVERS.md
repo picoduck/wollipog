@@ -1334,6 +1334,33 @@ retained without `_meta` or other arbitrary agent data. Stable agent-managed aut
 are retained as bounded render-only choices; draft environment-variable and terminal methods are
 ignored.
 
+**Managed worktrees (#4901, #4902).**
+
+- **Why some agents are refused.** On Linux, a native host launch in a runner-created worktree always
+  runs under bubblewrap. On a runner configured for `provider` isolation, that sandbox keeps only the
+  provider's own state directory writable (`preserveProviderHome`). The generic ACP driver has no
+  state directory, so it cannot keep one. Every ACP agent except Google Antigravity, whose profile
+  names `~/.gemini/antigravity-cli` (§4.3), would lose its settings and conversations there. Its
+  launch is therefore refused. This covers Claude Code (ACP), Codex (ACP), Gemini CLI, Hermes,
+  OpenClaw and operator-configured agents. That includes an operator's own agent under
+  Antigravity's id (`source: "config"`), which launches without Antigravity's profile.
+- **Where it is refused.** One rule, `managedWorktreeUnsupportedReason` in `@wollipog/protocol`,
+  refuses these agents before anything is created or lost:
+  - session creation, with a 409 that names the agent and the In Place alternative;
+  - `create_worktree` and `select_worktree`, so no worktree is made or moved to;
+  - `start`, which keeps an older control plane from making a worktree the launch would leave
+    behind. It is judged by the checkout that launch will use, so a restart into a selected attached
+    worktree proceeds. It runs at the launch-refusal step: after the session record exists, so the
+    refusal is published as the session's status, and before any worktree is made;
+  - the relaunch after a worktree switch, before the running provider is retired. The check that
+    used to guard that relaunch read the capabilities of the launch being retired.
+- **Unaffected.** In-place sessions, attached worktrees, and runners configured for bwrap or Seatbelt,
+  where every agent already runs with HOME read-only.
+- **A relaunch that fails anyway.** After a switch, a relaunch can still fail for a reason no check
+  could foresee, such as a provider rejecting the resume or its process exiting during the
+  handshake. The session then goes idle with the error instead of Failed. Its prompts queued for that relaunch are rejected, not retried, and the next
+  message or Restart retries. Setup and provider-account failures keep their own recovery states.
+
 The current client advertises its canonical-root filesystem service and the complete stable
 terminal lifecycle. Filesystem calls are active-session/root-bound with canonical and symlink
 escape checks plus 8 MiB text limits. ACP terminals are separate from dashboard shells, retain a
@@ -1432,6 +1459,338 @@ transcript events have been suppressed.
 Protocol v100 provisions native host sessions with the session-scoped Wollipog CLI and, for Claude
 Code, the equivalent general stdio MCP server. See [Agent Control CLI and MCP](./agent-control.md)
 for the credential lifecycle, route/audit boundary, commands, and compatibility contract.
+
+### 4.2 Google Antigravity setup (protocol v403, managed install v404)
+
+Protocol v403 (Refs #4780) lets a person who can manage a Machine set up Google's `agy` CLI from
+**Connections**. The setup itself launches no turn; Antigravity sessions build on it (§4.3).
+
+- **Runtime.** The runner resolves `agy` for its own user (PATH, `~/.local/bin` and the other
+  discovery locations) and runs `agy --version`. A missing runtime shows Google's documented install
+  command for a person to run in the machine's terminal, and, from protocol v404, an Install action.
+- **Resolution (v404).** A working managed copy (below) is preferred. The operator-installed copy on
+  PATH is used when there is no managed copy, or when the managed copy fails its version check, and
+  Wollipog never changes it. The setup names the executable in use (`executable.source`: `managed`
+  or `path`), the PATH copy kept as the fallback (`managedInstall.pathExecutable`: the first `agy`
+  on PATH that isn't a link into the managed folder), and
+  `managedInstall.activeCheckFailed` when the fallback is in use because the managed copy failed.
+  The managed launch path is `<dataDir>/antigravity-managed/current/agy`, so an update changes what
+  the next launch runs without disturbing one already running.
+- **Managed install and update (v404).** Only on a person's explicit Install or Update
+  (`POST /api/runners/:id/antigravity-setup/install`, Machine manage permission, human principals
+  only; the Assistant capability audit marks it `human_authority`), on Linux and macOS. Google
+  publishes the CLI through `https://antigravity.google/cli/install.sh`, which reads a per-platform
+  manifest and downloads a gzipped tar. Wollipog follows that chain itself and never runs the script
+  (nor `agy install`, which edits shell profiles):
+  1. Fetch the script from `antigravity.google` as text, with no redirect off that origin, and
+     record its SHA-256. It must assign `DOWNLOAD_BASE_URL` exactly once, to a bare `https://` origin
+     whose host ends in `.run.app`, read `$DOWNLOAD_BASE_URL/manifests/$platform.json`, and extract
+     the `antigravity` member. Anything else fails as `installer_not_recognized`.
+  2. Fetch `<base>/manifests/<platform>.json`. The platform is the script's own name for it:
+     `linux_amd64`, `linux_arm64`, `linux_amd64_musl`, `linux_arm64_musl`, `darwin_amd64` or
+     `darwin_arm64`. musl is detected as the script does, from its two loader paths, else from the C
+     library the runner's own Node process reports instead of running `ldd`. Other platforms keep the
+     guidance only (`managedInstall.available: false`). The manifest is
+     `{"version": "1.5.14", "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/<version>-<build>/<platform-dir>/cli_<os>_<arch>.tar.gz", "sha512": "<128 hex>"}`.
+     Its `url` must be HTTPS on `storage.googleapis.com`, end in `.tar.gz` and have no query or
+     fragment, so a signed download token can never reach the setup report or the runner log.
+  3. Download the archive into `<dataDir>/antigravity-managed/staging/<id>/` (512 MiB cap, 20-minute
+     limit, same-origin redirects only), hashing it as it streams, and refuse it unless its SHA-512
+     equals the manifest's.
+  4. Extract only the single regular `antigravity` member as `agy`, mode 0755 (1 GiB cap). Links,
+     devices, absolute or `..` paths, a duplicate or missing member, a truncated archive, a missing
+     second end-of-archive block or data after it refuse the whole archive (`archive_invalid`).
+  5. Validate the staged binary with HOME, the XDG folders (the runtime folder included) and TMPDIR
+     inside a private scratch folder, and without the session bus, agent sockets or display, so a
+     release not yet trusted doesn't use the runner user's files, keyring or sign-in in the ordinary
+     course: `agy --version` must print a version, `agy acp --help` must succeed, and `agy acp` must
+     complete an ACP `initialize` handshake. It still runs as the runner's user without an
+     operating-system sandbox. The manifest's SHA-512 is what establishes it is Google's build.
+  6. Activate: rename the staging folder to `generations/<id>/` with a `release.json` provenance
+     record, write `pending-activation.json` naming what both pointers named, point `previous` at the
+     old generation, and swap the `current` symlink by renaming a new link over it. A runner that
+     begins stopping before a pointer changes activates nothing.
+  7. Verify: run the ordinary check, with the runner user's sign-in, against the activated managed
+     copy alone (never falling back to the PATH copy). It must get past its version check
+     (`sign_in_required` at least), and do no worse than Antigravity on the machine did at the
+     start of the install, by a fresh ordinary check (`ready` over `sign_in_required` over
+     anything else), so a working PATH fallback is never displaced by a worse managed copy. A
+     check that timed out proves nothing, including a managed copy's version check that timed out
+     while the PATH copy stood in, so the update stops there with `timed_out`, before anything is
+     downloaded. Otherwise, or if the runner began
+     stopping, both pointers are restored, so the previous managed version (or, for a first install,
+     the PATH copy) is used again, and the install reports `access_check_failed` (`activation_failed`
+     when stopping). Only a verified activation removes the pending record, and then the generations
+     other than `current` and `previous`, keeping exactly one previous.
+  8. Recover: a pending record means an activation was never verified (the runner exited mid-check,
+     a restore failed, or the record couldn't be removed to commit it). The runner restores the
+     pointers it names at startup, before anything reads `current`, before each check and before
+     each install. An install refuses to start while a record it can't restore remains, and an
+     activation never replaces one. A restore that fails reports `rollback_failed` and claims no
+     kept version; once a later restore succeeds (removing the rejected folder is best effort),
+     the outcome reads the failure the install began with, `access_check_failed` or
+     `activation_failed`, with the previous version kept. A verified activation whose record can't be removed is rolled back and
+     reported as failed, never as a success.
+
+  Any failure removes the staging folder, leaves `current` untouched and reports a distinct
+  `managedInstall.operation.failure` (`platform_not_supported`, `installer_not_recognized`,
+  `redirect_refused`, `download_failed`, `timed_out`, `checksum_mismatch`, `archive_invalid`,
+  `validation_failed`, `activation_failed`, `access_check_failed` or `rollback_failed`). The card then shows the version still active. The
+  provenance (installer SHA-256, manifest URL, version, archive URL and SHA-512) is recorded in the
+  setup (`managedInstall.active`), in the generation's `release.json` and in the runner log.
+  Operations are kept in memory, so a finished install's outcome lasts until the runner restarts.
+  `managedInstall.latest` is Google's newest version. It is read on a person's Check Again, and at
+  runner start only when a managed copy exists, never on a timer. The card offers an update only when
+  that version is newer than the active managed one. A runner sends the v404 fields only to a v404
+  control plane; an older one receives the v403 shape. The register frame always carries the v403
+  shape, because the peer's version isn't known yet, and the registration republish adds the v404
+  fields for a v404 peer.
+- **Credential context.** `antigravityCredentialContext()` (`apps/runner/src/antigravity-setup.ts`)
+  is the single launch environment for the version check, sign-in and access check, and it is
+  exported for #4779's session launch. It keeps the runner user's HOME and drops ambient
+  credentials that could change the account or billing: `GEMINI_API_KEY`, `GOOGLE_API_KEY`,
+  `GOOGLE_GEMINI_BASE_URL`, `AGY_ADC_AUTH`, `GOOGLE_APPLICATION_CREDENTIALS`,
+  `GOOGLE_GENAI_USE_VERTEXAI` and every `GOOGLE_CLOUD_*` variable. The managed copy always runs with
+  `AGY_CLI_DISABLE_AUTO_UPDATE=true`, Google's switch for the CLI's background self-updater, because
+  Wollipog owns its updates and its kept previous generation. A copy on PATH keeps its own behavior.
+  `AntigravitySetupSupervisor.launchTarget()` returns the resolved executable with its context.
+  Antigravity stores its sign-in in
+  the OS keyring, which every process of that user shares. The setup therefore reports
+  `credentialStore: "shared_os_keyring"`, and the card calls it a shared sign-in. No per-account
+  isolation is claimed.
+- **Access check.** The runner sends ACP `initialize`, then `session/new` in a fresh, empty,
+  runner-private directory under `<dataDir>/antigravity-setup`, without a prompt, and terminates the
+  process right after. An authentication error (-32000) reports `sign_in_required`. A session with
+  at least one advertised model (the stable `model` config option, or session model state) reports
+  `ready` with those models. Anything else reports `verification_failed` with the failing step. It
+  runs at runner start and on a person's Check Again or sign-in, never on periodic discovery or
+  Rediscover, which the Assistant can also send.
+- **Remote sign-in.** The runner runs Google's `agy acp --login` in the same context and publishes
+  the first complete, credential-free HTTPS link it prints. A link counts only once a terminator
+  follows it, since output arrives in chunks. No output is read after that link, so nothing the command
+  prints later (such as a diagnostic echoing the code) can be published. The pasted code is written to the command's stdin
+  once and never stored, logged or published. The command's output stays in memory, bounded, and is
+  read only for that link. A successful exit is not success: the sign-in ends `succeeded` only if the
+  access check then reports `ready`, and otherwise `failed` with `not_verified`. A missing link,
+  rejected code, timeout or Cancel ends it without changing the setup.
+- **Exposure.** The control plane keeps the setup only for principals who can manage the Machine,
+  because its sign-in link is bearer-like. The routes accept only human principals, and the
+  Assistant has no route to them. A runner reconnect clears the stored setup until the runner
+  republishes it.
+
+These outputs are undocumented: the link format, the exit codes and the session errors. The tests use
+the credential-free fixtures in `apps/runner/src/fixtures/antigravity/` (`fake-agy.mjs`, and
+`fake-release.ts` for the installer, manifest and archive). Every unrecognized outcome fails closed to
+`sign_in_required` or `verification_failed`. Setup from Connections supports Linux and macOS runners;
+others report `unsupported` and show the terminal commands.
+
+Real-runner verification (2026-11-21, `linux_amd64`, `agy` 1.5.14):
+
+- The access check against an operator-installed, signed-in `agy` on PATH reported `ready`.
+  `--version` parsed as `1.5.14`, and the session advertised nine models, which parsed as expected.
+- The managed install chain ran into a throwaway data folder. It read the live script (7,643 bytes),
+  the manifest above and the 101 MB archive, whose SHA-512 matched. It extracted the single
+  273 MB `antigravity` member, and validation passed (`1.5.14`; `acp --help` and `initialize`
+  succeeded with the scratch HOME, where the CLI created only `.gemini/antigravity-cli`).
+- Google's documentation lists `--skip-path` and `--skip-aliases` installer flags, but the live
+  script accepts only `--dir` and `--help`, which is one reason Wollipog never runs it.
+- The remote `agy acp --login` sign-in remains verified only against the fixture.
+
+### 4.3 Google Antigravity sessions (Refs #4779)
+
+Antigravity sessions reuse `AcpDriver` with Google's `agy acp`. No protocol change: the agent is an
+ordinary ACP row in the runner's agent list, `google-antigravity` (`ANTIGRAVITY_AGENT_ID`), and an
+older runner simply advertises none. `apps/runner/src/antigravity-session.ts` derives it from the
+setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-specific handling.
+
+- **Availability.** The row follows the last settled setup; a check in progress keeps the previous
+  row. A runtime that was never found (or an `unsupported` platform) advertises nothing, so machines
+  without Antigravity gain no Needs Setup entry. `ready` makes it choosable in New Session with the
+  setup's models. `sign_in_required` lists it under Needs Setup as signed out, and
+  `verification_failed` as a failed check. Execution isolation that denies network access keeps it
+  unavailable, because agy must reach Google. An operator-configured agent with the same id is never
+  replaced. Antigravity is not Orchestrator-eligible: only the audited Claude Agent ACP release is
+  (`orchestrator-preset.ts`), and nothing here changes that.
+- **One credential context.** Every launch (new session, restart, fork) re-reads the setup: it
+  runs the executable the setup resolves (the managed copy, with
+  `AGY_CLI_DISABLE_AUTO_UPDATE=true`, or else the PATH copy) as `agy acp`, with
+  exactly that copy's `antigravityCredentialContext()` environment, pinned over every later layer
+  (a worktree setup environment cannot turn the managed copy's updater back on). A launch runs
+  only what a ready check verified and its install committed (`antigravity-launch-ledger.ts`): a
+  managed copy by its resolved generation path, never `current/agy`. An update moves `current` to
+  its candidate before verifying it, so a ready result for that candidate is held, not
+  launchable, until the install commits the activation; a failed commit, a rollback (including
+  one that fails) or a recovered activation discards it, and the committed generation keeps
+  launching. Preparation waits for a running install or check (`verifiedLaunchTarget()`), and the
+  client resolves the executable once more at the spawn itself (`AcpCompatibility.resolveLaunch`,
+  with no await in between), so updates that commit while the launch prepares can never leave it
+  naming a pruned generation: the store keeps `current` and `previous` through every commit, and
+  no prune removes a generation a launch resolved until its agent answers the handshake (a
+  launcher such as bwrap or the cgroup helper opens the executable after the runner spawned it).
+  The managed copy's updater switch is applied at that spawn, never stored in the session's
+  environment, so a PATH copy resolved instead keeps its own setting. With nothing verified (a
+  failed check, or a rejected release a rollback could not undo) the launch is refused with the
+  start failure below, at preparation or at the spawn, and nothing is spawned; a refusal at the
+  spawn releases the launch's provider-HOME reference. New Session offers Antigravity only while
+  something committed is launchable: a ready check of an uncommitted first install leaves the row
+  under Needs Setup as a failed check.
+  `antigravity-launch-ledger.test.ts` checks every ordering of an update's activation, an access
+  probe, its check settling, a launch and a session's sign-out report. It passes
+  the context's scrub list to `spawnAgent`, which
+  removes those variables from the inherited environment. The profile also withholds every ambient
+  credential name and `GOOGLE_CLOUD_*` prefix from the explicit launch environment, whatever layer
+  added it (an approved worktree setup environment included). The version check, access check,
+  sign-in and session therefore share one executable, one HOME and one OS-keyring sign-in.
+  Worktree, execution-isolation and admission checks are the shared ACP launch's. The one
+  provider-home difference: a managed Linux worktree forces bwrap even under `provider` isolation,
+  and normally asks bwrap to keep the provider's own state writable, which no ACP agent can name.
+  An Antigravity launch runs there with HOME read-only and a private temporary mount at
+  `~/.gemini/antigravity-cli/bin` for its generated `agentapi` shell helper (#4896). Its credentials,
+  settings, and conversations stay read-only. Every other ACP agent keeps the refusal. Find Sessions
+  and adoption never probe the setup-derived row, since they spawn adapters without its context or profile.
+- **Compatibility profile.** The ACP client withholds, for Antigravity only: every advertised auth
+  method (they include an API key and Agent Platform ADC, which would change the account or billing;
+  sign-in happens in Connections), `logout` (it would sign every session on the runner out of the
+  shared sign-in), `session/load`, `session/list`, and, unless the runner uses `provider` execution
+  isolation, `session/resume`. agy's stderr is never mirrored into the transcript or runner log,
+  because its fallback log names the signed-in account. An auth-required error from `session/new`,
+  `session/resume` or `session/prompt` marks the agent signed out until a setup check whose
+  access probe ran after the report confirms the sign-in, judged by when it observed access (its
+  `session/new` succeeding, stamped before the probe's process and folder are cleaned up)
+  rather than when it published (which re-runs the setup check, and once more if the check it
+  joined had probed before the report, so
+  New Session and Connections follow) and fails with "needs sign-in on this machine. Sign in from
+  Connections". A failed handshake (including a missing executable) fails with "could not be started
+  on this machine. Check its setup in Connections". A rejected turn fails with "could not complete
+  this turn: …" and the provider's message with email-shaped text replaced by `[account]` (bounded,
+  with an ellipsis when cut). The handshake has a 20-second deadline and opening or resuming the
+  session, and each settings update, a 60-second one, so a process that never answers fails the
+  launch with the same errors (an unanswered initial settings update keeps the agent's own values,
+  as the shared restore already does for a refused one). The transcript shows the start, sign-in
+  and resume failures as their own notices ("Google Antigravity Couldn't Start", "Sign-In
+  Required" with Open Connections, "Conversation Can't Resume"), never as a failed turn.
+- **MCP servers.** When opening or resuming an Antigravity session, Wollipog skips configured HTTP
+  and SSE servers whose transport the agent did not advertise and lists them by name and transport
+  in the session's Agent Log. agy 1.5.14 advertises neither. Stdio servers and any advertised remote
+  transports are still passed to the agent. Other ACP agents still refuse unsupported transports.
+- **Client file writes.** The profile does not offer the client's `fs/write_text_file` service and
+  refuses the request if agy sends it anyway: the runner would perform that write outside agy's
+  sandbox, where a managed worktree's runner-owned registration files are not read-only. agy
+  1.5.14 writes files with its own tools inside its sandbox, with the service offered or not.
+- **Modes.** For every ACP agent, the session capabilities now carry the agent's own bounded mode
+  names and descriptions (`agentPermissionModes`). For an ACP session that has them, the composer
+  lists every advertised mode (agy's `plan` included) under the agent's names, without a separate
+  generic Default, and quotes each description as the agent's own, adding that the person is
+  asked only about actions the agent sends for approval. Wollipog's read-only Plan Mode is not
+  offered for such a session, because an agent's `plan` mode makes no such promise.
+- **Stop.** For every ACP agent, `cancel()` now answers each pending `session/request_permission`
+  with `cancelled`, as ACP requires, so a stopped turn's approval never stays open in the agent. The
+  card itself settles with the turn, as for the native drivers.
+- **Resume.** agy keeps its conversations in its state directory, `~/.gemini/antigravity-cli`, which
+  also holds its OAuth token and settings. It resumes only where that directory is writable. Where
+  it is, the session advertises `session/resume`, and a relaunch in the conversation's own folder
+  (parking, a runner restart) resumes by id without replaying history. A relaunch in another
+  folder, such as after a worktree switch, starts a fresh conversation instead (see "A
+  conversation stays in the folder it was created in" below). An explicit Restart is always a new
+  conversation.
+  - On a `provider` isolation runner, both in place and in a managed Linux worktree. A managed
+    worktree forces bwrap there, and the launch preserves the provider home as it does for Claude,
+    Codex and Pi. Antigravity's compatibility profile names the directory, since the generic ACP
+    driver has none, and only that directory is bound writable (plus the shared build caches every
+    preserved home gets). The rest of HOME stays read-only.
+  - The generated shell helper stays on its session-private tmpfs at `bin`. The launcher renders
+    it after the writable binds, so it shadows the shared directory's `bin`. A sandboxed session
+    therefore cannot plant a helper that another session's agy would run.
+  - A directory the launch creates is mode 0700.
+  - Before this (#4779 to #4898), the directory was read-only in managed worktrees. A session that
+    started in place and then created its own worktree failed on the relaunch with "ACP agent does
+    not advertise session resume or load support".
+  - **A conversation stays in the folder it was created in.** agy 1.5.14 runs every command of a
+    conversation in that folder, whatever `cwd` a `session/resume` names, whatever folder the
+    process starts in, and with the new folder in `additionalDirectories` or `--add-dir` (measured
+    with real agy outside Wollipog). The runner therefore records the folder a fresh ACP
+    conversation was created in (`providerConversationCwd`). An Antigravity launch that would
+    resume it in any other folder starts a fresh conversation there instead. That covers a worktree
+    switch, and any relaunch after one: parking, a runner restart, a retry.
+  - **The handoff.** The fresh conversation's first ordinary prompt is preceded, once, by a
+    handoff: the old and new folders and the conversation so far, meaning the person's messages and
+    the agent's top-level replies, the newest kept within 24,000 characters. Tool calls are not
+    replayed. This follows T3 Code's `create_with_handoff` and Omnigent's Antigravity harness, which
+    seeds a fresh agy conversation the same way.
+  - **Durability.** The new conversation's id, its folder and a pending-handoff marker
+    (`pendingConversationHandoffFrom`) are written in one patch, whichever path captures the id
+    first, and nothing is written before the conversation exists. Until the agent has accepted the
+    prompt carrying the handoff, every relaunch rebuilds it from the event log, so parking or a
+    runner restart cannot lose it. A replacement that fails before it exists leaves the old
+    conversation as it was, so returning to its folder resumes it without its own history.
+    Clearing the marker is delivery's bookkeeping only: a failure there never fails the accepted
+    turn, and a relaunch in the same runner process retries the clear instead of re-sending the
+    history. Across a runner crash in that window the handoff is sent again: it is delivered at
+    least once.
+  - **Exemptions.** An explicit Restart never resumes an ACP conversation (`restartResumeId`): it is
+    a new conversation by design ("Restarting starts a new conversation"), unseeded, recording its
+    own folder. A session that never recorded its folder (created before this) keeps resuming.
+    Codex and Claude Code need none of this: Codex takes `cwd` on every resume and turn, and Claude
+    Code starts a process per turn in the session's folder.
+
+  Under a runner configured for bwrap or Seatbelt, the directory stays read-only, so no resume is
+  advertised there. A restart shows the existing "read-only history" refusal instead of starting a
+  fresh conversation, and a worktree switch is refused before the provider is retired.
+  `session/load` is never used: agy answers a load of an id it cannot read with an empty session,
+  which would pass for a resumed conversation.
+- **Approvals.** Commands ask through `session/request_permission` (string request ids, `allow` and
+  `deny` options) and the card's title is the command line. Deny prevents the command. New sessions
+  default to Auto Mode. Wollipog selects ACP's `auto` before the first prompt or after resume if agy
+  supports it. agy 1.5.14 offers `auto` only where its OS terminal sandbox works; on Linux hosts
+  with `kernel.apparmor_restrict_unprivileged_userns = 1` (Ubuntu's default) its log says
+  "Terminal sandbox unavailable", `auto` is missing from the session's modes and `session/set_mode`
+  refuses it. The session then shows a warning that names the reason and Full Permissions Mode,
+  and runs in Default mode. When the runner reads that sysctl as `1` and launched agy outside
+  bwrap, the warning also carries `fixCommand`, which the dashboard shows as a copyable block. It is
+  the exact host command (`antigravity-apparmor.ts`) that installs the AppArmor profile
+  `wollipog-antigravity`, granting `userns` only to a file no unprivileged program can replace.
+  - If root owns the launched agy's realpath and every parent directory, and none of them is
+    group- or world-writable, that path is granted.
+  - Otherwise, for example `~/.local/bin/agy`, the command first installs a root-owned copy at
+    `/usr/local/lib/wollipog-antigravity/agy`, turns the old path into a symlink to it, and grants
+    only the copy. A profile on a user-writable path would let any program running as the user
+    gain user namespaces by writing itself there.
+  - A Wollipog-managed copy gets no command, because updates replace it in a user-owned directory.
+  - An agy self-update that replaces the symlink drops Auto again, and the warning returns with
+    the command.
+
+  Unlike setting the sysctl to `0`, the restriction stays on for every other program. On Linux managed worktrees where agy's Auto sandbox cannot create its
+  nested namespace, a failed sandbox launch switches the session to Default mode once agy
+  confirms the change. The runner displays the effective mode and never retries the command.
+  **Full Permissions Mode** is Wollipog's own live mode, listed after agy's modes for every
+  non-Orchestrator session, as T3 Code runs Antigravity full access: agy stays in its `default`
+  mode and the runner answers each `session/request_permission` with its allow option. It needs
+  no sandbox and no launch flag, so it can be chosen at creation or switched in or out between
+  turns, and every launch stays under the same runner isolation. agy's own file edits are agent-owned
+  tools: in `default` mode real agy wrote a file without asking, so edits are not approval-gated by
+  Wollipog, which does not claim otherwise. No ACP approval context is synthesized from agy's tool
+  input, because governance policies match on that context.
+
+Tested with agy 1.5.14 on Linux (2026-11-21), signed in with the runner user's own Google sign-in,
+from a bwrap session whose HOME was read-only, through the runner's own code
+(`AntigravitySetupSupervisor.check()`, then `AcpDriver` with the launch above): the setup reported
+`ready` with nine models; the session advertised those models in the `model` config option, four
+thinking levels (`thought_level`) and the four modes; a turn streamed its reply; a command raised a
+permission request that Deny prevented; Stop ended the turn as `cancelled`, the pending approval was
+answered `cancelled` and the command never ran; no stderr reached the transcript; and a restart's
+`session/resume` failed with -32603, shown as the resume error. Raw probes of the same CLI also showed
+the initialize capabilities captured in `apps/runner/src/fixtures/acp/antigravity-1.5.14.initialize.json`,
+"Authentication required" (-32000) from `session/new` when agy cannot find its sign-in, the silent
+empty `session/load`, and an unrequested file edit in `default` mode, made with agy's own
+`write_file` tool both when the client offered `fs/write_text_file` and when it did not.
+
+Assumed, not verified against real agy: resume with a writable state directory under `provider`
+isolation (the profile offers it, and only the credential-free fixture exercises it); macOS; the
+full New Session-to-transcript flow through a running control plane and web app on a real runner;
+mode and model changes during a session (`session/set_config_option`, `session/set_mode`); turn
+errors other than sign-in (the fixture's quota message is invented); and image prompts. The
+credential-free fixture `apps/runner/src/fixtures/antigravity/fake-agy.mjs` models the observed
+behavior for regression tests; it contains no model output, account or token.
 
 ---
 

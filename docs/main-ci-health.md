@@ -27,6 +27,39 @@ completions, a best-effort recovery schedule, and manual dispatch on main. Deliv
 completions have woken health; GITHUB_TOKEN worker completion delivery is unreliable.
 The worker's explicit terminal dispatch is the prompt health path, independently verified
 in shadow as documented below. Native pending progression needs no health callback.
+
+Rolling workers also explicitly dispatch the controller after an admitted suite or an admission
+error requiring reconciliation. The controller waits for that exact run/attempt to become terminal
+(at most six reads and three minutes), then re-reads live claims and Actions. This repairs a failed
+admission without waiting for another push or cron; three incomplete target attempts still stop
+at `recovery-limit-operator-required`. Unsafe predecessor failures never request this wake.
+Superseded admissions retain their existing separate wake. A controller wake certifies nothing
+and cannot close an incident. Admission errors now include a fixed sanitized `failureClass`, such
+as `state-conflict`, `changed-worker-attempt`, `type-error` or `request-timeout`; messages,
+response bodies and tokens are never logged. Failed controller delivery or terminal-wait timeout
+still requires another delivered event or trusted manual reconciliation.
+
+For #4789, the completion-reconciliation CAS interleaving is covered by a deterministic fake-API
+test and already recovered with the existing three-attempt retry. It does not establish the
+historical exception: the old `httpStatus: null` log erased that distinction. The worker and
+subscription names match, and the controller API reported zero `workflow_run` deliveries.
+Workers are dispatched with `github.token`; GitHub's
+[generated-event restriction](https://docs.github.com/en/actions/concepts/security/github_token)
+is consistent with this missing completion delivery, but the internal delivery cause remains an
+inference. Explicit `workflow_dispatch` is a documented exception to that restriction.
+
+Fake-API tests prove fencing, bounded recovery, exact terminal handoff and unsafe-predecessor
+stops. They cannot prove GitHub scheduling or event delivery. After merge, inspect the next
+natural back-to-back main landings: verify the successor's admission, the explicit controller
+dispatch and `main_rolling_handoff`, then a complete full rolling verdict for the latest target
+(or a coalesced descendant). Verify health independently certifies that target and closes #4785
+only when its ordinary descendant/full-suite rules permit. Do not dispatch artificial traffic
+or treat a green controller or admission-only run as that observation.
+When an admission error next occurs naturally, also verify GitHub propagates the failed admit
+job's `reconcile=true` output: **Wake Rolling Controller** must run and log
+`main_rolling_wake` with delivery `dispatched`, followed by the controller's terminal handoff.
+Local tests prove the output is written and the workflow references it; only GitHub can prove
+that failed-job output propagation and actual dispatch delivery.
 No fixed provider-event or cron delivery bound is promised. Push and in-progress wakes are omitted. Skipped workflow-run
 jobs consume no observer API calls. It checks out trusted default-branch code without persisted credentials and runs
 `scripts/main-ci-health.mjs`; it never executes the triggering run's code or artifacts. The

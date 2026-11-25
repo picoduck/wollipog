@@ -14,6 +14,17 @@
 #   WOLLIPOG_E2E_CONFIRM=1   acknowledge that this installs and removes system units on THIS host
 #   WOLLIPOG_E2E_USER        unprivileged account that runs the installer (default: SUDO_USER)
 #   GH_TOKEN                 needed for draft releases and private repositories
+
+# The local admin credential is owned by the system service account.
+admin_status() { sudo -u wollipog -H "$cli" admin status --json; }
+# Runner output includes the protocol after the version. Keep the full version token.
+version_of() { "$1" --version | tr -d '\r' | awk 'NR == 1 { print $1 }'; }
+
+# Allow fixture tests to source the helpers without installing or removing services.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return
+fi
+
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -67,9 +78,7 @@ wait_until() { # wait_until <seconds> <description> <command...>
   done
 }
 healthy() { curl -fsS --max-time 3 "http://127.0.0.1:$port/healthz" 2>/dev/null | jq -e '.ok == true' >/dev/null; }
-admin_status() { "$cli" admin status --json; }
 runner_online() { admin_status 2>/dev/null | jq -e '.runners.items | any(.status == "online")' >/dev/null; }
-version_of() { "$1" --version | tr -d '\r' | head -n1; }
 digest_of() { sha256sum "$1" | awk '{print $1}'; }
 as_user() { sudo -u "$install_user" -H env "PATH=$PATH" ${GH_TOKEN:+GH_TOKEN="$GH_TOKEN"} "$@"; }
 

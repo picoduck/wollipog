@@ -108,6 +108,7 @@ export type CssFeature = RequiresFloor | Downlevelled | Degrades;
  * Deliberately absent, because they are older than every version below and so cannot raise the
  * floor: `:is()`, `:where()`, `content-visibility`, `accent-color`, `inert`, `dvh` units, and `@layer`
  * (cascade layers: Chrome and Edge 99, Firefox 97, Safari 15.4; emitted unchanged by the build).
+ * Grid track fit-content() also predates the floor (Chrome 57, Edge 16, Firefox 52, Safari 10.1).
  */
 export const CSS_FEATURES: readonly CssFeature[] = [
   {
@@ -258,14 +259,16 @@ export const CSS_SURFACE = {
   "grid-template-columns", "grid-template-rows", "height", "image-rendering", "inset", "isolation",
   "inset-inline-end", "inset-inline-start", "justify-content",
   "justify-items", "justify-self", "left", "letter-spacing", "line-height", "list-style",
-  "margin", "margin-bottom", "margin-inline-start", "margin-left",
+  // These logical margins and paddings predate the floor (MDN browser-compat-data).
+  "margin", "margin-block", "margin-block-start", "margin-bottom", "margin-inline", "margin-inline-start", "margin-left",
   "margin-right", "margin-top", "mask-image", "max-height", "max-width", "min-height",
   "min-inline-size", "min-width", "object-fit", "opacity", "order", "outline", "outline-offset",
   "overflow", "overflow-anchor", "overflow-wrap", "overflow-x", "overflow-y",
-  "overscroll-behavior", "padding", "padding-block", "padding-bottom", "padding-inline",
+  "overscroll-behavior", "padding", "padding-block", "padding-block-end", "padding-block-start", "padding-bottom", "padding-inline",
   "padding-inline-end", "padding-inline-start", "padding-left", "padding-right", "padding-top",
   "place-items", "pointer-events", "position", "resize", "right", "row-gap",
-  "scroll-behavior", "scroll-margin-bottom", "scroll-margin-inline-end", "scroll-padding-inline",
+  // Logical scroll padding shipped by Chromium 69, Firefox 68, and Safari 15.
+  "scroll-behavior", "scroll-margin-bottom", "scroll-margin-inline-end", "scroll-padding-block-start", "scroll-padding-inline",
   "scrollbar-color", "scrollbar-width", "src", "stroke", "stroke-linecap", "stroke-width",
   "table-layout", "text-align", "text-decoration", "text-overflow", "text-transform", "text-wrap", "top",
   "touch-action", "transform", "transform-origin", "transition", "transition-duration", "transition-property",
@@ -274,14 +277,15 @@ export const CSS_SURFACE = {
   /** Pseudo-classes and pseudo-elements, without their leading colons. */
   pseudos: [
   "active", "after", "before", "checked", "disabled", "empty", "first-child", "focus",
-  "focus-visible", "focus-within", "has", "hover", "is", "last-child", "not", "nth-child",
+  "focus-visible", "focus-within", "has", "hover", "indeterminate", "is", "last-child", "not", "nth-child",
   "placeholder", "root", "where",
   ],
   /** Function names appearing in declaration values. */
   functions: [
   "attr", "calc", "color-mix", "conic-gradient", "counter",
-  "cubic-bezier", "env", "format", "inset", "linear-gradient", "max", "min", "minmax", "rect",
-  "repeat", "rgb", "rgba", "rotate", "scale", "scaley", "translatex", "translatey", "url", "var",
+  "cubic-bezier", "env", "fit-content", "format", "inset", "linear-gradient", "max", "min", "minmax", "rect",
+  // CSS Images 3 repeating gradients predate every supported engine.
+  "repeat", "repeating-linear-gradient", "rgb", "rgba", "rotate", "scale", "scaley", "translatex", "translatey", "url", "var",
   ],
 } as const;
 

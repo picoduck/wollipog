@@ -85,6 +85,10 @@ export interface CampaignRecoveryDecline {
   lastDeclinedAt: number;
 }
 
+/** A credential decline for the current server-generated handoff set, scoped separately from
+ * the root's other credential declines. */
+export const HANDOFF_CREDENTIAL_DECLINE = "handoff_credentials";
+
 /** Server-verified exact terminal-report accounting, never a quality or media receipt. */
 export interface CampaignRecoveryVerifiedReport {
   seq: number;
@@ -171,13 +175,17 @@ export class CampaignRecoveryStore {
       WHERE campaign_session_id=? AND subject_session_id=? AND occurrence=?`).run(campaignId, sessionId, occurrence);
   }
 
+  private rememberDecline(campaignId: string, sessionId: string, occurrenceId: string, policyRevision: number): boolean {
+    return this.db.prepare(`INSERT OR IGNORE INTO campaign_recovery_declined_occurrences (campaign_session_id,occurrence)
+      VALUES (?,?)`).run(campaignId, `${policyRevision}:${sessionId}:${occurrenceId}`).changes > 0;
+  }
+
   /** Record one declined occurrence. A session's repeated requests of the same class collapse
    * into its first record (#2938 AC6): the count rises, nothing else is created or re-notified. */
   recordDecline(campaignId: string, sessionId: string, requestClass: string, occurrenceId: string,
     policyRevision: number, now: number): { firstForClass: boolean } {
     // A redelivered occurrence (a reconnect replaying a still-pending request) is the same decline.
-    if (!this.db.prepare(`INSERT OR IGNORE INTO campaign_recovery_declined_occurrences (campaign_session_id,occurrence)
-      VALUES (?,?)`).run(campaignId, `${policyRevision}:${sessionId}:${occurrenceId}`).changes) return { firstForClass: false };
+    if (!this.rememberDecline(campaignId, sessionId, occurrenceId, policyRevision)) return { firstForClass: false };
     const existing = this.db.prepare(`SELECT policy_revision FROM campaign_recovery_declines
       WHERE campaign_session_id=? AND subject_session_id=? AND request_class=?`).get(campaignId, sessionId, requestClass) as
       { policy_revision: number } | undefined;
@@ -195,6 +203,47 @@ export class CampaignRecoveryStore {
   hasDeclinedOccurrence(campaignId: string, sessionId: string, occurrenceId: string, policyRevision: number): boolean {
     return Boolean(this.db.prepare(`SELECT 1 FROM campaign_recovery_declined_occurrences
       WHERE campaign_session_id=? AND occurrence=?`).get(campaignId, `${policyRevision}:${sessionId}:${occurrenceId}`));
+  }
+
+  /** The current set may return after another set superseded it. Restore its block without
+   * replaying its screen or incrementing an unrelated decline's count. */
+  blockHandoffCredentials(campaignId: string, occurrenceId: string, policyRevision: number, now: number): void {
+    this.atomic(() => {
+      this.rememberDecline(campaignId, campaignId, occurrenceId, policyRevision);
+      this.db.prepare(`INSERT INTO campaign_recovery_declines (campaign_session_id,subject_session_id,request_class,
+        first_occurrence,policy_revision,declined_count,first_declined_at,last_declined_at) VALUES (?,?,?,?,?,1,?,?)
+        ON CONFLICT(campaign_session_id,subject_session_id,request_class) DO UPDATE SET
+          first_occurrence=excluded.first_occurrence,policy_revision=excluded.policy_revision,declined_count=1,
+          first_declined_at=excluded.first_declined_at,last_declined_at=excluded.last_declined_at
+        WHERE first_occurrence<>excluded.first_occurrence OR policy_revision<>excluded.policy_revision`)
+        .run(campaignId, campaignId, HANDOFF_CREDENTIAL_DECLINE, occurrenceId, policyRevision, now, now);
+    });
+  }
+
+  /** Preserve the decline fence for the exact old set, while settling its recovery block. */
+  retireSupersededHandoffDecline(campaignId: string, current: string | null): boolean {
+    return this.db.prepare(`DELETE FROM campaign_recovery_declines WHERE campaign_session_id=? AND subject_session_id=?
+      AND request_class=? AND first_occurrence IS NOT ?`).run(campaignId, campaignId, HANDOFF_CREDENTIAL_DECLINE, current).changes > 0;
+  }
+
+  /** Only a single-occurrence legacy row can be unambiguously attributed to a handoff. */
+  singleRootCredentialDecline(campaignId: string, policyRevision: number): string | null {
+    const row = this.db.prepare(`SELECT first_occurrence AS occurrenceId FROM campaign_recovery_declines
+      WHERE campaign_session_id=? AND subject_session_id=? AND request_class='secrets_and_sign_in' AND declined_count=1 AND policy_revision=?`)
+      .get(campaignId, campaignId, policyRevision) as { occurrenceId: string } | undefined;
+    return row?.occurrenceId ?? null;
+  }
+
+  /** A provable legacy handoff decline stops blocking on supersession but still fences the same
+   * content if it returns. Record the exact content fence in the same transaction. */
+  retireLegacyHandoffDecline(campaignId: string, legacy: string, content: string, policyRevision: number): boolean {
+    return this.atomic(() => {
+      const retired = this.db.prepare(`DELETE FROM campaign_recovery_declines WHERE campaign_session_id=? AND subject_session_id=?
+        AND request_class='secrets_and_sign_in' AND first_occurrence=? AND declined_count=1 AND policy_revision=?`)
+        .run(campaignId, campaignId, legacy, policyRevision).changes > 0;
+      if (retired) this.rememberDecline(campaignId, campaignId, content, policyRevision);
+      return retired;
+    });
   }
 
   /** Declines still shown as blocked work for the current revision. A revocation or newer

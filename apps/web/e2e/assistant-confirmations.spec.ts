@@ -43,12 +43,13 @@ function thread(id: string, title: string, sessionId: string, count: number): As
 
 const CLEANUP = "Clean Up Last Week's Prototype Sessions Before the Release Branch Is Cut";
 const RELEASE = "Ship the Release Notes";
+const isThreadList = (url: URL) => url.pathname === "/api/assistant-threads";
 
 /** Serves the Thread API with `threads`; Approve Once and Deny settle the request they name. */
 async function serveThreads(page: Page, threads: AssistantThread[]) {
   let current = threads;
   const answers: string[] = [];
-  await page.route("**/api/assistant-threads", (route) => route.fulfill({ json: { threads: current } }));
+  await page.route(isThreadList, (route) => route.fulfill({ json: { threads: current } }));
   await page.route("**/api/assistant-threads/*/confirmations/*/*", (route) => {
     const [threadId, , confirmationId, intent] = route.request().url().split("/").slice(-4).map(decodeURIComponent);
     answers.push(`${confirmationId}:${intent}`);
@@ -83,7 +84,7 @@ test("the Inbox sums up a thread's requests in one line, and Review opens the th
   await expect(approvals(page).getByRole("button", { name: "Approve Once" })).toHaveCount(0);
   await row.getByRole("button", { name: "Review", exact: true }).click();
   await expect(page).toHaveURL(/path=%2Fassistants%2F(~|%7E)/);
-  const request = page.getByRole("list", { name: "Approvals Needed" }).getByRole("listitem", { name: "Archive Session" });
+  const request = page.getByRole("list", { name: "Pending Requests" }).getByRole("listitem", { name: "Archive Session" });
   await expect(request).toBeVisible();
   await expect(request.locator("dl[aria-label='Arguments']")).toContainText("session-0");
   await request.getByRole("button", { name: "Approve Once", exact: true }).click();
@@ -115,8 +116,9 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     // Review opens the thread it names.
     await threadRow(page, RELEASE).getByRole("button", { name: "Review", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`path=${encodeURIComponent("/assistants/")}`));
-    await expect(page.getByRole("list", { name: "Approvals Needed" }).getByRole("listitem")).toHaveCount(2);
-    if (viewport.width > 760) await expect(page.locator(".assistant-thread-head").getByRole("heading", { level: 2 })).toHaveText(RELEASE);
+    await page.getByRole("button", { name: "Show All", exact: true }).click();
+    await expect(page.getByRole("list", { name: "Pending Requests" }).getByRole("listitem")).toHaveCount(2);
+    if (viewport.width > 760) await expect(page.locator(".assistant-thread-bar").getByRole("heading", { level: 2 })).toHaveText(RELEASE);
     else await expect(page.locator(".detail-bar-title")).toHaveText(RELEASE);
   });
 }
@@ -156,7 +158,7 @@ test("past three threads the block names the first three, and +N More opens the 
 });
 
 test("a control plane without the Thread API shows no approvals", async ({ page }) => {
-  await page.route("**/api/assistant-threads", (route) => route.fulfill({ status: 404, json: { error: "not found" } }));
+  await page.route(isThreadList, (route) => route.fulfill({ status: 404, json: { error: "not found" } }));
   await page.goto("/command-inbox-projects-e2e.html?fullShell=1");
   await expect(sessionsPane(page)).toBeVisible();
   await expect(approvals(page)).toHaveCount(0);

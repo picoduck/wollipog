@@ -30,7 +30,10 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await expect(dialog).toContainText("tool guardrails remain human-owned. Unsupported UI evidence routes to a human.");
       await expect(dialog).not.toContainText("Video and unsupported UI evidence routes to a human.");
       await chooseRoleSetting(page, "Child Harness", "Codex App Server · Native");
-      await chooseRoleSetting(page, "Child Model", "GPT-6.1 Sol");
+      await dialog.getByRole("button", { name: /^Child Model:/ }).click();
+      const modelPicker = page.getByRole("dialog", { name: "Child Model", exact: true });
+      await modelPicker.getByRole("searchbox", { name: "Search Models" }).fill("GPT-6.1 Sol");
+      await modelPicker.getByRole("radio", { name: "GPT-6.1 Sol", exact: true }).click();
       await chooseRoleSetting(page, "Child Effort", "High");
       await dialog.getByLabel("Maximum Concurrent Children", { exact: true }).fill("7");
       await chooseRoleSetting(page, "Follow-Ups", "Execute Approved");

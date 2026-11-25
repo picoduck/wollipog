@@ -1,4 +1,6 @@
+import { OWNER_CONFIRMATION_NOTICE_PREFIX, type PromptSessionMessage, type WollipogPromptOrigin } from "@wollipog/protocol";
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
+import { ANTIGRAVITY_AGENT_ID, ANTIGRAVITY_AUTO_MODE, managedWorktreeUnsupportedReason } from "@wollipog/protocol";
 import { isProviderCapacityFailure, PROVIDER_RETRY_CONTINUATION } from "./provider-turn-retry.js";
 import { artifactGuidance } from "./artifact-guidance.js";
 import { providerCommandHomeWriteSeparationDiagnostic } from "./provider-command-home-write-separation.js";
@@ -14,9 +16,9 @@ import { executeGithubIssueClosure, inspectGithubIssueClosure, reconcileGithubIs
 import type { GithubIssueClosureLocation, GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, GitLabMergeClosuresMessage, GitLabMergeClosuresResultMessage, ForgeDecisionAction, ForgeDecisionActionMessage, ForgeDecisionActionOutcome, ForgeDecisionActionRefusalReason, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
-import { sameForgeMergeQueueFacts } from "@wollipog/protocol";
+import { ciRerunResourceKey, releaseDecisionResourceKey, sameForgeMergeQueueFacts } from "@wollipog/protocol";
 import { githubMergeQueueFacts } from "./pull-request-queue.js";
-import { executeBranchDeletion, executeTemporaryBranch, executeIssuePublication, executePullRequestEnqueue, observeIssuePublication, observePullRequestMerge, observePullRequestRetirement } from "./forge-decision-action.js";
+import { executeBranchDeletion, executeCiRerun, executeReleaseDecision, inspectCiRerunJob, executeTemporaryBranch, executeIssuePublication, executePullRequestEnqueue, observeIssuePublication, observePullRequestMerge, observePullRequestRetirement } from "./forge-decision-action.js";
 import { githubSlug } from "./git-ops.js";
 import { proveWorktreePatchDelivery, type CampaignDeliveredPullRequest, type WorktreePatchDeliveryResult } from "./worktree-patch-delivery.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
@@ -47,7 +49,7 @@ import { transferCodexAccountTranscript } from "./codex-account-transcript.js";
 import type { ClaudeLiveUsage } from "./drivers/claude-usage-accounting.js";
 import type { PoisonedProviderHistory } from "./drivers/poisoned-provider-history.js";
 import { UnclassifiedRejectionJournal } from "./drivers/unclassified-rejection-journal.js";
-import { PROVIDER_ACCOUNT_SKIP_TEXT, providerAccountLaunchIneligibility, type ProviderAccountBilling } from "@wollipog/protocol";
+import { PROVIDER_ACCOUNT_SKIP_TEXT, providerAccountExplicitRecord, providerAccountLaunchIneligibility, type ProviderAccountBilling } from "@wollipog/protocol";
 import type {
   AgentCapabilities,
   AgentContext,
@@ -88,6 +90,7 @@ import type {
   RunnerCapacityConfiguration,
   RunnerCapacityState,
   RunnerAutomaticAccountSwitchConfiguration,
+  AssistantThreadHealth,
   ProviderAccountDefinition,
   SubscriptionUsageSnapshot,
   RunnerToControlPlane,
@@ -173,6 +176,7 @@ import type {
   DriverSubscriptionUsageUpdate,
   StopReason,
 } from "./drivers/driver.js";
+import { AcpLaunchRefusedError } from "./acp-compatibility.js";
 import { coalesceDriverTextDeltas, type TextDeltaCoalescer } from "./text-delta-coalescer.js";
 import { CodexAppServerResumeError, CodexCommandSandboxUnavailableError } from "./drivers/codex-app-server.js";
 import type { CodexPromptTemplate } from "./discovery/codex-prompts.js";
@@ -507,6 +511,13 @@ export interface SessionLaunchPreparation {
   sessionCommandCatalogProvenance?: string;
   /** Codex App Server custom prompts read for this launch. Bodies never enter session metadata. */
   codexPrompts?: CodexPromptTemplate[];
+  /** ACP only: inherited variables this launch's agent must not see (its credential context). */
+  scrubInheritedEnv?: string[];
+  /** ACP only: narrow handling this launch's agent needs (see `acp-compatibility.ts`). */
+  acpCompatibility?: DriverOptions["acpCompatibility"];
+  /** The launch must not start a provider (nothing verified to run, #4779). The sentence is the
+   * runner's own and becomes the launch failure; no process is spawned. */
+  launchRefusal?: string;
 }
 
 /** Transcript text for an invoked provider command, spelled the way the harness expects: a
@@ -686,6 +697,7 @@ interface QueuedPrompt {
   /** Control-plane-authenticated campaign or review continuation, distinct from human input.
    * This historical name also persists in user_message and authentication-retry records. */
   campaignContinuation?: boolean;
+  promptOrigin?: WollipogPromptOrigin;
   /** Durable managed jobs whose barrier terminal observation caused this continuation. */
   backgroundJobIds?: string[];
   /** Submit-only continuation for a lost callback or an async question answered in a later turn. */
@@ -783,6 +795,13 @@ interface SteeringOperation {
 }
 
 interface ActiveSession {
+  /** A fresh ACP conversation this launch creates: the folder it is created in and, when it replaces
+   * a conversation in another folder, that folder until its handoff is delivered. Written with the
+   * conversation's id by `captureAgentSessionId`, never before. */
+  freshConversation?: { cwd: string; handoffFrom?: string };
+  /** Set while a worktree-switch relaunch is still starting (#4902): a provider that exits then
+   * leaves the session idle with the error, as a rejected start does, rather than Failed. */
+  recoverableLaunch?: true;
   /** False only when this exact launch has no host package filesystem sandbox. */
   codexPackageSandboxed?: boolean;
   /** Immutable package-denial snapshot from this exact native provider launch. */
@@ -922,8 +941,11 @@ interface ActiveSession {
   /** (#4138) The durable `pendingLocationSwitch` this process must carry out once its turn settles,
    * by occurrence; the metadata stays the source of truth. */
   pendingLocationSwitch?: string;
+  locationSwitchLookupRetry?: ReturnType<typeof setTimeout>;
   /** Structured exhausted-window observation from this exact provider turn. */
   usageWindowRejection?: UsageWindowRejection;
+  assistantUsageHold?: { limit: UsageWindowRejection; timer: ReturnType<typeof setTimeout> };
+  assistantTurnErrorId?: string;
   /** Exact canonical roots rendered into this live process's Seatbelt profile at launch. */
   seatbeltWritableRoots?: readonly string[];
   /** The session's other managed worktrees this live process's bwrap boundary binds (#3316). A
@@ -975,7 +997,7 @@ interface ApprovedProviderAuthentication {
 
 type ProviderReplacementResult =
   | { status: "launched"; entry: ActiveSession; queuedWork: boolean }
-  | { status: "not_resumable" | "lock_unavailable" | "retirement_failed" | "launch_failed" | "stopped" | "superseded" }
+  | { status: "not_resumable" | "lock_unavailable" | "capacity_unavailable" | "retirement_failed" | "launch_failed" | "stopped" | "superseded" }
   | { status: "prepare_failed"; error: string };
 
 /** Capability-derived resume gate. ACP must have proven stable resume or load in its last live
@@ -990,6 +1012,23 @@ export function providerStopError(stop: StopReason, client: Pick<Driver, "lastTu
   const reason = stop === "cancelled" ? "canceled" : stop;
   return detail ? `provider ${reason}: ${detail}` : `provider ${reason}`;
 }
+
+/** A launch's ACP compatibility profile as its effective sandbox allows (#4779). Any runner-owned
+ * sandbox (bwrap, including the one a managed Linux worktree forces, or Seatbelt) leaves the
+ * agent's own state read-only, so resume is withheld whatever the configured isolation mode. */
+export function effectiveAcpCompatibility(
+  compatibility: DriverOptions["acpCompatibility"],
+  isolation: SpawnIsolation | undefined,
+): Pick<DriverOptions, "acpCompatibility"> {
+  if (!compatibility) return {};
+  // A sandbox makes agy's state directory read-only unless it preserves the provider home.
+  const stateReadOnly = isolation && !(isolation.backend === "bwrap" && isolation.preservesProviderHome);
+  return { acpCompatibility: stateReadOnly ? { ...compatibility, resumable: false } : compatibility };
+}
+
+/** Bound on the conversation carried into a fresh Antigravity conversation (`conversationHandoff`):
+ * the newest turns that fit, so the seed stays a modest share of one prompt. */
+const CONVERSATION_HANDOFF_MAX_CHARS = 24_000;
 
 function canResumeSession(meta: SessionMeta): boolean {
   if (meta.driver === "acp") {
@@ -1753,6 +1792,8 @@ export class SessionManager {
    * preceding provable rejection, so automatic turns wait in the FIFO instead of reaching the
    * provider. Session-scoped so a provider exit and its automatic recovery keep it. A person's
    * prompt dispatches ahead of the held turns and clears it; Restart and Stop discard it. */
+  private readonly assistantRejectionErrorIds = new Map<string, string>();
+  private readonly assistantToolsUnavailable = new Set<string>();
   private readonly providerRejectionHolds = new Map<string, string>();
   /** Provider error of the immediately preceding submission the provider provably rejected without
    * starting a turn (#3100). Any other outcome, an uncertain failure included, clears it. Scoped like
@@ -2044,8 +2085,44 @@ export class SessionManager {
   private readonly claudeInitCatalogQueue = new Map<string, Promise<void>>();
   /** Sessions whose init list merged before the provider was ready to authorize it. */
   private readonly claudeInitAwaitingAuthority = new Set<string>();
+  /** The ACP compatibility profile a launch's preparation returned, keyed by the exact metadata
+   * object that launch prepares and isolates (#4779). */
+  private readonly launchAcpCompatibility = new WeakMap<SessionMeta, NonNullable<DriverOptions["acpCompatibility"]>>();
   /** Async seam covers WSL markerless recovery without blocking runner startup. */
   private discoverClaudeTasksInContext: typeof discoverIncompleteClaudeTasksInContext = discoverIncompleteClaudeTasksInContext;
+  private resolveDetachedClaudeEnvironment: (meta: SessionMeta) => Record<string, string> = () => ({});
+
+  /** Resolve detached task-inspection paths from current runner configuration after restart. */
+  setDetachedClaudeEnvironment(resolveEnvironment: (meta: SessionMeta) => Record<string, string>): void {
+    this.resolveDetachedClaudeEnvironment = resolveEnvironment;
+  }
+
+  private claudeTaskInspectionLocation(meta: SessionMeta): { cwd: string; env: Record<string, string> } | null {
+    try {
+      const active = this.active.get(meta.sessionId);
+      if (active?.launchEnv) return { cwd: active.cwd, env: active.launchEnv };
+      const cwd = this.orchestratorLaunchDirectory(meta);
+      return {
+        cwd,
+        env: {
+          ...this.resolveDetachedClaudeEnvironment(meta),
+          ...this.worktreeSetupEnvironmentFor(meta, meta.worktreePath),
+          ...this.orchestratorTempEnvironment(meta, cwd),
+        },
+      };
+    } catch {
+      // An unavailable configuration must not redirect inspection to a different provider home.
+      this.log(`Could not resolve the Claude task inspection environment for ${boundedSessionIdForLog(meta.sessionId)}`);
+      return null;
+    }
+  }
+
+  private orchestratorTempEnvironment(meta: SessionMeta, cwd: string): Record<string, string> {
+    if (meta.config.permissionMode !== "orchestrator") return {};
+    return meta.context.kind === "native" && process.platform === "win32"
+      ? { TEMP: cwd, TMP: cwd }
+      : { TMPDIR: cwd };
+  }
   private readonly sessionCommandAuthority = new SessionCommandAuthorityRegistry();
   private readonly providerHomeLeases?: AsyncProviderHomeLeaseRegistry;
   /** Provider profiles (#3239): until the runner learns the control plane's grants, a HOME holding
@@ -2100,6 +2177,10 @@ export class SessionManager {
   }>();
 
   private sharedDirectoryWorkspaces: readonly RunnerConfigWorkspace[] = [];
+  /** Undefined means the transport could not confirm the lookup; null is an authoritative refusal. */
+  private registeredLocationSwitchLookup?: (sessionId: string,
+    target: Pick<PendingLocationSwitch, "occurrenceId" | "workspaceId" | "repository">,
+    phase: "accept" | "apply") => Promise<string | null | undefined>;
   /** (#4138) Existing worktrees a Location switch has chosen to continue in, by path, until its
    * metadata records them: the window between the holder check and the move. */
   private readonly reusedWorktreeClaims = new Map<string, string>();
@@ -2114,12 +2195,28 @@ export class SessionManager {
     this.configuredProjectPaths = [...paths];
   }
 
+  /** Conversations (by session) that accepted their handoff while clearing its marker failed. A
+   * relaunch in this process retries the clear instead of re-sending the history; across a runner
+   * crash in that window the handoff is delivered again (at least once). */
+  private readonly deliveredHandoffs = new Map<string, string>();
+
+  /** Agent ids the operator configured, set by the host bootstrap. A configured agent that reuses
+   * Antigravity's id launches without Antigravity's profile (#4901). */
+  private configuredAgentIds: ReadonlySet<string> = new Set();
+  setConfiguredAgentIds(ids: Iterable<string>): void {
+    this.configuredAgentIds = new Set(ids);
+  }
+
   /** Called by the host bootstrap, and again after a configured Workspace is removed (#4123);
    * never from a session request. */
   configureSharedDirectories(workspaces: readonly RunnerConfigWorkspace[], forbiddenRoots: readonly string[] = []): void {
     this.sharedDirectoryWorkspaces = workspaces.map((workspace) => ({ ...workspace,
       sharedWritableDirectories: workspace.sharedWritableDirectories ? [...workspace.sharedWritableDirectories] : undefined }));
     this.sharedDirectoryForbiddenRoots = [...forbiddenRoots];
+  }
+
+  setRegisteredLocationSwitchLookup(lookup: NonNullable<SessionManager["registeredLocationSwitchLookup"]>): void {
+    this.registeredLocationSwitchLookup = lookup;
   }
 
   constructor(
@@ -3734,6 +3831,8 @@ export class SessionManager {
       if (meta.executionTarget && meta.executionTarget.adapter !== "host") {
         throw new Error("session worktrees are available only on host execution targets");
       }
+      const managedWorktreeRefusal = this.managedWorktreeRefusal(meta);
+      if (managedWorktreeRefusal) throw new Error(managedWorktreeRefusal);
       const options = {
         context: meta.context,
         dataDir: this.dataDir,
@@ -4180,6 +4279,12 @@ export class SessionManager {
         );
       }
       const selected = { ...worktree, path: verified.path };
+      // The same boundary `requiresManagedWorktreeBwrap` applies at launch: refuse while the
+      // provider still runs where it is, rather than after it is retired (#4901, #4902).
+      const managedWorktreeRefusal = selected.source !== "attached" || selected.reusedInPlace === true
+        ? this.managedWorktreeRefusal(meta)
+        : null;
+      if (managedWorktreeRefusal) throw new Error(managedWorktreeRefusal);
       if (selected.setup?.status === "failed") {
         throw new Error("required worktree setup must be retried before selection");
       }
@@ -4334,6 +4439,7 @@ export class SessionManager {
     const active = this.active.get(sessionId);
     if (!active || (expected && active !== expected)) return false;
     this.closeTextDeltas(sessionId);
+    clearTimeout(active.assistantUsageHold?.timer);
     if (releaseLease) this.releaseActiveWorktreeLease(active);
     const deleted = this.active.delete(sessionId);
     if (deleted) {
@@ -6937,10 +7043,40 @@ export class SessionManager {
         ? { backgroundFollowUp: this.backgroundFollowUp(meta) } : {}),
       ...(runnerSupportsProtocol(protocolVersion, "providerHomeWait")
         ? { providerHomeWait: this.providerHomeWaits.get(meta.sessionId)?.view ?? null } : {}),
+      ...(meta.assistant && runnerSupportsProtocol(protocolVersion, "assistantThreadHealth")
+        ? { assistantThreadHealth: this.assistantThreadHealth(meta) } : {}),
       ...(runnerSupportsProtocol(protocolVersion, "worktreeSwitchStatus")
         ? { worktreeSwitch: this.publishedWorktreeSwitches.get(meta.sessionId) ?? null } : {}),
       ...(runnerSupportsProtocol(protocolVersion, "campaignRetirementHold") ? this.campaignRetirementHold(meta) : {}),
     };
+  }
+
+  private assistantThreadHealth(meta: SessionMeta): AssistantThreadHealth {
+    const sessionId = meta.sessionId;
+    const automaticTurnsHeld = this.assistantRejectionErrorIds.get(sessionId);
+    const usageLimit = this.active.get(sessionId)?.assistantUsageHold?.limit;
+    return {
+      ...(meta.assistantThreadTurn ? { turn: meta.assistantThreadTurn } : {}),
+      ...(automaticTurnsHeld ? { automaticTurnsHeld } : {}),
+      ...(usageLimit ? { usageLimit } : {}),
+      ...(meta.providerAuthBlock || pendingRequests(meta.pendingApproval).some((request) => request.kind === "authentication")
+        ? { signInNeeded: true } : {}),
+      ...(this.assistantToolsUnavailable.has(sessionId) ? { toolsUnavailable: true } : {}),
+    };
+  }
+
+  private publishAssistantThreadHealth(sessionId: string): void {
+    const meta = this.store.readMeta(sessionId);
+    if (meta?.assistant && runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "assistantThreadHealth")) {
+      this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
+    }
+  }
+
+  setAssistantToolsUnavailable(sessionId: string, unavailable: boolean): void {
+    if (this.assistantToolsUnavailable.has(sessionId) === unavailable) return;
+    if (unavailable) this.assistantToolsUnavailable.add(sessionId);
+    else this.assistantToolsUnavailable.delete(sessionId);
+    this.publishAssistantThreadHealth(sessionId);
   }
 
   /** The worktree relaunch a session is waiting for or running (#3810). A rebind that only drops a
@@ -8301,7 +8437,7 @@ export class SessionManager {
     const priorResumeId = prior?.driver === driver ? restartResumeId(prior) ?? null : null;
     // A fresh provider conversation keeps this Wollipog session's corrected lifetime baseline.
     // Clearing it would lose the repair generation and make every subsequent snapshot stale.
-    const retainAccounting = !!priorResumeId || prior?.costReconciliationRevision !== undefined ||
+    const retainAccounting = !!priorResumeId || !!prior?.assistant || prior?.costReconciliationRevision !== undefined ||
       prior?.costReconciliationRepairId !== undefined;
     const priorManagedPiState = prior?.adoptedProviderState?.driver === "pi"
       ? prior.adoptedProviderState
@@ -8410,6 +8546,7 @@ export class SessionManager {
       orchestrator: this.withAppliedIssueGrant(spec.sessionId, launchGeneration, launchOrchestratorMeta(prior?.orchestrator, spec.orchestrator)),
       ...(spec.uiEvidenceReviewer ? { uiEvidenceReviewer: { reviewId: spec.uiEvidenceReviewer.reviewId } } : {}),
       ...(spec.assistant ?? prior?.assistant ? { assistant: { threadId: (spec.assistant ?? prior!.assistant)!.threadId } } : {}),
+      ...(prior?.assistant && prior.handoffPending ? { handoffPending: true } : {}),
       ...(spec.review ? { review: {
         ...spec.review, checkout: repoPath, launchOwner: this.lockOwner,
         ...(this.preparedReviewRounds.has(spec.sessionId) ? { round: this.preparedReviewRounds.get(spec.sessionId)! } : {}),
@@ -8614,7 +8751,30 @@ export class SessionManager {
     }
     durable?.queued();
     // A session persisted on the retired exec driver stays readable but never starts again (#3259).
-    const launchRefusal = launchAssertionError ?? (isRetiredCodexExec(meta) ? CODEX_EXEC_RETIRED_REASON : undefined);
+    // Nor does one whose agent a managed worktree's sandbox cannot run (#4901). Judged by the checkout
+    // this launch will use, read from the row the serialized write above refreshed (`prior`), as the
+    // materialization below reads it: a selected attached worktree is reattached unsandboxed, and only
+    // a runner-created one (or a new one) is sandboxed. Refused here, after the session record exists
+    // so the refusal is published as its status, and before any worktree is made.
+    const restartSelection = shouldUseWorktree && prior?.repoPath === repoPath &&
+        agentContextKey(prior.context) === agentContextKey(context) && prior.worktreePath
+      ? { path: prior.worktreePath, branch: prior.worktreeBranch,
+          row: prior.worktrees?.find((item) => sameWorktreePath(prior!.context, item.path, prior!.worktreePath!)) }
+      : undefined;
+    const targetsManagedWorktree = restartSelection?.row
+      ? restartSelection.row.source !== "attached" || restartSelection.row.reusedInPlace === true
+      : shouldUseWorktree;
+    const managedWorktreeRefusal = targetsManagedWorktree ? this.managedWorktreeRefusal(meta) : null;
+    if (managedWorktreeRefusal) {
+      // The replacement record starts without a selection, which materialization would restore. The
+      // session keeps the worktree it had, so its Files and shells still open there, not the base.
+      this.store.patchMeta(spec.sessionId, {
+        worktreePending: false,
+        ...(restartSelection ? { worktreePath: restartSelection.path, worktreeBranch: restartSelection.branch } : {}),
+      });
+    }
+    const launchRefusal = launchAssertionError ??
+      (isRetiredCodexExec(meta) ? CODEX_EXEC_RETIRED_REASON : managedWorktreeRefusal ?? undefined);
     if (launchRefusal) {
       this.emitEvent(spec.sessionId, { kind: "error", message: launchRefusal });
       this.emitStatus(spec.sessionId, "failed", launchRefusal);
@@ -8736,6 +8896,7 @@ export class SessionManager {
               ...worktreeIdentity,
               baseRef: worktree.baseRef ?? "HEAD",
               baseCommit: await worktreeHead(worktree.path, worktreeOptions),
+              ...(worktree.baseFallbackWarning ? { baseFallback: "remote_check_failed" as const } : {}),
             };
           }
           try {
@@ -8752,6 +8913,11 @@ export class SessionManager {
             }
             worktree = null;
             throw claimError;
+          }
+          if (worktree.baseFallbackWarning && this.launchIsCurrent(spec.sessionId, launchGeneration)) {
+            this.emitEvent(spec.sessionId, {
+              kind: "error", nonFatal: true, source: "worktree_base_fallback", message: worktree.baseFallbackWarning,
+            });
           }
           if (worktreeIdentity) {
             const setup = await this.prepareWorktreeSetup(
@@ -9560,7 +9726,7 @@ export class SessionManager {
     return this.latestLaunchGenerations.get(sessionId) ?? 0;
   }
 
-  private acquireAdmission(sessionId: string): Promise<boolean> {
+  private acquireAdmission(sessionId: string, { wait = true } = {}): Promise<boolean> {
     if (this.admitted.has(sessionId)) return Promise.resolve(true);
     // Review sessions take no runner slot and count against no agent limit (#3368).
     if (this.isReviewSession(sessionId)) return Promise.resolve(true);
@@ -9572,6 +9738,10 @@ export class SessionManager {
       this.admissionWaitReasons.delete(sessionId);
       this.reportCapacity();
       return Promise.resolve(true);
+    }
+    if (!wait) {
+      this.boxAdmission.clearFailure(sessionId);
+      return Promise.resolve(false);
     }
     const waiting = new Promise<boolean>((resolve) => this.admissionQueue.push({ request, bypasses: 0, resolve }));
     this.emitAdmissionWait(request);
@@ -10327,11 +10497,17 @@ export class SessionManager {
   }
 
   private async launch(
-    meta: SessionMeta,
+    storedMeta: SessionMeta,
     resumeId: string | undefined,
     launchGeneration: number,
     approvedAuthentication?: ApprovedProviderAuthentication,
+    /** The relaunch after a worktree switch (#4902). Its conversation and history are intact, so a
+     * failure leaves the session idle with the error, where the next message or Restart retries,
+     * rather than Failed. Setup failures keep their own Retry Setup state either way. */
+    options: { recoverableFailure?: boolean } = {},
   ): Promise<boolean> {
+    // A cache hit can expose the store's own object. Prepare only a launch-local copy.
+    const meta = structuredClone(storedMeta);
     // Launch preparation's provider-HOME reference (#3238). A launch that reaches its driver
     // reference settles it there; every path that gives up earlier settles it on the way out.
     const preparationHome = this.launchPreparationProviderHome();
@@ -10340,7 +10516,8 @@ export class SessionManager {
       ? this.providerHomeWaiter(meta, launchGeneration)
       : undefined;
     try {
-      return await this.launchPrepared(meta, resumeId, launchGeneration, approvedAuthentication, preparationHome, providerHomeWait);
+      return await this.launchPrepared(meta, resumeId, launchGeneration, approvedAuthentication, preparationHome,
+        providerHomeWait, options.recoverableFailure === true);
     } finally {
       if (providerHomeWait) this.endProviderHomeWait(meta.sessionId, launchGeneration);
       await preparationHome.settle();
@@ -10425,9 +10602,15 @@ export class SessionManager {
     approvedAuthentication: ApprovedProviderAuthentication | undefined,
     preparationHome: LaunchProviderHomeScope,
     providerHomeWait?: ProviderHomeWaiter,
+    recoverableFailure = false,
   ): Promise<boolean> {
     const launchStarted = Date.now();
     const sessionId = meta.sessionId;
+    // See `launch`'s `recoverableFailure`: the generic failure exits below report through this.
+    const failLaunch = (message: string, launchFailure?: SessionLaunchFailureCode): void => {
+      if (recoverableFailure) this.emitStatus(sessionId, "idle", message);
+      else this.emitStatus(sessionId, "failed", message, undefined, undefined, false, launchFailure);
+    };
     if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
     if (meta.review && (meta.review.update || meta.review.launchOwner !== this.lockOwner || resumeId)) {
       this.emitStatus(sessionId, "stopped", "A review session runs once and cannot be relaunched.");
@@ -10438,6 +10621,10 @@ export class SessionManager {
     this.emitStatus(sessionId, "starting");
     this.clearProviderHomeRefusal(sessionId);
     let cwd = meta.worktreePath ?? meta.repoPath;
+    /** The conversation so far, for a fresh Antigravity conversation that replaces a resume. */
+    let conversationHandoff: string | undefined;
+    /** The folder of the conversation a fresh Antigravity conversation replaces. */
+    let replacedConversationCwd: string | undefined;
     const worktree: WorktreeHandle | null = meta.worktreePath
       ? { path: meta.worktreePath, branch: meta.worktreeBranch ?? `agent/${sessionId}` }
       : null;
@@ -10500,23 +10687,62 @@ export class SessionManager {
         providerHome: preparationHome,
         ...(providerHomeWait ? { providerHomeWait } : {}),
       });
+      this.rememberAcpCompatibility(meta, launchPreparation);
       // Launch preparation may await filesystem/provider discovery. A restart can replace this
       // session with a new generation (and even a different provider) during that window; the old
       // continuation must not patch or publish its stale launch-local metadata.
       if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
+      if (launchPreparation?.launchRefusal) {
+        // Nothing may be spawned (#4779): fail the launch with the runner's sentence, as a failed
+        // provider start would, before any isolation or provider process is set up.
+        this.emitEvent(sessionId, { kind: "error", message: `agent init failed: ${launchPreparation.launchRefusal}` });
+        failLaunch(launchPreparation.launchRefusal);
+        return false;
+      }
+      // agy fixes a conversation's working directory when it creates it: a resume in another folder
+      // still runs every command in the original one, whatever cwd the resume names or the process
+      // starts in. A launch that would resume across folders (a worktree switch, or any relaunch
+      // after one: parking, a runner restart, a retry) therefore starts a fresh conversation in this
+      // launch's folder, seeded once with the session's conversation so far, as T3 Code's
+      // create_with_handoff and Omnigent's Antigravity harness do. An explicit Restart never resumes
+      // an ACP conversation (`restartResumeId`), so it is a new conversation by design, unseeded.
+      // Unknown (an older session) keeps resuming.
+      const antigravityProfile = launchPreparation?.acpCompatibility?.profile === "antigravity";
+      if (resumeId && antigravityProfile &&
+          meta.providerConversationCwd && !sameWorktreePath(meta.context, meta.providerConversationCwd, cwd)) {
+        // Nothing is recorded until the fresh conversation's id is captured (`freshConversation`):
+        // a launch that fails first leaves the old conversation, its folder and no pending handoff,
+        // so a retry here seeds again and a return to the old folder resumes it untouched.
+        replacedConversationCwd = meta.providerConversationCwd;
+        conversationHandoff = this.conversationHandoff(sessionId, replacedConversationCwd, cwd);
+        resumeId = undefined;
+        this.emitEvent(sessionId, {
+          kind: "stderr",
+          text: "Google Antigravity keeps a conversation in the folder it started in, so this session continues " +
+            `in a new conversation in ${cwd}, given the conversation so far.`,
+        });
+      } else if (resumeId && antigravityProfile && meta.pendingConversationHandoffFrom &&
+          resumeId === meta.agentSessionId) {
+        if (this.deliveredHandoffs.get(sessionId) === resumeId) {
+          // Already accepted; only the marker's clear failed. Retry it, never re-send the history.
+          try {
+            this.store.patchMeta(sessionId, { pendingConversationHandoffFrom: undefined });
+            this.deliveredHandoffs.delete(sessionId);
+          } catch (error) {
+            this.log(`session ${sessionId} could not clear a delivered conversation handoff: ${errText(error)}`);
+          }
+        } else {
+          // The replacement was created but has not yet taken its handoff (it was parked, or the
+          // runner restarted, before its first ordinary prompt). The marker is written with this
+          // conversation's id, so it belongs to the conversation being resumed.
+          conversationHandoff = this.conversationHandoff(sessionId, meta.pendingConversationHandoffFrom, cwd);
+        }
+      }
       // Repository setup values are resolved runner-side from the immutable base-commit config.
       // Apply them after agent-config refresh so they reach hooks and the provider without ever
       // being persisted in meta.json or projected to the control plane.
       const setupEnvironment = this.worktreeSetupEnvironmentFor(meta, worktree?.path ?? null);
-      meta.env = { ...meta.env, ...setupEnvironment };
-      if (meta.config.permissionMode === "orchestrator") {
-        meta.env = {
-          ...meta.env,
-          ...(meta.context.kind === "native" && process.platform === "win32"
-            ? { TEMP: cwd, TMP: cwd }
-            : { TMPDIR: cwd }),
-        };
-      }
+      meta.env = { ...meta.env, ...setupEnvironment, ...this.orchestratorTempEnvironment(meta, cwd) };
       if (sameSlashCommandCatalog(priorSessionSlashCommands, meta.sessionSlashCommands)) {
         meta.sessionSlashCommands = priorSessionSlashCommands;
       }
@@ -10627,7 +10853,7 @@ export class SessionManager {
         return false;
       }
       this.emitEvent(sessionId, { kind: "error", message: `execution isolation unavailable: ${errText(error)}` });
-      this.emitStatus(sessionId, "failed", "Runner-owned execution isolation could not be established");
+      failLaunch("Runner-owned execution isolation could not be established");
       return false;
     }
 
@@ -10715,8 +10941,11 @@ export class SessionManager {
           args: preparedProjectMemoryArgs ?? launchPreparation?.codexLaunchArgs ?? meta.args,
           cwd,
           env: meta.env,
+          ...(launchPreparation?.scrubInheritedEnv?.length ? { scrubInheritedEnv: launchPreparation.scrubInheritedEnv } : {}),
+          ...effectiveAcpCompatibility(launchPreparation?.acpCompatibility, isolation),
           config: meta.config,
           artifactGuidance: meta.review ? "" : [artifactGuidance(meta, this.controlPlaneProtocolVersion()), shellGuidance(meta)].filter(Boolean).join(" "),
+          ...(conversationHandoff ? { acpConversationHandoff: conversationHandoff } : {}),
           ...(meta.review ? { review: true } : {}),
           ...(preparedProjectMemoryDirectory ? { projectMemoryDirectory: preparedProjectMemoryDirectory } : {}),
           orchestrator: meta.orchestrator,
@@ -10790,6 +11019,17 @@ export class SessionManager {
         },
         onStderr: (t) => this.onDriverStderr(sessionId, t),
         onExit: (code) => this.onDriverExit(sessionId, code, client),
+        onConversationHandoffDelivered: () => {
+          const live = this.active.get(sessionId);
+          if (live?.client === client && live.freshConversation) delete live.freshConversation.handoffFrom;
+          // Remembered before the durable clear: if that write fails, a relaunch in this runner
+          // process still knows the conversation has its handoff, and retries the clear instead of
+          // sending it again.
+          const accepted = client?.agentSessionId();
+          if (accepted) this.deliveredHandoffs.set(sessionId, accepted);
+          this.store.patchMeta(sessionId, { pendingConversationHandoffFrom: undefined });
+          this.deliveredHandoffs.delete(sessionId);
+        },
         onBackgroundWork: (update) => {
           // A retiring driver may emit an exit/null callback after a replacement owns the session.
           if (this.active.get(sessionId)?.client !== client) return;
@@ -10957,7 +11197,8 @@ export class SessionManager {
       if (reviewWriter) this.driverReviewWriterTokens.set(client, reviewWriter);
     } catch (error) {
       if (launchHome) {
-        if (driverConstructionStarted) await this.retainProviderHomeReference(launchHome);
+        // An ACP profile's refusal comes before its spawn (#4779): no process used the HOME.
+        if (driverConstructionStarted && !(error instanceof AcpLaunchRefusedError)) await this.retainProviderHomeReference(launchHome);
         else await this.releaseProviderHomeReference(launchHome);
       }
       if (worktreeLeaseOwner) this.store.releaseWorktreeLease(sessionId, worktreeLeaseOwner);
@@ -10969,9 +11210,13 @@ export class SessionManager {
       // Only the driver's own lease acquisition can refuse with a lease code here. Keep the
       // established prefix: older web clients use it to recognize account failures in transcripts.
       const refusal = !driverConstructionStarted ? providerHomeLaunchRefusal(error, meta) : undefined;
-      const prefix = refusal ? "provider account unavailable" : "agent process could not be created";
+      // An ACP profile that found nothing verified to run when it was about to spawn (#4779) fails
+      // the launch the way a launch-preparation refusal does.
+      const prefix = refusal ? "provider account unavailable"
+        : error instanceof AcpLaunchRefusedError ? "agent init failed" : "agent process could not be created";
       this.emitEvent(sessionId, { kind: "error", message: `${prefix}: ${errText(error)}` });
-      this.emitStatus(sessionId, "failed", errText(error));
+      if (refusal) this.emitStatus(sessionId, "failed", errText(error));
+      else failLaunch(errText(error));
       if (refusal) this.recordProviderHomeRefusal(sessionId, refusal);
       return false;
     }
@@ -10992,6 +11237,10 @@ export class SessionManager {
         .filter((path) => path !== cwd && !!isolation.writableBinds?.some((bind) => bind.target === path))
       : [];
     const entry: ActiveSession = {
+      ...(recoverableFailure ? { recoverableLaunch: true as const } : {}),
+      ...(meta.driver === "acp" && !resumeId
+        ? { freshConversation: { cwd, ...(replacedConversationCwd ? { handoffFrom: replacedConversationCwd } : {}) } }
+        : {}),
       orchestratorLaunchPolicy: meta.orchestrator,
       projectMemoryKey: effectiveProjectMemoryKey(meta),
       sessionId,
@@ -11198,8 +11447,7 @@ export class SessionManager {
       if (err instanceof CodexAppServerResumeError && err.retryable) {
         this.emitStatus(sessionId, "idle", `${errText(err)} — retry when the other app-server releases the thread`);
       } else {
-        this.emitStatus(sessionId, "failed", errText(err), undefined, undefined, false,
-          err instanceof CodexCommandSandboxUnavailableError ? err.launchFailure : undefined);
+        failLaunch(errText(err), err instanceof CodexCommandSandboxUnavailableError ? err.launchFailure : undefined);
       }
       retireUnlaunched();
       await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "driver initialization failed", launchGeneration);
@@ -11209,6 +11457,8 @@ export class SessionManager {
       provider: meta.driver, sharing: meta.projectMemory.sharing,
       effective: preparedProjectMemoryDirectory ? meta.projectMemory.sharing : "account_native" }));
     this.log(`session ${sessionId} ready (cwd=${cwd}${resumeId ? ", resumed" : ""})`);
+    // Started: from here an exit is the running provider's, with the ordinary terminal statuses.
+    delete entry.recoverableLaunch;
     // Release prompts admitted while the provider was starting. Deferred so the caller first
     // activates the pre-launch FIFO, whose ordinals precede anything admitted during startup.
     setImmediate(() => {
@@ -11315,7 +11565,12 @@ export class SessionManager {
         path: protectedWorktree, gitWritableRoots, requiredReadOnlyPaths,
         ...(ownedWorktrees.length ? { ownedWorktrees } : {}),
       } } : {}),
+      // A generic ACP agent has no known state directory, so isolation refuses to preserve one.
+      // Antigravity's profile names agy's (~/.gemini/antigravity-cli): preserved, a relaunch in the
+      // worktree resumes its conversation, as one in place does.
       ...(protectedWorktree && this.executionIsolation.mode === "provider" ? { preserveProviderHome: true } : {}),
+      ...(protectedWorktree && this.launchAcpCompatibility.get(meta)?.profile === "antigravity"
+        ? { antigravityTerminalHelper: true } : {}),
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(guardStateMask ? { guardStateMask } : {}),
       ...(this.strictProjectIsolation(meta) ? { orchestratorScratchOnly: true } : {}),
@@ -11342,6 +11597,69 @@ export class SessionManager {
       join(homedir(), ".aws"), join(homedir(), ".codex"), join(homedir(), ".claude"),
       ...[meta.providerCredentialHome, meta.pendingProviderCredentialHome].filter((path): path is string => !!path),
     ]);
+  }
+
+  private rememberAcpCompatibility(meta: SessionMeta, preparation: SessionLaunchPreparation | void | undefined): void {
+    if (preparation?.acpCompatibility) this.launchAcpCompatibility.set(meta, preparation.acpCompatibility);
+    else this.launchAcpCompatibility.delete(meta);
+  }
+
+  /** The conversation so far, to seed a fresh Antigravity conversation that replaces a resume in
+   * another folder. Only the person's messages and the agent's top-level replies are carried, the
+   * newest first kept within a bound: agy has no API to inject history, so this rides once ahead of
+   * the next prompt, and tool calls are not replayed (as in Omnigent's Antigravity harness). */
+  private conversationHandoff(sessionId: string, fromCwd: string, toCwd: string): string {
+    const turns: Array<{ role: "user" | "assistant"; text: string; open: boolean }> = [];
+    for (const { payload } of this.store.readEvents(sessionId)) {
+      if (payload.kind === "user_message" && payload.text.trim()) {
+        turns.push({ role: "user", text: payload.text.trim(), open: false });
+      } else if (payload.kind === "agent_message" && !payload.parentToolUseId) {
+        const last = turns.at(-1);
+        if (last?.role === "assistant" && last.open) {
+          last.text = payload.final && payload.text.trim() ? payload.text : last.text + payload.text;
+        } else if (payload.text.trim()) {
+          turns.push({ role: "assistant", text: payload.text, open: true });
+        }
+        if (payload.final) turns.at(-1)!.open = false;
+      } else if (payload.kind === "agent_response_completed") {
+        const last = turns.at(-1);
+        if (last) last.open = false;
+      }
+    }
+    const lines: string[] = [];
+    let size = 0;
+    for (const turn of [...turns].reverse()) {
+      const line = `${turn.role}: ${turn.text.trim()}`;
+      if (lines.length && size + line.length > CONVERSATION_HANDOFF_MAX_CHARS) {
+        lines.push("[earlier conversation omitted]");
+        break;
+      }
+      lines.push(line.length > CONVERSATION_HANDOFF_MAX_CHARS ? `${line.slice(0, CONVERSATION_HANDOFF_MAX_CHARS)}…` : line);
+      size += line.length;
+    }
+    return [
+      `[Wollipog] This session moved from ${fromCwd} to ${toCwd}. Google Antigravity cannot move a ` +
+        "conversation to another folder, so this is a new conversation that continues the earlier one. " +
+        `Work only in ${toCwd}. Tool calls and their results from before the move are not included.`,
+      ...(lines.length ? ["Conversation so far:", ...lines.reverse()] : []),
+      "Continue from here with the message below.",
+    ].join("\n");
+  }
+
+  /** Why this session's agent cannot launch in a managed worktree on this runner (#4901), or null.
+   * Checked before a worktree is created or selected and before a running provider is retired for
+   * a worktree switch, so the refusal never costs the session its worktree or its conversation. */
+  private managedWorktreeRefusal(meta: Pick<SessionMeta, "driver" | "agentId" | "context" | "executionTarget">): string | null {
+    return managedWorktreeUnsupportedReason({
+      os: process.platform === "linux" ? "linux" : process.platform === "darwin" ? "macos"
+        : process.platform === "win32" ? "windows" : undefined,
+      isolationMode: this.executionIsolation.mode,
+      driver: meta.driver,
+      agentId: meta.agentId,
+      ...(meta.agentId && this.configuredAgentIds.has(meta.agentId) ? { agentSource: "config" as const } : {}),
+      contextKind: meta.context.kind,
+      targetAdapter: meta.executionTarget?.adapter,
+    });
   }
 
   private requiresManagedWorktreeBwrap(meta: SessionMeta): boolean {
@@ -11412,18 +11730,23 @@ export class SessionManager {
    * Project Location writable. Native storage lives under the session row and is removed by
    * SessionStore.remove; Direct WSL uses the launcher's root-owned per-session partition. */
   async prepareOrchestratorScratch(meta: SessionMeta): Promise<string> {
-    if (!this.strictProjectIsolation(meta)) return meta.worktreePath ?? meta.repoPath;
-    if (meta.context.kind === "wsl") {
-      if (!this.runnerOwnerHash) throw new Error("Direct WSL Orchestrator scratch requires an attested runner owner");
-      return `${wslBwrapSessionRoot(this.runnerOwnerHash, providerStateKey(meta.sessionId))}/scratch`;
-    }
-    const scratch = join(this.store.sessionPath(meta.sessionId), "orchestrator-scratch");
+    const scratch = this.orchestratorLaunchDirectory(meta);
+    if (!this.strictProjectIsolation(meta) || meta.context.kind === "wsl") return scratch;
     await mkdir(scratch, { recursive: true, mode: 0o700 });
     if (!this.store.has(meta.sessionId)) {
       await rm(this.store.sessionPath(meta.sessionId), { recursive: true, force: true });
       throw new Error("session disappeared while Orchestrator scratch was being prepared");
     }
     return scratch;
+  }
+
+  private orchestratorLaunchDirectory(meta: SessionMeta): string {
+    if (!this.strictProjectIsolation(meta)) return meta.worktreePath ?? meta.repoPath;
+    if (meta.context.kind === "wsl") {
+      if (!this.runnerOwnerHash) throw new Error("Direct WSL Orchestrator scratch requires an attested runner owner");
+      return `${wslBwrapSessionRoot(this.runnerOwnerHash, providerStateKey(meta.sessionId))}/scratch`;
+    }
+    return join(this.store.sessionPath(meta.sessionId), "orchestrator-scratch");
   }
 
   /** Missing execution policy came from a pre-v144 control plane and must retain the legacy
@@ -11728,6 +12051,12 @@ export class SessionManager {
     this.nextQueueOrdinalBySession.delete(sessionId);
   }
 
+  promptFromControlPlane(command: PromptSessionMessage, durable?: DurableCommandLifecycle): boolean {
+    return this.prompt(command.sessionId, command.text, command.images, command.slashCommand, command.config,
+      durable, false, undefined, false, undefined, undefined, undefined,
+      Boolean(durable && (command.campaignContinuation || command.reviewContinuation)), false, false, command.promptOrigin);
+  }
+
   prompt(
     sessionId: string,
     text: string,
@@ -11745,6 +12074,7 @@ export class SessionManager {
     /** The launch's own initial prompt, which precedes whatever queued up while it was admitted. */
     launchInitialPrompt = false,
     providerRecovery = false,
+    promptOrigin?: WollipogPromptOrigin,
   ): boolean {
     const recoveryLaunch = this.launchGenerations.get(sessionId);
     const admittedRecoveryLaunch = recoveryLaunch !== undefined && this.preLaunchAdmissionGenerations.get(sessionId) === recoveryLaunch;
@@ -11888,6 +12218,7 @@ export class SessionManager {
           reservedOrdinal,
           recoveredQuestion,
           campaignContinuation,
+          promptOrigin,
         );
       }
       this.emitEvent(sessionId, {
@@ -11920,7 +12251,7 @@ export class SessionManager {
         images,
         slashCommand,
         config: effectiveConfig, durable, syntheticRecovery, providerRecovery, backgroundJobIds, recoveredQuestion,
-        campaignContinuation,
+        campaignContinuation, promptOrigin,
       });
       if (!this.recoveryLaunching.has(sessionId)) {
         setImmediate(() => void this.recoverQueuedAppServer(sessionId).catch((error) =>
@@ -11947,7 +12278,7 @@ export class SessionManager {
         id: queuedPromptId ?? durable?.commandId ?? randomUUID(),
         ordinal: reservedOrdinal ?? this.nextQueueOrdinal(sessionId), text, images, slashCommand,
         config: effectiveConfig, durable, syntheticRecovery, providerRecovery, backgroundJobIds, recoveredQuestion,
-        campaignContinuation,
+        campaignContinuation, promptOrigin,
       });
       this.preLaunchQueues.set(sessionId, queue);
       this.emitQueue(sessionId);
@@ -11971,6 +12302,7 @@ export class SessionManager {
         queuedPromptId,
         campaignContinuation,
         providerRecovery,
+        promptOrigin,
       ).catch((error) => {
         // resumeAndPrompt handles EXPECTED failures internally (durable.failed / error events). An
         // UNEXPECTED throw (e.g. a JSON.stringify RangeError writing a pathological config) escapes
@@ -12014,7 +12346,7 @@ export class SessionManager {
       images,
       slashCommand,
       config: effectiveConfig, durable, syntheticRecovery, providerRecovery, backgroundJobIds, recoveredQuestion,
-      campaignContinuation,
+      campaignContinuation, promptOrigin,
     });
     this.emitQueue(sessionId);
     this.scheduleDrain(sessionId);
@@ -12665,7 +12997,7 @@ export class SessionManager {
               operation.result?.disposition !== "uncertain" || operation.result.reason !== "transport_uncertain" || operation.resolved ||
               this.active.get(request.sessionId)?.client !== entry!.client) return;
           if (!this.appendAcceptedSteeringEvent(request.sessionId, request.turnId,
-            request.submissionId, displayText, imageInputs)) return;
+            request.submissionId, displayText, imageInputs, undefined, source?.promptOrigin)) return;
           operation.result = this.makeSteeringResult(request, "accepted", "accepted", { providerTurnId });
           operation.promise = Promise.resolve(operation.result);
           const current = this.active.get(request.sessionId);
@@ -12721,6 +13053,7 @@ export class SessionManager {
       displayText,
       imageInputs,
       source?.durable,
+      source?.promptOrigin,
     );
     if (!persisted) {
       return this.makeSteeringResult(request, "uncertain", "history_integrity_failure", {
@@ -12972,6 +13305,7 @@ export class SessionManager {
     text: string,
     images: PromptImageInput[],
     durable?: DurableCommandLifecycle,
+    promptOrigin?: WollipogPromptOrigin,
   ): boolean {
     // Landing pending text can itself latch a history failure, so check only after it.
     this.flushTextDeltas(sessionId);
@@ -12984,6 +13318,7 @@ export class SessionManager {
         turnId,
         submissionId,
         deliveryIntent: "steer",
+        ...this.promptEventOrigin(text, promptOrigin),
         ...(durable ? { commandId: durable.commandId } : {}),
       };
       const stored = this.store.appendEvent(sessionId, payload);
@@ -13102,6 +13437,9 @@ export class SessionManager {
   private queuedPromptEditEligibility(prompt: QueuedPrompt): { eligible: true } | { eligible: false; message: string } {
     if (prompt.durable) {
       return { eligible: false, message: "Messages controlled by durable delivery cannot be edited until delivery resolves." };
+    }
+    if (prompt.promptOrigin) {
+      return { eligible: false, message: "Wollipog notices cannot be edited after admission." };
     }
     if (prompt.sessionCommand) {
       return { eligible: false, message: "Provider commands cannot be edited after admission." };
@@ -13352,7 +13690,7 @@ export class SessionManager {
           editRevision: this.queuedPromptEditRevision(q),
         };
       }),
-      ...(entry && (this.queueHeld(entry) || this.providerRejectionHolds.has(sessionId)) ? { held: true } : {}),
+      ...(entry && (this.queueHeld(entry) || entry.assistantUsageHold || this.providerRejectionHolds.has(sessionId)) ? { held: true } : {}),
       ...(entry?.providerInitiatedTurnActive && entry.providerInitiatedTurnId
         ? { activeTurnId: entry.providerInitiatedTurnId }
         : entry?.running && entry.activeTurnId ? { activeTurnId: entry.activeTurnId } : {}),
@@ -13898,6 +14236,7 @@ export class SessionManager {
     queuedPromptId?: string,
     campaignContinuation = false,
     providerRecovery = false,
+    promptOrigin?: WollipogPromptOrigin,
   ): Promise<void> {
     const meta = this.store.readMeta(sessionId);
     if (providerRecovery && (!meta || meta.status === "stopped" || !meta.agentSessionId || !canResumeSession(meta))) return;
@@ -14057,7 +14396,7 @@ export class SessionManager {
         providerRecovery,
         backgroundJobIds,
         recoveredQuestion,
-        campaignContinuation,
+        campaignContinuation, promptOrigin,
       });
       this.preLaunchQueues.set(sessionId, queue);
     }
@@ -14143,6 +14482,7 @@ export class SessionManager {
           reservedOrdinal,
           recoveredQuestion,
           campaignContinuation,
+          promptOrigin,
         );
       } else if (blocked?.providerAuthBlock?.delivery === "not_delivered" &&
           blocked.providerAuthRetryAttemptedRecoveryId !== blocked.providerAuthBlock.recoveryId &&
@@ -14154,6 +14494,7 @@ export class SessionManager {
               ...(reservedOrdinal ? { ordinal: reservedOrdinal } : {}),
               text,
               images: [],
+              ...(promptOrigin ? { promptOrigin } : {}),
               ...(slashCommand ? { slashCommand } : {}),
               ...(config ? { config } : {}),
             },
@@ -14220,6 +14561,7 @@ export class SessionManager {
         campaignContinuation,
         false,
         providerRecovery,
+        promptOrigin,
       );
     }
   }
@@ -14464,6 +14806,16 @@ export class SessionManager {
         this.providerRejectionBlocker(sessionId, this.providerRejectionHolds.get(sessionId)!));
       return;
     }
+    const meta = this.store.readMeta(sessionId);
+    if (meta?.assistant) {
+      const limit = this.accountUsageLimit(meta, Date.now());
+      if (limit && this.providerAccountSwitchCanProceed(sessionId, entry) &&
+          this.scheduleAutomaticProviderAccountSwitch(sessionId, entry, limit)) {
+        await this.rebindSelectedProviderAccount(sessionId, entry);
+        return;
+      }
+      if (this.holdAssistantUsage(sessionId, entry, limit)) return;
+    }
     if (!this.acquireActiveTurn(sessionId)) return;
     if (!this.store.acquireLock(sessionId, this.lockOwner)) {
       if (this.active.get(sessionId) === entry) this.settleActiveWorkPermit(sessionId, entry);
@@ -14499,6 +14851,12 @@ export class SessionManager {
         }
         // A person's prompt is the way out of a rejection hold; the turns it held follow it.
         this.providerRejectionHolds.delete(sessionId);
+        this.assistantRejectionErrorIds.delete(sessionId);
+        entry.assistantTurnErrorId = undefined;
+        if (meta?.assistant && this.store.readMeta(sessionId)?.assistantThreadTurn) {
+          this.store.patchMeta(sessionId, { assistantThreadTurn: undefined });
+          this.publishAssistantThreadHealth(sessionId);
+        }
         entry.activeTurnId = next.id;
         this.emitQueue(sessionId); // it just left the queue and is about to run
         // This is the exact per-turn boundary. Reset before the first awaited configuration/image
@@ -14509,7 +14867,14 @@ export class SessionManager {
           entry.policyHookToolCallIds = new Set();
           entry.policyHookDecisionEvents = new Map();
         }
-        if (next.config && !configsEqual(next.config, this.store.readMeta(sessionId)?.config)) {
+        const current = this.store.readMeta(sessionId);
+        if (next.config?.permissionMode === ANTIGRAVITY_AUTO_MODE.id &&
+            current?.driver === "acp" && current.agentId === ANTIGRAVITY_AGENT_ID &&
+            current.capabilities && !current.capabilities.permissionModes?.includes(ANTIGRAVITY_AUTO_MODE.id)) {
+          // A prompt queued during launch may still carry the pre-negotiation Auto default.
+          next.config = { ...next.config, permissionMode: current.config.permissionMode };
+        }
+        if (next.config && !configsEqual(next.config, current?.config)) {
           // Apply the config THIS prompt was sent with (see QueuedPrompt.config). Drivers pick
           // config up at turn start, so setting it here is exactly "this turn runs under it".
           try {
@@ -14583,7 +14948,7 @@ export class SessionManager {
         }
         if (entry.pendingProviderAccountSwitch || this.requestRetiredWorktreeRebind(sessionId, entry) ||
             this.projectMemoryChanged(sessionId, entry)) break;
-        if (entry.authenticationBlocked || entry.historyQuarantined) break;
+        if (entry.authenticationBlocked || entry.historyQuarantined || entry.assistantUsageHold) break;
         if (this.steerFences(entry).size) {
           await this.waitForSteeringFences(entry);
           if (this.active.get(sessionId) !== entry) break;
@@ -14633,7 +14998,7 @@ export class SessionManager {
         await this.rebindProjectMemory(sessionId, entry);
       } else if (this.active.get(sessionId) === entry && entry.queue.length &&
           !entry.authenticationBlocked && !entry.historyQuarantined && !entry.historyIntegrityFailure &&
-          !entry.governanceTripped && !this.queueHeld(entry) && this.promotePromptPastRejectionHold(sessionId, entry)) {
+          !entry.governanceTripped && !entry.assistantUsageHold && !this.queueHeld(entry) && this.promotePromptPastRejectionHold(sessionId, entry)) {
         setImmediate(() => this.scheduleDrain(sessionId));
       }
     }
@@ -14668,7 +15033,7 @@ export class SessionManager {
       !this.reservedPromotionPrecedesQueue(sessionId, entry);
   }
 
-  private providerAccountForSession(meta: SessionMeta, providerAccountId: string): BoundProviderAccount {
+  private providerAccountForSession(meta: SessionMeta, providerAccountId: string, recheckEligibility = false): BoundProviderAccount {
     if (!this.resolveProviderAccount || !meta.agentId) {
       throw new Error("this session does not support provider accounts");
     }
@@ -14681,6 +15046,9 @@ export class SessionManager {
       workspacePath: meta.repoPath,
       agentId: meta.agentId,
       providerAccountId,
+      ...(recheckEligibility ? { providerAccountSelection: {
+        ...providerAccountExplicitRecord(null), revalidateAtLaunch: true,
+      } } : {}),
       command: meta.command,
       args: meta.args,
       env: {},
@@ -14706,8 +15074,8 @@ export class SessionManager {
    * pending binding is authoritative: a re-resolved account that now reports another profile (a
    * re-pointed or re-adopted HOME) refuses the switch, and one that reports none binds the saved id,
    * so the lease's expected id still refuses a replaced HOME. */
-  private pendingProviderAccountTarget(meta: SessionMeta, pending: BoundProviderAccount): BoundProviderAccount {
-    const target = this.providerAccountForSession(meta, pending.id);
+  private pendingProviderAccountTarget(meta: SessionMeta, pending: BoundProviderAccount, recheckEligibility = false): BoundProviderAccount {
+    const target = this.providerAccountForSession(meta, pending.id, recheckEligibility);
     const saved = pending.profileId;
     if (saved === undefined) return target;
     if (target.profileId !== undefined && target.profileId !== saved) {
@@ -14884,6 +15252,104 @@ export class SessionManager {
     }
     await this.rebindSelectedProviderAccount(sessionId, entry);
     return { ok: true, scheduled: false };
+  }
+
+  assistantHarnessReady(request: import("@wollipog/protocol").AssistantHarnessReadinessRequest): boolean {
+    const source = this.store.readMeta(request.sourceSessionId);
+    const target = this.store.readMeta(request.targetSessionId);
+    if (!source || !target || source.assistant?.threadId !== request.threadId ||
+        target.assistant?.threadId !== request.threadId || target.providerAccountId !== request.providerAccountId ||
+        source.driver === target.driver || this.store.readEvents(target.sessionId).some(({ payload }) => payload.kind === "user_message") ||
+        !this.active.has(target.sessionId) || target.status !== "idle") return false;
+    for (const meta of [source, target]) {
+      const entry = this.active.get(meta.sessionId);
+      if (meta.status !== "idle" && meta.status !== "completed" ||
+          !this.sessionCanOpen(meta.sessionId) || this.launchGenerations.has(meta.sessionId) ||
+          this.closing.has(meta.sessionId) || this.roleConversionPending(meta.sessionId) ||
+          meta.pendingProviderAccountId || meta.pendingLocationSwitch || meta.backgroundWorkState ||
+          meta.pendingBackgroundTaskIds?.length || this.hasPendingApproval(meta.sessionId) ||
+          (entry && (entry.queue.length > 0 || !this.providerAccountSwitchCanProceed(meta.sessionId, entry)))) return false;
+    }
+    return true;
+  }
+
+  /** An owner changes the existing backing session at an idle boundary. A queued or racing turn
+   * is refused; retirement fences new prompts until the replacement is ready. */
+  async changeAssistantThreadAccount(
+    sessionId: string,
+    providerAccountId: string,
+    change: NonNullable<import("@wollipog/protocol").SwitchSessionProviderAccountMessage["assistantThread"]>,
+  ): Promise<{ ok: boolean; error?: string; scheduled?: boolean }> {
+    const refuse = (error: string) => ({ ok: false, error });
+    const meta = this.store.readMeta(sessionId);
+    if (!meta?.assistant || meta.assistant.threadId !== change.threadId || !this.sessionCanOpen(sessionId)) {
+      return refuse("This session no longer backs the Assistant thread.");
+    }
+    if ((meta.providerAccountId ?? null) !== change.expectedProviderAccountId) {
+      return refuse("The thread's account changed. Reopen Change Account to see the current account.");
+    }
+    if (meta.providerAccountId === providerAccountId && !meta.providerAccountSwitchFailure) {
+      return refuse("The thread already uses that account.");
+    }
+    const entry = this.active.get(sessionId);
+    if (meta.status === "stopped" || this.launchGenerations.has(sessionId) || this.closing.has(sessionId) ||
+        meta.status === "running" || meta.status === "starting" || meta.status === "queued" ||
+        this.roleConversionPending(sessionId) || meta.pendingProviderAccountId || meta.pendingLocationSwitch ||
+        meta.providerHistoryBlock || (this.hasPendingApproval(sessionId) && !isProviderAuthenticationBlock(meta.pendingApproval)) ||
+        (entry && ((entry.queue.length > 0 && !entry.assistantUsageHold) || !this.providerAccountSwitchCanProceed(sessionId, entry)))) {
+      return refuse("The thread isn't ready to change accounts. Wait for its turn or pending work to finish and try again.");
+    }
+    if (entry) this.captureAgentSessionId(sessionId, entry.client);
+    const current = this.store.readMeta(sessionId)!;
+    if (!change.freshConversation && current.seq > 0 && !current.handoffPending &&
+        (!current.agentSessionId || !canResumeSession(current) || (!current.providerConversationHome && !current.providerCredentialHome))) {
+      return refuse("The provider conversation can't be carried over. Select Start a Fresh Conversation to change accounts and keep the thread's visible history.");
+    }
+    let target: BoundProviderAccount;
+    try {
+      target = this.providerAccountForSession(current, providerAccountId, true);
+    } catch (error) {
+      return refuse(errText(error));
+    }
+    // Resolve the target again after retiring the old provider so a configuration change during
+    // retirement fails closed.
+    const replacement = await this.replaceProviderProcess(sessionId, entry, {
+      freshConversation: change.freshConversation,
+      prepareReplacement: async () => { target = this.pendingProviderAccountTarget(current, target, true); },
+      replacementMeta: () => {
+        const latest = this.store.readMeta(sessionId);
+        if (!latest) return undefined;
+        const updated = this.store.patchMeta(sessionId, {
+          ...this.providerAccountBindingPatch(latest, target),
+          ...(change.freshConversation ? {
+            agentSessionId: null, handoffPending: true, providerConversationHome: undefined,
+            providerUnstartedThreadId: undefined, claudeUsageCheckpoint: undefined, claudeUsageCheckpointSeq: undefined,
+            contextTokensUsed: undefined, contextWindow: undefined,
+          } : {}),
+        });
+        if (updated) this.store.flush(sessionId);
+        return updated ?? undefined;
+      },
+      queueFailureReason: () => "the Assistant thread couldn't start on the selected account",
+      onLaunched: () => {
+        if (change.freshConversation) this.noticeSessionLaunch(sessionId, "The Assistant started a fresh provider conversation. The earlier transcript is still in this thread.");
+        this.emitEvent(sessionId, { kind: "provider_account_switched", providerAccountId: target.id, providerAccountLabel: target.label });
+        const updated = this.store.readMeta(sessionId);
+        if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+      },
+    });
+    if (replacement.status === "launched") {
+      if (!replacement.queuedWork) this.emitStatus(sessionId, "idle");
+      return { ok: true };
+    }
+    if (replacement.status === "capacity_unavailable") {
+      return refuse("This Machine has no available provider process slot. Try changing the account when a slot is free.");
+    }
+    if (replacement.status === "launch_failed") {
+      this.parkProviderAccountSwitchFailure(sessionId, target, "The thread couldn't resume on the selected account. If its conversation can't be carried over, try Start a Fresh Conversation.");
+    }
+    return refuse(replacement.status === "prepare_failed" ? replacement.error
+      : "The thread couldn't start on the selected account. Check the thread before trying again.");
   }
 
   private roleConversionPending(sessionId: string): boolean {
@@ -15381,17 +15847,56 @@ export class SessionManager {
     }
   }
 
+  private accountUsageLimit(meta: SessionMeta | null, now: number): UsageWindowRejection | null {
+    const usage = meta?.providerAccountId
+      ? this.subscriptionUsageInventory().find((snapshot) => snapshot.providerAccountId === meta.providerAccountId)
+      : undefined;
+    return usageWindowRejection(usage, now);
+  }
+
+  /** An exhausted Assistant account parks the FIFO before provider submission. A timer wakes
+   * that exact provider generation at reset (or rechecks allowance when no reset is known). */
+  private holdAssistantUsage(
+    sessionId: string, entry: ActiveSession, limit: UsageWindowRejection | null, recheck = false,
+  ): boolean {
+    const held = entry.assistantUsageHold;
+    if (!limit) {
+      if (held) {
+        clearTimeout(held.timer);
+        entry.assistantUsageHold = undefined;
+        this.publishAssistantThreadHealth(sessionId);
+        this.emitQueue(sessionId);
+      }
+      return false;
+    }
+    const changed = !held || held.limit.resetsAt !== limit.resetsAt;
+    if (changed || recheck) {
+      clearTimeout(held?.timer);
+      const delay = Math.min(30_000, Math.max(1, (limit.resetsAt ?? Infinity) - Date.now()));
+      const timer = setTimeout(() => {
+        if (this.active.get(sessionId) !== entry || entry.assistantUsageHold?.timer !== timer) return;
+        this.holdAssistantUsage(sessionId, entry, this.accountUsageLimit(this.store.readMeta(sessionId), Date.now()), true);
+        this.scheduleDrain(sessionId);
+      }, delay);
+      timer.unref();
+      entry.assistantUsageHold = { limit, timer };
+      if (changed) {
+        this.publishAssistantThreadHealth(sessionId);
+        this.emitQueue(sessionId);
+      }
+    }
+    return true;
+  }
+
   /** Decide and persist an automatic handoff only after the rejected provider promise settled.
    * The existing rebind lane performs the actual credential change after drain releases the turn. */
-  private scheduleAutomaticProviderAccountSwitch(sessionId: string, entry: ActiveSession): boolean {
+  private scheduleAutomaticProviderAccountSwitch(
+    sessionId: string,
+    entry: ActiveSession,
+    rejection: UsageWindowRejection | null,
+  ): boolean {
     const meta = this.store.readMeta(sessionId);
     const now = Date.now();
-    const currentUsage = meta?.providerAccountId
-      ? this.subscriptionUsageInventory().find((snapshot) =>
-        snapshot.providerAccountId === meta.providerAccountId)
-      : undefined;
-    const rejection = entry.usageWindowRejection ?? usageWindowRejection(currentUsage, now);
-    entry.usageWindowRejection = undefined;
     if (!this.automaticAccountSwitching || !this.automaticAccountSwitchAuthorityReady ||
         !rejection || entry.governanceTripped ||
         entry.authenticationBlocked || entry.pendingProviderAccountSwitch) return false;
@@ -15481,7 +15986,7 @@ export class SessionManager {
    * a promptable session between retiring the old process and readying its replacement. */
   private async replaceProviderProcess(
     sessionId: string,
-    entry: ActiveSession,
+    entry: ActiveSession | undefined,
     options: {
       replacementMeta: () => SessionMeta | undefined;
       queueFailureReason: () => string;
@@ -15490,12 +15995,15 @@ export class SessionManager {
       /** Runs once the old provider has exited and before replacementMeta. A throw ends the
        * replacement with nothing relaunched and replacementMeta never called. */
       prepareReplacement?: () => Promise<void>;
+      /** Explicit owner consent to keep the visible transcript and start fresh at the provider. */
+      freshConversation?: boolean;
     },
   ): Promise<ProviderReplacementResult> {
-    this.captureAgentSessionId(sessionId, entry.client);
+    if (entry) this.captureAgentSessionId(sessionId, entry.client);
     const resumable = this.store.readMeta(sessionId);
-    const resumeId = resumable?.agentSessionId ?? undefined;
-    const hasConversation = (resumable?.seq ?? 0) > 0;
+    const resumeId = options.freshConversation ? undefined : resumable?.agentSessionId ?? undefined;
+    const freshAssistantHandoff = !!resumable?.assistant && resumable.handoffPending;
+    const hasConversation = !options.freshConversation && !freshAssistantHandoff && (resumable?.seq ?? 0) > 0;
     if (!resumable || (!resumeId && hasConversation) || (resumeId && !canResumeSession(resumable))) {
       return { status: "not_resumable" };
     }
@@ -15508,27 +16016,35 @@ export class SessionManager {
 
     const launchGeneration = this.beginLaunchGeneration(sessionId);
     this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
-    const queued = entry.queue.splice(0);
-    if (queued.length) this.preLaunchQueues.set(sessionId, queued);
-    this.deleteActiveSession(sessionId, entry, false, false);
+    const queued = entry?.queue.splice(0);
+    if (queued?.length) this.preLaunchQueues.set(sessionId, queued);
+    if (entry) this.deleteActiveSession(sessionId, entry, false, false);
     this.emitQueue(sessionId);
     let launched = false;
     let preserveLockForQueue = false;
     let result: ProviderReplacementResult = { status: "launch_failed" };
     try {
+      // The account change is a bounded request. A dormant thread must not queue a switch that
+      // could take effect after the control plane has already reported a timeout.
+      if (!entry && !await this.acquireAdmission(sessionId, { wait: false })) {
+        result = { status: "capacity_unavailable" };
+        return result;
+      }
       try {
-        const retirement = this.beginProviderRetirement(sessionId, entry, {
-          preserveAdmission: true,
-          preserveLock: true,
-          acceptPromptsDuringHandoff: true,
-        });
-        await retirement.promise;
-        if (this.closing.get(sessionId) === retirement) {
-          throw new Error("provider process retirement is unconfirmed");
+        if (entry) {
+          const retirement = this.beginProviderRetirement(sessionId, entry, {
+            preserveAdmission: true,
+            preserveLock: true,
+            acceptPromptsDuringHandoff: true,
+          });
+          await retirement.promise;
+          if (this.closing.get(sessionId) === retirement) {
+            throw new Error("provider process retirement is unconfirmed");
+          }
         }
       } catch (error) {
         const retirement = this.closing.get(sessionId);
-        if (retirement?.client === entry.client) {
+        if (retirement && retirement.client === entry?.client) {
           retirement.preserveAdmission = false;
           retirement.preserveLock = false;
           retirement.acceptPromptsDuringHandoff = false;
@@ -15720,7 +16236,11 @@ export class SessionManager {
         }
         if (!entry) throw new Error("the session is not running; send it a message and ask again");
         if ((meta.seq ?? 0) > 0 && (!meta.agentSessionId || !canResumeSession(meta))) throw new LocationSwitchRefusal("not_resumable");
-        const repoPath = await verifyLocationSwitchTarget(meta.context, this.sharedDirectoryWorkspaces, msg);
+        const registeredPath = msg.registeredWorkspace === true
+          ? await this.registeredLocationSwitchLookup?.(sessionId, msg, "accept")
+          : undefined;
+        if (msg.registeredWorkspace === true && registeredPath === undefined) throw new LocationSwitchRefusal("lookup_unavailable");
+        const repoPath = await verifyLocationSwitchTarget(meta.context, this.sharedDirectoryWorkspaces, msg, registeredPath);
         const current = await realpath(meta.repoPath).catch(() => meta.repoPath);
         if (current === repoPath) throw new LocationSwitchRefusal("same_repository");
         if (msg.recoverBranch !== undefined && !validLocationSwitchBranch(msg.recoverBranch)) {
@@ -15729,6 +16249,7 @@ export class SessionManager {
         const updated = this.store.patchMeta(sessionId, {
           pendingLocationSwitch: {
             requestId: msg.requestId, occurrenceId: msg.occurrenceId, workspaceId: msg.workspaceId, repoPath,
+            ...(registeredPath ? { registeredWorkspacePath: registeredPath } : {}),
             repository: msg.repository, locationName: msg.locationName, continuation: msg.continuation,
             ...(msg.recoverBranch ? { recoverBranch: msg.recoverBranch } : {}), requestedAt: Date.now(),
           },
@@ -15748,6 +16269,7 @@ export class SessionManager {
 
   /** Provider replacements share one lane: a Location switch and an account switch never overlap. */
   private switchLocation(sessionId: string, entry: ActiveSession): Promise<void> {
+    if (entry.locationSwitchLookupRetry) return Promise.resolve();
     const current = this.providerAccountSwitches.get(sessionId);
     if (current) return current.promise;
     let promise: Promise<void>;
@@ -15756,6 +16278,30 @@ export class SessionManager {
     });
     this.providerAccountSwitches.set(sessionId, { entry, promise });
     return promise;
+  }
+
+  private async verifyPendingLocationSwitch(meta: SessionMeta, pending: PendingLocationSwitch): Promise<string> {
+    const registeredPath = pending.registeredWorkspacePath !== undefined
+      ? await this.registeredLocationSwitchLookup?.(meta.sessionId, pending, "apply")
+      : undefined;
+    if (pending.registeredWorkspacePath !== undefined && registeredPath === undefined) {
+      throw new LocationSwitchRefusal("lookup_unavailable");
+    }
+    const repoPath = await verifyLocationSwitchTarget(meta.context, this.sharedDirectoryWorkspaces,
+      { workspaceId: pending.workspaceId, workspacePath: pending.registeredWorkspacePath ?? pending.repoPath,
+        repository: pending.repository }, registeredPath);
+    if (repoPath !== pending.repoPath) throw new LocationSwitchRefusal("path_changed");
+    return repoPath;
+  }
+
+  private deferLocationSwitchLookup(sessionId: string, entry: ActiveSession, occurrenceId: string): void {
+    if (this.shuttingDown) return;
+    // A missed reply is not a denial. Keep the accepted switch and retry it ahead of queued turns.
+    entry.locationSwitchLookupRetry = setTimeout(() => {
+      entry.locationSwitchLookupRetry = undefined;
+      if (this.active.get(sessionId) === entry && entry.pendingLocationSwitch === occurrenceId) this.scheduleDrain(sessionId);
+    }, 5_000);
+    entry.locationSwitchLookupRetry.unref();
   }
 
   /** The Claude projects roots this session's conversation may live in, most specific first. */
@@ -16030,9 +16576,7 @@ export class SessionManager {
     // What the session is told about a worktree it comes back to, if it is not quite as it was.
     let returning: { setup?: "unfinished" | "unreadable"; portBlock?: WorktreePortBlock } | undefined;
     try {
-      const repoPath = await verifyLocationSwitchTarget(meta.context, this.sharedDirectoryWorkspaces,
-        { workspaceId: pending.workspaceId, workspacePath: pending.repoPath, repository: pending.repository });
-      if (repoPath !== pending.repoPath) throw new LocationSwitchRefusal("path_changed");
+      const repoPath = await this.verifyPendingLocationSwitch(meta, pending);
       const targetBranch = pending.recoverBranch ?? `agent/${sessionId}`;
       const removal = await this.pendingWorktreeRemoval(sessionId, meta.context, repoPath, targetBranch);
       if (removal) throw new Error(this.pendingRemovalRefusal(removal, targetBranch));
@@ -16108,6 +16652,11 @@ export class SessionManager {
         };
     } catch (error) {
       const kept = await release({ beforeSetup: true });
+      if (error instanceof LocationSwitchRefusal && error.failure === "lookup_unavailable") {
+        reportKept(kept);
+        this.deferLocationSwitchLookup(sessionId, entry, pending.occurrenceId);
+        return;
+      }
       this.failLocationSwitch(sessionId, entry, pending, error instanceof LocationSwitchRefusal ? error.message
         : `the target worktree could not be prepared: ${errText(error)}`, kept);
       return;
@@ -16125,6 +16674,22 @@ export class SessionManager {
         // durable and runs again once the runner is back.
         if (this.shuttingDown) return;
         this.failLocationSwitch(sessionId, entry, pending, setupFailure, kept);
+        return;
+      }
+    }
+    if (pending.registeredWorkspacePath !== undefined) {
+      try {
+        // Preparing a worktree can take time. Recheck authority and local identity before retiring
+        // the current provider, while a refusal still leaves the session in its current Location.
+        await this.verifyPendingLocationSwitch(meta, pending);
+      } catch (error) {
+        const kept = await release();
+        if (error instanceof LocationSwitchRefusal && error.failure === "lookup_unavailable") {
+          reportKept(kept);
+          this.deferLocationSwitchLookup(sessionId, entry, pending.occurrenceId);
+        } else if (!this.shuttingDown) {
+          this.failLocationSwitch(sessionId, entry, pending, errText(error), kept);
+        }
         return;
       }
     }
@@ -16453,13 +17018,22 @@ export class SessionManager {
     // provider-visible events. Event sequence is the established resume predicate used by the
     // normal stopped-session path and prevents a failed first conversation from becoming fresh.
     const hasConversation = (resumable?.seq ?? 0) > 0;
-    if (!resumable || (!resumeId && hasConversation) || (resumeId && !canResumeSession(resumable))) {
+    // `canResumeSession` reads what the launch being retired recorded. Judge the launch this switch
+    // will make as well (#4902): a managed worktree's sandbox can refuse an agent that ran in place.
+    const selectedRow = resumable ? this.attributedWorktreeForPath(resumable, selectedPath) : undefined;
+    const launchRefusal = resumable && selectedRow &&
+        (selectedRow.source !== "attached" || selectedRow.reusedInPlace === true)
+      ? this.managedWorktreeRefusal(resumable)
+      : null;
+    if (!resumable || launchRefusal || (!resumeId && hasConversation) || (resumeId && !canResumeSession(resumable))) {
       const retirement = this.retirementRebindPending(entry);
       this.failRetirementRebind(entry);
       entry.pendingWorktreeRebind = undefined;
       this.emitEvent(sessionId, {
         kind: "error",
-        message: retirement
+        message: launchRefusal
+          ? `The session stays where it is. ${launchRefusal}`
+          : retirement
           ? "this provider conversation cannot resume, so the provider keeps its launch sandbox after one of " +
             "its worktrees was retired; restart the session to drop it"
           : "the selected worktree cannot resume this provider conversation",
@@ -16598,7 +17172,8 @@ export class SessionManager {
       }
       try {
         launched = await this.launch(
-          { ...fresh, worktreePath: verifiedWorktreePath }, resumeId, launchGeneration,
+          { ...fresh, worktreePath: verifiedWorktreePath }, resumeId, launchGeneration, undefined,
+          { recoverableFailure: true },
         );
       } catch (error) {
         // launch() contains expected preparation/driver failures. This final boundary keeps an
@@ -17042,10 +17617,12 @@ export class SessionManager {
                 backgroundJobIds.includes(job.id) && job.restartedAt !== undefined && !job.restartResumed)
               ? "Runner reported the background work of the conversation the restart replaced."
               : "Runner continued after managed background work completed.",
+          ...(backgroundJobIds?.length ? { backgroundPrompt: { origin: { kind: "background_result" as const }, text } } : {}),
         })
       : this.emitEvent(sessionId, {
           kind: "user_message",
           text: displayText,
+          ...this.promptEventOrigin(displayText, queued.promptOrigin),
           images: imageInputs.length ? imageInputs : undefined,
           ...(campaignContinuation ? { campaignContinuation: true as const } : {}),
           ...(durable ? { commandId: durable.commandId } : {}),
@@ -17426,10 +18003,17 @@ export class SessionManager {
         if (!automaticTurn(queued) && this.active.get(sessionId) === entry) this.rearmLaunchHeldBackgroundContinuation(sessionId);
       }
       if (stop === "refusal" && !interrupted && !entry.governanceTripped) {
-        this.scheduleAutomaticProviderAccountSwitch(sessionId, entry);
-      } else {
-        entry.usageWindowRejection = undefined;
+        const current = this.store.readMeta(sessionId);
+        const limit = entry.usageWindowRejection ?? this.accountUsageLimit(current, Date.now());
+        const switching = this.scheduleAutomaticProviderAccountSwitch(sessionId, entry, limit);
+        if (current?.assistant && !switching && !this.holdAssistantUsage(sessionId, entry, limit)) {
+          const notDelivered = !inputMayHaveBeenDelivered && entry.client.lastPromptUndelivered?.() === true;
+          this.recordAssistantTurnFailure(sessionId, entry, notDelivered && !entry.providerCapacityFailure
+            ? "rejected" : "failed", entry.client.lastTurnError?.() ?? "The provider refused the turn.",
+          userEvent.payload.kind === "user_message" ? queued.id : undefined);
+        }
       }
+      entry.usageWindowRejection = undefined;
       if (interrupted) {
         this.emitEvent(sessionId, { kind: "turn_interrupted" });
         this.emitStatus(sessionId, "idle");
@@ -17497,6 +18081,10 @@ export class SessionManager {
         return;
       }
       this.emitEvent(sessionId, { kind: "error", message: `prompt failed: ${errText(err)}` }, durable);
+      if (this.store.readMeta(sessionId)?.assistant) {
+        this.recordAssistantTurnFailure(sessionId, entry, "failed", errText(err),
+          userEvent.payload.kind === "user_message" ? queued.id : undefined);
+      }
       if (entry.historyIntegrityFailure) return;
       if (continuationHoldBlocker) this.emitStatus(sessionId, "input_required", continuationHoldBlocker);
       else this.emitStatus(sessionId, "failed", errText(err));
@@ -17986,6 +18574,8 @@ export class SessionManager {
     // driver's own reference holds the HOME, or when the fork gives up before that.
     const forkPreparationHome = this.launchPreparationProviderHome();
     let forkConstructionStarted = false;
+    // An ACP profile refused before spawning (#4779): no process ever used the provider HOME.
+    let forkRefusedBeforeSpawn = false;
     // The Claude target fork's reference: settled on the fork probe's own tree proof once
     // forkSession returns or throws; released unproven only if forkSession was never called.
     let claudeForkHome: ProviderHomeReference | null = null;
@@ -18102,7 +18692,9 @@ export class SessionManager {
           isCurrent: forkIsCurrent,
           providerHome: forkPreparationHome,
         });
+        this.rememberAcpCompatibility(source, launchPreparation);
         if (!forkIsCurrent()) throw new Error("conversation fork preparation was canceled");
+        if (launchPreparation?.launchRefusal) throw new Error(launchPreparation.launchRefusal);
         if (sameSlashCommandCatalog(priorSessionSlashCommands, source.sessionSlashCommands)) {
           source.sessionSlashCommands = priorSessionSlashCommands;
         }
@@ -18165,6 +18757,8 @@ export class SessionManager {
             args: launchPreparation?.codexLaunchArgs ?? source.args,
             cwd: source.worktreePath,
             env: source.env,
+            ...(launchPreparation?.scrubInheritedEnv?.length ? { scrubInheritedEnv: launchPreparation.scrubInheritedEnv } : {}),
+            ...effectiveAcpCompatibility(launchPreparation?.acpCompatibility, isolation),
             config: source.config,
             context: source.context,
             capabilities: source.capabilities,
@@ -18525,6 +19119,7 @@ export class SessionManager {
         ...(retainedPrompt ? { retainedPrompt } : {}),
       };
     } catch (err) {
+      if (err instanceof AcpLaunchRefusedError) forkRefusedBeforeSpawn = true;
       if (forkedThreadId && client?.archiveSession) {
         try {
           await client.archiveSession(forkedThreadId);
@@ -18601,7 +19196,7 @@ export class SessionManager {
       } else if (forkHome) {
         const unused = forkHome;
         forkHome = null;
-        if (forkConstructionStarted) await this.retainProviderHomeReference(unused);
+        if (forkConstructionStarted && !forkRefusedBeforeSpawn) await this.retainProviderHomeReference(unused);
         else await this.releaseProviderHomeReference(unused);
       }
       if (claudeForkHome) {
@@ -19143,6 +19738,7 @@ export class SessionManager {
           prompt.campaignContinuation,
           false,
           prompt.providerRecovery,
+          prompt.promptOrigin,
         );
       }
     });
@@ -20822,8 +21418,15 @@ export class SessionManager {
     this.providerRejectionHolds.set(sessionId, rejection);
     this.log(JSON.stringify({ event: "provider_rejection_hold", sessionId, queued: entry.queue.length }));
     const blocker = this.providerRejectionBlocker(sessionId, rejection);
+    const previousErrorId = entry.assistantTurnErrorId;
     // An error row stays visible in the transcript, where an Agent Log line would be hidden.
-    this.emitEvent(sessionId, { kind: "error", message: blocker });
+    const error = this.emitEvent(sessionId, { kind: "error", message: blocker });
+    if (error?.payload.kind === "error" && error.payload.assistantThreadErrorId) {
+      this.assistantRejectionErrorIds.set(sessionId, error.payload.assistantThreadErrorId);
+      // The hold is distinct from the individual provider rejection.
+      entry.assistantTurnErrorId = previousErrorId;
+      this.publishAssistantThreadHealth(sessionId);
+    }
     this.emitQueue(sessionId);
     return blocker;
   }
@@ -20919,10 +21522,24 @@ export class SessionManager {
   }
 
   /** Persist the agent-native resumable id once it's known (claude immediately, codex after turn 1). */
+  /** A fresh ACP conversation's facts (where it was created, and the handoff it still needs) are
+   * written in the same patch as its id, whichever caller captures it first: they must never be
+   * observed beside another conversation's id, after a crash or a concurrent worktree selection. */
   private captureAgentSessionId(sessionId: string, client: Driver): void {
     const aid = client.agentSessionId();
-    if (aid && this.store.readMeta(sessionId)?.agentSessionId !== aid) {
-      const updated = this.store.patchMeta(sessionId, { agentSessionId: aid, handoffPending: undefined });
+    const entry = this.active.get(sessionId);
+    const fresh = entry?.client === client ? entry.freshConversation : undefined;
+    const current = this.store.readMeta(sessionId);
+    // Capture only ever adds these facts. Clearing a delivered handoff's marker belongs to delivery
+    // alone (`onConversationHandoffDelivered`), so a failed clear never turns into another write here
+    // that could fail a turn the agent already completed.
+    const with_: Partial<SessionMeta> = fresh
+      ? { providerConversationCwd: fresh.cwd, ...(fresh.handoffFrom ? { pendingConversationHandoffFrom: fresh.handoffFrom } : {}) }
+      : {};
+    const stale = fresh && (current?.providerConversationCwd !== fresh.cwd ||
+      (fresh.handoffFrom !== undefined && current?.pendingConversationHandoffFrom !== fresh.handoffFrom));
+    if (aid && (current?.agentSessionId !== aid || stale)) {
+      const updated = this.store.patchMeta(sessionId, { agentSessionId: aid, handoffPending: undefined, ...with_ });
       if (updated && runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "sessionRestartResume")) {
         this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       }
@@ -21055,7 +21672,11 @@ export class SessionManager {
         // between turns completed it; one that cut a turn short, a non-zero code, or a signal failed it.
         this.fenceExitedProvider(sessionId, expectedClient);
         const turnCut = entry.running || entry.providerInitiatedTurnActive;
-        if (code === 0 && !turnCut) this.emitStatus(sessionId, "completed", "agent exited (code 0)");
+        // A worktree-switch relaunch that exits while starting keeps the session usable (#4902).
+        if (entry.recoverableLaunch) {
+          this.emitStatus(sessionId, "idle", `agent exited while starting in the selected worktree (${
+            code === null ? "signal" : `code ${code}`}); send a message to retry`);
+        } else if (code === 0 && !turnCut) this.emitStatus(sessionId, "completed", "agent exited (code 0)");
         else if (code === 0) this.emitStatus(sessionId, "failed", "agent exited (code 0) during a turn");
         else if (code === null) this.emitStatus(sessionId, "failed", "agent exited by a signal");
         else this.emitStatus(sessionId, "failed", `agent exited ${code}`);
@@ -21217,6 +21838,7 @@ export class SessionManager {
     this.recoveryLaunching.delete(sessionId);
     this.recoveryHolds.delete(sessionId);
     this.providerRejectionHolds.delete(sessionId);
+    this.assistantRejectionErrorIds.delete(sessionId);
     this.lastProviderRejections.delete(sessionId);
   }
 
@@ -21744,6 +22366,19 @@ export class SessionManager {
     // Publish the matched turn at its actual start, without waiting for provider acceptance;
     // status-only messages cannot refresh the display-only follow-up facts at the control plane.
     this.publishBackgroundFollowUp(sessionId);
+    this.publishAssistantThreadHealth(sessionId);
+  }
+
+  private recordAssistantTurnFailure(
+    sessionId: string, entry: ActiveSession, kind: "failed" | "rejected", message: string, promptTurnId?: string,
+  ): void {
+    if (this.active.get(sessionId) !== entry || entry.historyIntegrityFailure ||
+        !runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "assistantThreadHealth")) return;
+    if (!entry.assistantTurnErrorId) this.emitEvent(sessionId, { kind: "error", message });
+    const errorId = entry.assistantTurnErrorId;
+    if (errorId) this.store.patchMeta(sessionId, {
+      assistantThreadTurn: { kind, errorId, ...(promptTurnId ? { promptTurnId } : {}) },
+    });
   }
 
   /** Contain authoritative history failures to one session. History itself remains strict: this
@@ -21823,6 +22458,13 @@ export class SessionManager {
     this.textDeltaCoalescers.delete(sessionId);
   }
 
+  private promptEventOrigin(text: string, origin?: WollipogPromptOrigin): { promptOrigin?: WollipogPromptOrigin | null } {
+    if (origin) return { promptOrigin: origin };
+    if (text.startsWith(OWNER_CONFIRMATION_NOTICE_PREFIX) &&
+        runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "wollipogPromptOrigin")) return { promptOrigin: null };
+    return {};
+  }
+
   private emitEvent(
     sessionId: string,
     payload: SessionEventPayload,
@@ -21857,8 +22499,14 @@ export class SessionManager {
       // Provider request ids are not occurrence identities: some providers may reuse one after a
       // restart or a later turn. Stamp the durable event before any snapshot or relay observes it
       // so delegated Parent Control can compare-and-set the exact pending occurrence.
+      const assistantErrorId = payload.kind === "error" && !payload.nonFatal && !payload.source &&
+        entry?.running && this.store.readMeta(sessionId)?.assistant &&
+        runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "assistantThreadHealth")
+        ? randomUUID() : undefined;
       const identifiedPayload: SessionEventPayload =
-        payload.kind === "permission_request" || payload.kind === "question_request"
+        payload.kind === "error" && assistantErrorId
+          ? { ...payload, assistantThreadErrorId: assistantErrorId }
+          : payload.kind === "permission_request" || payload.kind === "question_request"
           ? { ...payload, occurrenceId: preserveAsyncQuestionOccurrence &&
               payload.kind === "question_request" && payload.async && payload.occurrenceId
               ? payload.occurrenceId : `request_${randomUUID().replaceAll("-", "")}` }
@@ -21868,6 +22516,7 @@ export class SessionManager {
       // append: a complete-history failure is latched and contained to this session here.
       const stored = this.store.appendEvent(sessionId, identifiedPayload);
       if (!stored) throw new Error("session metadata disappeared before history append");
+      if (assistantErrorId && entry) entry.assistantTurnErrorId = assistantErrorId;
       try {
         // Relay what was stored: the store may have shortened an oversized record (#4288).
         this.accrueMeta(sessionId, stored.payload);
@@ -22073,6 +22722,9 @@ export class SessionManager {
     if (typeof providerTurnId !== "string" || !bounded(providerTurnId, 512)) {
       return fail(occurrenceId, "Codex has not confirmed a provider turn for the current turn");
     }
+    const admissionRefusal = active.client.workflowActionAdmissionRefusal?.(occurrenceId, raw.commandDigest)
+      ?? (active.client.workflowActionAdmissionRefusal ? null : "the provider admission input is unavailable");
+    if (admissionRefusal) return fail(occurrenceId, admissionRefusal);
     const payload: WorkflowActionAdmissionArmedEvent = {
       kind: "workflow_action_admission_armed",
       occurrenceId,
@@ -22226,12 +22878,121 @@ export class SessionManager {
       const agentEnv = options.agentEnv?.(meta) ?? {};
       const neutral = meta.context?.kind === "wsl" ? "/" : parsePath(tmpdir()).root;
       const gh = options.gh ?? contextGhRunner(meta.context, neutral, agentEnv);
+      const verifyBoundLocation = message.location
+        ? async (): Promise<{ outcome: ForgeDecisionActionOutcome; refusal?: { reason: ForgeDecisionActionRefusalReason; summary: string } } | null> => {
+          const currentMeta = this.store.readMeta(message.sessionId);
+          if (!currentMeta) {
+            return {
+              outcome: "refused",
+              refusal: { reason: "runner_unavailable", summary: "The session is not known to this runner." },
+            };
+          }
+          const expectedWorkspaceId = typeof message.location?.workspaceId === "string" ? message.location.workspaceId : "";
+          const expectedWorkspacePath = typeof message.location?.workspacePath === "string" ? message.location.workspacePath : "";
+          const expectedRepository = typeof message.location?.repository === "string" ? message.location.repository.toLowerCase() : "";
+          const actionRepository = "repository" in message.action && typeof message.action.repository === "string"
+            ? message.action.repository.toLowerCase() : "";
+          const stripTrailing = (p: string) => p.length > 1 ? p.replace(/[\\/]+$/u, "") : p;
+          let pathMatches = Boolean(currentMeta.repoPath && expectedWorkspacePath &&
+            stripTrailing(currentMeta.repoPath) === stripTrailing(expectedWorkspacePath));
+          if (!pathMatches && currentMeta.repoPath && expectedWorkspacePath && currentMeta.context?.kind !== "wsl") {
+            try {
+              pathMatches = (await realpath(currentMeta.repoPath)) === (await realpath(expectedWorkspacePath));
+            } catch {
+              pathMatches = false;
+            }
+          }
+          if (!expectedWorkspaceId || !expectedWorkspacePath || !expectedRepository ||
+              (actionRepository && actionRepository !== expectedRepository) ||
+              currentMeta.workspaceId !== expectedWorkspaceId || !pathMatches) {
+            return {
+              outcome: "refused",
+              refusal: {
+                reason: "repository_mismatch",
+                summary: "The session's workspace no longer matches the approved GitHub repository; nothing was performed.",
+              },
+            };
+          }
+          let origin: string | undefined | null;
+          try {
+            const run = issueClosureRun(currentMeta.context, currentMeta.repoPath, options.agentEnv?.(currentMeta) ?? {});
+            origin = githubSlug((await run("git", ["remote", "get-url", "origin"])).trim());
+          } catch {
+            return {
+              outcome: "refused",
+              refusal: {
+                reason: "forge_unavailable",
+                summary: "The session's repository origin could not be read; nothing was performed.",
+              },
+            };
+          }
+          if (!origin || origin.toLowerCase() !== expectedRepository) {
+            return {
+              outcome: "refused",
+              refusal: {
+                reason: "repository_mismatch",
+                summary: "The session's repository no longer matches the approved GitHub repository; nothing was performed.",
+              },
+            };
+          }
+          // Re-check live metadata synchronously after awaiting git so a Location switch committed
+          // while reading origin cannot proceed into a forge write.
+          const latestMeta = this.store.readMeta(message.sessionId);
+          if (!latestMeta || latestMeta.workspaceId !== expectedWorkspaceId || latestMeta.repoPath !== currentMeta.repoPath) {
+            return {
+              outcome: "refused",
+              refusal: {
+                reason: "repository_mismatch",
+                summary: "The session's workspace changed while verifying the repository; nothing was performed.",
+              },
+            };
+          }
+          return null;
+        }
+        : undefined;
+      if (verifyBoundLocation) {
+        const locationRefusal = await verifyBoundLocation();
+        if (locationRefusal) return { ...base, ...locationRefusal };
+      }
+      if (message.action?.kind === "ci_rerun" || message.action?.kind === "ci_rerun_inspect_job" ||
+          message.action?.kind === "release_tag" || message.action?.kind === "release_publish") {
+        const action = message.action;
+        let origin: string | undefined | null;
+        try {
+          const run = issueClosureRun(meta.context, meta.repoPath, agentEnv);
+          origin = githubSlug((await run("git", ["config", "--local", "--get", "remote.origin.url"])).trim());
+        } catch {
+          return { ...base, outcome: "refused", refusal: { reason: "forge_unavailable",
+            summary: "The session's repository origin could not be read." } };
+        }
+        if (!meta.workspaceId || origin?.toLowerCase() !== action.repository) {
+          return { ...base, outcome: "refused", refusal: { reason: action.kind === "ci_rerun" || action.kind === "ci_rerun_inspect_job" ?
+            "ci_target_mismatch" : "release_target_mismatch",
+            summary: "The session's repository no longer matches the approved GitHub repository." } };
+        }
+        if (action.kind === "ci_rerun_inspect_job") return { ...base, ...await inspectCiRerunJob(action, gh) };
+        const key = action.kind === "ci_rerun" ? ciRerunResourceKey({ ...action, category: "ci_rerun" })
+          : action.kind === "release_tag" ? releaseDecisionResourceKey({ ...action, category: "release_tag" })
+          : releaseDecisionResourceKey({ ...action, category: "release_publish" });
+        const directory = action.kind === "ci_rerun" ? "workflow-ci-reruns" : "workflow-releases";
+        const digest = createHash("sha256").update(JSON.stringify(action)).digest("hex");
+        const fence = {
+          begin: () => this.beginLocationAttempt(directory, key, digest),
+          release: () => this.releaseLocationAttempt(directory, key),
+        };
+        const result = action.kind === "ci_rerun" ? await executeCiRerun(action, gh, fence)
+          : await executeReleaseDecision(action, gh, fence);
+        this.log(JSON.stringify({ event: "forge_decision_action_result", sessionId: message.sessionId,
+          occurrenceId: message.occurrenceId, kind: action.kind, outcome: result.outcome,
+          ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
+        return { ...base, ...result };
+      }
       const result = message.action?.kind === "temporary_branch_create" || message.action?.kind === "temporary_branch_deletion"
         ? await executeTemporaryBranch(message.action, gh)
         : message.action?.kind === "branch_deletion"
-        ? await executeBranchDeletion(message.action, gh)
+        ? await executeBranchDeletion(message.action, gh, verifyBoundLocation)
         : message.action?.kind === "pr_merge_enqueue"
-          ? await executePullRequestEnqueue(message.action, gh)
+          ? await executePullRequestEnqueue(message.action, gh, verifyBoundLocation)
           : message.action?.kind === "pr_merge_retirement_observe"
             ? await observePullRequestRetirement(message.action, gh)
           : message.action?.kind === "pr_merge_observe"
@@ -22485,7 +23246,12 @@ export class SessionManager {
       prepared.commit();
       return { ...await prepared.finished, ...base };
     }
-    if (!meta?.orchestrator || !meta.repoPath) {
+    const standalone = message.standalone === true;
+    if (standalone) {
+      if (!meta || meta.orchestrator || !meta.repoPath || !meta.workspaceId) {
+        return { ...base, ok: false, failure: "runner_failed", error: "Standalone issue closure requires a runner-local non-Orchestrator registered workspace" };
+      }
+    } else if (!meta?.orchestrator || !meta.repoPath) {
       return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires a runner-local Orchestrator repository" };
     }
     if (this.campaignHostTargetRefusal(meta)) {
@@ -22499,13 +23265,14 @@ export class SessionManager {
       } catch (error) { return issueClosureFailure(base, error); }
     }
     const issue = message.operation === "inspect" ? message.issue : message.snapshot.issue;
-    if (!meta.orchestrator.issueNumbers?.includes(issue)) {
+    if (!standalone && !meta.orchestrator?.issueNumbers?.includes(issue)) {
       return { ...base, ok: false, failure: "campaign_authority_changed", error: "Issue is outside the human-authorized campaign scope" };
     }
     const revision = message.operation === "inspect" ? message.scopeRevision : message.snapshot.scopeRevision;
-    if (meta.orchestrator.issueScope && revision !== meta.orchestrator.issueScope.revision) return { ...base, ok: false, failure: "campaign_authority_changed", error: "Campaign scope revision is stale; synchronize and request renewed review" };
+    if (!standalone && meta.orchestrator?.issueScope && revision !== meta.orchestrator.issueScope.revision) return { ...base, ok: false, failure: "campaign_authority_changed", error: "Campaign scope revision is stale; synchronize and request renewed review" };
     const boundedAuthorityCurrent = (current: SessionMeta): boolean => {
       if (message.operation !== "execute" || !message.snapshot.issueAdmission) return true;
+      if (standalone) return false;
       const control = current.orchestrator?.control;
       return control?.mode === "full_control" && validCampaignControl(control) &&
         control.boundary.issueScopeRevision === revision &&
@@ -22519,10 +23286,22 @@ export class SessionManager {
     try {
       if (message.operation === "inspect") {
         const inspection = await inspectGithubIssueClosure(issue, run, message.deliveryPullRequests, message.epicMembers === true, message.campaignPullRequests);
-        if (meta.orchestrator.issueScope && inspection.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, failure: "repository_changed", error: "Repository differs from the authorized scope" };
+        if (standalone) {
+          if (message.expectedRepository && inspection.repository.toLowerCase() !== message.expectedRepository.toLowerCase()) {
+            return { ...base, ok: false, failure: "repository_changed", error: "Repository differs from the verified Project Location" };
+          }
+        } else if (meta.orchestrator?.issueScope && inspection.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) {
+          return { ...base, ok: false, failure: "repository_changed", error: "Repository differs from the authorized scope" };
+        }
         return { ...base, ok: true, inspection };
       }
-      if (meta.orchestrator.issueScope && message.snapshot.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the authorized scope" };
+      if (standalone) {
+        if (message.expectedRepository && message.snapshot.repository.toLowerCase() !== message.expectedRepository.toLowerCase()) {
+          return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the verified Project Location" };
+        }
+      } else if (meta.orchestrator?.issueScope && message.snapshot.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) {
+        return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the authorized scope" };
+      }
       const digest = createHash("sha256").update(JSON.stringify(message.snapshot)).digest("hex");
       if (message.snapshot.campaignPullRequests !== undefined && (message.prepare !== true || message.campaignPullRequests === undefined)) {
         return { ...base, ok: false, failure: "campaign_authority_changed", error: "Filtered closure requires fresh campaign PR context and a separate commit" };
@@ -22531,15 +23310,20 @@ export class SessionManager {
         const fresh = this.store.readMeta(message.sessionId);
         const attempts = fresh?.githubIssueClosureAttempts ?? {};
         if (!fresh || attempts[message.occurrenceId] || Object.keys(attempts).length >= 1000 ||
-            isTerminal(fresh.status) || !fresh.orchestrator?.issueNumbers?.includes(issue) ||
-            (fresh.orchestrator.issueScope && revision !== fresh.orchestrator.issueScope.revision)) return false;
-        if (message.snapshot.issueAdmission && (!boundedAuthorityCurrent(fresh) ||
-            fresh.controlPlaneLaunchId !== meta.controlPlaneLaunchId ||
-            JSON.stringify(fresh.orchestrator.control) !== JSON.stringify(meta.orchestrator?.control))) {
-          this.log(JSON.stringify({ event: "campaign_issue_closure_authority_changed", entryPoint: "closure_mutation_fence",
-            requestId: message.requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId,
-            boundaryRevision: message.snapshot.issueAdmission.boundaryRevision, scopeRevision: revision, outcome: "refused" }));
-          return false;
+            isTerminal(fresh.status)) return false;
+        if (standalone) {
+          if (fresh.orchestrator || !fresh.workspaceId || !fresh.repoPath) return false;
+        } else {
+          if (!fresh.orchestrator?.issueNumbers?.includes(issue) ||
+              (fresh.orchestrator.issueScope && revision !== fresh.orchestrator.issueScope.revision)) return false;
+          if (message.snapshot.issueAdmission && (!boundedAuthorityCurrent(fresh) ||
+              fresh.controlPlaneLaunchId !== meta.controlPlaneLaunchId ||
+              JSON.stringify(fresh.orchestrator.control) !== JSON.stringify(meta.orchestrator?.control))) {
+            this.log(JSON.stringify({ event: "campaign_issue_closure_authority_changed", entryPoint: "closure_mutation_fence",
+              requestId: message.requestId, sessionId: message.sessionId, occurrenceId: message.occurrenceId,
+              boundaryRevision: message.snapshot.issueAdmission.boundaryRevision, scopeRevision: revision, outcome: "refused" }));
+            return false;
+          }
         }
         return this.store.patchMeta(message.sessionId, {
           githubIssueClosureAttempts: { ...attempts, [message.occurrenceId]: digest },
@@ -23283,10 +24067,12 @@ export class SessionManager {
     const ids = (meta.backgroundJobs ?? []).filter((job) => !job.terminalStatus &&
       job.restartedAt === undefined).map((job) => job.id);
     if (ids.length === 0) return;
+    const location = this.claudeTaskInspectionLocation(meta);
+    if (!location) return;
     const correlationId = randomUUID();
     this.historicalJobInspections.add(meta.sessionId);
-    void inspectClaudeBackgroundWorkInContext(meta.context, meta.worktreePath ?? meta.repoPath,
-      meta.agentSessionId, ids, { env: meta.env, ...(this.executionIsolation.mode === "bwrap" ? {
+    void inspectClaudeBackgroundWorkInContext(meta.context, location.cwd,
+      meta.agentSessionId, ids, { env: location.env, ...(this.executionIsolation.mode === "bwrap" ? {
         projectsRoot: join(this.stateDir, "provider-state", "claude", providerStateKey(meta.sessionId), "projects"),
       } : {}) })
       .then((inspection) => {
@@ -23327,11 +24113,13 @@ export class SessionManager {
   private discoverOrphanedClaudeWork(meta: SessionMeta): SessionMeta {
     if (meta.driver !== "claude-code" || meta.context.kind !== "native" || !meta.agentSessionId ||
         meta.status === "stopped" || meta.orphanedWork || this.active.has(meta.sessionId)) return meta;
-    const cwd = meta.worktreePath ?? meta.repoPath;
     const recovered = new Set(meta.recoveredBackgroundTaskIds ?? []);
+    const location = this.claudeTaskInspectionLocation(meta);
+    if (!location) return meta;
+    const { cwd, env } = location;
     const tasks = this.discoverClaudeTasks(cwd, meta.agentSessionId, {
-      tempRoot: meta.env.TMPDIR ?? meta.env.TEMP ?? meta.env.TMP,
-      claudeHome: meta.env.HOME ? join(meta.env.HOME, ".claude") : undefined,
+      tempRoot: env.TMPDIR ?? env.TEMP ?? env.TMP,
+      claudeHome: env.HOME ? join(env.HOME, ".claude") : undefined,
       ...(this.executionIsolation.mode === "bwrap"
         ? {
             projectsRoot: join(
@@ -23363,12 +24151,14 @@ export class SessionManager {
     if (this.shuttingDown || meta.driver !== "claude-code" || meta.context.kind !== "wsl" ||
         meta.status === "stopped" || !meta.agentSessionId || meta.orphanedWork || this.active.has(meta.sessionId) ||
         this.orphanDiscoveryLaunching.has(meta.sessionId)) return;
+    const location = this.claudeTaskInspectionLocation(meta);
+    if (!location) return;
     this.orphanDiscoveryLaunching.add(meta.sessionId);
     void this.discoverClaudeTasksInContext(
       meta.context,
-      meta.worktreePath ?? meta.repoPath,
+      location.cwd,
       meta.agentSessionId,
-      { env: meta.env },
+      { env: location.env },
     )
       .then((tasks) => {
         if (this.shuttingDown || tasks.length === 0) return;
@@ -23940,16 +24730,18 @@ export class SessionManager {
     // Terminal receipts settle ownership without a paid recovery turn, including while a
     // governance ceiling holds that turn. Keep unknown tasks pending; absence is not proof.
     if (meta.agentSessionId && !this.active.get(sessionId)?.running) {
+      const location = this.claudeTaskInspectionLocation(meta);
+      if (!location) return;
       this.orphanRecoveryLaunching.add(sessionId);
       try {
         const inspection = await inspectClaudeBackgroundWorkInContext(
-          meta.context, meta.worktreePath ?? meta.repoPath, meta.agentSessionId,
+          meta.context, location.cwd, meta.agentSessionId,
           new Set([
             ...(meta.pendingBackgroundTaskIds ?? []), ...meta.orphanedWork.pendingTaskIds,
             ...(meta.backgroundJobs ?? []).filter((job) => !job.terminalStatus && job.restartedAt === undefined)
               .map((job) => job.id),
           ]),
-          { env: meta.env, ...(this.executionIsolation.mode === "bwrap" ? {
+          { env: location.env, ...(this.executionIsolation.mode === "bwrap" ? {
             projectsRoot: join(this.stateDir, "provider-state", "claude", providerStateKey(sessionId), "projects"),
           } : {}) },
         );
@@ -24434,6 +25226,7 @@ export class SessionManager {
     reservedOrdinal: number | undefined,
     recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
     campaignContinuation = false,
+    promptOrigin?: WollipogPromptOrigin,
   ): boolean {
     const block = meta.providerAuthBlock;
     if (!block) return false;
@@ -24466,6 +25259,7 @@ export class SessionManager {
         ...(slashCommand ? { slashCommand } : {}),
         ...(config ? { config } : {}),
         ...(campaignContinuation ? { campaignContinuation: true as const } : {}),
+        ...(promptOrigin ? { promptOrigin } : {}),
         ...(recoveredQuestion ? { recoveredQuestion } : {}),
       };
       this.ensureQueueOrdinal(meta.sessionId, retry);
@@ -24598,6 +25392,7 @@ export class SessionManager {
           "recoveredQuestion" in retry ? retry.recoveredQuestion : undefined,
           undefined,
           "campaignContinuation" in retry && retry.campaignContinuation === true,
+          false, false, retry.promptOrigin,
         );
         if (!accepted && "commandId" in retry && retry.recoveredQuestion) {
           refusedRecoveredQuestion = { commandId: retry.commandId, question: retry.recoveredQuestion };
@@ -24877,8 +25672,10 @@ export class SessionManager {
     this.providerAuthAutomaticAttempted.add(scopeId);
     // Defer until cancellation and the caller's durable retry bookkeeping have completed.
     const operation = Promise.resolve().then(async () => {
-      const owner = this.providerAuthenticationOwner(scopeId);
-      if (!owner?.providerAuthBlock || !this.providerAuthRecovery || this.shuttingDown) return;
+      const stored = this.providerAuthenticationOwner(scopeId);
+      if (!stored?.providerAuthBlock || !this.providerAuthRecovery || this.shuttingDown) return;
+      const owner = structuredClone(stored);
+      const recoveryId = stored.providerAuthBlock.recoveryId;
       let timedOut = false;
       const preparation = new AbortController();
       const ownerIsCurrent = this.providerAuthenticationPreparationCurrent(owner);
@@ -24920,7 +25717,7 @@ export class SessionManager {
       }
       if (this.shuttingDown || observation.status !== "authenticated" || !observation.identityId) return;
       const current = this.store.readMeta(owner.sessionId);
-      if (!current?.providerAuthBlock || current.providerAuthBlock.recoveryId !== owner.providerAuthBlock.recoveryId ||
+      if (!current?.providerAuthBlock || current.providerAuthBlock.recoveryId !== recoveryId ||
           !compareProviderAuthIdentity(
             current.providerAuthBlock.expectedIdentityId,
             current.providerAuthBlock.expectedIdentityEvidence,
@@ -25031,10 +25828,10 @@ export class SessionManager {
     optionId: string | null,
     decidedBy?: PermissionResolver,
   ): Promise<void> {
-    let meta = this.store.readMeta(sessionId);
-    let block = meta?.providerAuthBlock;
-    if (!meta || meta.pendingApproval?.requestId !== requestId ||
-        meta.pendingApproval.kind !== "authentication") return;
+    const stored = this.store.readMeta(sessionId);
+    if (!stored || stored.pendingApproval?.requestId !== requestId ||
+        stored.pendingApproval.kind !== "authentication") return;
+    let block = stored.providerAuthBlock;
     if (optionId === "auth:dismiss") {
       // An accepted dismissal is completed once the turn settles, never refused and never expired:
       // a caller that answers at most once (Full Control, #2940) must not be left with a parked
@@ -25060,8 +25857,7 @@ export class SessionManager {
           this.store.patchMeta(sessionId, { pendingProviderAuthDismissal: undefined });
           return;
         }
-        meta = this.store.readMeta(sessionId);
-        block = meta?.providerAuthBlock;
+        block = this.store.readMeta(sessionId)?.providerAuthBlock;
       }
       const preparing = block && this.providerAuthPreparations.get(block.credentialScopeId);
       if (preparing && preparing.sessionId === sessionId && preparing.requestId === requestId) {
@@ -25116,16 +25912,17 @@ export class SessionManager {
         preparing.controller.abort();
       }
       controller.cancel(block.credentialScopeId);
-      this.emitProviderAuthenticationCard(meta, block, "The runner-owned sign-in was canceled. No prompt was retried.");
+      this.emitProviderAuthenticationCard(stored, block, "The runner-owned sign-in was canceled. No prompt was retried.");
       return;
     }
     if (!["auth:login", "auth:revalidate", "auth:accept-current"].includes(optionId) ||
         this.providerAuthOperations.has(block.credentialScopeId)) {
-      this.emitProviderAuthenticationCard(meta, block, "An authentication operation is already in progress for this credential scope.");
+      this.emitProviderAuthenticationCard(stored, block, "An authentication operation is already in progress for this credential scope.");
       return;
     }
     this.providerAuthOperations.add(block.credentialScopeId);
     try {
+      const meta = structuredClone(stored);
       const preparation = { sessionId, requestId, controller: new AbortController() };
       const cardIsCurrent = this.providerAuthenticationPreparationCurrent(meta);
       const isCurrent = () => !preparation.controller.signal.aborted && cardIsCurrent();
@@ -25238,8 +26035,9 @@ export class SessionManager {
             observation,
           ).matches);
     for (const candidate of candidates) {
-      let meta = this.store.readMeta(candidate.sessionId);
-      if (!meta) continue;
+      const stored = this.store.readMeta(candidate.sessionId);
+      if (!stored) continue;
+      let meta = stored;
       let block = meta.providerAuthBlock;
       if (!block) continue;
       if (meta.status === "stopped") {
@@ -25257,6 +26055,7 @@ export class SessionManager {
         continue;
       }
       if (meta.sessionId !== targetSessionId) {
+        meta = structuredClone(stored);
         const isCurrent = this.providerAuthenticationPreparationCurrent(meta);
         // Nothing but the preparation runs under this reference; its relaunch takes its own.
         const preparationHome = this.launchPreparationProviderHome();

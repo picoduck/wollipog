@@ -214,8 +214,8 @@ check runs (every such app must report), and the newest run of a name (by check 
 Check contexts are read in pages of 100, up to ten pages per commit; past that, a pass also needs
 GitHub's `mergeStateStatus` to confirm it, because an unseen context could still fail. A required check with no reported run is `pending`
 (`reported: false`), never passing, and a base whose rules require nothing returns
-`no_required_checks` at once. An unreadable base is an error, never an empty requirement, and a
-GraphQL answer carrying any error is retried rather than trusted. A queue
+`no_required_checks` at once. A failed rules read cannot prove that a base has no required
+checks. GraphQL answers carrying errors cannot establish a verdict. A queue
 entry that disappears without a merge is reported as `queue_ejected` only once it has stayed missing
 for 10 seconds. The same query reads the latest merge-queue timeline event and the latest force push
 (#3712), so a call that starts after GitHub removed the entry also reports `queue_ejected`, confirmed
@@ -228,10 +228,15 @@ event, so a delayed or re-run job cannot move it. A pull request never enqueued,
 a commit already tested on another branch) keeps reporting its own checks. A failed merge-group check alone never ends the wait (#3121): when an entry ahead
 caused it, GitHub drops that entry and rebuilds this one's group on a new commit, so the wait keeps
 reading until GitHub itself gives up on the entry or it merges; `--any-failure` applies to the head's
-checks only. Timeouts are clamped to 1 ms–3 hours (default 4 minutes); reads share that budget, so no read
-starts more than 20 seconds past it and one still in flight then is abandoned. Resolving a bare
-number's repository is one of those reads, so `--timeout 1` still returns one snapshot. Polling is clamped to
-10 seconds–10 minutes (default 30 seconds); lists are capped at 30 required checks and 20 failed jobs.
+checks only. GitHub waits and CLI repository lookup share a deadline of 1 ms to 3 hours
+(default 4 minutes). The runner aborts reads still in flight at the deadline. Each transient
+failure that prevents a complete observation increments `transientErrorCount`. The runner retries
+with jittered backoff until the deadline. Authentication, permission and missing-resource errors
+end the wait immediately. A timeout during an outage sets `forgeDegraded` and includes the last
+complete observation, or `observation: null` if none completed. An in-flight read cancelled at the
+deadline does not count as a forge error. The last observation can predate the deadline by a
+polling interval. Polling intervals range from
+10 seconds to 10 minutes (default 30 seconds). Lists are capped at 30 required checks and 20 failed jobs.
 
 MCP `park_on_pull_request` (#4071, protocol 272) lets a session stop waiting inside a turn. The
 session names its own enqueued GitHub pull request and exact head, gets a watch back, and ends its
@@ -244,8 +249,8 @@ plane accepts only the first report from the watch's runner, then wakes the sess
 session receives one durable `[Wollipog Pull Request Watch — <id>]` prompt with the outcome and the
 bounded wait summary (at most 16 KiB, on one line), carried exactly like a review continuation.
 Every runner registration resends the watches still watching on it, so a runner restart resumes
-them. A runner that cannot watch any more (an older version), or one that could not read GitHub
-for about half an hour, reports the watch `lost`, and the wake says so. Parking again replaces the
+them. The watch shares the wait's transient retry behavior, and stale observations do not renew
+its 10-minute lease. A permanent error or an expired lease reports the watch `lost`. Parking again replaces the
 watch; an ended or archived session's watch is cancelled and owes no wake. `get_session` shows the
 watch as `pullRequestWatch`, and `get_campaign` lists parked children as `parkedChildren`. While a
 child is parked (watching, or its wake not yet started), its turn end is no `child_ready`
@@ -1678,12 +1683,16 @@ this conservative restriction avoids emulating Bash and covers partial operands 
 Single-quoted or escaped literal text and already admitted inert copy-only heredoc bodies retain
 their existing treatment. No new command allowance is introduced.
 
+The veto also checks the body of a double-quoted command substitution when it can delimit the
+body, including ordinary pipelines and redirects and whitelisted copy heredocs. It refuses nested
+or otherwise uninspectable quoted substitutions (#3322).
+
 Sessions without OS isolation rely on this best-effort text veto to protect hook state. This
 includes Claude in provider mode and Codex launches whose provider boundary is not enforced, as
 described above; native Windows and WSL launches must likewise not assume a filesystem deny unless
 their selected isolation boundary enforces one. OS-isolated launches retain the veto as defense in
-depth. It is not a sandbox: plain unknown variables remain opaque, quoted command substitution
-(#3322) and script-file indirection remain limitations; #1336 tracks the OS boundary. The separate
+depth. Plain unknown variables and script-file indirection remain limitations of the text veto.
+The OS boundary is tracked in #1336. The separate
 misleading managed-worktree refusal wording tracked under #1734 is unchanged here.
 
 ## Typed Parent Control Decisions
@@ -1921,6 +1930,16 @@ If `thread/read` retains the successful command but cannot represent that old CL
 rollout proof is accepted only when its thread, turn, and command item exactly match the live
 successful item; a failed, duplicate, partial, fenced, or natively mismatched live item still blocks
 the fallback.
+
+Protocol v390 adds `externalMerge: true` to reconciliation (`wollipog decision reconcile
+--external-merge`). Use it for a merge that a person performed outside the session. The server
+reads the campaign's forge directly and requires the exact approved head in the merged state and
+a forge merge time after approval. It records the observed merge without a provider receipt,
+arming, or enqueueing. Standard Codex command reconciliation still requires provider proof.
+An armed merge superseded by an unarmed same-head request can be reconciled with its original
+proof; the transaction also settles the outstanding unarmed replacement. A later armed occurrence
+retains precedence. When a Claude Code child stops before a merge lands, the server revokes the
+grant and can retry its read for up to 24 hours, independently of the child's lifecycle.
 
 Protocol v166 lets the resolver tell the child why. `resolve_descendant_workflow_decision` accepts
 an optional `childMessage` of at most 2,000 characters, separate from the audit-only `rationale`.
@@ -2438,6 +2457,17 @@ The reviewer follows the video reviewer's provenance pattern, but for images:
   with the reviewer's receipts: supersession, a policy or ownership change, an authority loss, or
   a digest mismatch. A resolved decision ends any other live review. Receipts expire after an hour,
   as they do under direct review, so an old verdict has to be prepared again.
+- **Automatic reviewer retirement (#4187).** Once a review is `consumed` or `ended`, the control
+  plane stops and archives its reviewer through the normal durable lifecycle. Maintenance and
+  runner reconnects recover reviews that ended before an upgrade. A `running` review or an
+  unconsumed `verdict` still blocks campaign completion. A terminal review requires no report
+  verification from the Orchestrator; unconfirmed stop or archival remains visible as automatic
+  cleanup and prevents verified completion. Review records, receipts, verdicts and usage stay
+  available after archival. The maintenance query advances in batches of 64; existing Stop
+  intents own bounded retries, and a reconnect rearms a failed retirement.
+  `delegated_image_reviewer_retirement` logs identify each requested retirement by review, root and
+  reviewer, with its review state and archive state. Check the Session's durable Stop state for a
+  pending or failed runner confirmation; no evidence bytes or transcripts are logged.
 - **One review at a time.** An occurrence has at most one live review, and preparing again returns
   it. Some reviews can no longer back an approval: the reviewer ended its turn or Session without a
   verdict, or one of its verdict's receipts expired. Such a review is retired, and preparing again
@@ -2524,16 +2554,23 @@ An uncertain deletion may be executed again, because a compare-and-delete pinned
 head cannot do more than the approval allowed. The consume result for a merge or deletion names
 this fallback (`forgeActionFallback`).
 
-`get_campaign` reports `mergedBranches` on the same version. For each GitHub pull request a campaign
-child merged through a consumed `pr_merge`, or through one whose enqueue Wollipog performed (a
-success or an uncertain attempt, even if a new request superseded or a revocation ended that
-occurrence while it ran), it gives the head branch the forge last reported as
+When Claude Code reports a structured permission denial for an exact approved GitHub command or
+for `execute_workflow_decision`, v393 records one notice in the child's session and one campaign
+continuation per decision and attempt path. Raw provider output is excluded. The notice identifies
+the occurrence and the applicable recovery. Managed execution and campaign cleanup keep their
+existing approval, ancestry, and forge checks. The refusal report itself authorizes no action.
+
+`get_campaign` reports `mergedBranches` from v284. For each GitHub pull request a campaign child
+merged through a consumed `pr_merge`, or whose enqueue Wollipog performed (a success or an uncertain
+attempt, even if a new request superseded or a revocation ended that occurrence while it ran),
+it gives the head branch the forge last reported as
 `deleted`, `retained` (its work item is handed to `human` or `external`, with the handoff's reason),
-or `pending`. A pull request not read yet, or still open after its approved enqueue, is `pending`
-too, and a handoff retains it even before the first read. A pending branch keeps
-`campaignTerminalStatus` from `verified_complete` and leaves the campaign `active`. A retained one
-finishes it as `complete_with_handoffs`. The forge observer keeps re-reading such a pull request
-until it merges and its branch is gone, and `get_campaign` refreshes pending ones before answering.
+or `pending`. The projection also includes still-armed approvals and approved or consumed typed
+deletions that name an exact merged head, even if the merge ran outside Wollipog. A pull request
+awaiting a read or still open under an armed or consumed approval remains `pending`. A handoff can
+retain the branch before the first read. Pending and retained branches keep a settled campaign in
+`complete_needs_cleanup`. The forge observer keeps re-reading pending pull requests and branches,
+and `get_campaign` refreshes pending ones before answering.
 A merged pull request whose branch the forge does not name usably, including one read before branches
 were reported, stays `pending` with no branch name. A handoff can retain it, but a deletion cannot
 be pinned to it. The background pass keeps re-reading it too, so a read stored before the upgrade

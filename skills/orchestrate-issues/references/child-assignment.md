@@ -2,6 +2,13 @@
 
 Fill in the placeholders and send after model/effort metadata has been verified. Include the parent's actual authorization record; do not manufacture approval.
 
+For UI work, replace the rubric placeholder with the current version verbatim from the root's
+supplementary campaign notes. Before the first capture it must specify the viewport set, target
+sizes and gaps, numeral size and contrast, ring and demo-hand rules, fill and centring, standard
+exemptions, measured claims in evidence IDs, and the round limit for each PR. The root uses that
+same text verbatim in every UI evidence reviewer brief. Omit the rubric and re-filing paragraphs
+from assignments without UI evidence.
+
 > Campaign: <campaign ID>. Issue: <repository and issue URL>. Lineage: <initial issue or originating issue and accepted recommendation>. Dependencies: <merged prerequisite URLs or none>.
 >
 > Your session has been verified as <exact model> with effort <verified effort or not applicable>, on <harness>. Selection policy: <which dimensions Wollipog campaign policy fixed and which the parent chose automatically, with rationale>. Do not change your session configuration yourself; report a capability limitation or need for reconsideration to the parent. Claim and deliver this issue following using-wollipog, the repository instructions, and the repository's issue workflow and review requirements. Recheck claims and overlapping work before starting. Use the isolated Wollipog worktree already attached to this session if appropriate; verify its branch and base rather than creating a redundant worktree. Report a contested claim before implementing.
@@ -11,6 +18,20 @@ Fill in the placeholders and send after model/effort metadata has been verified.
 > Do not update, stop, or restart the Wollipog installation (control plane, runner, or development stack) that hosts this session, including through a detached updater or supervisor. After merge, report the exact merge commit and deployed commit if known. Deployment is a handoff to a human terminal or an operator proven to be outside the target stack; do not make it live yourself and do not treat that handoff as unfinished issue implementation.
 >
 > Authority preflight: <effective Custom/Full Control mode, server-established human boundary/revision, allowed operations, current owners, compatibility and Human Required exceptions>. Evidence: <authorized task uploads, destination/retention and exact reviewer provider/model disclosure>. Name unresolved mandatory human rules from external/user-authored instructions with exact sources; never silently rewrite them or infer authority from the mode label.
+>
+> UI evidence rubric for this assignment: <verbatim rubric and version from the root's campaign
+> notes>. Raise constraint conflicts at claim time with an `implementation_question` of
+> `kind: "question"`. Capture only the rubric's required states. At the PR's round limit, wait
+> for the root's consolidated decision before another capture. Use any recorded rubric update
+> for future captures.
+>
+> Re-file only images whose bytes changed. Mark the rest unchanged and keep their original
+> evidence IDs, artifact IDs and digests so a successor approval can reference them and the
+> server can reuse eligible receipts. Plan for the session's artifact count and byte limits.
+> When less than about a round remains, or another upload would use space reserved for the final
+> set, stage drafts privately in the worktree with an evidence ID, relative path and SHA-256
+> manifest. Keep them out of commits. Attach only the final passing set from those staged files,
+> verify the digests, and obtain the normal typed evidence approval.
 >
 > Authorization and outstanding gates: <exact delegated decisions, approved payloads or PR snapshots, and decisions still requiring the user>. Follow current policy. Use exact typed request/get/consume for each workflow decision, reading its effective owner and consuming approval immediately before the matching action. Custom preserves existing approvals; Full Control delegates only when server authority and repository policy permit. Parent prompts do not replace required typed responses. For PR merge arm and execute the exact canonical command, then verify merge-group CI and actual MERGED state. Scope/closure need their dedicated routes and separate eligible issue authority; unsupported hosts retain human review. Never use automatic closing PR keywords to bypass closure: reference issues as "Refs #N", and never put close, fix or resolve (any tense, even negated as in "does not close" or hyphenated as in "auto-close") directly before an issue reference in a PR description, title or commit message; on a GitLab merge request also avoid implement and "-ing" forms such as "closing", and remember that one keyword closes every reference in a list. Check drafts with `wollipog pr closures --file <draft>` before publishing, and declare in `intendedClosures` only issues the merge is authorized to close.
 >

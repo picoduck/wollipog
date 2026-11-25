@@ -822,6 +822,14 @@ function toolCallsRequest(): PendingApproval {
 const closuresParam = query.get("closures");
 const gitlabMerge = query.get("forge") === "gitlab";
 const GITLAB_PROJECT = "gitlab.example.com/platform/wollipog";
+// `owner=handoff` makes the `workflow` merge one the Orchestrator handed to its owner, and
+// `owner=rule` one a rule kept with them: either way the owner can return the pull request (#4713).
+const ownerKept = query.get("owner");
+const ownerKeptFields = ownerKept === "handoff"
+  ? { returnableOwnerResource: true as const, ownerHandoff: { bySessionId: "parent", at: Date.now() - 8 * 60_000, reason: "The owner kept this merge." } }
+  : ownerKept === "rule"
+  ? { returnableOwnerResource: true as const, ownerRule: { source: "AGENTS.md", quote: "Ask me before merging." } }
+  : {};
 
 function workflowRequest(): PendingApproval {
   const extension = scenario === "review-extension";
@@ -887,6 +895,7 @@ function workflowRequest(): PendingApproval {
       authority: "human",
       status: "pending",
       createdAt: Date.now() - 3 * 60_000,
+      ...(extension ? {} : ownerKeptFields),
     },
   };
 }
@@ -1130,6 +1139,10 @@ function Fixture() {
       policyId: "deploy-guard", name: "Deploy Guard", effect: "ask", priority: 1, enabled: true, scope: {},
       askTimeout: 600, createdAt: 1, updatedAt: 1,
     }] }),
+    returnOwnerResource: async (sessionId: string, occurrenceId: string) => {
+      submissions.push({ returnOwnerResource: { sessionId, occurrenceId } });
+      return sessionRef.current.pendingApproval!.workflowDecision!;
+    },
     approve: async (sessionId: string, body: { requestId: string; optionId: string | null }) => {
       submissions.push(structuredClone(body));
       if (failNextDecision) {

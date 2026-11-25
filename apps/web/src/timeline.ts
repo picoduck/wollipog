@@ -1,4 +1,5 @@
 import { AGENT_SPAWN_OBSERVATION_CAP } from "@wollipog/protocol";
+import { legacyOwnerConfirmationOrigin, type TimelinePromptOrigin } from "./wollipog-prompt-origin.js";
 import { policyHookOutcome, type GovernanceDecision } from "./governance.js";
 import type {
   AgentQuestion,
@@ -15,6 +16,7 @@ import type {
   SessionCommandExecutionMode,
   SessionEvent,
   ArtifactView,
+  AssistantTranscriptReceipt,
   QuestionAnswerSummaryEntry,
   StructuredRequestResolutionReason,
 } from "@wollipog/protocol";
@@ -65,11 +67,14 @@ export function mergeTurnUsage(current: TurnUsage | undefined, addition: TurnUsa
 }
 
 export type TimelineItem =
+  | { kind: "assistant_receipt"; id: number; toolCallId: string; receipt: AssistantTranscriptReceipt }
+  | { kind: "wollipog_prompt"; id: number; text: string; promptOrigin: TimelinePromptOrigin; createdAt: number }
   | { kind: "artifact_attached"; id: number; artifact: ArtifactView; createdAt: number }
   | {
       kind: "user_message";
       id: number;
       text: string;
+      promptOrigin?: TimelinePromptOrigin;
       images?: PromptImageInput[];
       /** Runner queue id for reconciling a formerly queued prompt without text de-duplication. */
       turnId?: string;
@@ -177,7 +182,7 @@ export type TimelineItem =
       parentToolUseId?: string;
     }
   | { kind: "file_edit"; id: number; path: string; diff?: string; diffRefs?: EventPayloadReference[]; parentToolUseId?: string }
-  | { kind: "error"; id: number; message: string; nonFatal?: true }
+  | { kind: "error"; id: number; message: string; nonFatal?: true; source?: Extract<SessionEvent["payload"], { kind: "error" }>["source"]; fixCommand?: string; assistantThreadErrorId?: string }
   | {
       kind: "turn_interrupted";
       id: number;
@@ -948,10 +953,12 @@ export class TimelineBuilder {
         break;
       case "user_message": {
         this.breakText();
+        const promptOrigin = p.promptOrigin === undefined ? legacyOwnerConfirmationOrigin(p.text) : p.promptOrigin;
         const userIndex = this.items.push({
           kind: "user_message",
           id: ev.seq,
           text: p.text,
+          ...(promptOrigin ? { promptOrigin } : {}),
           images: p.images,
           turnId: p.turnId,
           commandId: p.commandId,
@@ -1013,6 +1020,14 @@ export class TimelineBuilder {
         this.pushText("command_output", ev.seq, p.text, undefined, p.parentToolUseId, undefined, p.textRefs);
         break;
       case "stderr":
+        if (p.backgroundPrompt) {
+          this.breakText();
+          this.markDirty(this.items.push({
+            kind: "wollipog_prompt", id: ev.seq, createdAt: ev.ts,
+            promptOrigin: p.backgroundPrompt.origin, text: p.backgroundPrompt.text,
+          }) - 1);
+          break;
+        }
         if (p.runnerMarker === "background_continuation_delivery") {
           this.breakText();
           break;
@@ -1122,7 +1137,7 @@ export class TimelineBuilder {
           else delete updated.completedAt;
           this.items[idx] = updated;
           this.markDirty(idx);
-        } else {
+        } else if (!p.assistantReceipt) {
           this.breakText();
           const i =
             this.items.push({
@@ -1143,6 +1158,12 @@ export class TimelineBuilder {
           this.pendingSubagentRollups.delete(p.toolCallId);
           this.toolIndex.set(p.toolCallId, i);
           this.markDirty(i);
+        }
+        if (p.assistantReceipt) {
+          this.breakText();
+          this.markDirty(this.items.push({
+            kind: "assistant_receipt", id: ev.seq, toolCallId: p.toolCallId, receipt: p.assistantReceipt,
+          }) - 1);
         }
         break;
       }
@@ -1468,17 +1489,21 @@ export class TimelineBuilder {
         // same X on its own; the turn failed once, so the second merges into the first, keeping
         // the provider's own wording.
         const previous = this.lastErrorIndex == null ? undefined : this.items[this.lastErrorIndex];
-        if (previous?.kind === "error" && !previous.nonFatal === !p.nonFatal &&
+        if (previous?.kind === "error" && !previous.nonFatal === !p.nonFatal && previous.source === p.source &&
             withoutPromptFailedPrefix(previous.message) === withoutPromptFailedPrefix(p.message)) {
           const message = withoutPromptFailedPrefix(p.message);
-          if (previous.message !== message) {
-            this.items[this.lastErrorIndex!] = { ...previous, message };
+          if (previous.message !== message || p.assistantThreadErrorId) {
+            this.items[this.lastErrorIndex!] = { ...previous, message,
+              ...(p.assistantThreadErrorId ? { assistantThreadErrorId: p.assistantThreadErrorId } : {}) };
             this.markDirty(this.lastErrorIndex!);
           }
           break;
         }
         this.lastErrorIndex = this.items.push({
           kind: "error", id: ev.seq, message: p.message, ...(p.nonFatal ? { nonFatal: true as const } : {}),
+          ...(p.source ? { source: p.source } : {}),
+          ...(typeof p.fixCommand === "string" && p.fixCommand ? { fixCommand: p.fixCommand } : {}),
+          ...(p.assistantThreadErrorId ? { assistantThreadErrorId: p.assistantThreadErrorId } : {}),
         }) - 1;
         this.markDirty(this.lastErrorIndex);
         break;

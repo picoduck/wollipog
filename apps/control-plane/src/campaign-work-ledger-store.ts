@@ -586,6 +586,14 @@ export interface CampaignDeliveryEvidence {
   note: string | null;
 }
 
+/** The delivery facts of one work item: its derived state, attempts and verifications, without
+ * the views, observations, costs and timelines `detail` builds (#4851). */
+export interface CampaignWorkItemDeliveryFacts {
+  primaryState: CampaignWorkItemPrimaryState;
+  attempts: Array<{ id: string; ordinal: number; sessionId: string | null }>;
+  verifications: Array<{ attemptId: string; outcome: CampaignWorkItemVerificationOutcome }>;
+}
+
 interface RecommendationRow {
   id: string; origin_session_id: string | null; repository: string; title: string;
   recommendation_key: string | null; duplicate_of: string | null; created_at: number;
@@ -2762,6 +2770,27 @@ export class CampaignWorkLedgerStore {
       total: rows.length,
       repositories: repositoryCounts(snapshot),
     });
+  }
+
+  /** Delivery facts for the given items, read from one snapshot (#4851). Periodic maintenance checks
+   * supersession for every failed child; building `detail` there replayed every item's timing
+   * history on each check. Ids not in the ledger are absent from the result. */
+  deliveryFacts(campaignId: string, itemIds: Iterable<string>): Map<string, CampaignWorkItemDeliveryFacts> {
+    const wanted = new Set(itemIds);
+    const facts = new Map<string, CampaignWorkItemDeliveryFacts>();
+    if (!wanted.size) return facts;
+    const snapshot = this.snapshot(campaignId);
+    for (const item of snapshot.items) {
+      if (!wanted.has(item.id)) continue;
+      facts.set(item.id, {
+        primaryState: snapshot.derived.get(item.id)!.state,
+        attempts: (snapshot.attempts.get(item.id) ?? []).map((attempt) =>
+          ({ id: attempt.id, ordinal: attempt.ordinal, sessionId: attempt.session_id })),
+        verifications: (snapshot.verifications.get(item.id) ?? []).map((verification) =>
+          ({ attemptId: verification.attempt_id, outcome: verification.outcome })),
+      });
+    }
+    return facts;
   }
 
   detail(campaignId: string, itemId: string, now: number, canSeeSession?: SessionVisibility): CampaignWorkItemDetail | null {

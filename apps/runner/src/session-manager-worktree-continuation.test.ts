@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import type { RunnerToControlPlane, SessionLaunchSpec, SessionWorktreeIsolationNotice } from "@wollipog/protocol";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { DriverCallbacks } from "./drivers/driver.js";
+import type { DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import { SessionManager, worktreeContinuationPrompt } from "./session-manager.js";
-import { SessionStore } from "./session-store.js";
+import { SessionStore, type SessionMeta } from "./session-store.js";
 
 // #3810: a session that switches to a worktree its live sandbox cannot write is relaunched there
 // when its turn ends. When the session's own turn made that switch, the runner continues the task
@@ -48,13 +49,15 @@ function fakeProvider(options: {
   beforeInitialize?: (launch: number) => Promise<void>;
 }) {
   const prompts: Array<{ cwd: string; text: string }> = [];
+  const launchEnvironments: DriverOptions["env"][] = [];
   let launches = 0;
   const factory = (
     _driver: unknown,
-    launch: { cwd: string },
+    launch: Pick<DriverOptions, "cwd" | "env">,
     cb: DriverCallbacks,
   ) => {
     launches++;
+    launchEnvironments.push(launch.env);
     const generation = launches;
     const relaunch = launches > 1;
     return {
@@ -79,7 +82,7 @@ function fakeProvider(options: {
       agentSessionId: () => "provider-session-id",
     };
   };
-  return { factory, prompts, launches: () => launches };
+  return { factory, prompts, launches: () => launches, launchEnvironments };
 }
 
 function claudeSpec(sessionId: string, repo: string): SessionLaunchSpec {
@@ -106,6 +109,7 @@ async function withSession(
     managedGitBoundary?: boolean;
     failRelaunch?: boolean;
     beforeInitialize?: (launch: number) => Promise<void>;
+    prepareLaunch?: (meta: SessionMeta) => void;
   },
   body: (harness: Harness) => Promise<void>,
 ): Promise<void> {
@@ -128,6 +132,7 @@ async function withSession(
     });
     manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
       fake.factory as never, dataDir, 1);
+    if (options.prepareLaunch) Object.defineProperty(manager, "prepareLaunch", { value: options.prepareLaunch });
     const sessionId = `s_continuation_${name.replaceAll("-", "_")}`;
     harness = { manager, store, sessionId, fake, sent };
     await manager.start(claudeSpec(sessionId, repo));
@@ -151,7 +156,11 @@ function stderr(store: SessionStore, sessionId: string): string[] {
 
 test("a session's own switch to a worktree it cannot write continues there once after the relaunch (#3810)", { skip: !haveGit() }, async () => {
   let switched: Switched | undefined;
+  const sentinel = randomUUID();
   await withSession("own", {
+    prepareLaunch: (meta) => {
+      if (meta.worktreePath) meta.env = { TEST_LAUNCH_ENV: sentinel };
+    },
     during: async ({ manager, sessionId }, text) => {
       if (text !== "start the fix") return;
       switched = await manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/own-switch" }, undefined,
@@ -173,6 +182,15 @@ test("a session's own switch to a worktree it cannot write continues there once 
     assert.equal(fake.prompts.length, 2, "a continuation never chains into another");
     assert.equal(fake.launches(), 2);
     assert.equal(store.readMeta(sessionId)?.status, "idle");
+    assert.equal(fake.launchEnvironments[1]?.TEST_LAUNCH_ENV, sentinel);
+    store.flush(sessionId);
+    const directory = store.sessionPath(sessionId);
+    assert.deepEqual(store.readMeta(sessionId)?.env, {});
+    assert.deepEqual(JSON.parse(readFileSync(join(directory, "meta.json"), "utf8")).env, {});
+    for (const entry of readdirSync(directory, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      assert.equal(readFileSync(join(entry.parentPath, entry.name)).includes(sentinel), false, entry.name);
+    }
     const notices = stderr(store, sessionId);
     assert.ok(notices.includes("Relaunching this session in worktree fix/own-switch so it can write there. " +
       "It continues the task on its own once the relaunch finishes."), notices.join("\n"));

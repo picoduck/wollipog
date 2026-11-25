@@ -266,6 +266,14 @@ test("each runner diagnosis keeps its own fix in New Session's words (#2953)", (
     [{ ...acp, registry: { installStatus: "approval-required" } as NonNullable<AgentDefinition["registry"]> },
       "approve_install", "Approve its install in Connections first."],
     [acp, "not_installed", "Not installed on M."],
+    // Google Antigravity's row, from its setup (#4779).
+    [{ ...acp, id: "google-antigravity", name: "Google Antigravity", authStatus: "unauthenticated" },
+      "sign_in", "Sign in before the session can start."],
+    [{ ...acp, id: "google-antigravity", name: "Google Antigravity", unavailableReason: "The Google Antigravity check failed on this runner." },
+      "unchecked", "Wollipog couldn't check it on M. Check it again in Connections."],
+    [{ ...acp, id: "google-antigravity", name: "Google Antigravity",
+      unavailableReason: "Google Antigravity needs network access, which this runner's execution isolation denies." },
+    "network_denied", "It needs network access, which execution isolation on M denies."],
   ];
   for (const [input, problem, reason] of cases) {
     assert.equal(agentSetupProblem(input, true), problem, reason);
@@ -286,6 +294,9 @@ test("every runner reason New Session reads by its wording still appears in runn
   for (const name of readdirSync(directory).filter((file) => file.endsWith(".ts") && !file.endsWith(".test.ts"))) {
     collect(ts.createSourceFile(name, readFileSync(new URL(name, directory), "utf8"), ts.ScriptTarget.Latest, true));
   }
+  // Google Antigravity's row comes from its setup, not discovery (#4779).
+  const antigravity = new URL("../../../runner/src/antigravity-session.ts", import.meta.url);
+  collect(ts.createSourceFile("antigravity-session.ts", readFileSync(antigravity, "utf8"), ts.ScriptTarget.Latest, true));
   for (const [name, pattern] of Object.entries(RUNNER_REASON_PATTERNS)) {
     const alternatives = pattern.source.split("|").map((part) => new RegExp(part, pattern.flags));
     for (const alternative of alternatives) {

@@ -45,8 +45,9 @@ export function useSecretInput(): SecretInput {
  */
 export function secretValueRef(
   value: string,
-  forward?: { current: HTMLInputElement | null },
-): (input: HTMLInputElement | null) => void {
+  // Wide enough for a ref that also holds Answer Mode's growing field (#4714).
+  forward?: { current: HTMLInputElement | HTMLTextAreaElement | null },
+): (input: HTMLInputElement | HTMLTextAreaElement | null) => void {
   return (input) => {
     if (forward) forward.current = input;
     if (input && input.value !== value) input.value = value;

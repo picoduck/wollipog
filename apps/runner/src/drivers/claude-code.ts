@@ -19,11 +19,12 @@
 
 import { ClaudeUsageAccounting, claudeRestoresUsage, claudeUsageCheckpoint } from "./claude-usage-accounting.js";
 import { parseClaudeInitCatalog } from "../discovery/claude-slash-catalog.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { claudeFailureCategory, type ProviderFailureCategory } from "./provider-failure.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { BACKGROUND_HANDOFF_WAIT_MAX_MS, fullControlAutomaticResponseText, type AgentQuestion, type FullControlAutomaticResponse, type PlanEntry, type PromptImage, type SessionConfig } from "@wollipog/protocol";
+import { ASSISTANT_MCP_SERVER_NAME, BACKGROUND_HANDOFF_WAIT_MAX_MS, fullControlAutomaticResponseText, type AgentQuestion, type FullControlAutomaticResponse, type PlanEntry, type PromptImage, type SessionConfig } from "@wollipog/protocol";
+import { assistantTranscriptReceiptKey } from "./assistant-tool-result.js";
 import { approvalScopeContext } from "../approval-scope.js";
 import { campaignOperationEvidence } from "../campaign-operation-evidence.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
@@ -75,6 +76,10 @@ import { readCompatibleEnv, type Environment } from "../env-compat.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
+
+// Hash only the literal GitHub commands that the control plane can correlate to an approval.
+// Command output and unrelated arguments never enter the refusal evidence.
+const APPROVED_FORGE_COMMAND = /^(?:gh pr merge https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/[1-9][0-9]* --squash --match-head-commit [a-f0-9]{40}|git push origin --delete [\w./+@-]+|gh api (?:-X|--method) DELETE (?:repos\/[\w.-]+\/[\w.-]+\/git\/refs\/heads\/[\w./+@-]+|'repos\/[\w.-]+\/[\w.-]+\/git\/refs\/heads\/[^'\r\n]+'))$/u;
 
 export const CLAUDE_PERSISTENT_FLAG = "WOLLIPOG_CLAUDE_PERSISTENT";
 export const CLAUDE_PERSISTENT_IDLE_MS = "WOLLIPOG_CLAUDE_PERSISTENT_IDLE_MS";
@@ -674,6 +679,7 @@ export class ClaudeCodeDriver implements Driver {
   private launchedRoutineControlChannelMode: string | null = null;
   /** requestId -> the tool input to echo back on allow (stdio control protocol). */
   private readonly pendingApprovals = new Map<string, Json>();
+  private readonly assistantToolCalls = new Set<string>();
   private readonly pendingAttentionOwners = new Map<string, { owner: string; question: boolean }>();
   /** Claude's message_start id scoped by parent Task. Entries close on message_stop/result, so
    * provider block identity never becomes transcript-lifetime state. */
@@ -3432,6 +3438,9 @@ export class ClaudeCodeDriver implements Driver {
         for (const b of blocks) {
           if (b?.type !== "tool_use") continue;
           const name: string = b.name ?? "tool";
+          if (name.startsWith(`mcp__${ASSISTANT_MCP_SERVER_NAME}__`) && typeof b.id === "string") {
+            this.assistantToolCalls.add(b.id);
+          }
           const input = b.input as Record<string, Json> | undefined;
           if (name === "TodoWrite" && Array.isArray(input?.todos)) {
             const entries: PlanEntry[] = (input!.todos as Json[]).map((t) => ({
@@ -3493,11 +3502,15 @@ export class ClaudeCodeDriver implements Driver {
             }
             this.pendingAttentionOwners.delete(requestId);
           }
+          const text = contentToText(b.content);
+          const receiptKey = this.assistantToolCalls.delete(b.tool_use_id) && !b.is_error
+            ? assistantTranscriptReceiptKey(text) : undefined;
           this.cb.onEvent({
             kind: "tool_call_update",
             toolCallId: b.tool_use_id ?? "tool",
             status: b.is_error ? "failed" : "completed",
-            text: truncate(contentToText(b.content), 400),
+            text: truncate(text, 400),
+            ...(receiptKey ? { assistantReceiptKey: receiptKey } : {}),
             ...pp,
           });
         }
@@ -3506,6 +3519,7 @@ export class ClaudeCodeDriver implements Driver {
 
       case "result": {
         this.streamingMessageIds.clear();
+        if (!parentId) this.assistantToolCalls.clear();
         // A request without `message_stop` was cut off; the result's totals are authoritative.
         if (!parentId) this.liveRequest = null;
         // A stop call never outlives its turn; one left without a tool result proves nothing later.
@@ -3559,6 +3573,24 @@ export class ClaudeCodeDriver implements Driver {
           // whether or not the turn then ended in an error.
           const denials = (msg as { permission_denials?: unknown }).permission_denials;
           this.lastPermissionDenials = Array.isArray(denials) ? denials.length : denials === undefined ? 0 : 1;
+        }
+        if (!parentId && !this.opts.review && Array.isArray(msg.permission_denials)) {
+          for (const denial of msg.permission_denials.slice(0, 64)) {
+            const toolCallId = denial?.tool_use_id;
+            const input = denial?.tool_input;
+            if (typeof toolCallId !== "string" || !/^[\w-]{1,128}$/u.test(toolCallId) || !input) continue;
+            const command = input.command;
+            if (denial.tool_name === "Bash" && typeof command === "string" && command.length <= 2048 &&
+                APPROVED_FORGE_COMMAND.test(command)) {
+              this.cb.onEvent({ kind: "tool_call_update", toolCallId, status: "failed",
+                providerForgeRefusal: { kind: "command", commandSha256: createHash("sha256").update(command).digest("hex") } });
+            } else if (denial.tool_name === "mcp__wollipog__execute_workflow_decision" &&
+                typeof input.occurrenceId === "string" && /^workflow_[\w-]{1,80}$/u.test(input.occurrenceId) &&
+                typeof input.resourceDigest === "string" && /^[a-f0-9]{64}$/u.test(input.resourceDigest)) {
+              this.cb.onEvent({ kind: "tool_call_update", toolCallId, status: "failed",
+                providerForgeRefusal: { kind: "managed", occurrenceId: input.occurrenceId, resourceDigest: input.resourceDigest } });
+            }
+          }
         }
         if (msg.is_error || msg.subtype === "error_during_execution") {
           if (!parentId) {

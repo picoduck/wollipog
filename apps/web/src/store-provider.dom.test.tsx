@@ -264,6 +264,60 @@ test("paged snapshots acknowledge background deliveries as their authorized rows
   container.remove();
 });
 
+test("compact session upserts restore the socket inventory before updating the store or observing delivery", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const sockets: FakeSocket[] = [];
+  let latest: SessionView | undefined;
+  function ReadSession() {
+    latest = useStoreSelector((state) => state.sessions.get("session-1"));
+    return null;
+  }
+  try {
+    await act(async () => {
+      root.render(<StoreProvider connection={runtime("inventory", "inventory:1", sockets)}><ReadSession /></StoreProvider>);
+    });
+    const socket = sockets[0]!;
+    const frame = JSON.parse(snapshot("session-1", "Background Delivery"));
+    const session = frame.sessions[0];
+    const jobs: SessionView["backgroundJobs"] = [{
+      id: "monitor-1", parentTurnId: "turn-1", launchType: "monitor", sourcePresent: true,
+      registeredAt: 1, lastObservedAt: 2,
+    }];
+    const deliveries: SessionView["backgroundDeliveries"] = [{
+      continuationId: "bgcont-1", parentTurnId: "turn-1", jobCount: 2, terminalCount: 1, notificationQueuedAt: 100,
+    }];
+    const push = (message: unknown) => socket.onmessage?.({ data: JSON.stringify(message) });
+    await act(async () => {
+      push(frame);
+      push({ type: "session_upsert", session: { ...session, backgroundJobs: jobs,
+        backgroundJobsTruncated: true, backgroundDeliveries: deliveries } });
+      push({ type: "session_upsert", reuseBackgroundInventory: true, session: { ...session, title: "Renamed" } });
+    });
+    assert.equal(latest?.title, "Renamed");
+    assert.deepEqual(latest?.backgroundJobs, jobs);
+    assert.equal(latest?.backgroundJobsTruncated, true);
+    assert.deepEqual(latest?.backgroundDeliveries, deliveries);
+    assert.deepEqual(socket.sent.map((data) => JSON.parse(data)), [{
+      type: "background_delivery_observed", sessionId: "session-1", continuationId: "bgcont-1",
+    }]);
+
+    await act(async () => { push({ type: "session_upsert", session: { ...session, title: "Inventory Cleared" } }); });
+    assert.equal(latest?.title, "Inventory Cleared");
+    assert.equal(latest?.backgroundJobs, undefined);
+    assert.equal(latest?.backgroundDeliveries, undefined);
+    await act(async () => {
+      push({ type: "session_upsert", reuseBackgroundInventory: true, session: { ...session, title: "Missing Base" } });
+    });
+    assert.equal(socket.closeCount, 1, "a missing base reconnects instead of publishing incomplete inventory");
+    assert.equal(latest?.title, "Inventory Cleared");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
 test("paged loading sends one complete stream selection, then reacts to live changes", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);

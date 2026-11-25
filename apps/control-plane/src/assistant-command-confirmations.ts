@@ -65,9 +65,9 @@ export class AssistantCommandConfirmations {
       return {receipt: JSON.parse(prior.receipt_json), recovery: "This command already ran or is running. Read its receipt and target; never dispatch it again."};
     }
     const target = request.target;
-    const label = target.kind === "session"
+    const label = request.targetLabel ?? (target.kind === "session"
       ? (this.db.prepare("SELECT title FROM sessions WHERE id=?").get(target.id) as {title: string} | undefined)?.title || target.id
-      : target.id;
+      : target.id);
     const confirmation = this.owner.request(binding, request, label, now);
     const {recovery: _external, ...shown} = external;
     return {...shown, ownerConfirmationRequired: true, ownerConfirmation: {status: confirmation.status, expiresAt: confirmation.expiresAt},

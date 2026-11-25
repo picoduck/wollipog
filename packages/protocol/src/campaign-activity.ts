@@ -75,6 +75,7 @@ export type CampaignCleanupAction =
   | { kind: "person"; text: string };
 
 export type CampaignCleanupItem =
+  | { kind: "image_reviewer"; sessionId: string; reason: string; action: CampaignCleanupAction }
   | {
     kind: "merged_branch";
     /** The child whose approved merge landed it. */

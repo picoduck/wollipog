@@ -1,6 +1,7 @@
 import {
   agentHarnessIdentityKey,
   installationSupportsDefault,
+  managedModelChoices,
   orchestratorAdditiveCapability,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
@@ -19,7 +20,8 @@ export function savedSessionPermissionMode(
   const key = agentHarnessIdentityKey({ agentId: agent.id, driver: agent.driver ?? "acp", context: agent.context ?? { kind: "native" } });
   const preference = view?.defaults.find((option) => agentHarnessIdentityKey(option) === key)?.preference;
   if (!preference || !installationSupportsDefault({
-    models: agent.capabilities.models.filter((model) => model.id !== "default" && !model.hidden),
+    models: [...agent.capabilities.models.filter((model) => model.id !== "default" && !model.hidden),
+      ...managedModelChoices(agent.driver, agent.capabilities)],
     effortLevels: agent.capabilities.effortLevels ?? [],
     permissionModes: agent.capabilities.permissionModes ?? [],
   }, preference)) return undefined;

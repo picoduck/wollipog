@@ -16,6 +16,23 @@ const text = (snapshot: WorkflowDecisionResourceSnapshot, check?: PullRequestClo
   renderToStaticMarkup(<WorkflowDecisionSummary snapshot={snapshot} authority={authority} authorityReason={reason} {...(check ? { closingReferenceCheck: check } : {})} />)
     .replace(/<[^>]+>/gu, " ").replace(/\s+/gu, " ").trim();
 
+test("a whole CI rerun shows all target fields and exposes the exact commit", () => {
+  const headSha = "ab".repeat(20);
+  const snapshot = { category: "ci_rerun" as const, repository: "owner/repo", runId: 123, headSha, attempt: 2 };
+  const html = renderToStaticMarkup(<WorkflowDecisionSummary snapshot={snapshot} />);
+  assert.match(text(snapshot), /Repository owner\/repo Workflow Run #123 Attempt 2 Head Commit ababababab Job Entire Run/u);
+  assert.ok(html.includes(`title="${headSha}"`));
+});
+
+test("a CI job rerun shows the named job and visibly discloses the dependent jobs it includes", () => {
+  const snapshot = { category: "ci_rerun" as const, repository: "owner/repo", runId: 123, headSha: "ab".repeat(20),
+    attempt: 2, jobId: 987, jobName: "Build and Bundle" };
+  const html = renderToStaticMarkup(<WorkflowDecisionSummary snapshot={snapshot} />);
+  assert.match(text(snapshot), /Job and Dependents Build and Bundle/u);
+  assert.match(html, /title="Job #987"/u);
+  assert.match(text({ ...snapshot, jobName: undefined }), /Job and Dependents #987/u);
+});
+
 test("temporary deletion shows its exact tip and receipt without claiming a merged pull request (#4535)", () => {
   const snapshot = { category: "merged_branch_deletion" as const, merged: false as const, repository: "picoduck/wollipog",
     branch: "temporary/check", headSha: "a".repeat(40), temporaryReceiptId: "tbr_receipt", dependentPullRequests: { checkedAt: 1, open: [] },
@@ -109,4 +126,21 @@ test("an owner rule shows its source and quote as plain text, whoever reads the 
   assert.equal(markup.replace(/<[^>]+>/gu, " ").replace(/\s+/gu, " ").trim(),
     "An installed or user-authored rule keeps this decision for a person, so no agent can make it. " +
     "Rule Source ~/.claude/skills/issue-workflow/SKILL.md Rule Ask &lt;script&gt;alert(1)&lt;/script&gt; &amp; wait for &quot;yes&quot;.");
+});
+
+test("a blocking standalone Owner Question or Owner Approval omits non-blocking Orchestrator copy (#4894)", () => {
+  const questionHtml = renderToStaticMarkup(<WorkflowDecisionSummary nonBlocking={false} snapshot={{
+    category: "owner_decision", kind: "question", question: "Which format should exports use?", options: [],
+  }} />);
+  const questionText = questionHtml.replace(/<[^>]+>/gu, " ").replace(/\s+/gu, " ").trim();
+  assert.match(questionText, /This session asked you this question\. Only you can answer it, in your own words\./u);
+  assert.doesNotMatch(questionText, /Orchestrator/u);
+
+  const approvalHtml = renderToStaticMarkup(<WorkflowDecisionSummary nonBlocking={false} snapshot={{
+    category: "owner_decision", question: "Proceed with schema migration?",
+    options: [{ optionId: "yes", label: "Proceed" }, { optionId: "no", label: "Hold" }],
+  }} />);
+  const approvalText = approvalHtml.replace(/<[^>]+>/gu, " ").replace(/\s+/gu, " ").trim();
+  assert.match(approvalText, /Only you can make this decision\./u);
+  assert.doesNotMatch(approvalText, /Orchestrator keeps working/u);
 });

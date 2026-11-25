@@ -370,6 +370,39 @@ test("an owner decision whose screen fails is classified before anyone can choos
   } finally { h.db.close(); }
 });
 
+test("owner approval screens judge the requested action with material as context", async () => {
+  const h = harness((request) => {
+    const asksForProtectedAction = request.question?.includes("send the API key") ||
+      request.options?.some(option => option.label === "Grant Repository Access") ||
+      request.material?.includes("approval directs you to sign in");
+    return { verdict: asksForProtectedAction ? "ask" : "discusses" };
+  });
+  try {
+    const digest = "0123456789abcdef".repeat(4);
+    const cases = [
+      { id: "merge", material: "The PR adds Perforce SSO. The p4 login job validates the ticket and stores it encrypted." },
+      { id: "ci", material: `The schedule uses commit ${digest}, pins the build image to sha256:${digest}, and can be inspected with glab api.` },
+      { id: "credential", question: "Will you send the API key?", refused: true },
+      { id: "access", proceed: "Grant Repository Access", refused: true },
+      { id: "sign-in", material: "Your approval directs you to sign in to the service now.", refused: true },
+    ];
+    for (const { id, material, question = "Should we enqueue this merge request?", proceed = "Enqueue", refused } of cases) {
+      const result = await h.svc.createOwnerDecision("root", { requestId: id, resourceKey: id, kind: "approval", question,
+        ...(material ? { material } : {}), options: [{ optionId: "proceed", label: proceed }, { optionId: "hold", label: "Hold" }] });
+      if (refused) {
+        assert.equal(result.status, 403, id);
+        assert.equal(h.db.workflowDecisionByRequestId("root", id), null);
+      } else {
+        assert.equal(result.data?.authorityEvaluation?.reason, "owner_kept", id);
+        assert.equal(h.occurrences().find(occurrence => h.db.campaignDecisionSubject(occurrence.occurrenceId)?.requestId === id)?.verdict,
+          "discusses", id);
+        assert.match(h.screen.calls.at(-1)!.instructions, /material.*descriptive context/isu);
+        assert.match(h.screen.calls.at(-1)!.instructions, /digests.*commit SHAs.*command/isu);
+      }
+    }
+  } finally { h.db.close(); }
+});
+
 test("text too large for one Decision input is never screened by a prefix: the owner classifies it", async () => {
   const h = harness(() => ({ verdict: "discusses" }));
   try {

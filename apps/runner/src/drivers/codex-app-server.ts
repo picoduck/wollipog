@@ -13,6 +13,7 @@
  */
 
 import {
+  ASSISTANT_MCP_SERVER_NAME,
   DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
   type AgentCapabilities,
   type AgentQuestion,
@@ -26,6 +27,7 @@ import {
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, posix } from "node:path";
 import { JsonRpcPeer, type RpcError } from "../jsonrpc.js";
+import { assistantTranscriptReceiptKey } from "./assistant-tool-result.js";
 import { campaignOperationEvidence } from "../campaign-operation-evidence.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import {
@@ -71,7 +73,7 @@ import {
   type CodexPermissionProfileBase,
 } from "../codex-permission-profile.js";
 import { readCodexRolloutCompletedCommand } from "./codex-rollout-proof.js";
-import { codexCliAdmission, codexCliAdmissionScript } from "./codex-cli-admission.js";
+import { codexCliAdmission, codexCliAdmissionInput, codexCliAdmissionScript } from "./codex-cli-admission.js";
 import {
   commandTargetsManagedWorktree,
   type ManagedWorktreeProtection,
@@ -978,6 +980,30 @@ export class CodexAppServerDriver implements Driver {
       ? proof : null;
   }
 
+  private readonly pendingAdmissionItems = new Map<string, Json>();
+
+  workflowActionAdmissionRefusal(occurrenceId: string, commandDigest: string): string | null {
+    const refusal = 'Use the consume_workflow_decision MCP tool or one standalone literal "$WOLLIPOG_CLI" decision consume <id> --snapshot \'<json>\' [--action \'<json>\'] --json command; the snapshot must be inline literal JSON.';
+    const items = [...this.pendingAdmissionItems.values()];
+    // The arming request has no provider item id. With multiple running root commands we
+    // cannot tell whether the request came from the supported item or an opaque wrapper.
+    if (items.length > 1) return `Admission input is ambiguous while multiple root tools are running; wait for the other tools to finish and retry. ${refusal}`;
+    if (!this.turnId || items.length !== 1) return refusal;
+    const item = items[0]!;
+    if (!boundedProviderCorrelationId(item.id)) return refusal;
+    const input = item.type === "commandExecution"
+      ? typeof item.command === "string" ? codexCliAdmissionInput(codexCliAdmissionScript(item.command)) : null
+      : item.arguments;
+    if (input?.occurrenceId !== occurrenceId) return refusal;
+    // MCP proof requires the explicit action; only CLI proof derives an omitted --action
+    // from its completed provider response.
+    if (item.type === "mcpToolCall" && input.action === undefined) return refusal;
+    if (input.action !== undefined && (input.action?.kind !== "pr_merge_enqueue" ||
+        typeof input.action.command !== "string" ||
+        createHash("sha256").update(JSON.stringify({ kind: "pr_merge_enqueue", command: input.action.command }), "utf8").digest("hex") !== commandDigest)) return refusal;
+    return null;
+  }
+
   agentTurnId(): string | null {
     return this.turnId ?? this.lastTurnId;
   }
@@ -1429,6 +1455,7 @@ export class CodexAppServerDriver implements Driver {
 
   private setSteeringTurn(id: string | null): void {
     if (this.turnId === id) return;
+    this.pendingAdmissionItems.clear();
     this.turnId = id;
     this.cb.onSteeringTurnChanged?.();
   }
@@ -2466,8 +2493,8 @@ export class CodexAppServerDriver implements Driver {
     peer.onNotification("item/reasoning/summaryTextDelta", onReasoningDelta);
     peer.onNotification("item/reasoning/textDelta", onReasoningDelta);
     peer.onNotification("item/reasoning/delta", onReasoningDelta);
-    peer.onNotification("item/started", (p: Json) => this.onItem(p?.item, false, p?.threadId));
-    peer.onNotification("item/completed", (p: Json) => this.onItem(p?.item, true, p?.threadId));
+    peer.onNotification("item/started", (p: Json) => this.onItem(p?.item, false, p?.threadId, p?.turnId));
+    peer.onNotification("item/completed", (p: Json) => this.onItem(p?.item, true, p?.threadId, p?.turnId));
     // Guardian auto-review (approvalsReviewer=auto_review): surface the model's verdict so
     // the user can see that a boundary-crossing action was AI-reviewed rather than silently
     // auto-approved. One thought per review; genuine escalations arrive as requestApproval
@@ -2819,12 +2846,21 @@ export class CodexAppServerDriver implements Driver {
   }
 
   /** Map an item.started/completed payload to our normalized events. */
-  private onItem(item: Json, completed: boolean, threadId?: unknown): void {
+  private onItem(item: Json, completed: boolean, threadId?: unknown, turnId?: unknown): void {
     if (!item || this.disposed) return;
     const context = this.eventContext(threadId);
     if (!context.accepted) return;
     const parentToolUseId = context.parentToolUseId;
     const id = scopedCodexItemId(item.id, threadId, this.threadId) ?? "item";
+    // Keep full provider-owned input only while the root item is running. Display titles are
+    // truncated and cannot prove the CLI grammar. Other threads cannot authorize this session.
+    if (!parentToolUseId && threadId === this.threadId && this.turnId && turnId === this.turnId) {
+      if (completed) this.pendingAdmissionItems.delete(id);
+      else if (item.type === "commandExecution" || (item.type === "mcpToolCall" &&
+          item.server === "wollipog" && item.tool === "consume_workflow_decision")) {
+        this.pendingAdmissionItems.set(id, item);
+      }
+    }
     switch (item.type) {
       case "userMessage": {
         // A steered user message can arrive before the turn/steer response. Suppress both item
@@ -2948,6 +2984,11 @@ export class CodexAppServerDriver implements Driver {
           completed ? "completed" : "in_progress",
           parentToolUseId,
         );
+        if (completed && item.server === ASSISTANT_MCP_SERVER_NAME && !item.error && !item.result?.isError) {
+          const receiptKey = assistantTranscriptReceiptKey(item.result?.content?.[0]?.text);
+          if (receiptKey) this.cb.onEvent({ kind: "tool_call_update", toolCallId: id,
+            status: "completed", assistantReceiptKey: receiptKey, ...(parentToolUseId ? { parentToolUseId } : {}) });
+        }
         break;
       }
       case "todoList": {

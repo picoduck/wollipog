@@ -10,6 +10,8 @@ import {
   type AgentDefinition,
   type AssistantOwnerConfirmation,
   type AssistantThread,
+  type ControlPlaneToRunner,
+  type WollipogPromptOrigin,
 } from "@wollipog/protocol";
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
@@ -34,7 +36,8 @@ async function harness() {
     workspaces: [{ id: "w", name: "Home", path: "/fixture/home" }], agents: [claude] }, Date.now(), PROTOCOL_VERSION);
   const hub = new Hub(db);
   hub.isRunnerOnline = () => true;
-  hub.sendToRunner = () => true;
+  const sent: ControlPlaneToRunner[] = [];
+  hub.sendToRunner = (_id, message) => { sent.push(message); return true; };
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
   const threads = createAssistantThreads(db, hub, svc);
   const operations = createAssistantOperations(db);
@@ -49,13 +52,14 @@ async function harness() {
     return setArchived(sessionId, value, ...rest);
   };
   // Admitted notices; `admit` false refuses admission, as an offline runner's session does.
-  const told: Array<{ sessionId: string; text: string }> = [];
+  const told: Array<{ sessionId: string; text: string; origin: WollipogPromptOrigin }> = [];
   let admit = true;
   const confirmations = createAssistantOwnerConfirmationService(db, {
-    prompt: (sessionId: string, text: string) => {
+    promptWollipogNotice: (sessionId, text, origin) => {
       if (!admit) return { ok: false };
-      told.push({ sessionId, text });
-      return { ok: true };
+      const result = svc.promptWollipogNotice(sessionId, text, origin);
+      if (result.ok) told.push({ sessionId, text, origin });
+      return result;
     },
   }, operations);
   let requester: HumanPrincipal = owner;
@@ -72,6 +76,7 @@ async function harness() {
   // The thread's proxy binds a credential it minted; the assistant's calls carry it.
   const token = `wollipoga_${randomBytes(32).toString("base64url")}`;
   assert.equal(threads.registerCredential("r", thread.sessionId, hashToken(token)).accepted, true);
+  db.updateSessionStatus(thread.sessionId, "idle", Date.now());
   const credential = db.assistantConnections.authenticate(token)!;
   const call = (name: string, args: Record<string, unknown>) => operations.call(credential, name, args) as Promise<any>;
 
@@ -80,7 +85,7 @@ async function harness() {
     db.updateSessionStatus(id, "completed", Date.now());
   }
   const pending = () => db.assistantOwnerConfirmations.pendingForThread(thread!.id);
-  return { db, owner, svc, threads, operations, receipts, confirmations, thread, call, ownerCall, archived, told, pending,
+  return { db, owner, svc, threads, operations, receipts, confirmations, thread, call, ownerCall, archived, told, pending, sent,
     connectionId: thread.connectionId!,
     setRequester: (principal: HumanPrincipal) => { requester = principal; },
     faultArchive: (error: Error | null) => { archiveFault = error; },
@@ -165,7 +170,17 @@ test("Approve Once runs the bound command exactly once, across repeated and conc
     // The assistant was told once, in its own conversation, and the request id was not in it.
     assert.equal(h.told.length, 1);
     assert.equal(h.told[0]!.sessionId, h.thread.sessionId);
-    assert.match(h.told[0]!.text, /^\[Wollipog Owner Confirmation\] Your owner approved "Archive Session".*ran it once; its receipt reads succeeded/);
+    assert.equal(h.told[0]!.text, '[Wollipog Owner Confirmation] Your owner approved "Archive Session" (' +
+      request!.operation + ') on session ' + request!.target.label + ' (target-1), command archive-1. ' +
+      'Wollipog ran it once; its receipt reads succeeded. Never send that command again: read its receipt and target, then continue.');
+    assert.deepEqual(h.told[0]!.origin, {
+      kind: "owner_confirmation", confirmationId: request!.id, outcome: "approved", title: "Archive Session",
+      target: request!.target, receiptStatus: "succeeded", resolvedAt: first.body.confirmation.resolvedAt,
+    });
+    const command = h.sent.find((message) => message.type === "prompt_session");
+    assert.equal(command?.type, "prompt_session");
+    assert.equal(command.text, h.told[0]!.text);
+    assert.deepEqual(command.promptOrigin, h.told[0]!.origin);
     assert.ok(!h.told[0]!.text.includes(request!.id));
     // The approved run is audited against the thread's own connection.
     assert.equal(h.db.assistantConnections.activity(h.connectionId)[0]?.outcome, "succeeded");
@@ -209,6 +224,8 @@ test("Deny and expiry refuse the command, tell the assistant, and a later Approv
     assert.equal(answer.body.thread.status === "needs_you", false);
     assert.equal((await h.ownerCall("POST", approveUrl(h.thread, denied!))).body.confirmation.status, "denied");
     assert.match(h.told.at(-1)!.text, /Your owner denied "Archive Session".*Nothing ran/);
+    const deniedOrigin = h.told.at(-1)!.origin;
+    assert.equal(deniedOrigin.kind === "owner_confirmation" && deniedOrigin.outcome, "denied");
 
     await h.call("session_archive", { commandId: "archive-2", sessionId: "target-2" });
     const [expiring] = h.pending();
@@ -218,6 +235,8 @@ test("Deny and expiry refuse the command, tell the assistant, and a later Approv
     assert.equal((await h.ownerCall("POST", approveUrl(h.thread, expiring!))).body.confirmation.status, "expired");
     h.confirmations.expireDue();
     assert.match(h.told.at(-1)!.text, /expired before your owner answered\. Nothing ran/);
+    const expiredOrigin = h.told.at(-1)!.origin;
+    assert.equal(expiredOrigin.kind === "owner_confirmation" && expiredOrigin.outcome, "expired");
     assert.equal(h.told.length, 2);
 
     // The timer path expires an unanswered request on its own.
@@ -242,6 +261,8 @@ test("a changed grant or target between request and approval refuses the approva
     assert.equal(refused.status, "refused");
     assert.match(refused.outcome?.reason ?? "", /target, arguments or the thread's grant changed/);
     assert.match(h.told.at(-1)!.text, /was refused, so nothing ran/);
+    const refusedOrigin = h.told.at(-1)!.origin;
+    assert.equal(refusedOrigin.kind === "owner_confirmation" && refusedOrigin.outcome, "refused");
 
     await h.call("session_archive", { commandId: "archive-2", sessionId: "target-2" });
     const [target] = h.pending();

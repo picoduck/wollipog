@@ -365,6 +365,24 @@ const VOCABULARY = {
     done: success("Done"),
     archived: neutral("Archived"),
   },
+  assistantThreadHealth: {
+    tools_unavailable: danger("Tools Unavailable"),
+    sign_in_needed: danger("Sign In Needed"),
+    turn_failed: danger("Turn Failed"),
+    turn_rejected: danger("Turn Rejected"),
+    usage_limit: warning("Usage Limit"),
+    automatic_turns_held: warning("Automatic Turns Held"),
+    machine_offline: warning("Machine Offline"),
+    reconnecting: info("Reconnecting"),
+  },
+  assistantThreadSpending: {
+    near_budget: warning("Near Budget"),
+    budget_used_up: warning("Budget Used Up"),
+    budget_committed: warning("Budget Committed"),
+    over_budget: danger("Over Budget"),
+    launch_limit: warning("Launch Limit Reached"),
+    launch_paused: warning("Launches Paused"),
+  },
   /** One work item in an issue campaign's ledger (Campaign Status, #2417). */
   campaignWork: {
     planned: neutral("Planned"),
@@ -407,7 +425,12 @@ const VOCABULARY = {
   /** A provider's subscription usage. */
   usage: {
     available: success("Available"),
+    /** Less than a quarter of a usage window is left. */
     approaching_limit: warning("Approaching Limit"),
+    /** The provider warned while plenty is left: the window is being used faster than it elapses. */
+    on_pace_to_run_out: warning("On Pace to Run Out"),
+    /** The provider warned about a window that reports no percentage. */
+    usage_warning: warning("Usage Warning"),
     temporarily_unavailable: danger("Temporarily Unavailable"),
     exhausted: danger("Exhausted"),
     limit_reached: danger("Limit Reached"),
@@ -432,6 +455,24 @@ const VOCABULARY = {
     unavailable: danger("Unavailable"),
     /** A ready agent on a machine that is not online: its last report, not a current one. */
     ready_when_last_seen: neutral("Ready When Last Seen", { hollow: true }),
+  },
+  /** Google Antigravity setup on a machine (#4780), by `antigravitySetupPresentation()`. */
+  antigravitySetup: {
+    checking: info("Checking", { pulse: true }),
+    installing: info("Installing", { pulse: true }),
+    updating: info("Updating", { pulse: true }),
+    missing_runtime: neutral("Not Installed", { hollow: true }),
+    unsupported: neutral("Not Available"),
+    update_runner: warning("Update Runner"),
+    sign_in_required: warning("Sign-In Required"),
+    signing_in: info("Signing In", { pulse: true }),
+    verification_failed: danger("Check Failed"),
+    ready: success("Ready"),
+  },
+  /** A failed managed Google Antigravity install or update (#4780), beside the setup's own status. */
+  antigravityInstall: {
+    install_failed: danger("Install Failed"),
+    update_failed: danger("Update Failed"),
   },
 } as const satisfies Record<string, Record<string, Entry>>;
 

@@ -15,6 +15,24 @@ const shot = (page: Page, name: string) => page.locator(".agents-roster-fixture-
 test.describe("fine pointer", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
+  test("ordinary background jobs hash readable ids and set the suffix apart in faint monospace", async ({ page }) => {
+    await open(page, "workers");
+    // The fixture's readable id (`job-monitor`) must be hashed, not cut to "onitor".
+    const job = page.locator(".worker-row", { hasText: "Monitor Job" });
+    await expect(job.locator(".row-title")).toHaveText(/^Monitor Job [0-9a-f]{6}$/);
+    await expect(job.locator(".row-title")).not.toHaveText(/\bonitor\b/);
+    const suffix = await job.locator(".background-job-id").evaluate((id) => {
+      const probe = id.ownerDocument.createElement("span");
+      probe.style.cssText = "color: var(--text-faint); font-family: var(--font-mono)";
+      id.parentElement!.append(probe);
+      const [shown, expected] = [getComputedStyle(id), getComputedStyle(probe)];
+      const result = { color: shown.color === expected.color, mono: shown.fontFamily === expected.fontFamily };
+      probe.remove();
+      return result;
+    });
+    expect(suffix).toEqual({ color: true, mono: true });
+  });
+
   test("nested workers indent once under a spine, and the one asking says what it waits to do", async ({ page }) => {
     await open(page, "nested");
     const items = page.locator(".agents-list [role=listitem]");

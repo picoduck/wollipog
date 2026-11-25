@@ -161,7 +161,7 @@ const SUBJECT_OF_DESIGN =
  * subject is answered no rather than read as a compound "is this about credentials?". */
 const CREDENTIAL_SCREEN: DecisionKindDefinition = {
   kind: "credential_screen",
-  promptVersion: "credential_screen.v3",
+  promptVersion: "credential_screen.v4",
   instructions:
     "A software agent working on a code change sent a quoted request to whoever supervises it. The supervisor is " +
     "another agent that can only choose among offered options, answer in text, or allow one tool call once. You " +
@@ -171,7 +171,13 @@ const CREDENTIAL_SCREEN: DecisionKindDefinition = {
     "a design or the code, for example how a feature should store or copy a key, which keyboard keys or cache keys " +
     "to use, how sessions are listed, what permissions a CI workflow file declares, or a quoted notice that a " +
     "request was declined; answering those hands over and grants nothing. The `request` value is a JSON document: " +
-    "`surface` says where it came from and the other fields are the request's own text. " + TYPED_DATA_RULES,
+    "`surface` says where it came from and the other fields are the request's own text. For an owner decision, " +
+    "read the question and each option to identify what the owner is being asked to do. Use material as descriptive context " +
+    "unless it also tells the owner to take an action or explains what their choice would authorize. Enqueuing a merge " +
+    "whose feature signs users in or stores tickets does not sign the owner in or hand over a ticket. Image digests, " +
+    "commit SHAs and command summaries are not credential requests by themselves. For campaign handoffs, the material " +
+    "can contain the actual request in its next actions even if the outer question only asks what should happen next. " +
+    "Count a protected action the owner is asked to take or authorize anywhere in the request. " + TYPED_DATA_RULES,
   verdicts: ["ask", "discusses", "uncertain"],
   ownerMessage: false,
   dataFields: ["request"],

@@ -130,7 +130,13 @@ function outcomeText(decision: CampaignDecision): string {
     if (decision.verdict === "ask") return ownerDecision ? "Refused; nobody was asked." : "Declined and recorded as blocked work.";
     return ownerDecision ? "It went to you as an owner decision." : "The Orchestrator decides it.";
   }
-  return "Waiting for you to classify it.";
+  return decision.subject?.classificationPending === false
+    ? "No classification is pending for this request." : "Waiting for you to classify it.";
+}
+
+function awaitingCredentialClassification(decision: CampaignDecision): boolean {
+  if (decision.kind !== "credential_screen" || decision.subject?.classification) return false;
+  return decision.subject?.classificationPending ?? (decision.state === "uncertain" || decision.state === "failed");
 }
 
 /**
@@ -190,9 +196,10 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
   };
 
   const attention = loadError ? "load-error" : (decisions ?? []).filter(decision =>
-    !decision.subject?.classification && (decision.state === "uncertain" || decision.state === "failed" || decision.subject?.classificationPending || decision.subject?.seed === "owner")
+    decision.kind === "credential_screen" ? awaitingCredentialClassification(decision)
+      : !decision.subject?.classification && (decision.state === "uncertain" || decision.state === "failed" || decision.subject?.seed === "owner")
   ).map(decision => decision.occurrenceId).join("|");
-  useEffect(() => onAttentionChange?.(Boolean(attention)), [attention, onAttentionChange]);
+  useEffect(() => { onAttentionChange?.(Boolean(attention)); }, [attention, onAttentionChange]);
   if (!decisions?.length && !loadError) return null;
   return (
     <CampaignSection title="Decision Model Checks" count={decisions?.length ?? 0} attention={attention} className="campaign-status-handoffs">
@@ -210,9 +217,7 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
           const subject = decision.subject;
           // A failed/uncertain screen or a live typed ask hold is classified here; a follow-up or closure
           // the model could not check is decided on its own request.
-          const awaiting = decision.kind === "credential_screen" && (decision.state === "uncertain" || decision.state === "failed" ||
-            (decision.state === "decided" && decision.verdict === "ask" && subject?.surface === "implementation_question" && subject.classificationPending)) &&
-            !subject?.classification;
+          const awaiting = awaitingCredentialClassification(decision);
           // An epic seed the model could not settle waits for the owner, who may continue without one.
           const seedAwaiting = isEpicSeed(decision) && subject?.seed === "owner" && !subject.classification;
           // An owner decision stays the owner's: classifying it only lets them choose an option.

@@ -45,14 +45,17 @@ async function callThroughAdapter(env: Record<string, string>, lines: string[]):
   return written.split("\n").filter(Boolean);
 }
 
-function harness(answer: "accept" | "refuse" = "accept") {
+function harness(answer: "accept" | "refuse" = "accept", statuses: number[] = []) {
   const root = mkdtempSync(join(tmpdir(), "wollipog-assistant-proxy-"));
   const worktree = mkdtempSync(join(tmpdir(), "wollipog-assistant-worktree-"));
   const host: AgentControlHost = { isSea: true, execPath: "/opt/wollipog-runner", execArgv: [], configDir: root };
   const cp = fakeControlPlane(), registered: string[] = [];
   let now = 1_000_000;
+  const rejected: boolean[] = [];
   const proxies: AssistantProxies = new AssistantProxies({
-    fetch: cp.fetch,
+    fetch: (url, init) => statuses.shift() === 401
+      ? Promise.resolve(new Response(null, { status: 401 })) : cp.fetch(url, init),
+    credentialRejected: (_sessionId, value) => { rejected.push(value); },
     now: () => now,
     ackTimeoutMs: 500,
     register: (sessionId, tokenHash) => {
@@ -67,7 +70,7 @@ function harness(answer: "accept" | "refuse" = "accept") {
     env: { PROVIDER_SETTING: "kept" }, useWorktree: false, driver: "claude-code", context: { kind: "native" },
     assistant: { threadId: "thr_fixture" },
   };
-  return { root, worktree, host, cp, registered, proxies, spec, advance: (ms: number) => { now += ms; },
+  return { root, worktree, host, cp, registered, rejected, proxies, spec, advance: (ms: number) => { now += ms; },
     close: async () => { await proxies.closeAll(); rmSync(root, { recursive: true, force: true }); rmSync(worktree, { recursive: true, force: true }); } };
 }
 
@@ -128,6 +131,7 @@ test("a revoked proxy shuts down and a refused credential reaches the assistant 
     const [reply] = await callThroughAdapter(adapterEnv, [JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/list" })]);
     assert.match(JSON.parse(reply!).error.message, /the Assistant thread is archived/);
     assert.equal(refused.cp.bearers.length, 0);
+    assert.equal(refused.rejected.at(-1), true);
   } finally { await refused.close(); }
 });
 
@@ -150,5 +154,20 @@ test("the proxy registers a fresh short-lived credential before half its lifetim
       [JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/list" })]);
     assert.match(JSON.parse(reply!).error.message, /refused this request/);
     assert.equal(h.cp.bearers.length, before);
+  } finally { await h.close(); }
+});
+
+test("Assistant tools recover when the same credential succeeds after a rejected retry", async () => {
+  const h = harness("accept", [401, 401, 200]);
+  try {
+    const env = await provisioned(h);
+    const call = (id: number) => callThroughAdapter(env, [JSON.stringify({ jsonrpc: "2.0", id, method: "tools/list" })]);
+    await call(1);
+    assert.equal(h.rejected.at(-1), true);
+    assert.equal(h.registered.length, 2);
+    const [reply] = await call(2);
+    assert.equal(JSON.parse(reply!).result.tools[0].name, "assistant_discover");
+    assert.equal(h.rejected.at(-1), false);
+    assert.equal(h.registered.length, 2, "the same credential recovered without a rotation");
   } finally { await h.close(); }
 });

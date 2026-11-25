@@ -71,7 +71,7 @@ export function pendingAssistantConfirmationsByThread(threads: Iterable<Assistan
 export function assistantThreadPendingKey(thread: AssistantThread): string {
   if (thread.status === "archived") return "";
   return (thread.confirmations ?? []).filter((confirmation) => confirmation.status === "pending")
-    .map((confirmation) => confirmation.id).sort().join("\n");
+    .map((confirmation) => confirmation.campaign ? `${confirmation.id}:${confirmation.campaign.digest}` : confirmation.id).sort().join("\n");
 }
 
 /** What the card says once the owner answered, for its toast. */

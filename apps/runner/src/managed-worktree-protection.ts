@@ -2492,8 +2492,8 @@ export function pathTargetsGuardState(path: string, cwd: string, directory: stri
  *   included: it learns the directory's shape and size but opens no file (#1334 accepts that).
  * - `find` takes one or more explicit starts and then exactly `-maxdepth N`. The walk is bounded by
  *   the directory it actually starts in, measured under every reading of that start — spelling,
- *   physical path, and the physical landing of a `..` — with the nearest one deciding. Without an
- *   explicit start it walks the working directory, which no operand names, so it is refused.
+ *   physical path, and the physical landing of a `..` — with the nearest one deciding. The
+ *   implicit-root check applies the same bound when the working directory supplies the start.
  *
  * What disqualifies a command, and why each one has to:
  *
@@ -2589,7 +2589,12 @@ function guardStateReadings(text: string): GuardStateReading[] {
  * what the command DOES. `words` is null when the segment carries an unexpanded variable, since one
  * opaque word could be a recursion flag or another operand.
  */
-interface CommandSegment { operands: Array<string | null>; words: string[] | null; redirects: Array<string | null> }
+interface CommandSegment {
+  operands: Array<string | null>;
+  words: string[] | null;
+  redirects: Array<string | null>;
+  walkWords: string[];
+}
 
 /**
  * Split a parsed command into segments, or `null` when it contains a construct this classifier does
@@ -2601,13 +2606,17 @@ function commandSegments(tokens: readonly ShellToken[], allowPipe = false): Comm
   let operands: Array<string | null> = [];
   let words: string[] | null = [];
   let redirects: Array<string | null> = [];
+  let walkWords: string[] = [];
   let redirected = false;
   let previousWord: string | null = null;
+  let previousWasArgument = false;
   for (const token of tokens) {
     const op = operator(token);
     if (op === null) {
       const text = tokenText(token);
       operands.push(text);
+      previousWasArgument = !redirected;
+      if (previousWasArgument) walkWords.push(text ?? "\0");
       if (redirected) { redirects.push(text); redirected = false; }
       else if (words !== null) {
         if (text === null || text.includes("\0")) words = null;
@@ -2617,12 +2626,14 @@ function commandSegments(tokens: readonly ShellToken[], allowPipe = false): Comm
       continue;
     }
     if (SEGMENT_SEPARATORS.has(op) || (allowPipe && op === "|")) {
-      segments.push({ operands, words, redirects });
+      segments.push({ operands, words, redirects, walkWords });
       operands = [];
       words = [];
       redirects = [];
+      walkWords = [];
       redirected = false;
       previousWord = null;
+      previousWasArgument = false;
       continue;
     }
     if (!REDIRECTIONS.has(op)) return null;
@@ -2631,10 +2642,14 @@ function commandSegments(tokens: readonly ShellToken[], allowPipe = false): Comm
     // an ordinary numeric argument.
     if (words !== null && words.length === 1 && previousWord !== null &&
         words[0] === previousWord && /^\d+$/u.test(previousWord)) words.pop();
+    // For the additive walk check, a number immediately before a redirect cannot prove
+    // that the walk has an explicit path. Keep the original reading for inspection bounds.
+    if (previousWasArgument && previousWord !== null && /^\d+$/u.test(previousWord)) walkWords.pop();
     redirected = true;
     previousWord = null;
+    previousWasArgument = false;
   }
-  segments.push({ operands, words, redirects });
+  segments.push({ operands, words, redirects, walkWords });
   return segments;
 }
 
@@ -2645,6 +2660,61 @@ function recursiveListing(word: string): boolean {
     return name.length > 0 && "recursive".startsWith(name);
   }
   return /^-[^-]/u.test(word) && word.includes("R");
+}
+
+/** A positive reading of explicit paths. An unknown option may consume the next word, so
+ * it cannot prove that the command has a path operand. */
+function hasExplicitWalkPath(args: readonly string[], options: RegExp, patterns = 0): boolean {
+  let parsingOptions = true;
+  for (const arg of args) {
+    if (!arg || arg.includes("\0")) return false;
+    if (parsingOptions && arg === "--") {
+      parsingOptions = false;
+    } else if (parsingOptions && arg.startsWith("-") && arg !== "-") {
+      if (!options.test(arg)) return false;
+    } else if (patterns === 0) {
+      return true;
+    } else {
+      patterns -= 1;
+    }
+  }
+  return false;
+}
+
+/** Whether the visible argv can start a recursive walk at its default directory. Only forms
+ * with a provable explicit input path are excluded from the implicit-operand check. */
+function usesImplicitWalkRoot(words: readonly string[]): boolean {
+  const [command, ...args] = words;
+  if (!command) return false;
+  switch (basename(command)) {
+    case "find": {
+      // find reads the first non-control word as a start or as the beginning of its expression.
+      const start = args.find((arg) => !/^-(?:[HLP]|O[0-9]+)$/u.test(arg));
+      return !start || start.includes("\0") || start.startsWith("-") || ["!", "(", ")", ","].includes(start);
+    }
+    case "du":
+      return !hasExplicitWalkPath(args,
+        /^(?:-[abchkmsx]+|--(?:all|apparent-size|bytes|human-readable|one-file-system|si|summarize|total|max-depth=[0-9]+))$/u);
+    case "ls": {
+      const endOfOptions = args.indexOf("--");
+      const options = endOfOptions < 0 ? args : args.slice(0, endOfOptions);
+      return options.some(recursiveListing) &&
+        !hasExplicitWalkPath(args, /^(?:-[1aAbCdFghHilLnopqQrRstux]+|--(?:all|almost-all|recursive))$/u);
+    }
+    case "grep": {
+      const endOfOptions = args.indexOf("--");
+      const options = endOfOptions < 0 ? args : args.slice(0, endOfOptions);
+      return options.some((arg) => recursiveListing(arg) || /^-[^-]*r/u.test(arg) ||
+        (arg.startsWith("--") && arg.length > 2 && "dereference-recursive".startsWith(arg.slice(2)))) &&
+        !hasExplicitWalkPath(args, /^(?:-[EFGHILPRabchilnoqrsvwxz]+|--(?:recursive|dereference-recursive))$/u, 1);
+    }
+    case "rg":
+      return !hasExplicitWalkPath(args, /^-[FHiNPSVchilnosquvwx]+$/u, 1);
+    case "tree":
+      return !hasExplicitWalkPath(args, /^-[aCdfFgilnNpqrstux]+$/u);
+    default:
+      return false;
+  }
 }
 
 /**
@@ -2678,8 +2748,8 @@ function plainDiskUsage(words: readonly string[]): boolean {
  * `N` levels reads the directories above level `N` and only names what sits at it, so it never
  * reads the hook directory when every START holds it at least `N` levels down. Everything else
  * `find` accepts is refused: a leading `-L` follows links out of the tree, a test such as `-empty`
- * opens the directory it names at the bound, and an action acts on it. A walk with no START begins
- * in the working directory, which no operand names, so it is never an inspection here.
+ * opens the directory it names at the bound, and an action acts on it. The implicit-root check
+ * supplies a START of `.` before calling this helper.
  */
 function boundedFind(words: readonly string[], depthBelow: (start: string) => number | null): boolean {
   if (words.length < 4 || words.at(-2) !== "-maxdepth") return false;
@@ -2984,6 +3054,107 @@ export function prepareGuardStateCommand(command: string): PreparedGuardStateCom
   return { scan: command, parse };
 }
 
+// The boundary checks prevent the repeated quote pattern below from retrying each shorter reading
+// of a parameter name when the closing quote is missing.
+const GUARD_STATE_PLAIN_PARAMETER =
+  /\$(?:[A-Za-z_][A-Za-z0-9_]*(?![A-Za-z0-9_])|[0-9]+(?![0-9])|\{[A-Za-z_][A-Za-z0-9_]*\})/u.source;
+
+/** Ordinary words, pipelines and redirects leave a clear closing delimiter. Compound syntax,
+ * shell comments and active nested substitutions require more than this lexical reading. */
+const GUARD_STATE_SUBSTITUTION_BODY = new RegExp(
+  "(?:" +
+  [
+    /[A-Za-z0-9._/:=,@+%~ \t|>&*?!-]|<(?!<)/u.source,
+    /\\[^\r\n]/u.source,
+    /'[^'\r\n]*'/u.source,
+    String.raw`"(?:[^"\\\x60$\r\n]|\\[^\r\n]|${GUARD_STATE_PLAIN_PARAMETER})*"`,
+    GUARD_STATE_PLAIN_PARAMETER,
+  ].join("|") +
+  ")*",
+  "uy",
+);
+
+function guardStateHeredocTerminator(
+  command: string, start: number, delimiter: string, stripTabs: boolean,
+): number | null {
+  for (let lineStart = start; lineStart < command.length;) {
+    const newline = command.indexOf("\n", lineStart);
+    const lineEnd = newline < 0 ? command.length : newline;
+    const line = command.slice(lineStart, lineEnd);
+    if ((stripTabs ? line.replace(/^\t+/u, "") : line) === delimiter) return lineEnd;
+    lineStart = lineEnd + 1;
+  }
+  return null;
+}
+
+function guardStateSubstitutionEnd(command: string, start: number, close: ")" | "`"): number | null {
+  const body = new RegExp(GUARD_STATE_SUBSTITUTION_BODY);
+  body.lastIndex = start;
+  const reading = body.exec(command)![0];
+  if (command[body.lastIndex] === close) {
+    // A case pattern can contain an unmatched closing parenthesis, and legacy backticks
+    // process escapes before they parse the body. Neither has an unambiguous reading here.
+    const ambiguous = close === ")" ? /\bcase\b/u.test(reading) : /[\\`]/u.test(reading);
+    return ambiguous ? null : body.lastIndex;
+  }
+  if (close === "`") return null;
+
+  // Preserve command messages built with a quoted copy heredoc. Its first delimiter line
+  // must be followed immediately by the substitution's closing parenthesis.
+  const headerEnd = command.indexOf("\n", start);
+  if (headerEnd < 0) return null;
+  const header = command.slice(start, headerEnd);
+  if (!GUARD_STATE_STRIPPABLE_HEREDOC_LINE.test(header)) return null;
+  const delimiter = /<<-?'([A-Za-z_][A-Za-z0-9_]*)'/u.exec(header)![1]!;
+  const end = guardStateHeredocTerminator(command, headerEnd + 1, delimiter, header.includes("<<-"));
+  return end !== null && command[end + 1] === ")" ? end + 1 : null;
+}
+
+/** Inspect extra command readings from the source text. The outer command keeps every existing
+ * reading, including the original shell-quote tokens and raw path scan. */
+function quotedGuardStateSubstitutionRefusal(command: string, cwd: string, directory: string): string | null {
+  if (!command.includes('"') || (!command.includes("$(") && !command.includes("`"))) return null;
+  // These specific commands consume a quoted heredoc as data. A shell or another unknown
+  // consumer may execute that input. The original path scan still receives the full source.
+  const heredoc = /^(?::|git commit -F -|gh pr create --body-file -)[ \t]+<<(-)?[ \t]*(['"])([A-Za-z_][A-Za-z0-9_]*)\2[ \t]*\n/u.exec(command);
+  const bodyEnd = heredoc === null ? null :
+    guardStateHeredocTerminator(command, heredoc[0].length, heredoc[3]!, heredoc[1] !== undefined);
+  const arithmetic = /\(\([A-Za-z0-9_$*/%~^&|<>=?:, \t+-]+\)\)/uy;
+  let quote: "'" | '"' | "ansi" | null = null;
+  for (let i = bodyEnd === null ? 0 : bodyEnd + 1; i < command.length; i += 1) {
+    const char = command[i];
+    if (quote === "'") {
+      if (char === "'") quote = null;
+      continue;
+    }
+    if (char === "\\") { i += 1; continue; }
+    if (quote === '"' && (char === "`" || (char === "$" && command[i + 1] === "("))) {
+      // This arithmetic subset contains no nested shell expansion syntax. Leave more
+      // involved arithmetic to the uninspectable path.
+      if (char === "$" && command[i + 2] === "(") {
+        arithmetic.lastIndex = i + 1;
+        if (arithmetic.test(command)) { i = arithmetic.lastIndex - 1; continue; }
+      }
+      const start = i + (char === "`" ? 1 : 2);
+      const end = guardStateSubstitutionEnd(command, start, char === "`" ? "`" : ")");
+      if (end === null) return guardStateUninspectableRefusal("a quoted command substitution cannot be inspected");
+      // The whitelist excludes active nested substitutions. The only multiline form has an
+      // inert heredoc body, which the classifier strips before looking for new readings.
+      const refusal = commandTargetsGuardState(command.slice(start, end), cwd, directory);
+      if (refusal !== null) return refusal;
+      i = end;
+    } else if (quote !== null) {
+      if (char === (quote === "ansi" ? "'" : quote)) quote = null;
+    } else if (char === "$" && command[i + 1] === "'") {
+      quote = "ansi";
+      i += 1;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+    }
+  }
+  return null;
+}
+
 /**
  * Refuse a shell command that references the guard-state directory in any form. Unparsable input
  * is refused rather than allowed: this is the state the veto itself depends on. An operand that is
@@ -3055,7 +3226,7 @@ export function commandTargetsGuardState(
       // Refuse the entire reading, including non-path uses, rather than emulate Bash expansion.
       // This also covers partial operands, assignment values and nested operator expressions.
       // An empty name is shell-quote's sentinel for a bare `$` or `$(`, not an operator
-      // expression. Keep its original unresolved reading; command substitution is out of scope.
+      // expression. Keep its original unresolved reading; quoted substitutions are checked separately.
       if (name !== "" && !/^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?$!_-])$/u.test(name)) {
         throw new UnclassifiableCommandError("shell parameter operators cannot be inspected");
       }
@@ -3073,6 +3244,8 @@ export function commandTargetsGuardState(
   if (tokens.some((token) => token != null && typeof token === "object" && "comment" in token)) {
     return guardStateUninspectableRefusal(GUARD_STATE_COMMENT_REASON);
   }
+  const substitutionRefusal = quotedGuardStateSubstitutionRefusal(scanText, cwd, directory);
+  if (substitutionRefusal !== null) return substitutionRefusal;
   // Each distinct reading is resolved once, and a bounded `find` reads its START depths back from here.
   const relations = new Map<string, GuardStateRelation | null>();
   const relationOf = (path: string): GuardStateRelation | null => {
@@ -3134,7 +3307,23 @@ export function commandTargetsGuardState(
   // A backtick nests a command the tokenizer does not separate, and a newline would silently join
   // two commands into one; nothing in either is inspectable.
   const pipeline = readOnlyPipelineWhitelisted(command);
-  const segments = /[`\n\r]/u.test(parseText) ? null : commandSegments(tokens, pipeline);
+  const singleLine = !/[`\n\r]/u.test(parseText);
+  const segments = singleLine ? commandSegments(tokens, pipeline) : null;
+  // This additional check never changes the explicit-operand exemptions. A pipeline can
+  // contain a default-root walk even when it is ineligible for the inspection whitelist.
+  // This reading is limited to shell segments the tokenizer can delimit and direct invocations.
+  const walkSegments = segments ?? (!/[`\n\r]/u.test(parseText.trimEnd()) ? commandSegments(tokens, true) : null);
+  if (walkSegments !== null) {
+    for (const { words, walkWords } of walkSegments) {
+      if (!usesImplicitWalkRoot(walkWords)) continue;
+      const relation = relationOf(".");
+      if (relation?.kind === "inside") return GUARD_STATE_REFUSAL;
+      if (relation?.kind === "ancestor" && !(words?.[0] === "find" &&
+          boundedFind(["find", ".", ...words.slice(1)], () => relation.depth))) {
+        return GUARD_STATE_REFUSAL;
+      }
+    }
+  }
   if (segments === null) {
     // Nothing here is an inspection, so any related word refuses. A word INSIDE the hook directory
     // names the guard state itself. One that only encloses it is refused because the command cannot

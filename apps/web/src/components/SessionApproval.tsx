@@ -31,8 +31,10 @@ import {
   questionEyebrowParts,
   questionOtherChosen,
   questionStepLabel,
+  questionTypesWords,
   type QuestionChoice,
 } from "./requests/QuestionStep.js";
+import { useIsTouchPhone } from "./useIsMobile.js";
 import { holdFieldFocus } from "./requests/hold-field-focus.js";
 import { revealDockedRequest } from "./requests/request-reveal.js";
 import { useClipEdges } from "./requests/clip-edges.js";
@@ -286,6 +288,8 @@ type CardFocus =
  * answer." and a footer of Dismiss and Answer, which opens Answer Mode (R, too). The question is then
  * shown in the composer alone. A person who may not answer reads why instead, and Answer is off.
  * Without a composer to answer in (a worker's or a child's question in a panel) the card is the form.
+ * The form on a touch phone with a composer to answer in types Something Else there (#4714):
+ * choosing it opens Answer Mode, and the step shows the answer so far as a button that opens it again.
  *
  * On the request dock (#2205) the head line ends with Show Where Asked, and while the software
  * keyboard is open the card keeps only the question and its answer: no head line, a one-line title,
@@ -359,7 +363,8 @@ export function SessionQuestionBanner({
   /** As the Request Card's: the Requests panel's detail draws it flush with a sticky footer (#2206). */
   presentation?: "dock" | "panel";
   /** Opens Answer Mode for this question, where the composer can answer it (#2212). In Composer
-   * Response the card is then compact; without it the card is always the form. */
+   * Response the card is then compact; without it the card is always the form. In the form, a touch
+   * phone opens it to type Something Else (#4714). */
   onAnswer?: () => void;
   /** Whether the person has expanded the question (#2786): the dock then keeps this card up. */
   onReadingChange?: (reading: boolean) => void;
@@ -373,6 +378,7 @@ export function SessionQuestionBanner({
   // is unavailable and the foot-note says why.
   const responsesAvailable = runnerOnline && responseRefusal === null;
   const responseStyle = useQuestionResponseStyle();
+  const touchPhone = useIsTouchPhone();
   const instanceScope = useInstanceScope();
   const operationKey = isAsync && occurrenceId ? `${requestId}:${occurrenceId}` : requestId;
   const answerKey = useMemo(() => questionDraftIdentity(requestId, questions, occurrenceId, requestedAt, instanceScope),
@@ -486,6 +492,12 @@ export function SessionQuestionBanner({
   // answer this question, the card is the form whatever the style.
   const compact = responseStyle === "composer" && onAnswer !== undefined;
   const interactive = !compact;
+  // On a touch phone the form's Something Else is typed in the composer, which has the room, the
+  // keyboard's place and the mic that a card's field lacks (#4714).
+  // A secret answered here lives in this card's memory alone (never storage), and opening Answer
+  // Mode takes the card off the dock, so a request with a secret keeps every answer on the card.
+  const typeInComposer = interactive && touchPhone && onAnswer !== undefined &&
+    !questions.some((candidate) => candidate.secret);
   const cardStyle: typeof responseStyle = compact ? "composer" : "interactive";
   const controlsDisabled = busy !== null || !responsesAvailable || unsupportedQuestionFormat || recoveryRequiresDismiss;
   // The form can be answered here: Next checks the step and the last step submits.
@@ -617,23 +629,41 @@ export function SessionQuestionBanner({
   useClipEdges(cardRef);
   useClipEdges(stepRef);
 
+  /** Keep the non-secret drafts where Answer Mode and a remounted card read them. */
+  const storeDrafts = (values: Record<string, QuestionResponseDraft>) => {
+    const cacheable: Record<string, QuestionResponseDraft> = {};
+    for (const candidate of questions) {
+      if (candidate.secret || !Object.hasOwn(values, candidate.id)) continue;
+      Object.defineProperty(cacheable, candidate.id, {
+        value: values[candidate.id],
+        configurable: true,
+        enumerable: true,
+        writable: true,
+      });
+    }
+    storeQuestionDrafts(sessionId, answerKey, cacheable);
+  };
+
   const updateDraft = (target: AgentQuestion, value: QuestionResponseDraft) => {
     setDrafts((current) => {
       const own = current.requestId === answerKey;
       const values = { ...(own ? current.values : {}), [target.id]: value };
-      const cacheable: Record<string, QuestionResponseDraft> = {};
-      for (const candidate of questions) {
-        if (candidate.secret || !Object.hasOwn(values, candidate.id)) continue;
-        Object.defineProperty(cacheable, candidate.id, {
-          value: values[candidate.id],
-          configurable: true,
-          enumerable: true,
-          writable: true,
-        });
-      }
-      storeQuestionDrafts(sessionId, answerKey, cacheable);
+      storeDrafts(values);
       return { requestId: answerKey, values, step: own ? current.step : 0 };
     });
+  };
+
+  /** Type the step's Something Else in the composer (#4714). Answer Mode reads the draft and the step
+   * from storage, and opening it takes this card off the dock in the same commit, before a queued
+   * state update here would run, so both are stored now. */
+  const typeOtherInComposer = (target: AgentQuestion) => {
+    if (!onAnswer || controlsDisabled) return;
+    const draft = draftValue(target.id);
+    const values = { ...draftValues, [target.id]: questionOtherChosen(target, draft) && draft ? draft : { kind: "other", value: "" } as const };
+    storeDrafts(values);
+    storeQuestionStep(sessionId, answerKey, step);
+    setDrafts({ requestId: answerKey, values, step });
+    onAnswer();
   };
 
   const choose = (target: AgentQuestion, choice: QuestionChoice) => {
@@ -642,6 +672,7 @@ export function SessionQuestionBanner({
     const otherChosen = questionOtherChosen(target, draft);
     if (choice === "other") {
       if (otherChosen && target.multiSelect) updateDraft(target, { kind: "choice", labels: [] });
+      else if (typeInComposer && questionTypesWords(target)) typeOtherInComposer(target);
       else if (!otherChosen) updateDraft(target, { kind: "other", value: "" });
       return;
     }
@@ -661,7 +692,8 @@ export function SessionQuestionBanner({
     const target = focusRequest?.target;
     if (!target) return;
     const body = stepRef.current;
-    const field = body?.querySelector<HTMLElement>(".question-input:not(:disabled)");
+    // On a touch phone, Something Else's field is the button that types it in the composer (#4714).
+    const field = body?.querySelector<HTMLElement>(":is(.question-input, .question-handoff):not(:disabled)");
     if (target.kind === "title") {
       // A new step is read from its start, wherever the last one's field had scrolled the body.
       if (body) body.scrollTop = 0;
@@ -1048,6 +1080,7 @@ export function SessionQuestionBanner({
             showKeyHints={keyHints && answerable}
             onChoose={(choice) => choose(question, choice)}
             onText={(value) => updateDraft(question, { kind: "other", value })}
+            onTypeInComposer={typeInComposer ? () => typeOtherInComposer(question) : undefined}
           />
         )}
       </div>}

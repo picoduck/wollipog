@@ -1,6 +1,25 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { describeTurnError, isAutomaticTurnsHeld, isBackgroundResultsHeld, TURN_ERROR_FALLBACK } from "./turn-error.js";
+import { agentLaunchFailure, describeTurnError, isAutomaticTurnsHeld, isBackgroundResultsHeld, TURN_ERROR_FALLBACK } from "./turn-error.js";
+
+test("an agent's setup failures are told apart from failed turns, on the runner's exact wording (#4779)", () => {
+  assert.deepEqual(
+    agentLaunchFailure("agent init failed: Google Antigravity could not be started on this machine. Check its setup in Connections."),
+    { kind: "start", agent: "Google Antigravity", text: "Google Antigravity could not be started on this machine. Check its setup in Connections." },
+  );
+  assert.equal(agentLaunchFailure("agent init failed: Google Antigravity needs sign-in on this machine. Sign in from Connections, then try again.")?.kind, "sign_in");
+  // A prompt rejected for sign-in is a failed turn: it keeps Retry Turn and still says to sign in.
+  for (const rejected of ["Google Antigravity needs sign-in on this machine. Sign in from Connections, then try again.",
+    "prompt failed: Google Antigravity needs sign-in on this machine. Sign in from Connections, then try again."]) {
+    assert.equal(agentLaunchFailure(rejected), null);
+    assert.equal(describeTurnError(rejected), "The provider account needs you to sign in again.");
+  }
+  assert.equal(agentLaunchFailure("agent init failed: Google Antigravity could not resume this conversation, so its history here is read-only. Start a new session to continue.")?.kind, "resume");
+  // A real turn error, an unrelated launch error, and text naming another agent are not setup failures.
+  assert.equal(agentLaunchFailure("Google Antigravity could not complete this turn: Quota exhausted for [account]"), null);
+  assert.equal(agentLaunchFailure("agent init failed: ACP session resume failed"), null);
+  assert.equal(agentLaunchFailure("agent init failed: Evil Agent could not be started on this machine. Check its setup in Connections."), null);
+});
 
 test("describeTurnError says known failures in plain words", () => {
   const cases: Array<[string, string]> = [

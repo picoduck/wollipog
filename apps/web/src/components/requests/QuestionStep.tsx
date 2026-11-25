@@ -49,6 +49,11 @@ export const QUESTION_CARD_COPY = {
   exitAnswerMode: "Exit Answer Mode",
   showContext: "Show Context",
   showAnswer: "Show Answer",
+  // A touch phone types Something Else in the composer (#4714).
+  showOptions: "Show Options",
+  hideOptions: "Hide Options",
+  dictate: "Dictate",
+  stopDictating: "Stop Dictating",
   nothingChosen: "Nothing chosen yet",
   answerEntered: "Answer entered",
   typeAnswer: "Type your answer",
@@ -68,6 +73,19 @@ export const QUESTION_CARD_COPY = {
 /** The footer's foot-note while a request has several questions: "Question 2 of 3". */
 export function questionStepLabel(step: number, count: number): string {
   return `Question ${step + 1} of ${count}`;
+}
+
+/** Answer Mode's head while a touch phone types Something Else (#4714): "Answering Question 2 of 3",
+ * or "Answering the Question" when the request asks only one. */
+export function answeringStepLabel(step: number, count: number): string {
+  return count > 1 ? `Answering ${questionStepLabel(step, count)}` : "Answering the Question";
+}
+
+/** Whether a Something Else answer is free words, which a touch phone types in the composer (#4714).
+ * A secret, and an answer with a format of its own (an email, a number, a date), keep the card's
+ * field and the keyboard that format brings. */
+export function questionTypesWords(question: AgentQuestion): boolean {
+  return !question.secret && (question.inputFormat === undefined || question.inputFormat === "text");
 }
 
 /** The dim line above a question: its header, then "Choose one", "Choose any" or "Optional". */
@@ -182,6 +200,10 @@ export function QuestionChoiceRows({
  *
  * In Composer Response the docked card is compact and the question is answered in the composer
  * (#2212), so this body is the Interactive Form's alone.
+ *
+ * On a touch phone whose composer can answer (`onTypeInComposer`), a Something Else answer in words
+ * is typed there instead (#4714): the card shows what has been typed so far, or what to type, as a
+ * button that opens the composer again, never a field of its own.
  */
 export function QuestionStep({
   question,
@@ -194,6 +216,7 @@ export function QuestionStep({
   showKeyHints,
   onChoose,
   onText,
+  onTypeInComposer,
 }: {
   question: AgentQuestion;
   ids: QuestionStepIds;
@@ -209,17 +232,21 @@ export function QuestionStep({
   showKeyHints: boolean;
   onChoose: (choice: QuestionChoice) => void;
   onText: (value: string) => void;
+  /** Opens the composer to type Something Else (#4714). Given only on a touch phone. */
+  onTypeInComposer?: () => void;
 }) {
   const otherChosen = questionOtherChosen(question, draft);
   const choices = question.options.length > 0;
   const answerable = isAnswerableAgentQuestion(question);
-  const textField = answerable && (!choices || otherChosen);
+  const typedInComposer = onTypeInComposer !== undefined && choices && otherChosen && answerable &&
+    questionTypesWords(question);
+  const textField = answerable && (!choices || otherChosen) && !typedInComposer;
   const names = [ids.header, ids.title].filter((id): id is string => Boolean(id)).join(" ");
   const descriptions = (...extra: Array<string | null>) =>
     [question.context ? ids.context : null, ids.requirement, ...describedBy, ...extra]
       .filter((id): id is string => Boolean(id)).join(" ");
   const keycap = (index: number) => showKeyHints && index < 9 ? <kbd aria-hidden="true">{index + 1}</kbd> : undefined;
-  const choiceError = error && !textField ? ids.error : null;
+  const choiceError = error && !textField && !typedInComposer ? ids.error : null;
   const textValue = draft?.kind === "other" || (draft?.kind === "entry" && (!choices || otherChosen))
     ? questionDraftText(draft) : "";
 
@@ -245,6 +272,23 @@ export function QuestionStep({
             marker={keycap}
             onChoose={onChoose}
           />
+        )}
+        {typedInComposer && (
+          // Named "Something Else" and what has been typed, as the field it stands in for would be.
+          <button
+            type="button"
+            className="question-handoff"
+            data-session-request-control={`question:${question.id}:input`}
+            aria-labelledby={`${ids.somethingElse} ${ids.somethingElse}-text`}
+            aria-describedby={descriptions(error ? ids.error : null)}
+            aria-invalid={error ? true : undefined}
+            disabled={inputDisabled}
+            onClick={onTypeInComposer}
+          >
+            <span id={`${ids.somethingElse}-text`} className={`question-handoff-text${textValue.trim() ? "" : " question-handoff-placeholder"}`}>
+              {textValue.trim() ? textValue : QUESTION_CARD_COPY.typeAnswer}
+            </span>
+          </button>
         )}
         {textField && question.secret && (
           // A secret is uncontrolled, so it never reaches the value attribute (#3814); the draft

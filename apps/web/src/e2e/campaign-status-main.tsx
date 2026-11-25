@@ -68,6 +68,7 @@ import { MINUTE, campaignProjection, forgeObservation, itemDetail, itemSummary, 
 import "../styles.css";
 import { campaignRecoveryFixture } from "./campaign-recovery-fixtures.js";
 import { epicTrackingFixture } from "./epic-tracking-fixture.js";
+import { assistantDecisionHistoryFixture } from "./assistant-decision-fixture.js";
 import {
   campaignDecisionsFixture,
   DECISION_TARGET,
@@ -110,7 +111,8 @@ if (largeCampaign) {
   params.set("recovery", "failed_checks"); params.set("owners", "after");
 }
 const scenario = params.get("scenario") ?? "campaign";
-if (params.get("theme") === "light") document.documentElement.dataset.theme = "light";
+const theme = params.get("theme");
+if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
 
 const NOW = params.has("closureRecovery") || params.has("epicTracking") ? Date.parse("2026-01-01T12:00:00Z") : Date.now();
 let pauseFixture: import("@wollipog/protocol").CampaignPauseView | undefined = params.has("pause") ? {
@@ -550,7 +552,15 @@ function activityProjection(state: "active" | "cleanup" | "complete" | "stuck"):
     limits: { maximumConcurrentChildren: 4, occupied: state === "active" ? 1 : 0, remaining: state === "active" ? 3 : 4, costBudgetUsd: 40, maxToolCalls: null },
     heldChildren: [],
     ...(activityLegacy ? {} : { activity: state === "active" ? { live: ["child_turn" as const, "merge_queue_wait" as const] } : { live: [], ...(state === "complete" ? {} : { repair }) } }),
-    ...(state === "cleanup" && !activityLegacy ? { cleanup: { total: 3, items: [
+    ...(state === "cleanup" && !activityLegacy ? { cleanup: { total: params.has("imageReviewers") ? 11 : 3, items: [
+      ...(params.has("imageReviewers") ? Array.from({ length: 8 }, (_, i) => ({
+        kind: "image_reviewer" as const, sessionId: `s_reviewer_${i}`,
+        reason: params.has("failedReviewer") ? "The image reviewer's Stop failed; archival is still pending."
+          : "The finished image reviewer is waiting for confirmed stop and archival.",
+        action: params.has("failedReviewer")
+          ? { kind: "person" as const, text: "Open the reviewer session and choose Retry Stop, or reconnect its runner." }
+          : { kind: "automatic" as const, text: "Wollipog stops and archives the reviewer when its runner confirms release." },
+      })) : []),
       { kind: "merged_branch" as const, sessionId: "s_child", repository: "picoduck/wollipog", pullRequest: 4217, branch: "agent/s_9d2f41c07a11",
         state: "pending" as const, reason: "The merged branch is still on the remote.",
         action: { kind: "command" as const, command: "gh api -X DELETE 'repos/picoduck/wollipog/git/refs/heads/agent/s_9d2f41c07a11'" } },
@@ -758,7 +768,7 @@ const ownerSnapshot = params.get("closureRecovery") === "owner" ? {
   material: 'Source: ~/.claude/CLAUDE.md\n\nExact rule: "Ask before merging a pull request."\n\nCategories: PR Merge\n\nConfirm only your own general user-level instruction. Repository rules, installed skills and Human Required rules remain unchanged. This applies only to this campaign and boundary revision 3.',
   ruleDelegation: { rule: { source: "~/.claude/CLAUDE.md", quote: "Ask before merging a pull request." }, categories: ["pr_merge" as const], boundaryRevision: 3 },
   options: [{ optionId: "delegate", label: "Delegate for This Campaign", description: undefined }, { optionId: "keep", label: "Keep My Approval", description: undefined }],
-} : { category: "owner_decision" as const, question: "Which credential design should the provider bridge use?",
+} : { category: "owner_decision" as const, ...(params.has("ownerQuestion") ? { kind: "question" as const } : {}), question: "Which credential design should the provider bridge use?",
   material: "PR picoduck/wollipog#4141 at head 3f9c2e1. Both designs pass CI; the broker adds a helper process the owner would run.",
   recommendedOptionId: "lease", options: [
     { optionId: "lease", label: "Short-Lived Lease", description: "Credentials expire with the session." },
@@ -1147,7 +1157,12 @@ const scopeCompatibility = scopeRequirement ? (({ error, ...versions }) =>
 
 /** `screen=1`: the question screen's checks (#4104), one of them waiting for the owner to classify. */
 const decisionUsage = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0 };
-let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["decisions"] = params.get("screen") === "ask" ? [
+let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["decisions"] = params.get("screen") === "handoff" ? [
+  { occurrenceId: "dec_handoff", kind: "credential_screen", promptVersion: "credential_screen.v4", state: "failed", failureClass: "harness_unavailable",
+    inputDigests: {}, target: DECISION_TARGET, attempts: [1, 2, 3].map(attempt => ({ attempt, errorClass: "harness_unavailable" as const, latencyMs: 0 })),
+    usage: decisionUsage, createdAt: NOW - MINUTE, subject: { sessionId: "s_root", surface: "owner_decision", requestId: "rollout-handoff",
+      classificationPending: !params.has("dismissed") } },
+] : params.get("screen") === "ask" ? [
   { occurrenceId: "dec_config", kind: "credential_screen", promptVersion: "credential_screen.v1", state: "decided", verdict: "ask",
     reason: "The configuration migration design could involve provider sign-in; the owner must classify this question.",
     inputDigests: {}, target: DECISION_TARGET, attempts: [{ attempt: 1, model: "claude-haiku-5-5", latencyMs: 1840 }],
@@ -1247,6 +1262,11 @@ if (params.get("typed") === "1") {
 
 const client = {
   ...api,
+  assistantDecisionHistory: async (filter: Parameters<typeof assistantDecisionHistoryFixture>[1] & { campaignId: string }) =>
+    params.get("decision-history") === "empty" ? { entries: [], outcomeCounts: { approved: 0, denied: 0, answered: 0 } }
+    : assistantDecisionHistoryFixture(filter.campaignId, {
+      ...filter, release: params.has("release-history"), stress: params.get("decision-history") === "stress",
+    }),
   ...(params.get("screen") === "ask" ? { session: async (id: string) => ({
     session: { ...sessionsFor(revision).find((candidate) => candidate.id === id)!, pendingApproval: classificationRequest },
   }) } : {}),
@@ -1423,7 +1443,8 @@ class FixtureSocket implements UiSocket {
       this.onopen?.();
       pushToStore?.({
         type: "snapshot",
-        capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false },
+        capabilities: { sessionSubscriptionsV2: false, boundedDelivery: false, paginatedSessionHistory: false,
+          ...(params.has("delegation") ? { assistantDecisionHistory: true } : {}) },
         runners: [], boxes: [], projects: [], sessions: sessionsFor(revision),
       });
     }, 0);
@@ -1504,7 +1525,7 @@ function Fixture() {
                   ))}
                 </div>
               </div>
-              {(ownerScopeCards.length > 0 || params.get("closureRecovery") === "owner") && session.pendingApproval && (
+              {(ownerScopeCards.length > 0 || params.has("ownerQuestion") || params.get("closureRecovery") === "owner") && session.pendingApproval && (
                 <RequestDock session={session} requests={dockRequests(pendingRequests(withPresentedOwnerQuestions(session).pendingApproval))} runnerOnline />
               )}
             </div>

@@ -258,6 +258,7 @@ export type AgentSetupProblem =
   | "update_wollipog"
   | "changed"
   | "needs_windows"
+  | "network_denied"
   | "not_installed"
   | "sign_in"
   | "update_agent"
@@ -271,12 +272,17 @@ export type AgentSetupProblem =
 
 /**
  * Discovery outcomes the runner reports only as `unavailableReason` text, matched on the runner's
- * own wording (apps/runner/src/discovery). agent-options.test.ts reads that source and fails if a
- * pattern stops matching it, so a reworded reason cannot quietly fall through to the generic one.
+ * own wording (apps/runner/src/discovery and antigravity-session.ts). agent-options.test.ts reads
+ * that source and fails if a pattern stops matching it, so a reworded reason cannot quietly fall
+ * through to the generic one.
  */
 export const RUNNER_REASON_PATTERNS = {
   changed: /^The discovered harness executable changed\./u,
   needsWindows: /incompatible with a non-Windows runner/u,
+  /** Google Antigravity's setup check failed (#4779): checking it again in Connections is the fix. */
+  checkFailed: /^The Google Antigravity check failed on this runner\./u,
+  /** The runner's execution isolation denies network access, which the agent needs (#4779). */
+  networkDenied: /needs network access, which this runner's execution isolation denies/u,
   notInstalled: /^Pi is not installed\.|^The configured command was not found/u,
   updatePi: /did not satisfy Wollipog's RPC compatibility probe/u,
   /** Claude Code's one unsupported mode that an update does not fix: Git for Windows Bash. */
@@ -295,6 +301,8 @@ export function agentSetupProblem(a: AgentDefinition, availabilityVerified: bool
   const reason = a.unavailableReason ?? "";
   if (RUNNER_REASON_PATTERNS.changed.test(reason)) return "changed";
   if (RUNNER_REASON_PATTERNS.needsWindows.test(reason)) return "needs_windows";
+  if (RUNNER_REASON_PATTERNS.networkDenied.test(reason)) return "network_denied";
+  if (RUNNER_REASON_PATTERNS.checkFailed.test(reason)) return "unchecked";
   if (a.codexAppServer?.status === "unavailable" || a.codexAppServer?.failure?.code === "codex_unavailable" ||
     a.claudeCode?.status === "unavailable" || a.claudeCode?.failure?.code === "claude_unavailable" ||
     RUNNER_REASON_PATTERNS.notInstalled.test(reason)) {
@@ -344,6 +352,7 @@ export function agentSetupReason(a: AgentDefinition, machine: string, availabili
     case "update_wollipog": return `Update Wollipog on ${machine} to use it.`;
     case "changed": return `It changed on ${machine} since Wollipog last checked it. Check it again in Connections.`;
     case "needs_windows": return "Its WSL launch runs only on a Windows machine.";
+    case "network_denied": return `It needs network access, which execution isolation on ${machine} denies.`;
     case "not_installed": return `Not installed on ${machine}.`;
     case "sign_in": return "Sign in before the session can start.";
     case "update_agent": {

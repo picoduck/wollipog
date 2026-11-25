@@ -1163,7 +1163,7 @@ async function chooseOption(scope: HTMLElement, select: string, option: RegExp) 
   assert.ok(trigger, `${select} is a Select`);
   await act(async () => trigger.click());
   // The menu is portalled to the document, outside the form.
-  const match = [...scope.ownerDocument.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+  const match = [...scope.ownerDocument.querySelectorAll<HTMLButtonElement>('[role="option"], [data-model-choice]')]
     .find((node) => option.test(node.textContent ?? ""));
   assert.ok(match, `${select} offers ${String(option)}`);
   await act(async () => match.click());
@@ -1363,7 +1363,7 @@ test("an exact-row campaign offers only its kept row's models while the change k
   const modelOptions = async () => {
     const trigger = form.querySelector<HTMLButtonElement>('[aria-label^="Child Model:"]')!;
     await act(async () => trigger.click());
-    const labels = [...form.ownerDocument.querySelectorAll('[role="option"]')].map((node) => node.textContent ?? "");
+    const labels = [...form.ownerDocument.querySelectorAll('[role="option"], [data-model-choice]')].map((node) => node.textContent ?? "");
     await act(async () => trigger.click());
     return labels;
   };

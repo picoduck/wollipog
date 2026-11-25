@@ -17,7 +17,9 @@ import type {
   SessionConfig,
   SessionView,
 } from "@wollipog/protocol";
-import { runnerSupportsProtocol } from "@wollipog/protocol";
+import { ANTIGRAVITY_FULL_PERMISSIONS_MODE, runnerSupportsProtocol } from "@wollipog/protocol";
+import { ModelPickerList } from "./ModelPicker.js";
+import { isExactModelChoice } from "../model-picker.js";
 import { modelOptionLabel } from "../agent-presentation.js";
 import {
   permissionModeDescription,
@@ -25,6 +27,8 @@ import {
   permissionModeForDisplay,
   permissionModeLabel,
   effortLabel,
+  resolvedModelLabel,
+  titleCaseLabel,
 } from "../format.js";
 import {
   defaultPermissionMode,
@@ -54,6 +58,7 @@ import {
 import {
   ChevronDownIcon,
   ChevronLeftIcon,
+  ChevronRightIcon,
   CloseIcon,
   ServiceTierIcon,
   ShieldAlertIcon,
@@ -61,7 +66,6 @@ import {
   ShieldIcon,
 } from "./Icons.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
-import { useIsMobile } from "./useIsMobile.js";
 
 type Apply = (patch: Partial<SessionConfig>) => void;
 
@@ -123,8 +127,13 @@ function useSessionConfig(session: SessionView) {
   const { permModes, permVal, showDefaultPermissionMode } = sessionPermissionModeControls(session, caps);
 
   const effective = effectiveModelEffortForDisplay(effectiveCaps, session.driver, session.model, session.effort, caps);
-  const modelVal = effective.model?.id ?? "";
-  const selectedModel = effective.model;
+  const configuredModel = effective.model?.id ?? "";
+  const resolved = session.resolvedModel && (!session.model || !isExactModelChoice(session.model, session.driver))
+    ? session.resolvedModel : null;
+  const modelVal = resolved ?? configuredModel;
+  const selectedModel = resolved
+    ? listedModels.find(model => model.id === resolved) ?? { id: resolved, displayName: resolvedModelLabel(resolved) }
+    : effective.model;
   const modelEfforts = effective.efforts;
   const effortVal = effective.effort ?? "";
   // Context-window variants of one base (`opus` / `opus[1m]`) are one Model entry plus a Context
@@ -157,8 +166,11 @@ export function sessionPermissionModeControls(
   if (session.permissionMode === "orchestrator") {
     return { permModes: ["orchestrator"], permVal: "orchestrator", showDefaultPermissionMode: true };
   }
+  // An ACP agent that names its own modes (#4779) owns them all, `plan` included: its plan mode is
+  // what the agent says, not Wollipog's read-only Plan Mode, and the menu needs no separate Default.
+  const agentOwned = agentOwnsPermissionModes(session.driver, capabilities);
   const advertised = (capabilities?.permissionModes ?? [])
-    .filter((mode) => mode !== "plan" && mode !== "orchestrator");
+    .filter((mode) => (agentOwned || mode !== "plan") && mode !== "orchestrator");
   const piWithoutHostBridge = session.driver === "pi" && session.executionTarget !== undefined &&
     session.executionTarget.adapter !== "host";
   let permModes = piWithoutHostBridge ? ["bypassPermissions"] : advertised;
@@ -174,8 +186,25 @@ export function sessionPermissionModeControls(
     permVal: piWithoutHostBridge
       ? configuredMode || "bypassPermissions"
       : unavailablePiMode ? configuredMode : displayedMode,
-    showDefaultPermissionMode: !piWithoutHostBridge,
+    showDefaultPermissionMode: !piWithoutHostBridge && !agentOwned,
   };
+}
+
+/** Whether the session is in Wollipog's read-only Plan Mode, which shows the Plan pill and its
+ * promise. An agent-owned `plan` (#4779) is one of the agent's modes, shown by Permission Mode. */
+export function nativePlanModeActive(
+  session: Pick<SessionView, "driver" | "permissionMode">,
+  capabilities: Pick<AgentCapabilities, "agentPermissionModes"> | undefined,
+): boolean {
+  return session.permissionMode === "plan" && !agentOwnsPermissionModes(session.driver, capabilities);
+}
+
+/** Whether an ACP session's agent named its own modes, so every mode is the agent's (#4779). */
+export function agentOwnsPermissionModes(
+  driver: AgentDriverKind | undefined,
+  capabilities: Pick<AgentCapabilities, "agentPermissionModes"> | undefined,
+): boolean {
+  return driver === "acp" && (capabilities?.agentPermissionModes?.length ?? 0) > 0;
 }
 
 /** Shared menu shell for the composer-bar dropdowns (bottom-anchored, click-away backdrop). */
@@ -246,9 +275,6 @@ export function BarMenu({
   );
 }
 
-/** Model Settings in two columns: wide enough for a model's description beside the effort list. */
-const MODEL_SETTINGS_TWO_COLUMN_WIDTH = 536;
-
 /** Tab and Shift+Tab move between the popover's stops and wrap at either end: it is portalled to
  * the end of <body>, so the browser would otherwise carry focus out of it with nowhere to go but
  * the address bar. A row the arrow keys moved to is not its group's Tab stop (arrows do not
@@ -256,14 +282,16 @@ const MODEL_SETTINGS_TWO_COLUMN_WIDTH = 536;
 function keepTabInside(event: ReactKeyboardEvent<HTMLDivElement>): void {
   if (event.key !== "Tab") return;
   // A disclosure's <summary> is focusable without a tabindex, though not every DOM reports it so.
-  const stops = [...event.currentTarget.querySelectorAll<HTMLElement>("button, summary, a[href], [tabindex]")]
+  const stops = [...event.currentTarget.querySelectorAll<HTMLElement>("button, input, summary, a[href], [tabindex]")]
     .filter((element) => (element.tabIndex >= 0 || (element.localName === "summary" && !element.hasAttribute("tabindex")))
       && !(element instanceof HTMLButtonElement && element.disabled));
   if (stops.length === 0) return;
   const active = event.currentTarget.ownerDocument.activeElement as HTMLElement | null;
-  // Each group's container: its radio rows, or the segmented Context Window.
-  const group = active?.closest(".model-settings-group") ?? null;
-  const current = stops.findIndex((stop) => stop === active || (group !== null && group.contains(stop)));
+  // When focus is on an arrowed-to radio, use the corresponding group's roving Tab stop.
+  // Search and disclosure controls within a model group have their own stops.
+  const exact = stops.findIndex(stop => stop === active);
+  const group = active?.closest("[role=radiogroup]");
+  const current = exact >= 0 ? exact : stops.findIndex(stop => stop.getAttribute("role") === "radio" && group?.contains(stop));
   const next = current < 0
     ? (event.shiftKey ? stops.length - 1 : 0)
     : (current + (event.shiftKey ? -1 : 1) + stops.length) % stops.length;
@@ -274,11 +302,9 @@ function keepTabInside(event: ReactKeyboardEvent<HTMLDivElement>): void {
 /**
  * Model Settings (docs/design-system.md §9.2, #2191): the model chip and the popover it opens, a
  * `dialog` of radio groups rather than a menu, because a segmented control (the context window)
- * cannot sit inside a menu. Two columns when there is something for each, opening up from the chip
- * at its left edge; on a phone, the shared bottom sheet in one column. It keeps its title row and
- * Close button at every width.
+ * cannot sit inside a menu. It opens at the chip or in the shared bottom sheet on a phone.
  *
- * A Session Usage row opens its breakdown in the choices' place (#2447), as a dialog opened from a
+ * A setting row or a Session Usage row opens its detail in place, as a dialog opened from a
  * sheet pushes onto it (§7.5) rather than stacking a second layer: the title row gains Back and
  * names the breakdown. Escape, like Back, returns to the choices with focus on the row, so each
  * press closes one layer; a reopened popover starts on its choices.
@@ -295,7 +321,7 @@ export function ModelSettingsPopover({
   ariaLabel: string;
   /** Why the signed-in person may not change the model or effort (#1857). */
   disabledReason?: string | null;
-  children: (close: () => void) => ReactNode;
+  children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const popover = useDismissiblePopover(open, setOpen, "model-settings");
@@ -305,6 +331,7 @@ export function ModelSettingsPopover({
   // The row a closed breakdown returns focus to.
   const returnTo = useRef<ModelSettingsDetail | null>(null);
   const backRef = useRef<HTMLButtonElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const detailController = useMemo<ModelSettingsDetailController>(() => ({
     detail,
     open: setDetail,
@@ -320,8 +347,10 @@ export function ModelSettingsPopover({
       returnTo.current = null;
       return;
     }
-    // The first roving stop: the Model group's checked row (or the first group's, without models).
-    popover.panelRef.current?.querySelector<HTMLElement>('[tabindex="0"]')?.focus();
+    const panel = popover.panelRef.current;
+    (panel?.querySelector<HTMLElement>('[tabindex="0"]')
+      ?? panel?.querySelector<HTMLElement>('[data-model-settings-detail]')
+      ?? panel)?.focus();
   }, [open, popover.panelRef]);
   // A breakdown opens at its top with focus on Back; closing it puts focus back on its row, or on
   // the first choice if that row has gone.
@@ -380,14 +409,13 @@ export function ModelSettingsPopover({
       {open && !disabled && (
         <MenuSurface
           surfaceRef={popover.panelRef}
+          contentRef={contentRef}
           anchor={{ trigger: popover.triggerRef }}
           id={popover.panelId}
           kind="popover"
           role="dialog"
           label="Model Settings"
           className="model-settings"
-          // Two columns are as wide as this; one column keeps the popover's own width (styles.css).
-          maxWidth={MODEL_SETTINGS_TWO_COLUMN_WIDTH}
           align="start"
           // Composer popovers stay inside the composer's column, which can be a narrow side panel.
           boundary=".composer-box"
@@ -431,7 +459,7 @@ export function ModelSettingsPopover({
           }}
         >
           <ModelSettingsDetailContext.Provider value={detailController}>
-            {children(() => popover.close(true))}
+            <div ref={contentRef}>{children}</div>
           </ModelSettingsDetailContext.Provider>
         </MenuSurface>
       )}
@@ -441,6 +469,7 @@ export function ModelSettingsPopover({
 
 interface MenuModelChoice {
   id: string;
+  baseModelId?: string;
   displayName?: string;
   description?: string;
   defaultEffort?: string;
@@ -473,7 +502,7 @@ export function plainModelDescription(model: MenuModelChoice): string | undefine
 }
 
 /** One Model Settings choice: §9.1's row with its trailing check, as a radio in its group. */
-function SettingsRadioOption({ checked, tabStop, title, ariaLabel, description, icon, onSelect, children }: {
+function SettingsRadioOption({ checked, tabStop, title, ariaLabel, description, icon, disabled, onSelect, children }: {
   checked: boolean;
   /** The group's one Tab stop (roving): the checked option, or the first when none is. */
   tabStop: boolean;
@@ -481,12 +510,14 @@ function SettingsRadioOption({ checked, tabStop, title, ariaLabel, description, 
   ariaLabel?: string;
   description?: ReactNode;
   icon?: ReactNode;
+  disabled?: boolean;
   onSelect: () => void;
   children: ReactNode;
 }) {
   return (
     <MenuItem
       role="radio"
+      aria-disabled={disabled || undefined}
       checked={checked}
       tabIndex={tabStop ? 0 : -1}
       aria-label={ariaLabel}
@@ -506,10 +537,10 @@ function SettingsRadioOption({ checked, tabStop, title, ariaLabel, description, 
  * configuration request, and a model change resets the effort, so arrowing past a model must not
  * choose it on the way.
  */
-function SettingsRadioGroup({ label, children }: { label: string; children: ReactNode }) {
+function SettingsRadioGroup({ label, children, showLabel = true }: { label: string; children: ReactNode; showLabel?: boolean }) {
   return (
     <div className="model-settings-group">
-      <MenuLabel>{label}</MenuLabel>
+      {showLabel && <MenuLabel>{label}</MenuLabel>}
       <div
         role="radiogroup"
         aria-label={label}
@@ -521,9 +552,28 @@ function SettingsRadioGroup({ label, children }: { label: string; children: Reac
   );
 }
 
-/** Pure leaf so the independent radio groups retain an executable semantic contract. */
+function ModelSettingRow({ detail, value, onClick }: {
+  detail: "reasoning-effort" | "speed";
+  value: string;
+  onClick: () => void;
+}) {
+  const label = MODEL_SETTINGS_DETAIL_TITLES[detail];
+  return (
+    <button type="button" className="menu-item model-setting-selector" data-model-settings-detail={detail}
+      aria-label={`${label}: ${value}`} onClick={onClick}>
+      <span className="menu-body"><span className="menu-text">{label}</span></span>
+      <span className="menu-trail" aria-hidden="true">
+        <span className="menu-text">{value}</span>
+        <ChevronRightIcon size={14} />
+      </span>
+    </button>
+  );
+}
+
+/** The settings overview and the choices for the active selector. */
 export function ModelEffortMenuChoices({
   models,
+  modelDriver,
   modelSource,
   modelVal,
   selectedModel,
@@ -533,12 +583,12 @@ export function ModelEffortMenuChoices({
   effortVal,
   pendingEffort,
   serviceTierState,
+  pendingServiceTier,
   sessionUsage = null,
-  stacked = false,
-  close,
   apply,
 }: {
   models: MenuModelChoice[];
+  modelDriver?: AgentDriverKind;
   modelSource?: string;
   modelVal: string;
   selectedModel?: MenuModelChoice;
@@ -553,44 +603,88 @@ export function ModelEffortMenuChoices({
    * yet; undefined means nothing is staged. */
   pendingEffort?: () => string | undefined;
   serviceTierState?: NonNullable<ReturnType<typeof serviceTierChoices>> | null;
-  /** The Session Usage group (#2166), first and above the choices at every width. While one of its
-   * rows has its breakdown open (#2447), that breakdown is all Model Settings shows. */
+  pendingServiceTier?: () => string | undefined;
+  /** A usage row opens its breakdown in this overview's place (#2447). */
   sessionUsage?: ReactNode;
-  /** One column in reading order (the phone sheet): Model, Context Window, Reasoning Effort, then
-   * Service Tier. Otherwise the effort has a column of its own beside the rest. */
-  stacked?: boolean;
-  close?: () => void;
   apply: Apply;
 }) {
   const detail = useModelSettingsDetail();
-  // A breakdown takes the choices' place (#2447). The group renders it, so a breakdown left open
-  // when the group goes (the bar has room for the triggers again) returns to the choices.
-  const detailOpen = detail?.detail != null;
-  const orphaned = detailOpen && sessionUsage == null;
+  const active = detail?.detail;
+  const usageDetail = active === "context-window" || active === "session-cost";
+  const orphaned = (usageDetail && sessionUsage == null) ||
+    (active === "reasoning-effort" && !modelEfforts.length) || (active === "speed" && !serviceTierState);
   useEffect(() => {
     if (orphaned) detail?.back();
   }, [orphaned, detail]);
-  if (detailOpen && !orphaned) return <div className="model-settings-detail">{sessionUsage}</div>;
-  const modelListed = models.some((model) => model.id === modelVal);
-  const modelGroup = models.length > 0 && (
-    <SettingsRadioGroup label={`Model${modelSource === "cached" ? " (Cached)" : ""}`}>
-      {models.map((model, index) => {
-        const description = plainModelDescription(model);
-        const label = modelOptionLabel(model, models);
-        return (
-          <SettingsRadioOption
-            key={model.id}
-            checked={model.id === modelVal}
-            tabStop={modelListed ? model.id === modelVal : index === 0}
-            title={description}
-            ariaLabel={label}
-            description={description}
-            onSelect={() => apply({ model: model.id, effort: "", serviceTier: "" })}
-          >
-            {label}
-          </SettingsRadioOption>
-        );
-      })}
+  if (usageDetail && !orphaned) {
+    return <div className="model-settings-detail model-settings-usage-breakdown">{sessionUsage}</div>;
+  }
+
+  const currentEffort = pendingEffort?.() ?? effortVal;
+  const defaultEffortLabel = selectedModel?.defaultEffort
+    ? `Default (${effortLabel(selectedModel.defaultEffort)})`
+    : "Default";
+  const pendingTier = pendingServiceTier?.();
+  const currentTier = serviceTierState?.choices.find(choice => choice.id === pendingTier) ?? serviceTierState?.selected;
+  if (active === "reasoning-effort" && !orphaned) {
+    const chooseEffort = (effort: string) => {
+      apply({ effort });
+      detail?.back();
+    };
+    return <div className="model-settings-detail">
+      <SettingsRadioGroup label="Reasoning Effort" showLabel={false}>
+        <SettingsRadioOption checked={!currentEffort} tabStop={!modelEfforts.includes(currentEffort)}
+          onSelect={() => chooseEffort("")}>{defaultEffortLabel}</SettingsRadioOption>
+        {modelEfforts.map(effort => (
+          <SettingsRadioOption key={effort} checked={effort === currentEffort} tabStop={effort === currentEffort}
+            onSelect={() => chooseEffort(effort)}>{effortLabel(effort)}</SettingsRadioOption>
+        ))}
+      </SettingsRadioGroup>
+      <MenuNote>Changes apply from the next turn.</MenuNote>
+    </div>;
+  }
+  if (active === "speed" && serviceTierState && currentTier) {
+    return <div className="model-settings-detail">
+      <SettingsRadioGroup label="Speed" showLabel={false}>
+        {serviceTierState.choices.map(choice => (
+          <SettingsRadioOption key={choice.id} checked={choice.id === currentTier.id} tabStop={choice.id === currentTier.id}
+            description={choice.description || undefined}
+            icon={choice.id.toLowerCase() === "fast" ? <ServiceTierIcon size={16} /> : undefined}
+            onSelect={() => {
+              apply({ serviceTier: choice.id });
+              detail?.back();
+            }}>{choice.name}</SettingsRadioOption>
+        ))}
+      </SettingsRadioGroup>
+      <MenuNote>Changes apply from the next turn.</MenuNote>
+    </div>;
+  }
+  const exactModels = models.filter(model => isExactModelChoice(model.id, modelDriver));
+  const modelChoices = exactModels.map(model => ({
+    value: model.id, label: modelOptionLabel(model, exactModels), description: plainModelDescription(model),
+    baseModelId: model.baseModelId,
+  }));
+  const savedChoice = models.find(model => model.id === modelVal) ?? selectedModel;
+  if (savedChoice && !modelChoices.some(option => option.value === modelVal)) {
+    modelChoices.push({ value: modelVal, label: savedChoice.displayName ?? modelVal,
+      description: plainModelDescription(savedChoice), baseModelId: savedChoice.baseModelId });
+  }
+  const modelOption = modelChoices.find(option => option.value === modelVal) ?? modelChoices[0];
+  const modelGroup = modelChoices.length > 0 && (
+    <SettingsRadioGroup label={modelSource === "cached" ? "Model (Cached)" : "Model"}>
+      {!exactModels.length && <MenuNote>This harness reports model aliases only. Rediscover it in Connections to check for specific models.</MenuNote>}
+      <ModelPickerList options={modelChoices} value={modelVal} context={{ mode: "exact", driver: modelDriver }}
+        renderOption={option => <SettingsRadioOption
+          key={option.value}
+          checked={option.value === modelVal}
+          tabStop={option.value === modelOption?.value}
+          title={option.description}
+          ariaLabel={option.label}
+          description={option.description}
+          disabled={option.retained || option.disabled}
+          onSelect={() => { if (!option.retained && !option.disabled) apply({ model: option.value, effort: "", serviceTier: "" }); }}
+        >{option.label}</SettingsRadioOption>}
+      />
     </SettingsRadioGroup>
   );
   const contextGroup = contextChoice && (
@@ -628,34 +722,16 @@ export function ModelEffortMenuChoices({
       />
     </div>
   );
-  const effortListed = modelEfforts.includes(effortVal);
-  const effortGroup = modelEfforts.length > 0 && (
-    <SettingsRadioGroup label="Reasoning Effort">
-      <SettingsRadioOption checked={!effortVal} tabStop={!effortListed} onSelect={() => apply({ effort: "" })}>
-        {selectedModel?.defaultEffort ? `Default (${selectedModel.defaultEffort})` : "Default"}
-      </SettingsRadioOption>
-      {modelEfforts.map((effort) => (
-        <SettingsRadioOption key={effort} checked={effort === effortVal} tabStop={effort === effortVal} onSelect={() => apply({ effort })}>
-          {effortLabel(effort)}
-        </SettingsRadioOption>
-      ))}
-    </SettingsRadioGroup>
-  );
-  const tierGroup = serviceTierState && (
-    <ServiceTierMenuChoices state={serviceTierState} apply={apply} close={close ?? (() => undefined)} />
-  );
-  const leading = Boolean(modelGroup || contextGroup || tierGroup);
   return (
     <>
       {sessionUsage}
-      {stacked || !leading || !effortGroup ? (
-        <div className="model-settings-column">{modelGroup}{contextGroup}{effortGroup}{tierGroup}</div>
-      ) : (
-        <div className="model-settings-columns">
-          <div className="model-settings-column">{modelGroup}{contextGroup}{tierGroup}</div>
-          <div className="model-settings-column">{effortGroup}</div>
-        </div>
-      )}
+      {modelEfforts.length > 0 && <ModelSettingRow detail="reasoning-effort"
+        value={currentEffort ? effortLabel(currentEffort) : defaultEffortLabel}
+        onClick={() => detail?.open("reasoning-effort")} />}
+      {currentTier && <ModelSettingRow detail="speed" value={currentTier.name}
+        onClick={() => detail?.open("speed")} />}
+      {modelGroup}
+      {contextGroup}
       <MenuNote>Changes apply from the next turn.</MenuNote>
     </>
   );
@@ -719,14 +795,12 @@ export function ModelEffortControl(
   const {
     caps, models, contextChoice, modelSource, modelVal, selectedModel, modelEfforts, effortVal, serviceTierState, available,
   } = useModelSettings(session, pendingModel, pendingServiceTier);
-  // The phone sheet is one column in reading order (§9.2).
-  const sheet = useIsMobile();
   if (!available) return null;
   const pickerModel = models.find((model) => model.id === modelVal) ?? selectedModel;
   const selectedWindow = contextChoice?.options.find((option) => option.id === contextChoice.selectedId);
   const modelLabel = modelEffortControlLabel(pickerModel, modelVal);
   const effortSuffix = effortVal ? effortLabel(effortVal) : "";
-  const tooltip = `${modelLabel}${effortSuffix ? ` · ${effortSuffix}` : ""}. Opens Model Settings for model${contextChoice ? ", context window" : ""}, reasoning effort${serviceTierState ? ", and service tier" : ""}.`;
+  const tooltip = `${modelLabel}${effortSuffix ? ` · ${effortSuffix}` : ""}. Opens Model Settings for model${contextChoice ? ", context window" : ""}, reasoning effort${serviceTierState ? ", and speed" : ""}.`;
   // The model name is the chip's only truncating label. A phone hides the context size, and with
   // Plan on also the mark and the effort, so the accessible name is what keeps all of them (#2174).
   const label = (
@@ -745,24 +819,22 @@ export function ModelEffortControl(
       ariaLabel={`Model Settings: ${accessibleFacts}`}
       disabledReason={disabledReason}
     >
-      {(close) => (
-        <ModelEffortMenuChoices
-          models={models}
-          modelSource={modelSource}
-          modelVal={modelVal}
-          selectedModel={selectedModel}
-          contextChoice={contextChoice}
-          modelEfforts={modelEfforts}
-          agentEffortLevels={caps?.effortLevels}
-          effortVal={effortVal}
-          pendingEffort={pendingEffort}
-          serviceTierState={serviceTierState}
-          sessionUsage={sessionUsage}
-          stacked={sheet}
-          close={close}
-          apply={apply}
-        />
-      )}
+      <ModelEffortMenuChoices
+        models={models}
+        modelDriver={session.driver}
+        modelSource={modelSource}
+        modelVal={modelVal}
+        selectedModel={selectedModel}
+        contextChoice={contextChoice}
+        modelEfforts={modelEfforts}
+        agentEffortLevels={caps?.effortLevels}
+        effortVal={effortVal}
+        pendingEffort={pendingEffort}
+        serviceTierState={serviceTierState}
+        sessionUsage={sessionUsage}
+        pendingServiceTier={pendingServiceTier}
+        apply={apply}
+      />
     </ModelSettingsPopover>
   );
 }
@@ -797,36 +869,10 @@ export function serviceTierChoices(
   return { choices, selected: choices.find((choice) => choice.id === preferred) ?? choices[0]! };
 }
 
-export function ServiceTierMenuChoices({ state, apply, close }: {
-  state: NonNullable<ReturnType<typeof serviceTierChoices>>;
-  apply: Apply;
-  close: () => void;
-}) {
-  return (
-    <SettingsRadioGroup label="Service Tier">
-      {state.choices.map((choice) => (
-        <SettingsRadioOption
-          key={choice.id}
-          checked={choice.id === state.selected.id}
-          tabStop={choice.id === state.selected.id}
-          title={choice.description || undefined}
-          icon={choice.id.toLowerCase() === "fast" ? <ServiceTierIcon size={16} /> : null}
-          description={choice.description || undefined}
-          onSelect={() => {
-            apply({ serviceTier: choice.id });
-            close();
-          }}
-        >
-          {choice.name}
-        </SettingsRadioOption>
-      ))}
-    </SettingsRadioGroup>
-  );
-}
-
 /** A mode that runs every action without command approvals: the shield's amber risk warning. */
 function skipsApprovals(permissionMode: string | undefined): boolean {
-  return permissionMode === "bypassPermissions" || permissionMode === "danger-full-access";
+  return permissionMode === "bypassPermissions" || permissionMode === "danger-full-access" ||
+    permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id;
 }
 
 /**
@@ -912,11 +958,38 @@ export function permissionModeOptionDescription(
   return base;
 }
 
+/** An ACP agent's own name and meaning for one of its modes, when its session advertised them
+ * (#4779). A native harness's meaning for the same id (Claude's classifier `auto`, say) never
+ * describes an ACP agent's mode. */
+export function advertisedPermissionMode(
+  capabilities: AgentCapabilities | undefined,
+  driver: AgentDriverKind,
+  mode: string | undefined,
+): { label: string; description: string } | undefined {
+  if (driver !== "acp" || !mode) return undefined;
+  // Wollipog's own mode, not the agent's: the runner approves every request agy sends.
+  if (mode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) {
+    return { label: ANTIGRAVITY_FULL_PERMISSIONS_MODE.name,
+      description: "Wollipog approves every action Antigravity asks about, without asking you. Runner isolation still applies." };
+  }
+  const entry = capabilities?.agentPermissionModes?.find((candidate) => candidate.id === mode);
+  if (!entry) return undefined;
+  // The agent's words, said as its own: Wollipog can't verify what an agent-owned mode permits (agy
+  // 1.5.14 edited a file without asking in its Default), only that it shows what the agent asks.
+  const claim = entry.description
+    ? `The agent describes this mode as “${entry.description.replace(/[.\s]+$/u, "")}.”`
+    : "Wollipog doesn't know what this mode permits.";
+  return { label: titleCaseLabel(entry.name), description: `${claim} You're asked only about actions the agent sends for approval.` };
+}
+
 export function approvalControlLabel(
   driver: AgentDriverKind,
   permissionMode: string,
   _status: ElicitationAvailability,
+  capabilities?: AgentCapabilities,
 ): string {
+  const advertised = advertisedPermissionMode(capabilities, driver, permissionMode);
+  if (advertised) return advertised.label;
   if (permissionMode) return permissionModeLabel(permissionMode, driver);
   if (driver === "pi") return permissionModeLabel("default", driver);
   if (driver === "claude-code") return defaultPermissionModeDisplayLabel(driver);
@@ -978,7 +1051,7 @@ export function ApprovalsMenuChoices({
     }] : []),
     ...displayedModes.map((mode) => ({
       key: `mode-${mode}`,
-      label: permissionModeLabel(mode, driver),
+      label: advertisedPermissionMode(capabilities, driver, mode)?.label ?? permissionModeLabel(mode, driver),
       mode,
       checked: mode === permVal,
       select: () => {
@@ -988,9 +1061,10 @@ export function ApprovalsMenuChoices({
   ];
   const described = rows.map((row) => {
     const status = elicitationAvailability(capabilities, row.mode);
+    const advertised = row.key === "default-row" ? undefined : advertisedPermissionMode(capabilities, driver, row.mode);
     return {
       ...row,
-      description: permissionModeOptionDescription(
+      description: advertised?.description ?? permissionModeOptionDescription(
         row.mode,
         driver,
         status,
@@ -1040,7 +1114,7 @@ export function ApprovalsControl({ session, apply, disabledReason = null }: {
   if (permModes.length === 0) return null;
   const currentMode = permVal || defaultPermissionMode(session.driver);
   const currentStatus = elicitationAvailability(caps, currentMode);
-  const currentLabel = approvalControlLabel(session.driver, permVal, currentStatus);
+  const currentLabel = approvalControlLabel(session.driver, permVal, currentStatus, caps);
   const unrestricted = skipsApprovals(currentMode);
   const accessibleLabel = `Permission Mode: ${currentLabel}`;
   if (permModes.length === 1 && permModes[0] === "orchestrator") {

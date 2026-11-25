@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import test from "node:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import fc from "fast-check";
 import { CANDIDATE_POLICY, candidatePlan, candidateReceipt, queueCandidate } from "./main-validation-candidates.mjs";
 import { admit, COMPACT_EVERY, emptyState, main, observe, plan, readState, reconcile, REQUIRED, RETRY_MS, STATE_REF,
@@ -275,6 +277,137 @@ function forge() {
   };
   return { data, api };
 }
+
+// Each snapshot is one traversal, with an explicit page sequence. Other endpoints
+// still use the stateful forge so tests exercise real admission/reconciliation.
+function queuedListings(api, snapshots) {
+  const pages = [], waits = [];
+  let attempt = -1;
+  return { pages, waits, sleep: async ms => { waits.push(ms); }, api: async (path, options) => {
+    const url = new URL(path, "https://api.github.com");
+    if (url.pathname.endsWith("/runs") && url.searchParams.get("status") === "queued") {
+      const page = Number(url.searchParams.get("page"));
+      if (page === 1) attempt++;
+      pages.push(page);
+      const snapshot = snapshots[Math.min(attempt, snapshots.length - 1)];
+      return snapshot[page - 1] ?? { workflow_runs: [], total_count: snapshot[0].total_count };
+    }
+    return api(path, options);
+  } };
+}
+
+test("admission retries an empty page with a transiently inflated total from page one", async () => {
+  const { data, api } = forge(); data.nativeQueue = true;
+  await reconcile(repository, { api, now: () => at(), log: () => {} });
+  const worker = data.runs.at(-1);
+  const listing = queuedListings(api, [
+    [{ workflow_runs: [], total_count: 1 }],
+    [{ workflow_runs: [], total_count: 0 }],
+  ]);
+  assert.equal(await admit(repository, eventFor(worker), worker.id, 1, { api: listing.api, sleep: listing.sleep }), true);
+  assert.deepEqual(listing.pages, [1, 1]);
+  assert.deepEqual(listing.waits, [5000]);
+  const state = (await readState(api, repository)).value;
+  assert.equal(state.active.runId, worker.id); assert.equal(state.pending, null);
+  assert.equal(data.dispatches.length, 1);
+});
+
+test("page shifts cannot count duplicate run IDs as a complete census", async () => {
+  const { api } = forge();
+  const first = run({ id: 20, status: "queued", conclusion: null });
+  const second = run({ id: 21, status: "queued", conclusion: null });
+  const listing = queuedListings(api, [
+    [{ workflow_runs: [first], total_count: 2 }, { workflow_runs: [first], total_count: 2 }],
+    [{ workflow_runs: [first, second, first], total_count: 2 }],
+  ]);
+  const result = await observe(listing.api, repository, emptyState(repository), { sleep: listing.sleep });
+  assert.deepEqual(listing.pages, [1, 2, 3, 1]);
+  assert.deepEqual(result.active.map(r => r.id), [20, 21]);
+});
+
+test("persistent short census fails closed without losing pending intent; next terminal wake recovers", async () => {
+  const { data, api } = forge(); data.nativeQueue = true;
+  await reconcile(repository, { api, now: () => at(), log: () => {} });
+  const worker = data.runs.at(-1);
+  const before = await readState(api, repository);
+  const listing = queuedListings(api, [[{ workflow_runs: [], total_count: 1 }]]);
+  await assert.rejects(admit(repository, eventFor(worker), worker.id, 1, { api: listing.api, sleep: listing.sleep }),
+    { failureClass: "worker-listing-truncated-operator-reconciliation-required" });
+  assert.deepEqual(listing.pages, [1, 1, 1, 1, 1]);
+  assert.deepEqual(listing.waits, [5000, 10000, 20000, 30000]);
+  assert.deepEqual(await readState(api, repository), before);
+  assert.equal(data.dispatches.length, 1);
+  worker.status = "completed"; worker.conclusion = "failure"; data.jobs.set(`${worker.id}/1`, []);
+  const transient = queuedListings(api, [
+    [{ workflow_runs: [], total_count: 1 }], [{ workflow_runs: [], total_count: 0 }],
+  ]);
+  const env = { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test", GITHUB_REF: "refs/heads/main",
+    MAIN_ROLLING_WORKER_RUN_ID: String(worker.id), MAIN_ROLLING_WORKER_ATTEMPT: "1" };
+  assert.equal(await main(["reconcile"], { env, api: transient.api, sleep: transient.sleep,
+    waitForWorker: async () => ({ status: "completed" }), log: () => {}, error: () => {} }), 0);
+  assert.deepEqual(transient.pages, [1, 1]);
+  assert.equal(data.dispatches.length, 2);
+  assert.equal(data.dispatches.at(-1).inputs.target_sha, A);
+});
+
+test("listing transport and malformed payload failures are never retried", async () => {
+  for (const failure of [new Error("private response body"), { workflow_runs: null, total_count: 1 }]) {
+    const { data, api } = forge();
+    let reads = 0;
+    await assert.rejects(reconcile(repository, { api: async (path, options) => {
+      if (path.includes("status=queued")) {
+        reads++;
+        if (failure instanceof Error) throw failure;
+        return failure;
+      }
+      return api(path, options);
+    }, log: () => {} }));
+    assert.equal(reads, 1); assert.equal(data.mutations.length, 0); assert.equal(data.dispatches.length, 0);
+  }
+});
+
+test("listing retries discard prior census and retain the ten-page bound", async () => {
+  const { api } = forge();
+  const first = run({ id: 20, status: "queued", conclusion: null });
+  const second = run({ id: 21, status: "queued", conclusion: null });
+  const changed = queuedListings(api, [
+    [{ workflow_runs: [first], total_count: 2 }],
+    [{ workflow_runs: [second], total_count: 1 }],
+  ]);
+  assert.deepEqual((await observe(changed.api, repository, emptyState(repository), { sleep: changed.sleep })).active.map(r => r.id), [21]);
+  const capped = queuedListings(api, [Array.from({ length: 10 }, () => ({ workflow_runs: [first], total_count: 1001 }))]);
+  await assert.rejects(observe(capped.api, repository, emptyState(repository), { sleep: capped.sleep }),
+    { failureClass: "worker-listing-truncated-operator-reconciliation-required" });
+  assert.deepEqual(capped.pages, Array.from({ length: 5 }, () => Array.from({ length: 10 }, (_, i) => i + 1)).flat());
+});
+
+test("a short census lasting forty seconds recovers within the bounded retry window", async () => {
+  const { data, api } = forge();
+  let elapsed = 0;
+  const waits = [];
+  const transient = async (path, options) => {
+    if (path.includes("status=pending") && elapsed < 40_000) return { workflow_runs: [], total_count: 1 };
+    return api(path, options);
+  };
+  await reconcile(repository, { api: transient, now: () => at(), log: () => {},
+    sleep: async ms => { waits.push(ms); elapsed += ms; } });
+  assert.deepEqual(waits, [5000, 10000, 20000, 30000]);
+  assert.equal(elapsed, 65_000); assert.equal(data.dispatches.length, 1);
+});
+
+test("CAS retries share the invocation's sixty-five-second listing delay allowance", async () => {
+  const { data, api } = forge();
+  let listings = 0;
+  const waits = [];
+  await assert.rejects(reconcile(repository, { api: async (path, options) => {
+    if (path.includes("status=queued")) return { workflow_runs: [], total_count: ++listings % 5 === 0 ? 0 : 1 };
+    if (path === "/graphql") return { errors: [{ message: "CAS refused" }] };
+    return api(path, options);
+  }, log: () => {}, sleep: async ms => { waits.push(ms); } }),
+  { failureClass: "worker-listing-truncated-operator-reconciliation-required" });
+  assert.deepEqual(waits, [5000, 10000, 20000, 30000]);
+  assert.equal(data.oid, null); assert.equal(data.dispatches.length, 0);
+});
 
 test("candidate request persists before dispatch, concurrent/cross-purpose duplicates share one claim", async () => {
   const { data, api } = forge();
@@ -596,7 +729,7 @@ test("errors never log response bodies or token-bearing exception messages", asy
   const rc = await main(["reconcile"], { env: { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "private-token", GITHUB_REF: "refs/heads/main" },
     api: async () => { throw new Error("private-token private response body"); }, error: (line) => errors.push(line) });
   assert.equal(rc, 1); assert.ok(!errors.join("").includes("private-token"));
-  assert.deepEqual(JSON.parse(errors[0]), { event: "main_rolling_error", httpStatus: null, status: "reconciliation-required" });
+  assert.deepEqual(JSON.parse(errors[0]), { event: "main_rolling_error", failureClass: "unexpected-error", httpStatus: null, status: "reconciliation-required" });
 });
 
 test("a delayed duplicate dispatch cannot repeat an already verified target", async () => {
@@ -927,4 +1060,165 @@ test("an operator rerun in the replaceable pending slot remains an incomplete re
   assert.equal(a.status, "in_progress"); assert.equal(manual.conclusion, "cancelled");
   assert.equal(record(manual, []).verdict, "incomplete");
   assert.equal(data.runs.at(-1).status, "pending");
+});
+
+
+test("predecessor completion reconciliation between admission read and CAS retries from fresh evidence", async () => {
+  const { data, api } = forge(); data.nativeQueue = true;
+  await reconcile(repository, { api, now: () => at(), log: () => {} });
+  const prior = data.runs.at(-1);
+  await admit(repository, eventFor(prior), prior.id, 1, { api });
+  data.main = B;
+  await reconcile(repository, { api, now: () => at(2), log: () => {} });
+  const successor = data.runs.at(-1);
+  data.finish(prior);
+  data.jobs.set(`${successor.id}/1`, []);
+  let conflicts = 0;
+  const racingApi = async (path, options) => {
+    if (path === "/graphql" && conflicts++ === 0) {
+      // A completion-triggered controller clears the old active pointer after the
+      // successor reads it, but before its fenced admission write.
+      await reconcile(repository, { api, now: () => at(41), log: () => {} });
+    }
+    return api(path, options);
+  };
+  assert.equal(await admit(repository, eventFor(successor), successor.id, 1, { api: racingApi }), true);
+  assert.equal(conflicts, 2);
+  const stored = await readState(api, repository);
+  assert.equal(stored.value.active.runId, successor.id);
+  assert.equal(stored.value.pending, null);
+  assert.equal(data.dispatches.length, 2, "admission retries never dispatch another worker");
+});
+
+test("admission errors expose only sanitized classes and request a bounded completion reconciliation", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rolling-admit-"));
+  try {
+    const eventPath = join(dir, "event.json"), output = join(dir, "output");
+    writeFileSync(eventPath, JSON.stringify(eventFor(run())));
+    const errors = [];
+    const rc = await main(["admit"], { env: { GITHUB_REPOSITORY: repository,
+      GITHUB_TOKEN: "secret", GITHUB_REF: "refs/heads/main", GITHUB_RUN_ID: "10", GITHUB_RUN_ATTEMPT: "1",
+      GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: output },
+      api: async () => { throw new TypeError("secret transport body"); }, error: line => errors.push(JSON.parse(line)) });
+    assert.equal(rc, 1);
+    assert.equal(errors[0].failureClass, "type-error");
+    assert.equal(errors[0].httpStatus, null);
+    assert.doesNotMatch(JSON.stringify(errors), /secret|transport body/);
+    assert.equal(readFileSync(output, "utf8"), "reconcile=true\n");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("exhausted admission CAS conflicts recover through terminal reconciliation without a push", async () => {
+  const { data, api } = forge(); data.nativeQueue = true;
+  await reconcile(repository, { api, now: () => at(), log: () => {} });
+  const prior = data.runs.at(-1); await admit(repository, eventFor(prior), prior.id, 1, { api });
+  data.main = B; await reconcile(repository, { api, now: () => at(2), log: () => {} });
+  const successor = data.runs.at(-1); data.finish(prior); data.jobs.set(`${successor.id}/1`, []);
+  const dir = mkdtempSync(join(tmpdir(), "rolling-conflict-"));
+  try {
+    const eventPath = join(dir, "event.json"), output = join(dir, "output");
+    writeFileSync(eventPath, JSON.stringify(eventFor(successor)));
+    const env = { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test", GITHUB_REF: "refs/heads/main" };
+    const errors = []; let conflicts = 0;
+    assert.equal(await main(["admit"], { env: { ...env, GITHUB_RUN_ID: String(successor.id),
+      GITHUB_RUN_ATTEMPT: "1", GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: output },
+      api: async (path, options) => {
+        if (path === "/graphql") { conflicts++; return { errors: [{ message: "untrusted body" }] }; }
+        return api(path, options);
+      }, error: line => errors.push(JSON.parse(line)) }), 1);
+    assert.equal(conflicts, 3);
+    assert.deepEqual(errors[0], { event: "main_rolling_error", failureClass: "state-conflict",
+      httpStatus: null, status: "reconciliation-required" });
+    assert.equal(readFileSync(output, "utf8"), "reconcile=true\n");
+    assert.equal((await readState(api, repository)).value.active.runId, prior.id);
+    successor.status = "completed"; successor.conclusion = "failure";
+    assert.equal(await main(["reconcile"], { env: { ...env, MAIN_ROLLING_WORKER_RUN_ID: String(successor.id),
+      MAIN_ROLLING_WORKER_ATTEMPT: "1" }, api, log: () => {} }), 0);
+    const replacement = data.runs.at(-1);
+    assert.notEqual(replacement.id, successor.id);
+    assert.equal(workerIdentity(replacement, repository).targetSha, B);
+    assert.equal(await admit(repository, eventFor(replacement), replacement.id, 1, { api }), true);
+    assert.notEqual((await readState(api, repository)).value.lastVerdict?.targetSha, B,
+      "recovery admission cannot certify the target");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("handoff failures retain only allow-listed failure classes and never reconcile", async () => {
+  for (const reason of ["invalid-worker-handoff", "worker-handoff-identity-changed", "worker-handoff-status-unknown", "private body"]) {
+    const errors = [];
+    const rc = await main(["reconcile"], { env: { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test",
+      GITHUB_REF: "refs/heads/main", MAIN_ROLLING_WORKER_RUN_ID: "10", MAIN_ROLLING_WORKER_ATTEMPT: "1" },
+      api: async () => assert.fail("no state reads after failed handoff"),
+      waitForWorker: async () => { const error = new Error("private message"); error.reason = reason; throw error; },
+      error: line => errors.push(JSON.parse(line)) });
+    assert.equal(rc, 1);
+    assert.equal(errors[0].failureClass, reason === "private body" ? "unexpected-error" : reason);
+    assert.doesNotMatch(JSON.stringify(errors), /private/);
+  }
+});
+
+test("completion reconciliation waits for the exact terminal attempt before any state reads", async () => {
+  const { data, api } = forge();
+  const env = { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test", GITHUB_REF: "refs/heads/main",
+    MAIN_ROLLING_WORKER_RUN_ID: "10", MAIN_ROLLING_WORKER_ATTEMPT: "1" };
+  const logs = [];
+  for (const status of ["pending", "completed"]) {
+    let waited = false;
+    const before = data.requests.length;
+    const rc = await main(["reconcile"], { env, api: async (...args) => {
+      assert.ok(waited, "no claim read or mutation before terminal handoff");
+      return api(...args);
+    }, waitForWorker: async (repo, expected) => {
+      assert.equal(repo, repository); assert.deepEqual(expected, { runId: 10, attempt: 1 });
+      waited = true; return { status };
+    }, log: line => logs.push(JSON.parse(line)), error: line => logs.push(JSON.parse(line)) });
+    assert.equal(rc, status === "completed" ? 0 : 1);
+    if (status === "pending") assert.equal(data.requests.length, before);
+  }
+  assert.equal(data.dispatches.length, 1);
+});
+
+test("unsafe predecessor admission emits no automatic reconciliation output", async () => {
+  const { data, api } = forge(); data.nativeQueue = true;
+  await reconcile(repository, { api, now: () => at(), log: () => {} });
+  const prior = data.runs.at(-1); await admit(repository, eventFor(prior), prior.id, 1, { api });
+  data.main = B; await reconcile(repository, { api, now: () => at(2), log: () => {} });
+  const successor = data.runs.at(-1);
+  const dir = mkdtempSync(join(tmpdir(), "rolling-unsafe-"));
+  try {
+    const eventPath = join(dir, "event.json"), output = join(dir, "output");
+    writeFileSync(eventPath, JSON.stringify(eventFor(successor))); writeFileSync(output, "");
+    const errors = [];
+    assert.equal(await main(["admit"], { env: { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test",
+      GITHUB_REF: "refs/heads/main", GITHUB_RUN_ID: String(successor.id), GITHUB_RUN_ATTEMPT: "1",
+      GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: output }, api, error: line => errors.push(JSON.parse(line)) }), 1);
+    assert.equal(errors[0].failureClass, "unsafe-predecessor");
+    assert.equal(readFileSync(output, "utf8"), "");
+    assert.equal((await readState(api, repository)).value.status, "predecessor-evidence-operator-required");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("repeated incomplete admission attempts stop completion-driven recovery at the existing limit", () => {
+  const failures = [11, 12, 13].map(id => record(run({ id, conclusion: "failure" }), []));
+  const decision = plan(pendingState(), { active: [], records: failures }, A, at(50));
+  assert.equal(decision.dispatch, false);
+  assert.equal(decision.next.status, "recovery-limit-operator-required");
+  assert.equal(decision.next.lastVerdict, null);
+});
+
+test("controller terminal dispatch is explicitly scoped and bound to recovery outputs", () => {
+  const worker = readFileSync(new URL("../.github/workflows/main-rolling-validation.yml", import.meta.url), "utf8");
+  const wake = worker.split("\n  controller_wake:\n")[1];
+  assert.match(wake, /if: always\(\) && !cancelled\(\) && github.ref == 'refs\/heads\/main' && needs.admit.outputs.reconcile == 'true'/);
+  assert.match(worker, /reconcile: \$\{\{ steps.admit.outputs.reconcile \}\}/);
+  assert.match(wake, /needs: \[admit, validation\]/);
+  assert.match(wake, /permissions:\n      actions: write/);
+  assert.doesNotMatch(wake, /checkout@|contents:|issues:|download-artifact/);
+  const commands = [...wake.matchAll(/run: (timeout .+)/g)].map(match => match[1]);
+  assert.deepEqual(commands, Array(2).fill('timeout 30 gh workflow run main-rolling-controller.yml --ref main --repo "$GITHUB_REPOSITORY" -f worker_run_id="$WORKER_RUN_ID" -f worker_attempt="$WORKER_ATTEMPT"'));
+  assert.match(wake, /if: steps.dispatch.outcome == 'failure'/);
+  assert.match(wake, /"event":"main_rolling_wake","delivery":"failed"/);
+  const controller = readFileSync(new URL("../.github/workflows/main-rolling-controller.yml", import.meta.url), "utf8");
+  assert.match(controller, /MAIN_ROLLING_WORKER_RUN_ID: \$\{\{ inputs.worker_run_id \}\}/);
+  assert.match(controller, /MAIN_ROLLING_WORKER_ATTEMPT: \$\{\{ inputs.worker_attempt \}\}/);
 });

@@ -227,7 +227,10 @@ function SessionToolsListView({
   onChoose,
   campaignWork,
   machine,
-}: SessionToolsListProps & { campaignWork: CampaignWorkSummary | null; machine: string | null }) {
+}: SessionToolsListProps & {
+  campaignWork: CampaignWorkSummary | null;
+  machine: string | null;
+}) {
   const coarsePointer = useIsCoarsePointer();
   const groupId = useId();
   const requiredFindings = useRequiredFindings(session.id, git.observation);

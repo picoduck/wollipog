@@ -4,7 +4,7 @@ import { ApiError } from "./api.js";
 import {
   applyAssistantThreadEvents,
   ASSISTANT_THREAD_TITLE_MAX,
-  assistantThreadAccessLabel,
+  assistantThreadAccessSentence,
   assistantThreadHarnessLabel,
   assistantThreadRoutes,
   assistantThreadsOwnerOnly,
@@ -45,6 +45,10 @@ test("every Thread API request goes to the control plane's thread routes", async
   await routes.assistantThreads({ includeArchived: true });
   await routes.assistantThread("thr_a/b");
   await routes.assistantThreadDefaults();
+  await routes.assistantThreadLimitDefaults();
+  const limits = { costUsd: null, launchedSessions: 0 };
+  await routes.setAssistantThreadLimitDefaults(limits);
+  await routes.setAssistantThreadLimits("thr_a/b", limits);
   await routes.createAssistantThread({ harness: "codex", title: "Ship It" });
   await routes.renameAssistantThread("thr_a/b", "Renamed");
   await routes.archiveAssistantThread("thr_a/b");
@@ -53,11 +57,27 @@ test("every Thread API request goes to the control plane's thread routes", async
     { path: "/api/assistant-threads?includeArchived=true", method: "GET" },
     { path: "/api/assistant-threads/thr_a%2Fb", method: "GET" },
     { path: "/api/assistant-threads/defaults", method: "GET" },
+    { path: "/api/assistant-threads/defaults/limits", method: "GET" },
+    { path: "/api/assistant-threads/defaults/limits", method: "PUT", body: limits },
+    { path: "/api/assistant-threads/thr_a%2Fb/limits", method: "PUT", body: limits },
     { path: "/api/assistant-threads", method: "POST", body: { harness: "codex", title: "Ship It" } },
     // A thread id is one path segment whatever it contains.
     { path: "/api/assistant-threads/thr_a%2Fb", method: "PATCH", body: { title: "Renamed" } },
     { path: "/api/assistant-threads/thr_a%2Fb/archive", method: "POST", body: {} },
   ]);
+});
+
+test("an older control plane's missing limit routes refuse writes without falling back to rename", async () => {
+  const refusal = new ApiError("not found", 404, undefined, { error: "not found" });
+  const calls: string[] = [];
+  const routes = assistantThreadRoutes(async (path, init) => {
+    calls.push(`${init?.method ?? "GET"} ${path}`);
+    throw refusal;
+  });
+  const limits = { costUsd: null, launchedSessions: null };
+  await assert.rejects(routes.setAssistantThreadLimits("thr_1", limits), assistantThreadsUnavailable);
+  await assert.rejects(routes.setAssistantThreadLimitDefaults(limits), assistantThreadsUnavailable);
+  assert.deepEqual(calls, ["PUT /api/assistant-threads/thr_1/limits", "PUT /api/assistant-threads/defaults/limits"]);
 });
 
 test("a control plane without the Thread API is unavailable, not failing", () => {
@@ -84,16 +104,18 @@ test("only an organization owner has threads, in the control plane's own words",
   assert.equal(ASSISTANT_THREAD_TITLE_MAX, 120, "the control plane's title limit");
 });
 
-test("thread events apply in order: a change replaces its row, a new thread joins, an archive leaves", () => {
+test("thread events apply in order and retain archives for the archive list", () => {
   const list = [thread({ id: "thr_a", lastActivityAt: 10 }), thread({ id: "thr_b", lastActivityAt: 20 })];
   const events = [
     { seq: 1, thread: thread({ id: "thr_a", title: "Already Applied", lastActivityAt: 15 }) },
     { seq: 2, thread: thread({ id: "thr_a", title: "Renamed", lastActivityAt: 30 }) },
     { seq: 3, thread: thread({ id: "thr_c", lastActivityAt: 25 }) },
-    { seq: 4, thread: thread({ id: "thr_b", status: "archived", archivedAt: 40 }) },
+    { seq: 4, thread: thread({ id: "thr_b", status: "archived", archivedAt: 40, lastActivityAt: 40 }) },
   ];
   const next = applyAssistantThreadEvents(list, events, 1);
-  assert.deepEqual(next.map((item) => [item.id, item.title]), [["thr_a", "Renamed"], ["thr_c", "Triage Open Issues"]]);
+  assert.deepEqual(next.map((item) => [item.id, item.title, item.status]), [
+    ["thr_b", "Triage Open Issues", "archived"], ["thr_a", "Renamed", "working"], ["thr_c", "Triage Open Issues", "working"],
+  ]);
   // Nothing newer than the read: the read stands as it was.
   assert.deepEqual(applyAssistantThreadEvents(list, events, 4).map((item) => item.id), ["thr_b", "thr_a"]);
 });
@@ -111,7 +133,7 @@ test("the store numbers each thread event and keeps only the newest", () => {
 });
 
 test("threads read in Title Case labels, newest activity first", () => {
-  assert.equal(assistantThreadAccessLabel({ level: "full_access", destructive: "ask" }), "Full Access · Ask Before Destructive");
+  assert.equal(assistantThreadAccessSentence({ level: "full_access", destructive: "ask" }), "Full access. Asks before destructive actions.");
   assert.equal(assistantThreadHarnessLabel("claude-code"), "Claude Code");
   assert.equal(assistantThreadHarnessLabel("codex"), "Codex");
   assert.equal(assistantThreadHarnessLabel("codex", [{ id: "codex", label: "Codex CLI", available: true }]), "Codex CLI");
@@ -141,4 +163,24 @@ test("an open thread streams its backing session, and only while it is open", ()
   assert.deepEqual(uiStreamSubscriptions({ ...base, view: { name: "assistants", threadId: "thr_1" } }).sessionIds, ["sess_backing"]);
   assert.deepEqual(uiStreamSubscriptions({ ...base, view: { name: "assistants" } }).sessionIds, []);
   assert.deepEqual(uiStreamSubscriptions({ ...base, view: { name: "automations" } }).sessionIds, []);
+});
+
+test("an older control plane's account refusals never retry a launch or rename with the choice dropped", async () => {
+  const account = "acct:0000000000000001";
+  const requested = { providerAccountRef: account, expectedProviderAccountRef: null };
+  const calls: Array<{ path: string; method?: string; body?: unknown }> = [];
+  const missingRoute = new ApiError("not found", 404);
+  const unknownField = new ApiError("Unsupported thread fields: providerAccountRef.", 400);
+  const routes = assistantThreadRoutes(async (path, init) => {
+    calls.push({ path, method: init?.method ?? "GET", ...(init?.body ? { body: JSON.parse(init.body as string) } : {}) });
+    throw path.endsWith("/account") ? missingRoute : unknownField;
+  });
+  await assert.rejects(routes.createAssistantThread({ providerAccountRef: account }), unknownField);
+  await assert.rejects(routes.assistantThreadAccountChoices("thr_a/b"), missingRoute);
+  await assert.rejects(routes.changeAssistantThreadAccount("thr_a/b", requested), missingRoute);
+  assert.deepEqual(calls, [
+    { path: "/api/assistant-threads", method: "POST", body: { providerAccountRef: account } },
+    { path: "/api/assistant-threads/thr_a%2Fb/account", method: "GET" },
+    { path: "/api/assistant-threads/thr_a%2Fb/account", method: "POST", body: requested },
+  ]);
 });

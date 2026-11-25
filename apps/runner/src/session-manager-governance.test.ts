@@ -53,6 +53,7 @@ function harness(config: SessionConfig, appServer = false) {
     setConfig: () => {},
     agentSessionId: () => appServer ? "thread-exact" : null,
     agentTurnId: () => appServer ? "provider-turn-exact" : null,
+    workflowActionAdmissionRefusal: () => null,
   };
   const logs: string[] = [];
   const sm = new SessionManager((message) => sent.push(message), (message) => logs.push(message), store, "test-runner");
@@ -151,6 +152,19 @@ test("a refused App Server action admission names its specific cause (#4054)", (
   } finally {
     h.cleanup();
   }
+});
+
+test("unprovable provider admission is refused before appending an arming fence", () => {
+  const h = harness({}, true);
+  try {
+    h.entry.client.workflowActionAdmissionRefusal = () => "Use consume_workflow_decision or standalone literal CLI";
+    const result = h.sm.recordWorkflowActionAdmission("s_governance", {
+      occurrenceId: "workflow-refused", commandDigest: "a".repeat(64), sessionTurnId: "turn-exact",
+    });
+    assert.equal(result.accepted, false);
+    assert.match(result.error!, /standalone literal/);
+    assert.deepEqual(h.store.readEvents("s_governance"), []);
+  } finally { h.cleanup(); }
 });
 
 test("retroactive action reconciliation binds exact provider admission, command, and forge evidence", async () => {
@@ -841,8 +855,9 @@ test("a budget trip with managed work settles idle and reconciles a killed recei
   const h = harness({ costBudgetUsd: 8 });
   try {
     h.store.patchMeta("s_governance", {
-      agentSessionId: "provider-session", env: { HOME: h.root, TMPDIR: h.root },
+      agentSessionId: "provider-session",
     });
+    h.sm.setDetachedClaudeEnvironment(() => ({ HOME: h.root, TMPDIR: h.root }));
     h.entry.client.prompt = async () => {
       (h.sm as any).onDriverBackgroundWork("s_governance", {
         state: "running", pendingTaskIds: ["job"], observedTaskIds: ["job"],

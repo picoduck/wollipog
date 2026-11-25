@@ -73,6 +73,7 @@ import { CampaignCleanup, CampaignStuck } from "./CampaignCleanup.js";
 import { CampaignHeldSlots } from "./CampaignHeldSlots.js";
 import { useStoreSelector } from "../store.js";
 import { CampaignDecisions } from "./CampaignDecisions.js";
+import { CampaignAssistantDecisions } from "./AssistantDecisionHistory.js";
 import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
 import { OwnerRuleFactRows } from "./requests/WorkflowDecisionSummary.js";
 import { ReturnOwnerResource } from "./ReturnOwnerResource.js";
@@ -444,6 +445,7 @@ function AvailableCampaignStatus({
                 policyRevision={availability.role === "campaign" ? data.summary.campaign?.policyRevision : undefined}
                 boundaryShown={data.summary.campaign?.control?.mode === "full_control"} />
               <CampaignDecisions campaignId={availability.campaignSessionId} />
+              <CampaignAssistantDecisions campaignId={availability.campaignSessionId} />
 
             </div></CampaignSections>
           </StaleContent>
@@ -459,7 +461,7 @@ function CampaignRecoveryAutomation({ campaign }: { campaign: CampaignStatusData
   const notice = campaignRecoveryAutomationNotice(campaign?.status, campaign?.recovery?.automation);
   if (!notice) return null;
   return (
-    <CampaignSection title="Recovery Automation" count={1} attention={notice.tone === "warning" ? `${notice.title}:${notice.body}` : ""}><Notice tone={notice.tone} title={notice.title} role={notice.tone === "neutral" ? "status" : undefined}>
+    <CampaignSection title="Recovery Automation" attention={notice.tone === "warning" ? `${notice.title}:${notice.body}` : ""}><Notice tone={notice.tone} title={notice.title} role={notice.tone === "neutral" ? "status" : undefined}>
       {notice.body}
     </Notice></CampaignSection>
   );
@@ -487,11 +489,12 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
   // So does its request to add a repository (#4117): the owner never kept it, it is always theirs.
   const repositoryAddition = (item: (typeof ownerDecisions.items)[number]) => item.category === "campaign_repository_addition" && !item.ownerRule && !item.handedOff;
   const one = ownerDecisions.total === 1;
+  const hasHandoff = ownerDecisions.items.some((item) => item.kind === "handoff");
   const runtimeRecovery = ownerDecisions.items.some((item) => item.category === "runner_recovery");
   return (
     <CampaignSection title="Waiting for You" count={ownerDecisions.total} attention={ownerDecisions.items.map(item => item.occurrenceId).join("|")} className="campaign-status-handoffs">
       <p className="section-note">
-        {`Only you can make ${one ? "this decision" : "these decisions"}.`}{" "}
+        {hasHandoff ? "Open each request to review what it needs." : `Only you can make ${one ? "this decision" : "these decisions"}.`}{" "}
         {runtimeRecovery ? "Relaunch the Orchestrator to restore its tools and continue its pending work." : "The Orchestrator keeps working on everything else meanwhile."}
       </p>
       <ul className="campaign-detail-list">
@@ -516,12 +519,12 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
                   <dd>{item.credentialScreenReview.workItem.label}</dd>
                 </div>}
                 <div>
-                  <dt>{item.category === "runner_recovery" ? "Runner Recovery" : item.kind === "question" ? "Question" : item.ownerRule ? "Kept by Rule" : item.handedOff ? "Handed to You" : scopeApproval(item) ? "Scope Approval"
+                  <dt>{item.category === "runner_recovery" ? "Runner Recovery" : item.kind === "handoff" ? "Status Update" : item.kind === "question" ? "Question" : item.ownerRule ? "Kept by Rule" : item.handedOff ? "Handed to You" : scopeApproval(item) ? "Scope Approval"
                     : repositoryAddition(item) ? "Add Repository" : "Owner Decision"}</dt>
                   <dd>
                     {item.summary}
                     <span className="campaign-status-meta">
-                      {item.category === "runner_recovery" ? "Runner restarted" : item.ownerRule ? "Requested under a rule" : item.handedOff ? "Handed over by the Orchestrator"
+                      {item.category === "runner_recovery" ? "Runner restarted" : item.kind === "handoff" ? "Ready to acknowledge" : item.ownerRule ? "Requested under a rule" : item.handedOff ? "Handed over by the Orchestrator"
                         : scopeApproval(item) ? "Proposed by the Orchestrator" : item.credentialScreenReview ? "Held by the model screen" : "Asked by the Orchestrator"}{" "}
                       <RecordedTime at={item.createdAt} now={now} />
                     </span>
@@ -533,7 +536,7 @@ function CampaignOwnerDecisions({ sessionId, ownerDecisions, now, findRequest, o
                 onClick={open}>Open Request</button>}
               {item.returnableOwnerResource &&
                 <ReturnOwnerResource sessionId={item.sessionId} occurrenceId={item.occurrenceId}
-                  resourceLabel={item.resourceLabel ?? item.summary} onChanged={onChanged} inRow
+                  resourceLabel={item.resourceLabel ?? item.summary} onChanged={onChanged} presentation="row"
                   ownershipReason={ownerResourceKeepReason(item)} />}
             </li>
           );
@@ -612,7 +615,7 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
   }
   const view = campaignSummaryView(summary.summary, summary.campaign, now);
   return (
-    <CampaignSection title="Summary" count={1} defaultOpen className="campaign-status-summary">
+    <CampaignSection title="Summary" defaultOpen className="campaign-status-summary">
       {summary.error && (
         <Notice tone="danger" compact role="alert" title="Couldn't Refresh Campaign Summary"
           actions={<button type="button" className="btn sm" onClick={data.retry}>Retry</button>}>

@@ -1,16 +1,16 @@
 import { createContext, useContext } from "react";
 
 /**
- * A breakdown Model Settings shows in place of its choices (#2447): the Session Usage group's
- * Context Window or Session Cost, opened from its row while the composer bar has no room for the
- * triggers whose popovers hold them.
+ * A selector or usage breakdown Model Settings opens in place of its overview.
  */
-export type ModelSettingsDetail = "context-window" | "session-cost";
+export type ModelSettingsDetail = "context-window" | "session-cost" | "reasoning-effort" | "speed";
 
 /** The title row's name for each breakdown: the row label it was opened from. */
 export const MODEL_SETTINGS_DETAIL_TITLES: Record<ModelSettingsDetail, string> = {
   "context-window": "Context Window",
   "session-cost": "Session Cost",
+  "reasoning-effort": "Reasoning Effort",
+  speed: "Speed",
 };
 
 export interface ModelSettingsDetailController {

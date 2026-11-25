@@ -413,6 +413,7 @@
   --control-h-sm: 28px;
   --control-h: 32px;
   --control-h-lg: 40px;
+  --queue-action-h: 44px;
   --row-h: 40px;
   --row-h-2: 56px;
   --row-h-dense: 32px;
@@ -494,6 +495,8 @@
   /* The height docked at the bottom of the view (tab bar, composer, sheet footer) that toasts sit
      above (§13.1). FeedbackProvider measures it onto the root element while a toast is showing. */
   --toast-clear: 0px;
+  /* FeedbackProvider measures the visible toast stack for the phone Assistant transcript. */
+  --toast-stack-height: 0px;
   --tone: var(--text-faint);
   --tone-text: var(--text-dim-on-tint);
 
@@ -1653,6 +1656,10 @@ kbd {
   background: var(--bg-elev-3);
   border-color: var(--control-outline);
 }
+.choice-chips > .btn[aria-checked="true"] {
+  background: var(--bg-elev-3);
+  border-color: var(--control-outline);
+}
 .btn.primary {
   background: var(--primary-bg);
   border-color: transparent;
@@ -2030,8 +2037,11 @@ button.status { cursor: pointer; }
   align-items: center;
   gap: var(--space-1);
 }
-/* A 28px control in a 20px title line: the row keeps the title's height. */
-.notice-head > .notice-trailing { margin-top: calc(var(--space-1) * -1); margin-bottom: calc(var(--space-1) * -1); }
+/* Let small controls overhang the first 20px text line equally in both directions. */
+.notice-head > .notice-trailing,
+.notice:not(.compact) > .notice-trailing:not(:has(> .notice-dismiss:first-child:last-child)) {
+  margin: calc((1lh - var(--control-h-sm)) / 2) 0;
+}
 .notice-body { min-width: 0; }
 .notice-body > p { margin: 0; }
 .notice-body > p + p { margin-top: var(--space-1); }
@@ -2079,8 +2089,10 @@ button.status { cursor: pointer; }
 .notice:not(.page-banner) > .notice-content > .notice-actions > .notice-details-toggle:first-child {
   margin-inline-start: calc(-1 * (var(--space-2) + 1px));
 }
-.notice-dismiss { margin: calc(var(--space-1) * -1) calc(var(--space-2) * -1) 0 0; }
-.notice-head .notice-dismiss { margin: 0 calc(var(--space-2) * -1) 0 0; }
+.notice-dismiss { margin-right: calc(var(--space-2) * -1); }
+.notice:not(.compact) > .notice-trailing > .notice-dismiss:first-child:last-child {
+  margin: calc((20px - var(--control-h-sm)) / 2) calc(var(--space-2) * -1) calc((20px - var(--control-h-sm)) / 2) 0;
+}
 /* One line for field-group and composer notices: icon, sentence, one trailing action.
    Its parts line up on their first baselines rather than their centers, so once a notice wraps (a
    title beside or over a sentence of several lines, a sentence over two lines) the icon and an
@@ -2118,7 +2130,7 @@ button.status { cursor: pointer; }
 }
 .notice.compact .notice-body { flex: 1 1 12rem; }
 .notice.compact .notice-actions { margin-top: 0; }
-.notice.compact .notice-dismiss { margin: 0; }
+.notice.compact .notice-dismiss { margin-right: 0; }
 /* Opened details take the line under the sentence and its row; the icon stays on the first line. */
 .notice.compact .notice-details-body { flex-basis: 100%; margin-top: var(--space-2); }
 /* The page banner spans the top of the main area (§13.3): no radius, no side edges, a hairline
@@ -2679,6 +2691,15 @@ button.status { cursor: pointer; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.model-picker-search {
+  width: 100%;
+  min-width: 0;
+  margin-bottom: var(--space-2);
+}
+.model-picker-family {
+  padding-inline-start: var(--space-3);
+}
+
 .menu-item {
   display: flex;
   flex: none;
@@ -2722,7 +2743,7 @@ button.status { cursor: pointer; }
   height: var(--icon);
 }
 .menu:has(.menu-icon) .menu-item:not(:has(> .menu-icon))::before,
-.model-settings-column:has(.menu-icon) .menu-item:not(:has(> .menu-icon))::before {
+.model-settings-detail:has(.menu-icon) .menu-item:not(:has(> .menu-icon))::before {
   content: "";
   flex: none;
   width: var(--icon);
@@ -2924,6 +2945,31 @@ button.status { cursor: pointer; }
   min-width: 0;
   margin: 0;
   color: var(--text);
+  overflow-wrap: anywhere;
+}
+.ci-rerun-target {
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: var(--space-1);
+}
+.ci-rerun-target .ci-rerun-repository dd { grid-column: span 3; }
+@media (max-width: 760px) {
+  .ci-rerun-target { grid-template-columns: auto minmax(0, 2fr) auto minmax(0, 1fr); }
+  .ci-rerun-target .ci-rerun-phone-wide dd { grid-column: span 3; }
+}
+.ci-rerun-token {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+@media (max-width: 760px) {
+  .release-payload-detail:has(> dd > details[open]) > :is(dt, dd) { grid-column: 1 / -1; }
+}
+.release-payload-digest {
+  display: block;
+  white-space: normal;
   overflow-wrap: anywhere;
 }
 .facts.strip {
@@ -4198,14 +4244,17 @@ textarea {
   min-height: 0;
   padding: 0;
 }
-/* The panel notice slot on a phone (#2861, §13.2): its notices' buttons, "+N More" included, are
-   44px touch targets, and the resolving action fills the action row as in the session slot. A 44px
-   "+N More" overhangs its 20px title line by 8px each way, so the body stays close to the title. */
+/* The panel notice slot on a phone (#2861, §13.2): resolving actions keep their 44px visible
+   height. On coarse pointers, the title row's small buttons borrow their 44px hit area. */
 @media (max-width: 760px) {
+  .panel-notice-slot .notice-actions {
+    --control-h-sm: 44px;
+  }
+}
+@media (max-width: 760px) and (not (pointer: coarse)) {
   .panel-notice-slot .notice {
     --control-h-sm: 44px;
   }
-  .panel-notice-slot .notice-head > .notice-trailing { margin-top: calc(var(--space-2) * -1); margin-bottom: calc(var(--space-2) * -1); }
 }
 .agents-page {
   display: flex;
@@ -5493,16 +5542,7 @@ body.shell-dock-dragging * {
   color: var(--text-dim);
   font: var(--type-small);
 }
-.owner-resource-return {
-  display: grid;
-  gap: var(--space-3);
-  margin: var(--space-4) 0;
-  padding: var(--space-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-elev);
-}
-:is(.owner-resource-return, .owner-resource-return-inline) > :is(h4, p) { margin: 0; }
+.owner-resource-return-inline > :is(h4, p) { margin: 0; }
 .owner-resource-return-actions {
   display: flex;
   flex-wrap: wrap;
@@ -5520,6 +5560,31 @@ body.shell-dock-dragging * {
   gap: var(--space-3);
   padding-top: var(--space-3);
   border-top: 1px solid var(--border);
+}
+/* An owner-kept resource inside a request card (#4713): one line under what the card asks and
+   above its footer, ruled off so the owner's own action never reads as part of the request. */
+.owner-resource-footnote {
+  display: grid;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+  color: var(--text-dim-on-tint);
+  font: var(--type-small);
+}
+.owner-resource-footnote > p { margin: 0; }
+.owner-resource-footnote .link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+}
+.owner-resource-footnote-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
 }
 /* One observed pull request (#2417 slice 8): a rule above heads its group, and its facts sit
    indented under it so two pull requests never read as one list. */
@@ -5683,34 +5748,90 @@ body.shell-dock-dragging * {
   gap: var(--space-6);
   min-width: 0;
 }
-/* Campaign sections keep their live bodies mounted while disclosures hide them. */
+/* Campaign sections keep their live bodies mounted while disclosures hide them. The index is one
+   row (#4781): a menu button naming the section you are in, an attention chip, and Collapse All /
+   Expand All as icons. Only the section name gives way to a narrow panel. The row takes the panel's
+   width rather than lending its own: a long section name would otherwise widen every section.
+   An inline-size container gives it no intrinsic width; its menu is portalled, so the layout
+   containment that comes with it does not move the menu.
+   Every control here is a small one, 36px on touch with a borrowed 44px hit area (§2.8): they sit
+   8px apart so no hit area takes a neighbour's taps. On touch the row is 36 + 4 + 2 + its 1px rule
+   = 43px: the 4px above is the hit area's borrowed top, which the panel's scrollport would clip
+   at the top of the panel, and the 1px it borrows below the rule lies over the content, where it
+   still takes the tap. */
 .campaign-section-index {
   position: sticky;
   top: 0;
   z-index: var(--z-sticky);
-  display: grid;
+  display: flex;
+  align-items: center;
   gap: var(--space-2);
   min-width: 0;
-  padding: var(--space-2);
+  padding: var(--space-0-5) 0;
   background: var(--bg);
   border-bottom: 1px solid var(--border);
+  container-type: inline-size;
 }
-.campaign-section-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
+@media (pointer: coarse) {
+  .campaign-section-index { padding: var(--space-1) 0 var(--space-0-5); }
+}
+.campaign-section-trigger.btn {
+  flex: 0 1 auto;
+  justify-content: flex-start;
   min-width: 0;
-  max-height: 30dvh;
-  overflow-y: auto;
+  max-width: 100%;
+  padding-left: var(--space-1);
 }
-.campaign-section-links button {
-  white-space: normal;
+.campaign-section-trigger svg { flex: none; color: var(--text-dim); }
+@media (forced-colors: active) {
+  .campaign-section-trigger svg { color: inherit; }
+}
+.campaign-section-trigger-label {
+  flex: none;
+  color: var(--text-faint);
+}
+/* At the right panel's usual width and on a phone, the prefix leaves the section's name too little
+   room ("Section: Waiting for Y…"), so it shows only in a wider panel. The name alone stays inside
+   the trigger's accessible name, so dropping the prefix keeps the two consistent. */
+@container (max-width: 420px) {
+  .campaign-section-trigger-label { display: none; }
+}
+.campaign-section-current {
   min-width: 0;
-  text-align: left;
+  overflow: hidden;
+  font-weight: var(--weight-semibold);
+  text-overflow: ellipsis;
 }
-.campaign-section-links [aria-current="location"] {
-  border-color: var(--accent);
+/* A small button (its size and touch hit area come from `.btn.sm`) drawn as an amber pill. */
+.campaign-section-attention.btn {
+  border-color: color-mix(in srgb, var(--amber) 32%, transparent);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--amber) 7%, var(--bg-elev));
+  color: var(--amber-on-tint);
+  font: var(--type-micro);
 }
+@media (hover: hover) {
+  .campaign-section-attention.btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--amber) 14%, var(--bg-elev));
+  }
+}
+.campaign-section-dot {
+  flex: none;
+  width: var(--space-2);
+  height: var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--amber);
+}
+.campaign-section-tools {
+  display: inline-flex;
+  flex: none;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+.campaign-section-menu { min-width: 240px; }
+.campaign-section-menu .menu-trail .count { color: var(--text-dim); }
+.campaign-section-menu .campaign-section-empty .menu-text,
+.campaign-section-menu .campaign-section-empty .menu-trail .count { color: var(--text-faint); }
 .campaign-section-heading button {
   display: flex;
   align-items: center;
@@ -6805,16 +6926,16 @@ body.shell-dock-dragging * {
   padding-left: max(var(--space-3), calc((100% - var(--chat-max)) / 2));
   padding-right: max(var(--space-3), calc((100% - var(--chat-max)) / 2));
 }
-/* The queue tray (#2178): messages waiting behind the turn, docked on the composer card so they read
-   as lined up behind the one being written. Inset from the card's edges, solid edge, open at the
-   bottom where the card takes over, and a hairline between rows. Collapsed, it is only its summary. */
-.queue {
-  margin: 0 var(--space-3);
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-bottom: none;
-  border-top-left-radius: var(--radius-md);
-  border-top-right-radius: var(--radius-md);
+/* The queued messages share the card's edge and the editing strip's full-width position. */
+.composer-queue {
+  min-width: 0;
+  margin: 0 calc(-1 * var(--space-3));
+  border-bottom: 1px solid var(--border);
+}
+.composer-queue:first-child {
+  margin-top: calc(-1 * var(--space-2) - var(--space-0-5));
+  border-top-left-radius: inherit;
+  border-top-right-radius: inherit;
 }
 /* The tray starts as this one line (#2788): the §5.5 disclosure across the tray's full width, with
    the Held badge and the most severe row status after the count. It stays one line on a phone; the
@@ -6859,6 +6980,12 @@ body.shell-dock-dragging * {
   padding: 0;
   list-style: none;
 }
+.composer-queue:not(.is-single) .queue-rows {
+  /* Keep the transcript in view when a long queue is expanded. */
+  max-height: min(30dvh, calc(4 * (var(--control-h) + 2 * var(--space-1) + 1px)));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .queue-row {
   position: relative;
   display: flex;
@@ -6889,6 +7016,13 @@ body.shell-dock-dragging * {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+.composer-queue:not(.is-single) .queue-text {
+  /* Preserve the inset of a line centred beside the controls when the text wraps. */
+  padding-block: max(0px, calc((var(--control-h-sm) - 1lh) / 2));
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.queue-clock { flex: none; }
 .queue-clip {
   display: inline-block;
   margin-right: var(--space-1);
@@ -6909,22 +7043,27 @@ body.shell-dock-dragging * {
 }
 /* Phones (#2178): each row is its text and one 44px actions button. A status that differs moves under
    the text, so the words keep the line. */
-.queue.is-phone .queue-status {
+.composer-queue.is-phone:not(.is-single) .queue-text {
+  padding-block: max(0px, calc((var(--queue-action-h) - 1lh) / 2));
+}
+.composer-queue.is-phone .queue-status {
   order: 1;
 }
-.queue.is-phone .queue-status + .queue-text {
-  flex-basis: calc(100% - var(--space-2) - 44px);
+.composer-queue.is-phone:not(.is-single) .queue-status + .queue-text {
+  flex-basis: calc(100% - var(--space-2) - var(--queue-action-h));
 }
 .queue-more {
-  width: 44px;
-  height: 44px;
+  width: var(--queue-action-h);
+  height: var(--queue-action-h);
 }
-/* A lone queued message is the tray's one line in place of the summary (#3962): no hairline above
-   it, the queue's Held badge after its words, and on a phone a Steer as tall as the actions button
-   beside it, so one tap steers. */
-.queue.is-single .queue-row { border-top: none; }
+/* A lone message replaces the summary (#3962). On touch the actions button sets the row's
+   height and the smaller Steer Now borrows its 44px hit area vertically. */
+.composer-queue.is-single .queue-row { border-top: none; }
+.composer-queue.is-phone.is-single .queue-row { padding-block: 0; }
 .queue-held { flex: none; }
-.queue.is-phone .queue-steer { height: 44px; }
+@media (pointer: coarse) {
+  .composer-queue.is-phone .queue-steer::after { left: 0; right: 0; }
+}
 /* The composer's mode strip (#2194): editing a queued message is a state of the card, so it is the
    card's first row, full bleed across its 10px/12px padding, 40px tall at every width. Its actions
    are `.btn.sm.ghost`, 8px apart so each keeps its 44px touch area (§2.8). A recovered edit takes
@@ -6978,9 +7117,7 @@ body.shell-dock-dragging * {
   background: color-mix(in srgb, var(--tone) 7%, var(--bg-elev));
 }
 .composer-mode.is-recovered .composer-mode-icon { color: var(--tone); }
-/* The queue tray docks on the card, so the row above sits close to the strip. On a coarse pointer the
-   strip's actions take the strip's bottom edge, 8px from the row's actions above. Every 44px touch
-   area stays its own (§2.8); the strip stays 40px. */
+/* The editing strip's controls extend into the gap below it on touch. */
 @media (pointer: coarse) {
   .composer-mode-actions { align-self: end; }
 }
@@ -7449,65 +7586,255 @@ body.shell-dock-dragging * {
   margin-left: var(--space-1);
 }
 .assistant-approvals-more { align-self: flex-end; }
-/* An Assistant thread's owner confirmations (#4665): request cards among a thread's work cards. An
-   argument's whole value wraps rather than hides. */
+/* Assistant confirmations in the Waiting for You dock and the Inbox. */
 .assistant-confirmation-summary {
   margin: 0;
   font: var(--type-body);
+  overflow-wrap: anywhere;
 }
 .assistant-confirmation-arguments code {
+  border: 0;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
-/* A thread's pending requests, in their own list ahead of its work cards (AssistantWorkCards). Each
-   keeps a readable width and its whole height. On desktop the list scrolls sideways when several are
-   waiting, and where the requests and the work cards' own floor (`.assistant-work-cards`) do not both
-   fit, the row wraps and the work cards take a full line below. Neither is ever squeezed to nothing.
-   On a phone (below) they stack above the work cards, and the whole area scrolls within a bound. */
-.assistant-work-confirmations {
+/* Fit one request to its content while reserving room for the transcript. */
+.assistant-dock-slot {
   display: flex;
-  flex: 0 1 auto;
-  gap: var(--space-2);
-  min-width: min(440px, 100%);
-  max-width: 100%;
+  flex: none;
+  min-height: 0;
+  max-height: 60cqh;
+  padding: var(--space-1) max(var(--space-3), calc((100% - var(--chat-max)) / 2));
+}
+.assistant-dock {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev);
+}
+.assistant-dock-head,
+.assistant-dock-pager {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.assistant-dock-head {
+  justify-content: space-between;
+  flex: none;
+  min-height: var(--bar-h);
+  padding-inline: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+.assistant-dock-head h3 {
   margin: 0;
-  padding: 0 0 var(--space-1);
-  overflow-x: auto;
+  font: var(--type-body-strong);
+}
+.assistant-dock-pager {
+  flex: none;
+  font: var(--type-small);
+}
+.assistant-dock-pager > span { white-space: nowrap; }
+.assistant-dock-list {
+  min-height: 0;
+  padding: 0;
+  margin: 0;
   list-style: none;
-}
-.assistant-work-confirmations > .request-card {
-  flex: none;
-  width: 440px;
-  max-width: 100%;
-}
-.assistant-work-confirmations > .request-card > .request-card-body {
-  flex: none;
-  overflow: visible;
-}
-/* With requests waiting, the requests and work cards scroll together within a bound at every width,
-   wrapped or not, so the transcript and composer always keep their room. A phone (below) allows
-   more, enough for a whole request. */
-.assistant-work:has(> .assistant-work-confirmations) {
-  max-height: 40vh;
-  overflow-y: auto;
+  overflow: auto;
   overscroll-behavior: contain;
 }
+.assistant-dock-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.assistant-dock-list:not([data-show-all]) { display: flex; }
+.assistant-dock-list[data-show-all][data-clip-start] { box-shadow: inset 0 1px var(--border); }
+.assistant-dock-list:not([data-show-all]) > .assistant-dock-card { width: 100%; }
+.assistant-dock-card-head,
+.assistant-dock-card-body {
+  display: grid;
+  gap: var(--space-1);
+  padding-inline: var(--space-3);
+  min-width: 0;
+}
+.assistant-dock-card-head {
+  flex: none;
+  padding-block: var(--space-2) var(--space-1);
+}
+.assistant-dock-list:not([data-show-all]) .assistant-dock-card-body {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.assistant-dock-card-body[data-clip-start] { box-shadow: inset 0 1px var(--border); }
+.assistant-dock-card-body[data-clip-end] + .assistant-dock-actions { box-shadow: 0 -1px var(--border); }
+.assistant-dock-card + .assistant-dock-card { border-top: 1px solid var(--border); }
+.assistant-dock-card .request-card-title {
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:is(.assistant-dock-card, .assistant-thread-notice-slot, .assistant-campaign-review) .code-well { border: 0; }
+.assistant-dock-card .code-well pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.assistant-dock-target,
+.assistant-dock-actions,
+.assistant-dock-resolve {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.assistant-dock-target > .chip {
+  display: block;
+  overflow: hidden;
+  align-content: center;
+  border: 0;
+  background: var(--bg-elev-2);
+  text-overflow: ellipsis;
+}
+.assistant-dock-target > .status { flex: none; }
+.assistant-dock-details { justify-self: start; }
+:is(.assistant-dock, .assistant-thread-panel, .detail-bar:has(.assistant-bar-title)) :is(.chip, .count, .status) {
+  font-size: var(--text-sm);
+}
+.assistant-dock-facts { display: grid; gap: var(--space-1); min-width: 0; }
+.assistant-dock-facts .facts { margin: 0; }
+.assistant-dock-choices { min-width: 0; }
+.assistant-dock-failure {
+  margin: 0;
+  scroll-margin-bottom: var(--space-1);
+  color: var(--danger-text);
+  font: var(--type-body);
+}
+.assistant-dock-actions {
+  justify-content: space-between;
+  flex: none;
+  background: var(--bg-elev);
+  padding: var(--space-2) var(--space-3);
+}
+.assistant-dock-scroll-cue { display: none; }
+.assistant-dock-resolve { margin-left: auto; }
 @media (max-width: 760px) {
-  .assistant-work-confirmations {
-    flex: none;
-    flex-direction: column;
-    min-width: 0;
-    max-width: none;
-    padding: 0;
-    overflow: visible;
+  .assistant-dock-slot:not(:has([data-show-all])) { max-height: 74cqh; }
+  @container chat-reading (min-height: 480px) {
+    /* A single request with expanded facts can use more of a tall reading column while
+       leaving at least a fifth for the transcript. Short reading columns keep their lower cap. */
+    .assistant-dock-slot:not(:has([data-show-all], .assistant-dock-pager)):has(.assistant-dock-facts) {
+      max-height: 78cqh;
+    }
   }
-  .assistant-work-confirmations > .request-card { width: auto; }
-  /* Tall enough to show a whole request and the start of what follows. */
-  .assistant-work:has(> .assistant-work-confirmations) { max-height: 60vh; }
-  .assistant-work:has(> .assistant-work-confirmations) > .assistant-work-cards {
-    max-height: none;
-    overflow-y: visible;
+  .assistant-dock-head { padding-inline: var(--space-2); }
+  .assistant-dock-card-head,
+  .assistant-dock-card-body,
+  .assistant-dock-actions { padding-inline: var(--space-2); }
+  .assistant-dock-actions { flex-wrap: wrap; }
+  .assistant-dock-resolve:has(> [data-dock-action="approve"]) {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
   }
+  .assistant-dock-resolve:has(> [data-dock-action="approve"]) > .btn { max-width: none; }
+}
+@container chat-reading (max-height: 479px) {
+  .assistant-dock-slot:not(:has([data-show-all])) { max-height: 60cqh; }
+}
+/* At phone widths that fit all three actions, keep Open Session beside the equal resolving pair. */
+@media (min-width: 380px) and (max-width: 760px) {
+  .detail-chat:has(.assistant-spending-notice, .assistant-thread-notice-slot) .assistant-dock-resolve:has(> [data-dock-action="approve"]) {
+    flex: 1;
+    width: auto;
+  }
+}
+/* With a spending notice, let the dock use spare space in the short column while reserving
+   5.25rem or two control heights for the transcript when the column is tall enough. */
+@container chat-reading (max-height: 479px) {
+  .detail-chat:has(.assistant-spending-notice) .assistant-dock-slot:not(:has([data-show-all])) {
+    max-height: max(60cqh, calc(100cqh - max(5.25rem, 2 * var(--control-h))));
+  }
+  @media (min-width: 761px) {
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock-list:not([data-show-all]) .assistant-dock-card-head {
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: center;
+      gap: var(--space-2);
+      padding-block: var(--space-1);
+    }
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock-list:not([data-show-all]) .assistant-dock-actions {
+      padding-block: var(--space-1);
+    }
+  }
+}
+@media (max-width: 760px) {
+  .assistant-dock-card-body[data-clip-end] {
+    mask-image: linear-gradient(to top, transparent, #000 var(--space-6));
+  }
+  .assistant-dock-card-body[data-clip-end] + .assistant-dock-actions { box-shadow: none; }
+}
+@media (min-width: 1000px) and (max-height: 600px) {
+  .assistant-dock-actions { position: relative; }
+  .assistant-dock-card-body[data-clip-end] + .assistant-dock-actions > .assistant-dock-scroll-cue {
+    display: block;
+    position: absolute;
+    inset: 0 0 auto;
+    border-top: var(--space-1) solid var(--border-strong);
+    pointer-events: none;
+  }
+  /* Keep the title and actions in place while the request details scroll between them. */
+  .detail-chat:has(.assistant-spending-notice) .assistant-dock-slot:has(.assistant-dock-list) {
+    max-height: max(60cqh, calc(100cqh - var(--bar-h)));
+  }
+  .detail-chat:has(.assistant-spending-notice) .assistant-dock-list:not([data-show-all]) .assistant-dock-card-head {
+    padding-block: 0 var(--space-1);
+  }
+  @container chat-reading (max-height: 180px) {
+    /* A docked side panel can make the notice wrap. Share the card's row with the heading
+       when there is one request and no pager, leaving room between its title and actions. */
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock:not(:has(.assistant-dock-pager)) {
+      flex-direction: row;
+    }
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock:not(:has(.assistant-dock-pager)) > .assistant-dock-head {
+      align-self: start;
+      border-bottom: none;
+    }
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock:not(:has(.assistant-dock-pager)) > .assistant-dock-list {
+      flex: 1;
+      min-width: 0;
+    }
+    .detail-chat:has(.assistant-spending-notice) .assistant-dock:not(:has(.assistant-dock-pager)) .assistant-dock-card-head {
+      padding-block: 0;
+    }
+  }
+}
+@media (pointer: coarse) {
+  .assistant-dock :is(.btn.sm, .icon-btn.sm) { --control-h-sm: var(--control-h); }
+  .assistant-dock :is(.btn.sm, .icon-btn.sm)::after { content: none; }
+}
+.assistant-campaign-review {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.assistant-campaign-review .facts dd,
+.assistant-campaign-message > p {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.assistant-campaign-message > h3 {
+  margin: 0 0 var(--space-2);
+  font: var(--type-label);
+}
+.assistant-campaign-message > p {
+  margin: 0;
+}
+.assistant-inbox-campaigns {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 /* The card in a side panel's detail (#2206): flush on the panel, with no wash or frame, a title-sized
    heading, and its footer stuck to the panel's lower edge above a hairline. The detail scrolls as one
@@ -7703,13 +8030,22 @@ body.shell-dock-dragging * {
   margin-bottom: var(--space-1);
 }
 /* Shrunk by Show Context, the panel is its head: the question on one line, then the answer so far. */
-.composer-answer[data-collapsed] > .answer-title {
+/* A touch phone typing Something Else (#4714) keeps the question to one line in the same way, above
+   the field, until Show Options opens it whole with its options. */
+.composer-answer:is([data-collapsed], [data-own-answer]:not([data-options-shown])) > .answer-title {
   display: -webkit-box;
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 1;
 }
-.composer-answer[data-collapsed] > .answer-title > * { display: inline; }
+.composer-answer:is([data-collapsed], [data-own-answer]:not([data-options-shown])) > .answer-title > * { display: inline; }
+/* "Answering Question 1 of 2", then Show Options and the × at the end (#4714). The field below is
+   labelled "Something Else", in the dim line a field label is. */
+.answer-options-toggle { margin-left: auto; }
+.answer-own {
+  color: var(--text-dim);
+  font: var(--type-small);
+}
 .answer-summary {
   min-width: 0;
   margin: 0;
@@ -7759,6 +8095,16 @@ body.shell-dock-dragging * {
   font: var(--type-reading);
 }
 .composer-answer-input::placeholder { color: var(--text-faint); }
+/* Something Else on a touch phone (#4714): a box that wraps, never scrolls sideways, and grows with
+   its text; ComposerQuestionResponse sizes it to six lines at most, past which it scrolls itself. */
+textarea.composer-answer-input {
+  display: block;
+  resize: none;
+  overflow-wrap: anywhere;
+}
+/* Its mic (#4714), an icon button whose pressed state shows it listening. The press is held on the
+   field (holdFieldFocus), so the keyboard stays up while it listens. */
+.answer-mic { flex: none; }
 /* Dismiss, Back from question 2, the usage triggers, then Next or Submit Answers, last. */
 .answer-foot {
   display: flex;
@@ -7982,23 +8328,10 @@ body.shell-dock-dragging * {
   max-width: 360px;
   flex: 0 1 auto;
 }
-/* Model Settings (#2191, docs/design-system.md §9.2): §9.1's radio rows in a popover. Its rows keep
-   the menu's inset, so it takes the menu's padding rather than the popover's. With a choice for
-   each column (ModelEffortMenuChoices renders the columns only then), the model and what belongs
-   to it sit beside the reasoning effort, and a composer pane too narrow for both lays them out in
-   one. */
+/* Model Settings uses menu rows and their inset inside a popover. */
 .popover.model-settings { padding: var(--space-1); }
-.popover.model-settings:has(.model-settings-columns) {
-  width: 536px;
-  max-width: min(536px, calc(100vw - var(--space-4)));
-}
-.model-settings-columns {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  align-items: start;
-  gap: 0 var(--space-2);
-}
-.model-settings-column,
+.model-setting-selector .menu-trail { flex: 0 1 auto; min-width: 0; max-width: 55%; }
+.model-setting-selector .menu-trail svg { flex: none; }
 .model-settings-group {
   display: flex;
   flex-direction: column;
@@ -8587,9 +8920,8 @@ textarea {
   font-variant-numeric: tabular-nums;
 }
 .session-usage-group-capacity { color: var(--text-dim); }
-/* A breakdown in Model Settings' place keeps its popover's type and spacing; on a phone it slides in
-   from the right, as a dialog pushed onto a sheet does (§7.5). */
-.model-settings-detail {
+/* Usage breakdowns keep their own type and spacing. Selector choices use the same inset as the overview. */
+.model-settings-usage-breakdown {
   padding: var(--space-2) var(--space-2) var(--space-1);
   font-size: var(--text-sm);
 }
@@ -8873,6 +9205,87 @@ textarea {
 /* Absolutely positioned screen-reader text otherwise keeps its static inline position. When the
    timestamp lands exactly at the reader edge, the 1px hidden box extends scrollWidth by 1px. */
 .timeline .sr-only { inset-inline-start: 0; }
+.tl-wollipog-prompt {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--border);
+  color: var(--text);
+  font: var(--type-body);
+}
+.tl-prompt-icon {
+  display: flex;
+  align-items: center;
+  min-height: var(--control-h-sm);
+}
+.tl-prompt-content { flex: 1; min-width: 0; }
+.tl-prompt-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-height: var(--control-h-sm);
+  overflow-wrap: anywhere;
+}
+.tl-prompt-heading > span { min-width: 0; }
+.chip.tl-prompt-target {
+  height: auto;
+  min-height: var(--control-h-sm);
+  max-width: 100%;
+  gap: var(--space-2);
+  white-space: normal;
+  text-align: start;
+  overflow-wrap: anywhere;
+  overflow: clip;
+}
+.tl-prompt-target > span:first-child { min-width: 0; }
+.tl-prompt-target > .status { flex: none; }
+.tl-prompt-fact { color: var(--text-dim); font: var(--type-small); }
+.tl-wollipog-prompt[data-prompt-origin="delegated_decision"] .tl-prompt-fact { overflow-wrap: anywhere; }
+.tl-prompt-message {
+  flex-direction: column;
+  align-items: stretch;
+  padding: var(--space-2);
+  overflow-wrap: anywhere;
+}
+.tl-prompt-message > pre { margin: var(--space-1) 0 0; white-space: pre-wrap; }
+.assistant-transcript-receipts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-top: var(--space-2);
+}
+.btn.assistant-transcript-receipt {
+  max-width: 100%;
+  min-height: var(--control-h-sm);
+  text-align: start;
+}
+.assistant-transcript-receipt > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.assistant-transcript-launch.btn {
+  justify-content: space-between;
+  width: 100%;
+}
+.assistant-transcript-launch > .status { flex: none; }
+.assistant-transcript-settled {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+@media (pointer: coarse) {
+  button.chip.tl-prompt-target,
+  .tl-prompt-details > summary { min-height: var(--control-h); }
+  .assistant-transcript-receipt.btn.sm { --control-h-sm: var(--control-h); }
+  .assistant-transcript-receipt.btn.sm::after { content: none; }
+}
 .tl-row {
   display: flex;
 }
@@ -9967,13 +10380,29 @@ textarea {
 .md :is(h4, h5, h6) {
   font: var(--type-body-strong);
 }
-.md a {
+.md :is(a, .md-streaming-link) {
   color: var(--accent);
   text-decoration: none;
   overflow-wrap: anywhere;
 }
 .md a:hover {
   text-decoration: underline;
+}
+.md-streaming-caret {
+  display: inline-block;
+  width: 2px;
+  height: 0.9em;
+  margin-inline-start: var(--space-0-5);
+  vertical-align: -0.1em;
+  background: currentColor;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .md-streaming-caret {
+    animation: md-streaming-caret-blink 1s step-end infinite;
+  }
+}
+@keyframes md-streaming-caret-blink {
+  50% { opacity: 0; }
 }
 .md strong {
   font-weight: var(--weight-semibold);
@@ -11744,6 +12173,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     margin: 0 calc(-1 * var(--space-2));
     padding: 0 var(--space-2) 0 var(--space-4);
   }
+  /* The grabber's top margin and height remain reserved above the pinned Model Settings header. */
+  .model-settings .menu-head.persistent { top: var(--space-3); }
   /* Sheet rows read at the phone's reading size, like the dialog sheet's body. */
   .menu-item { font-size: var(--text-md); }
   /* A section label that only repeats the sheet's title row is dropped. */
@@ -11926,6 +12357,17 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   flex: none;
   margin-left: auto;
 }
+.shortcut-row.has-description {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  row-gap: var(--space-1);
+  padding-block: var(--space-1);
+}
+.shortcut-description {
+  grid-column: 1 / -1;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
 /* De-emphasised by TOKEN, not by subtree opacity. An unavailable row is documentation, not an
    inactive control, so it keeps the full text contrast requirement: `opacity: 0.62` took
    --text-faint to about 2.6:1 on the light modal. */
@@ -12014,7 +12456,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   display: flex;
   align-items: center;
   gap: var(--space-1);
-  margin: calc(var(--space-1) * -1) calc(var(--space-1) * -1) calc(var(--space-1) * -1) 0;
+  margin: calc((1lh - var(--control-h-sm)) / 2) 0;
 }
 /* Older toasts wait behind one control above the stack; their list opens upward from it. */
 .toast-region > .toast { flex-shrink: 0; }
@@ -12055,6 +12497,11 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     width: auto;
     max-height: calc(100dvh - max(var(--toast-clear), env(safe-area-inset-bottom, 0px)) - var(--keyboard-inset, 0px) - var(--space-4));
   }
+  /* The Assistant dock can leave only a short transcript above it. Reserve a band for the
+     notification so it clears both the dock controls and the transcript's last visible row. */
+  body:has(.toast-region:not(.under-menu) > .toast) .detail-main[data-assistant-transcript] {
+    margin-bottom: calc(var(--toast-stack-height) + var(--space-2));
+  }
 
   /* On a phone the stack and an open menu sheet compete for the same screen, and there is no free edge
      to move the stack to. So while a menu is open the stack is hidden outright rather than moved.
@@ -12086,6 +12533,146 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: 0;
   font: var(--type-section);
 }
+.assistant-decision-choices {
+  overflow-wrap: anywhere;
+}
+.assistant-decision-history {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.assistant-decision-filters .chip {
+  gap: var(--space-1);
+  height: var(--control-h-sm);
+  font: var(--type-small);
+}
+.assistant-decision-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-2);
+  padding-block: var(--space-2);
+}
+.assistant-decision-outcome {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--tone) var(--tint), transparent);
+  color: var(--tone-text);
+}
+.assistant-decision-content {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.assistant-decision-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0 var(--space-2);
+  width: 100%;
+  min-height: var(--space-6);
+}
+.assistant-decision-meta strong { font: var(--type-body-strong); }
+.assistant-decision-meta time {
+  color: var(--text-dim);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+}
+.assistant-decision-subject code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  white-space: normal;
+}
+.assistant-decision-reason { color: var(--text-dim); }
+.assistant-decision-reason[data-expanded="false"] {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.assistant-decision-history .link {
+  display: inline-flex;
+  align-items: center;
+  text-align: start;
+  max-width: 100%;
+  min-width: var(--control-h-sm);
+  min-height: var(--control-h-sm);
+}
+.assistant-decision-content > .link + .link { margin-top: var(--space-1); }
+.assistant-decision-history p { margin: 0; }
+.assistant-decision-history .assistant-decision-empty { padding: var(--space-4) 0; }
+.assistant-decision-results > .assistant-decision-pagination { margin-top: var(--space-2); }
+.assistant-decision-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+@media (max-width: 760px) {
+  .assistant-decision-history { --control-h-sm: 44px; }
+  .assistant-decision-history :is(.chip, .btn) { min-width: var(--control-h-sm); }
+  .assistant-decision-history :is(button.chip, button.btn, .link)::after { content: none; }
+}
+.delegation-dialog :is(.delegation-category, .form) > p { margin: 0; }
+.delegation-dialog .modal-foot > .delegation-revoke { margin-right: auto; }
+@media (min-width: 761px) {
+  .delegation-dialog .modal-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .delegation-dialog .modal-heading { display: contents; }
+  .delegation-dialog .modal-desc { grid-area: 2 / 1 / auto / -1; }
+  .delegation-dialog .modal-close { grid-area: 1 / 2; }
+}
+.delegation-groups,
+.delegation-scopes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  align-items: start;
+}
+.delegation-dialog .delegation-group {
+  display: grid;
+  gap: var(--space-2);
+}
+.checkbox.delegation-group-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  padding-inline: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev-2);
+  font: var(--type-body-strong);
+}
+.delegation-group-toggle .checkbox-helper { grid-column: auto; }
+.delegation-category {
+  display: grid;
+  gap: var(--space-2);
+}
+.delegation-dialog .seg {
+  display: grid;
+  grid-auto-flow: row;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+  height: auto;
+}
+.delegation-dialog .delegation-presets {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+.delegation-dialog .delegation-scope-choice {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.delegation-dialog .seg-option { min-height: var(--control-h); }
+.delegation-dialog .assistant-decision-choices {
+  display: grid;
+  gap: var(--space-2);
+}
 @media (max-width: 760px) {
   /* Grant restrictions must remain readable in full, including operation inventory details. */
   .assistant-fields .choice-row-desc {
@@ -12093,17 +12680,19 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     overflow: visible;
     white-space: normal;
   }
-}
-.assistant-id-control {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-}
-.assistant-id-control > input {
-  flex: 1;
-  min-width: 0;
-  font-family: var(--font-mono);
+  .delegation-groups,
+  .delegation-scopes { grid-template-columns: minmax(0, 1fr); }
+  .delegation-dialog .delegation-presets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .delegation-dialog .modal-foot > .btn { padding-inline: var(--space-2); }
+  .delegation-dialog .modal-head:has(> .btn) { align-items: flex-start; }
+  .delegation-dialog .modal-head:has(> .btn) .modal-heading {
+    padding-block-start: calc((var(--control-h) - var(--space-6)) / 2);
+  }
+  .delegation-dialog .modal-head > .btn {
+    flex: none;
+    padding-inline: var(--space-2);
+  }
+  .delegation-dialog .form > .delegation-revoke { justify-self: start; }
 }
 /* Field anatomy (§8.1): the parts stack 8px apart, which puts the label 8px above the control.
    The helper sits 4px under the control: it, the error that replaces it (§8.5) and a
@@ -12676,117 +13265,283 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   overflow: hidden;
 }
 .assistant-thread-pane > .session-detail { flex: 1 1 0; min-height: 0; }
+.assistant-thread-archive-notice { margin: var(--space-2) var(--page-gutter); }
+.new-assistant-thread {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+.new-assistant-thread-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: var(--space-4);
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-6) var(--page-gutter) var(--space-4);
+}
+.new-assistant-thread-body > * {
+  width: 100%;
+  max-width: 680px;
+  margin-inline: auto;
+}
+.new-assistant-thread-body > h2 { margin-block: 0; font: var(--type-title); }
+.new-assistant-thread-box {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev-1);
+}
+.new-assistant-thread-box > textarea {
+  width: 100%;
+  min-height: 112px;
+  padding: var(--space-2);
+  resize: vertical;
+  font: var(--type-body);
+  border: 0;
+}
+.new-assistant-thread-chips,
+.new-assistant-thread-suggestions,
+.new-assistant-thread-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.new-assistant-thread-actions {
+  justify-content: flex-end;
+  width: 100%;
+  max-width: calc(680px + 2 * var(--page-gutter));
+  margin-inline: auto;
+  padding-inline: var(--page-gutter);
+}
+.new-assistant-option {
+  display: inline-grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-content: center;
+  align-items: start;
+  height: auto;
+  min-height: var(--control-h);
+  min-width: 0;
+  max-width: 100%;
+  padding-block: var(--space-1);
+  text-align: start;
+}
+.new-assistant-option > span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.new-assistant-option > svg { margin-block-start: calc((1lh - var(--icon-sm)) / 2); }
+.new-assistant-option-panel .menu-head {
+  z-index: var(--z-sticky);
+  justify-content: space-between;
+}
+.new-assistant-option-content {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  overflow-wrap: anywhere;
+}
+.new-assistant-option-content p { margin: 0; }
+.new-assistant-option-content .choice-row-title { overflow-wrap: anywhere; }
+.new-assistant-option-content .choice-rows { gap: var(--space-2); }
+.popover.new-assistant-account-panel { padding-block-start: 0; }
+.new-assistant-account-panel > .menu-head {
+  top: 0;
+  margin-block-start: 0;
+  border-bottom: 1px solid var(--border);
+}
+.new-assistant-account-panel[data-scrolled] > .menu-head { box-shadow: var(--elev-2); }
+@media (min-width: 761px) {
+  .new-assistant-account-panel .choice-rows { gap: var(--space-1); }
+  .new-assistant-account-panel .choice-row { min-height: 32px; padding-block: var(--space-1); }
+}
+.new-assistant-unavailable > summary { justify-content: flex-start; width: 100%; }
+.new-assistant-unavailable .count { font: var(--type-small); }
+.new-assistant-unavailable > ul { display: grid; gap: var(--space-2); margin: var(--space-2) 0 0; padding: 0; list-style: none; }
+.new-assistant-unavailable li {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.new-assistant-unavailable strong { color: var(--text); }
+@media (max-width: 760px) {
+  .popover.new-assistant-account-panel:has(.new-assistant-unavailable[open]) {
+    max-height: calc(100dvh - var(--keyboard-inset, 0px) - env(safe-area-inset-top, 0px));
+    scroll-padding-block-start: var(--bar-h);
+  }
+  .new-assistant-thread-body { flex: 1; padding-block-start: var(--space-4); }
+  .new-assistant-thread-actions {
+    padding-block: var(--space-2);
+    padding-block-end: max(var(--space-2), env(safe-area-inset-bottom, 0px));
+    border-top: 1px solid var(--border);
+  }
+  .new-assistant-thread-actions:empty { display: none; }
+  .new-assistant-thread-actions > .btn { max-width: none; width: 100%; }
+}
 .assistant-thread-pane-state {
   min-height: 0;
   overflow-y: auto;
   padding: var(--space-5) var(--page-gutter) var(--space-12) var(--space-6);
 }
-/* One column as wide as the pane. An implicit `auto` column would grow to its rows' min-content, the
-   longest title on one line, and push the list and New Thread past the pane; this one lets each row's
-   title shrink and end in its ellipsis instead. */
-.assistant-group {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-1);
-}
 /* The empty state's column starts where the Threads label and the rows' titles do. */
 .assistant-group > .state { padding-inline: var(--space-3); }
-.assistant-group-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-}
-.assistant-group-icon {
-  display: inline-flex;
-  color: var(--text-dim);
-}
-.assistant-group-title {
-  margin: 0;
-  font: var(--type-body-strong);
-}
 .assistant-threads-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: var(--space-2);
 }
-.assistant-thread-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
+.assistant-threads-head > .group-label {
+  flex: 1;
+  min-width: 0;
 }
-/* The thread's header, in the session bar's place: the title row, the facts, then the work cards. */
-.assistant-thread-head {
-  display: grid;
+.assistant-threads-search > input { width: 100%; }
+.assistant-threads-foot {
   flex: none;
+  padding: 0 var(--space-2) var(--space-2) 0;
+}
+.assistant-threads-foot .list-foot { margin-top: 0; }
+.assistant-thread-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-2);
-  padding: var(--space-3) var(--page-gutter) var(--space-3) var(--space-6);
-  border-bottom: 1px solid var(--border);
-}
-.assistant-thread-title-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  min-width: 0;
-}
-.assistant-thread-title {
-  flex: 0 1 auto;
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  font: var(--type-title);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.assistant-thread-title-row > :last-child { margin-left: auto; }
-/* Neutral facts (§11.3), as a project's meta line draws them. */
-.assistant-thread-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1) var(--space-3);
   margin: 0;
   padding: 0;
-  color: var(--text-dim);
-  font: var(--type-small);
   list-style: none;
 }
-.assistant-thread-access { color: var(--text); }
-/* AssistantWorkCards.tsx: one scrolling row of cards, so many launches never push the transcript
-   off the pane; each card opens its session, and a waiting approval rides on its card. */
-/* Pending requests (#4665) and the work cards share one row when both fit, the work cards keeping at
-   least a card's width; otherwise the row wraps and the work cards take the next line. */
-.assistant-work {
+.assistant-inbox-row {
+  align-items: flex-start;
+  gap: var(--space-2);
+  height: auto;
+  min-height: var(--row-h-2);
+  padding-block: var(--space-2);
+}
+.assistant-thread-glyph { display: inline-flex; flex: none; }
+.assistant-thread-title-line {
+  align-items: baseline;
+  justify-content: space-between;
+}
+.assistant-thread-title-line > .row-sub {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.assistant-thread-list-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.assistant-thread-preview-line { margin-top: var(--space-1); }
+.assistant-thread-preview-line > .status,
+.assistant-group .group-label > .count,
+.assistant-threads-foot .count { font-size: var(--text-sm); }
+@media (max-width: 760px) {
+  .assistant-threads-foot { padding-inline: var(--page-gutter); }
+  .detail-bar-heading:has(> .assistant-bar-title) { gap: var(--space-1); }
+}
+/* The thread title is the only part of the detail bar that shrinks. The tooltip belongs outside the
+   clipping box so it can show the whole title and wrap on a phone. */
+.assistant-thread-bar { padding-inline: var(--space-3); }
+.detail-bar-heading > .assistant-bar-title {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.assistant-bar-title > :is(h1, h2) { margin: 0; }
+.assistant-bar-title .detail-bar-title {
+  display: block;
+  width: 100%;
+  height: var(--control-h);
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: start;
+  cursor: pointer;
+}
+.assistant-bar-title-tooltip {
+  position: absolute;
+  z-index: var(--z-popover);
+  top: 100%;
+  inset-inline-start: 0;
+  width: max-content;
+  max-width: min(280px, calc(100vw - 2 * var(--page-gutter) - var(--control-h) - var(--space-2)));
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  background: var(--bg-elev-3);
+  box-shadow: var(--elev-2);
+  color: var(--text);
+  font: var(--type-small);
+  overflow-wrap: anywhere;
+  visibility: hidden;
+}
+.assistant-bar-title[data-open] > .assistant-bar-title-tooltip { visibility: visible; }
+@media (hover: hover) {
+  .assistant-bar-title:hover:not([data-open], [data-dismissed]) > .assistant-bar-title-tooltip {
+    visibility: visible;
+    transition: visibility var(--dur-fast) var(--ease-out) var(--delay-tooltip);
+  }
+}
+[data-assistant-panel-toggle] { position: relative; }
+.assistant-side-panel-dot {
+  position: absolute;
+  top: calc(50% - 11px);
+  inset-inline-end: calc(50% - 11px);
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--warning);
+  box-shadow: 0 0 0 2px var(--bg);
+}
+.assistant-thread-account-picker .choice-row-title { overflow-wrap: anywhere; }
+.assistant-thread-account-picker .choice-row-body { gap: var(--space-1); }
+.assistant-thread-settings .modal-head { gap: var(--space-2); }
+.assistant-thread-settings .settings-group-surface { border: 0; }
+.assistant-thread-settings .setting-row-trailing:has(.setting-row-control > .btn) {
+  align-items: start;
+  align-content: center;
+}
+.assistant-thread-settings .setting-row-trailing:has(.setting-row-control > .btn) .setting-row-text {
+  padding-block-start: calc((var(--control-h) - var(--space-5)) / 2);
+}
+.assistant-thread-spending-row { display: block; }
+.choice-chips,
+.assistant-launch-stepper {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
-  min-width: 0;
 }
-.assistant-work-cards {
-  display: flex;
-  flex: 1 1 280px;
-  gap: var(--space-2);
-  min-width: min(280px, 100%);
-  margin: 0;
-  padding: 0 0 var(--space-1);
-  overflow-x: auto;
-  list-style: none;
+.choice-chips > .btn,
+.assistant-launch-stepper > .btn { min-width: var(--control-h); }
+.assistant-launch-stepper > input { width: 6rem; }
+.assistant-launch-stepper > input:disabled { background: var(--bg-elev-2); }
+.assistant-thread-defaults-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-h);
+  color: inherit;
+  text-decoration: underline;
 }
-/* Cards share the row's width up to a readable measure, so a title takes the room beside it rather
-   than truncating at the minimum; past the row's width they scroll. */
-.assistant-work-card {
-  display: grid;
-  flex: 1 1 280px;
-  align-content: start;
-  min-width: min(280px, 80%);
-  max-width: 480px;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-elev);
+.assistant-thread-spending-row .assistant-panel-meter > span { grid-column: 1 / -1; }
+.assistant-thread-account-label { overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .assistant-thread-settings .modal-back { display: none; }
+  .assistant-thread-settings-cancel { order: -1; }
+  /* Keep room between the pinned Save action and the first Conversation row when the
+     defaults link at the end of the form is brought into view. */
+  .assistant-thread-settings .modal-body { padding-block-end: var(--space-2); }
+  .assistant-thread-settings .modal-body > .form { gap: var(--space-2); }
+  .assistant-thread-account-label:not(.pid),
+  .assistant-thread-account-label .pid-value {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
 }
-.assistant-work-card[data-needs-you] { border-color: var(--border-strong); }
 .assistant-work-open {
   display: grid;
   gap: var(--space-1);
@@ -12820,45 +13575,288 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.assistant-work-request {
-  display: grid;
-  gap: var(--space-2);
-}
 .assistant-work-request-title {
   margin: 0;
   font: var(--type-small);
   overflow-wrap: anywhere;
 }
-.assistant-work-request-actions {
-  display: flex;
-  flex-wrap: wrap;
+/* Thread tabs share the session panel's frame. */
+.assistant-thread-panel .rpanel-head > .tabs {
+  flex: 1;
   gap: var(--space-2);
+  margin-left: calc(-1 * var(--space-1));
+  margin-right: calc(-1 * var(--space-1));
+  padding-inline: var(--space-1);
+}
+.assistant-thread-panel .tab { min-width: var(--control-h-lg); }
+.assistant-thread-panel .tab:focus-visible { outline: none; }
+/* Give the tab label breathing room without crossing the scrollport or the active underline. */
+.assistant-thread-panel .tab:focus-visible::before {
+  position: absolute;
+  inset: var(--space-1) calc(-1 * var(--space-1));
+  border-radius: var(--radius-sm);
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: calc(-1 * var(--focus-width));
+  pointer-events: none;
+  content: "";
+}
+.assistant-thread-panel .rpanel-head > .icon-btn { flex: none; }
+.assistant-thread-panel .rpanel-body[hidden] { display: none; }
+.assistant-thread-panel .rpanel-body { overflow-wrap: anywhere; }
+.assistant-panel-details {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-4);
+}
+.assistant-panel-details > :not(button) { width: 100%; }
+.assistant-panel-details > .link {
+  min-height: var(--control-h);
+  font: var(--type-body-strong);
+  cursor: pointer;
+  text-decoration: underline;
+}
+.assistant-panel-meter {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-variant-numeric: tabular-nums;
+}
+.assistant-panel-meter > .meter { grid-column: 1 / -1; }
+.assistant-spending-meter {
+  display: grid;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+.assistant-spending-meter > .meter { display: flex; }
+.assistant-spending-meter > .meter:has(> .assistant-spending-overflow) > span { border-radius: initial; }
+.assistant-spending-meter > .meter > .assistant-spending-overflow {
+  background: repeating-linear-gradient(135deg, var(--tone) 0 2px, var(--bg-elev-3) 2px 5px);
+}
+.assistant-spending-total { font: var(--type-small); font-variant-numeric: tabular-nums; }
+@media (pointer: coarse) {
+  .assistant-thread-notice-slot { --control-h-sm: var(--control-h); }
+  .assistant-thread-notice-slot :is(.btn.sm, .icon-btn.sm)::after { content: none; }
+  .menu.assistant-thread-notice-slot > .menu-item + .menu-item { margin-top: var(--space-2); }
 }
 @media (max-width: 760px) {
-  .assistant-thread-head { padding: var(--space-2) var(--page-gutter); }
+  .detail-chat:has(.assistant-dock) .assistant-thread-notice-slot[data-notice-key="tools_unavailable"] > .notice {
+    padding-block: var(--space-2);
+  }
+  /* A pager and a notice compete for the same vertical space as the first turn. Keep
+     the request heading and actions fixed and let the request body scroll between them. */
+  .detail-chat:has(.composer .session-notice-slot) .assistant-dock-slot:has(.assistant-dock-pager):not(:has([data-show-all])) {
+    max-height: min(100cqh, max(4 * var(--control-h), 43cqh));
+  }
+  .detail-chat:has(.composer .session-notice-slot) .assistant-dock-card-head .request-card-head {
+    min-height: 0;
+  }
+}
+@media (max-width: 760px) and (pointer: coarse) {
+  .assistant-thread-pane :is(.composer-input, .composer-box.idle-collapsed .composer-idle-preview) {
+    min-height: var(--control-h);
+  }
+  /* Keep other long notices scrollable while typing. Focus works with both keyboard resize modes. */
+  .detail-chat:has(.assistant-dock) .composer:has(.composer-input:focus) .session-notice-slot:not(:has(.assistant-spending-notice)) {
+    max-height: calc(2 * var(--control-h) + var(--space-8));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+}
+.session-notice-slot .assistant-spending-notice .notice-actions { flex-wrap: wrap; }
+.session-notice-slot .assistant-spending-notice .notice-actions > .btn:first-child { flex: none; }
+.assistant-spending-notice .assistant-budget-details,
+.assistant-spending-notice .notice-trailing:has(> .assistant-budget-details:first-child:last-child) {
+  display: none;
+}
+@media (min-width: 380px) and (max-width: 760px) and (pointer: coarse) {
+  /* Start with the budget warning and its actions. Expand the prose and meter on demand
+     so a paged request and the first turn can share the screen. */
+  .detail-chat:has(.assistant-dock-pager) .assistant-spending-notice {
+    padding: var(--space-2);
+    column-gap: var(--space-2);
+  }
+  .detail-chat:has(.assistant-dock-pager) .assistant-spending-notice .assistant-budget-details { display: inline-flex; }
+  .detail-chat:has(.assistant-dock-pager) .assistant-spending-notice .notice-head:has(.assistant-budget-details) {
+    align-items: center;
+    min-height: var(--control-h);
+  }
+  .detail-chat:has(.assistant-dock-pager) .assistant-spending-notice .notice-trailing:has(> .assistant-budget-details) {
+    display: flex;
+    margin: 0;
+  }
+  .detail-chat:has(.assistant-dock-pager) .assistant-spending-notice:has(.assistant-budget-details) .notice-icon {
+    height: var(--control-h);
+  }
+  .detail-chat:has(.assistant-dock-pager) .assistant-spending-notice:has(.assistant-budget-details[aria-expanded="false"])
+    :is(.notice-body:not(:has(> .notice-meta)), .notice-body > :not(.notice-meta)) {
+    display: none;
+  }
+  .detail-chat:has(.assistant-dock-pager) .assistant-spending-notice .notice-actions {
+    display: grid;
+    grid-auto-columns: minmax(0, 1fr);
+    grid-auto-flow: column;
+  }
+  .detail-chat:has(.assistant-dock-pager) .assistant-spending-notice .notice-actions > .btn {
+    height: auto;
+    min-height: var(--control-h);
+    white-space: normal;
+    padding-inline: var(--space-1);
+  }
+  .detail-chat:has(.assistant-dock-pager) .assistant-spending-meter {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+}
+@media (max-width: 760px) and (pointer: coarse) {
+  /* Keep the spending warning visible while typing, with room left for both the transcript
+     and the request actions. The existing notice controls return when the composer loses focus. */
+  .detail-chat:has(.composer-input:focus):has(.composer .assistant-spending-notice)
+    .assistant-dock-slot:has(.assistant-dock-pager):not(:has([data-show-all])) {
+    max-height: min(100cqh, max(calc(4 * var(--control-h) - var(--space-4)), 40cqh));
+  }
+  .detail-chat:has(.composer-input:focus):has(.composer .assistant-spending-notice) .assistant-dock-actions {
+    padding-block: var(--space-1);
+  }
+  .detail-chat:has(.assistant-dock) .composer:has(.composer-input:focus):has(.assistant-spending-notice) {
+    padding-block: var(--space-2);
+  }
+  .detail-chat:has(.assistant-dock) .composer:has(.composer-input:focus) .assistant-spending-notice {
+    align-items: center;
+    padding-block: var(--space-1);
+  }
+  .detail-chat:has(.assistant-dock) .composer:has(.composer-input:focus) .assistant-spending-notice
+    :is(.notice-head, .notice-icon) {
+    height: auto;
+    min-height: 0;
+  }
+  .detail-chat:has(.assistant-dock) .composer:has(.composer-input:focus) .assistant-spending-notice
+    :is(.notice-body, .notice-actions, .notice-trailing) {
+    display: none;
+  }
+}
+@media (min-width: 1000px) and (max-height: 600px) {
+  /* Share the notice's rows so the dock and transcript have room on short desktops. */
+  .detail-chat:has(.assistant-dock) .assistant-spending-notice {
+    padding-block: var(--space-2);
+  }
+  .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-content {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) fit-content(70%);
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+  }
+  .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-body {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-row: 2;
+    grid-template-columns: minmax(0, 1fr) 25%;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+  }
+  .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-meta { grid-column: 1 / -1; }
+  .detail-chat:has(.assistant-dock) .assistant-spending-notice :is(.notice-actions, .assistant-spending-meter) { margin-top: 0; }
+  .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-actions > .btn {
+    height: auto;
+    min-height: var(--control-h-sm);
+  }
+  @container session-body (max-width: 540px) {
+    /* Give the actions the full row when a docked panel narrows the reading column. */
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-content {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-content:has(.assistant-spending-meter) {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 35%);
+    }
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-body { display: contents; }
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice :is(.notice-body > p, .notice-actions) {
+      grid-column: 1 / -1;
+    }
+    .detail-chat:has(.assistant-dock) .assistant-spending-meter {
+      grid-column: 2;
+      grid-row: 1;
+    }
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-actions { flex-wrap: nowrap; }
+    .detail-chat:has(.assistant-dock) .assistant-spending-notice .notice-actions > .btn {
+      flex: 0 1 auto;
+      min-width: 0;
+      white-space: normal;
+    }
+  }
+}
+@media (pointer: coarse) {
+  .assistant-spending-notice.compact .notice-content { row-gap: var(--space-2); }
+}
+.assistant-history > .group-label { padding-inline: 0; }
+.assistant-history-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.assistant-history-row > p {
+  margin: 0;
+  padding-block-start: calc((var(--control-h-sm) - var(--space-5)) / 2);
+  font: var(--type-body);
+}
+.assistant-history-row > .btn { flex: none; }
+.assistant-delegation-summary {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  margin-bottom: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev);
+}
+.assistant-delegation-summary p { margin: 0; }
+.launched-sessions {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.launched-sessions-group {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.launched-sessions-group > .group-label { padding: 0; }
+.launched-sessions-fold { margin: 0; font: inherit; }
+.launched-sessions-fold .disclosure-trigger { min-height: var(--control-h); }
+.launched-sessions-fold .count { color: var(--text-dim); }
+.launched-sessions-rows {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.assistant-work-row {
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+}
+.assistant-work-row > .assistant-work-open {
+  width: 100%;
+  min-height: var(--control-h-lg);
+  align-content: center;
+  gap: 0;
+}
+.assistant-work-review {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  justify-content: space-between;
+}
+.assistant-work-review > .assistant-work-request-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.assistant-work-review > .btn { flex: none; }
+@media (max-width: 760px) {
   .assistant-thread-pane-state { padding: var(--space-4) var(--page-gutter) var(--space-12); }
   .master-detail.assistants-md:not([data-detail-open]) > .assistant-thread-pane { display: none; }
-  /* A phone stacks the cards at the column's width, so a waiting approval and all three of its
-     buttons show without a sideways scroll nobody would know to try. Many cards scroll in place
-     rather than pushing the transcript off the screen. */
-  /* Pending requests stack above the cards at their whole height; only the cards' column scrolls. */
-  .assistant-work {
-    flex-direction: column;
-    flex-wrap: nowrap;
-  }
-  .assistant-work-cards {
-    flex: none;
-    flex-direction: column;
-    max-height: 40vh;
-    padding: 0;
-    overflow-x: visible;
-    overflow-y: auto;
-  }
-  .assistant-work-card {
-    flex: none;
-    min-width: 0;
-    max-width: none;
-  }
   .master-detail.assistants-md[data-detail-open] > .master-detail-list { display: none; }
 }
 /* Project management --------------------------------------------------- */
@@ -13494,18 +14492,54 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   font: var(--type-small);
 }
 .inbox-row-sender > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The phone card's first line: the sender and, trailing, the flags. */
-.inbox-row-sender-line > .inbox-row-flags { margin-left: auto; }
-/* The phone card's status line: the time is trailing, and the branch between gives way. */
-/* So does one with a pull request attention badge (#604), rather than clip its reason or the branch. */
-.stacked .inbox-row-status-line:has(.status + .status),
-.stacked .inbox-row-status-line:has(.inbox-row-pr .status) { height: auto; min-height: var(--space-5); flex-wrap: wrap; }
-.inbox-row-shell.stacked .inbox-row-status-line > .inbox-row-time { margin-left: auto; }
-/* Dense phone cards grow a status line rather than clipping either lifecycle or secondary label. */
-.inbox-row-shell.stacked .inbox-row-status-line > .row-status { flex: 0 1 auto; min-width: 0; max-width: 100%; flex-wrap: wrap; }
+/* The phone card's first line (#4791): the sender, then the time and the flags trailing it at the
+   card's right edge, above ⋯. The sender gives up width; the time and the flags never do. */
+.inbox-row-sender-line > .inbox-row-trail { gap: var(--space-1); }
+/* The phone card's status line (#4791) is one line across the whole card and never wraps, so every
+   card stays three lines. The branch gives way long before the status does, as the sender does on
+   the desktop status line; past that, `fitStatusLine()` drops the branch (keeping a pull request
+   that needs the person, #604), then the strip, then folds the secondary badge into its count, and
+   last ends that pull request in an ellipsis. The lifecycle badge always stays. */
 .inbox-row-shell.stacked .row-status > .status { flex: none; padding-inline: var(--space-1); }
-/* The branch gives way long before the status does, as the sender does on the desktop status line. */
 .inbox-row-shell.stacked .inbox-row-status-line > .inbox-row-git { flex-shrink: 100000; }
+/* Once its branch has gone, the group holds only a pull request that needs the person, which no longer
+   shrinks: the line overflows instead, so the later steps run. */
+.inbox-row-shell.stacked .inbox-row-status-line[data-fit~="branch"] > .inbox-row-git { flex: none; }
+/* A dropped branch and strip leave the eye only: the card's accessible name still says them, as
+   `.sr-only` text does. The folded secondary badge is named by its count instead. */
+.inbox-row-status-line[data-fit~="branch"] > .inbox-row-git:not(:has(.inbox-row-pr .status)),
+.inbox-row-status-line[data-fit~="branch"] > .inbox-row-git > :is(.inbox-row-branch, .inbox-row-base),
+.inbox-row-status-line[data-fit~="strip"] > .inbox-row-activity {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.inbox-row-status-line[data-fit~="badge"] .row-status > .status + .status,
+.inbox-row-status-line[data-fit~="badge"] .row-status-more { display: none; }
+.row-status-collapsed { display: none; }
+.inbox-row-status-line[data-fit~="badge"] .row-status-collapsed { display: inline; }
+/* Last, a pull request that needs the person ends in an ellipsis rather than being cut off; its
+   whole label stays in the card's name and its tooltip. */
+.inbox-row-shell.stacked .inbox-row-status-line[data-fit~="pr"] > .inbox-row-git { flex: 0 1 auto; }
+.inbox-row-status-line[data-fit~="pr"] .inbox-row-pr { flex: 0 1 auto; min-width: calc(var(--icon-sm) + var(--space-1) + 3em); overflow: hidden; }
+.inbox-row-status-line[data-fit~="pr"] .inbox-row-pr > .status {
+  display: block;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.inbox-row-status-line[data-fit~="pr"] .inbox-row-pr > .status::before {
+  display: inline-block;
+  margin-right: var(--space-1);
+  vertical-align: 1px;
+}
 /* Meta (§11.3): plain text, each item after its 14px icon, 12px apart. */
 .inbox-row-git {
   display: flex;
@@ -13560,7 +14594,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 /* The one status (#2209, §11.1): the badge and a neutral "+N". */
 .row-status { display: inline-flex; flex: none; align-items: center; gap: var(--space-1); }
-.row-status-more {
+.row-status-more,
+.row-status-collapsed {
   color: var(--text-dim);
   font: var(--type-micro);
   font-variant-numeric: tabular-nums;
@@ -13628,7 +14663,10 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .inbox-row-action:not(.inbox-row-more) { display: none; }
   .icon-btn.inbox-row-more { width: var(--control-h); height: var(--control-h); }
   .inbox-row-shell .inbox-row { padding-right: var(--control-h); }
-  .inbox-row-shell.stacked .inbox-row { padding-right: calc(var(--control-h) + var(--space-2)); }
+  /* A phone card keeps the column for ⋯ on its title line only (#4791): the time and the flags above
+     ⋯ and the status line below it run to the card's own padding. */
+  .inbox-row-shell.stacked .inbox-row { padding-right: var(--inbox-row-pad-x); }
+  .inbox-row-shell.stacked .inbox-row-copy { padding-right: calc(var(--control-h) + var(--space-2) - var(--inbox-row-pad-x)); }
 }
 /* A wide list's rows (#2218, docs/design-system.md §6.3 "Rows use the width"). At 880px and wider the
    two lines keep their height. The status line's trailing cluster becomes fixed columns, the same on
@@ -14839,6 +15877,34 @@ button.review-finding-location {
   white-space: normal;
 }
 .question-input { display: block; }
+/* On a touch phone Something Else is typed in the composer (#4714). The card shows the answer so far
+   where its field would be, drawn as that field (§8.1), and a tap opens the composer to go on. */
+.question-handoff {
+  display: block;
+  width: 100%;
+  min-height: var(--control-h);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--control-outline);
+  border-radius: var(--radius-sm);
+  background: var(--field-bg);
+  color: var(--text);
+  font: var(--type-body);
+  text-align: start;
+  cursor: text;
+}
+/* Three lines at most, clamped inside the padding so no part of a fourth shows. */
+.question-handoff-text {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.question-handoff:disabled {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+.question-handoff-placeholder { color: var(--text-faint); }
 /* Dismiss at the far left, then the step count, Back and the primary, last (§3.2). */
 .question-dismiss { margin-right: auto; }
 .question-step-note {
@@ -15282,6 +16348,7 @@ button.review-finding-location {
   }
 
   .app { flex-direction: column; }
+  .app[data-assistant-composing] > .app-rail { display: none; }
   .main { order: 1; min-height: 0; }
   .app-rail {
     order: 2;
@@ -17870,6 +18937,40 @@ button.setting-row { cursor: pointer; }
 .setting-row-value-part { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
 .setting-row-link-word { color: var(--text-dim); font: var(--type-small); white-space: nowrap; }
 .setting-row-chevron { display: inline-flex; color: var(--text-dim); }
+/* Centre the trailing button on the title's first line even if that title wraps. */
+:is(.assistant-thread-defaults, .assistant-active-delegations) .setting-row-trailing {
+  align-items: start;
+  align-content: center;
+}
+:is(.assistant-thread-defaults, .assistant-active-delegations) .setting-row-trailing .setting-row-text {
+  padding-block-start: calc((var(--control-h) - var(--space-5)) / 2);
+}
+.assistant-active-delegations .setting-row-trailing { grid-template-columns: minmax(0, 1fr) auto; }
+.assistant-active-delegations .setting-row-title-line {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-0-5);
+}
+/* The button shows the current value. Keep long account labels inside the control column. */
+.assistant-thread-defaults .setting-row-control > .btn {
+  display: block;
+  min-width: var(--control-h);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@container (max-width: 559px) {
+  .assistant-thread-defaults .setting-row { grid-template-columns: minmax(0, 1fr) fit-content(51%); }
+}
+.assistant-default-dialog .choice-rows { gap: var(--space-2); }
+@media (max-width: 560px) {
+  .assistant-connections-group .settings-group-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: var(--space-1);
+  }
+  .assistant-connections-group .settings-group-action { grid-column: 2; grid-row: 1 / 3; }
+}
 /* The switch row is the Switch button itself, so its track and Saved check are the row's own
    children: both in the control column, the track at its right edge and Saved just before it. */
 .setting-row-switch > .ui-switch,
@@ -18829,6 +19930,13 @@ a.tab { text-decoration: none; }
 .checkbox-mark > input { border-radius: var(--radius-xs); }
 .radio-mark > input { border-radius: var(--radius-pill); }
 .checkbox-mark > input:checked { border-color: var(--accent); background: var(--accent); }
+.checkbox-mark:has(> input:indeterminate)::after {
+  content: "";
+  position: absolute;
+  width: var(--space-2);
+  border-top: 2px solid currentColor;
+  pointer-events: none;
+}
 /* Radio: an accent ring plus a dot. */
 .radio-mark > input:checked { border-color: var(--accent); }
 .checkbox-check,
@@ -19239,6 +20347,108 @@ a.tab { text-decoration: none; }
 .settings-detail .settings-panel-heading { display: none; }
 .settings-detail .settings-panel-head:not(:has(> .settings-panel-scope, > .settings-panel-action)) { display: none; }
 
+.assistant-connections-page > .detail-bar {
+  margin-left: calc(-1 * var(--page-gutter));
+  margin-right: calc(-1 * var(--page-gutter));
+}
+.assistant-connections-list > .detail-bar {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+}
+.assistant-connections-content {
+  padding-top: var(--space-5);
+  --setting-control-w: 264px;
+}
+.assistant-connections-content .assistant-installation-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.assistant-installation-row .setting-row-control {
+  flex-direction: row;
+  gap: var(--space-2);
+}
+.assistant-installation-row .setting-row-desc {
+  padding: 0;
+  border: 0;
+  background: none;
+}
+.assistant-connection-row {
+  align-items: start;
+  align-content: center;
+}
+.assistant-connection-row .setting-row-control {
+  padding-block-start: calc((var(--space-5) - var(--icon)) / 2);
+}
+.assistant-connection-row .setting-row-title {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.assistant-connections-page .status,
+.assistant-connections-group .status {
+  font-size: var(--text-sm);
+}
+.assistant-editor-save {
+  align-self: flex-start;
+}
+.assistant-connections-content .choice-row-desc {
+  display: block;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.assistant-activity-scroll {
+  max-height: 420px;
+  overflow: auto;
+}
+.assistant-activity-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font: var(--type-small);
+}
+.assistant-activity-table :is(th, td) {
+  padding: var(--space-2);
+  text-align: start;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.assistant-activity-table tbody tr { border-top: 1px solid var(--border); }
+.assistant-credential-visibility { align-self: flex-start; }
+.assistant-credential-revealed {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+  resize: none;
+}
+@media (max-width: 760px) {
+  .assistant-connections-content .assistant-installation-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .assistant-installation-row .setting-row-control {
+    justify-content: flex-start;
+  }
+  .assistant-connections-content .seg { gap: var(--space-2); }
+  .assistant-connections-content .choice-list { gap: var(--space-2); }
+  .assistant-connection-row + .assistant-connection-row,
+  .assistant-connections-group .assistant-connection-row + .setting-row-link { margin-top: var(--space-2); }
+  .assistant-activity-table :is(tbody, td) { display: block; }
+  .assistant-activity-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    padding: var(--space-3);
+  }
+  .assistant-activity-table td { padding: 0; }
+  .assistant-activity-table td:nth-child(-n+2) { grid-column: 1 / -1; }
+  .assistant-activity-target {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+}
+
 
 
 
@@ -19373,6 +20583,7 @@ a.tab { text-decoration: none; }
     --switch-h: 24px;
     --switch-thumb: 18px;
   }
+  .new-assistant-option-panel .choice-row { min-height: var(--control-h); }
   /* Comfortable density on touch: the same 4px more per row tier, above the touch floor. */
   :root[data-density="comfortable"] {
     --row-h: 52px;
@@ -19392,6 +20603,9 @@ a.tab { text-decoration: none; }
     inset: -4px;
   }
   :is(.btn.sm, button.chip, .composer-btn)::after { inset: -5px; }
+  .toast-actions, .notice-trailing { gap: var(--space-2); }
+  .assistant-group .notice-actions { gap: var(--space-3); }
+  .notice.compact > .notice-trailing::before { margin-right: calc(var(--space-2) * -1); }
   /* A segmented option cannot borrow from its neighbours, so it borrows the track's inset and edge
      instead: 38px option + 2px inset + 1px edge on each side = 44px, plus the option's own 1px
      border for the padding-edge reason above. A dense toolbar's track is a full control tall on

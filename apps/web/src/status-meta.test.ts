@@ -179,6 +179,8 @@ const TABLE: readonly Row[] = [
   // Usage
   ["usage", "available", "Available", "success"],
   ["usage", "approaching_limit", "Approaching Limit", "warning"],
+  ["usage", "on_pace_to_run_out", "On Pace to Run Out", "warning"],
+  ["usage", "usage_warning", "Usage Warning", "warning"],
   ["usage", "temporarily_unavailable", "Temporarily Unavailable", "danger"],
   ["usageBudget", "reached", "Budget Reached", "warning"],
   // Agent on a machine

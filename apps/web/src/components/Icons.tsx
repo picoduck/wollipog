@@ -26,7 +26,9 @@ import {
   ChevronRight as LucideChevronRight,
   ChevronUp as LucideChevronUp,
   ChevronsDown as LucideChevronsDown,
+  ChevronsDownUp as LucideChevronsDownUp,
   ChevronsUp as LucideChevronsUp,
+  ChevronsUpDown as LucideChevronsUpDown,
   Circle as LucideCircle,
   CircleUserRound as LucideCircleUserRound,
   CircleX as LucideCircleX,
@@ -340,6 +342,16 @@ export function ChevronsDownIcon(props: IconProps) {
 /** Show Answer: Answer Mode's panel opens again (#2212). */
 export function ChevronsUpIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideChevronsUp} {...props} />;
+}
+
+/** Collapse All: every Campaign Status section folds to its heading (#4781). */
+export function CollapseAllIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideChevronsDownUp} {...props} />;
+}
+
+/** Expand All: every Campaign Status section unfolds (#4781). */
+export function ExpandAllIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideChevronsUpDown} {...props} />;
 }
 
 export function PlusIcon(props: IconProps) {

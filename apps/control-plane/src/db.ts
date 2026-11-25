@@ -1,5 +1,7 @@
 import { CAMPAIGN_SCOPE_OWNER_REVIEW_REASONS, issueClosureDeliveryGap, knownProviderCommandHomeWriteSeparation } from "@wollipog/protocol";
 import { validCampaignLaunchDisclosure, ownerResourceLabel, campaignPublicationTitle } from "@wollipog/protocol";
+import { assistantDecisionCategory, ciRerunSubject, isRequesterForgeDecisionCategory,
+  releaseDecisionSubject, type AssistantDecisionHistoryPage, type AssistantDecisionOutcome } from "@wollipog/protocol";
 import { withoutProviderAccountNames } from "./agent-account-view.js";
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, agentAvailableForRunnerDefault, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, CAMPAIGN_PENDING_CAUSES, PROJECT_LOCATION_INSPECTION_FAILURES, validCampaignRepositoryList,
@@ -62,13 +64,14 @@ import { genericRequestScreenData, storedCredentialScreenFact } from "./credenti
 import { scopeSettlements } from "./campaign-issue-authority.js";
 import { grantReviewMaxIssues, ownerReviewMaxIssues, proposalMaxIssues, scopeApprovalMaxIssuesIncrease, scopeDerivedFollowUpLimit } from "./scope-grant.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
-import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
+import { validCampaignBudgetAuthority, validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation, type CampaignBudgetAuthority } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
 import { claudeUsageProbeable } from "./subscription-usage.js";
 import { ACCRUED_USAGE_SQL, claudeTurnRunningTotal } from "./claude-running-total.js";
 import { lookupRate, priceUsage, resolveCostSource, sameRequestInputTier, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
 import { WalCheckpointer, type WalCheckpointerOptions } from "./wal-checkpointer.js";
+import { FILE_BACKED_PAGE_CACHE_PRAGMA } from "./sqlite-page-cache.js";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
 import { uptime } from "node:os";
@@ -113,6 +116,7 @@ import {
   canonicalAgentHarnessIdentity,
   agentContextKey,
   runnerSupportsProtocol,
+  validAntigravitySetupView,
   normalizeBackgroundFollowUp,
   scopeAudienceContained,
   validatePromptImageInputs,
@@ -397,9 +401,11 @@ import { matchWorkspaceId, matchWorkspaceIds, workspacePathsEqual } from "./work
 import { installMaintenanceIndexes } from "./maintenance-indexes.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { CAMPAIGN_RECOVERY_SCHEMA, CampaignRecoveryStore, type CampaignRecoveryVerifiedReport } from "./campaign-recovery-store.js";
+import { CAMPAIGN_HANDOFF_QUESTION_KEY, CAMPAIGN_HANDOFF_TITLE, isCampaignHandoffQuestion } from "@wollipog/protocol";
 import {
   CAMPAIGN_FORGE_OBSERVATION_SCHEMA,
   CampaignForgeObservationStore,
+  hasCampaignCheckFailure,
   type CampaignForgeObservingRunner,
   type ForgeObserverState,
 } from "./campaign-forge-observations.js";
@@ -496,6 +502,12 @@ function boundedProviderLoginError(error: string): string {
   const characters = Array.from(error);
   return characters.length <= PROVIDER_LOGIN_ERROR_LIMIT ? error
     : `${characters.slice(0, PROVIDER_LOGIN_ERROR_LIMIT - 1).join("")}…`;
+}
+
+/** A stored setup is revalidated on read; anything unreadable is treated as not yet reported. */
+function antigravitySetupFromRow(value: string | null): RunnerView["antigravitySetup"] {
+  const parsed = parseJson<unknown>(value);
+  return validAntigravitySetupView(parsed) ? parsed : undefined;
 }
 
 function safeProviderLogins(value: RunnerView["providerLogins"]): ProviderLoginView[] {
@@ -1016,6 +1028,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   provider_account_label TEXT,
   provider_account_automatically_selected INTEGER NOT NULL DEFAULT 0 CHECK (provider_account_automatically_selected IN (0, 1)),
   provider_account_switch_failure TEXT,
+  assistant_thread_health TEXT,
   location_switch TEXT,
   provider_profile_id TEXT,
   provider_home_refusal TEXT,
@@ -1032,6 +1045,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   worktree_recovery TEXT,
   queue_hold TEXT,
   capacity_wait TEXT,
+  initial_prompt_state TEXT CHECK (initial_prompt_state IN ('submitted','interrupted')),
   status         TEXT NOT NULL DEFAULT 'queued',
   board_column   TEXT,
   use_worktree   INTEGER NOT NULL DEFAULT 0,
@@ -1118,6 +1132,7 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
   evidence_reviewed     TEXT,
   delegated_video_evidence TEXT,
   delegated_image_review TEXT,
+  assistant_delegation   TEXT,
   rationale_digest      TEXT,
   human_fallback        TEXT,
   authority_evaluation  TEXT,
@@ -1155,6 +1170,14 @@ CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resource
   ON workflow_decisions(session_id, category, resource_key, created_at);
 CREATE INDEX IF NOT EXISTS idx_workflow_decisions_automation_expiry
   ON workflow_decisions(category, status) WHERE category='automation_creation' AND status IN ('pending','approved');
+-- A lifecycle revocation keeps a bounded, read-only forge observation alive after the child ends.
+CREATE TABLE IF NOT EXISTS workflow_merge_settlement_checks (
+  occurrence_id TEXT PRIMARY KEY REFERENCES workflow_decisions(occurrence_id) ON DELETE CASCADE,
+  next_check_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_merge_settlement_due ON workflow_merge_settlement_checks(next_check_at);
+CREATE INDEX IF NOT EXISTS idx_workflow_merge_settlement_expiry ON workflow_merge_settlement_checks(expires_at);
 -- Durable post-commit work: lifecycle callbacks can send prompts and open their own transactions.
 CREATE TABLE IF NOT EXISTS automation_expiration_effects (
   occurrence_id TEXT PRIMARY KEY,
@@ -1194,7 +1217,7 @@ CREATE TABLE IF NOT EXISTS workflow_decision_action_receipts (
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
--- One row per evidence item actually delivered to the reviewing Orchestrator. Identifiers and
+-- One row per evidence item delivered to a reviewer. Identifiers and
 -- digests only: evidence bytes and storage credentials never reach this table. A redelivery
 -- replaces the row, so a receipt id observed earlier cannot be replayed.
 CREATE TABLE IF NOT EXISTS ui_evidence_review_receipts (
@@ -1208,6 +1231,7 @@ CREATE TABLE IF NOT EXISTS ui_evidence_review_receipts (
   sha256              TEXT NOT NULL,
   delivered_at        INTEGER NOT NULL,
   delivery_order      INTEGER,
+  assistant_binding   TEXT,
   video_source_artifact_id TEXT,
   video_source_sha256 TEXT,
   video_manifest_sha256 TEXT,
@@ -1851,6 +1875,9 @@ CREATE TABLE IF NOT EXISTS session_events (
 CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_session_events_user_message ON session_events(session_id, seq)
   WHERE kind='user_message';
+CREATE INDEX IF NOT EXISTS idx_session_events_assistant_reply ON session_events(session_id, seq)
+  WHERE kind='agent_message' AND json_extract(payload, '$.final') = 1
+    AND json_extract(payload, '$.parentToolUseId') IS NULL;
 CREATE INDEX IF NOT EXISTS idx_session_events_turn_start ON session_events(session_id, seq)
   WHERE kind='user_message' AND COALESCE(json_extract(payload, '$.deliveryIntent'), '')!='steer'
     AND json_type(payload, '$.commandInvocation') IS NULL;
@@ -3096,6 +3123,7 @@ CREATE TABLE IF NOT EXISTS human_campaign_launches (
   session_id TEXT NOT NULL UNIQUE,
   dispatch_state TEXT NOT NULL CHECK (dispatch_state IN ('committed','uncertain','sent','unsent')),
   created_at INTEGER NOT NULL,
+  custom_budget INTEGER CHECK (custom_budget IN (0,1)),
   PRIMARY KEY (user_id, request_id)
 );
 
@@ -3413,6 +3441,7 @@ interface RunnerRow {
   capacity_status: string | null;
   provider_accounts: string | null;
   provider_logins: string | null;
+  antigravity_setup: string | null;
 }
 
 interface RunnerCredentialRow {
@@ -3446,6 +3475,7 @@ interface SessionRow {
   provider_account_selection?: string | null;
   provider_account_automatically_selected: number;
   provider_account_switch_failure: string | null;
+  assistant_thread_health: string | null;
   location_switch?: string | null;
   provider_profile_id: string | null;
   provider_home_refusal: string | null;
@@ -3620,7 +3650,7 @@ function campaignLeftoverDigest(status: "stuck" | "complete_needs_cleanup", stuc
     ...cleanup.map((item) => item.kind === "merged_branch"
       ? `branch:${item.repository.toLowerCase()}#${item.pullRequest}:${item.state}:${item.branch ?? ""}:${item.action.kind}`
       : item.kind === "worktree" ? `worktree:${item.sessionId}:${item.path}:${item.status}`
-      : `handoff:${item.workItemId}`),
+      : item.kind === "image_reviewer" ? `reviewer:${item.sessionId}` : `handoff:${item.workItemId}`),
     ...recoveryIds.map((id) => `recovery:${id}`),
   ].sort();
   return createHash("sha256").update(JSON.stringify([status, keys])).digest("hex");
@@ -4820,6 +4850,8 @@ export class HourlyUsageUnavailableError extends RangeError {
 }
 
 export interface NewSessionInput {
+  /** A direct launch includes an initial message. Retain only its presence, never its content. */
+  initialPromptSubmitted?: boolean;
   /** Server-validated origin reserved alongside the Assistant command receipt. */
   assistantWorkOrigin?: {connectionId: string; commandId: string};
   /** Server-owned campaign fields and the actual implementing harness, captured atomically. */
@@ -5960,6 +5992,10 @@ export class ControlPlaneDb {
     }
     this.assistantConnections = new AssistantConnections(db);
     this.assistantThreads = new AssistantThreadStore(db);
+    if (!attached) {
+      this.migrateAssistantThreadLaunchDefaults();
+      this.migrateAssistantThreadBudgets();
+    }
     this.assistantOwnerConfirmations = new AssistantOwnerConfirmations(db);
     this.assistantWork = new AssistantWorkStore(db, this, this.assistantConnections);
     this.providerPublications = new ProviderProfilePublicationStore(db, controlPlaneInstanceId);
@@ -6213,8 +6249,6 @@ export class ControlPlaneDb {
   /** A child's human gate cannot starve unrelated work, but only a current Full Control
    * boundary permits that continuation. This never clears the child's gate. */
   campaignMayContinueWhileHumanWaiting(campaignId: string): boolean {
-    // This predicate is also used while projecting a campaign. A SessionView embeds that
-    // projection, so read the authority/lifecycle row directly rather than recursively mapping it.
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
     const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
     return Boolean(row && policy?.control?.mode === "full_control" &&
@@ -6234,6 +6268,13 @@ export class ControlPlaneDb {
   /** Shared live CP preflight for recovery, scheduler, projection and outbox. Read rows rather
    * than SessionView: a view contains the projection which calls this predicate. */
   campaignContinuationAdmission(campaignId: string): NonNullable<import("@wollipog/protocol").CampaignRecoveryProjection["automation"]> {
+    return this.readCampaignContinuationAdmission(campaignId, () => this.campaignRecoveryCompletion(campaignId));
+  }
+
+  private readCampaignContinuationAdmission(
+    campaignId: string,
+    readCompletion: () => ReturnType<ControlPlaneDb["campaignRecoveryCompletion"]>,
+  ): ReturnType<ControlPlaneDb["campaignContinuationAdmission"]> {
     if (this.campaignPaused(campaignId)) return { state: "lifecycle_held", reason: "The campaign is paused." };
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
     const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
@@ -6246,7 +6287,7 @@ export class ControlPlaneDb {
     if (full && !campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy: this.parentControlPolicy(campaignId) ?? undefined })) {
       return { state: "authority_unavailable", reason: "The current authority boundary is unavailable; recovery cannot enlarge it." };
     }
-    const completion = this.campaignRecoveryCompletion(campaignId);
+    const completion = readCompletion();
     // The one wake-up the server's repair of a delivered campaign's leftovers records (#4146) is how
     // the Orchestrator learns of owed cleanup; it dispatches no recovery record. Held scoped work
     // stays held: its original obligation is reconciled first, so the repair records no wake for it.
@@ -6329,11 +6370,21 @@ export class ControlPlaneDb {
     state: "children_unfinished" | "complete" | "recovery_ready" | "recovery_held";
     recoveryIds: string[];
   } {
+    return this.readCampaignRecoveryCompletion(campaignId, now);
+  }
+
+  private readCampaignRecoveryCompletion(
+    campaignId: string,
+    now: number,
+    verified = this.validCampaignChildReportIds(campaignId),
+    reviewerCleanup = () => this.campaignReviewerCleanup(campaignId),
+  ): ReturnType<ControlPlaneDb["campaignRecoveryCompletion"]> {
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
     const policy = row ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) : undefined;
-    const children = this.campaignDescendantIds(campaignId), verified = this.validCampaignChildReportIds(campaignId);
+    const children = this.campaignCompletionChildIds(campaignId);
     const childRows = children.map(id => this.stmt("SELECT archived FROM sessions WHERE id=?").get(id) as { archived: number });
-    if (!row || !policy || children.length === 0 || children.some((id, i) => !(verified.has(id) || this.campaignChildFailureSuperseded(campaignId, id)) ||
+    if (!row || !policy || reviewerCleanup().length > 0 || children.length === 0 ||
+        children.some((id, i) => !(verified.has(id) || this.campaignChildFailureSuperseded(campaignId, id, verified)) ||
         policy.behavior.completion !== "retain" && (childRows[i]!.archived !== 1 || this.campaignWorktreeCleanup(id).length > 0)) ||
         pendingRequests(parseJson<PendingApproval>(row.pending_approval)).length > 0 ||
         this.stmt("SELECT 1 FROM workflow_decisions WHERE controlling_session_id=? AND status='pending'").get(campaignId)) {
@@ -6400,10 +6451,7 @@ export class ControlPlaneDb {
                 record.resource.pullRequest !== ref.number) continue;
             if (record.resource.kind === "pull_request" && record.resource.sessionId === campaignId &&
                 record.resource.occurrenceId === fact.value.headSha &&
-                (record.action === "repair_checks" && record.reason === "failed_checks" &&
-                  (fact.value.forge === "gitlab"
-                    ? fact.value.pipeline?.status === "failed"
-                    : fact.value.checks.state === "failing" || fact.value.requiredChecks.state === "failing") ||
+                (record.action === "repair_checks" && record.reason === "failed_checks" && hasCampaignCheckFailure(fact.value) ||
                  record.action === "rereview" && record.reason === "reviewer_objection" &&
                   fact.value.forge !== "gitlab" && fact.value.reviewDecision === "changes_requested")) {
               recoveryIds.add(record.id);
@@ -6476,12 +6524,13 @@ export class ControlPlaneDb {
         (status='consumed' AND json_extract(issue_closure_result,'$.outcome')='uncertain'
           AND json_extract(issue_closure_result,'$.reconciliation.acknowledgedAt') IS NULL))
         AND NOT (category='owner_decision' AND request_id GLOB 'issue_closure_recovery_*')
+        AND NOT (category='owner_decision' AND resource_key=?)
         AND NOT EXISTS (SELECT 1 FROM campaign_recovery_denial_settlements settled
           WHERE decision.status='denied' AND settled.campaign_session_id=decision.controlling_session_id
             AND settled.occurrence_id=decision.occurrence_id)
         AND NOT EXISTS (SELECT 1 FROM workflow_decisions newer
           WHERE newer.session_id=decision.session_id AND newer.resource_key=decision.resource_key
-          AND decision.status='denied' AND newer.rowid>decision.rowid)`).all(campaignId) as unknown[])
+          AND decision.status='denied' AND newer.rowid>decision.rowid)`).all(campaignId, CAMPAIGN_HANDOFF_QUESTION_KEY) as unknown[])
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null);
   }
 
@@ -6822,6 +6871,40 @@ export class ControlPlaneDb {
   /** Server-only wrapper: insert a campaign child and open its work-item attempt together (#3106). */
   campaignChildCreationTransaction<T>(work: () => T): T { return this.atomic(work); }
 
+  /** Persist a thread's owner limits and the matching backing session cap together. */
+  assistantThreadLimitsTransaction<T>(work: () => T): T { return this.atomic(work); }
+
+  private migrateAssistantThreadBudgets(): void {
+    const key = "assistant_thread_budgets_unified";
+    const applied = this.db.prepare("SELECT 1 FROM control_plane_metadata WHERE key=?");
+    if (applied.get(key)) return;
+    this.atomic(() => {
+      if (applied.get(key)) return;
+      this.assistantThreads.migrateLegacyBackingBudgets();
+      this.db.prepare("INSERT INTO control_plane_metadata (key, value) VALUES (?, '1')").run(key);
+    });
+  }
+
+  /** Snapshot the formerly shared harness before Orchestrator settings can change again. */
+  private migrateAssistantThreadLaunchDefaults(): void {
+    const key = "assistant_thread_launch_defaults_migrated";
+    const applied = this.db.prepare("SELECT 1 FROM control_plane_metadata WHERE key=?");
+    if (applied.get(key)) return;
+    this.atomic(() => {
+      if (applied.get(key)) return;
+      const memberships = this.db.prepare(`SELECT m.user_id AS userId, m.organization_id AS organizationId
+        FROM identity_memberships m JOIN orchestrator_settings s ON s.user_id=m.user_id
+        WHERE m.role='owner' AND s.child_harness IS NOT NULL`).all() as Array<{ userId: string; organizationId: string }>;
+      for (const owner of memberships) {
+        const driver = this.getOrchestratorDefaults(owner.userId)?.defaults.behavior.childHarness?.driver;
+        if (driver === "codex" || driver === "codex-app-server") {
+          this.assistantThreads.setDefaultLaunch(owner, { harness: "codex", providerAccount: null });
+        }
+      }
+      this.db.prepare("INSERT INTO control_plane_metadata (key, value) VALUES (?, '1')").run(key);
+    });
+  }
+
   static open(location: string, options: { artifactBlobDir?: string; hostBootId?: string; incrementalVacuum?: boolean } = {}): ControlPlaneDb {
     if (location !== ":memory:") mkdirSync(dirname(location), { recursive: true });
     const artifactBlobs = location === ":memory:" && !options.artifactBlobDir
@@ -6842,6 +6925,7 @@ export class ControlPlaneDb {
     }
     const journalMode = (db.prepare("PRAGMA journal_mode = WAL;").get() as { journal_mode: string })
       .journal_mode;
+    if (location !== ":memory:") db.exec(FILE_BACKED_PAGE_CACHE_PRAGMA);
     // FULL flushes the WAL at every commit, so control-plane decisions are durable once
     // acknowledged. Only runner-replayable event ingest relaxes it; see replayableCommit.
     db.exec("PRAGMA synchronous = FULL;");
@@ -6860,16 +6944,21 @@ export class ControlPlaneDb {
         db.exec(`ALTER TABLE ${table} ADD COLUMN revision INTEGER NOT NULL DEFAULT ${defaultValue}`);
       }
     }
-    const videoReceiptColumns = new Set((db.prepare("PRAGMA table_info(ui_evidence_review_receipts)")
+    const evidenceReceiptColumns = new Set((db.prepare("PRAGMA table_info(ui_evidence_review_receipts)")
       .all() as unknown as Array<{ name: string }>).map((column) => column.name));
     for (const [name, type] of [
       ["delivery_order", "INTEGER"], ["video_source_artifact_id", "TEXT"],
       ["video_source_sha256", "TEXT"], ["video_manifest_sha256", "TEXT"],
       ["video_frame_index", "INTEGER"], ["video_frame_pts_ms", "INTEGER"],
+      ["assistant_binding", "TEXT"],
     ] as const) {
-      if (!videoReceiptColumns.has(name)) {
+      if (!evidenceReceiptColumns.has(name)) {
         db.exec(`ALTER TABLE ui_evidence_review_receipts ADD COLUMN ${name} ${type}`);
       }
+    }
+    const launchColumns = db.prepare("PRAGMA table_info(human_campaign_launches)").all() as unknown as Array<{ name: string }>;
+    if (!launchColumns.some((column) => column.name === "custom_budget")) {
+      db.exec("ALTER TABLE human_campaign_launches ADD COLUMN custom_budget INTEGER CHECK (custom_budget IN (0,1))");
     }
     const reminderColumns = db.prepare("PRAGMA table_info(session_reminders)")
       .all() as unknown as Array<{ name: string }>;
@@ -7645,6 +7734,7 @@ export class ControlPlaneDb {
       "delegated_video_evidence TEXT",
       // #4074: the delegated image reviewer whose verdict backed an Orchestrator approval.
       "delegated_image_review TEXT",
+      "assistant_delegation TEXT",
       "human_fallback TEXT",
       "authority_evaluation TEXT",
       "issue_closure_result TEXT",
@@ -7678,6 +7768,10 @@ export class ControlPlaneDb {
     ]) {
       try { db.exec(`ALTER TABLE workflow_decisions ADD COLUMN ${column}`); } catch { /* already present */ }
     }
+    db.exec(`CREATE INDEX IF NOT EXISTS workflow_assistant_decision_history ON workflow_decisions (
+      json_extract(assistant_delegation, '$.ownerUserId'), json_extract(assistant_delegation, '$.organizationId'),
+      json_extract(assistant_delegation, '$.resolvedAt') DESC, occurrence_id DESC
+    ) WHERE assistant_delegation IS NOT NULL`);
     // #4323: a consumed merge's closure watch. Merges consumed before it existed are not watched:
     // marked once, when the column is added, so none of them is read or reported afterwards.
     let closureWatchAdded = false;
@@ -7703,11 +7797,18 @@ export class ControlPlaneDb {
     // #4067: a campaign's merged branches are found through its consumed merges' Orchestrators.
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_consumed_merges
       ON workflow_decisions(controlling_session_id) WHERE category='pr_merge' AND status='consumed'`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_armed_merges
+      ON workflow_decisions(controlling_session_id) WHERE category='pr_merge' AND status='approved' AND action_kind='pr_merge_enqueue'`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_forge_deletions
       ON workflow_decisions(controlling_session_id) WHERE category='merged_branch_deletion' AND forge_action IS NOT NULL`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_approved_deletions
+      ON workflow_decisions(controlling_session_id) WHERE category='merged_branch_deletion' AND status IN ('approved','consumed')`);
     // An enqueue Wollipog performed is a merge whatever its occurrence's status became meanwhile.
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_forge_merges
       ON workflow_decisions(controlling_session_id) WHERE category='pr_merge' AND forge_action IS NOT NULL`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_requester_forge
+      ON workflow_decisions(category, resource_key) WHERE forge_action IS NOT NULL`);
+    db.exec("DROP INDEX IF EXISTS idx_workflow_decisions_ci_reruns");
     admitCampaignEventKinds(db);
     preserveCampaignFollowUpOrigins(db);
     widenCampaignDecisionSubjects(db);
@@ -7832,6 +7933,8 @@ export class ControlPlaneDb {
       "provider_accounts TEXT",
       // Protocol v171 secret-free supervised provider sign-in projections.
       "provider_logins TEXT",
+      // Protocol v403 secret-free Google Antigravity setup projection (Refs #4780).
+      "antigravity_setup TEXT",
     ]) {
       try {
         db.exec(`ALTER TABLE runners ADD COLUMN ${col}`);
@@ -7870,6 +7973,7 @@ export class ControlPlaneDb {
       "provider_account_label TEXT",
       "provider_account_automatically_selected INTEGER NOT NULL DEFAULT 0 CHECK (provider_account_automatically_selected IN (0, 1))",
       "provider_account_switch_failure TEXT",
+      "assistant_thread_health TEXT",
       // #4353: why this session started on its account, as reason codes that name no account.
       "provider_account_selection TEXT",
       // #4138: the runner's pending or failed Location switch for the live session.
@@ -7988,6 +8092,7 @@ export class ControlPlaneDb {
       "worktree_recovery TEXT",
       // Protocol v187: a runner-reported prompt held behind a handoff barrier (#1651).
       "queue_hold TEXT",
+      "initial_prompt_state TEXT CHECK (initial_prompt_state IN ('submitted','interrupted'))",
       // Secret-free ACP MCP environment references and explicit directory selections.
       "acp_session_context TEXT",
       // Protocol v60 immutable launch placement. NULL identifies legacy sessions.
@@ -8593,6 +8698,7 @@ export class ControlPlaneDb {
         throw uninitialized;
       }
       // The same per-connection behavior open sets, so attached writes act exactly as the server's.
+      db.exec(FILE_BACKED_PAGE_CACHE_PRAGMA);
       db.exec("PRAGMA secure_delete = ON;");
       db.exec("PRAGMA foreign_keys = ON;");
       db.exec("PRAGMA recursive_triggers = ON;");
@@ -8713,6 +8819,12 @@ export class ControlPlaneDb {
       const providerLogins = runnerSupportsProtocol(protocolVersion, "providerLogin")
         ? JSON.stringify(safeProviderLogins(meta.providerLogins ?? []))
         : null;
+      // v403 (#4780): the register frame's setup replaces the previous connection's. Anything a
+      // supported runner sends that does not validate is stored as not yet reported.
+      const antigravitySetup = runnerSupportsProtocol(protocolVersion, "antigravitySetup") &&
+          validAntigravitySetupView(meta.antigravitySetup)
+        ? JSON.stringify(meta.antigravitySetup)
+        : null;
       let containerTargets: string | null = null;
       if (runnerSupportsProtocol(protocolVersion, "containerExecutionTargets")) {
         const advertised = meta.executionTargets ?? [];
@@ -8735,16 +8847,16 @@ export class ControlPlaneDb {
         this.stmt(
             `UPDATE runners SET hostname=?, os=?, version=?, protocol_version=?, status='online',
                 connected_at=?, last_seen=?, updated_at=?, agents_refreshed_at=NULL,
-                editors=COALESCE(?, editors), runtime=?, container_targets=?, provider_accounts=?, provider_logins=?, capacity_status=NULL WHERE runner_id=?`,
+                editors=COALESCE(?, editors), runtime=?, container_targets=?, provider_accounts=?, provider_logins=?, antigravity_setup=?, capacity_status=NULL WHERE runner_id=?`,
           )
-          .run(meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, editors, runtime, containerTargets, providerAccounts, providerLogins, meta.runnerId);
+          .run(meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, editors, runtime, containerTargets, providerAccounts, providerLogins, antigravitySetup, meta.runnerId);
       } else {
         this.stmt(
             `INSERT INTO runners
-               (runner_id, hostname, os, version, protocol_version, status, connected_at, last_seen, created_at, updated_at, editors, runtime, container_targets, provider_accounts, provider_logins)
-             VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               (runner_id, hostname, os, version, protocol_version, status, connected_at, last_seen, created_at, updated_at, editors, runtime, container_targets, provider_accounts, provider_logins, antigravity_setup)
+             VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .run(meta.runnerId, meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, now, editors, runtime, containerTargets, providerAccounts, providerLogins);
+          .run(meta.runnerId, meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, now, editors, runtime, containerTargets, providerAccounts, providerLogins, antigravitySetup);
       }
       // A runner that cannot prove provider retirement now serves its sessions' live generations,
       // so their slots stay held whatever it, or a later runner, attests for them (#3788).
@@ -8918,6 +9030,18 @@ export class ControlPlaneDb {
     const safe = safeReviewSessionCapability(capability);
     const next = safe ? { ...rest, reviewSession: safe } : rest;
     this.stmt("UPDATE runners SET runtime=? WHERE runner_id=?").run(JSON.stringify(next), runnerId);
+  }
+
+  /** Replace one runner's Google Antigravity setup with its validated report (Refs #4780). */
+  updateRunnerAntigravitySetup(runnerId: string, setup: unknown, now: number): void {
+    const protocol = this.stmt("SELECT protocol_version FROM runners WHERE runner_id=?")
+      .get(runnerId) as { protocol_version: number | null } | undefined;
+    if (!runnerSupportsProtocol(protocol?.protocol_version, "antigravitySetup")) {
+      throw new Error("runner does not support Google Antigravity setup");
+    }
+    if (!validAntigravitySetupView(setup)) throw new Error("runner Google Antigravity setup is invalid");
+    this.stmt("UPDATE runners SET antigravity_setup=?, updated_at=? WHERE runner_id=?")
+      .run(JSON.stringify(setup), now, runnerId);
   }
 
   updateRunnerProviderLogins(runnerId: string, logins: ProviderLoginView[], now: number): void {
@@ -10686,7 +10810,7 @@ export class ControlPlaneDb {
 
   getRunner(runnerId: string): RunnerView | null {
     const row = this.stmt(
-        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status, provider_accounts, provider_logins FROM runners WHERE runner_id=?",
+        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status, provider_accounts, provider_logins, antigravity_setup FROM runners WHERE runner_id=?",
       )
       .get(runnerId) as unknown as RunnerRow | undefined;
     return row ? this.runnerView(row) : null;
@@ -10694,7 +10818,7 @@ export class ControlPlaneDb {
 
   listRunners(): RunnerView[] {
     const rows = this.stmt(
-        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status, provider_accounts, provider_logins FROM runners ORDER BY runner_id",
+        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status, provider_accounts, provider_logins, antigravity_setup FROM runners ORDER BY runner_id",
       )
       .all() as unknown as RunnerRow[];
     return rows.map((r) => this.runnerView(r));
@@ -13191,10 +13315,11 @@ export class ControlPlaneDb {
       { campaign_session_id: string; session_id: string; surface: CampaignDecisionSubject["surface"]; request_id: string;
         classification: "decline" | "orchestrator" | null } | undefined;
     if (!row) return null;
-    const decision = row.surface === "implementation_question" ? this.workflowDecisionByRequestId(row.session_id, row.request_id) : null;
+    const workflowScreen = row.surface === "implementation_question" || row.surface === "owner_decision";
+    const decision = workflowScreen ? this.workflowDecisionByRequestId(row.session_id, row.request_id) : null;
     return { campaignSessionId: row.campaign_session_id, sessionId: row.session_id, surface: row.surface,
       requestId: row.request_id, ...(row.classification ? { classification: row.classification } : {}),
-      ...(row.surface === "implementation_question" ? { classificationPending: !row.classification && decision?.status === "pending" &&
+      ...(workflowScreen ? { classificationPending: !row.classification && decision?.status === "pending" &&
         decision.authority === "human" && decision.authorityEvaluation?.reason === "credential_screen_review" &&
         decision.authorityEvaluation.credentialScreen?.occurrenceId === occurrenceId } : {}) };
   }
@@ -13689,6 +13814,8 @@ export class ControlPlaneDb {
           // Verification URLs and device codes are bearer-like authentication material. Keep the
           // complete operation projection available only to principals who can mutate this Machine.
           providerLogins: canManage ? this.providerLoginsForPrincipal(principal, runner) : undefined,
+          // The sign-in link is bearer-like and the executable path is host detail: managers only.
+          antigravitySetup: canManage ? runner.antigravitySetup : undefined,
         };
       });
   }
@@ -15945,6 +16072,9 @@ export class ControlPlaneDb {
       providerLogins: runnerSupportsProtocol(row.protocol_version, "providerLogin")
         ? (parseJson<ProviderLoginView[]>(row.provider_logins) ?? [])
         : undefined,
+      antigravitySetup: runnerSupportsProtocol(row.protocol_version, "antigravitySetup")
+        ? antigravitySetupFromRow(row.antigravity_setup)
+        : undefined,
       workspaces,
       // The editors COLUMN survives re-registers by design (COALESCE), so gate the VIEW on
       // the registered protocol version: a downgraded runner (or an old runner reusing this
@@ -17859,8 +17989,8 @@ export class ControlPlaneDb {
     `).get(targetId, ancestorId));
   }
 
-  /** Descendant request candidates only, so Parent Control does not hydrate complete session views
-   * or scan every archived session. UNION terminates malformed cycles and never returns self. */
+  /** Only descendants with a pending approval need request timestamps or card metadata.
+   * Keep the ancestry walk independent of pending state so it still reaches their children. */
   listSessionDescendantRequestCandidates(ancestorId: string): Array<{
     id: string;
     title: string;
@@ -17905,7 +18035,9 @@ export class ControlPlaneDb {
               )
           ) AS request_created_at_by_id
         FROM descendants d JOIN sessions s ON s.id=d.id
-        WHERE s.id<>? AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=s.id) ORDER BY s.created_at DESC, s.id ASC
+        WHERE s.id<>? AND s.pending_approval IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=s.id)
+        ORDER BY s.created_at DESC, s.id ASC
     `).all(ancestorId, ancestorId) as unknown as Array<{
       id: string;
       title: string;
@@ -18006,6 +18138,15 @@ export class ControlPlaneDb {
        FROM session_events WHERE session_id=? AND kind='user_message' ORDER BY seq LIMIT 1`,
     ).get(sessionId) as { text: string | null } | undefined;
     return typeof row?.text === "string" && row.text.length <= 65_536 ? row.text : null;
+  }
+
+  /** Read only the end of the latest complete top-level reply, where its last sentence lives. */
+  latestAssistantReplyTail(sessionId: string): string | undefined {
+    const row = this.stmt(`SELECT substr(json_extract(payload, '$.text'), -8192) AS text
+      FROM session_events WHERE session_id=? AND kind='agent_message'
+        AND json_extract(payload, '$.final') = 1 AND json_extract(payload, '$.parentToolUseId') IS NULL
+      ORDER BY seq DESC LIMIT 1`).get(sessionId) as { text: string | null } | undefined;
+    return row?.text ?? undefined;
   }
 
   /** Bound closure approvals to the most recent delivered, durable queued, immediately sent, or
@@ -19282,25 +19423,39 @@ export class ControlPlaneDb {
     return row ? { digest: row.digest, sessionId: row.session_id } : null;
   }
 
+  hasHumanCustomCampaignLaunch(sessionId: string, userId: string): boolean {
+    // A legacy launch has no explicit budget kind. Use its exact retained owner confirmation.
+    return Boolean(this.stmt(`SELECT 1 FROM human_campaign_launches h WHERE h.session_id=? AND h.user_id=?
+      AND (h.custom_budget=1 OR h.custom_budget IS NULL AND EXISTS (
+        SELECT 1 FROM assistant_owner_confirmations c WHERE h.request_id='assistant-'||c.id
+          AND c.owner_user_id=h.user_id AND c.operation='campaign_start' AND c.status IN ('approved','executed')
+          AND json_extract(c.arguments_json,'$.mode')='custom'))`).get(sessionId, userId));
+  }
+
   /** Internal Human admission, never an HTTP/agent-provided grant. All resources and initial
    * reservation commit together; callers may send a provider command only after this returns. */
-  createHumanCampaignLaunch(input: NewSessionInput, principal: HumanPrincipal, requestId: string, digest: string): { session: SessionView; created: boolean } {
+  createHumanCampaignLaunch(input: NewSessionInput, principal: HumanPrincipal, requestId: string, digest: string,
+    customBudget?: CampaignBudgetAuthority): { session: SessionView; created: boolean } {
     const policy = input.orchestratorPolicy;
     const control = policy?.control;
     const boundary = control?.mode === "full_control" ? control.boundary : undefined;
     const scope = policy?.issueScope;
-    if (principal.kind !== "human" || input.parentSessionId || input.creationActor !== "human" || input.role !== "orchestrator" ||
+    const budget = customBudget ?? boundary?.budgetAuthority;
+    if (principal.kind !== "human" || input.parentSessionId || input.creationActor !== "human" || input.role !== "orchestrator" || !policy ||
         input.scope?.owner.kind !== "user" || input.scope.owner.userId !== principal.userId || input.scope.organizationId !== principal.organizationId ||
-        !boundary || !validCampaignControl(control) || !scope || boundary.authorizedByUserId !== principal.userId ||
+        !budget || !validCampaignBudgetAuthority(budget) || budget.concurrency === undefined || budget.acceptedFollowUps === undefined ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(requestId) || !/^[a-f0-9]{64}$/.test(digest)) {
+      throw new Error("Human campaign launch admission is invalid");
+    }
+    if (customBudget ? (control?.mode === "full_control" || Boolean(customBudget.controlledReview))
+      : (!boundary || !validCampaignControl(control) || !scope || boundary.authorizedByUserId !== principal.userId ||
         scope.authorizedByUserId !== principal.userId || scope.repository !== boundary.repository ||
         scope.revision !== 1 || boundary.issueScopeRevision !== 1 || boundary.revision !== 1 ||
-        scope.authorizedAt !== boundary.authorizedAt || !boundary.budgetAuthority ||
+        scope.authorizedAt !== boundary.authorizedAt ||
         !boundary.issueAuthority || scope.issueNumbers.length > boundary.issueAuthority.maxIssues ||
         scope.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) || new Set(scope.issueNumbers).size !== scope.issueNumbers.length ||
-        JSON.stringify(policy?.issueNumbers) !== JSON.stringify(scope.issueNumbers) ||
-        boundary.budgetAuthority.concurrency === undefined || boundary.budgetAuthority.acceptedFollowUps === undefined ||
-        !input.parentControlPolicy || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId) || !/^[a-f0-9]{64}$/.test(digest)) {
-      throw new Error("Human campaign launch admission is invalid");
+        JSON.stringify(policy.issueNumbers) !== JSON.stringify(scope.issueNumbers) || !input.parentControlPolicy)) {
+      throw new Error("Human campaign launch authority is invalid");
     }
     return this.atomic(() => {
       const existing = this.stmt("SELECT digest,session_id FROM human_campaign_launches WHERE user_id=? AND request_id=?")
@@ -19314,12 +19469,13 @@ export class ControlPlaneDb {
       if (input.config.costBudgetUsd !== undefined) this.updateSessionCostBudget(input.id, input.config.costBudgetUsd, input.now);
       if (input.config.maxToolCalls !== undefined) this.updateSessionMaxToolCalls(input.id, input.config.maxToolCalls, input.now);
       if (input.config.costCheckpointsUsd?.length) this.updateSessionCostCheckpoints(input.id, input.config.costCheckpointsUsd, input.now);
-      this.campaignBudgets.authorize(input.id, boundary.budgetAuthority!);
+      this.campaignBudgets.authorize(input.id, budget);
       const allocation = this.campaignBudgets.allocation(input.id)!;
       if (allocation.costUsd !== undefined) this.updateSessionCostBudget(input.id, allocation.costUsd, input.now);
       if (allocation.toolCalls !== undefined) this.updateSessionMaxToolCalls(input.id, allocation.toolCalls, input.now);
-      this.stmt("INSERT INTO human_campaign_launches VALUES (?,?,?,?, 'committed',?)")
-        .run(principal.userId, requestId, digest, input.id, input.now);
+      this.stmt(`INSERT INTO human_campaign_launches
+        (user_id, request_id, digest, session_id, dispatch_state, created_at, custom_budget) VALUES (?,?,?,?,'committed',?,?)`)
+        .run(principal.userId, requestId, digest, input.id, input.now, customBudget ? 1 : 0);
       return { session: this.getSession(input.id)!, created: true };
     });
   }
@@ -19406,8 +19562,8 @@ export class ControlPlaneDb {
            (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, status, use_worktree, archived, creation_actor,
              driver, model, effort, service_tier, permission_mode, parent_control, parent_control_policy,
              parent_control_policy_revision, orchestrator_policy, session_role, workspace_path, acp_session_context, created_at, updated_at,
-             archived_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             archived_at, initial_prompt_state)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -19438,6 +19594,7 @@ export class ControlPlaneDb {
         input.now,
         input.now,
         input.archived ? input.now : null,
+        input.initialPromptSubmitted ? "submitted" : null,
       );
       if (input.role === "assistant") {
         if (!input.assistantThreadId) throw new Error("an assistant session requires its thread");
@@ -19663,6 +19820,10 @@ export class ControlPlaneDb {
           .run(snap.providerAccountSwitchFailure
             ? JSON.stringify(snap.providerAccountSwitchFailure)
             : null, snap.id);
+      }
+      if (snap.assistantThreadHealth !== undefined) {
+        this.stmt("UPDATE sessions SET assistant_thread_health=? WHERE id=?")
+          .run(JSON.stringify(snap.assistantThreadHealth), snap.id);
       }
       this.writeSessionProviderProfileId(snap.id, snap.providerProfileId);
       this.writeSessionProviderHomeRefusal(snap.id, snap.providerHomeRefusal);
@@ -20029,6 +20190,10 @@ export class ControlPlaneDb {
       this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=?, provider_account_automatically_selected=? WHERE id=?")
         .run(snap.providerAccountId, snap.providerAccountLabel ?? snap.providerAccountId,
           snap.providerAccountAutomaticallySelected ? 1 : 0, id);
+    }
+    if (snap.assistantThreadHealth !== undefined) {
+      this.stmt("UPDATE sessions SET assistant_thread_health=? WHERE id=?")
+        .run(JSON.stringify(snap.assistantThreadHealth), id);
     }
     this.writeSessionProviderProfileId(id, snap.providerProfileId);
     this.writeSessionProviderHomeRefusal(id, snap.providerHomeRefusal);
@@ -21546,6 +21711,11 @@ export class ControlPlaneDb {
     // The overloads require provenance for `stopped`; an untyped caller still records a stop that
     // nothing has confirmed rather than one that claims runner evidence it never had.
     const stopWrite = stop ?? { cause: "unrecorded" };
+    if (effectiveStatus === "stopped" && stopWrite.cause === "requested" &&
+        (current?.status === "queued" || current?.status === "starting")) {
+      this.stmt(`UPDATE sessions SET initial_prompt_state='interrupted'
+        WHERE id=? AND initial_prompt_state='submitted'`).run(id);
+    }
     this.writeSessionStopProvenance(id, current?.status, effectiveStatus, stopWrite, now);
     const restorableStop = effectiveStatus === "stopped" && sessionStopRestorable({
       cause: stopWrite.cause,
@@ -21705,6 +21875,13 @@ export class ControlPlaneDb {
   setSessionColumn(id: string, column: BoardColumn | null, now: number): void {
     this.stmt("UPDATE sessions SET board_column=?, updated_at=? WHERE id=?")
       .run(column, now, id);
+  }
+
+  /** A requested Stop interrupted startup, and we have no recorded user turn. A Stop can race
+   * provider admission, so absence of history does not prove the provider never saw the prompt. */
+  hasInterruptedInitialPrompt(id: string): boolean {
+    return Boolean(this.stmt("SELECT 1 FROM sessions WHERE id=? AND initial_prompt_state='interrupted'").get(id)) &&
+      !this.hasCompletedUserMessage(id);
   }
 
   /** Pin a session's resolved launch directory before the legacy workspace-group adapter changes
@@ -22489,6 +22666,21 @@ export class ControlPlaneDb {
       UNION ALL SELECT 1 FROM session_command_invocations WHERE session_id=? LIMIT 1`).get(sessionId, sessionId, sessionId));
   }
 
+  /** Helpers are excluded from implementation bookkeeping, but a live review still blocks completion. */
+  private campaignCompletionChildIds(campaignId: string): string[] {
+    const reviewers = this.stmt(`SELECT reviewer_session_id AS id FROM delegated_image_reviews
+      WHERE root_session_id=? AND state IN ('running','verdict')`).all(campaignId) as Array<{ id: string }>;
+    return [...this.campaignDescendantIds(campaignId), ...reviewers.map(row => row.id)];
+  }
+
+  /** A terminal review is server-proven; retirement is complete only after the normal lifecycle confirms it. */
+  private campaignReviewerCleanup(campaignId: string): string[] {
+    return (this.stmt(`SELECT session.id FROM delegated_image_reviews review JOIN sessions session
+      ON session.id=review.reviewer_session_id WHERE review.root_session_id=? AND review.state IN ('consumed','ended')
+      AND (session.archived=0 OR EXISTS (SELECT 1 FROM session_stop_intents WHERE session_id=session.id))`)
+      .all(campaignId) as Array<{ id: string }>).map(row => row.id);
+  }
+
   campaignDescendantIds(campaignSessionId: string): string[] {
     return (this.stmt(`
       WITH RECURSIVE descendants(id) AS (
@@ -22498,6 +22690,44 @@ export class ControlPlaneDb {
       ) SELECT id FROM descendants WHERE NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=descendants.id)
         AND NOT EXISTS (SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=descendants.id) ORDER BY id
     `).all(campaignSessionId) as unknown as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  /** The recovery sweep needs lifecycle and request facts, without rebuilding session views.
+   * Read steering receipts even for archived children when an uncertain one may survive. */
+  campaignRecoveryDescendants(campaignId: string): Array<Pick<SessionView,
+    "id" | "runnerId" | "workspaceId" | "driver" | "status" | "archived" | "eventEpoch" |
+    "pendingApproval" | "holds" | "steeringAttempts" | "backgroundWorkState"> & { stopStatus?: ArchiveStatus }> {
+    const rows = this.stmt(`
+      SELECT s.id, s.runner_id, s.workspace_id, s.driver, s.status, s.archived, s.event_epoch,
+        s.pending_approval, s.worktree_recovery, s.queue_hold, s.background_work_state,
+        CASE WHEN stop.session_id IS NULL THEN NULL
+          WHEN stop.failed_at IS NULL THEN 'stop_pending' ELSE 'stop_failed' END AS stop_status,
+        EXISTS (SELECT 1 FROM session_steering_attempts attempt
+          WHERE attempt.session_id=s.id AND attempt.disposition='uncertain'
+            AND attempt.receipt_dismissed_at IS NULL) AS uncertain_steering
+      FROM sessions s LEFT JOIN session_stop_intents stop ON stop.session_id=s.id
+      WHERE s.id IN (SELECT value FROM json_each(?)) ORDER BY s.id
+    `).all(JSON.stringify(this.campaignDescendantIds(campaignId))) as unknown as Array<Pick<SessionRow,
+      "id" | "runner_id" | "workspace_id" | "driver" | "status" | "archived" | "event_epoch" |
+      "pending_approval" | "worktree_recovery" | "queue_hold" | "background_work_state"> & {
+        stop_status: ArchiveStatus | null; uncertain_steering: number;
+      }>;
+    return rows.map(row => {
+      const status = row.status as SessionStatus;
+      const archived = row.archived === 1;
+      const observingRequests = !archived && row.stop_status === null;
+      return {
+        id: row.id, runnerId: row.runner_id, workspaceId: row.workspace_id,
+        driver: (row.driver as AgentDriverKind) ?? "acp", status, archived, eventEpoch: row.event_epoch ?? 0,
+        stopStatus: row.stop_status ?? undefined,
+        backgroundWorkState: parseBackgroundWorkState(row.background_work_state),
+        pendingApproval: observingRequests ? parseJson<PendingApproval>(row.pending_approval) : null,
+        holds: observingRequests
+          ? this.sessionHoldsFor(row.id, row.worktree_recovery, isTerminal(status) ? null : row.queue_hold)
+          : undefined,
+        steeringAttempts: row.uncertain_steering ? this.listSteeringAttempts(row.id) : undefined,
+      };
+    });
   }
 
   hasCompletedAgentReportAt(sessionId: string, eventSeq: number): boolean {
@@ -22726,31 +22956,41 @@ export class ControlPlaneDb {
 
   /** A failed attempt is never delivery. A separately verified successor can settle its owed
    * work, leaving any preserved worktree visible as cleanup rather than unverified work. */
-  campaignChildFailureSuperseded(campaignId: string, childId: string): boolean {
+  campaignChildFailureSuperseded(campaignId: string, childId: string, verified?: ReadonlySet<string>): boolean {
     const child = this.stmt("SELECT status FROM sessions WHERE id=?").get(childId) as { status: string } | undefined;
     if (child?.status !== "failed" && !(child?.status === "stopped" && this.sessionStopProvenance(childId)?.confirmation)) return false;
     const attempts = this.stmt("SELECT work_item_id, ordinal, ended_at, end_reason FROM campaign_work_attempts WHERE campaign_session_id=? AND session_id=?")
       .all(campaignId, childId) as Array<{ work_item_id: string; ordinal: number; ended_at: number | null; end_reason: string | null }>;
     if (!attempts.length || this.campaignDescendantIds(childId).length || this.unconsumedWorkflowDecisionsForSession(childId).length) return false;
+    if (attempts.some((attempt) => attempt.ended_at === null ||
+      !["failed", "superseded", "reassigned"].includes(attempt.end_reason ?? ""))) return false;
+    // #4851: delivery facts from one snapshot, never `detail`, which replays every item's timings.
+    const items = this.campaignWorkLedger.deliveryFacts(campaignId, attempts.map((attempt) => attempt.work_item_id));
     return attempts.every((attempt) => {
-      if (attempt.ended_at === null || !["failed", "superseded", "reassigned"].includes(attempt.end_reason ?? "")) return false;
-      const item = this.campaignWorkLedger.detail(campaignId, attempt.work_item_id, Date.now());
+      const item = items.get(attempt.work_item_id);
       if (item?.primaryState !== "delivered") return false;
       return item.attempts.some((successor) => successor.ordinal > attempt.ordinal && successor.sessionId !== childId &&
-        successor.sessionId !== null && this.campaignChildReportVerified(campaignId, successor.sessionId) &&
+        successor.sessionId !== null &&
+        (verified ? verified.has(successor.sessionId) : this.campaignChildReportVerified(campaignId, successor.sessionId)) &&
         item.verifications.some((v) => v.attemptId === successor.id && v.outcome === "delivered"));
     });
   }
 
   /** The root campaign whose verification of this child is current. Verifications are keyed by the
-   * resolved root (#1462); a row under any other id is one the projection never counts. */
-  campaignForVerifiedChild(childSessionId: string): string | null {
+   * resolved root (#1462); a row under any other id is one the projection never counts. A synchronous
+   * sweep can reuse resolved root policies, but each child's report must still be verified. */
+  campaignForVerifiedChild(childSessionId: string, rootPolicies?: Map<string, OrchestratorCampaignPolicy | null>): string | null {
     const row = this.stmt(
       `SELECT campaign_session_id AS id FROM orchestrator_campaign_child_reports
        WHERE child_session_id=? ORDER BY verified_at DESC LIMIT 1`,
     ).get(childSessionId) as { id: string } | undefined;
-    return row && this.resolvedCampaignSessionId(row.id) === row.id &&
-      this.campaignChildReportVerified(row.id, childSessionId) ? row.id : null;
+    if (!row) return null;
+    if (rootPolicies && !rootPolicies.has(row.id)) {
+      const root = this.resolvedCampaignSession(row.id);
+      rootPolicies.set(row.id, root?.id === row.id ? orchestratorCampaignPolicyFromJson(root.orchestrator_policy) : null);
+    }
+    const isRoot = rootPolicies ? Boolean(rootPolicies.get(row.id)) : this.resolvedCampaignSessionId(row.id) === row.id;
+    return isRoot && this.campaignChildReportVerified(row.id, childSessionId) ? row.id : null;
   }
 
   campaignReportRecoverySessionIds(campaignSessionId: string): string[] {
@@ -22795,6 +23035,30 @@ export class ControlPlaneDb {
       }
       return Number(result.changes) === 1;
     });
+  }
+
+  /** The continuation and the child's notice share one durable receipt for a provider refusal. */
+  recordCampaignProviderForgeRefusal(input: {
+    campaignSessionId: string;
+    subjectSessionId: string;
+    occurrenceId: string;
+    attemptedPath: "command" | "managed";
+    message: string;
+    now: number;
+  }): SessionEvent | null {
+    const notice = this.atomic(() => {
+      const recorded = this.recordCampaignContinuationEvent({
+        eventId: `provider_forge_refusal:${input.occurrenceId}:${input.attemptedPath}`,
+        campaignSessionId: input.campaignSessionId,
+        kind: "child_blocked", subjectSessionId: input.subjectSessionId, occurrenceId: input.occurrenceId,
+        subjectStatus: `provider_forge_${input.attemptedPath}`, now: input.now,
+      });
+      return recorded ? this.appendEventTransaction(input.subjectSessionId, {
+        kind: "error", message: input.message, nonFatal: true,
+      }, input.now) : null;
+    });
+    if (notice) this.noteCommittedIngest(input.subjectSessionId, undefined, false);
+    return notice;
   }
 
   /** A write-ahead checkpoint is committed BEFORE any deferred session change. It may survive
@@ -23055,6 +23319,25 @@ export class ControlPlaneDb {
          AND parent_session_id IS NULL AND archived=0
          AND status NOT IN ('completed','failed','stopped') ${runnerId ? "AND runner_id=?" : ""}
        ORDER BY created_at,id`,
+    ).all(...(runnerId ? [runnerId] : [])) as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  }
+
+  /** Live sessions (including standalone Normal sessions) holding an unacknowledged uncertain
+   * issue closure that needs scheduled read-only reconciliation (#4894). */
+  listUncertainIssueClosureSessionIds(runnerId?: string): string[] {
+    const rows = this.stmt(
+      `SELECT DISTINCT wd.controlling_session_id AS id
+       FROM workflow_decisions wd
+       JOIN sessions s ON s.id = wd.controlling_session_id
+       WHERE wd.category = 'issue_closure'
+         AND wd.status = 'consumed'
+         AND json_extract(wd.issue_closure_result, '$.outcome') = 'uncertain'
+         AND json_extract(wd.issue_closure_result, '$.reconciliation.acknowledgedAt') IS NULL
+         AND s.archived = 0
+         AND s.status NOT IN ('completed','failed','stopped')
+         ${runnerId ? "AND s.runner_id=?" : ""}
+       ORDER BY wd.controlling_session_id`,
     ).all(...(runnerId ? [runnerId] : [])) as Array<{ id: string }>;
     return rows.map((row) => row.id);
   }
@@ -23506,6 +23789,22 @@ export class ControlPlaneDb {
     return rows.map(row => row.id);
   }
 
+  /** Only the inventory and archive gate are needed before worktree retirement. */
+  campaignWorktreeRetirementState(sessionId: string): Pick<SessionView, "runnerId" | "archived" | "worktrees"> & {
+    archivePending: boolean;
+  } | null {
+    const row = this.stmt(`
+      SELECT s.runner_id, s.archived, s.worktrees, stop.archive_after_stop
+      FROM sessions s LEFT JOIN session_stop_intents stop ON stop.session_id=s.id WHERE s.id=?
+    `).get(sessionId) as {
+      runner_id: string; archived: number; worktrees: string | null; archive_after_stop: number | null;
+    } | undefined;
+    if (!row) return null;
+    const worktrees = parseJson<SessionWorktreeView[]>(row.worktrees);
+    return { runnerId: row.runner_id, archived: row.archived === 1, archivePending: row.archive_after_stop === 1,
+      worktrees: Array.isArray(worktrees) ? worktrees : undefined };
+  }
+
   campaignWorktreeCleanup(sessionId: string): NonNullable<OrchestratorCampaignProjection["cleanupWorktrees"]> {
     // A SessionView embeds its campaign projection, so read the raw row here to avoid
     // projecting the campaign recursively while its children are being counted.
@@ -23565,9 +23864,10 @@ export class ControlPlaneDb {
   /** The campaign's status and the counts behind it, derived once for both the full projection and
    * the session summary's status-only fact (#2940), so the two can never disagree. Reads no session
    * view, so it cannot re-enter a projection. */
-  private campaignStatusState(campaign: SessionRow, policy: OrchestratorCampaignPolicy, campaignSessionId: string) {
+  private campaignStatusState(campaign: SessionRow, policy: OrchestratorCampaignPolicy, campaignSessionId: string,
+    reads = this.campaignProjectionReads(campaign.id)) {
     const resolvedCampaignId = campaign.id;
-    const childIds = this.campaignDescendantIds(resolvedCampaignId);
+    const childIds = this.campaignCompletionChildIds(resolvedCampaignId);
     const rows = childIds.length ? (this.stmt(
       `SELECT id, runner_id, driver, workspace_id, status, archived, worktree_path, worktrees, pending_approval, worktree_recovery,
               queue_hold
@@ -23577,7 +23877,7 @@ export class ControlPlaneDb {
       worktrees: string | null; pending_approval: string | null; worktree_recovery: string | null;
       queue_hold: string | null;
     }>) : [];
-    const verified = this.validCampaignChildReportIds(resolvedCampaignId);
+    const verified = reads.verifiedReports();
     const pending = this.stmt(
       `SELECT session_id, occurrence_id, authority FROM workflow_decisions
        WHERE controlling_session_id=? AND status='pending'`,
@@ -23596,7 +23896,7 @@ export class ControlPlaneDb {
     let active = 0;
     let blocked = 0;
     let fullyVerified = 0;
-    let cleanupPending = 0;
+    let cleanupPending = reads.reviewerCleanup().length;
     const cleanupWorktrees: NonNullable<OrchestratorCampaignProjection["cleanupWorktrees"]> = [];
     const heldChildren: NonNullable<OrchestratorCampaignProjection["heldChildren"]> = [];
     const genericOrchestratorRequests: Array<{ sessionId: string; occurrenceId: string }> = [];
@@ -23639,7 +23939,7 @@ export class ControlPlaneDb {
       if (childHasHumanRequest) waitingHuman += 1;
       // A retained child may receive more work after verification. Re-check both the exact
       // latest report and terminal-for-review state instead of trusting a durable row forever.
-      const reportVerified = verified.has(child.id) || this.campaignChildFailureSuperseded(resolvedCampaignId, child.id);
+      const reportVerified = verified.has(child.id) || this.campaignChildFailureSuperseded(resolvedCampaignId, child.id, verified);
       const childCleanup = reportVerified && policy.behavior.completion === "stop_and_archive"
         ? this.campaignWorktreeCleanup(child.id) : [];
       cleanupWorktrees.push(...childCleanup);
@@ -23685,7 +23985,8 @@ export class ControlPlaneDb {
     } else {
       for (const child of unverifiedChildren) {
         stuckItems.push({ kind: "unverified_child", sessionId: child.sessionId, status: child.status,
-          reason: child.held ? "The child is held from starting its next turn."
+          reason: this.delegatedImageReviews.isReviewer(child.sessionId) ? "The image review is still live; resolve its evidence decision before retirement."
+            : child.held ? "The child is held from starting its next turn."
             : child.status === "failed" || child.status === "stopped" ? `The child ${child.status === "failed" ? "failed" : "was stopped"} before its report was verified.`
             : child.status === "idle" || child.status === "completed" ? "The child's latest report has not been verified."
             : child.status === "input_required" ? "The child is waiting for input."
@@ -23705,12 +24006,12 @@ export class ControlPlaneDb {
         const rootPending = pendingRequests(parseJson<PendingApproval>(campaign.pending_approval)).length > 0 ||
           pending.some((decision) => decision.session_id === campaign.id);
         const terminal = this.campaignTerminalStatus(resolvedCampaignId, policy,
-          { childCount: total, worktreesPending: cleanupPending > 0, rootPending });
+          { childCount: total, worktreesPending: cleanupPending > 0, rootPending }, reads.recoveryCompletion);
         baseStatus = terminal.status;
         recoveryIds = terminal.recoveryIds;
         if (baseStatus === "stuck") stuckItems.push(...terminal.stuckItems);
         if (baseStatus === "complete_needs_cleanup") {
-          cleanupItems = this.campaignCleanupItems(resolvedCampaignId, cleanupWorktrees, terminal.handoffs);
+          cleanupItems = this.campaignCleanupItems(resolvedCampaignId, cleanupWorktrees, terminal.handoffs, reads.reviewerCleanup());
         }
       }
     }
@@ -23719,7 +24020,7 @@ export class ControlPlaneDb {
     // every view, since a pending continuation is live work, and projected on the root's own view only.
     // A campaign that never had a child has finished nothing, so nothing it owes holds its wake-ups.
     const continuation = this.campaignContinuationProjection(campaign,
-      total === 0 && campaignStatusTerminal(baseStatus) ? "stuck" : baseStatus);
+      total === 0 && campaignStatusTerminal(baseStatus) ? "stuck" : baseStatus, fullControl, reads.continuationAdmission);
     // A campaign whose own wake-up failed or lost its result has a stalled continuation (#1352). It
     // is not live work, so with nothing else live an unfinished campaign reads Campaign Stuck.
     const stalled = continuation.continuation?.state === "failed" ? "continuation_failed" as const
@@ -23732,7 +24033,7 @@ export class ControlPlaneDb {
     if (rows.some((child) => child.archived !== 1 && CAMPAIGN_LIVE_SESSION_STATUSES.has(child.status))) liveKinds.add("child_turn");
     if (this.sessionsWithLiveBackgroundJobs(members, now).size > 0) liveKinds.add("background_job");
     if (continuation.continuation?.state === "pending" || continuation.continuation?.state === "running") liveKinds.add("continuation");
-    if (members.some((id) => this.pullRequestWatches.isParked(id))) liveKinds.add("merge_queue_wait");
+    if (members.some((id) => this.pullRequestWatches.hasLiveWatch(id))) liveKinds.add("merge_queue_wait");
     const repair = this.campaignRepairView(resolvedCampaignId, now);
     if (repair?.state === "running" || worktreesRetiring || this.campaignBranchDeletionInFlight(members, now)) {
       liveKinds.add("server_repair");
@@ -23774,13 +24075,14 @@ export class ControlPlaneDb {
    * waiting on a person, reads Waiting for You. Reads rows only, never a SessionView.
    */
   private campaignTerminalStatus(campaignId: string, policy: OrchestratorCampaignPolicy,
-    facts: { childCount: number; worktreesPending: boolean; rootPending: boolean }): {
+    facts: { childCount: number; worktreesPending: boolean; rootPending: boolean },
+    readCompletion: () => ReturnType<ControlPlaneDb["campaignRecoveryCompletion"]>): {
     status: "waiting_human" | "complete_needs_cleanup" | "verified_complete" | "stuck";
     recoveryIds: string[];
     stuckItems: CampaignStuckItem[];
     handoffs: OrchestratorCampaignHandoff[];
   } {
-    const completion = this.campaignRecoveryCompletion(campaignId);
+    const completion = readCompletion();
     const ledger = this.campaignWorkLedger.completionFacts(campaignId);
     const fullControl = policy.control?.mode === "full_control";
     const scope = fullControl ? policy.issueScope : undefined;
@@ -23839,8 +24141,18 @@ export class ControlPlaneDb {
    * work items handed to a person or an outside party. Bounded by CAMPAIGN_CLEANUP_ITEMS_LIMIT. */
   private campaignCleanupItems(campaignId: string,
     worktrees: NonNullable<OrchestratorCampaignProjection["cleanupWorktrees"]>,
-    handoffs: readonly OrchestratorCampaignHandoff[]): CampaignCleanupItem[] {
-    const items: CampaignCleanupItem[] = [];
+    handoffs: readonly OrchestratorCampaignHandoff[],
+    reviewerCleanup: readonly string[]): CampaignCleanupItem[] {
+    const items: CampaignCleanupItem[] = reviewerCleanup.map(sessionId => {
+      const failed = Boolean(this.sessionStopIntent(sessionId)?.operation.failure);
+      return { kind: "image_reviewer", sessionId,
+        reason: failed ? "The image reviewer's Stop failed; archival is still pending."
+          : "The finished image reviewer is waiting for confirmed stop and archival.",
+        action: failed
+          ? { kind: "person", text: "Open the reviewer session and choose Retry Stop, or reconnect its runner." }
+          : { kind: "automatic", text: "Wollipog stops and archives the reviewer when its runner confirms release." },
+      };
+    });
     const branches = this.campaignMergedBranches(campaignId).filter((row) => row.state !== "deleted");
     if (branches.length) {
       const workItems = this.campaignWorkLedger.pullRequestWorkItems(campaignId);
@@ -23859,7 +24171,7 @@ export class ControlPlaneDb {
         ).get(campaignId, row.repository.toLowerCase(), row.pullRequest) as { value_json: string | null } | undefined;
         const value = parseJson<CampaignForgePullRequestObservation>(observed?.value_json ?? null);
         // Deleting the branch of a pull request that has not merged would close it: never offer it.
-        if (value?.state !== "merged") {
+        if (value?.state !== "merged" || row.observedAt === undefined) {
           items.push({ ...base, state: "pending", action: { kind: "automatic", text: value
             ? "Wollipog reads the forge again; the branch is cleaned up after the merge lands."
             : "Wollipog reads the forge for this pull request." } });
@@ -24073,8 +24385,7 @@ export class ControlPlaneDb {
    * Orchestrator, or forge reconciliation). A merge is a consumed `pr_merge`, or one whose enqueue
    * Wollipog performed, whatever its status became while that ran (superseded or revoked in
    * flight). Membership is plain ancestry, never a role, so a nested controller is never dropped.
-   * Read through the two merge indexes, so a campaign without any costs two probes however many
-   * children it has. */
+   * Read through the merge indexes without walking the campaign's children. */
   private campaignMergeControllers(campaignId: string): string[] {
     const ids = (this.stmt(
       `SELECT decision.controlling_session_id AS id FROM workflow_decisions decision
@@ -24082,23 +24393,34 @@ export class ControlPlaneDb {
        WHERE decision.category='pr_merge' AND decision.status='consumed'
          AND (decision.controlling_session_id=? OR controller.parent_session_id IS NOT NULL)
        UNION
+       SELECT decision.controlling_session_id FROM workflow_decisions decision
+       JOIN sessions controller ON controller.id=decision.controlling_session_id
+       WHERE decision.category='pr_merge' AND decision.status='approved' AND decision.action_kind='pr_merge_enqueue'
+         AND (decision.controlling_session_id=? OR controller.parent_session_id IS NOT NULL)
+       UNION
        SELECT decision.controlling_session_id AS id FROM workflow_decisions decision
        JOIN sessions controller ON controller.id=decision.controlling_session_id
        WHERE decision.category='pr_merge' AND decision.forge_action IS NOT NULL
          AND (decision.controlling_session_id=? OR controller.parent_session_id IS NOT NULL)`,
-    ).all(campaignId, campaignId) as Array<{ id: string }>).map((row) => row.id);
+    ).all(campaignId, campaignId, campaignId) as Array<{ id: string }>).map((row) => row.id);
     return ids.filter((id) => this.sessionWithinCampaign(id, campaignId));
   }
 
-  /** The controlling sessions of this campaign's branch deletions Wollipog acted on, found on their
-   * own: a deletion need not share its merge's controller. */
+  /** The controlling sessions of this campaign's branch deletions that were approved or attempted,
+   * found on their own: a deletion need not share its merge's controller. */
   private campaignDeletionControllers(campaignId: string): string[] {
+    // Each arm can use a partial index. UNION deduplicates controllers qualifying in both.
     const ids = (this.stmt(
-      `SELECT DISTINCT decision.controlling_session_id AS id FROM workflow_decisions decision
+      `SELECT decision.controlling_session_id AS id FROM workflow_decisions decision
+       JOIN sessions controller ON controller.id=decision.controlling_session_id
+       WHERE decision.category='merged_branch_deletion' AND decision.status IN ('approved','consumed')
+         AND (decision.controlling_session_id=? OR controller.parent_session_id IS NOT NULL)
+       UNION
+       SELECT decision.controlling_session_id AS id FROM workflow_decisions decision
        JOIN sessions controller ON controller.id=decision.controlling_session_id
        WHERE decision.category='merged_branch_deletion' AND decision.forge_action IS NOT NULL
          AND (decision.controlling_session_id=? OR controller.parent_session_id IS NOT NULL)`,
-    ).all(campaignId) as Array<{ id: string }>).map((row) => row.id);
+    ).all(campaignId, campaignId) as Array<{ id: string }>).map((row) => row.id);
     return ids.filter((id) => this.sessionWithinCampaign(id, campaignId));
   }
 
@@ -24122,9 +24444,9 @@ export class ControlPlaneDb {
 
   /**
    * The head branches of the campaign's merged pull requests (#4067): every GitHub pull request a
-   * campaign child merged through a consumed `pr_merge` decision, or through one whose enqueue
-   * Wollipog performed (whatever that occurrence's status became meanwhile), with the forge's last word on its
-   * branch. `deleted` once the forge reports the branch gone, or once Wollipog deleted it after that
+   * campaign child armed or consumed a `pr_merge` for, whose enqueue Wollipog performed, or whose
+   * exact merged HEAD a typed branch deletion approved. `deleted` once the forge reports the
+   * branch gone, or once Wollipog deleted it after that
    * report; `retained` while the work item naming the pull request is handed to a person or an
    * outside party, with the handoff's reason; otherwise `pending`, including a pull request the
    * forge has not been read for yet and one still open after its approved enqueue. A pull request
@@ -24135,39 +24457,51 @@ export class ControlPlaneDb {
   campaignMergedBranches(campaignId: string): CampaignMergedBranch[] {
     const observer = this.campaignForgeObservingRunner(campaignId);
     if (!observer || !runnerSupportsProtocol(observer.protocolVersion, "forgeDecisionActions")) return [];
-    // Found through the deciding Orchestrator, never by walking every descendant: the projection is
-    // rebuilt as children change, and a campaign without a consumed merge costs one indexed probe.
+    // Start at the deciding Orchestrator because this projection is rebuilt as children change.
     const controllers = this.campaignMergeControllers(campaignId);
-    if (!controllers.length) return [];
+    const deletionControllers = this.campaignDeletionControllers(campaignId);
+    if (!controllers.length && !deletionControllers.length) return [];
     // An enqueue Wollipog dispatched counts unless its latest attempt was refused (refusals follow
     // only refusals, which changed nothing): a success or an uncertain one stays a merge even if a
     // new request superseded, or a revocation ended, its occurrence while it ran.
     const merges = this.stmt(
       `SELECT session_id, resource_snapshot FROM workflow_decisions
        WHERE category='pr_merge' AND session_id<>?
-         AND (status='consumed' OR (forge_action IS NOT NULL AND json_extract(forge_action, '$.outcome')<>'refused'))
+         AND (status='consumed' OR (status='approved' AND action_kind='pr_merge_enqueue') OR
+           (forge_action IS NOT NULL AND json_extract(forge_action, '$.outcome')<>'refused'))
          AND controlling_session_id IN (SELECT value FROM json_each(?))
        ORDER BY COALESCE(consumed_at, json_extract(forge_action, '$.updatedAt'), created_at), occurrence_id`,
     ).all(campaignId, JSON.stringify(controllers)) as Array<{ session_id: string; resource_snapshot: string }>;
-    const latest = new Map<string, { sessionId: string; repository: string; pullRequest: number; headSha: string }>();
+    const latest = new Map<string, { sessionId: string; repository: string; pullRequest: number; headSha: string;
+      deletionSnapshot?: Extract<WorkflowDecisionResourceSnapshot, { category: "merged_branch_deletion"; merged: true }> }>();
     for (const row of merges) {
       const snapshot = parseJson<WorkflowDecisionResourceSnapshot>(row.resource_snapshot);
       if (snapshot?.category !== "pr_merge" || snapshot.mergeMethod !== undefined) continue;
       latest.set(`${snapshot.repository.toLowerCase()}#${snapshot.pullRequest}`,
         { sessionId: row.session_id, repository: snapshot.repository, pullRequest: snapshot.pullRequest, headSha: snapshot.headSha });
     }
-    if (!latest.size) return [];
     const deletions = new Map<string, { occurrenceId: string; deletedAt?: number; refusal?: string }>();
     for (const row of this.stmt(
-      `SELECT occurrence_id, resource_snapshot, forge_action FROM workflow_decisions
-       WHERE category='merged_branch_deletion' AND forge_action IS NOT NULL AND session_id<>?
+      `SELECT occurrence_id, session_id, status, resource_snapshot, forge_action FROM workflow_decisions
+       WHERE category='merged_branch_deletion' AND (forge_action IS NOT NULL OR status IN ('approved','consumed')) AND session_id<>?
          AND controlling_session_id IN (SELECT value FROM json_each(?))
        ORDER BY created_at, occurrence_id`,
-    ).all(campaignId, JSON.stringify(this.campaignDeletionControllers(campaignId))) as Array<{ occurrence_id: string; resource_snapshot: string; forge_action: string }>) {
+    ).all(campaignId, JSON.stringify(deletionControllers)) as Array<{ occurrence_id: string; session_id: string;
+      status: WorkflowDecisionStatus; resource_snapshot: string; forge_action: string | null }>) {
       const snapshot = parseJson<WorkflowDecisionResourceSnapshot>(row.resource_snapshot);
       const action = parseJson<NonNullable<WorkflowDecisionView["forgeAction"]>>(row.forge_action);
-      if (snapshot?.category !== "merged_branch_deletion" || !action) continue;
+      if (snapshot?.category !== "merged_branch_deletion") continue;
       const key = `${snapshot.repository.toLowerCase()}#${snapshot.branch}`;
+      // A typed deletion can be the campaign's only record of a merge performed outside the
+      // campaign's enqueue path. Its exact merged PR must still be verified before cleanup settles.
+      if (snapshot.merged && snapshot.pullRequest !== undefined && snapshot.headSha !== undefined &&
+          (row.status === "approved" || row.status === "consumed") && /^[^/]+\/[^/]+$/u.test(snapshot.repository)) {
+        const pullRequestKey = `${snapshot.repository.toLowerCase()}#${snapshot.pullRequest}`;
+        const prior = latest.get(pullRequestKey);
+        if (!prior || prior.deletionSnapshot) latest.set(pullRequestKey, { sessionId: row.session_id,
+          repository: snapshot.repository, pullRequest: snapshot.pullRequest, headSha: snapshot.headSha, deletionSnapshot: snapshot });
+      }
+      if (!action) continue;
       if (action.outcome === "deleted" || action.outcome === "already_deleted") {
         deletions.set(key, { occurrenceId: row.occurrence_id, deletedAt: action.updatedAt });
       } else if (!deletions.get(key)?.deletedAt) {
@@ -24188,6 +24522,12 @@ export class ControlPlaneDb {
       // A handoff to a person or an outside party retains the branch whatever the forge last said,
       // so cleanup handed off before the first successful read still lets the campaign finish.
       const retained = item?.handoff ? { state: "retained" as const, reason: item.handoff.reason } : null;
+      if (merge.deletionSnapshot && (value?.state !== "merged" || value.headSha !== merge.headSha ||
+          value.mergeCommitSha !== merge.deletionSnapshot.mergeCommitSha || value.headBranch?.name !== merge.deletionSnapshot.branch)) {
+        rows.push({ ...base, branch: merge.deletionSnapshot.branch, ...(retained ?? { state: "pending" as const,
+          reason: "The forge has not confirmed the approved merged branch." }) });
+        continue;
+      }
       if (!value || value.state === "open") {
         // Unread, or approved and enqueued but not merged yet: the merge and its branch are still owed.
         rows.push({ ...base, branch: value?.headBranch?.name ?? null, ...(retained ?? { state: "pending" as const,
@@ -24285,14 +24625,30 @@ export class ControlPlaneDb {
     return campaign && policy ? this.campaignStatusState(campaign, policy, campaignSessionId).status : null;
   }
 
+  /** Share these reads within one synchronous projection. The next projection (or any scheduler
+   * or outbox admission) reads live state again. */
+  private campaignProjectionReads(campaignId: string) {
+    let verified: Set<string> | undefined;
+    let reviewers: string[] | undefined;
+    let completion: ReturnType<ControlPlaneDb["campaignRecoveryCompletion"]> | undefined;
+    let admission: ReturnType<ControlPlaneDb["campaignContinuationAdmission"]> | undefined;
+    const verifiedReports = () => verified ??= this.validCampaignChildReportIds(campaignId);
+    const reviewerCleanup = () => reviewers ??= this.campaignReviewerCleanup(campaignId);
+    const recoveryCompletion = () => completion ??= this.readCampaignRecoveryCompletion(
+      campaignId, Date.now(), verifiedReports(), reviewerCleanup);
+    const continuationAdmission = () => admission ??= this.readCampaignContinuationAdmission(campaignId, recoveryCompletion);
+    return { verifiedReports, reviewerCleanup, recoveryCompletion, continuationAdmission };
+  }
+
   campaignProjection(campaignSessionId: string): OrchestratorCampaignProjection | null {
     const campaign = this.resolvedCampaignSession(campaignSessionId);
     if (!campaign) return null;
     const policy = orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy);
     if (!policy) return null;
     const resolvedCampaignId = campaign.id;
+    const reads = this.campaignProjectionReads(resolvedCampaignId);
     const { childIds, pendingHuman, pendingOrchestrator, pendingGenericHuman, pendingGenericOrchestrator, humanRequestTokens, orchestratorRequestTokens, waitingHuman, active, blocked, fullyVerified, cleanupPending, cleanupWorktrees, heldChildren, total, continuation: continuationState, stalled, status, activity, cleanupItems, stuckItems } =
-      this.campaignStatusState(campaign, policy, campaignSessionId);
+      this.campaignStatusState(campaign, policy, campaignSessionId, reads);
     // The continuation and its stall ride on the root campaign's own view only, as before #4146.
     const continuation = resolvedCampaignId === campaignSessionId ? continuationState : {};
     const followUps = this.stmt(
@@ -24358,7 +24714,7 @@ export class ControlPlaneDb {
       recovery.unattendedReady = false;
       recovery.automation = { state: "lifecycle_held" };
     } else if (recovery) {
-      recovery.automation = this.campaignContinuationAdmission(resolvedCampaignId);
+      recovery.automation = reads.continuationAdmission();
       recovery.unattendedReady &&= recovery.automation.state === "available";
     }
     return {
@@ -24516,6 +24872,8 @@ export class ControlPlaneDb {
   private campaignContinuationProjection(
     campaign: SessionRow,
     campaignStatus: OrchestratorCampaignProjection["status"],
+    fullControl: boolean,
+    readAdmission: () => ReturnType<ControlPlaneDb["campaignContinuationAdmission"]>,
   ): Pick<OrchestratorCampaignProjection, "continuation"> {
     const cursor = this.campaignContinuationCursor(campaign.id);
     const pendingEvents = Number((this.stmt(
@@ -24528,9 +24886,8 @@ export class ControlPlaneDb {
       "campaignContinuations",
     );
     const held = campaign.archived === 1 || isTerminal(campaign.status as SessionStatus) ||
-      this.campaignContinuationAdmission(campaign.id).state !== "available" ||
-      campaign.status === "input_required" || (campaignStatus === "waiting_human" &&
-        !this.campaignMayContinueWhileHumanWaiting(campaign.id)) ||
+      readAdmission().state !== "available" ||
+      campaign.status === "input_required" || (campaignStatus === "waiting_human" && !fullControl) ||
       // A finished campaign takes no automatic turn, except the one wake-up its server's repair of
       // owed cleanup records (#4146): that is how the Orchestrator learns what is left.
       (campaignStatusTerminal(campaignStatus) && !this.campaignCleanupWakePending(campaign.id)) || !runnerCompatible;
@@ -24727,14 +25084,21 @@ export class ControlPlaneDb {
   /** The server's informational handoff question, including its last settled set. */
   campaignHandoffQuestion(rootId: string): WorkflowDecisionView | null {
     return workflowDecisionFromRow(this.stmt(`SELECT * FROM workflow_decisions WHERE session_id=?
-      AND resource_key='campaign_handoffs:owner' AND category='owner_decision' ORDER BY rowid DESC LIMIT 1`).get(rootId));
+      AND resource_key=? AND category='owner_decision' ORDER BY rowid DESC LIMIT 1`).get(rootId, CAMPAIGN_HANDOFF_QUESTION_KEY));
+  }
+
+  /** Identifies legacy handoff declines without treating the root's other denials as handoffs. */
+  campaignDeniedHandoffQuestions(rootId: string): Array<{ requestId: string; resourceDigest: string }> {
+    return this.stmt(`SELECT request_id AS requestId,resource_digest AS resourceDigest FROM workflow_decisions WHERE session_id=?
+      AND resource_key=? AND category='owner_decision' AND status='denied'`).all(rootId, CAMPAIGN_HANDOFF_QUESTION_KEY) as
+      Array<{ requestId: string; resourceDigest: string }>;
   }
 
   updateCampaignHandoffQuestion(occurrenceId: string, snapshot: WorkflowDecisionView["resourceSnapshot"], digest: string,
     evaluation: NonNullable<WorkflowDecisionView["authorityEvaluation"]>): boolean {
     return this.stmt(`UPDATE workflow_decisions SET resource_snapshot=?, resource_digest=?, authority_evaluation=? WHERE occurrence_id=?
-      AND resource_key='campaign_handoffs:owner' AND category='owner_decision' AND status='pending'
-      AND json_extract(resource_snapshot, '$.kind')='question'`).run(JSON.stringify(snapshot), digest, JSON.stringify(evaluation), occurrenceId).changes === 1;
+      AND resource_key=? AND category='owner_decision' AND status='pending'
+      AND json_extract(resource_snapshot, '$.kind')='question'`).run(JSON.stringify(snapshot), digest, JSON.stringify(evaluation), occurrenceId, CAMPAIGN_HANDOFF_QUESTION_KEY).changes === 1;
   }
 
   /** Keyset pages keep a consumed/revoked cursor usable without retaining it in the result. */
@@ -24765,6 +25129,51 @@ export class ControlPlaneDb {
     ).all(controllingSessionId) as unknown[]).map(workflowDecisionFromRow).filter(
       (decision): decision is WorkflowDecisionView => decision !== null,
     );
+  }
+
+  assistantDecisionHistory(owner: HumanPrincipal, filter: {
+    campaignId?: string; threadId?: string; outcome?: AssistantDecisionOutcome; before?: { at: number; id: string };
+  }): AssistantDecisionHistoryPage {
+    const limit = 5;
+    const time = "json_extract(assistant_delegation, '$.resolvedAt')";
+    const outcome = "json_extract(assistant_delegation, '$.outcome')";
+    const scope = `FROM workflow_decisions WHERE assistant_delegation IS NOT NULL
+      AND json_extract(assistant_delegation, '$.ownerUserId')=? AND json_extract(assistant_delegation, '$.organizationId')=?
+      ${filter.campaignId ? "AND json_extract(assistant_delegation, '$.campaignId')=?" : ""}
+      ${filter.threadId ? "AND json_extract(assistant_delegation, '$.threadId')=?" : ""}`;
+    const scopeArgs = [owner.userId, owner.organizationId,
+      ...(filter.campaignId ? [filter.campaignId] : []), ...(filter.threadId ? [filter.threadId] : [])];
+    const rows = this.stmt(`SELECT * ${scope}
+      ${filter.outcome ? `AND ${outcome}=?` : ""}
+      ${filter.before ? `AND (${time}, occurrence_id) < (?, ?)` : ""}
+      ORDER BY ${time} DESC, occurrence_id DESC LIMIT ?`).all(...scopeArgs,
+        ...(filter.outcome ? [filter.outcome] : []),
+        ...(filter.before ? [filter.before.at, filter.before.id] : []), limit + 1);
+    const outcomeCounts = !filter.before ? { approved: 0, denied: 0, answered: 0 } : undefined;
+    if (outcomeCounts) {
+      const groups = this.stmt(`SELECT ${outcome} AS outcome, count(*) AS total ${scope} GROUP BY ${outcome}`)
+        .all(...scopeArgs) as { outcome: string; total: number }[];
+      for (const group of groups) {
+        if (group.outcome === "approved" || group.outcome === "denied" || group.outcome === "answered") {
+          outcomeCounts[group.outcome] = group.total;
+        }
+      }
+    }
+    const total = filter.threadId && outcomeCounts ? Object.values(outcomeCounts).reduce((sum, count) => sum + count, 0) : undefined;
+    const entries = rows.slice(0, limit).flatMap((row) => {
+      const decision = workflowDecisionFromRow(row);
+      const category = decision && assistantDecisionCategory(decision.resourceSnapshot);
+      if (!decision?.assistantDelegation || !category) return [];
+      return [{ occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, category, resourceKey: decision.resourceKey,
+        ...(decision.resourceSnapshot.category === "ci_rerun" ? { subject: ciRerunSubject(decision.resourceSnapshot) } :
+          decision.resourceSnapshot.category === "merged_branch_deletion" ? { subject: decision.resourceSnapshot.branch } :
+          decision.resourceSnapshot.category === "release_tag" || decision.resourceSnapshot.category === "release_publish"
+            ? { subject: releaseDecisionSubject(decision.resourceSnapshot) } : {}),
+        delegation: decision.assistantDelegation }];
+    });
+    const last = entries.at(-1);
+    return { entries, ...(total === undefined ? {} : { total }), ...(outcomeCounts ? { outcomeCounts } : {}),
+      ...(rows.length > limit && last ? { nextBefore: `${last.delegation.resolvedAt}:${last.occurrenceId}` } : {}) };
   }
 
   pendingWorkflowDecisionsForSession(sessionId: string): WorkflowDecisionView[] {
@@ -24981,21 +25390,32 @@ export class ControlPlaneDb {
     delegatedVideoEvidence?: WorkflowDecisionView["delegatedVideoEvidence"],
     delegatedImageReview?: WorkflowDecisionView["delegatedImageReview"],
     actor?: GovernanceActor,
+    assistantDelegation?: WorkflowDecisionView["assistantDelegation"],
   ): WorkflowDecisionView | null {
     const owed = oweResume ? ", resume_state='held', resume_command_id=NULL, resume_updated_at=?" : "";
     const snapshot = this.workflowDecisionByOccurrence(occurrenceId)?.resourceSnapshot;
     const questionAnswer = outcome === "approved" && (isChildQuestionSnapshot(snapshot) ||
       (snapshot?.category === "owner_decision" && snapshot.ruleDelegation !== undefined));
+    // The write itself fences revocation and expiry, including a call arriving at its deadline.
+    const delegated = assistantDelegation ? `AND EXISTS (
+      SELECT 1 FROM assistant_threads thread JOIN assistant_connections connection ON connection.id=thread.connection_id
+      WHERE thread.id=? AND thread.owner_user_id=? AND thread.organization_id=? AND thread.state='active'
+        AND thread.decision_grant_revision=? AND thread.decision_grant IS NOT NULL
+        AND connection.revoked=0 AND connection.expires_at>?
+        AND (json_extract(thread.decision_grant, '$.expiresAt') IS NULL OR json_extract(thread.decision_grant, '$.expiresAt')>?)
+    )` : "";
     const result = this.stmt(
       `UPDATE workflow_decisions SET status=?, consumed_at=?, selected_option_id=?, evidence_reviewed=?,
-       rationale_digest=?, child_message=?, delegated_video_evidence=?, delegated_image_review=?, resolved_at=?,
+       rationale_digest=?, child_message=?, delegated_video_evidence=?, delegated_image_review=?, assistant_delegation=?, resolved_at=?,
        closure_approval=CASE WHEN category IN ('issue_closure','owner_decision') AND ?='approved' THEN ? ELSE closure_approval END${owed}
-       WHERE occurrence_id=? AND status='pending' AND authority=?`,
+       WHERE occurrence_id=? AND status='pending' AND authority=? ${delegated}`,
     ).run(
       questionAnswer ? "consumed" : outcome, questionAnswer ? now : null, selectedOptionId ?? null, evidenceReviewed ? JSON.stringify(evidenceReviewed) : null,
       rationaleDigest ?? null, childMessage ?? null, delegatedVideoEvidence ? JSON.stringify(delegatedVideoEvidence) : null,
-      delegatedImageReview ? JSON.stringify(delegatedImageReview) : null, now,
+      delegatedImageReview ? JSON.stringify(delegatedImageReview) : null, assistantDelegation ? JSON.stringify(assistantDelegation) : null, now,
       outcome, actor ? JSON.stringify({ actor, at: now }) : null, ...(oweResume ? [now] : []), occurrenceId, expectedAuthority,
+      ...(assistantDelegation ? [assistantDelegation.threadId, assistantDelegation.ownerUserId, assistantDelegation.organizationId,
+        assistantDelegation.grantRevision, now, now] : []),
     );
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
@@ -25181,8 +25601,9 @@ export class ControlPlaneDb {
           this.stmt("SELECT 1 FROM sessions WHERE id=? AND json_extract(orchestrator_policy, '$.control.mode')='full_control'")
             .get(decision.controllingSessionId)
           ? { returnableOwnerResource: true as const } : {}),
-        ...(isWorkflowQuestionSnapshot(decision.resourceSnapshot) ? { kind: "question" as const } : {}),
-        summary: decision.resourceSnapshot.category === "campaign_issue_scope"
+        ...(isCampaignHandoffQuestion(decision) ? { kind: "handoff" as const }
+          : isWorkflowQuestionSnapshot(decision.resourceSnapshot) ? { kind: "question" as const } : {}),
+        summary: isCampaignHandoffQuestion(decision) ? CAMPAIGN_HANDOFF_TITLE : decision.resourceSnapshot.category === "campaign_issue_scope"
           ? campaignScopeChangeSummary(decision.resourceSnapshot, this.scopeApprovalIncrease(controllingSessionId, decision.resourceSnapshot))
           : ownerDecisionSummary(decision.resourceSnapshot),
         ...(() => {
@@ -25891,7 +26312,8 @@ export class ControlPlaneDb {
   /** `oweRestartNotice` records, in the revocation's own transaction, the notice a restart owes
    * the child for this occurrence (#1861): no crash can leave the revocation without it, and it
    * stays owed whatever the decision's status becomes later (a forge-settled merge, say). */
-  markWorkflowDecisionRevoked(occurrenceId: string, now: number, oweRestartNotice = false, stopResumeDelivery = false): WorkflowDecisionView | null {
+  markWorkflowDecisionRevoked(occurrenceId: string, now: number, oweRestartNotice = false, stopResumeDelivery = false,
+    mergeCheck?: { nextAt: number; expiresAt: number; audit: () => void }): WorkflowDecisionView | null {
     // One transaction, so a restart can never leave a revoked decision with its resume still
     // waiting to be sent.
     return this.atomic(() => {
@@ -25911,9 +26333,34 @@ export class ControlPlaneDb {
            WHERE occurrence_id=?`,
         ).run(prior.status, now, now, occurrenceId);
       }
+      if (revoked && prior?.status === "approved" && mergeCheck) {
+        this.stmt(`INSERT INTO workflow_merge_settlement_checks (occurrence_id, next_check_at, expires_at) VALUES (?,?,?)`)
+          .run(occurrenceId, mergeCheck.nextAt, mergeCheck.expiresAt);
+        mergeCheck.audit();
+      }
       this.revokeUiEvidenceReviewReceipts(occurrenceId, now);
       return this.workflowDecisionByOccurrence(occurrenceId);
     });
+  }
+
+  dueLifecycleMergeChecks(now: number, runnerId?: string): Array<{ occurrenceId: string; expiresAt: number }> {
+    this.stmt(`DELETE FROM workflow_merge_settlement_checks WHERE expires_at<=?`).run(now);
+    return this.stmt(`SELECT checks.occurrence_id AS occurrenceId, checks.expires_at AS expiresAt
+      FROM workflow_merge_settlement_checks checks
+      JOIN workflow_decisions d ON d.occurrence_id=checks.occurrence_id
+      JOIN sessions s ON s.id=d.session_id
+      WHERE checks.next_check_at<=? AND d.status='revoked' AND (? IS NULL OR s.runner_id=?)
+      ORDER BY checks.next_check_at, checks.occurrence_id LIMIT 16`).all(now, runnerId ?? null, runnerId ?? null) as
+      Array<{ occurrenceId: string; expiresAt: number }>;
+  }
+
+  deferLifecycleMergeCheck(occurrenceId: string, now: number, nextAt: number): boolean {
+    return Number(this.stmt(`UPDATE workflow_merge_settlement_checks SET next_check_at=?
+      WHERE occurrence_id=? AND next_check_at<=? AND expires_at>?`).run(nextAt, occurrenceId, now, now).changes) === 1;
+  }
+
+  finishLifecycleMergeCheck(occurrenceId: string): void {
+    this.stmt(`DELETE FROM workflow_merge_settlement_checks WHERE occurrence_id=?`).run(occurrenceId);
   }
 
   /** Record one delivery. Redelivering the same item replaces its receipt and restarts its expiry. */
@@ -25928,14 +26375,15 @@ export class ControlPlaneDb {
     this.stmt(
       `INSERT INTO ui_evidence_review_receipts
        (receipt_id, occurrence_id, reviewer_session_id, child_session_id, policy_revision, evidence_id,
-        artifact_id, sha256, delivered_at, delivery_order, video_source_artifact_id,
+        artifact_id, sha256, delivered_at, delivery_order, assistant_binding, video_source_artifact_id,
         video_source_sha256, video_manifest_sha256, video_frame_index, video_frame_pts_ms, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(occurrence_id, reviewer_session_id, evidence_id) DO UPDATE SET
          receipt_id=excluded.receipt_id, child_session_id=excluded.child_session_id,
          policy_revision=excluded.policy_revision, artifact_id=excluded.artifact_id,
          sha256=excluded.sha256, delivered_at=excluded.delivered_at,
          delivery_order=excluded.delivery_order,
+         assistant_binding=excluded.assistant_binding,
          video_source_artifact_id=excluded.video_source_artifact_id,
          video_source_sha256=excluded.video_source_sha256,
          video_manifest_sha256=excluded.video_manifest_sha256,
@@ -25946,7 +26394,7 @@ export class ControlPlaneDb {
     ).run(
       receipt.receiptId, receipt.occurrenceId, receipt.reviewerSessionId, receipt.childSessionId,
       receipt.policyRevision, receipt.evidenceId, receipt.artifactId, receipt.sha256,
-      receipt.deliveredAt, video ? deliveryOrder : null, video?.sourceArtifactId ?? null,
+      receipt.deliveredAt, video ? deliveryOrder : null, receipt.assistantBinding ?? null, video?.sourceArtifactId ?? null,
       video?.sourceSha256 ?? null, video?.manifestSha256 ?? null,
       video?.index ?? null, video?.ptsMs ?? null, expiresAt,
     );
@@ -25960,12 +26408,13 @@ export class ControlPlaneDb {
     reviewerSessionId: string,
     sha256: string,
     now: number,
+    assistantBinding?: string,
   ): boolean {
     return Number(this.stmt(
       `UPDATE ui_evidence_review_receipts SET acknowledged_at=COALESCE(acknowledged_at, ?)
-       WHERE receipt_id=? AND reviewer_session_id=? AND sha256=? AND consumed_at IS NULL
+       WHERE receipt_id=? AND reviewer_session_id=? AND sha256=? AND assistant_binding IS ? AND consumed_at IS NULL
          AND revoked_at IS NULL AND expires_at>?`,
-    ).run(now, receiptId, reviewerSessionId, sha256, now).changes) === 1;
+    ).run(now, receiptId, reviewerSessionId, sha256, assistantBinding ?? null, now).changes) === 1;
   }
 
   /** Receipts still able to support an approval: acknowledged, unexpired, unconsumed, unrevoked. */
@@ -25985,7 +26434,7 @@ export class ControlPlaneDb {
     return (rows as Array<{
       receipt_id: string; occurrence_id: string; reviewer_session_id: string; child_session_id: string;
       policy_revision: number; evidence_id: string; artifact_id: string; sha256: string; delivered_at: number;
-      delivery_order: number | null; video_source_artifact_id: string | null;
+      delivery_order: number | null; assistant_binding: string | null; video_source_artifact_id: string | null;
       video_source_sha256: string | null; video_manifest_sha256: string | null;
       video_frame_index: number | null; video_frame_pts_ms: number | null;
     }>).map((row) => ({
@@ -25998,6 +26447,7 @@ export class ControlPlaneDb {
       artifactId: row.artifact_id,
       sha256: row.sha256,
       deliveredAt: row.delivered_at,
+      ...(row.assistant_binding ? { assistantBinding: row.assistant_binding } : {}),
       ...(row.delivery_order == null ? {} : { deliveryOrder: row.delivery_order }),
       ...(row.video_source_artifact_id && row.video_source_sha256 && row.video_manifest_sha256 &&
           row.video_frame_index != null && row.video_frame_pts_ms != null ? { videoFrame: {
@@ -26168,6 +26618,16 @@ export class ControlPlaneDb {
         AND json_extract(location_switch_result, '$.state')='starting'`).run(occurrenceId);
   }
 
+  /** True only after the exact live move was dispatched, including when runner acceptance was recorded. */
+  hasLocationSwitchDispatch(occurrenceId: string, locationId: string): boolean {
+    return Boolean(this.stmt(`SELECT 1 FROM workflow_decisions
+      WHERE occurrence_id=? AND category='location_switch' AND authority='human'
+        AND json_extract(location_switch_result, '$.action')='switch'
+        AND json_extract(location_switch_result, '$.locationId')=?
+        AND (status='consumed' OR (status='approved' AND json_extract(location_switch_result, '$.state')='starting'))`)
+      .get(occurrenceId, locationId));
+  }
+
   completeLocationSwitch(occurrenceId: string, resourceDigest: string, result: NonNullable<WorkflowDecisionView["locationSwitchResult"]>, now: number): boolean {
     return Number(this.stmt(`UPDATE workflow_decisions SET status='consumed', consumed_at=?, location_switch_result=?
       WHERE occurrence_id=? AND category='location_switch' AND authority='human' AND status='approved'
@@ -26307,6 +26767,14 @@ export class ControlPlaneDb {
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
 
+  workflowForgeRefusalCandidates(sessionId: string): WorkflowDecisionView[] {
+    return (this.stmt(`SELECT * FROM workflow_decisions WHERE session_id=? AND
+      ((category='pr_merge' AND status='approved' AND action_kind='pr_merge_enqueue') OR
+       (category='merged_branch_deletion' AND status IN ('approved','consumed')))
+      ORDER BY created_at DESC LIMIT 100`).all(sessionId) as unknown[])
+      .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null);
+  }
+
   /**
    * Open one dispatch of a Wollipog-performed forge action (#4067), as one durable write before the
    * runner is asked. Only an approved decision qualifies, or a consumed deletion whose approved
@@ -26326,6 +26794,13 @@ export class ControlPlaneDb {
     try {
       const row = this.stmt("SELECT status, category, forge_action FROM workflow_decisions WHERE occurrence_id=?")
         .get(occurrenceId) as { status: WorkflowDecisionStatus; category: string; forge_action: string | null } | undefined;
+      // A target can be approved in multiple sessions. An existing or still-possible effect at
+      // this run attempt or release tag blocks a second write.
+      const competingWrite = isRequesterForgeDecisionCategory(kind) && this.stmt(`SELECT 1 FROM workflow_decisions
+        WHERE category=? AND resource_key=(SELECT resource_key FROM workflow_decisions WHERE occurrence_id=?)
+        AND occurrence_id<>? AND forge_action IS NOT NULL
+        AND json_extract(forge_action,'$.outcome') IN ('in_progress','uncertain','rerun_requested','release_tagged','release_published') LIMIT 1`)
+        .get(kind, occurrenceId, occurrenceId);
       let previous = parseJson<NonNullable<WorkflowDecisionView["forgeAction"]>>(row?.forge_action ?? null);
       if (previous?.outcome === "in_progress" && now - previous.updatedAt > staleAfterMs) {
         previous = { ...previous, outcome: "uncertain", updatedAt: now };
@@ -26333,11 +26808,11 @@ export class ControlPlaneDb {
       }
       const eligible = row && (row.status === "approved" ||
         (row.status === "consumed" && row.category === "merged_branch_deletion" && kind === "branch_deletion"));
-      if (!eligible || (previous && previous.kind !== kind) || previous?.outcome === "in_progress" ||
+      if (!eligible || competingWrite || (previous && previous.kind !== kind) || previous?.outcome === "in_progress" ||
           (previous && FORGE_DECISION_ACTION_SUCCESSES.has(previous.outcome)) ||
           // A consumed deletion cannot be revoked, so a stale refusal ends it here instead.
           (previous?.refusal && FORGE_DECISION_ACTION_STALE_REFUSALS.has(previous.refusal.reason)) ||
-          (previous?.outcome === "uncertain" && kind === "pr_merge_enqueue") ||
+          (previous?.outcome === "uncertain" && (kind === "pr_merge_enqueue" || isRequesterForgeDecisionCategory(kind))) ||
           (previous?.attempts ?? 0) >= FORGE_DECISION_ACTION_MAX_ATTEMPTS) {
         this.db.exec("COMMIT");
         return null;
@@ -26366,6 +26841,14 @@ export class ControlPlaneDb {
           this.retireTemporaryBranchReceipt(snapshot.temporaryReceiptId);
         }
       }
+    });
+  }
+
+  /** Record the confirmed requester forge effect and consume a still-live approval together. */
+  completeRequesterForgeDecision(occurrenceId: string, action: NonNullable<WorkflowDecisionView["forgeAction"]>): WorkflowDecisionView | null {
+    return this.atomic(() => {
+      this.recordWorkflowDecisionForgeAction(occurrenceId, action);
+      return this.consumeWorkflowDecision(occurrenceId, action.updatedAt);
     });
   }
 
@@ -26565,6 +27048,33 @@ export class ControlPlaneDb {
       (scope.scopeRevokedDecisions ?? scope.resourceSnapshot.affectedDecisions).includes(decision.occurrenceId) ? scope : null;
   }
 
+  /** A request can supersede an armed approval without issuing a later admission. A merge receipt
+   * can still belong to the original occurrence while every later same-head request is unarmed. */
+  reconcilableSupersededMerge(occurrenceId: string): { pendingReplacement: string | null } | null {
+    const row = this.stmt(`WITH original AS (
+        SELECT rowid AS serial, * FROM workflow_decisions
+        WHERE occurrence_id=? AND category='pr_merge' AND status='superseded'
+          AND action_kind='pr_merge_enqueue' AND action_command_digest IS NOT NULL
+          AND consumed_at IS NULL AND retirement IS NULL
+      ), replacements AS (
+        SELECT later.rowid AS serial, later.occurrence_id, later.status, later.action_kind
+        FROM original JOIN workflow_decisions later ON later.session_id=original.session_id
+        WHERE later.category='pr_merge' AND later.resource_key=original.resource_key AND later.rowid>original.serial
+          AND later.policy_revision=original.policy_revision
+          AND lower(json_extract(later.resource_snapshot,'$.repository'))=lower(json_extract(original.resource_snapshot,'$.repository'))
+          AND json_extract(later.resource_snapshot,'$.pullRequest')=json_extract(original.resource_snapshot,'$.pullRequest')
+          AND json_extract(later.resource_snapshot,'$.headSha')=json_extract(original.resource_snapshot,'$.headSha')
+      ) SELECT (SELECT occurrence_id FROM replacements WHERE status IN ('pending','approved')
+        ORDER BY serial DESC LIMIT 1) AS pendingReplacement FROM original
+      WHERE EXISTS (SELECT 1 FROM replacements WHERE occurrence_id=original.superseded_by)
+        AND NOT EXISTS (SELECT 1 FROM replacements WHERE action_kind='pr_merge_enqueue' OR status='consumed')
+        AND NOT EXISTS (SELECT 1 FROM workflow_decisions admitted
+          WHERE admitted.session_id=original.session_id AND admitted.category='pr_merge' AND admitted.rowid>original.serial
+            AND admitted.action_command_digest=original.action_command_digest)`)
+      .get(occurrenceId) as { pendingReplacement: string | null } | undefined;
+    return row ?? null;
+  }
+
   /** Atomically claim one reconciliation proof and consume either a live approval or the narrowly
    * auditable lifecycle-revoked state above. The eligibility check is repeated under the write
    * lock so restart/revocation races cannot widen recovery. The proof shows the exact approved head
@@ -26577,32 +27087,44 @@ export class ControlPlaneDb {
     commandDigest: string,
     receiptDigest: string,
     now: number,
-    options: { forgeAttested?: boolean } = {},
+    options: { forgeAttested?: boolean; externalMerge?: boolean; recoverSuperseded?: boolean } = {},
   ): { decision: WorkflowDecisionView; supersededOccurrenceIds: string[] } | null {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const decision = this.workflowDecisionByOccurrence(occurrenceId);
+      const recovery = options.recoverSuperseded && decision?.status === "superseded"
+        ? this.reconcilableSupersededMerge(occurrenceId) : null;
       const eligible = decision?.sessionId === sessionId &&
-        (decision.status === "approved" || decision.status === "retired" && Boolean(decision.retirement) ||
+        (decision.status === "approved" || (!options.externalMerge && (recovery !== null ||
+          decision.status === "retired" && Boolean(decision.retirement) ||
           this.isRecoverableWorkflowDecisionActionRevocation(
             sessionId,
             occurrenceId,
             options.forgeAttested ? FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS : RECOVERABLE_ACTION_REVOCATION_ACTORS,
-          ));
+          ))));
+      const unarmedExternal = options.externalMerge === true && decision?.status === "approved" && !decision.actionAdmission;
       // A provider receipt names one session's command; a forge merge is one fact for every session.
       const claimedElsewhere = options.forgeAttested === true && this.stmt(
         "SELECT 1 FROM workflow_decision_action_receipts WHERE receipt_digest=? LIMIT 1",
       ).get(receiptDigest) !== undefined;
-      if (!eligible || decision?.actionAdmission?.commandDigest !== commandDigest || claimedElsewhere ||
+      // A restarted child can record its re-enqueue through a provider receipt before a delayed
+      // forge read observes the same head. Keep the revoked occurrence terminal in that case.
+      const newerEnqueueRecorded = options.forgeAttested === true && decision?.status === "revoked" && this.stmt(`
+        SELECT 1 FROM workflow_decisions earlier JOIN workflow_decisions later ON later.session_id=earlier.session_id
+        WHERE earlier.occurrence_id=? AND later.category='pr_merge' AND later.status='consumed'
+          AND later.action_command_digest=? AND later.rowid>earlier.rowid LIMIT 1`).get(occurrenceId, commandDigest) !== undefined;
+      if (!eligible || (!unarmedExternal && decision?.actionAdmission?.commandDigest !== commandDigest) ||
+          claimedElsewhere || newerEnqueueRecorded ||
           !this.claimWorkflowDecisionActionReceipt(sessionId, receiptDigest, commandDigest, now)) {
         this.db.exec("COMMIT");
         return null;
       }
       const result = this.stmt(
-        `UPDATE workflow_decisions SET status='consumed', consumed_at=?
-         WHERE occurrence_id=? AND session_id=? AND status IN ('approved','revoked')
-           AND action_command_digest=?`,
-      ).run(now, occurrenceId, sessionId, commandDigest);
+        `UPDATE workflow_decisions SET status='consumed', consumed_at=?, superseded_by=NULL
+         WHERE occurrence_id=? AND session_id=? AND status=?
+           AND action_command_digest IS ?`,
+      ).run(now, occurrenceId, sessionId, decision!.status === "retired" ? "revoked" : decision!.status,
+        unarmedExternal ? null : commandDigest);
       if (Number(result.changes) !== 1) {
         this.db.exec("ROLLBACK");
         return null;
@@ -26616,12 +27138,14 @@ export class ControlPlaneDb {
         .map((row) => row.occurrence_id);
       const supersede = this.stmt(
         `UPDATE workflow_decisions SET status='superseded', resolved_at=?, superseded_by=?
-         WHERE occurrence_id=? AND (status='approved' OR status='revoked' AND retirement IS NOT NULL) AND consumed_at IS NULL`,
+         WHERE occurrence_id=? AND (status IN ('pending','approved') OR status='revoked' AND retirement IS NOT NULL) AND consumed_at IS NULL`,
       );
+      if (recovery?.pendingReplacement) siblings.push(recovery.pendingReplacement);
       for (const sibling of siblings) {
         supersede.run(now, occurrenceId, sibling);
         this.retireWorkflowDecisionResume(sibling, now);
       }
+      this.finishLifecycleMergeCheck(occurrenceId);
       this.db.exec("COMMIT");
       return { decision: this.workflowDecisionByOccurrence(occurrenceId)!, supersededOccurrenceIds: siblings };
     } catch (error) {
@@ -30409,8 +30933,10 @@ export class ControlPlaneDb {
     // newer runner counters whose cost is not known yet; the detailed `/usage` consumer applies
     // the same processed-token freshness test before accepting its provenance.
     const costSource = this.sessionCostSource(row.id, row.input_tokens + row.output_tokens);
+    const assistantThread = row.assistant_thread_id ? this.assistantThreads.get(row.assistant_thread_id) : null;
     const view: SessionView = {
       id: row.id,
+      ...(assistantThread ? { assistantThreadBudget: { threadId: assistantThread.id, limitUsd: assistantThread.cost_limit_usd } } : {}),
       runnerId: row.runner_id,
       workspaceId: row.workspace_id,
       workspaceName,
@@ -30426,6 +30952,9 @@ export class ControlPlaneDb {
       providerAccountAutomaticallySelected: row.provider_account_automatically_selected === 1 || undefined,
       ...(row.provider_account_selection
         ? { providerAccountSelection: parseJson<ProviderAccountSelectionRecord>(row.provider_account_selection) ?? undefined } : {}),
+      ...(row.assistant_thread_health && row.assistant_thread_id ? {
+        assistantThreadHealth: parseJson<SessionView["assistantThreadHealth"]>(row.assistant_thread_health) ?? undefined,
+      } : {}),
       providerAccountSwitchFailure:
         parseJson<ProviderAccountSwitchFailureView>(row.provider_account_switch_failure) ?? undefined,
       ...(row.location_switch ? { locationSwitch: parseJson<NonNullable<SessionView["locationSwitch"]>>(row.location_switch) ?? undefined } : {}),
@@ -31026,8 +31555,12 @@ export class ControlPlaneDb {
     // write path (one call per streamed delta) and was previously 5 separate auto-commit
     // statements — 5 WAL commits per token chunk, and a torn crash could desync seq/counters.
     let appended: SessionEvent;
+    const ownsTransaction = !this.db.isTransaction;
+    // Only a control-plane notice may join its caller's transaction. Runner ingest must commit
+    // before updating its in-memory cursor and history-epoch bookkeeping below.
+    if (!ownsTransaction && options?.runnerSeq !== undefined) throw new Error("Runner event ingest requires its own transaction");
     const advanceEpoch = options?.runnerSeq !== undefined && this.ingestReassignsSequence(sessionId);
-    this.db.exec("BEGIN");
+    if (ownsTransaction) this.db.exec("BEGIN");
     try {
       if (advanceEpoch) this.advanceEventEpochInTransaction(sessionId);
       const seq = this.sessionSeqHighWater(sessionId) + 1;
@@ -31118,8 +31651,10 @@ export class ControlPlaneDb {
         );
       }
 
-      this.db.exec("COMMIT");
-      this.noteCommittedIngest(sessionId, options?.runnerSeq, advanceEpoch);
+      if (ownsTransaction) {
+        this.db.exec("COMMIT");
+        this.noteCommittedIngest(sessionId, options?.runnerSeq, advanceEpoch);
+      }
       appended = {
         id: Number(info.lastInsertRowid),
         sessionId,
@@ -31128,7 +31663,7 @@ export class ControlPlaneDb {
         payload,
       };
     } catch (err) {
-      this.db.exec("ROLLBACK");
+      if (ownsTransaction) this.db.exec("ROLLBACK");
       throw err;
     }
     return appended;
@@ -35569,6 +36104,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     evidence_reviewed?: string | null;
     delegated_video_evidence?: string | null;
     delegated_image_review?: string | null;
+    assistant_delegation?: string | null;
     human_fallback?: string | null;
     authority_evaluation?: string | null;
     created_at?: number;
@@ -35608,6 +36144,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
   const evidenceReviewed = parseJson<string[]>(row.evidence_reviewed ?? null);
   const delegatedVideoEvidence = parseJson<NonNullable<WorkflowDecisionView["delegatedVideoEvidence"]>>(row.delegated_video_evidence ?? null);
   const delegatedImageReview = parseJson<NonNullable<WorkflowDecisionView["delegatedImageReview"]>>(row.delegated_image_review ?? null);
+  const assistantDelegation = parseJson<NonNullable<WorkflowDecisionView["assistantDelegation"]>>(row.assistant_delegation ?? null);
   const humanFallback = parseJson<NonNullable<WorkflowDecisionView["humanFallback"]>>(row.human_fallback ?? null);
   const closingReferenceCheck = parseJson<NonNullable<WorkflowDecisionView["closingReferenceCheck"]>>(row.closing_reference_check ?? null);
   const forgeAction = parseJson<NonNullable<WorkflowDecisionView["forgeAction"]>>(row.forge_action ?? null);
@@ -35642,6 +36179,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     ...(evidenceReviewed ? { evidenceReviewed } : {}),
     ...(delegatedVideoEvidence ? { delegatedVideoEvidence } : {}),
     ...(delegatedImageReview ? { delegatedImageReview } : {}),
+    ...(assistantDelegation ? { assistantDelegation } : {}),
     createdAt: row.created_at!,
     ...(row.resolved_at != null ? { resolvedAt: row.resolved_at } : {}),
     ...(row.consumed_at != null ? { consumedAt: row.consumed_at } : {}),
@@ -35698,6 +36236,9 @@ function ownerDecisionSummary(snapshot: Exclude<WorkflowDecisionView["resourceSn
       case "owner_decision":
       case "implementation_question": return snapshot.question;
       case "pr_merge": return `Merge ${snapshot.repository}#${snapshot.pullRequest}`;
+      case "ci_rerun": return `Rerun CI for run ${snapshot.runId} in ${snapshot.repository}`;
+      case "release_tag": return `Tag release ${snapshot.tag} in ${snapshot.repository}`;
+      case "release_publish": return `Publish release ${snapshot.tag} in ${snapshot.repository}`;
       case "review_round_extension": return `More review rounds for ${snapshot.repository}#${snapshot.pullRequest}`;
       case "merged_branch_deletion": return `Delete branch ${snapshot.branch} in ${snapshot.repository}`;
       case "issue_closure": return `Close ${snapshot.repository}#${snapshot.issue}`;

@@ -360,7 +360,7 @@ async function listOptions(container: HTMLDivElement, label: string): Promise<Ar
   const trigger = choiceTrigger(container, label);
   assert.ok(trigger, `${label} choice is rendered`);
   await act(async () => { trigger.click(); });
-  const options = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')].map((option) => ({
+  const options = [...container.querySelectorAll<HTMLButtonElement>('[role="option"], [data-model-choice]')].map((option) => ({
     label: option.querySelector('[id$="-label"]')?.textContent?.trim() ?? "",
     disabled: option.getAttribute("aria-disabled") === "true",
   }));
@@ -379,7 +379,7 @@ async function chooseAction(container: HTMLDivElement, title: string): Promise<v
 }
 
 function choiceTrigger(container: HTMLDivElement, label: string): HTMLButtonElement | undefined {
-  return [...container.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="listbox"]')]
+  return [...container.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="listbox"], button[aria-haspopup="dialog"]')]
     .find((candidate) => candidate.getAttribute("aria-label")?.startsWith(`${label}:`));
 }
 
@@ -387,7 +387,7 @@ async function choose(container: HTMLDivElement, label: string, optionLabel: str
   const trigger = choiceTrigger(container, label);
   assert.ok(trigger, `${label} choice is rendered`);
   await act(async () => { trigger.click(); });
-  const options = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')];
+  const options = [...container.querySelectorAll<HTMLButtonElement>('[role="option"], [data-model-choice]')];
   // By the option's label alone: its description and status are its other lines.
   const option = options
     .find((candidate) => (candidate.querySelector('[id$="-label"]') ?? candidate).textContent?.trim() === optionLabel);
@@ -513,7 +513,7 @@ test("Agent, Machine, and Model controls invoke their capability-transition help
   const fixture = await mountFixture();
   try {
     await openNew(fixture);
-    await choose(fixture.container, "Model", "Opus");
+    await choose(fixture.container, "Model", "Opus Latest");
     await choose(fixture.container, "Reasoning Effort", "High");
     await choose(fixture.container, "Permission Mode", "Auto");
 
@@ -529,10 +529,10 @@ test("Agent, Machine, and Model controls invoke their capability-transition help
     assert.equal(choiceTrigger(fixture.container, "Reasoning Effort")?.getAttribute("aria-label"), "Reasoning Effort: Agent Default");
 
     await choose(fixture.container, "Machine", "runner-1");
-    await choose(fixture.container, "Model", "Opus");
+    await choose(fixture.container, "Model", "Opus Latest");
     await choose(fixture.container, "Reasoning Effort", "High");
     await choose(fixture.container, "Permission Mode", "Auto");
-    await choose(fixture.container, "Model", "Haiku");
+    await choose(fixture.container, "Model", "Haiku Latest");
     assert.equal(choiceTrigger(fixture.container, "Reasoning Effort")?.getAttribute("aria-label"), "Reasoning Effort: Agent Default");
     assert.equal(choiceTrigger(fixture.container, "Permission Mode")?.getAttribute("aria-label"), "Permission Mode: Auto");
   } finally {
@@ -663,7 +663,7 @@ test("editing and saving without changes sends the exact stored multi-alternate 
     assert.equal(nameInput?.value, "Nightly Sweep");
     assert.equal(shownValue(fixture.container, "Machine"), "runner-1");
     assert.equal(shownValue(fixture.container, "Agent"), "Rich Agent");
-    assert.equal(choiceTrigger(fixture.container, "Model")?.getAttribute("aria-label"), "Model: Opus");
+    assert.equal(choiceTrigger(fixture.container, "Model")?.getAttribute("aria-label"), "Model: Opus Latest");
     assert.equal(choiceTrigger(fixture.container, "Reasoning Effort")?.getAttribute("aria-label"), "Reasoning Effort: High");
     assert.equal(choiceTrigger(fixture.container, "Permission Mode")?.getAttribute("aria-label"), "Permission Mode: Auto");
     assert.equal((await listOptions(fixture.container, "Machine")).find((option) => option.label === "runner-3")?.disabled, true);
@@ -2165,7 +2165,7 @@ test("a new automation starts on the first online machine, and switching the act
     assert.equal(shownValue(fixture.container, "Machine"), "runner-2");
     const machine = choiceTrigger(fixture.container, "Machine")!;
     await act(async () => { machine.click(); });
-    const offlineOption = [...fixture.container.querySelectorAll('[role="option"]')]
+    const offlineOption = [...fixture.container.querySelectorAll('[role="option"], [data-model-choice]')]
       .find((option) => option.querySelector('[id$="-label"]')?.textContent === "runner-1");
     assert.match(offlineOption?.textContent ?? "", /Offline/, "an offline machine carries its badge in the list");
     await act(async () => { machine.click(); });
@@ -2623,7 +2623,7 @@ test("Time Zone finds New York by typing \"york\", and a stored zone the browser
         .map((option) => option.textContent), ["Eastern (UTC\u22124)US/Eastern"]);
 
       await typeInto(zone, "york");
-      const options = [...fixture.container.querySelectorAll<HTMLElement>('[role="option"]')];
+      const options = [...fixture.container.querySelectorAll<HTMLElement>('[role="option"], [data-model-choice]')];
       assert.deepEqual(options.map((option) => option.textContent), ["New York (UTC−4)America/New_York"]);
       await act(async () => { options[0]!.click(); });
       await act(settle);
@@ -2691,7 +2691,7 @@ test("editing an automation keeps its retired exec agent unavailable with the co
     assert.ok(trigger);
     assert.match(trigger.getAttribute("aria-label") ?? "", /^Agent: Codex$/);
     await act(async () => trigger.click());
-    const option = [...fixture.container.querySelectorAll<HTMLElement>('[role="option"]')]
+    const option = [...fixture.container.querySelectorAll<HTMLElement>('[role="option"], [data-model-choice]')]
       .find((candidate) => candidate.getAttribute("aria-selected") === "true");
     assert.ok(option, "the bound retired agent stays listed");
     assert.equal(option.getAttribute("aria-disabled"), "true", "even an older runner's available=true cannot revive exec");

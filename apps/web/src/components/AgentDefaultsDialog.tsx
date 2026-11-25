@@ -1,3 +1,4 @@
+import { ModelPicker } from "./ModelPicker.js";
 import { useEffect, useRef, useState } from "react";
 import type { AgentHarnessDefaultConfig, AgentHarnessDefaultOption } from "@wollipog/protocol";
 import { effortLabel } from "../format.js";
@@ -10,6 +11,7 @@ import { Select } from "./ui/ChoiceControls.js";
 import {
   draftRepairNotice,
   effortsForDraft,
+  managedModelDriftText,
   permissionModeDisplayLabel,
   permissionModesForDraft,
   repairDraft,
@@ -98,6 +100,7 @@ export function AgentDefaultsDialog({
   }, [option]);
 
   const models = uniqueModels(option);
+  const managedDrift = managedModelDriftText(option, draft.model);
   const efforts = effortsForDraft(option, draft);
   const permissionModes = permissionModesForDraft(option, draft);
   // An effort belongs to a model when the agent lists models, so it waits for one.
@@ -215,14 +218,15 @@ export function AgentDefaultsDialog({
           {models.length > 0 && (
             <div className="field">
               <span>Model</span>
-              <Select
+              <ModelPicker
+                context={{ mode: "launch", driver: option.driver }}
                 label="Model"
                 value={draft.model ?? UNSET}
                 disabled={busy}
                 describedBy={HELPER_ID}
                 options={[
                   { value: UNSET, label: "Wollipog Default", description: "The model the agent picks for itself." },
-                  ...models.map((model) => ({ value: model.id, label: modelOptionLabel(model, models) })),
+                  ...models.map((model) => ({ value: model.id, label: modelOptionLabel(model, models), description: model.description })),
                 ]}
                 onChange={(model) => {
                   const next: AgentHarnessDefaultConfig = { ...draft };
@@ -236,6 +240,7 @@ export function AgentDefaultsDialog({
                   update(next);
                 }}
               />
+              {managedDrift && <p className="field-helper">{managedDrift}</p>}
             </div>
           )}
           {showEffort && (

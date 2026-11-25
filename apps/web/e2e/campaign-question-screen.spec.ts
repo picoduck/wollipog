@@ -57,6 +57,22 @@ for (const [device, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
 /** Campaign Status's Decision Model Checks (#4104): each Decision Model verdict beside the request it
  * affected, and the owner's classification of one the model could not screen. */
 
+test("a dismissed handoff remains in the Decision Model audit without classification actions", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  for (const dismissed of [false, true]) {
+    await page.goto(`/campaign-status-e2e.html?scenario=campaign&screen=handoff${dismissed ? "&dismissed=1" : ""}`);
+    await page.getByRole("button", { name: "Expand All", exact: true }).click();
+    const section = page.getByRole("region", { name: "Decision Model Checks" });
+    const check = section.locator("li.campaign-screen-item");
+    await expect(check).toHaveCount(1);
+    await expect(check).toContainText(dismissed ? "No classification is pending for this request." : "Waiting for you to classify it.");
+    await expect(check.getByRole("button", { name: "Let Me Answer", exact: true })).toHaveCount(dismissed ? 0 : 1);
+    await expect(check).toContainText("Harness Unavailable");
+    await check.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath(`handoff-audit-${dismissed ? "after" : "before"}.png`) });
+  }
+});
+
 for (const [label, viewport] of [["1440", { width: 1440, height: 900 }], ["390", { width: 390, height: 844 }]] as const) {
   test(`the owner classifies a question the Decision Model could not screen (${label}px)`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);

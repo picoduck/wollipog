@@ -61,6 +61,36 @@ const readFieldGeometry = (dialog: Locator) => dialog.evaluate((element) => {
   return { edges, clipped };
 });
 
+for (const [width, theme] of [[1440, "light"], [390, "dark"]] as const) {
+  test(`a handoff can choose Latest and validates its concrete effort options at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/command-inbox-projects-e2e.html?scenario=conversation-handoff&inPlace=1&managedLatest=1");
+    await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+    await page.getByRole("button", { name: /Alpha Session/ }).click();
+    await waitForSessionPreview(page);
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
+    if (await expand.isVisible()) await expand.click();
+    await page.locator(".tl-turn-footer").getByRole("button", { name: "More Turn Actions" }).click();
+    await page.getByRole("menuitem", { name: "Hand Off After This Turn…" }).click();
+    const dialog = page.getByRole("dialog", { name: "Hand Off to Another Agent", exact: true });
+    await dialog.getByRole("button", { name: /^Model:/ }).click();
+    const picker = page.getByRole("dialog", { name: "Model", exact: true });
+    const latest = picker.getByRole("radio", { name: "Sol Latest", exact: true });
+    await expect(latest).toHaveAccessibleDescription(/Currently GPT-6.2 Sol/);
+    await expect(latest).toBeInViewport({ ratio: 1 });
+    await page.screenshot({ path: testInfo.outputPath("handoff-latest.png"), animations: "disabled" });
+    await latest.click();
+    await dialog.getByRole("button", { name: /^Effort:/ }).click();
+    await expect(page.getByRole("option", { name: "High", exact: true })).toBeVisible();
+    await expect(page.getByRole("option", { name: "Low", exact: true })).toHaveCount(0);
+    await page.getByRole("option", { name: "High", exact: true }).click();
+    await dialog.getByRole("button", { name: "Create Handoff" }).click();
+    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.handoffRequests())).toMatchObject([
+      { agentId: "codex", config: { model: "wollipog:latest:sol", effort: "high" } },
+    ]);
+  });
+}
+
 for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
   test(`in-place handoff uses current files and leaves an unsent draft at ${width}px ${theme}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });

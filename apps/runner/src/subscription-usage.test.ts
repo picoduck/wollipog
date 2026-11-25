@@ -162,11 +162,40 @@ test("provider numeric sentinels are omitted instead of invalidating whole snaps
   }, base, 1_000);
   assert.ok(codex);
   assert.ok(claude);
+  assert.equal(codex.buckets[0]?.windowDurationMinutes, undefined);
+  // The invalid length is dropped; the five-hour window's own length stands in for it.
+  assert.equal(claude.buckets[0]?.windowDurationMinutes, 300);
   for (const bucket of [codex.buckets[0], claude.buckets[0]]) {
-    assert.equal(bucket?.windowDurationMinutes, undefined);
     assert.equal(bucket?.resetsAt, undefined);
     assert.ok((bucket?.label.length ?? 0) <= 160);
   }
+});
+
+test("Claude windows carry the length their id names, so a pace can be projected", () => {
+  const claude = normalizeClaudeRateLimits({
+    rate_limit_info: {
+      status: "allowed_warning",
+      rateLimitType: "seven_day",
+      unifiedWindows: {
+        five_hour: { utilization: 0.1, resetsAt: 2_000_000_000 },
+        seven_day: { utilization: 0.25, resetsAt: 2_000_100_000 },
+        seven_day_fable: { utilization: 0, resetsAt: 2_000_100_000 },
+        overage: { utilization: 0.5, resetsAt: 2_000_100_000 },
+      },
+    },
+  }, base, 2_000);
+  assert.ok(claude);
+  assert.deepEqual(
+    claude.buckets.map((bucket) => [bucket.id, bucket.windowDurationMinutes, bucket.status]),
+    [
+      ["five_hour", 300, "available"],
+      // Claude's `allowed_warning` on a quarter-used week is a pace warning, kept as the provider said.
+      ["seven_day", 10_080, "warning"],
+      ["seven_day_fable", 10_080, "available"],
+      // A window whose length its id does not name stays without one.
+      ["overage", undefined, "available"],
+    ],
+  );
 });
 
 test("the Codex refresh probe uses only account APIs, never starts a turn, and always reaps", async () => {
@@ -1032,6 +1061,7 @@ test("a quota reset inside one window applies once a second event confirms it", 
     label: "Weekly — All Models",
     usedPercent: 29,
     remainingPercent: 71,
+    windowDurationMinutes: 10_080,
     resetsAt: WEEK_RESET * 1000,
     observedAt: OBSERVED_AT + 61_000,
     status: "available",

@@ -175,7 +175,7 @@ function syncDirectory(path: string, options: StateDoctorOptions): void {
 function replaceMeta(path: string, meta: SessionMeta, options: StateDoctorOptions): void {
   const temp = `${path}.state-doctor-${process.pid}-${randomUUID()}`;
   try {
-    writeFileSync(temp, `${JSON.stringify(meta, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    writeFileSync(temp, `${JSON.stringify({ ...meta, env: {} }, null, 2)}\n`, { flag: "wx", mode: 0o600 });
     syncFile(temp, options);
     beforeDurabilityOperation(options, "rename", path);
     renameSync(temp, path);

@@ -10,7 +10,7 @@ import React, {
   type Ref,
 } from "react";
 import type { GovernancePolicy, PendingApproval, PermissionOption, SessionView } from "@wollipog/protocol";
-import { isChildQuestionSnapshot, ownerResourceLabel, ownerResourceKeepReason } from "@wollipog/protocol";
+import { CAMPAIGN_HANDOFF_TITLE, isCampaignHandoffQuestion, isChildQuestionSnapshot, isOwnerQuestionSnapshot, ownerResourceKeepReason, ownerResourceLabel, ownerResourceNoun } from "@wollipog/protocol";
 import { useApi } from "../../api-context.js";
 import type { ApiClient } from "../../api.js";
 import { titleCaseLabel } from "../../format.js";
@@ -42,7 +42,7 @@ import { CHOOSE_ACCOUNT_COPY, ChooseAccountDialog, type ChooseAccountResult } fr
 import { EvidenceReviewBody, useEvidenceReview } from "./EvidenceReview.js";
 import { OwnerRuleSummary, WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
 import { ReturnOwnerResource } from "../ReturnOwnerResource.js";
-import { QuestionClassification, QUESTION_CLASSIFICATION_REASON } from "./QuestionClassification.js";
+import { HANDOFF_CLASSIFICATION_REASON, QuestionClassification, QUESTION_CLASSIFICATION_REASON } from "./QuestionClassification.js";
 import { LocationSwitchSummary, locationSwitchCardActions, locationSwitchChoices, locationSwitchOptions } from "./LocationSwitchSummary.js";
 import { claimDecision, decisionKey, useDecisionFailure, useDecisionInFlight } from "./request-reveal.js";
 import {
@@ -85,6 +85,8 @@ export interface RequestCardProps {
   concealed?: boolean;
   /** Explicit reading mode on the session dock, shared with expanded questions (#2874). */
   onReadingChange?: (reading: boolean) => void;
+  /** Opens this status update in the full session when A is pressed in an Inbox preview. */
+  onOpenHandoff?: () => void;
   /** Someone else answers this request (an Orchestrator-owned child request, #2206): the card says
    * so in a neutral notice under its title and shows the request's facts, with no actions. */
   readOnlyNotice?: string;
@@ -117,6 +119,7 @@ export function RequestCard({
   headingRef,
   concealed = false,
   onReadingChange,
+  onOpenHandoff,
   readOnlyNotice: suppliedReadOnlyNotice,
   accountUnknown = false,
 }: RequestCardProps) {
@@ -130,6 +133,8 @@ export function RequestCard({
   );
   const evidence = useEvidenceReview(session.id, request);
   const workflowDecision = request.kind === "workflow_decision" ? request.workflowDecision : undefined;
+  const snapshot = workflowDecision?.resourceSnapshot;
+  const handoff = isCampaignHandoffQuestion(workflowDecision) && isOwnerQuestionSnapshot(snapshot) ? snapshot : null;
   const childQuestion = isChildQuestionSnapshot(workflowDecision?.resourceSnapshot);
   const classificationHeld = workflowDecision?.authorityEvaluation?.reason === "credential_screen_review";
   const readOnlyNotice = suppliedReadOnlyNotice ??
@@ -148,6 +153,9 @@ export function RequestCard({
   const [readingKey, setReadingKey] = useState<string | null>(null);
   const canExpandDecision = request.kind === "workflow_decision" && presentation === "dock" && onReadingChange !== undefined;
   const reading = canExpandDecision && readingKey === flightKey;
+  const readingLabel = handoff
+    ? reading ? "Collapse Update" : "Expand Update"
+    : reading ? REQUEST_CARD_COPY.collapseDecision : REQUEST_CARD_COPY.expandDecision;
   const onReadingChangeRef = useRef(onReadingChange);
   onReadingChangeRef.current = onReadingChange;
   useEffect(() => {
@@ -175,7 +183,8 @@ export function RequestCard({
   // Guardrail pauses and workflow decisions are resolved by the control plane; everything else is
   // answered by the runner, which must be connected to take it.
   const decisionNeedsRunner = request.kind !== "policy_hook" && request.kind !== "workflow_decision";
-  const reason = classificationHeld ? QUESTION_CLASSIFICATION_REASON : responseRefusal ?? (decisionNeedsRunner && !runnerOnline ? REQUEST_CARD_COPY.runnerOffline : null);
+  const classificationReason = handoff ? HANDOFF_CLASSIFICATION_REASON : QUESTION_CLASSIFICATION_REASON;
+  const reason = classificationHeld ? classificationReason : responseRefusal ?? (decisionNeedsRunner && !runnerOnline ? REQUEST_CARD_COPY.runnerOffline : null);
   const signInBlocked = runner?.canManage === false && request.options.some((option) => option.optionId === "auth:login");
   const optionReason = (option: PermissionOption): string | null =>
     option.optionId === "auth:login" && runner?.canManage === false ? signInReasonId
@@ -185,19 +194,13 @@ export function RequestCard({
   const describedBy = (option: PermissionOption) =>
     [reason !== null ? reasonId : null, optionReason(option)].filter(Boolean).join(" ") || undefined;
 
-  const decide = async (option: PermissionOption) => {
-    if (unavailable(option)) return;
+  const sendResponse = async (actionId: string, send: () => Promise<SessionView>) => {
     // Synchronous, so a second press or a held A key cannot slip in before the busy state renders.
-    const release = claimDecision(flightKey, option.optionId);
+    const release = claimDecision(flightKey, actionId);
     if (!release) return;
     let failure: string | undefined;
     try {
-      const updated = await api.approve(session.id, {
-        requestId: request.requestId,
-        optionId: option.optionId,
-        ...(evidence && option.optionId === "approve" ? evidence.approval() : {}),
-      });
-      evidence?.clearDraft();
+      const updated = await send();
       onSessionUpdate?.(updated);
     } catch (cause) {
       failure = (cause as Error).message;
@@ -206,14 +209,39 @@ export function RequestCard({
     }
   };
 
-  const decideRef = useRef(decide);
-  decideRef.current = decide;
+  const decide = async (option: PermissionOption) => {
+    if (unavailable(option)) return;
+    await sendResponse(option.optionId, async () => {
+      const updated = await api.approve(session.id, {
+        requestId: request.requestId,
+        optionId: option.optionId,
+        ...(evidence && option.optionId === "approve" ? evidence.approval() : {}),
+      });
+      evidence?.clearDraft();
+      return updated;
+    });
+  };
+
+  const acknowledge = () => {
+    if (reason !== null) return;
+    return sendResponse("acknowledge", () => api.answerQuestion(session.id, {
+      requestId: request.requestId, occurrenceId: request.occurrenceId, answers: {}, action: "dismiss",
+    }));
+  };
+
+  const actionsRef = useRef({ decide, acknowledge, onOpenHandoff });
+  actionsRef.current = { decide, acknowledge, onOpenHandoff };
   useEffect(() => {
     if (!intentRef) return;
     const handler: RequestIntentHandler = (intent) => {
       if (readOnlyNotice) return true;
+      if (handoff) {
+        if (intent === "deny" && !classificationHeld) void actionsRef.current.acknowledge();
+        else actionsRef.current.onOpenHandoff?.();
+        return true;
+      }
       const option = requestOptionForIntent(cardOptions, intent);
-      if (option) void decideRef.current(option);
+      if (option) void actionsRef.current.decide(option);
       // The expanded request owns A and D even when it cannot act on them, so the key never falls
       // through to a different request.
       return true;
@@ -222,7 +250,7 @@ export function RequestCard({
     return () => {
       if (intentRef.current === handler) intentRef.current = null;
     };
-  }, [intentRef, readOnlyNotice, cardOptions]);
+  }, [intentRef, readOnlyNotice, cardOptions, handoff, classificationHeld]);
 
   const signIn = request.kind === "authentication";
   // Every kind marks the edges its scrolling body can still scroll past (#2715).
@@ -330,7 +358,7 @@ export function RequestCard({
   const decisionCategory = workflowDecision?.resourceSnapshot.category;
   const decisionDetails = workflowDecision && decisionCategory !== "issue_closure" &&
     decisionCategory !== "campaign_issue_scope" && decisionCategory !== "automation_creation" &&
-    decisionCategory !== "location_switch" && decisionCategory !== "ui_evidence_approval" && !childQuestion ? request.context?.input : undefined;
+    decisionCategory !== "location_switch" && decisionCategory !== "ui_evidence_approval" && !childQuestion && !handoff ? request.context?.input : undefined;
   const facts = [
     { label: "Tool", value: childQuestion ? undefined : request.context?.toolName },
     { label: "Path", value: request.context?.path },
@@ -342,10 +370,16 @@ export function RequestCard({
     remaining,
   );
   const readOnly = readOnlyNotice !== undefined;
-  const body: ReactNode[] = readOnly ? [
+  const body: ReactNode[] = handoff ? [
+    <p key="intro">You can find these items and their next steps in Campaign Status.</p>,
+    handoff.material && <div key="handoffs"><StructuredQuestionText>{
+      handoff.material.replace(/\n\nThis question authorizes nothing\. Your answer grants no action authority\.$/u, "")
+    }</StructuredQuestionText></div>,
+  ].filter(Boolean) : readOnly ? [
     // Facts only: what is being decided, never a control that would act on it.
     workflowDecision ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot} authority={workflowDecision.authority}
       authorityReason={workflowDecision.authorityEvaluation?.reason} scopeDecisionDetails={request.scopeDecisionDetails}
+      nonBlocking={request.async === true}
       {...(request.scopeMaxIssuesIncrease ? { scopeMaxIssuesIncrease: request.scopeMaxIssuesIncrease } : {})}
       {...(workflowDecision.closingReferenceCheck ? { closingReferenceCheck: workflowDecision.closingReferenceCheck } : {})} /> : null,
     workflowDecision?.ownerRule ? <OwnerRuleSummary key="owner-rule" rule={workflowDecision.ownerRule} /> : null,
@@ -414,6 +448,7 @@ export function RequestCard({
       onChoose={setChosenLocation} /> : null,
     workflowDecision && !evidence && !locationSwitch ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot} authority={workflowDecision.authority}
       authorityReason={workflowDecision.authorityEvaluation?.reason} scopeDecisionDetails={request.scopeDecisionDetails}
+      nonBlocking={request.async === true}
       {...(request.scopeMaxIssuesIncrease ? { scopeMaxIssuesIncrease: request.scopeMaxIssuesIncrease } : {})}
       {...(workflowDecision.closingReferenceCheck ? { closingReferenceCheck: workflowDecision.closingReferenceCheck } : {})} /> : null,
     workflowDecision?.ownerRule ? <OwnerRuleSummary key="owner-rule" rule={workflowDecision.ownerRule} /> : null,
@@ -455,7 +490,7 @@ export function RequestCard({
   ].filter(Boolean);
 
   return (
-    <><section
+    <section
       ref={cardRef}
       className="request-card"
       data-presentation={presentation}
@@ -476,29 +511,35 @@ export function RequestCard({
           <button
             type="button"
             className="btn sm ghost decision-reading-toggle"
-            aria-label={reading ? REQUEST_CARD_COPY.collapseDecision : REQUEST_CARD_COPY.expandDecision}
+            aria-label={readingLabel}
             aria-expanded={reading}
             aria-controls={`${titleId} ${bodyId}`}
             onClick={() => setReadingKey(reading ? null : flightKey)}
           >
             {reading ? <ChevronDownIcon size={14} /> : <ChevronUpIcon size={14} />}
             <span className="decision-reading-toggle-label">
-              {reading ? REQUEST_CARD_COPY.collapseDecision : REQUEST_CARD_COPY.expandDecision}
+              {readingLabel}
             </span>
           </button>
           {headTrailing}
         </> : headTrailing}
       />
       <h3 className="request-card-title" id={titleId} ref={headingRef} tabIndex={-1} data-session-request-focus="">
-        {evidence && !readOnly ? evidence.title : request.title}
+        {handoff ? CAMPAIGN_HANDOFF_TITLE : evidence && !readOnly ? evidence.title : request.title}
       </h3>
       {readOnly && <Notice tone="neutral" compact>{readOnlyNotice}</Notice>}
       {request.kind === "runner_recovery" && <p className="request-card-policy">The runner restarted, so this Orchestrator needs a fresh connection for its tools. Relaunching refreshes its credential and guard and continues its pending work.</p>}
       {policyLine && <p className="request-card-policy">{policyLine}</p>}
       {body.length > 0 && <div className="request-card-body" id={bodyId} ref={bodyRef}>{body}</div>}
+      {/* Inside the card, under what it asks (#4713): a sibling shared the dock's capped column with the
+          card and squeezed the decision's own title, facts and footer out of view. */}
+      {!readOnly && workflowDecision?.returnableOwnerResource && <ReturnOwnerResource
+        key={workflowDecision.occurrenceId} sessionId={workflowDecision.sessionId} occurrenceId={workflowDecision.occurrenceId}
+        resourceLabel={ownerResourceLabel(workflowDecision.resourceSnapshot)} presentation="footnote"
+        ownershipReason={ownerResourceKeepReason(workflowDecision, ownerResourceNoun(workflowDecision.resourceSnapshot.category))} />}
       {error && !readOnly && (
         <Notice tone="danger" compact role="alert">
-          {REQUEST_CARD_COPY.notSent} {error}
+          {handoff ? "Your acknowledgment wasn’t recorded." : REQUEST_CARD_COPY.notSent} {error}
         </Notice>
       )}
       {!readOnly && (reason !== null || signInBlocked || evidence?.footNote) && (
@@ -608,6 +649,13 @@ export function RequestCard({
           </>
         )}
         {primary && optionButton(primary, "primary")}
+        {handoff && !classificationHeld && (
+          <BusyButton className="btn primary" busy={busy === "acknowledge"} disabled={busy !== null || reason !== null}
+            aria-describedby={reason !== null ? reasonId : undefined} data-session-request-control="acknowledge"
+            progress="Acknowledging the handoffs…" onClick={() => void acknowledge()}>
+            Acknowledge{showKeyHints && <kbd aria-hidden="true">D</kbd>}
+          </BusyButton>
+        )}
         {method && (
           <BusyButton
             className="btn primary"
@@ -637,11 +685,6 @@ export function RequestCard({
         />
       )}
     </section>
-    {!readOnly && workflowDecision?.returnableOwnerResource && <ReturnOwnerResource
-      key={workflowDecision.occurrenceId} sessionId={workflowDecision.sessionId} occurrenceId={workflowDecision.occurrenceId}
-      resourceLabel={ownerResourceLabel(workflowDecision.resourceSnapshot)}
-      ownershipReason={ownerResourceKeepReason(workflowDecision)} />}
-    </>
   );
 }
 

@@ -1,5 +1,6 @@
+import { ModelPicker } from "./ModelPicker.js";
 import { useRef, useState } from "react";
-import { handoffDestinationError, type AgentDefinition, type SessionConfig } from "@wollipog/protocol";
+import { handoffDestinationError, isManagedModelChoice, launchModelChoice, managedModelChoices, type AgentDefinition, type SessionConfig } from "@wollipog/protocol";
 import { Modal } from "./common.js";
 import { FieldError } from "./FieldError.js";
 import { ChevronRightIcon } from "./Icons.js";
@@ -62,15 +63,18 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceAgentId,
   const choices = listed.filter((item) => item.unavailable === null).map((item) => item.agent);
   const [agentId, setAgentId] = useState(choices[0]?.id ?? "");
   const agent = choices.find((item) => item.id === agentId);
-  const modelChoices = (agent?.capabilities?.models.filter((item) => !item.hidden) ?? [])
+  const modelChoices = [...(agent?.capabilities?.models.filter((item) => !item.hidden) ?? []),
+    ...managedModelChoices(agent?.driver, agent?.capabilities)]
     .map(item => ({ ...item, displayName: item.displayName ?? resolvedModelLabel(item.id) }));
   const [config, setConfig] = useState<SessionConfig>(() => seedConfig(agent, sourceServiceTier));
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const lock = useRef(false);
-  const destinationReason = handoffDestinationError(agent, sourceDriver, config);
+  const model = launchModelChoice(agent?.driver, agent?.capabilities, config.model);
+  const destinationReason = handoffDestinationError(agent, sourceDriver, isManagedModelChoice(config.model)
+    ? { ...config, model: model?.id }
+    : config);
   const reason = refusal ?? destinationReason;
-  const model = agent?.capabilities?.models.find((item) => item.id === config.model);
   // `default` is the provider-standard tier: it is always selectable and never needs advertising,
   // so it is excluded from the catalog list to avoid a duplicate entry.
   const advertisedTiers = model?.serviceTiers?.filter((item) => item.id !== "default") ?? [];
@@ -142,8 +146,8 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceAgentId,
           setAgentId(value); setConfig(seedConfig(next, sourceServiceTier));
         }} /></div>
       <div className="field-row">
-        <div className="field"><span>Model</span><Select label="Model" value={config.model ?? ""} disabled={busy}
-          options={modelChoices.map((item) => ({ value: item.id, label: modelOptionLabel(item, modelChoices) }))}
+        <div className="field"><span>Model</span><ModelPicker context={{ mode: "launch", driver: agent?.driver }} label="Model" value={config.model ?? ""} disabled={busy}
+          options={modelChoices.map((item) => ({ value: item.id, label: modelOptionLabel(item, modelChoices), description: item.description }))}
           onChange={(value) => setConfig({ ...config, model: value, effort: undefined })} /></div>
         <div className="field"><span>Effort</span><Select label="Effort" value={config.effort ?? ""} disabled={busy}
           options={[{ value: "", label: "Default" }, ...(model?.efforts?.length ? model.efforts : agent?.capabilities?.effortLevels ?? []).map((item) => ({ value: item, label: effortLabel(item) }))]}

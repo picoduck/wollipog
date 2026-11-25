@@ -141,17 +141,22 @@ The control plane that creates the account is granted it automatically:
    records a pending grant with `origin = 'created'`, `granted_by` the caller and `granted_role` the
    caller's organization role, and sends its id as `start_provider_login.profileGrantId`. A non-human
    caller, or a runner without a recorded scope, gets no grant and today's HOME. Adoption and
-   revocation stay Owner/Admin only.
-2. The runner creates `.agent-manager` and `profiles` (0700 when missing) and refuses either one
+   revocation stay Owner/Admin only. For runners that support `start_provider_login.newAccountId`,
+   the control plane chooses a `login-<8 hex>` account id, binds the grant to it before dispatch,
+   and sends it in that field. The `accountId` field still targets an existing account for repair.
+2. The runner refuses a malformed or taken proposed id before creating the HOME or starting the
+   provider. It creates `.agent-manager` and `profiles` (0700 when missing) and refuses either one
    when it is a link, owned by another user, or writable by group or others. It creates
    `<profileId>` 0700 and refuses one that already exists. Its lease worker then writes the first
    marker, holding the HOME's lease (`profile_create`), with this identity and only this control
    plane's grant. Only then does the sign-in take the HOME's lease and start the provider.
-3. The start reply names the new account id; the control plane binds the pending grant to it (until
-   then the row's account key is a placeholder that matches no account). When the sign-in succeeds,
-   the runner records the account with its `profileId`, counts the grant as active, and reports the
-   account with `profile.access = 'granted'`; the account report completes the pending grant, as a
-   lost adoption reply does.
+3. When sign-in succeeds, the runner records the named account with its `profileId` and reports the
+   account. The report completes the pending grant even if the start reply is lost.
+
+For a runner that supports profiles but lacks `newAccountId` support, the control plane sends only
+the grant id. The runner chooses the account id, and the control plane binds the placeholder grant
+when it receives the start reply. If that reply is lost, an Owner or Admin can adopt the account
+to replace the unbound grant.
 
 Windows runners (including their WSL account homes) cannot verify a marker, so they ignore the grant
 and create today's HOME; the control plane spends the grant when the account is reported without a
@@ -164,9 +169,6 @@ A sign-in that does not record the account spends the grant on both sides:
 | The start is refused (no agent, the profile cannot be created, the lease is unavailable) | Retains any created HOME and ownership evidence; settles any created grant | Revokes the grant from the start reply |
 | Cancelled, failed or timed out | Forgets the grant and retains the HOME, including scratch files and credentials; drops the grant from the marker under the lease when possible | Revokes the grant when the sign-in inventory reports the settled sign-in |
 | A duplicate of an account already on the Machine | Retains the new HOME and credentials; drops the grant from its marker when possible | Same as failed |
-
-A lost start reply leaves the grant pending and unbound. The runner still uses it, and the account
-reports `pending` access; adopting the account replaces the grant in the marker.
 
 Labels are reserved the same way as before: a second Add Account with the same provider and an
 equal label (trimmed, case-insensitive) is refused while the first is running. A managed start
@@ -637,9 +639,6 @@ a profile), `revoked_by`/`revoked_role` repeat the grantor's.
 - A managed profile's HOME is shared by every runner on the SSH account, by design. A runner of
   another control plane cannot use it without a grant, but grants do not stop a hostile process on
   the same OS account (see [Premise](#premise)).
-- When the start reply of an Add Account sign-in is lost, the grant stays pending without an
-  account and is never completed; the account shows **Grant Pending** until an Owner or Admin adopts
-  it.
 - A sign-in whose runner stopped before it settled leaves its pending grant bound to an account that
   never appears (the row is listed to that runner but grants nothing), and leaves its new HOME in the
   managed root, as an interrupted sign-in leaves its directory today.

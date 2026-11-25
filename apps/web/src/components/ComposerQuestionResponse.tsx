@@ -4,6 +4,7 @@ import {
   type SessionView,
 } from "@wollipog/protocol";
 import React, {
+  useCallback,
   useEffect,
   useId,
   useLayoutEffect,
@@ -33,20 +34,54 @@ import {
   storeQuestionStep,
   type QuestionResponseDraft,
 } from "../question-response.js";
+import { appendTranscript } from "../dictation.js";
+import { DictationStrip } from "./DictationStrip.js";
 import { FieldError } from "./FieldError.js";
-import { ChevronsDownIcon, ChevronsUpIcon, CloseIcon, QuestionIcon } from "./Icons.js";
+import { ChevronsDownIcon, ChevronsUpIcon, CloseIcon, ListIcon, MicIcon, QuestionIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { StructuredQuestionText } from "./StructuredQuestionText.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { secretValueRef } from "./ui/secret-input.js";
+import { useIsTouchPhone } from "./useIsMobile.js";
+import { useVoiceDictation } from "./useVoiceDictation.js";
 import {
   QUESTION_CARD_COPY,
   QuestionChoiceRows,
+  answeringStepLabel,
   questionEyebrowParts,
   questionOtherChosen,
   questionStepLabel,
+  questionTypesWords,
   type QuestionChoice,
 } from "./requests/QuestionStep.js";
+
+/** Answer Mode's field: a line in the composer, or, while a touch phone types Something Else, a
+ * box that wraps and grows (#4714). */
+export type AnswerField = HTMLInputElement | HTMLTextAreaElement;
+
+/** The most lines the growing Something Else field shows before it scrolls (#4714). */
+const OWN_ANSWER_MAX_LINES = 6;
+
+/** Fit the Something Else box to its text, up to OWN_ANSWER_MAX_LINES, then scroll within it; and
+ * keep it in view in the composer, which scrolls as a whole when the keyboard leaves it little room. */
+function growOwnAnswerField(field: HTMLTextAreaElement): void {
+  const style = field.ownerDocument.defaultView?.getComputedStyle(field);
+  const line = parseFloat(style?.lineHeight ?? "") || 22;
+  const edges = (parseFloat(style?.paddingTop ?? "") || 0) + (parseFloat(style?.paddingBottom ?? "") || 0);
+  const max = Math.ceil(line * OWN_ANSWER_MAX_LINES + edges);
+  const before = field.style.height;
+  field.style.height = "auto";
+  // Not laid out (hidden, or a document without layout): the stylesheet's own height stands.
+  if (field.scrollHeight === 0) {
+    field.style.height = "";
+    return;
+  }
+  const height = `${Math.min(field.scrollHeight, max)}px`;
+  field.style.height = height;
+  field.style.overflowY = field.scrollHeight > max ? "auto" : "hidden";
+  // Only a box that grew or shrank moves the view, so reading the options above is left alone.
+  if (height !== before && field === field.ownerDocument.activeElement) field.scrollIntoView?.({ block: "nearest" });
+}
 
 export interface ComposerQuestionResponseProps {
   sessionId: string;
@@ -60,7 +95,7 @@ export interface ComposerQuestionResponseProps {
   /** Answer Mode is open. While it is closed the question waits on the request dock's compact card
    * (#2212) and this renders nothing, keeping the answers given so far. */
   active: boolean;
-  inputRef: RefObject<HTMLInputElement | null>;
+  inputRef: RefObject<AnswerField | null>;
   onExit: () => void;
   onSessionUpdate?: (session: SessionView) => void;
   /** The session's context and cost triggers, which Answer Mode keeps in reach while it replaces
@@ -112,7 +147,7 @@ function persistDrafts(
   storeQuestionDrafts(sessionId, requestId, cacheable);
 }
 
-function focusSoon(ref: RefObject<HTMLInputElement | null>): void {
+function focusSoon(ref: RefObject<AnswerField | null>): void {
   window.requestAnimationFrame(() => ref.current?.focus());
 }
 
@@ -153,6 +188,11 @@ type AnswerFocus = { kind: "input" } | { kind: "control"; name: string };
  * Show Answer) so the conversation the question is about can be read. Nothing resets: the answers
  * and the step stay in the request-keyed draft the card shares. Escape exits Answer Mode, and a
  * number key opens the panel before it chooses.
+ *
+ * On a touch phone, Something Else in words is typed here (#4714), whichever style the card has:
+ * the head reads "Answering Question 1 of 2" and "Something Else", the question keeps one line,
+ * the options and context wait behind Show Options, and the field is a box that wraps and grows to
+ * a few lines, with the mic beside Next. The usage triggers step aside to leave the keyboard room.
  */
 export function ComposerQuestionResponse({
   sessionId,
@@ -184,6 +224,29 @@ export function ComposerQuestionResponse({
   }));
   const [questionIndex, setQuestionIndex] = useState(() => storedQuestionStep(sessionId, answerKey));
   const [collapsed, setCollapsed] = useState(false);
+  // While a touch phone types Something Else, whether the options are shown above the field (#4714).
+  const [optionsShown, setOptionsShown] = useState(false);
+  const touchPhone = useIsTouchPhone();
+  // Dictation writes into Something Else (#4714). The phrase lands through a ref that each render
+  // points at the step's own draft, so a phrase after a step change never reaches the last step.
+  const dictatePhraseRef = useRef<(phrase: string) => void>(() => {});
+  const dictation = useVoiceDictation((phrase) => dictatePhraseRef.current(phrase));
+  const cancelDictation = dictation.cancel;
+  // Dictation lives as long as an enabled mic shows it, as the composer bar's does (#2193): leaving
+  // Answer Mode, choosing an offered option, going offline or sending each end it, so nothing listens
+  // without a control to stop it. Each render sets this once it knows whether the mic is shown.
+  // Stop leaves the recognizer finalizing its last phrase after `recording` turns false, so the mic
+  // going away cancels whether or not it still records: no late phrase lands in a hidden answer.
+  const micAvailableRef = useRef(false);
+  const micWasAvailableRef = useRef(false);
+  micAvailableRef.current = false;
+  const recording = dictation.recording;
+  useEffect(() => {
+    const available = micAvailableRef.current;
+    if (!available && (recording || micWasAvailableRef.current)) cancelDictation();
+    micWasAvailableRef.current = available;
+  });
+  useEffect(() => cancelDictation, [cancelDictation]);
   const [focusRequest, setFocusRequest] = useState<{ target: AnswerFocus; serial: number } | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
@@ -205,24 +268,30 @@ export function ComposerQuestionResponse({
     setDraftState({ requestId: answerKey, values: storedQuestionDrafts(sessionId, answerKey) });
     setQuestionIndex(storedQuestionStep(sessionId, answerKey));
     setCollapsed(false);
+    setOptionsShown(false);
     setValidationError(null);
     setSubmissionError(null);
     setBusy(false);
     operationPendingRef.current = null;
-  }, [answerKey, sessionId]);
+    cancelDictation();
+  }, [answerKey, sessionId, cancelDictation]);
 
   useEffect(() => {
     setBusy(false);
     setSubmissionError(null);
   }, [recoveryId]);
 
-  useEffect(() => {
+  // Before paint, and so within the press that opened Answer Mode: a touch phone's card that chose
+  // Something Else opens it on the growing field, which must take focus while the keyboard may still
+  // open for it (#4714).
+  useLayoutEffect(() => {
     const entering = active && !previousActiveRef.current;
     previousActiveRef.current = active;
     if (!entering) return;
     const stored = storedQuestionDrafts(sessionId, answerKey);
     // The panel opens whole, on the step the request's draft keeps.
     setCollapsed(false);
+    setOptionsShown(false);
     setQuestionIndex(storedQuestionStep(sessionId, answerKey));
     setDraftState((current) => {
       const values = current.requestId === answerKey ? { ...current.values } : {};
@@ -275,6 +344,37 @@ export function ComposerQuestionResponse({
     };
   }, [active, requestId, revealRef]);
 
+  // The growing Something Else field (#4714). Taking the line field's place, it takes the focus the
+  // line had, and only then: the swap happens as Answer Mode opens on the draft the card chose, after
+  // the line was focused, and removing a focused element leaves focus on the page. Answer Mode that
+  // opens by itself leaves focus alone, as it always has, so no keyboard opens unasked.
+  const lineHadFocusRef = useRef(false);
+  const ownAnswerFieldRef = useCallback((node: HTMLTextAreaElement | null) => {
+    inputRef.current = node;
+    if (!node) return;
+    growOwnAnswerField(node);
+    if (!lineHadFocusRef.current) return;
+    lineHadFocusRef.current = false;
+    node.focus();
+  }, [inputRef]);
+  const plainFieldRef = useCallback((node: HTMLInputElement | null) => {
+    // Detached before the field that replaces it attaches, while it still holds focus.
+    const previous = inputRef.current;
+    lineHadFocusRef.current = node === null && previous !== null && previous.ownerDocument.activeElement === previous;
+    inputRef.current = node;
+  }, [inputRef]);
+  // A line that left because Answer Mode closed hands nothing to a later Something Else.
+  useEffect(() => {
+    if (!active) lineHadFocusRef.current = false;
+  }, [active]);
+  // Whatever wrote the answer (typing, dictation, a restored draft), the box fits it.
+  useLayoutEffect(() => {
+    const field = inputRef.current;
+    if (field?.tagName === "TEXTAREA") growOwnAnswerField(field as HTMLTextAreaElement);
+  });
+
+  // Closed, the panel takes no phrase: the last open render's draft is no longer what is shown.
+  dictatePhraseRef.current = () => {};
   if (questions.length === 0 || !active) return null;
 
   const currentIndex = Math.min(Math.max(questionIndex, 0), questions.length - 1);
@@ -292,6 +392,12 @@ export function ComposerQuestionResponse({
   const controlsDisabled = busy || responseUnavailable;
   const lastStep = currentIndex === questions.length - 1;
   const otherChosen = questionOtherChosen(question, currentDraft);
+  // A touch phone typing Something Else in words (#4714): the field takes the room the options had.
+  const typingOwnAnswer = touchPhone && otherChosen && !unsupported && questionTypesWords(question);
+  const choicesShown = !typingOwnAnswer || optionsShown;
+  micAvailableRef.current = typingOwnAnswer && dictation.supported && !controlsDisabled;
+  // Show Context's shrunk panel gives way to the field while Something Else is typed.
+  const shrunk = collapsed && !typingOwnAnswer;
   const eyebrow = questionEyebrowParts(question);
   const help = unsupported
     ? QUESTION_CARD_COPY.unsupported
@@ -310,9 +416,11 @@ export function ComposerQuestionResponse({
   };
 
   const goToStep = (step: number) => {
+    cancelDictation();
     setQuestionIndex(step);
     storeQuestionStep(sessionId, answerKey, step);
     setValidationError(null);
+    setOptionsShown(false);
     requestFocus({ kind: "input" });
   };
 
@@ -323,6 +431,10 @@ export function ComposerQuestionResponse({
     setValidationError(null);
     setSubmissionError(null);
     return next;
+  };
+  dictatePhraseRef.current = (phrase) => {
+    if (!typingOwnAnswer || controlsDisabled) return;
+    updateDraft({ kind: currentDraft?.kind === "other" ? "other" : "entry", value: appendTranscript(rawValue, phrase) });
   };
 
   const submitAnswers = async (next: Record<string, QuestionResponseDraft>) => {
@@ -340,6 +452,8 @@ export function ComposerQuestionResponse({
 
   const respond = async (action: "submit" | "dismiss", answers: Record<string, string | string[]>) => {
     if (operationPendingRef.current === answerKey || !runnerOnline) return;
+    // What is sent is what the field showed: a phrase still being settled is dropped.
+    cancelDictation();
     const submittedRequestId = requestId;
     const submittedRequest = liveRequestRef.current;
     const releaseOperation = claimQuestionResponseOperation(sessionId, operationKey);
@@ -457,8 +571,13 @@ export function ComposerQuestionResponse({
   };
 
   const contextLabel = collapsed ? QUESTION_CARD_COPY.showAnswer : QUESTION_CARD_COPY.showContext;
+  const optionsLabel = optionsShown ? QUESTION_CARD_COPY.hideOptions : QUESTION_CARD_COPY.showOptions;
   const kindLabel = recovery ? QUESTION_CARD_COPY.recoveryRequired
     : isAsync ? QUESTION_CARD_COPY.asyncQuestion : QUESTION_CARD_COPY.question;
+  const optionsId = `${ids}-answer-options`;
+  const contextId = `${ids}-answer-context`;
+  const describedBy = helpShown ? helpId : validationError ? errorId : undefined;
+  const fieldChange = (raw: string) => updateDraft({ kind: currentDraft?.kind === "other" ? "other" : "entry", value: raw });
 
   return (
     <section
@@ -467,7 +586,9 @@ export function ComposerQuestionResponse({
       tabIndex={0}
       aria-labelledby={titleId}
       aria-busy={busy}
-      data-collapsed={collapsed ? "" : undefined}
+      data-collapsed={shrunk ? "" : undefined}
+      data-own-answer={typingOwnAnswer ? "" : undefined}
+      data-options-shown={typingOwnAnswer && optionsShown ? "" : undefined}
       // The question's place while it is answered here, for the request coordinator's focus.
       data-session-request-id={requestId}
       data-session-request-session={sessionId}
@@ -475,20 +596,39 @@ export function ComposerQuestionResponse({
       onMouseDown={holdFieldFocus}
     >
       <div className="answer-head">
-        <span className="answer-kind"><QuestionIcon size={16} />{kindLabel}</span>
-        {questions.length > 1 && <span className="answer-step">{questionStepLabel(currentIndex, questions.length)}</span>}
-        {/* Icon-only below 760px, under the same name (§15.1). */}
-        <button
-          type="button"
-          className="btn sm ghost answer-context-toggle"
-          aria-label={contextLabel}
-          aria-expanded={!collapsed}
-          aria-controls={bodyId}
-          onClick={() => setCollapsed((current) => !current)}
-        >
-          {collapsed ? <ChevronsUpIcon size={14} /> : <ChevronsDownIcon size={14} />}
-          <span className="answer-context-label">{contextLabel}</span>
-        </button>
+        {typingOwnAnswer ? <>
+          {/* "Answering Question 1 of 2" (#4714); "Something Else" labels the field below, where a
+              phone's width never cuts it short. */}
+          <span className="answer-kind"><QuestionIcon size={16} />{answeringStepLabel(currentIndex, questions.length)}</span>
+          {/* Icon-only, as Show Context is on a phone (§15.1): the head's words need the width. */}
+          <button
+            type="button"
+            className="icon-btn sm answer-options-toggle"
+            aria-label={optionsLabel}
+            title={optionsLabel}
+            aria-expanded={optionsShown}
+            aria-controls={`${optionsId}${question.context ? ` ${contextId}` : ""}`}
+            disabled={busy}
+            onClick={() => setOptionsShown((current) => !current)}
+          >
+            <ListIcon size={16} />
+          </button>
+        </> : <>
+          <span className="answer-kind"><QuestionIcon size={16} />{kindLabel}</span>
+          {questions.length > 1 && <span className="answer-step">{questionStepLabel(currentIndex, questions.length)}</span>}
+          {/* Icon-only below 760px, under the same name (§15.1). */}
+          <button
+            type="button"
+            className="btn sm ghost answer-context-toggle"
+            aria-label={contextLabel}
+            aria-expanded={!collapsed}
+            aria-controls={bodyId}
+            onClick={() => setCollapsed((current) => !current)}
+          >
+            {collapsed ? <ChevronsUpIcon size={14} /> : <ChevronsDownIcon size={14} />}
+            <span className="answer-context-label">{contextLabel}</span>
+          </button>
+        </>}
         <button
           type="button"
           className="icon-btn sm"
@@ -500,7 +640,7 @@ export function ComposerQuestionResponse({
           <CloseIcon size={16} />
         </button>
       </div>
-      {!collapsed && (eyebrow.header || eyebrow.hint) && (
+      {!shrunk && choicesShown && (eyebrow.header || eyebrow.hint) && (
         <p className="answer-eyebrow">
           {eyebrow.header && <span id={headerId}>{eyebrow.header}</span>}
           {eyebrow.hint && <span>{eyebrow.hint}</span>}
@@ -509,24 +649,25 @@ export function ComposerQuestionResponse({
       <div className="answer-title" id={titleId}>
         <StructuredQuestionText>{question.question}</StructuredQuestionText>
       </div>
-      {collapsed && <p className="answer-summary" aria-live="polite">{answerSelectionSummary(question, currentDraft)}</p>}
+      {shrunk && <p className="answer-summary" aria-live="polite">{answerSelectionSummary(question, currentDraft)}</p>}
       {/* Hidden, not unmounted, behind Show Context: the field keeps its place for the composer's
           focus, and nothing in it resets. */}
-      <div className="answer-body" id={bodyId} hidden={collapsed}>
+      <div className="answer-body" id={bodyId} hidden={shrunk}>
         {recovery && <p className="answer-recovery">{QUESTION_CARD_COPY.recoveryResume}</p>}
         {question.context && (
-          <div className="answer-context">
+          <div className="answer-context" id={contextId} hidden={!choicesShown}>
             <StructuredQuestionText>{question.context}</StructuredQuestionText>
           </div>
         )}
         {question.options.length > 0 && (
-          <div className="answer-options">
+          // Behind Show Options while a touch phone types Something Else (#4714).
+          <div className="answer-options" id={optionsId} hidden={!choicesShown}>
             <QuestionChoiceRows
               question={question}
               draft={currentDraft}
               disabled={controlsDisabled}
-              labelledBy={eyebrow.header && !collapsed ? `${headerId} ${titleId}` : titleId}
-              describedBy={helpShown ? helpId : validationError ? errorId : undefined}
+              labelledBy={eyebrow.header && !shrunk && choicesShown ? `${headerId} ${titleId}` : titleId}
+              describedBy={describedBy}
               invalid={validationError !== null}
               marker={(index) => index < 9 ? <span className="answer-option-number" aria-hidden="true">{index + 1}</span> : undefined}
               onChoose={choose}
@@ -563,10 +704,34 @@ export function ComposerQuestionResponse({
               updateDraft({ kind: currentDraft?.kind === "other" ? "other" : "entry", value: raw });
             }}
           />
-        ) : (
+        ) : typingOwnAnswer ? (<>
+          {/* What the field answers, named as the card's Something Else row is (#4714). */}
+          <span className="answer-own" id={`${ids}-answer-own`}>{QUESTION_CARD_COPY.somethingElseField}</span>
+          {/* Wraps and grows to a few lines, then scrolls within itself (#4714). Enter still moves on,
+              as the keyboard's Next or Send key says; Shift+Enter starts a new line. */}
+          <textarea
+            key="own"
+            ref={ownAnswerFieldRef}
+            className="composer-answer-input"
+            data-session-request-focus=""
+            rows={1}
+            enterKeyHint={lastStep ? "send" : "next"}
+            autoComplete="off"
+            maxLength={question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH}
+            value={rawValue}
+            aria-labelledby={`${titleId} ${ids}-answer-own`}
+            aria-describedby={describedBy}
+            aria-invalid={validationError ? true : undefined}
+            aria-disabled={responseUnavailable || undefined}
+            disabled={busy}
+            readOnly={responseUnavailable}
+            placeholder={QUESTION_CARD_COPY.typeAnswer}
+            onChange={(event) => fieldChange(event.currentTarget.value)}
+          />
+        </>) : (
           <input
             key="plain"
-            ref={inputRef}
+            ref={plainFieldRef}
             className="composer-answer-input"
             data-session-request-focus=""
             type="text"
@@ -575,22 +740,24 @@ export function ComposerQuestionResponse({
             maxLength={question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH}
             value={rawValue}
             aria-labelledby={titleId}
-            aria-describedby={helpShown ? helpId : validationError ? errorId : undefined}
+            aria-describedby={describedBy}
             aria-invalid={validationError ? true : undefined}
             aria-disabled={responseUnavailable || undefined}
             disabled={busy}
             readOnly={responseUnavailable}
             placeholder={answerPlaceholder(question, currentDraft)}
-            onChange={(event) => {
-              const raw = event.currentTarget.value;
-              updateDraft({ kind: currentDraft?.kind === "other" ? "other" : "entry", value: raw });
-            }}
+            onChange={(event) => fieldChange(event.currentTarget.value)}
           />
         )}
         {validationError !== null && <FieldError id={errorId}>{validationError}</FieldError>}
         {helpShown && <p className="answer-help" id={helpId}>{help}</p>}
-        {usage && usageOwnRow && <div className="composer-answer-usage own-row">{usage}</div>}
+        {/* The usage triggers step aside while a phone types Something Else: the keyboard leaves the
+            composer little room, and they are back on the composer bar once the answer is sent. */}
+        {usage && usageOwnRow && !typingOwnAnswer && <div className="composer-answer-usage own-row">{usage}</div>}
         <div className="answer-foot">
+          {typingOwnAnswer && dictation.recording && dictation.startedAt !== null && (
+            <DictationStrip startedAt={dictation.startedAt} held={dictation.held} interim={dictation.interim} />
+          )}
           <BusyButton className="btn ghost" busy={busy && responseAction === "dismiss"}
             progress={QUESTION_CARD_COPY.dismissing} disabled={!runnerOnline || (busy && responseAction !== "dismiss")}
             aria-describedby={helpShown && !runnerOnline ? helpId : undefined}
@@ -602,7 +769,38 @@ export function ComposerQuestionResponse({
               {QUESTION_CARD_COPY.back}
             </button>
           )}
-          {usage && !usageOwnRow && <div className="composer-answer-usage">{usage}</div>}
+          {usage && !usageOwnRow && !typingOwnAnswer && <div className="composer-answer-usage">{usage}</div>}
+          {typingOwnAnswer && dictation.supported && (
+            // As the composer's mic (#2193): a tap toggles, a hold is push-to-talk, and a press that
+            // never completes stops. Its phrases go into Something Else.
+            <button
+              type="button"
+              className="icon-btn answer-mic"
+              disabled={controlsDisabled}
+              onPointerDown={(event) => {
+                if (!event.isPrimary || event.button !== 0) return;
+                dictation.pressStart();
+              }}
+              onPointerUp={dictation.pressEnd}
+              onPointerCancel={dictation.pressCancel}
+              onPointerLeave={dictation.pressCancel}
+              // Enter, Space and assistive technology click without a pointer (detail 0).
+              onClick={(event) => {
+                if (event.detail === 0) dictation.toggle();
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== "Escape" || !dictation.recording) return;
+                event.preventDefault();
+                event.stopPropagation();
+                dictation.stop();
+              }}
+              title={dictation.recording ? QUESTION_CARD_COPY.stopDictating : QUESTION_CARD_COPY.dictate}
+              aria-label={dictation.recording ? QUESTION_CARD_COPY.stopDictating : QUESTION_CARD_COPY.dictate}
+              aria-pressed={dictation.recording}
+            >
+              <MicIcon size={16} />
+            </button>
+          )}
           <BusyButton
             className="btn primary"
             busy={busy && responseAction === "submit"}

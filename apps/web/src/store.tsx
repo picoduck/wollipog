@@ -379,6 +379,9 @@ export interface State {
   unarchiveAndRestartSupported: boolean;
   /** True when the control plane provides durable, user-scoped reminder snapshots and deltas. */
   sessionRemindersSupported: boolean;
+  assistantDecisionHistorySupported: boolean;
+  assistantCiRerunDecisionsSupported: boolean;
+  assistantReleaseDecisionsSupported: boolean;
   /** True when reminder writes may omit a timer and use the explicit Someday schedule kind. */
   indefiniteSessionRemindersSupported: boolean;
   worktreeSetupConfigSupported: boolean;
@@ -1156,6 +1159,9 @@ function reducer(state: State, action: Action): State {
             stopFailureRecoverySupported: msg.capabilities?.stopFailureRecovery === true,
             unarchiveAndRestartSupported: msg.capabilities?.unarchiveAndRestart === true,
             sessionRemindersSupported: msg.capabilities?.sessionReminders === true,
+            assistantDecisionHistorySupported: msg.capabilities?.assistantDecisionHistory === true,
+            assistantCiRerunDecisionsSupported: msg.capabilities?.assistantCiRerunDecisions === true,
+            assistantReleaseDecisionsSupported: msg.capabilities?.assistantReleaseDecisions === true,
             indefiniteSessionRemindersSupported: msg.capabilities?.indefiniteSessionReminders === true,
             worktreeSetupConfigSupported: msg.capabilities?.worktreeSetupConfig === true,
             renameProjectLocationsSupported: msg.capabilities?.renameProjectLocations === true,
@@ -1578,6 +1584,9 @@ function initialState(
     stopFailureRecoverySupported: false,
     unarchiveAndRestartSupported: false,
     sessionRemindersSupported: false,
+    assistantDecisionHistorySupported: false,
+    assistantCiRerunDecisionsSupported: false,
+    assistantReleaseDecisionsSupported: false,
     indefiniteSessionRemindersSupported: false,
     worktreeSetupConfigSupported: false,
     renameProjectLocationsSupported: false,
@@ -2793,6 +2802,10 @@ export function StoreProvider({
       // Browsers can't set headers on WS — a paired device authenticates via query param.
       const ws = connection.createSocket();
       wsRef.current = ws;
+      // These bases belong to this socket alone. A REST response or a paged snapshot may have
+      // a different inventory, so restore compact frames before they reach the store or observers.
+      const backgroundInventories = new Map<string,
+        Pick<SessionView, "backgroundJobs" | "backgroundJobsTruncated" | "backgroundDeliveries">>();
       const backgroundObservations = new BackgroundDeliveryObservationTracker();
       let backgroundObservationRetryTimer: number | null = null;
       const cancelObservations = () => {
@@ -2846,6 +2859,23 @@ export function StoreProvider({
         }
         try {
           const msg = JSON.parse(ev.data as string) as ControlPlaneToUi;
+          if (msg.type === "session_upsert") {
+            const { id, backgroundJobs, backgroundJobsTruncated, backgroundDeliveries } = msg.session;
+            if (msg.reuseBackgroundInventory) {
+              const inventory = backgroundInventories.get(id);
+              if (!inventory) {
+                ws.close();
+                return;
+              }
+              Object.assign(msg.session, inventory);
+            } else if (backgroundJobs !== undefined || backgroundJobsTruncated !== undefined || backgroundDeliveries !== undefined) {
+              backgroundInventories.set(id, { backgroundJobs, backgroundJobsTruncated, backgroundDeliveries });
+            } else {
+              backgroundInventories.delete(id);
+            }
+          } else if (msg.type === "session_removed") {
+            backgroundInventories.delete(msg.sessionId);
+          }
           store.receiveFrame(msg, Date.now());
           if (msg.type === "assistant_thread_upsert") announceAssistantThread(msg.thread);
           const sessions: readonly SessionView[] = msg.type === "snapshot" || msg.type === "session_snapshot_page"

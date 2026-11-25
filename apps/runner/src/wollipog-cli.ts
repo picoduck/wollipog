@@ -188,13 +188,15 @@ export async function runPullRequestCli(
   io: { stdout: Write; stderr: Write },
   gh: GhRunner = contextGhRunner({ kind: "native" }, process.cwd()),
   signal?: AbortSignal,
-  /** Test hook for PULL_REQUEST_WAIT_READ_GRACE_MS. */
+  /** Kept for the routed GitLab wait, which allows bounded read grace. */
   graceMs = PULL_REQUEST_WAIT_READ_GRACE_MS,
   /** `glab` for a GitLab merge request (#3602); defaults to this machine's own login. */
   glab?: GlabRunner,
+  timing: Pick<McpDeps, "now" | "sleep"> = {},
 ): Promise<number> {
   const fail = (message: string, code: number): number => {
-    (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
+    const details = code === 124 ? { outcome: "timeout", observation: null, transientErrorCount: 0, forgeDegraded: false } : {};
+    (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message, ...details })}\n` : `${message}\n`);
     return code;
   };
   const words = positional(args, ["--repo", "--head", "--file", "--intended"]);
@@ -209,23 +211,33 @@ export async function runPullRequestCli(
   }
   let repository = option(args, "--repo");
   let remainingMs = timeoutMs;
-  let readGraceMs: number | undefined;
   if (!repository && /^#?\d+$/u.test(words[2]!)) {
-    // Discovery is one more read, so it shares the wait's budget of the timeout plus one read's
-    // grace: `--timeout 1` still returns a snapshot, and the command still ends within that budget.
-    // Clamped and floored exactly as the wait itself treats --timeout.
+    // A bare number requires a GitHub repository lookup within the same deadline as the wait.
     const budgetMs = Math.min(PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, Math.max(1, Math.floor(timeoutMs ?? PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS)));
-    const startedAt = Date.now();
-    const discovery = AbortSignal.timeout(budgetMs + graceMs);
-    const resolved = await gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
-      signal ? AbortSignal.any([discovery, signal]) : discovery);
-    repository = resolved.code === null ? resolved.stdout.trim() : "";
-    if (!repository) return fail("could not resolve this directory's GitHub repository; pass --repo <owner/name>", 1);
-    // The wait gets what remains of the timeout (at least one poll), and of the grace after it.
-    const elapsedMs = Date.now() - startedAt;
-    remainingMs = Math.max(1, budgetMs - elapsedMs);
-    readGraceMs = budgetMs + graceMs - elapsedMs - remainingMs;
-    if (readGraceMs < 1) return fail("resolving the repository used the whole timeout; pass --repo <owner/name>", 1);
+    const startedAt = (timing.now ?? Date.now)();
+    if (signal?.aborted) return fail("request cancelled", 1);
+    const lookup = new AbortController();
+    let stop!: () => void;
+    const stopped = new Promise<null>((resolve) => {
+      stop = () => { resolve(null); lookup.abort(); };
+    });
+    const timer = setTimeout(stop, budgetMs);
+    signal?.addEventListener("abort", stop, { once: true });
+    try {
+      const resolved = await Promise.race([
+        gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], lookup.signal), stopped,
+      ]);
+      if (signal?.aborted) return fail("request cancelled", 1);
+      remainingMs = budgetMs - ((timing.now ?? Date.now)() - startedAt);
+      if (remainingMs <= 0 || !resolved) {
+        return fail("resolving the repository used the whole timeout; pass --repo <owner/name>", 124);
+      }
+      repository = resolved.code === null ? resolved.stdout.trim() : "";
+      if (!repository) return fail("could not resolve this directory's GitHub repository; pass --repo <owner/name>", 1);
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", stop);
+    }
   }
   const result = await executeManagerTool("wait_pull_request", {
     pullRequest: words[2],
@@ -238,7 +250,8 @@ export async function runPullRequestCli(
     fetch: () => Promise.reject(new Error("no control plane")), cpUrl: "", selfSessionId: "", token: "", gh,
     ...(glab ? { glab } : {}),
     ...(signal ? { signal } : {}),
-    ...(readGraceMs !== undefined ? { pullRequestReadGraceMs: readGraceMs } : {}),
+    pullRequestReadGraceMs: graceMs,
+    ...timing,
   });
   const data = payload(result);
   io.stdout(json ? `${JSON.stringify(data)}\n` : `${JSON.stringify(data, null, 2)}\n`);
@@ -611,11 +624,15 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       if (optionPresent(args, "--action")) {
         return { error: "decision reconcile does not accept --action" };
       }
+      if (args.some((arg) => arg.startsWith("--external-merge="))) {
+        return { error: "decision reconcile --external-merge does not accept a value" };
+      }
       const snapshot = jsonObjectOption(args, "--snapshot");
       if ("error" in snapshot) return snapshot;
       return {
         tool: "reconcile_workflow_decision",
-        input: { occurrenceId, resourceSnapshot: snapshot.value },
+        input: { occurrenceId, resourceSnapshot: snapshot.value,
+          ...(flag(args, "--external-merge") ? { externalMerge: true } : {}) },
       };
     }
     if (verb === "execute") {
@@ -1116,13 +1133,16 @@ export async function runWollipogCli(
     : parsed.tool === "attach_session_artifact"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach
     : parsed.tool === "reconcile_workflow_decision"
-    ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation
+    ? parsed.input.externalMerge === true ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionExternalMergeReconciliation
+      : RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation
     : parsed.tool === "retire_workflow_decision"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionRetirement
     : parsed.tool === "withdraw_workflow_decision"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal
     : parsed.tool === "execute_workflow_decision"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.forgeDecisionActions
+    : parsed.tool === "request_owner_decision" && env.WOLLIPOG_PERMISSION_PRESET !== "orchestrator"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions
     : parsed.tool === "request_owner_decision" && parsed.input.kind === "question"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerQuestions
     : parsed.tool === "request_owner_decision" || parsed.tool === "hand_workflow_decision_to_owner"
@@ -1138,7 +1158,9 @@ export async function runWollipogCli(
     : ["get_campaign_issue_scope", "request_campaign_issue_scope_change"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueScopeChanges
     : ["request_github_issue_closure", "close_github_issue"].includes(parsed.tool)
-    ? RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure
+    ? env.WOLLIPOG_PERMISSION_PRESET === "orchestrator"
+      ? RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure
+      : RUNNER_CAPABILITY_MIN_PROTOCOL.standaloneOwnerDecisions
     : parsed.tool === "allocate_campaign_budget"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission
     : parsed.tool === "request_review_session" && parsed.input.mode === "contributor"

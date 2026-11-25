@@ -262,7 +262,7 @@ export function createCampaignStatusManagement(deps: CampaignStatusDependencies)
     const { id } = req.params as { id: string };
     const read = reader(req, reply, id);
     if (!read) return reply;
-    const policy = db.getSession(read.rootId)?.orchestratorPolicy;
+    const policy = db.sessionOrchestratorPolicy(read.rootId) ?? undefined;
     const response: CampaignDecisionsResponse = {
       canClassify: read.principal.kind === "human" && db.campaignOwnerUser(read.rootId, read.principal.userId),
       campaignSessionId: read.rootId,

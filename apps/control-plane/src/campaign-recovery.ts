@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { campaignAuthorityPreflight, isTerminal, pendingRequests, runnerSupportsProtocol, FULL_CONTROL_DECLINED_CLASSES, type FullControlRequestClass,
   type CampaignAuthorityEvaluation, type CampaignRecoveryReason, type SessionView, type WorkflowDecisionCategory } from "@wollipog/protocol";
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
+import { hasCampaignCheckFailure } from "./campaign-forge-observations.js";
 import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
 import type { ControlPlaneDb, SessionStopProvenance } from "./db.js";
-import type { CampaignRecoveryObservation } from "./campaign-recovery-store.js";
+import { HANDOFF_CREDENTIAL_DECLINE, type CampaignRecoveryObservation } from "./campaign-recovery-store.js";
 
 /** Hash untrusted provider coordinates rather than allowing an identifier to become a credential,
  * bearer URL, command or media leak. The digest still identifies the exact original resource. */
@@ -45,7 +46,7 @@ export class CampaignRecoveryService {
     const retained = new Set(this.db.campaignRecovery.campaignIds());
     const roots = new Set([...this.db.listOrchestratorCampaignSessionIds(runnerId), ...retained]);
     for (const rootId of roots) {
-      const root = this.db.getSession(rootId);
+      const root = this.db.getSession(rootId, { includeCampaignProjection: false });
       if (!root || (runnerId && root.runnerId !== runnerId)) continue;
       if (root.orchestratorPolicy?.control?.mode !== "full_control" && !retained.has(rootId)) continue;
       this.synchronize(root, now);
@@ -61,14 +62,14 @@ export class CampaignRecoveryService {
       return;
     }
     const current = full && !root.archived && !root.stopOperation && !isTerminal(root.status) && campaignBoundaryCurrent(root);
-    const supported = campaignAuthorityPreflight(root.orchestratorPolicy?.control, root.driver,
-      this.db.getRunner(root.runnerId)?.protocolVersion).supported;
+    const rootProtocol = this.db.getRunner(root.runnerId)?.protocolVersion;
+    const supported = campaignAuthorityPreflight(root.orchestratorPolicy?.control, root.driver, rootProtocol).supported;
     const observations: CampaignRecoveryObservation[] = [];
     const previous = this.db.campaignRecovery.activeObservations(root.id);
     const ledgerWorkers = this.db.campaignWorkLedger.attemptedSessionIds(root.id);
-    const sessions = [root, ...this.db.campaignDescendantIds(root.id).flatMap(id => {
-      const child = this.db.getSession(id); return child ? [child] : [];
-    })];
+    const rootFacts = { ...root, stopStatus: root.stopOperation?.status };
+    const descendants = this.db.campaignRecoveryDescendants(root.id);
+    const sessions = [rootFacts, ...descendants];
     for (const session of sessions) {
       // Stop/archive is no receipt. Preserve the original uncertain steering identity even
       // when the worker is retired; only its reconciled receipt may remove this observation.
@@ -78,7 +79,7 @@ export class CampaignRecoveryService {
           occurrenceId: recoveryCoordinate(attempt.submissionId) }, reason: "uncertain_outcome", owner: "orchestrator",
           signal: attempt.resolution?.state ?? attempt.state });
       }
-      if (session.archived || session.stopOperation) continue;
+      if (session.archived || session.stopStatus) continue;
       for (const request of pendingRequests(session.pendingApproval)) {
         if (!request.occurrenceId) continue;
         const decision = request.kind === "workflow_decision" ? this.db.workflowDecisionByOccurrence(request.occurrenceId) : null;
@@ -88,7 +89,7 @@ export class CampaignRecoveryService {
           boundaryRepository: campaignBoundaryRepositoryAt(this.db, root, session) },
         this.db.getRunner(session.runnerId)?.protocolVersion,
         decision?.resourceSnapshot ?? this.db.campaignPolicyRequest(session.id, root.orchestratorPolicy?.control, request),
-        root.parentControlPolicy, this.db.getRunner(root.runnerId)?.protocolVersion, undefined,
+        root.parentControlPolicy, rootProtocol, undefined,
         decision?.resourceSnapshot.category === "review_round_extension" ? this.db.reviewExtensionCap(session.id, decision.resourceSnapshot) : undefined);
         const owner = decision?.authority === "human" ? "human" : evaluated.owner;
         // The condition recorded when the server could not admit a publication, not a boundary
@@ -113,8 +114,8 @@ export class CampaignRecoveryService {
           reason: hold.kind === "provider_account_switch" ? "missing_access" : "transient_failure",
           owner: hold.kind === "provider_account_switch" ? "human" : "orchestrator", signal: hold.kind });
       }
-      if (session.id !== root.id && !this.db.campaignChildReportVerified(root.id, session.id) &&
-          (session.status === "failed" || session.status === "stopped")) {
+      if (session.id !== root.id && (session.status === "failed" || session.status === "stopped") &&
+          !this.db.campaignChildReportVerified(root.id, session.id)) {
         const assignment = this.db.campaignWorkLedger.currentAssignment(session.id);
         // A provider whose command sandbox cannot start on its host (#3843) fails the same way in
         // every replacement there. Fixing the host, or the Child Harness, is the person's to do.
@@ -152,7 +153,7 @@ export class CampaignRecoveryService {
       }
       // An unresolved-effect decline is a plain decline: the child was told how to retry, and
       // nothing it could not supply is blocked. Its row only keeps that message to once per child.
-      if (!FULL_CONTROL_DECLINED_CLASSES.has(decline.requestClass as FullControlRequestClass)) continue;
+      if (decline.requestClass !== HANDOFF_CREDENTIAL_DECLINE && !FULL_CONTROL_DECLINED_CLASSES.has(decline.requestClass as FullControlRequestClass)) continue;
       observations.push({ action: "continue_without_request",
         resource: { kind: "request", sessionId: decline.sessionId, occurrenceId: decline.occurrenceId },
         reason: "request_declined", owner: "orchestrator", signal: `declined:${decline.requestClass}` });
@@ -220,19 +221,12 @@ export class CampaignRecoveryService {
         if (value.state !== "open") continue;
         const resource = { kind: "pull_request" as const, sessionId: root.id, repository: ref.repository,
           pullRequest: ref.number, occurrenceId: value.headSha };
-        if (value.forge === "gitlab") {
-          // GitLab has no "changes requested" decision; a failed pipeline is the repair signal (#3600).
-          if (value.pipeline?.status === "failed") {
-            observations.push({ action: "repair_checks", resource, reason: "failed_checks", owner: "orchestrator",
-              signal: `${value.headSha}:pipeline:${value.pipeline.id}:failed` });
-          }
-          continue;
-        }
-        if (value.checks.state === "failing" || value.requiredChecks.state === "failing") {
+        if (hasCampaignCheckFailure(value)) {
           observations.push({ action: "repair_checks", resource, reason: "failed_checks", owner: "orchestrator",
-            signal: `${value.headSha}:checks:${value.checks.state}:${value.requiredChecks.state}` });
+            signal: value.forge === "gitlab" ? `${value.headSha}:pipeline:${value.pipeline!.id}:failed`
+              : `${value.headSha}:checks:${value.checks.state}:${value.requiredChecks.state}` });
         }
-        if (value.reviewDecision === "changes_requested" && !observations.some(item =>
+        if (value.forge !== "gitlab" && value.reviewDecision === "changes_requested" && !observations.some(item =>
           item.action === "rereview" && item.resource.repository === ref.repository && item.resource.pullRequest === ref.number)) {
           observations.push({ action: "rereview", resource, reason: "reviewer_objection", owner: "orchestrator",
             signal: `${value.headSha}:review:${value.reviewDecision}` });
@@ -244,11 +238,12 @@ export class CampaignRecoveryService {
     // foreground, a pending Stop or background work still returning (as the web's sessionWorking).
     // Each registered background job counts on its own too, not only the aggregate summary (#2938).
     const liveJobs = this.db.sessionsWithLiveBackgroundJobs(sessions.map(session => session.id), now);
-    const working = (session: SessionView) => ["queued", "starting", "running"].includes(session.status) ||
-      session.stopOperation?.status === "stop_pending" || liveJobs.has(session.id) ||
+    const working = (session: (typeof sessions)[number]) => ["queued", "starting", "running"].includes(session.status) ||
+      session.stopStatus === "stop_pending" || liveJobs.has(session.id) ||
       session.backgroundWorkState === "running" || session.backgroundWorkState === "continuation_pending";
-    const quiet = root.status === "idle" && !pendingRequests(root.pendingApproval).some(request => !request.async) && !working(root) &&
-      sessions.slice(1).every(session => session.archived || !working(session));
+    const rootHasBlockingRequest = pendingRequests(root.pendingApproval).some(request => !request.async);
+    const quiet = root.status === "idle" && !rootHasBlockingRequest && !working(rootFacts) &&
+      descendants.every(session => session.archived || !working(session));
     const changed = this.db.campaignRecovery.synchronize(root.id, revision, current, observations, now,
       quiet ? record => this.db.campaignRecoveryWakeSettledAt(root.id, `${record.id}:${record.attempts}`) : undefined);
     const admission = this.db.campaignContinuationAdmission(root.id);
@@ -262,8 +257,7 @@ export class CampaignRecoveryService {
     // otherwise idle parent from repairing unrelated work. One durable continuation remains the
     // execution lane, with its existing receipt and active-turn uniqueness constraints.
     const mayWake = current && supported && admission.state === "available" &&
-      root.status === "idle" && !pendingRequests(root.pendingApproval).some(request => !request.async) &&
-      runnerSupportsProtocol(this.db.getRunner(root.runnerId)?.protocolVersion, "campaignContinuations");
+      root.status === "idle" && !rootHasBlockingRequest && runnerSupportsProtocol(rootProtocol, "campaignContinuations");
     const committedDispatches: Array<{ recoveryId: string; action: string; reason: string; attempt: number }> = [];
     const dispatched = mayWake ? this.db.campaignRecovery.dispatchDue(root.id, revision, now, (record, eventId) => {
       if (record.resource.kind === "continuation") return; // existing outbox owns backoff/reconciliation

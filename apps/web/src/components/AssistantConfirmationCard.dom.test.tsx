@@ -12,6 +12,7 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { AssistantConfirmationsNotice } from "./AssistantConfirmationCard.js";
+import { useAssistantAttention } from "../use-assistant-attention.js";
 
 /** The Inbox's Assistant Approvals follow thread events, and read the list again on reconnect (#4665). */
 
@@ -58,6 +59,11 @@ const thread = (confirmations: AssistantOwnerConfirmation[]): AssistantThread =>
   access: { level: "full_access", destructive: "ask" }, connectionId: null, launchedSessionIds: [], confirmations, lastActivityAt: 1, createdAt: 1, archivedAt: null,
 });
 
+function NoticeFromAttention() {
+  const { confirmations } = useAssistantAttention();
+  return <AssistantConfirmationsNotice waiting={confirmations} />;
+}
+
 type StoreActions = ReturnType<typeof useStoreActions>;
 function ActionsProbe({ onActions }: { onActions: (actions: StoreActions) => void }) {
   onActions(useStoreActions());
@@ -97,7 +103,7 @@ test("approvals follow thread events and are read again when the connection retu
     <ApiProvider client={client}>
       <StoreProvider connection={connection} navigation={navigation}>
         <ActionsProbe onActions={(current) => { actions = current; }} />
-        <AssistantConfirmationsNotice />
+        <NoticeFromAttention />
       </StoreProvider>
     </ApiProvider>,
   ));
@@ -171,7 +177,7 @@ test("a control plane without the Thread API is read once and not retried", asyn
   const root = createRoot(container);
   await act(async () => root.render(
     <ApiProvider client={client}>
-      <StoreProvider connection={connection} navigation={navigation}><AssistantConfirmationsNotice /></StoreProvider>
+      <StoreProvider connection={connection} navigation={navigation}><NoticeFromAttention /></StoreProvider>
     </ApiProvider>,
   ));
   await act(async () => socket.push({ type: "session_removed", sessionId: "none" }));
@@ -181,7 +187,7 @@ test("a control plane without the Thread API is read once and not retried", asyn
   await act(async () => root.unmount());
 });
 
-test("a read still in flight when the Inbox unmounts is never retried", async () => {
+test("a read still in flight when the attention hook unmounts is never retried", async () => {
   let reads = 0;
   let fail: (() => void) | undefined;
   const client = { ...api, assistantConfirmationThreads: () => {
@@ -196,7 +202,7 @@ test("a read still in flight when the Inbox unmounts is never retried", async ()
   const root = createRoot(container);
   await act(async () => root.render(
     <ApiProvider client={client}>
-      <StoreProvider connection={connection} navigation={navigation}><AssistantConfirmationsNotice /></StoreProvider>
+      <StoreProvider connection={connection} navigation={navigation}><NoticeFromAttention /></StoreProvider>
     </ApiProvider>,
   ));
   await act(async () => socket.push({ type: "session_removed", sessionId: "none" }));

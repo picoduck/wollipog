@@ -193,6 +193,8 @@ export interface DriverCallbacks {
   /** Session-scoped ACP controls/config; never merge these onto the agent row because two live
    * sessions may advertise different modes or commands. */
   onAcpSessionState?: (state: { capabilities: AgentCapabilities; config: SessionConfig }) => void;
+  /** The agent accepted the prompt that carried `acpConversationHandoff`. */
+  onConversationHandoffDelivered?: () => void;
   /** The driver's complete invocable session command catalog changed. */
   onSessionCommands?: (commands: AgentSlashCommand[]) => void;
   /** Claude Code reported its session command catalog in a `system/init` message (#1224). The
@@ -227,6 +229,10 @@ export interface DriverOptions {
   args: string[];
   cwd: string;
   env: Record<string, string>;
+  /** ACP only: inherited variables the agent must not see, from the agent's credential context. */
+  scrubInheritedEnv?: string[];
+  /** ACP only: narrow handling for one agent (see `acp-compatibility.ts`). */
+  acpCompatibility?: import("../acp-compatibility.js").AcpCompatibility;
   projectMemoryDirectory?: string;
   /** Non-secret per-turn notes (artifact capability/policy, then zsh rules when commands run in zsh),
    * re-created at launch/resume. */
@@ -255,6 +261,9 @@ export interface DriverOptions {
    * transport never treats them as pending again, whatever Claude reports for them afterwards. */
   endedBackgroundTaskIds?: string[];
   acpSessionContext?: AcpSessionContextConfig;
+  /** Sent once, ahead of the first prompt of a fresh ACP conversation that replaces a resume the
+   * agent cannot make in this folder (Google Antigravity): the conversation so far. */
+  acpConversationHandoff?: string;
   isolation?: SpawnIsolation;
   /** Runner-private durable descendant marker for one managed worktree. */
   descendantMarker?: string;
@@ -291,6 +300,8 @@ export interface Driver {
 
   /** Provider-native id of the most recently started turn, when the driver exposes one. */
   agentTurnId?(): string | null;
+  /** Output-independent provider admission check before the runner appends its arming fence. */
+  workflowActionAdmissionRefusal?(occurrenceId: string, commandDigest: string): string | null;
 
   /** Why the turn that just settled produced no output, in the provider's own words. Only set for
    * a turn the provider itself ended in error; the session manager attaches it to the durable

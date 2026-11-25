@@ -6,7 +6,7 @@ import { NO_MACHINE_ATTENTION, machineAttention, overflowAttention, railAttentio
 
 const state = (overrides: Partial<RailAttentionState> = {}): RailAttentionState => ({
   blocked: 0,
-
+  assistantThreads: 0,
   machines: NO_MACHINE_ATTENTION,
   ...overrides,
 });
@@ -15,6 +15,19 @@ test("Sessions counts only concrete requests waiting on the person", () => {
   assert.deepEqual(railAttention("inbox", state({ blocked: 12 })),
     { kind: "count", count: 12, tone: "warning", note: "12 waiting on you" });
   assert.equal(railAttention("inbox", state()), null);
+});
+
+test("Assistants counts waiting threads independently of Inbox and preserves the total for More", () => {
+  assert.equal(railAttention("assistants", state({ blocked: 7 })), null);
+  assert.equal(railAttention("assistants", state({ assistantThreads: -1 })), null);
+  assert.deepEqual(railAttention("assistants", state({ assistantThreads: 1 })),
+    { kind: "count", count: 1, tone: "warning", note: "1 thread waiting on you" });
+  const busy = state({ blocked: 7, assistantThreads: 105 });
+  assert.deepEqual(railAttention("assistants", busy),
+    { kind: "count", count: 105, tone: "warning", note: "105 threads waiting on you" });
+  assert.deepEqual(railAttention("inbox", busy), railAttention("inbox", state({ blocked: 7 })));
+  assert.deepEqual(overflowAttention([item("assistants")], busy),
+    { tone: "warning", note: "Assistants: 105 threads waiting on you" });
 });
 
 test("zero is never shown", () => {
@@ -36,9 +49,9 @@ test("Connections shows a warning dot, never a count, and says why", () => {
 });
 
 test("every other destination carries nothing, whatever is waiting elsewhere", () => {
-  const busy = state({ blocked: 4, machines: { offlineWithActiveSessions: 1, updateRequired: 1 } });
+  const busy = state({ blocked: 4, assistantThreads: 3, machines: { offlineWithActiveSessions: 1, updateRequired: 1 } });
   for (const item of GLOBAL_VIEW_ITEMS) {
-    if (item.id === "inbox" || item.id === "runners") continue;
+    if (item.id === "inbox" || item.id === "runners" || item.id === "assistants") continue;
     assert.equal(railAttention(item.id, busy), null, item.id);
   }
 });

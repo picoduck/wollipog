@@ -11,13 +11,23 @@
  * are ones the control plane returned.
  */
 import type {
+  AssistantDecisionDefault,
+  AssistantDecisionDelegation,
+  AssistantDecisionHistoryPage,
+  AssistantDecisionOutcome,
   AssistantThread,
   AssistantThreadAccess,
+  AssistantThreadAccountChoices,
   AssistantThreadDefaultsResponse,
   AssistantThreadHarness,
   AssistantThreadHarnessOption,
+  AssistantThreadLaunchDefaults,
+  AssistantThreadLaunchDefaultsPatch,
   AssistantThreadListResponse,
+  AssistantThreadLimits,
   AssistantThreadResponse,
+  ChangeAssistantThreadAccountRequest,
+  ChangeAssistantThreadHarnessRequest,
   CreateAssistantThreadRequest,
   UpdateAssistantThreadRequest,
 } from "@wollipog/protocol";
@@ -31,7 +41,7 @@ export type {
   AssistantThreadStatus,
   CreateAssistantThreadRequest,
 } from "@wollipog/protocol";
-/** What New Thread reads: the saved Orchestrator harness it preselects, and each harness's state. */
+/** What New Thread reads to preselect the harness and account. */
 export type AssistantThreadDefaults = AssistantThreadDefaultsResponse;
 
 export const ASSISTANT_THREADS_PATH = "/api/assistant-threads";
@@ -53,6 +63,25 @@ export function assistantThreadRoutes(req: JsonRequest) {
     /** One thread, archived ones included: what a link to a thread the list leaves out opens. */
     assistantThread: (threadId: string) => req<AssistantThreadResponse>(threadPath(threadId)),
     assistantThreadDefaults: () => req<AssistantThreadDefaults>(`${ASSISTANT_THREADS_PATH}/defaults`),
+    setAssistantThreadLaunchDefaults: (defaults: AssistantThreadLaunchDefaults) =>
+      req<AssistantThreadDefaults>(`${ASSISTANT_THREADS_PATH}/defaults/launch`, { method: "PUT", body: JSON.stringify(defaults) }),
+    patchAssistantThreadLaunchDefaults: (defaults: AssistantThreadLaunchDefaultsPatch) =>
+      req<AssistantThreadDefaults>(`${ASSISTANT_THREADS_PATH}/defaults/launch`, { method: "PATCH", body: JSON.stringify(defaults) }),
+    setAssistantThreadDecisionDefault: (grant: AssistantDecisionDefault | null) =>
+      req<{ grant: AssistantDecisionDefault | null }>(`${ASSISTANT_THREADS_PATH}/defaults/delegation`, {
+        method: "PUT", body: JSON.stringify({ grant }),
+      }),
+    assistantThreadLimitDefaults: () => req<AssistantThreadLimits>(`${ASSISTANT_THREADS_PATH}/defaults/limits`),
+    setAssistantThreadLimitDefaults: (limits: AssistantThreadLimits) =>
+      req<AssistantThreadLimits>(`${ASSISTANT_THREADS_PATH}/defaults/limits`, { method: "PUT", body: JSON.stringify(limits) }),
+    patchAssistantThreadLimitDefaults: (limits: Partial<AssistantThreadLimits>) =>
+      req<AssistantThreadLimits>(`${ASSISTANT_THREADS_PATH}/defaults/limits`, { method: "PATCH", body: JSON.stringify(limits) }),
+    setAssistantThreadLimits: (threadId: string, limits: AssistantThreadLimits) =>
+      req<AssistantThreadResponse>(`${threadPath(threadId)}/limits`, { method: "PUT", body: JSON.stringify(limits) }),
+    setAssistantThreadDelegation: (threadId: string, delegation: AssistantDecisionDelegation) =>
+      req<AssistantThreadResponse>(`${threadPath(threadId)}/delegation`, { method: "PUT", body: JSON.stringify(delegation) }),
+    assistantDecisionHistory: (filter: { campaignId?: string; threadId?: string; before?: string; outcome?: AssistantDecisionOutcome } = {}, signal?: AbortSignal) =>
+      req<AssistantDecisionHistoryPage>(`/api/assistant-decision-history?${new URLSearchParams(filter)}`, { signal }),
     /** An unsupported runner or harness is refused with 409 and the server's guidance. */
     createAssistantThread: (body: CreateAssistantThreadRequest) =>
       req<AssistantThreadResponse>(ASSISTANT_THREADS_PATH, { method: "POST", body: JSON.stringify(body) }),
@@ -63,6 +92,14 @@ export function assistantThreadRoutes(req: JsonRequest) {
       }),
     archiveAssistantThread: (threadId: string) =>
       req<AssistantThreadResponse>(`${threadPath(threadId)}/archive`, { method: "POST", body: "{}" }),
+    assistantThreadAccountChoices: (threadId: string) =>
+      req<AssistantThreadAccountChoices>(`${threadPath(threadId)}/account`),
+    assistantThreadHarnessChoices: (threadId: string) =>
+      req<{ harnesses: AssistantThreadHarnessOption[] }>(`${threadPath(threadId)}/harness`),
+    changeAssistantThreadHarness: (threadId: string, body: ChangeAssistantThreadHarnessRequest) =>
+      req<AssistantThreadResponse>(`${threadPath(threadId)}/harness`, { method: "POST", body: JSON.stringify(body) }),
+    changeAssistantThreadAccount: (threadId: string, body: ChangeAssistantThreadAccountRequest) =>
+      req<AssistantThreadResponse>(`${threadPath(threadId)}/account`, { method: "POST", body: JSON.stringify(body) }),
   };
 }
 
@@ -100,7 +137,7 @@ export interface NumberedAssistantThread {
 
 /**
  * The list with every event after `afterSeq` applied, in order: a changed thread replaces its row,
- * a new one joins, and an archived one leaves. Applying the events newer than a read's start to
+ * a new one joins, and an archived one can move to the Archive. Applying the events newer than a read's start to
  * what the read returned keeps a change that landed while the read was in flight.
  */
 export function applyAssistantThreadEvents(
@@ -112,7 +149,7 @@ export function applyAssistantThreadEvents(
   for (const { seq, thread } of events) {
     if (seq <= afterSeq) continue;
     next = next.filter((candidate) => candidate.id !== thread.id);
-    if (thread.status !== "archived") next.push(thread);
+    next.push(thread);
   }
   return sortAssistantThreads(next);
 }
@@ -131,11 +168,13 @@ export function assistantThreadHarnessLabel(
   return options?.find((option) => option.id === harness)?.label || ASSISTANT_THREAD_HARNESS_LABELS[harness] || harness;
 }
 
-/** "Full Access · Ask Before Destructive": the thread's access level as its header shows it. */
-export function assistantThreadAccessLabel(access: AssistantThreadAccess): string {
-  const level = access.level === "full_access" ? "Full Access" : "Limited Access";
-  const destructive = access.destructive === "ask" ? "Ask Before Destructive" : "Destructive Allowed";
-  return `${level} · ${destructive}`;
+/** The thread's access level and destructive-action setting in Details. */
+export function assistantThreadAccessSentence(access: AssistantThreadAccess): string {
+  const level = access.level === "full_access" ? "Full access." : "Limited access.";
+  const destructive = access.destructive === "ask"
+    ? "Asks before destructive actions."
+    : "Can take destructive actions without asking.";
+  return level + " " + destructive;
 }
 
 /** The thread list's order: newest activity first, as the server sends it, and stable on ties. */

@@ -10,10 +10,12 @@ import type {
   UpdateAgentHarnessDefaultRequest,
 } from "@wollipog/protocol";
 import {
+  ANTIGRAVITY_FULL_PERMISSIONS_MODE,
   agentHarnessIdentityKey,
   builtInAgentHarnessName,
   canonicalAgentHarnessIdentity,
   installationSupportsDefault,
+  managedModelChoices,
   normalizeAgentHarnessIdentity,
 } from "@wollipog/protocol";
 export { agentHarnessIdentityKey, installationSupportsDefault } from "@wollipog/protocol";
@@ -78,13 +80,17 @@ export class AgentHarnessDefaultsSettings {
         const identity = canonicalAgentHarnessIdentity(agentHarnessIdentityFor(agent));
         const key = agentHarnessIdentityKey(identity);
         const builtInName = builtInAgentHarnessName(identity.driver);
+        const managed = agent.installation?.selection !== "other" && !agent.harnessSelectionBlocked
+          ? managedModelChoices(identity.driver, agent.capabilities)
+          : [];
         const installation: AgentHarnessDefaultInstallation = {
           runnerId: runner.runnerId,
           machineName: runner.displayName || runner.hostname || runner.runnerId,
           online: runner.status === "online",
-          models: visibleModels(agent.capabilities),
+          models: [...visibleModels(agent.capabilities), ...managed],
           effortLevels: [...(agent.capabilities?.effortLevels ?? [])],
-          permissionModes: [...(agent.capabilities?.permissionModes ?? [])],
+          permissionModes: (agent.capabilities?.permissionModes ?? [])
+            .filter((mode) => mode !== ANTIGRAVITY_FULL_PERMISSIONS_MODE.id),
         };
         const current = options.get(key);
         if (current) {
