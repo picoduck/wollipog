@@ -3,7 +3,7 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import {
   allocated, analyze, cachedApi, category, collectOccupancy, combineOccupancy, dropCopiedJobs, main, mergeGroupCriticalWaits,
@@ -222,7 +222,7 @@ async function gatedCacheMisses(t, dir) {
   let completed = 0;
   const ready = Promise.withResolvers();
   t.mock.method(fs, "readFile", async (file, ...args) => {
-    if (!file.startsWith(`${dir}/`)) return readFile(file, ...args);
+    if (dirname(file) !== dir) return readFile(file, ...args);
     const gate = Promise.withResolvers();
     // Record invocation order, independent of filesystem completion order.
     misses.push(gate);
