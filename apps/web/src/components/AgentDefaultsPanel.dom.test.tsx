@@ -286,7 +286,7 @@ test("Antigravity shows each selected model's advertised efforts and can save a 
   option.name = "Google Antigravity";
   option.installations[0]!.models = [
     { id: "pro", displayName: "Fixture Pro", efforts: ["low", "xhigh"] },
-    { id: "flash", displayName: "Fixture Flash", efforts: ["adaptive", "quick"] },
+    { id: "flash", displayName: "Fixture Flash", efforts: ["quick", "adaptive"] },
     { id: "experimental", displayName: "Fixture Experimental" },
   ];
   const saved: unknown[] = [];
@@ -306,7 +306,7 @@ test("Antigravity shows each selected model's advertised efforts and can save a 
       return [...body().querySelectorAll('[role="listbox"][aria-label="Reasoning Effort"] [role="option"]')]
         .map((node) => node.querySelector(".ui-select-option-body > span")?.textContent);
     };
-    assert.deepEqual(await readChoices(), ["Wollipog Default", "Adaptive", "Quick"]);
+    assert.deepEqual(await readChoices(), ["Wollipog Default", "Quick", "Adaptive"]);
     await act(async () => effort.click());
     await choose("Model", "Fixture Experimental");
     assert.deepEqual(await readChoices(), ["Wollipog Default"]);

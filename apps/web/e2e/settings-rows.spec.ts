@@ -1497,7 +1497,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       const row = page.locator(".setting-row").filter({ has: page.getByText("Google Antigravity", { exact: true }) });
       const edit = row.getByRole("button", { name: /^Edit…/ });
       const capture = async (surface: string, state: string) => {
-        if (process.env.WOLLIPOG_CAPTURE_ANTIGRAVITY_DEFAULTS === "1") {
+        const selection = process.env.WOLLIPOG_CAPTURE_ANTIGRAVITY_DEFAULTS;
+        if (selection === "1" || (selection === "effort-open" && state.startsWith("effort-open"))) {
           await page.screenshot({ path: testInfo.outputPath(`${surface}-${dimensions}-${state}.png`), animations: "disabled" });
         }
       };
@@ -1546,7 +1547,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       };
 
       if (narrow) await chooseModel(/^Fixture Pro With a Deliberately Long Model/);
-      await showEfforts(["High", "Low", "Medium", "Extra High"]);
+      await showEfforts(["Low", "Medium", "High", "Extra High"]);
       await capture("agent-defaults-dialog", narrow ? "effort-open-stress-target44csspx" : "effort-open");
       await page.keyboard.press("Escape");
       await chooseModel("Fixture Experimental");
@@ -1554,7 +1555,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       if (!narrow) await capture("agent-defaults-dialog", "effort-unavailable");
       await page.keyboard.press("Escape");
       await chooseModel("Fixture Flash");
-      await showEfforts(["Adaptive", "Quick"]);
+      await showEfforts(["Quick", "Adaptive"]);
       await list.getByRole("option", { name: "Adaptive", exact: true }).click();
       await save.click();
       await expect(dialog).toHaveCount(0);
