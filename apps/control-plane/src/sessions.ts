@@ -2183,6 +2183,10 @@ export function resolveEffectiveModelEffort(
   driver: AgentDriverKind,
 ): { value?: EffectiveModelEffort; error?: string } {
   if (!capabilities?.models?.length) return {};
+  // Antigravity's setup catalog offers per-model choices without resolving provider defaults.
+  // An empty agent-wide list distinguishes that catalog from a live thought_level snapshot.
+  if (driver === "acp" && !capabilities.effortLevels?.length &&
+      capabilities.permissionModes?.includes(ANTIGRAVITY_FULL_PERMISSIONS_MODE.id)) return {};
   const concrete = capabilities.models.filter((model) => model.id !== "default");
   const selectable = concrete.filter((model) => !model.hidden);
   const effortsFor = (model: AgentCapabilities["models"][number]) =>
@@ -4837,8 +4841,9 @@ export class SessionsService {
     }
     // A target-local executable has not advertised the host agent's model or permission catalog.
     // Keep validation honest until that exact target can provide its own capabilities.
+    const agentDefinition = runner.agents.find((agent) => agent.id === req.agentId);
     const agentCapabilities = selectedInstallationId ? undefined :
-      snapshotSpec?.capabilities ?? runner.agents.find((agent) => agent.id === req.agentId)?.capabilities;
+      snapshotSpec?.capabilities ?? agentDefinition?.capabilities;
     const requestedConfig = { ...(snapshotSpec?.config ?? req.config ?? {}) };
     const explicitManagedModel = !snapshotSpec && isManagedModelChoice(requestedConfig.model);
     if (!snapshotSpec) {

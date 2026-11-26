@@ -280,6 +280,44 @@ test("Edit… opens the agent's dialog; Save Defaults saves, closes, updates the
   }
 });
 
+test("Antigravity shows each selected model's advertised efforts and can save a model with no efforts", async () => {
+  const option = view().defaults[2]!;
+  option.agentId = "google-antigravity";
+  option.name = "Google Antigravity";
+  option.installations[0]!.models = [
+    { id: "pro", displayName: "Fixture Pro", efforts: ["low", "xhigh"] },
+    { id: "flash", displayName: "Fixture Flash", efforts: ["quick", "adaptive"] },
+    { id: "experimental", displayName: "Fixture Experimental" },
+  ];
+  const saved: unknown[] = [];
+  const fixture = await renderPanel(transport(async (_path, init) => {
+    if (init?.method === "PUT") saved.push(JSON.parse(String(init.body)).config);
+    return json({ defaults: [option] });
+  }));
+  try {
+    await openEditor(fixture.container, option.name);
+    await choose("Model", "Fixture Pro");
+    await choose("Reasoning Effort", "Extra High");
+    await choose("Model", "Fixture Flash");
+    const effort = buttonNamed(/^Reasoning Effort:/, dialog());
+    assert.match(effort.getAttribute("aria-label") ?? "", /Wollipog Default/);
+    const readChoices = async () => {
+      await act(async () => effort.click());
+      return [...body().querySelectorAll('[role="listbox"][aria-label="Reasoning Effort"] [role="option"]')]
+        .map((node) => node.querySelector(".ui-select-option-body > span")?.textContent);
+    };
+    assert.deepEqual(await readChoices(), ["Wollipog Default", "Quick", "Adaptive"]);
+    await act(async () => effort.click());
+    await choose("Model", "Fixture Experimental");
+    assert.deepEqual(await readChoices(), ["Wollipog Default"]);
+    await act(async () => effort.click());
+    await act(async () => buttonNamed("Save Defaults").click());
+    assert.deepEqual(saved, [{ model: "experimental" }]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("a model with efforts needs an effort, shown on the field instead of saving", async () => {
   const methods: string[] = [];
   const fixture = await renderPanel(transport(async (_path, init) => {

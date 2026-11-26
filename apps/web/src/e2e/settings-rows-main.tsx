@@ -215,6 +215,31 @@ const harnessDefaultsView: AgentHarnessDefaultsView = {
 /** What a save or reset leaves on the server, for the page's life, so the row reads it back. */
 let harnessDefaultsState = structuredClone(harnessDefaultsView);
 
+const antigravityDefaultsState: AgentHarnessDefaultsView = {
+  defaults: [{
+    agentId: "google-antigravity",
+    driver: "acp",
+    context: { kind: "native" },
+    name: "Google Antigravity",
+    installations: [{
+      runnerId: "fixture-runner",
+      machineName: "Build Machine",
+      online: true,
+      models: [
+        { id: "fixture-pro", displayName: "Fixture Pro", efforts: ["low", "medium", "high", "xhigh"] },
+        { id: "fixture-long", displayName: "Fixture Pro With a Deliberately Long Model Display Name (Experimental Preview)",
+          efforts: ["low", "medium", "high", "xhigh"] },
+        { id: "fixture-flash", displayName: "Fixture Flash", efforts: ["quick", "adaptive"] },
+        { id: "fixture-unknown", displayName: "Fixture Experimental" },
+      ],
+      effortLevels: [],
+      permissionModes: ["auto"],
+    }],
+    preference: { model: "fixture-pro", effort: "high" },
+    compatibleInstallations: 1,
+  }],
+};
+
 const harnessDefaultsRepairedView = structuredClone(harnessDefaultsView);
 harnessDefaultsRepairedView.defaults[0]!.installations[0]!.models = [
   { id: "luna", displayName: "Luna", efforts: ["low"] },
@@ -508,6 +533,13 @@ const harnessDefaultsTransport: ApiTransport = {
     if (mode === "agent-loading") return new Promise<Response>(() => undefined);
     if (mode === "agent-empty") return Response.json({ defaults: [] });
     const method = init?.method ?? "GET";
+    if (mode === "agent-antigravity") {
+      if (method === "PUT") {
+        const request = JSON.parse(String(init?.body)) as { config: AgentHarnessDefaultConfig };
+        antigravityDefaultsState.defaults[0]!.preference = request.config;
+      }
+      return Response.json(antigravityDefaultsState);
+    }
     if (method !== "GET") {
       // `agent-save-fails` refuses a save the way an overloaded server does.
       if (mode === "agent-save-fails") {
@@ -587,7 +619,7 @@ function Harness() {
   const askedFor = params.get("topology") as Topology | null;
   const topology: Topology = askedFor && TOPOLOGIES.includes(askedFor) ? askedFor : "full";
   const requestedSection = params.get("section") as SettingsSection | null;
-  const showAgentDefaults = ["agent", "agent-missing", "agent-repair", "agent-loading", "agent-empty", "agent-save-fails", "agent-managed", "agent-managed-skew"]
+  const showAgentDefaults = ["agent", "agent-missing", "agent-repair", "agent-loading", "agent-empty", "agent-save-fails", "agent-managed", "agent-managed-skew", "agent-antigravity"]
     .includes(params.get("defaults") ?? "");
   // #1646's and #3028's desktop update states; absent, the About panel renders as it does in a browser.
   const requestedUpdates = params.get("updates");

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { validAntigravitySetupView, type AntigravitySetupView } from "@wollipog/protocol";
+import { antigravityAgentDefinition } from "./antigravity-session.js";
 import {
   advertisedAntigravityModels,
   antigravityCredentialContext,
@@ -170,6 +171,40 @@ test("a rejected or expired code fails the sign-in and never reports success", a
   assert.equal(failed.status, "sign_in_required");
   assert.ok(!published.some((view) => view.status === "ready" || view.signIn?.status === "succeeded"));
   assert.ok(!JSON.stringify(published).includes("FIXTURE-WRONG-CODE"));
+});
+
+test("the Antigravity catalog uses confirmed per-model effort choices and degrades to no choices", async () => {
+  writeFileSync(join(state, "signed-in"), "fixture");
+  let row: ReturnType<typeof antigravityAgentDefinition> = null;
+  const { setup } = supervisor({ onUpdate: (view, modelEfforts) => {
+    assert.ok(validAntigravitySetupView(view), "the setup wire view remains compatible");
+    row = antigravityAgentDefinition(view, antigravityCredentialContext({}),
+      { mode: "provider", network: "inherit" }, true, modelEfforts);
+  } });
+  const pro = { id: "fixture-pro", displayName: "Fixture Pro" };
+  const flash = { id: "fixture-flash", displayName: "Fixture Flash" };
+  const choices = () => row?.capabilities;
+
+  mode("model_specific_efforts");
+  assert.equal((await setup.check()).status, "ready");
+  assert.deepEqual(choices()?.models, [
+    { ...pro, efforts: ["low", "medium", "high", "xhigh"] },
+    { ...flash, efforts: ["quick", "adaptive"] },
+  ]);
+  assert.deepEqual(choices()?.effortLevels, [], "never use one model's efforts as the agent-wide list");
+  const calls = readFileSync(join(state, "calls.jsonl"), "utf8").trim().split("\n")
+    .map((line) => JSON.parse(line) as { method: string; configId?: string; value?: string });
+  assert.deepEqual(calls.filter((call) => call.configId === "model").map((call) => call.value),
+    ["fixture-flash", "fixture-pro"], "the probe restores the original model");
+  assert.ok(!calls.some((call) => call.method === "session/prompt"));
+
+  mode("model_switch_unconfirmed");
+  assert.equal((await setup.check()).status, "ready");
+  assert.deepEqual(choices()?.models, [{ ...pro, efforts: ["low", "medium", "high", "xhigh"] }, flash]);
+
+  mode("efforts_unavailable");
+  assert.equal((await setup.check()).status, "ready");
+  assert.deepEqual(choices()?.models, [pro, flash], "a later incomplete check clears stale choices");
 });
 
 test("a zero exit is not success: an unconfirmed sign-in fails as not_verified", async () => {

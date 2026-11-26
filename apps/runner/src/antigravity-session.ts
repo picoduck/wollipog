@@ -18,6 +18,7 @@ import {
   ANTIGRAVITY_AMBIENT_CREDENTIAL_ENV,
   ANTIGRAVITY_AMBIENT_CREDENTIAL_PREFIXES,
   type AntigravityCredentialContext,
+  type AntigravityModelEfforts,
 } from "./antigravity-setup.js";
 import type { RunnerExecutionIsolation } from "./config.js";
 
@@ -49,6 +50,7 @@ export function antigravityAgentDefinition(
   context: AntigravityCredentialContext,
   isolation: Pick<RunnerExecutionIsolation, "mode" | "network">,
   launchable = true,
+  modelEfforts?: AntigravityModelEfforts,
 ): AgentDefinition | null {
   const executable = setup.executable?.path;
   if (!executable || setup.status === "missing_runtime" || setup.status === "unsupported" || setup.status === "checking") {
@@ -79,7 +81,11 @@ export function antigravityAgentDefinition(
     capabilities: {
       // The account's models from the setup's last check; a live session replaces them with the
       // model choices its own session advertises.
-      models: (ready ? setup.models ?? [] : []).map((model) => ({ id: model.id, displayName: model.name })),
+      models: (ready ? setup.models ?? [] : []).map((model) => {
+        const efforts = modelEfforts?.get(model.id);
+        return { id: model.id, displayName: model.name, ...(efforts?.length ? { efforts: [...efforts] } : {}) };
+      }),
+      // A model with no confirmed levels uses Wollipog Default, even if others advertise efforts.
       effortLevels: [],
       slashCommands: [],
       permissionModes: [ANTIGRAVITY_AUTO_MODE.id, ANTIGRAVITY_FULL_PERMISSIONS_MODE.id],

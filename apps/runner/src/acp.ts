@@ -619,14 +619,6 @@ export class AcpClient {
    * unlaunchable. Prompt-time setConfig remains strict and fail-closed. */
   async restoreInitialConfig(config: SessionConfig): Promise<void> {
     const supported: SessionConfig = {};
-    const model = optionForCategory(this.configOptions, "model");
-    if (config.model && model?.options.some((candidate) => candidate.value === config.model)) {
-      supported.model = config.model;
-    }
-    const effort = optionForCategory(this.configOptions, "thought_level");
-    if (config.effort && effort?.options.some((candidate) => candidate.value === config.effort)) {
-      supported.effort = config.effort;
-    }
     const modeOption = optionForCategory(this.configOptions, "mode");
     // Set Auto independently of model and effort so a rejected model change cannot skip it.
     if (this.compatibility?.profile === "antigravity" && config.permissionMode === ANTIGRAVITY_AUTO_MODE.id) {
@@ -662,9 +654,18 @@ export class AcpClient {
     ) {
       supported.permissionMode = config.permissionMode;
     }
-    if (!supported.model && !supported.effort && !supported.permissionMode) return;
     try {
-      await this.setConfig(supported);
+      // A model change can replace thought_level. Validate the saved effort against the
+      // provider's confirmed config for that model, before the first prompt.
+      const model = optionForCategory(this.configOptions, "model");
+      if (config.model && model?.options.some((candidate) => candidate.value === config.model)) {
+        await this.setSelectConfig("model", config.model);
+      }
+      const effort = optionForCategory(this.configOptions, "thought_level");
+      if (config.effort && effort?.options.some((candidate) => candidate.value === config.effort)) {
+        supported.effort = config.effort;
+      }
+      if (supported.effort || supported.permissionMode) await this.setConfig(supported);
     } catch {
       // The setup response/update already published the provider's confirmed live values. A
       // restoration race must not make an otherwise resumable session fatal or expose its error.

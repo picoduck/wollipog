@@ -134,8 +134,12 @@ if (args[0] === "acp" && args[1] === "--login") {
       options: modes.has("session_many_models")
         ? Array.from({ length: 40 }, (_, index) => ({ value: `fixture-model-${index + 1}`, name: `Fixture Model ${index + 1} With a Deliberately Long Display Name for Layout (Experimental Preview)` }))
         : [{ value: "fixture-pro", name: "Fixture Pro" }, { value: "fixture-flash", name: "Fixture Flash" }] },
-    { id: "thought_level", name: "Thinking Level", category: "thought_level", type: "select", currentValue: config.thought_level,
-      options: [{ value: "low", name: "Low" }, { value: "medium", name: "Medium" }, { value: "high", name: "High" }, { value: "xhigh", name: "Extra" }] },
+    ...modes.has("efforts_unavailable") ? [] : [
+      { id: "thought_level", name: "Thinking Level", category: "thought_level", type: "select", currentValue: config.thought_level,
+        options: modes.has("model_specific_efforts") && config.model === "fixture-flash"
+          ? [{ value: "quick", name: "Quick" }, { value: "adaptive", name: "Adaptive" }]
+          : [{ value: "low", name: "Low" }, { value: "medium", name: "Medium" }, { value: "high", name: "High" }, { value: "xhigh", name: "Extra" }] },
+    ],
     { id: "mode", name: "Mode", category: "mode", type: "select", currentValue: config.mode,
       options: modeState.availableModes.map((mode) => ({ value: mode.id, name: mode.name, description: mode.description })) },
   ];
@@ -249,6 +253,7 @@ if (args[0] === "acp" && args[1] === "--login") {
       clientCapabilities: request.params?.clientCapabilities ?? null, fullPermissions } : {}),
       ...(request.method === "session/prompt" ? { activeMode: config.mode,
         promptTexts: (request.params?.prompt ?? []).filter((block) => block.type === "text").map((block) => block.text) } : {}),
+      ...(request.method === "session/set_config_option" ? { configId: request.params?.configId, value: request.params?.value } : {}),
       ...(request.params?.sessionId ? { sessionId: request.params.sessionId } : {}),
       ...(Array.isArray(request.params?.mcpServers)
         ? { mcpServerNames: request.params.mcpServers.map((server) => server.name) } : {}) });
@@ -293,7 +298,13 @@ if (args[0] === "acp" && args[1] === "--login") {
     if ((request.method === "session/set_config_option" || request.method === "session/set_mode") && modes.has("config_hang")) return;
     if (request.method === "session/set_config_option") {
       const { configId, value } = request.params ?? {};
+      if (configId === "model" && modes.has("model_switch_unconfirmed")) {
+        return send({ id: request.id, result: { configOptions: configOptions() } });
+      }
       if (configId in config) config[configId] = value;
+      if (configId === "model" && modes.has("model_specific_efforts")) {
+        config.thought_level = value === "fixture-flash" ? "quick" : "high";
+      }
       return send({ id: request.id, result: { configOptions: configOptions() } });
     }
     if (request.method === "session/set_mode") {

@@ -148,6 +148,8 @@ const INSTALLER_TIMEOUT_MS = 30_000;
 const DOWNLOAD_TIMEOUT_MS = 20 * 60_000;
 const HANDSHAKE_TIMEOUT_MS = 20_000;
 const SESSION_TIMEOUT_MS = 30_000;
+const EFFORT_DISCOVERY_TIMEOUT_MS = 5_000;
+const EFFORT_DISCOVERY_RESTORE_MS = 1_000;
 const SIGN_IN_TIMEOUT_MS = 10 * 60_000;
 const SIGN_IN_LINK_TIMEOUT_MS = 15_000;
 const OUTPUT_LIMIT = 64 * 1024;
@@ -162,9 +164,12 @@ const CONTROL = /[\u0000-\u001f\u007f]/u;
 
 /** Outcome of the access check. `models` is set only for `ready`. */
 export type AntigravityAccessResult =
-  | { status: "ready"; models: Array<{ id: string; name: string }>; observedAt: number; tier?: string }
+  | { status: "ready"; models: Array<{ id: string; name: string }>; modelEfforts: AntigravityModelEfforts;
+      observedAt: number; tier?: string }
   | { status: "sign_in_required" }
   | { status: "verification_failed"; failure: AntigravitySetupFailure };
+
+export type AntigravityModelEfforts = ReadonlyMap<string, readonly string[]>;
 
 export interface AntigravityProcessOptions {
   command: string;
@@ -243,6 +248,55 @@ export function advertisedAntigravityModels(response: unknown): Array<{ id: stri
     }
   }
   return models;
+}
+
+/** ACP describes thought_level for the active model. Use the same disposable session to inspect
+ * each model, attributing an effort list only after the provider confirms the model in its reply. */
+async function discoverAntigravityEfforts(
+  peer: JsonRpcPeer,
+  sessionId: string,
+  response: unknown,
+  models: ReadonlyArray<{ id: string }>,
+  now: () => number,
+): Promise<AntigravityModelEfforts> {
+  const readOptions = (result: unknown) => normalizeAcpConfigOptions(
+    (result as { configOptions?: unknown } | null)?.configOptions,
+  );
+  const efforts = new Map<string, string[]>();
+  const initial = readOptions(response);
+  const model = optionForCategory(initial, "model");
+  if (!model) return efforts;
+
+  const remember = (id: string, options: ReturnType<typeof readOptions>) => {
+    if (optionForCategory(options, "model")?.currentValue !== id) return;
+    const levels = optionForCategory(options, "thought_level")?.options
+      .map(({ value }) => value)
+      .filter((value) => value.length <= 64 && value === value.trim());
+    if (levels?.length) efforts.set(id, levels);
+  };
+  if (models.some(({ id }) => id === model.currentValue)) remember(model.currentValue, initial);
+
+  const deadlineAt = now() + EFFORT_DISCOVERY_TIMEOUT_MS;
+  const probeDeadline = deadlineAt - EFFORT_DISCOVERY_RESTORE_MS;
+  let attemptedSwitch = false;
+  const select = (value: string, deadlineAt: number) =>
+    peer.request("session/set_config_option", { sessionId, configId: model.id, value }, { deadlineAt });
+  for (const { id } of models) {
+    if (now() >= probeDeadline) break;
+    if (id === model.currentValue) continue;
+    attemptedSwitch = true;
+    try {
+      const updated = await select(id, probeDeadline);
+      remember(id, readOptions(updated));
+    } catch (error) {
+      if (timedOut(error)) break;
+      // One rejected model does not invalidate the account or a confirmed list for another model.
+    }
+  }
+  // Leave the disposable session on its original model even if a switch failed to confirm.
+  // Restoration is best effort and shares the same overall deadline as discovery.
+  if (attemptedSwitch) await select(model.currentValue, deadlineAt).catch(() => undefined);
+  return efforts;
 }
 
 /** The Google AI subscription tier an ACP `session/new` response reports in `_meta.antigravity.tier`
@@ -366,7 +420,7 @@ export async function validateStagedAntigravity(options: {
 }
 
 /** Verify access: ACP initialize, then `session/new` in `cwd` (a private empty directory) with no
- * prompt. The process is terminated right after, which discards the session. An authentication
+ * prompt. The process is terminated after probing model options, which discards the session. An authentication
  * error means the sign-in is missing or expired; anything else that is not a session with at least
  * one advertised model fails verification. */
 export async function checkAntigravityAccess(
@@ -398,14 +452,15 @@ export async function checkAntigravityAccess(
       if (isAgentAuthRequiredError(error)) return { status: "sign_in_required" };
       return { status: "verification_failed", failure: timedOut(error) ? "timed_out" : "session_check_failed" };
     }
-    const sessionId = response && typeof response === "object" ? (response as { sessionId?: unknown }).sessionId : undefined;
+    const sessionId = boundedText((response as { sessionId?: unknown } | null)?.sessionId, 1_024);
     const models = advertisedAntigravityModels(response);
-    if (!boundedText(sessionId, 1_024) || models.length === 0) {
+    if (!sessionId || models.length === 0) {
       return { status: "verification_failed", failure: "session_check_failed" };
     }
     const tier = advertisedAntigravityTier(response);
-    // Stamped when access was seen working, before the cleanup below awaits the process's exit.
-    return { status: "ready", models, observedAt, ...(tier ? { tier } : {}) };
+    // Keep the observation timestamp from session/new, before optional discovery and cleanup.
+    const modelEfforts = await discoverAntigravityEfforts(peer, sessionId, response, models, now);
+    return { status: "ready", models, modelEfforts, observedAt, ...(tier ? { tier } : {}) };
   } finally {
     peer.dispose("Antigravity access check finished");
     await options.kill(child).catch(() => false);
@@ -433,7 +488,7 @@ interface ActiveSignIn {
 export interface AntigravitySetupSupervisorOptions {
   /** Runner data directory; private scratch directories and the managed install live under it. */
   dataDir: string;
-  onUpdate: (setup: AntigravitySetupView) => void;
+  onUpdate: (setup: AntigravitySetupView, modelEfforts: AntigravityModelEfforts) => void;
   /** Runner log for install provenance. It never receives the CLI's output or any credential. */
   log?: (message: string) => void;
   platform?: NodeJS.Platform;
@@ -489,6 +544,8 @@ export function antigravitySetupForControlPlane(view: AntigravitySetupView, supp
  * time, and never a sign-in and an install together. */
 export class AntigravitySetupSupervisor {
   private view: AntigravitySetupView;
+  // The agent catalog already has a per-model effort field. Keep these out of the setup wire view.
+  private modelEfforts: AntigravityModelEfforts = new Map();
   private checking: Promise<AntigravitySetupView> | null = null;
   private signIn: ActiveSignIn | null = null;
   private installing: Promise<void> | null = null;
@@ -947,7 +1004,7 @@ export class AntigravitySetupSupervisor {
           ...(targetIdentity ? { targetIdentity } : {}),
           ...(access.tier ? { tier: access.tier } : {}),
           accessObservedAt: access.observedAt,
-        });
+        }, access.modelEfforts);
     }
     return this.settleCheck({ ...base, status: access.status, executable,
       ...(access.status === "verification_failed" ? { failure: access.failure } : {}), checkedAt: this.now() });
@@ -1132,7 +1189,11 @@ export class AntigravitySetupSupervisor {
     return join(this.options.dataDir, "antigravity-setup");
   }
 
-  private settleCheck(view: AntigravitySetupView, verified?: VerifiedAntigravityLaunch): AntigravitySetupView {
+  private settleCheck(
+    view: AntigravitySetupView,
+    verified?: VerifiedAntigravityLaunch,
+    modelEfforts: AntigravityModelEfforts = new Map(),
+  ): AntigravitySetupView {
     // Only a ready check verifies what a session may launch (#4779); any other result withdraws it.
     // A ready candidate whose activation is uncommitted is held until the install commits it.
     this.launches.settle(view.status === "ready" && verified ? verified : null,
@@ -1140,6 +1201,7 @@ export class AntigravitySetupSupervisor {
     // A sign-in's progress during the check is newer than the check's copy of it.
     const { signIn: _stale, ...rest } = view;
     this.view = { ...rest, ...(this.view.signIn ? { signIn: this.view.signIn } : {}) };
+    this.modelEfforts = modelEfforts;
     this.publish();
     return this.current();
   }
@@ -1201,7 +1263,7 @@ export class AntigravitySetupSupervisor {
   }
 
   private publish(): void {
-    this.options.onUpdate(this.current());
+    this.options.onUpdate(this.current(), this.modelEfforts);
   }
 }
 

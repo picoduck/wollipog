@@ -19,6 +19,8 @@ import {
 test("effortLabel formats provider tokens for visible UI copy", () => {
   assert.equal(effortLabel("xhigh"), "Extra High");
   assert.equal(effortLabel("max"), "Max");
+  assert.equal(effortLabel("adaptive-preview"), "Adaptive Preview");
+  assert.equal(effortLabel("constructor"), "Constructor");
 });
 
 test("serviceTierLabel names a tier no catalog names instead of showing its provider id", () => {

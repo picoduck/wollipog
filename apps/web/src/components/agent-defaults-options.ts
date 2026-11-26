@@ -1,4 +1,5 @@
 import {
+  ANTIGRAVITY_AGENT_ID,
   isManagedModelChoice,
   managedModelChoiceLabel,
   modelResolutionDrift,
@@ -77,6 +78,9 @@ export function effortsForModel(option: AgentHarnessDefaultOption, modelId: stri
     if (!model) continue;
     for (const effort of model.efforts?.length ? model.efforts : installation.effortLevels) efforts.add(effort);
   }
+  // Antigravity's choices are ordered by the provider. Across machines, keep the first
+  // occurrence of each choice in the installation order supplied by the control plane.
+  if (option.driver === "acp" && option.agentId === ANTIGRAVITY_AGENT_ID) return [...efforts];
   return [...efforts].sort();
 }
 
