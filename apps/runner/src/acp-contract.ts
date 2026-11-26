@@ -57,14 +57,13 @@ export interface AcpNegotiation {
   experimentalAdvertised: AcpExperimentalCapability[];
 }
 
-export function acpInitializeRequest(): InitializeRequest {
+export function acpInitializeRequest(options?: { formElicitation: boolean }): InitializeRequest {
   return {
     protocolVersion: ACP_PROTOCOL_VERSION,
     clientCapabilities: {
       fs: { readTextFile: true, writeTextFile: true },
       terminal: true,
-      // Phase 3 enables stable session config/lifecycle features only with their UI/behavior slice.
-      // Do not advertise experimental auth, elicitation, NES, plan-update, or position encodings.
+      ...(options?.formElicitation ? { elicitation: { form: {} } } : {}),
     },
     clientInfo: { name: "wollipog", version: ACP_CLIENT_VERSION },
   };

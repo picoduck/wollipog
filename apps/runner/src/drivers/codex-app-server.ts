@@ -27,6 +27,7 @@ import {
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, posix } from "node:path";
 import { JsonRpcPeer, type RpcError } from "../jsonrpc.js";
+import { mcpElicitationResponse, normalizeMcpFormElicitation, type NormalizedQuestionRequest } from "../form-elicitation.js";
 import { assistantTranscriptReceiptKey } from "./assistant-tool-result.js";
 import { campaignOperationEvidence } from "../campaign-operation-evidence.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
@@ -3456,12 +3457,6 @@ interface PendingQuestion {
   response: (answers: Record<string, string | string[]>, action?: "submit" | "dismiss") => Json;
 }
 
-interface NormalizedQuestionRequest {
-  questions: AgentQuestion[];
-  response: (answers: Record<string, string | string[]>, action?: "submit" | "dismiss") => Json;
-}
-
-type McpElicitationAction = "accept" | "decline" | "cancel";
 const MAX_STRUCTURED_QUESTIONS = 20;
 /** How long the rejected-async-question steer may wait for Codex before the notice asks the user to
  * prompt the agent instead. */
@@ -3488,14 +3483,6 @@ export function diagnosticValue(value: unknown): string {
   if (value == null) return "?";
   const text = typeof value === "string" ? value : typeof value === "object" ? "[object]" : String(value);
   return text.length > MAX_DIAGNOSTIC_VALUE ? `${text.slice(0, MAX_DIAGNOSTIC_VALUE)}…` : text;
-}
-
-function finiteNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function nonnegativeInteger(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 function distinctQuestionIds(questions: AgentQuestion[]): boolean {
@@ -3578,179 +3565,4 @@ export function normalizeCodexUserInput(params: Json): NormalizedQuestionRequest
       ])),
     }),
   };
-}
-
-interface NativeChoice {
-  label: string;
-  value: Json;
-}
-
-function enumChoices(schema: Json): NativeChoice[] | null {
-  let choices: NativeChoice[];
-  const titled = Array.isArray(schema?.oneOf) ? schema.oneOf : Array.isArray(schema?.anyOf) ? schema.anyOf : null;
-  if (titled) {
-    choices = titled.map((entry: Json) => ({
-      label: boundedString(entry?.title, MAX_QUESTION_ID) ?? "",
-      value: entry?.const,
-    }));
-  } else if (Array.isArray(schema?.enum)) {
-    const names = Array.isArray(schema.enumNames) && schema.enumNames.length === schema.enum.length
-      ? schema.enumNames
-      : schema.enum;
-    choices = schema.enum.map((value: Json, index: number) => ({
-      label: boundedString(names[index], MAX_QUESTION_ID) ?? "",
-      value,
-    }));
-  } else {
-    return null;
-  }
-  if (
-    choices.length === 0 || choices.length > MAX_QUESTION_OPTIONS ||
-    choices.some((choice) => !choice.label || typeof choice.value !== "string") ||
-    new Set(choices.map((choice) => choice.label)).size !== choices.length
-  ) return null;
-  return choices;
-}
-
-function inputFormat(value: unknown): AgentQuestion["inputFormat"] | null {
-  if (value == null) return "text";
-  return value === "email" || value === "uri" || value === "date" || value === "date-time"
-    ? value === "uri" ? "url" : value
-    : null;
-}
-
-/** Normalize the stable MCP form elicitation schema into Wollipog's structured question surface. */
-export function normalizeMcpFormElicitation(params: Json): NormalizedQuestionRequest | null {
-  const schema = params?.requestedSchema;
-  const properties = schema?.properties;
-  if (params?.mode !== "form" || schema?.type !== "object" || !properties || typeof properties !== "object" || Array.isArray(properties)) {
-    return null;
-  }
-  const entries = Object.entries(properties);
-  if (entries.length === 0 || entries.length > MAX_STRUCTURED_QUESTIONS) return null;
-  if (schema.required != null && (!Array.isArray(schema.required) || schema.required.some((key: unknown) => typeof key !== "string"))) {
-    return null;
-  }
-  const requiredKeys = (schema.required ?? []) as string[];
-  const propertyKeys = new Set(entries.map(([key]) => key));
-  if (new Set(requiredKeys).size !== requiredKeys.length || requiredKeys.some((key) => !propertyKeys.has(key))) return null;
-  const required = new Set(requiredKeys);
-  const questions: AgentQuestion[] = [];
-  const nativeValues = new Map<string, Map<string, Json>>();
-  const message = boundedString(params?.message, MAX_QUESTION_TEXT);
-  const serverName = boundedString(params?.serverName, MAX_QUESTION_HEADER);
-  if (!message || !serverName) return null;
-
-  for (const [id, raw] of entries) {
-    if (!boundedString(id, MAX_QUESTION_ID) || !raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-    const property = raw as Json;
-    const title = property.title == null ? undefined : boundedString(property.title, MAX_QUESTION_HEADER);
-    const description = property.description == null ? undefined : boundedString(property.description, MAX_QUESTION_TEXT);
-    if ((property.title != null && !title) || (property.description != null && !description)) return null;
-    const base = {
-      id,
-      ...(title ? { header: title } : {}),
-      question: description ?? title ?? id,
-      options: [] as AgentQuestion["options"],
-      required: required.has(id),
-      ...(questions.length === 0 ? { context: `${serverName}: ${message}` } : {}),
-    };
-
-    if (property.type === "boolean") {
-      const choices = [{ label: "True", value: true }, { label: "False", value: false }];
-      nativeValues.set(id, new Map(choices.map((choice) => [choice.label, choice.value])));
-      questions.push({ ...base, customAnswerError: "cannot be delivered because the provider requires one of its typed choices", options: choices.map(({ label }) => ({ label })) });
-      continue;
-    }
-
-    if (property.type === "array") {
-      const choices = enumChoices(property.items);
-      if (!choices) return null;
-      const minSelections = nonnegativeInteger(property.minItems) ?? 0;
-      const maxSelections = nonnegativeInteger(property.maxItems);
-      if (
-        (property.minItems != null && nonnegativeInteger(property.minItems) == null) ||
-        (property.maxItems != null && maxSelections == null) ||
-        (maxSelections != null && maxSelections < minSelections)
-      ) return null;
-      nativeValues.set(id, new Map(choices.map((choice) => [choice.label, choice.value])));
-      questions.push({
-        ...base,
-        multiSelect: true,
-        customAnswerError: "cannot be delivered because the provider requires an array of its typed choices",
-        options: choices.map(({ label }) => ({ label })),
-        minSelections,
-        ...(maxSelections != null ? { maxSelections } : {}),
-      });
-      continue;
-    }
-
-    if (property.type === "string") {
-      const choices = enumChoices(property);
-      if (choices) {
-        nativeValues.set(id, new Map(choices.map((choice) => [choice.label, choice.value])));
-        questions.push({ ...base, customAnswerError: "cannot be delivered because the provider requires one of its typed choices", options: choices.map(({ label }) => ({ label })) });
-        continue;
-      }
-      if (property.enum !== undefined || property.oneOf !== undefined || property.anyOf !== undefined) return null;
-      const minLength = nonnegativeInteger(property.minLength);
-      const providerMaxLength = nonnegativeInteger(property.maxLength);
-      if (
-        (property.minLength != null && minLength == null) ||
-        (property.maxLength != null && providerMaxLength == null)
-      ) return null;
-      const maxLength = Math.min(providerMaxLength ?? MAX_FREE_TEXT, MAX_FREE_TEXT);
-      if (minLength != null && minLength > maxLength) return null;
-      const format = inputFormat(property.format);
-      if (!format) return null;
-      questions.push({
-        ...base,
-        allowOther: true,
-        inputFormat: format,
-        ...(minLength != null ? { minLength } : {}),
-        maxLength,
-      });
-      continue;
-    }
-
-    if (property.type === "number" || property.type === "integer") {
-      const minimum = finiteNumber(property.minimum);
-      const maximum = finiteNumber(property.maximum);
-      if (
-        (property.minimum != null && minimum == null) ||
-        (property.maximum != null && maximum == null) ||
-        (minimum != null && maximum != null && minimum > maximum)
-      ) return null;
-      questions.push({
-        ...base,
-        allowOther: true,
-        inputFormat: property.type,
-        ...(minimum != null ? { minimum } : {}),
-        ...(maximum != null ? { maximum } : {}),
-      });
-      continue;
-    }
-    return null;
-  }
-
-  return {
-    questions,
-    response: (answers, action) => {
-      if (action === "dismiss" || (action == null && Object.keys(answers).length === 0)) {
-        return mcpElicitationResponse("cancel");
-      }
-      const content = Object.fromEntries(Object.entries(answers).map(([id, answer]) => {
-        const values = nativeValues.get(id);
-        if (Array.isArray(answer)) return [id, answer.map((label) => values?.get(label) ?? label)];
-        if (values) return [id, values.get(answer) ?? answer];
-        const question = questions.find((candidate) => candidate.id === id);
-        return [id, question?.inputFormat === "number" || question?.inputFormat === "integer" ? Number(answer) : answer];
-      }));
-      return mcpElicitationResponse("accept", content);
-    },
-  };
-}
-
-export function mcpElicitationResponse(action: McpElicitationAction, content: Json = null): Json {
-  return { action, content: action === "accept" ? content : null, _meta: null };
 }

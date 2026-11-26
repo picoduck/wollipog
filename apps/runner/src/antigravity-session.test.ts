@@ -74,9 +74,85 @@ const PROVIDER = { mode: "provider", network: "inherit" } as const;
 const BWRAP = { mode: "bwrap", network: "inherit" } as const;
 
 function calls(): Array<{ method: string; clientInfo?: { name?: string } | null; outcome?: unknown;
-  mcpServerNames?: string[]; fullPermissions?: boolean; activeMode?: string; promptTexts?: string[] }> {
+  mcpServerNames?: string[]; fullPermissions?: boolean; activeMode?: string; promptTexts?: string[];
+  clientCapabilities?: { elicitation?: unknown }; result?: unknown }> {
   const path = join(state, "calls.jsonl");
   return existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
+}
+
+test("Antigravity advertises form elicitation and receives schema values in the original turn", { timeout: 15_000 }, async () => {
+  signIn();
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy, version: "1.5.14" } }), PROVIDER, root);
+  await driver.initialize();
+  await driver.newSession(root);
+  assert.deepEqual(calls().find(({ method }) => method === "initialize")?.clientCapabilities?.elicitation, { form: {} });
+
+  const turn = driver.prompt("Ask fixture question form");
+  const request = await waitFor(() => seen.events.find((event) => event.kind === "question_request"));
+  assert.equal(request.requestSource, "provider_elicitation");
+  assert.deepEqual(request.questions.map(({ id, options, allowOther, multiSelect, required }) => ({
+    id, labels: options.map(({ label }) => label), allowOther, multiSelect, required,
+  })), [
+    { id: "q1", labels: ["Red", "Blue"], allowOther: undefined, multiSelect: undefined, required: false },
+    { id: "q1_other", labels: [], allowOther: true, multiSelect: undefined, required: false },
+    { id: "q2", labels: ["Gold", "Silver"], allowOther: undefined, multiSelect: true, required: true },
+  ]);
+  assert.equal(driver.answerQuestion(request.requestId, { q1: "Unlisted", q2: ["Silver"] }, "submit"), false);
+  assert.equal(driver.answerQuestion(request.requestId, { q1_other: "Purple" }, "submit"), false);
+  assert.equal(driver.answerQuestion(request.requestId, {
+    q1: "Blue", q1_other: "Purple", q2: ["Gold", "Silver"],
+  }, "submit"), true);
+  assert.equal(await turn, "end_turn");
+  assert.deepEqual(calls().find(({ method }) => method === "elicitation_response")?.result, {
+    action: "accept", content: { q1: "2", q1_other: "Purple", q2: ["G", "S"] },
+  });
+  assert.equal(calls().filter(({ method }) => method === "session/prompt").length, 1);
+  assert.ok(seen.events.some((event) =>
+    event.kind === "agent_message" && event.text === "Question answers received by Antigravity."));
+  assert.equal(driver.answerQuestion(request.requestId, {}, "dismiss"), false);
+});
+
+for (const action of ["dismiss", "interrupt", "close"] as const) {
+  test(`Antigravity settles an open form on ${action}`, { timeout: 15_000 }, async () => {
+    signIn();
+    const { driver, seen } = launchDriver(setup({ executable: { path: agy, version: "1.5.14" } }), PROVIDER, root);
+    await driver.initialize();
+    await driver.newSession(root);
+    const turn = driver.prompt("Ask fixture question form");
+    const request = await waitFor(() => seen.events.find((event) => event.kind === "question_request"));
+    if (action === "dismiss") {
+      assert.equal(driver.answerQuestion(request.requestId, {}, "dismiss"), true);
+    } else if (action === "interrupt") {
+      driver.cancel();
+    } else {
+      assert.equal(await driver.close(), true);
+    }
+    assert.equal(await turn, action === "dismiss" ? "end_turn" : "cancelled");
+    assert.deepEqual(calls().find(({ method }) => method === "elicitation_response")?.result, {
+      action: action === "dismiss" ? "decline" : "cancel",
+    });
+    if (action !== "dismiss") {
+      assert.ok(seen.events.some((event) =>
+        event.kind === "question_resolved" && event.requestId === request.requestId && !event.answered));
+    }
+    assert.equal(driver.answerQuestion(request.requestId, {}, "dismiss"), false);
+  });
+}
+
+for (const scenario of ["unsupported", "url", "foreign"] as const) {
+  test(`Antigravity drops a ${scenario} elicitation without opening a card`, { timeout: 15_000 }, async () => {
+    signIn();
+    const { driver, seen } = launchDriver(setup({ executable: { path: agy, version: "1.5.14" } }), PROVIDER, root);
+    await driver.initialize();
+    await driver.newSession(root);
+    assert.equal(await driver.prompt(`Ask fixture question ${scenario}`), scenario === "foreign" ? "cancelled" : "end_turn");
+    assert.deepEqual(calls().find(({ method }) => method === "elicitation_response")?.result, {
+      action: scenario === "foreign" ? "cancel" : "decline",
+    });
+    assert.ok(!seen.events.some(({ kind }) => kind === "question_request"));
+    assert.equal(seen.events.some((event) =>
+      event.kind === "error" && event.nonFatal && event.message.includes("could not display the form")), scenario !== "foreign");
+  });
 }
 
 interface Observed {

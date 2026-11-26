@@ -39,6 +39,7 @@ export interface RequestOptions {
 }
 
 export type RequestHandler = (params: Params, requestId: number | string) => Promise<unknown> | unknown;
+type DeferredRequestHandler = (params: Params, reply: (result: unknown) => void, requestId: number | string) => void | Promise<void>;
 export type NotificationHandler = (params: Params) => void;
 
 interface Pending {
@@ -69,7 +70,7 @@ function inboundError(error: RpcError): RpcError {
 export class JsonRpcPeer {
   private nextId = 1;
   private readonly pending = new Map<number | string, Pending>();
-  private readonly requestHandlers = new Map<string, RequestHandler>();
+  private readonly requestHandlers = new Map<string, DeferredRequestHandler>();
   private readonly notificationHandlers = new Map<string, NotificationHandler>();
   private readonly input: BoundedNdjsonBuffer;
   private closed = false;
@@ -98,6 +99,11 @@ export class JsonRpcPeer {
   }
 
   onRequest(method: string, handler: RequestHandler): void {
+    this.onDeferredRequest(method, async (params, reply, requestId) => reply(await handler(params, requestId)));
+  }
+
+  /** Register a request whose response may be written synchronously during client shutdown. */
+  onDeferredRequest(method: string, handler: DeferredRequestHandler): void {
     this.requestHandlers.set(method, handler);
   }
 
@@ -254,16 +260,23 @@ export class JsonRpcPeer {
         this.write({ jsonrpc: "2.0", id: reqId, error: { code: -32601, message: "method not found" } });
         return;
       }
+      let replied = false;
+      const reply = (result: unknown) => {
+        if (replied) return;
+        replied = true;
+        this.write({ jsonrpc: "2.0", id: reqId, result: result ?? null });
+      };
       Promise.resolve()
-        .then(() => handler(msg.params, reqId))
-        .then((result) => this.write({ jsonrpc: "2.0", id: reqId, result: result ?? null }))
-        .catch((err) =>
+        .then(() => handler(msg.params, reply, reqId))
+        .catch((err) => {
+          if (replied) return;
+          replied = true;
           this.write({
             jsonrpc: "2.0",
             id: reqId,
             error: { code: -32000, message: err?.message ?? String(err) },
-          }),
-        );
+          });
+        });
       return;
     }
 
