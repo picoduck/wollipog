@@ -442,9 +442,9 @@ test("an older runner or a missing harness refuses the thread with guidance and 
     assert.equal((await h.call("POST", "/api/assistant-threads", { role: "orchestrator" })).status, 400);
     assert.equal(h.sessionCount(), 0);
     const defaults = (await h.call("GET", "/api/assistant-threads/defaults")).body;
-    assert.deepEqual(defaults, { harness: "claude-code", launchDefaults: { harness: "claude-code", providerAccount: null }, decisionDefault: null, harnesses: [
+    assert.deepEqual(defaults, { harness: "claude-code", launchDefaults: { harness: "claude-code", providerAccount: null, model: null, effort: null }, decisionDefault: null, harnesses: [
       { id: "claude-code", label: "Claude Code", available: true,
-        accountSelection: { runnerId: "r", workspaceId: "w", accounts: [] } },
+        accountSelection: { runnerId: "r", workspaceId: "w", accounts: [] }, driver: "claude-code", models: [], effortLevels: [] },
       { id: "codex", label: "Codex", available: false, reason: "Install Codex on an online Machine to start a thread with it." },
     ] });
   } finally { await h.close(); }
@@ -534,9 +534,9 @@ test("the Assistant default account applies to new threads, with an explicit Mac
     assert.equal((await h.call("PUT", launchDefaults, { ...chosen, providerAccount: { runnerId: "r", accountRef: accountRef("sign-in") } })).status, 409);
     const saved = await h.call("PATCH", launchDefaults, { expectedHarness: chosen.harness, providerAccount: chosen.providerAccount });
     assert.equal(saved.status, 200, saved.raw);
-    assert.deepEqual(saved.body.launchDefaults, chosen);
+    assert.deepEqual(saved.body.launchDefaults, { ...chosen, model: null, effort: null });
     assert.equal((await h.call("PATCH", launchDefaults, { expectedHarness: "codex", providerAccount: null })).status, 409);
-    assert.deepEqual((await h.call("PATCH", launchDefaults, { harness: chosen.harness })).body.launchDefaults, chosen);
+    assert.deepEqual((await h.call("PATCH", launchDefaults, { harness: chosen.harness })).body.launchDefaults, { ...chosen, model: null, effort: null });
     const implicit = await h.call("POST", "/api/assistant-threads", {});
     assert.equal(implicit.body.thread.providerAccountLabel, "Studio Subscription");
     const policy = await h.call("POST", "/api/assistant-threads", { providerAccountRef: null });
@@ -555,6 +555,102 @@ test("the Assistant default account applies to new threads, with an explicit Mac
     const fallback = await h.call("POST", "/api/assistant-threads", { providerAccountRef: null });
     assert.equal(fallback.status, 200, fallback.raw);
     assert.equal(h.db.getSession(fallback.body.thread.sessionId)?.runnerId, "fallback");
+  } finally { await h.close(); }
+});
+
+test("new threads start with the saved or chosen model and effort, which belong to the default harness", async () => {
+  const models = { models: [
+    { id: "opus", displayName: "Opus", efforts: ["medium", "high"] },
+    { id: "secret", displayName: "Hidden", hidden: true },
+    { id: "sonnet", displayName: "Sonnet" },
+  ], effortLevels: ["low", "medium", "high"] };
+  const h = await harness({ agents: [{ ...claude, capabilities: { ...claude.capabilities!, ...models } }, codex] });
+  try {
+    const launchDefaults = "/api/assistant-threads/defaults/launch";
+    const listed = (await h.call("GET", "/api/assistant-threads/defaults")).body;
+    assert.deepEqual(listed.harnesses[0].models.map((model: { id: string }) => model.id), ["opus", "sonnet"]);
+    assert.deepEqual(listed.harnesses[0].effortLevels, ["low", "medium", "high"]);
+    assert.equal(listed.harnesses[0].driver, "claude-code");
+    assert.deepEqual([listed.launchDefaults.model, listed.launchDefaults.effort], [null, null]);
+
+    const saved = await h.call("PATCH", launchDefaults, { expectedHarness: "claude-code", model: "opus", effort: "high" });
+    assert.equal(saved.status, 200, saved.raw);
+    assert.deepEqual(saved.body.launchDefaults, { harness: "claude-code", providerAccount: null, model: "opus", effort: "high" });
+    assert.equal((await h.call("PATCH", launchDefaults, { expectedHarness: "codex", model: null, effort: null })).status, 409);
+    assert.equal((await h.call("PATCH", launchDefaults, { expectedHarness: "claude-code", model: "", effort: null })).status, 400);
+    // A PUT that leaves out the model keeps it for the same harness.
+    assert.equal((await h.call("PUT", launchDefaults, { harness: "claude-code", providerAccount: null })).body.launchDefaults.model, "opus");
+
+    const implicit = await h.call("POST", "/api/assistant-threads", {});
+    assert.equal(implicit.status, 200, implicit.raw);
+    assert.deepEqual([h.sent.at(-1)!.spec.config?.model, h.sent.at(-1)!.spec.config?.effort], ["opus", "high"]);
+    const chosen = await h.call("POST", "/api/assistant-threads", { model: "sonnet", effort: "low" });
+    assert.equal(chosen.status, 200, chosen.raw);
+    assert.deepEqual([h.sent.at(-1)!.spec.config?.model, h.sent.at(-1)!.spec.config?.effort], ["sonnet", "low"]);
+    // Automatic effort is the launch's own resolution for the chosen model, never the saved "high"
+    // carried over from another model: Opus's own effort list resolves without it.
+    const automatic = await h.call("POST", "/api/assistant-threads", { effort: null });
+    assert.equal(automatic.status, 200, automatic.raw);
+    assert.equal(h.sent.at(-1)!.spec.config?.model, "opus");
+    // The saved model is Claude's, so a Codex thread starts on Codex's own default.
+    const other = await h.call("POST", "/api/assistant-threads", { harness: "codex" });
+    assert.equal(other.status, 200, other.raw);
+    assert.deepEqual([h.sent.at(-1)!.spec.config?.model, h.sent.at(-1)!.spec.config?.effort], [undefined, undefined]);
+    assert.equal((await h.call("POST", "/api/assistant-threads", { model: 7 })).status, 400);
+
+    const switched = await h.call("PATCH", launchDefaults, { harness: "codex" });
+    assert.deepEqual(switched.body.launchDefaults, { harness: "codex", providerAccount: null, model: null, effort: null });
+  } finally { await h.close(); }
+});
+
+test("a model change keeps the saved account while that account's Machine is offline", async () => {
+  const h = await harness({ accounts, agents: [{ ...claude,
+    capabilities: { ...claude.capabilities!, models: [{ id: "opus", displayName: "Opus", efforts: ["high"] }], effortLevels: ["high"] },
+    providerAccountReadiness: { defaultAuthStatus: "authenticated", readyAccountIds: ["work", "studio"] },
+  }] });
+  try {
+    const launchDefaults = "/api/assistant-threads/defaults/launch";
+    const account = { runnerId: "r", accountRef: accountRef("studio") };
+    assert.equal((await h.call("PATCH", launchDefaults, { expectedHarness: "claude-code", providerAccount: account })).status, 200);
+    const original = h.db.getRunner("r")!;
+    h.db.registerRunner({ runnerId: "fallback", hostname: "other machine", os: "linux", version: "fixture",
+      workspaces: [{ id: "fallback-workspace", name: "Home", path: "/fixture/other" }],
+      agents: original.agents, providerAccounts: accounts }, Date.now(), PROTOCOL_VERSION);
+    h.hub.isRunnerOnline = (runnerId) => runnerId === "fallback";
+    for (const model of ["opus", null]) {
+      const changed = await h.call("PATCH", launchDefaults, { expectedHarness: "claude-code", model, effort: model && "high" });
+      assert.equal(changed.status, 200, changed.raw);
+      assert.deepEqual(changed.body.launchDefaults, { harness: "claude-code", providerAccount: account, model, effort: model && "high" });
+    }
+    // Changing the account itself, and starting a thread on the saved one, still check its Machine.
+    assert.equal((await h.call("PATCH", launchDefaults, { expectedHarness: "claude-code", providerAccount: account })).status, 409);
+    const refused = await h.call("POST", "/api/assistant-threads", {});
+    assert.equal(refused.status, 409);
+    assert.match(refused.body.error, /default Assistant account is unavailable/);
+  } finally { await h.close(); }
+});
+
+test("a saved model or effort the installation no longer offers falls back instead of refusing new threads", async () => {
+  const caps = (models: { id: string; displayName: string; efforts?: string[] }[]) =>
+    ({ ...claude.capabilities!, models, effortLevels: ["low", "medium", "high"] });
+  const h = await harness({ agents: [{ ...claude, capabilities: caps([
+    { id: "opus", displayName: "Opus", efforts: ["high"] }, { id: "sonnet", displayName: "Sonnet", efforts: ["low"] },
+  ]) }] });
+  try {
+    const saved = await h.call("PATCH", "/api/assistant-threads/defaults/launch", { expectedHarness: "claude-code", model: "opus", effort: "high" });
+    assert.equal(saved.status, 200, saved.raw);
+    // The Machine's catalog drops the saved model.
+    h.db.registerRunner({ runnerId: "r", hostname: "fixture", os: "linux", version: "fixture",
+      workspaces: [{ id: "w", name: "Home", path: "/fixture/home" }],
+      agents: [{ ...claude, capabilities: caps([{ id: "sonnet", displayName: "Sonnet", efforts: ["low"] }]) }] }, Date.now(), PROTOCOL_VERSION);
+    // A client that leaves the model to the default, such as an older web app, still starts a thread.
+    const inherited = await h.call("POST", "/api/assistant-threads", {});
+    assert.equal(inherited.status, 200, inherited.raw);
+    assert.deepEqual([h.sent.at(-1)!.spec.config?.model, h.sent.at(-1)!.spec.config?.effort], ["sonnet", "low"]);
+    // Naming the missing model is still refused, and nothing launches for it.
+    const sent = h.sent.length;
+    assert.ok((await h.call("POST", "/api/assistant-threads", { model: "opus" })).status >= 400);
+    assert.equal(h.sent.length, sent);
   } finally { await h.close(); }
 });
 

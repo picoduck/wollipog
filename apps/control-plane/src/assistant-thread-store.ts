@@ -120,6 +120,10 @@ export class AssistantThreadStore {
       CREATE INDEX IF NOT EXISTS assistant_thread_members_thread ON assistant_thread_members(thread_id, root_session_id);`);
     // The backing session's final cost, if it was deleted: spend is never refunded by deletion.
     try { db.exec("ALTER TABLE assistant_threads ADD COLUMN retired_cost_usd REAL NOT NULL DEFAULT 0"); } catch { /* column already present */ }
+    // The model and effort new threads start with. Null is the harness's own default.
+    for (const column of ["model TEXT", "effort TEXT"]) {
+      try { db.exec(`ALTER TABLE assistant_thread_launch_defaults ADD COLUMN ${column}`); } catch { /* column already present */ }
+    }
     // A membership table an earlier build created lacks the retirement columns, and the allowance
     // columns (#4671): the cost cap a member was given, which it shares with the children it
     // creates; the own cap the thread last set it to; and the owner's own ceiling, once they set one.
@@ -305,19 +309,25 @@ export class AssistantThreadStore {
   }
 
   defaultLaunch(owner: Pick<HumanPrincipal, "userId" | "organizationId">): AssistantThreadLaunchDefaults {
-    const row = this.db.prepare("SELECT harness, runner_id, account_ref FROM assistant_thread_launch_defaults WHERE owner_user_id=? AND organization_id=?")
-      .get(owner.userId, owner.organizationId) as { harness: AssistantThreadHarness; runner_id: string | null; account_ref: string | null } | undefined;
+    const row = this.db.prepare("SELECT harness, runner_id, account_ref, model, effort FROM assistant_thread_launch_defaults WHERE owner_user_id=? AND organization_id=?")
+      .get(owner.userId, owner.organizationId) as {
+        harness: AssistantThreadHarness; runner_id: string | null; account_ref: string | null; model: string | null; effort: string | null;
+      } | undefined;
     return {
       harness: row?.harness ?? "claude-code",
       providerAccount: row?.runner_id && row.account_ref ? { runnerId: row.runner_id, accountRef: row.account_ref } : null,
+      model: row?.model ?? null,
+      effort: row?.effort ?? null,
     };
   }
 
   setDefaultLaunch(owner: Pick<HumanPrincipal, "userId" | "organizationId">, defaults: AssistantThreadLaunchDefaults): void {
-    this.db.prepare(`INSERT INTO assistant_thread_launch_defaults (owner_user_id, organization_id, harness, runner_id, account_ref)
-      VALUES (?, ?, ?, ?, ?) ON CONFLICT (owner_user_id, organization_id) DO UPDATE
-      SET harness=excluded.harness, runner_id=excluded.runner_id, account_ref=excluded.account_ref`)
-      .run(owner.userId, owner.organizationId, defaults.harness, defaults.providerAccount?.runnerId ?? null, defaults.providerAccount?.accountRef ?? null);
+    this.db.prepare(`INSERT INTO assistant_thread_launch_defaults (owner_user_id, organization_id, harness, runner_id, account_ref, model, effort)
+      VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (owner_user_id, organization_id) DO UPDATE
+      SET harness=excluded.harness, runner_id=excluded.runner_id, account_ref=excluded.account_ref,
+        model=excluded.model, effort=excluded.effort`)
+      .run(owner.userId, owner.organizationId, defaults.harness, defaults.providerAccount?.runnerId ?? null,
+        defaults.providerAccount?.accountRef ?? null, defaults.model ?? null, defaults.effort ?? null);
   }
 
   defaultDecision(owner: HumanPrincipal): AssistantDecisionDefault | null {

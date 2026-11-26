@@ -129,6 +129,15 @@ function harnessOf(value: unknown): AssistantThreadHarness {
   return value as AssistantThreadHarness;
 }
 
+/** A model or effort choice: null for the harness's own default, or a provider-defined id. */
+function modelChoiceOf(value: unknown, key: "model" | "effort"): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string" || !value.trim() || value.length > 200) {
+    throw new AssistantThreadRefusal(`${key} must be null or a non-empty string.`, 400);
+  }
+  return value;
+}
+
 /** The native installation this Machine launches for a harness: its selected installation first,
  * never one its installation choice excludes, the same rule every other launch uses. */
 function harnessAgent(runner: RunnerView, harness: AssistantThreadHarness): AgentDefinition | undefined {
@@ -372,10 +381,16 @@ export class AssistantThreads {
   setLaunchDefaults(owner: HumanPrincipal, body: unknown): AssistantThreadDefaultsResponse {
     const input = body as Record<string, unknown> | null;
     if (!input || typeof input !== "object" || Array.isArray(input) ||
-        Object.keys(input).some((key) => key !== "harness" && key !== "providerAccount")) {
+        Object.keys(input).some((key) => !["harness", "providerAccount", "model", "effort"].includes(key))) {
       throw new AssistantThreadRefusal("A harness and provider account choice are required.", 400);
     }
     const harness = harnessOf(input.harness);
+    // An omitted model or effort keeps the saved one for the same harness. Another harness's
+    // models are not this one's, so changing the harness clears them.
+    const current = this.store.defaultLaunch(owner);
+    const kept = (key: "model" | "effort") => harness === current.harness ? current[key] ?? null : null;
+    const model = "model" in input ? modelChoiceOf(input.model, "model") : kept("model");
+    const effort = "effort" in input ? modelChoiceOf(input.effort, "effort") : kept("effort");
     let providerAccount: AssistantThreadLaunchDefaults["providerAccount"] = null;
     if (input.providerAccount !== null) {
       const account = input.providerAccount as Record<string, unknown> | undefined;
@@ -395,7 +410,7 @@ export class AssistantThreads {
       if (choice.reason) throw new AssistantThreadRefusal(`The chosen account ${PROVIDER_ACCOUNT_SKIP_TEXT[choice.reason]}.`, 409);
       providerAccount = { runnerId: runner.runnerId, accountRef: choice.accountRef };
     }
-    this.store.setDefaultLaunch(owner, { harness, providerAccount });
+    this.store.setDefaultLaunch(owner, { harness, providerAccount, model, effort });
     return this.defaults(owner);
   }
 
@@ -414,6 +429,17 @@ export class AssistantThreads {
         throw new AssistantThreadRefusal("The default harness changed. Reopen Assistant Settings to choose its account.", 409);
       }
       return this.setLaunchDefaults(owner, { harness: current.harness, providerAccount: body.providerAccount });
+    }
+    if (keys.length === 3 && "model" in body && "effort" in body && "expectedHarness" in body) {
+      if (harnessOf(body.expectedHarness) !== current.harness) {
+        throw new AssistantThreadRefusal("The default harness changed. Reopen Assistant Settings to choose its model.", 409);
+      }
+      // Only the model and effort change. The saved account is not chosen here, so it is not checked
+      // again: its Machine being away must not refuse a model change. Creation still checks it.
+      this.store.setDefaultLaunch(owner, { ...current,
+        model: modelChoiceOf((body as { model: unknown }).model, "model"),
+        effort: modelChoiceOf((body as { effort: unknown }).effort, "effort") });
+      return this.defaults(owner);
     }
     throw new AssistantThreadRefusal("Specify either a harness or an account to update.", 400);
   }
@@ -435,7 +461,14 @@ export class AssistantThreads {
           const accounts = runnerSupportsProtocol(runner.protocolVersion, "assistantThreadProviderAccount")
             ? this.deps.accountChoices(runner, harnessAgent(runner, id)!)
             : { accounts: [], unavailable: "Update this Machine's runner to choose an account." };
-          return { id, label, available: true, accountSelection: { ...accounts, runnerId: runner.runnerId, workspaceId: runner.workspaces[0]!.id } };
+          const agent = harnessAgent(runner, id)!;
+          return {
+            id, label, available: true,
+            accountSelection: { ...accounts, runnerId: runner.runnerId, workspaceId: runner.workspaces[0]!.id },
+            driver: agent.driver,
+            models: (agent.capabilities?.models ?? []).filter((model) => !model.hidden && model.id !== "default"),
+            effortLevels: agent.capabilities?.effortLevels ?? [],
+          };
         }
         if (capable.some((candidate) => harnessAgent(candidate, id))) {
           return { id, label, available: false, reason: "Add a Location on a Machine with this harness to start a thread." };
@@ -454,7 +487,7 @@ export class AssistantThreads {
   create(owner: HumanPrincipal, body: unknown): AssistantThread {
     const input = (body ?? {}) as Record<string, unknown>;
     if (typeof input !== "object" || Array.isArray(input)) throw new AssistantThreadRefusal("A thread request object is required.", 400);
-    const unknown = Object.keys(input).filter((key) => !["harness", "title", "runnerId", "workspaceId", "providerAccountRef"].includes(key));
+    const unknown = Object.keys(input).filter((key) => !["harness", "title", "runnerId", "workspaceId", "providerAccountRef", "model", "effort"].includes(key));
     if (unknown.length) throw new AssistantThreadRefusal(`Unsupported thread fields: ${unknown.join(", ")}.`, 400);
     const defaults = this.store.defaultLaunch(owner);
     const harness = input.harness === undefined ? defaults.harness : harnessOf(input.harness);
@@ -469,6 +502,11 @@ export class AssistantThreads {
       throw new AssistantThreadRefusal("A valid providerAccountRef is required when choosing an account.", 400);
     }
     const defaultAccount = requestedAccount === undefined && harness === defaults.harness ? defaults.providerAccount : null;
+    // An omitted model or effort is the saved default, but only for the harness it was saved for.
+    let model = input.model !== undefined ? modelChoiceOf(input.model, "model")
+      : harness === defaults.harness ? defaults.model ?? null : null;
+    let effort = input.effort !== undefined ? modelChoiceOf(input.effort, "effort")
+      : harness === defaults.harness ? defaults.effort ?? null : null;
     const runners = this.deps.listRunners(owner);
     const workspaceRunnerId = workspaceId === undefined ? undefined : runners.find((runner) =>
       runner.workspaces.some((workspace) => workspace.id === workspaceId))?.runnerId;
@@ -510,6 +548,18 @@ export class AssistantThreads {
       throw new AssistantThreadRefusal(workspaceId === undefined ? "This Machine has no Location. Add one, or choose another Machine." : "Location not found on this Machine.", workspaceId === undefined ? 409 : 404);
     }
     const agent = harnessAgent(runner, harness)!;
+    // A saved default the installation no longer offers falls back to the harness's own choice,
+    // so a stale default never refuses every new thread. A model or effort the request names is
+    // still checked, and refused, by the session itself.
+    const capabilities = agent.capabilities;
+    if (input.model === undefined && model !== null && capabilities?.models.length &&
+        !capabilities.models.some((candidate) => candidate.id === model)) {
+      model = null;
+    }
+    if (input.effort === undefined && effort !== null && capabilities) {
+      const chosen = model === null ? undefined : capabilities.models.find((candidate) => candidate.id === model);
+      if (!(chosen?.efforts?.length ? chosen.efforts : capabilities.effortLevels).includes(effort)) effort = null;
+    }
     if (accountRef && !runnerSupportsProtocol(runner.protocolVersion, "assistantThreadProviderAccount")) {
       const { error, ...details } = runnerCapabilityRequirementError(runner.protocolVersion, "assistantThreadProviderAccount", "choosing an assistant thread's account");
       throw new AssistantThreadRefusal(error, 409, details);
@@ -534,8 +584,12 @@ export class AssistantThreads {
         ...(title === null ? {} : { title }),
         useWorktree: false,
         role: "normal",
-        // The assistant's own spend counts against the thread's budget too.
-        ...(limits.costUsd === null ? {} : { config: { costBudgetUsd: limits.costUsd } }),
+        ...(model === null && effort === null && limits.costUsd === null ? {} : { config: {
+          ...(model === null ? {} : { model }),
+          ...(effort === null ? {} : { effort }),
+          // The assistant's own spend counts against the thread's budget too.
+          ...(limits.costUsd === null ? {} : { costBudgetUsd: limits.costUsd }),
+        } }),
       }, threadId);
     } catch (error) {
       this.store.abandon(threadId);

@@ -87,7 +87,6 @@ const NOW = Date.now();
 const minute = 60_000;
 const accountScenario = params.get("accounts");
 const newThreadScenario = params.get("new-thread");
-let releaseFirstMessage: (() => void) | undefined;
 const fixtureAccountRef = (index: number) => `acct:${index.toString(16).padStart(16, "0")}`;
 const fixtureAccounts: AssistantThreadAccountChoices["accounts"] = [
   { accountRef: fixtureAccountRef(1), label: "Studio Subscription" },
@@ -103,6 +102,9 @@ const fixtureAccounts: AssistantThreadAccountChoices["accounts"] = [
 const triageAccount = fixtureAccounts[accountScenario === "stress" ? 1 : 6]!;
 const accountSelections = new Map([["thr_triage", triageAccount.accountRef]]);
 
+const workEmail = "work.me@example.com";
+const homeEmail = "home.me@example.org";
+
 function fixtureAccountChoices(harness: string, currentAccountRef?: string): AssistantThreadAccountChoices {
   const accounts = accountScenario === "composer-stress" ? [
     ...fixtureAccounts,
@@ -110,7 +112,15 @@ function fixtureAccountChoices(harness: string, currentAccountRef?: string): Ass
     { accountRef: fixtureAccountRef(12), label: "Operations Subscription" },
   ] : accountScenario === "stress" ? fixtureAccounts
     : accountScenario === "choices" ? [fixtureAccounts[0]!, ...fixtureAccounts.slice(2, 6)]
+    // Two eligible accounts named by an email each, for hidden-email choices.
+    : accountScenario === "emails" ? [
+      { accountRef: fixtureAccountRef(12), label: workEmail },
+      { accountRef: fixtureAccountRef(13), label: homeEmail },
+      fixtureAccounts[0]!,
+    ]
     : [fixtureAccounts[0]!, fixtureAccounts[6]!, fixtureAccounts[2]!];
+  // `codex-account=offline`: the Codex account's Machine is away, so it is not among the choices.
+  if (harness === "codex" && params.get("codex-account") === "offline") return { accounts: [], currentAccountRef };
   return harness === "codex"
     ? { accounts: [{ accountRef: fixtureAccountRef(10), label: "Codex Studio" }], policyAccountRef: fixtureAccountRef(10), currentAccountRef }
     : { accounts, policyAccountRef: fixtureAccountRef(1), currentAccountRef };
@@ -630,14 +640,40 @@ const defaults: AssistantThreadDefaults = {
 };
 if (limitsScenario && limitsScenario !== "old") {
   defaults.launchDefaults = { harness: "claude-code", providerAccount: null };
-  if (limitsScenario !== "older-defaults") defaults.decisionDefault = null;
+  if (limitsScenario !== "older-defaults") {
+    const savedGrant = params.get("default-grant");
+    defaults.decisionDefault = savedGrant === "all-before-releases" || savedGrant === "all-scoped" ? {
+      categories: (Object.keys(ASSISTANT_DECISION_CATEGORIES) as AssistantDecisionCategory[]).filter((category) =>
+        !["ci_rerun", "release_tag", "release_publish", "ui_evidence_review"].includes(category)),
+      selectionMode: "all", expiresAfterMs: 7 * 24 * 60 * 60_000,
+      ...(savedGrant === "all-scoped" ? { projects: ["project_0"], campaigns: ["campaign_0"] } : { projects: "all", campaigns: "all" }),
+    } : null;
+    // A control plane that saves a model and effort for new threads, and lists each harness's.
+    defaults.launchDefaults = { ...defaults.launchDefaults, model: null, effort: null };
+    defaults.harnesses[0] = { ...defaults.harnesses[0]!, driver: "claude-code", effortLevels: ["low", "medium", "high", "max"], models: [
+      { id: "claude-opus-4-7", displayName: "Opus 4.7", efforts: ["low", "medium", "high", "max"] },
+      { id: "claude-sonnet-4-6", displayName: "Sonnet 4.6", efforts: ["low", "medium", "high"] },
+      { id: "claude-haiku-4-5", displayName: "Haiku 4.5", efforts: [] },
+    ] };
+    defaults.harnesses[1] = { ...defaults.harnesses[1]!, driver: "codex-app-server", effortLevels: ["low", "medium", "high", "xhigh"], models: [
+      { id: "gpt-5.5", displayName: "GPT-5.5" },
+    ] };
+  }
 }
 if (accountScenario || defaults.launchDefaults) {
   for (const harness of defaults.harnesses) {
     harness.accountSelection = { ...fixtureAccountChoices(harness.id), runnerId: "runner-1", workspaceId: "workspace-1" };
   }
 }
+if (params.get("saved-account") === "unavailable" && defaults.launchDefaults) {
+  // The saved account's Machine is offline; the one available predates account choices.
+  defaults.launchDefaults = { ...defaults.launchDefaults, providerAccount: { runnerId: "runner-old", accountRef: fixtureAccountRef(1) } };
+  defaults.harnesses[0]!.accountSelection = { accounts: [], unavailable: "Update this Machine's runner to choose an account.",
+    runnerId: "runner-1", workspaceId: "workspace-1" };
+}
 
+/** `new-thread=hold-create`: a thread creation waits for `assistantsReleaseCreate()`. */
+let releaseCreate: (() => void) | undefined;
 let seq = 0;
 const event = (sessionId: string, ts: number, payload: SessionEvent["payload"]): SessionEvent =>
   ({ id: ++seq, sessionId, seq, ts, payload }) as SessionEvent;
@@ -899,19 +935,34 @@ const client = {
   },
   assistantThreadDefaults: () => refused() ?? Promise.resolve(structuredClone(defaults)),
   setAssistantThreadLaunchDefaults: async (next: AssistantThreadLaunchDefaults) => {
+    document.body.dataset.savedLaunchDefaults = JSON.stringify(next);
     defaults.harness = next.harness;
     defaults.launchDefaults = next;
     return structuredClone(defaults);
   },
   patchAssistantThreadLaunchDefaults: async (update: AssistantThreadLaunchDefaultsPatch) => {
     const current = defaults.launchDefaults!;
+    if ("expectedHarness" in update && update.expectedHarness !== current.harness) {
+      throw new ApiError("The default harness changed. Reopen Assistant Settings to choose its account.", 409);
+    }
+    if ("providerAccount" in update && params.get("account-patch") === "fail") {
+      throw new ApiError("The chosen account is no longer available for this harness.", 409);
+    }
+    if ("model" in update && params.get("model-patch") === "fail-once" && !document.body.dataset.modelPatchFailed) {
+      document.body.dataset.modelPatchFailed = "true";
+      throw new ApiError("The saved account's Machine is offline.", 409);
+    }
     defaults.launchDefaults = "harness" in update
-      ? { harness: update.harness, providerAccount: current.harness === update.harness ? current.providerAccount : null }
-      : { ...current, providerAccount: update.providerAccount };
+      ? current.harness === update.harness ? current : { ...current, harness: update.harness, providerAccount: null,
+        ...("model" in current ? { model: null, effort: null } : {}) }
+      : "model" in update ? { ...current, model: update.model, effort: update.effort }
+        : { ...current, providerAccount: update.providerAccount };
+    document.body.dataset.savedLaunchDefaults = JSON.stringify(defaults.launchDefaults);
     defaults.harness = defaults.launchDefaults.harness;
     return structuredClone(defaults);
   },
   setAssistantThreadDecisionDefault: async (grant: AssistantDecisionDefault | null) => {
+    document.body.dataset.savedDecisionDefault = JSON.stringify(grant);
     defaults.decisionDefault = grant;
     return { grant: structuredClone(grant) };
   },
@@ -929,11 +980,16 @@ const client = {
   assistantThreadLimitDefaults: () => refused() ?? (limitsScenario && limitsScenario !== "old"
     ? Promise.resolve(structuredClone(limitDefaults)) : unavailable()),
   setAssistantThreadLimitDefaults: async (limits: AssistantThreadLimits) => {
+    document.body.dataset.savedLimitDefaults = JSON.stringify(limits);
     limitDefaults = limits;
     return structuredClone(limitDefaults);
   },
   patchAssistantThreadLimitDefaults: async (update: Partial<AssistantThreadLimits>) => {
+    if (Object.keys(update).length !== 1) throw new ApiError("Specify either costUsd or launchedSessions to update.", 400);
+    document.body.dataset.patchedLimitDefaults = [document.body.dataset.patchedLimitDefaults, JSON.stringify(update)]
+      .filter(Boolean).join(" ");
     limitDefaults = { ...limitDefaults, ...update };
+    document.body.dataset.savedLimitDefaults = JSON.stringify(limitDefaults);
     return structuredClone(limitDefaults);
   },
   setAssistantThreadLimits: async (threadId: string, limits: AssistantThreadLimits) => {
@@ -991,6 +1047,10 @@ const client = {
     if (newThreadScenario === "create-failure") {
       throw new ApiError("The selected Machine went offline.", 409);
     }
+    if (newThreadScenario === "hold-create") {
+      document.body.dataset.threadCreateHeld = "true";
+      await new Promise<void>((resolve) => { releaseCreate = resolve; });
+    }
     document.body.dataset.threadCreateCount = String(Number(document.body.dataset.threadCreateCount ?? 0) + 1);
     const id = `thr_new_${threads.length + 1}`;
     const sessionId = `sess-new-${threads.length + 1}`;
@@ -1004,8 +1064,11 @@ const client = {
       accountSelections.set(id, account.accountRef);
       document.body.dataset.createdAccount = body.providerAccountRef ?? "policy";
     }
+    if ("model" in body) document.body.dataset.createdModel = body.model ?? "automatic";
+    if ("effort" in body) document.body.dataset.createdEffort = body.effort ?? "automatic";
     upsert(session(sessionId, body.title ?? "New Thread", { createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0,
-      ...(body.harness === "codex" ? { agentId: "codex", agentName: "Codex", driver: "codex-app-server" } : {}) }));
+      ...(body.harness === "codex" ? { agentId: "codex", agentName: "Codex", driver: "codex-app-server" } : {}),
+      ...(body.model ? { model: body.model } : {}), ...(body.effort ? { effort: body.effort } : {}) }));
     const created: AssistantThread = {
       id, assistant: "wollipog", title: body.title ?? "", harness: body.harness ?? defaults.harness, sessionId, status: "done",
       access, connectionId: null, launchedSessionIds: [], lastActivityAt: Date.now(), createdAt: Date.now(), archivedAt: null,
@@ -1018,6 +1081,9 @@ const client = {
         created.decisionDelegation = { revision: 1, grant: {
           ...scope, expiresAt: expiresAfterMs === null ? null : created.createdAt + expiresAfterMs,
         } };
+      } else if (defaults.decisionDefault === null) {
+        // A control plane with delegation reports a thread without a grant as a null one.
+        created.decisionDelegation = { revision: 1, grant: null };
       }
       if (limitsScenario !== "legacy-pause") created.launchPaused = false;
       created.usage = {
@@ -1134,16 +1200,6 @@ const client = {
   },
   prompt: async (id: string, message: string) => {
     if (id.startsWith("sess-new-")) {
-      if (newThreadScenario === "hold-first-message") {
-        await new Promise<void>((resolve) => {
-          releaseFirstMessage = resolve;
-          document.body.dataset.firstMessageHeld = "true";
-        });
-      }
-      if (newThreadScenario === "first-message-failure" && !document.body.dataset.refusedFirstMessage) {
-        document.body.dataset.refusedFirstMessage = "true";
-        throw new ApiError("The Machine did not accept the message.", 409);
-      }
       const thread = threads.find((candidate) => candidate.sessionId === id)!;
       const now = Date.now();
       const next = { ...sessions.get(id)!, title: thread.title || titleFromPrompt(message), messageCount: 1,
@@ -1292,10 +1348,17 @@ Object.assign(window, {
     publish(threads.find((candidate) => candidate.id === threadId)!);
   },
   assistantsHoldNextList: () => { holdNextList = true; },
-  assistantsReleaseFirstMessage: () => {
-    releaseFirstMessage?.();
-    releaseFirstMessage = undefined;
+  assistantsReleaseCreate: () => { releaseCreate?.(); releaseCreate = undefined; },
+  /** The launch defaults the fixture holds now, whatever wrote them. */
+  assistantsSavedLaunchDefaults: () => structuredClone(defaults.launchDefaults),
+  /** Another tab saving the default harness behind this page. */
+  assistantsSaveHarnessElsewhere: (harness: "claude-code" | "codex", accountRef?: string) => {
+    defaults.harness = harness;
+    defaults.launchDefaults = { ...defaults.launchDefaults!, harness,
+      providerAccount: accountRef ? { runnerId: "runner-1", accountRef } : null };
   },
+  /** Another tab saving limit defaults behind this page. */
+  assistantsSaveLimitDefaultsElsewhere: (update: Partial<AssistantThreadLimits>) => { limitDefaults = { ...limitDefaults, ...update }; },
   assistantsSlowLists: (ms: number) => { slowListMs = ms; },
   assistantsReleaseList: () => {
     initialListGate = undefined;

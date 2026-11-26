@@ -340,9 +340,14 @@ const harnessDefaultsTransport: ApiTransport = {
     if (path === "/api/assistant-threads") return Response.json({ threads: [] });
     if (path === "/api/assistant-threads/defaults") return Response.json({
       harness: "claude-code",
-      launchDefaults: { harness: "claude-code", providerAccount: null },
+      launchDefaults: { harness: "claude-code", providerAccount: null, model: null, effort: null },
       decisionDefault: null,
-      harnesses: [{ id: "claude-code", label: "Claude Code", available: true }, { id: "codex", label: "Codex", available: true }],
+      harnesses: [
+        { id: "claude-code", label: "Claude Code", available: true, driver: "claude-code", effortLevels: ["low", "medium", "high"],
+          models: [{ id: "claude-opus-4-7", displayName: "Opus 4.7" }, { id: "claude-sonnet-4-6", displayName: "Sonnet 4.6" }] },
+        { id: "codex", label: "Codex", available: true, driver: "codex-app-server", effortLevels: ["low", "medium", "high"],
+          models: [{ id: "gpt-5.5", displayName: "GPT-5.5" }] },
+      ],
     });
     if (path === "/api/assistant-threads/defaults/limits") return Response.json({ costUsd: 25, launchedSessions: 10 });
     if (path === "/api/assistant-connections") return Response.json({

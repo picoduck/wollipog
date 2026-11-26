@@ -296,13 +296,16 @@ for (const theme of ["dark", "light"] as const) {
     test("New Thread preselects the default harness, and rename and archive act on the thread", async ({ page }) => {
       await open(page, theme);
       await page.getByRole("button", { name: "New Thread" }).first().click();
-      const form = page.getByRole("form", { name: "What should the assistant work on?" });
-      await form.getByRole("button", { name: /^Harness Claude Code/ }).click();
-      await page.getByRole("radio", { name: "Codex", exact: true }).check();
-      await page.getByRole("button", { name: "Close Harness" }).click();
-      await form.getByRole("textbox", { name: "First Message" }).fill("Plan the Next Release");
-      await form.getByRole("button", { name: "Start Thread" }).click();
-      await expect(form).toHaveCount(0);
+      const dialog = page.getByRole("dialog", { name: "New Thread" });
+      await expect(dialog.getByRole("button", { name: /^Harness:/ })).toHaveAccessibleName("Harness: Claude Code");
+      await dialog.getByRole("button", { name: /^Harness:/ }).click();
+      await page.getByRole("option", { name: "Codex", exact: true }).click();
+      await dialog.getByRole("button", { name: "Create Thread" }).click();
+      await expect(dialog).toHaveCount(0);
+      // The thread opens on its own composer, and its first message names it.
+      const composer = page.locator(".assistant-thread-pane .composer-input");
+      await composer.fill("Plan the Next Release");
+      await page.locator(".assistant-thread-pane").getByRole("button", { name: "Send", exact: true }).click();
       await expect(page.locator(".assistant-thread-bar").getByRole("heading", { level: 2, name: "Plan the Next Release" })).toBeVisible();
       await expect(threadRow(page, "Plan the Next Release")).toHaveAttribute("aria-current", "true");
       await expect(threadRow(page, "Plan the Next Release").locator(".assistant-thread-glyph .agent-openai")).toBeVisible();

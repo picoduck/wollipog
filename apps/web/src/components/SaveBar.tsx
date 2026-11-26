@@ -1,5 +1,6 @@
 import { useId } from "react";
 import { ErrorIcon } from "./Icons.js";
+import { holdFieldFocus } from "./requests/hold-field-focus.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
 /**
@@ -47,7 +48,9 @@ export function SaveBar({
   const failed = Boolean(error) && !blocked;
   const message = blocked ? blockedReason : failed ? error : dirty ? "Unsaved changes" : null;
   return (
-    <div className={`save-bar${failed ? " is-error" : ""}`} role={failed ? "alert" : undefined}>
+    // On a touch phone the tab bar hides while a field is focused, so a press that blurred the field
+    // would move Save out from under the finger before its click (#2205): the field keeps focus.
+    <div className={`save-bar${failed ? " is-error" : ""}`} role={failed ? "alert" : undefined} onMouseDown={holdFieldFocus}>
       {failed && <ErrorIcon className="save-bar-icon" size={16} aria-hidden="true" />}
       <span className="save-bar-message" id={messageId}>{message}</span>
       <button type="button" className="btn ghost" disabled={busy} onClick={onDiscard}>{discardLabel}</button>

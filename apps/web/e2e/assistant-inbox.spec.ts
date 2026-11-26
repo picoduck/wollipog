@@ -5,23 +5,6 @@ import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizont
 const inbox = (page: Page) => page.getByRole("complementary", { name: "Assistants" });
 const rows = (list: Locator) => list.locator("[data-thread-id]");
 
-test("returning to the list during a first send does not revive or redirect the old composer", async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await open(page, "light", "threads=empty&limits=enabled&new-thread=hold-first-message");
-  const composer = page.getByRole("form", { name: "What should the assistant work on?" });
-  await composer.getByRole("button", { name: "Plan a Task" }).click();
-  await composer.getByRole("button", { name: "Start Thread" }).click();
-  await expect(page.locator("body")).toHaveAttribute("data-first-message-held", "true");
-  await rows(inbox(page)).first().click();
-  await expect(composer).toHaveCount(0);
-  await page.goBack();
-  await expect(inbox(page).getByRole("button", { name: "New Thread", exact: true })).toBeVisible();
-  await expect(composer).toHaveCount(0);
-  await page.evaluate(() => Reflect.get(window, "assistantsReleaseFirstMessage")());
-  await expect(rows(inbox(page)).first()).toContainText("Help me plan a task");
-  await expect(page.getByRole("heading", { name: "Choose a Thread" })).toBeVisible();
-});
-
 test("background polls refresh active threads and keep the archived list", async ({ page }) => {
   await page.clock.install();
   await page.goto("/assistants-e2e.html?threads=inbox&track-list-reads");
@@ -123,31 +106,21 @@ for (const theme of ["light", "dark"] as const) {
     test.describe(`${theme} inbox at ${viewport.width}px`, () => {
       test.use({ viewport, hasTouch: phone, isMobile: phone, colorScheme: theme });
 
-      test("mounts the first-thread composer and three starter prompts in an empty inbox", async ({ page }) => {
-        await open(page, theme, "threads=empty&limits=enabled&new-thread=hold-first-message");
-        const pane = page.locator(".assistant-thread-pane");
-        const composer = pane.getByRole("form", { name: "What should the assistant work on?" });
-        const start = composer.getByRole("button", { name: "Start Thread" });
-        const suggestions = composer.getByRole("group", { name: "Starter Prompts" }).getByRole("button");
-        await expect(composer).toBeVisible();
-        await expect(suggestions).toHaveText(["Check On Running Work", "Review Open Decisions", "Plan a Task"]);
-        for (const suggestion of await suggestions.all()) await expectFullyInViewport(suggestion);
-        await expect(start).toBeDisabled();
-        await expectFullyInViewport(start, "Start Thread");
-        await expect(inbox(page).getByRole("button", { name: "New Thread", exact: true })).toHaveCount(0);
-        await expectInboxLayout(composer, phone);
+      test("an empty inbox invites New Thread, which opens the dialog rather than a composer", async ({ page }) => {
+        await open(page, theme, "threads=empty&limits=enabled");
+        // A phone shows the list alone; a desktop also invites from the empty pane beside it.
+        const surface = phone ? inbox(page) : page.locator(".assistant-thread-pane");
+        const invite = surface.getByRole("button", { name: "New Thread", exact: true });
+        await expect(surface.getByText("No Threads Yet", { exact: true })).toBeVisible();
+        await expect(page.locator(".assistant-thread-pane form, .assistant-thread-pane textarea")).toHaveCount(0);
+        await expect(invite).toHaveClass(/\bprimary\b/);
+        await expectFullyInViewport(invite, "New Thread");
+        if (!phone) await expectFullyInViewport(inbox(page).getByRole("button", { name: "New Thread", exact: true }), "List New Thread");
+        await expectInboxLayout(surface, phone);
         await expectPageNoHorizontalOverflow(page);
-        await capture(page, `${prefix}-empty-composer`);
-        await suggestions.getByText("Plan a Task").click();
-        await expect(start).toBeEnabled();
-        await start.click();
-        await expect(page.locator("body")).toHaveAttribute("data-first-message-held", "true");
-        // The creation event has reached the list while the first prompt is still in flight.
-        await expect(page.locator(".master-detail-list [data-thread-id]")).toHaveCount(1);
-        await expect(composer).toBeVisible();
-        await page.evaluate(() => Reflect.get(window, "assistantsReleaseFirstMessage")());
-        await expect(pane.locator(".composer")).toBeVisible();
-        await expect(composer).toHaveCount(0);
+        await capture(page, `${prefix}-empty`);
+        await invite.click();
+        await expect(page.getByRole("dialog", { name: "New Thread" })).toBeVisible();
       });
 
       test("groups owner attention above recent work and keeps titles, statuses and previews inside the pane", async ({ page }) => {

@@ -2,7 +2,7 @@
  * assistant; its transcript and composer are the backing `assistant`-role session's own routes.
  * These views never carry a credential value or hash. */
 import type { ProviderAccountSkipReason } from "./provider-account-selection.js";
-import type { OrchestratorCampaignBudgetDefault, WorkflowDecisionResourceSnapshot } from "./index.js";
+import type { AgentDriverKind, AgentModel, OrchestratorCampaignBudgetDefault, WorkflowDecisionResourceSnapshot } from "./index.js";
 
 /** The harnesses a thread can run on. `codex` selects a runner's Codex agent (App Server when
  * installed, otherwise the Codex CLI driver). */
@@ -240,6 +240,12 @@ export interface CreateAssistantThreadRequest {
   workspaceId?: string;
   /** Opaque account reference, null for Machine Policy, or absent for the Assistant default. */
   providerAccountRef?: string | null;
+  /** The backing session's model. Null is the harness's own default; absent uses the owner's
+   * default model when the harness is the default harness. A control plane whose launch
+   * defaults carry `model` accepts this field. */
+  model?: string | null;
+  /** The backing session's reasoning effort, with the same null and absent rules as `model`. */
+  effort?: string | null;
 }
 
 export interface UpdateAssistantThreadRequest { title: string }
@@ -274,6 +280,11 @@ export interface AssistantThreadHarnessOption {
   reason?: string;
   /** The same Machine and Location creation selects for this harness. */
   accountSelection?: AssistantThreadAccountChoices & { runnerId: string; workspaceId: string };
+  /** The driver of the installation that Machine launches, for model presentation. */
+  driver?: AgentDriverKind;
+  /** The models and efforts that installation reports. Absent on older control planes. */
+  models?: AgentModel[];
+  effortLevels?: string[];
 }
 
 export interface AssistantThreadDefaultsResponse {
@@ -288,11 +299,17 @@ export interface AssistantThreadDefaultsResponse {
 export interface AssistantThreadLaunchDefaults {
   harness: AssistantThreadHarness;
   providerAccount: { runnerId: string; accountRef: string } | null;
+  /** Null is the harness's own default. Absent on control planes that do not save a model or
+   * effort for new threads; present (even null) advertises that they do. */
+  model?: string | null;
+  effort?: string | null;
 }
 
 export type AssistantThreadLaunchDefaultsPatch =
   | Pick<AssistantThreadLaunchDefaults, "harness">
-  | (Pick<AssistantThreadLaunchDefaults, "providerAccount"> & { expectedHarness: AssistantThreadHarness });
+  | (Pick<AssistantThreadLaunchDefaults, "providerAccount"> & { expectedHarness: AssistantThreadHarness })
+  /** Both together, for the harness the owner saw. Advertised by `launchDefaults.model`. */
+  | { model: string | null; effort: string | null; expectedHarness: AssistantThreadHarness };
 
 /** A thread credential authenticates for this long after the runner registers it. The runner
  * proxy registers a fresh one at each launch and before half of this has passed (#4663). */
