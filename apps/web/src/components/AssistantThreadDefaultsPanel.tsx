@@ -54,6 +54,10 @@ interface Draft {
   categories: AssistantDecisionCategory[];
   projects: AssistantDecisionDefault["projects"];
   campaigns: AssistantDecisionDefault["campaigns"];
+  /** What Delegate All grants when chosen: the saved snapshot, or the editor's refresh. Null is
+   * today's delegable set. Kept apart from `categories` so a round trip through another mode
+   * returns to it. */
+  allCategories: AssistantDecisionCategory[] | null;
 }
 
 interface Saved {
@@ -88,6 +92,7 @@ function draftFrom({ defaults, limits }: Saved): Draft {
     mode: grant ? grant.selectionMode ?? "choose" : "ask",
     expiry: grant ? defaultDelegationExpiry(grant.expiresAfterMs)?.value ?? "week" : "week",
     categories: grant?.categories ?? [],
+    allCategories: grant?.selectionMode === "all" ? grant.categories : null,
     projects: grant?.projects ?? "all",
     campaigns: grant?.campaigns ?? "all",
   };
@@ -202,6 +207,12 @@ function AssistantThreadDefaultsForm() {
   const accountOptions = assistantAccountOptions(choices, titles, "default");
   const savedAccountGone = draft.account !== MACHINE_ACCOUNT_POLICY && !accountOptions.some((candidate) =>
     candidate.value === draft.account && !candidate.disabled);
+  // The saved account, when this tab did not choose it, is the server's: it stays saved while its
+  // Machine is away, and a save that does not send it is never blocked by it. Only an unavailable
+  // account the owner chose here refuses Save.
+  const harnessEdited = !!baseline && draft.harness !== baseline.harness;
+  const accountGoneChosen = savedAccountGone && !!baseline &&
+    draft.account !== (harnessEdited ? MACHINE_ACCOUNT_POLICY : baseline.account);
   if (savedAccountGone && !accountOptions.some((candidate) => candidate.value === draft.account)) {
     accountOptions.push({ value: draft.account, label: "Saved Account (Unavailable)", disabled: true });
   }
@@ -221,7 +232,7 @@ function AssistantThreadDefaultsForm() {
     unavailable.release_publish = "Update the control plane to delegate release publication.";
   }
   const delegable = ALL_CATEGORIES.filter((category) => !unavailable[category]);
-  const blockedReason = savedAccountGone && launchDirty ? "Choose an available account, or Machine Policy."
+  const blockedReason = accountGoneChosen && launchDirty ? "Choose an available account, or Machine Policy."
     : modelProblem && launchDirty ? modelProblem.message
       : limits && !budget.ok ? budget.error
         : limits && !launches.ok ? launches.error
@@ -335,7 +346,7 @@ function AssistantThreadDefaultsForm() {
               ...(modelChosen ? {} : { model: fresh.model, effort: fresh.effort }),
             } : {}),
           ...(settled.has("limits") ? { budget: fresh.budget, launches: fresh.launches } : {}),
-          ...(settled.has("delegation") ? { mode: fresh.mode, expiry: fresh.expiry, categories: fresh.categories,
+          ...(settled.has("delegation") ? { mode: fresh.mode, expiry: fresh.expiry, categories: fresh.categories, allCategories: fresh.allCategories,
             projects: fresh.projects, campaigns: fresh.campaigns } : {}),
         });
         setBusy(false);
@@ -378,10 +389,12 @@ function AssistantThreadDefaultsForm() {
       {launchDefaults && <SelectRow title="Account"
         // A Machine that cannot choose an account says so, and Machine Policy stays choosable: the way
         // back from a saved account that is gone.
-        description={choices?.unavailable ?? accountOptions.find((candidate) => candidate.value === draft.account)?.description
+        description={choices?.unavailable
+          ?? (savedAccountGone && !accountGoneChosen ? "The saved account isn't available on an online Machine right now." : undefined)
+          ?? accountOptions.find((candidate) => candidate.value === draft.account)?.description
           ?? "The provider account new threads sign in with."}
         options={accountOptions} value={draft.account} disabled={busy}
-        error={savedAccountGone ? "The saved account is unavailable. Choose another account, or Machine Policy." : null}
+        error={accountGoneChosen ? "This account is unavailable. Choose another account, or Machine Policy." : null}
         onChange={(account) => change({ account })} />}
     </SettingsGroup>}
 
@@ -401,7 +414,7 @@ function AssistantThreadDefaultsForm() {
         onChange={(value) => {
           const mode = value as DelegationMode;
           // Delegate All is a snapshot: back to the saved one, or today's set when it is new.
-          if (mode === "all") change({ mode, categories: baseline!.mode === "all" ? baseline!.categories : delegable });
+          if (mode === "all") change({ mode, categories: draft.allCategories ?? delegable });
           else change({ mode, ...(mode === "choose" && draft.mode !== "choose" && !draft.categories.length ? { categories: delegable } : {}) });
         }} />
       {draft.mode !== "ask" && <>
@@ -435,7 +448,8 @@ function AssistantThreadDefaultsForm() {
         // never widens a scope the owner limited.
         if (!grant) return change({ mode: "ask" });
         const chosen = draftFrom({ defaults: saved.defaults && { ...saved.defaults, decisionDefault: grant }, limits: saved.limits });
-        change({ mode: chosen.mode, expiry: chosen.expiry, categories: chosen.categories, projects: chosen.projects, campaigns: chosen.campaigns });
+        change({ mode: chosen.mode, expiry: chosen.expiry, categories: chosen.categories, projects: chosen.projects, campaigns: chosen.campaigns,
+          ...(chosen.mode === "all" ? { allCategories: chosen.categories } : {}) });
       }} />}
     </SettingsGroup>}
 

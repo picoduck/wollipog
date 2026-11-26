@@ -119,6 +119,8 @@ function fixtureAccountChoices(harness: string, currentAccountRef?: string): Ass
       fixtureAccounts[0]!,
     ]
     : [fixtureAccounts[0]!, fixtureAccounts[6]!, fixtureAccounts[2]!];
+  // `codex-account=offline`: the Codex account's Machine is away, so it is not among the choices.
+  if (harness === "codex" && params.get("codex-account") === "offline") return { accounts: [], currentAccountRef };
   return harness === "codex"
     ? { accounts: [{ accountRef: fixtureAccountRef(10), label: "Codex Studio" }], policyAccountRef: fixtureAccountRef(10), currentAccountRef }
     : { accounts, policyAccountRef: fixtureAccountRef(1), currentAccountRef };

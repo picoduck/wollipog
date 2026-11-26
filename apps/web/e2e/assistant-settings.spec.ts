@@ -222,12 +222,39 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
         await editor.getByRole("radio", { name: "Choose", exact: true }).click();
         await editor.getByRole("radio", { name: "Delegate All", exact: true }).click();
         await editor.getByRole("button", { name: "Use Delegation Settings" }).click();
+        // A round trip through Ask Me returns to the refresh just staged, not the saved snapshot.
+        const mode = delegation.getByRole("button", { name: /^New Threads:/ });
+        await mode.click();
+        await page.getByRole("option", { name: /^Ask Me/ }).click();
+        await mode.click();
+        await page.getByRole("option", { name: /^Delegate All/ }).click();
         await page.getByRole("button", { name: "Save Defaults" }).click();
         await expect(page.getByRole("button", { name: "Save Defaults" })).toHaveCount(0);
         const grant = JSON.parse(await page.locator("body").getAttribute("data-saved-decision-default") ?? "null");
         expect(grant.selectionMode).toBe("all");
         for (const added of ["ci_rerun", "release_tag", "release_publish"]) expect(grant.categories).toContain(added);
         expect(grant.categories).not.toContain("ui_evidence_review");
+      });
+
+      test("a model edit saves while the account another tab saved is on a Machine that is away", async ({ page }) => {
+        await open(page, "enabled", "&model-patch=fail-once&codex-account=offline");
+        const defaults = page.getByRole("region", { name: "Thread Defaults" });
+        await expect(defaults.getByRole("button", { name: /^Harness:/ })).toHaveAccessibleName("Harness: Claude Code");
+        await page.evaluate(() => Reflect.get(window, "assistantsSaveHarnessElsewhere")("codex", "acct:000000000000000a"));
+        await defaults.getByRole("button", { name: /^Harness:/ }).click();
+        await page.getByRole("option", { name: "Codex", exact: true }).click();
+        await defaults.getByRole("button", { name: /^Model:/ }).click();
+        await page.getByRole("option", { name: /GPT-5\.5/ }).click();
+        await page.getByRole("button", { name: "Save Defaults" }).click();
+        await expect(page.getByText("The saved account's Machine is offline.", { exact: false })).toBeVisible();
+        // The account is the server's, not a choice made here: it never blocks the retry.
+        await expect(defaults).toContainText("The saved account isn't available on an online Machine right now.");
+        const retry = page.getByRole("button", { name: /^(Try Again|Save Defaults)$/ });
+        await expect(retry).toBeEnabled();
+        await retry.click();
+        await expect(retry).toHaveCount(0);
+        const saved = await page.evaluate(() => Reflect.get(window, "assistantsSavedLaunchDefaults")());
+        expect(saved).toMatchObject({ harness: "codex", model: "gpt-5.5", providerAccount: { accountRef: "acct:000000000000000a" } });
       });
 
       test("retrying a failed model save keeps the account another tab saved", async ({ page }) => {
