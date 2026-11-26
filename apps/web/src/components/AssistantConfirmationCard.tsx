@@ -144,7 +144,8 @@ export function CampaignReviewDialog({ confirmation, onClose, onAnswered }: {
         aria-disabled={busy !== null || undefined} onClick={() => { if (!busy) setEditingBudget(true); }}>
         {campaign.budget ? "Change Budget" : "Set Budget"}
       </button>}
-      footer={!editingBudget && <ConfirmationActions busy={busy} answer={answer} approveDisabled={!campaign.budget} />}>
+      footer={!editingBudget && <ConfirmationActions busy={busy} answer={answer}
+        approveDisabled={campaign.mode !== "custom" && !campaign.budget} />}>
       {editingBudget ? (
         <CampaignBudgetEditor confirmation={{ ...shown, campaign }} onCancel={() => setEditingBudget(false)} onSaved={response => {
           setChanged({ previousDigest: confirmation.campaign?.digest ?? campaign.digest, confirmation: response.confirmation });

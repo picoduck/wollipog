@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { join } from "node:path";
-import { expectPageNoHorizontalOverflow } from "./layout-invariants.js";
+import { expectNoHorizontalOverflow, expectPageNoHorizontalOverflow, expectTextContrast } from "./layout-invariants.js";
 
 const threadPath = "/assistants/~dABoAHIAXwB0AHIAaQBhAGcAZQA";
 const dir = process.env.ASSISTANT_CAMPAIGN_EVIDENCE_DIR;
@@ -14,11 +14,91 @@ async function capture(page: Page, name: string) {
   await page.screenshot({ path: join(dir, `${name}.png`), animations: "disabled" });
 }
 
-async function open(page: Page, theme: string, path: string, count: number) {
+async function open(page: Page, theme: string, path: string, count: number, campaign = "") {
   await page.clock.setFixedTime(new Date("2026-11-19T19:00:00Z"));
   await page.emulateMedia({ colorScheme: theme as "light" | "dark" });
-  await page.goto(`/assistants-e2e.html?campaign&confirm=${count}&theme=${theme}&path=${encodeURIComponent(path)}`);
+  await page.goto(`/assistants-e2e.html?campaign=${campaign}&confirm=${count}&theme=${theme}&path=${encodeURIComponent(path)}`);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+}
+
+async function checkCustomConfirmation(dialog: Locator) {
+  await expectNoHorizontalOverflow(dialog);
+  for (const name of ["Approve Once", "Deny"]) {
+    const action = dialog.getByRole("button", { name, exact: true });
+    await expect(action).toBeEnabled();
+    await expect(action).toBeInViewport({ ratio: 1 });
+  }
+  await expectTextContrast(dialog);
+}
+
+async function captureCustom(page: Page, viewport: { width: number; height: number }, state: string) {
+  if (!dir) return;
+  const dialog = reviewDialog(page);
+  const controls = await dialog.getByRole("button").evaluateAll(buttons => buttons.map(button => {
+    const { x, y, width, height } = button.getBoundingClientRect();
+    return { name: button.getAttribute("aria-label") ?? button.textContent?.trim(), x, y, width, height };
+  }));
+  for (const [index, first] of controls.entries()) {
+    expect(Math.min(first.width, first.height), `${first.name} size in CSS px`).toBeGreaterThanOrEqual(24);
+    for (const second of controls.slice(index + 1)) {
+      const gapX = Math.max(0, second.x - first.x - first.width, first.x - second.x - second.width);
+      const gapY = Math.max(0, second.y - first.y - first.height, first.y - second.y - second.height);
+      expect(Math.hypot(gapX, gapY), `gap between ${first.name} and ${second.name} in CSS px`).toBeGreaterThanOrEqual(4);
+    }
+  }
+  const approveHeight = Math.round(controls.find(control => control.name === "Approve Once")!.height);
+  await capture(page, `confirm-${viewport.width}x${viewport.height}-${state}-approve${approveHeight}csspx`);
+}
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test(`Custom campaign confirms with no budget, a saved budget, or a budget set for this launch at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await open(page, "dark", threadPath, 2, "custom");
+    const dialog = reviewDialog(page);
+    const approve = dialog.getByRole("button", { name: "Approve Once" });
+    await page.getByRole("button", { name: "Show All", exact: true }).click();
+    await reviewButton(cards(page).nth(1)).click();
+    await expect(dialog.getByText("No campaign budget applies.", { exact: true })).toBeVisible();
+    await checkCustomConfirmation(dialog);
+    await captureCustom(page, viewport, "nobudget");
+    await approve.click();
+    await expect(page.getByText("Start Campaign ran once.", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Dismiss Notification", exact: true }).click();
+
+    await reviewButton(cards(page).first()).click();
+    const details = dialog.getByLabel("Campaign Details");
+    await expect(details).toContainText("Release Engineering for Long-Running Cross-Platform Verification and Packaging");
+    await expect(details).toContainText("claude-opus-5-5-release-engineering-long-context-verification-preview-fixture");
+    await expect(details.getByText("Automatic", { exact: true })).toBeVisible();
+    await checkCustomConfirmation(dialog);
+    await captureCustom(page, viewport, "stress-top");
+    const body = dialog.locator(".modal-body");
+    await body.evaluate(element => { element.scrollTop = element.scrollHeight; });
+    await expect(details.getByText("Decision Owners", { exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(dialog.getByRole("region", { name: "First Message" })).toBeInViewport({ ratio: 1 });
+    await checkCustomConfirmation(dialog);
+    await captureCustom(page, viewport, "stress-end");
+    await dialog.getByRole("button", { name: "Set Budget", exact: true }).click();
+    const editor = page.getByRole("dialog", { name: "Campaign Budget" });
+    await editor.getByRole("spinbutton", { name: "Cost Budget (USD)" }).fill("25");
+    await editor.getByRole("spinbutton", { name: "Tool Call Limit" }).fill("200");
+    await editor.getByRole("button", { name: "Update Preview" }).click();
+    await expect(dialog.getByText("$25 USD · 200 tool calls", { exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(dialog.getByRole("button", { name: "Change Budget", exact: true })).toBeVisible();
+    await checkCustomConfirmation(dialog);
+    await captureCustom(page, viewport, "entered-budget");
+    await approve.click();
+    await expect(cards(page)).toHaveCount(0);
+
+    await open(page, "dark", threadPath, 2, "custom-saved");
+    await page.getByRole("button", { name: "Show All", exact: true }).click();
+    await reviewButton(cards(page).nth(1)).click();
+    await expect(dialog.getByText("$20 USD · 150 tool calls", { exact: true })).toBeInViewport({ ratio: 1 });
+    await checkCustomConfirmation(dialog);
+    await captureCustom(page, viewport, "saved-budget");
+    await approve.click();
+    await expect(cards(page)).toHaveCount(1);
+  });
 }
 
 for (const theme of ["light", "dark"] as const) {

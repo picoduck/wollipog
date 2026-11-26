@@ -218,7 +218,9 @@ export function registerAssistantCampaignStart(operations: AssistantOperations, 
         return confirmations.preview(binding, { commandId: args.commandId, args, target,
           campaign: proposed.preview, targetLabel: proposed.locationLabel }, { operation: ASSISTANT_CAMPAIGN_START });
       }
-      if (!proposed.preview.budget) throw new AssistantRefusal("The owner must set a campaign budget before starting it.");
+      if (args.mode === "full_control" && !proposed.preview.budget) {
+        throw new AssistantRefusal("The owner must set a campaign budget before starting it.");
+      }
       const reserved = receipts.reserve({ controlPlaneId: db.instanceId(), connectionId: live.id, operationId: args.commandId,
         operation: ASSISTANT_CAMPAIGN_START, argumentsDigest, grantRevision: live.revision, target },
       () => confirmations.consume(String(confirmationId), binding));

@@ -344,7 +344,12 @@ export interface AssistantOwnerConfirmation {
    * name and `value` its whole value (JSON for a non-string). Never truncated or relabeled. */
   arguments: AssistantOwnerConfirmationDetail[];
   /** Campaign-only fields. Approval sends the digest of the exact owner-visible launch. */
-  campaign?: { digest: string; budget: OrchestratorCampaignBudgetDefault | null };
+  campaign?: {
+    digest: string;
+    budget: OrchestratorCampaignBudgetDefault | null;
+    /** Older control planes omit this and require a budget in both modes. */
+    mode?: "custom" | "full_control";
+  };
   status: AssistantOwnerConfirmationStatus;
   createdAt: number;
   expiresAt: number;
