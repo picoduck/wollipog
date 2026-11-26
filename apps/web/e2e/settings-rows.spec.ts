@@ -1492,6 +1492,135 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
   test.describe(`Antigravity Agent Defaults at ${dimensions}`, () => {
     test.use({ viewport, hasTouch: narrow });
 
+    test("saves Full Permissions Mode for user launches and reports an unsupported machine", async ({ page }, testInfo) => {
+      const capture = async (name: string) => {
+        if (process.env.WOLLIPOG_CAPTURE_ANTIGRAVITY_FULL_PERMISSIONS === "1") {
+          await page.screenshot({ path: testInfo.outputPath(`${name}.png`), animations: "disabled" });
+        }
+      };
+      await useHarness(page, "dark", { section: "behavior", defaults: "agent-antigravity" });
+      const row = page.locator(".setting-row").filter({ has: page.getByText("Google Antigravity", { exact: true }) });
+      const edit = row.getByRole("button", { name: /^Edit…/ });
+      await edit.click();
+      const dialog = page.getByRole("dialog", { name: "Google Antigravity Defaults" });
+      const mode = dialog.getByRole("button", { name: /^Permission Mode:/ });
+      const save = dialog.getByRole("button", { name: "Save Defaults" });
+      const chooseModel = async (name: string | RegExp) => {
+        await dialog.getByRole("button", { name: /^Model:/ }).click();
+        await page.getByRole("radio", { name }).click();
+      };
+      if (narrow) await chooseModel(/^Fixture Pro With a Deliberately Long Model/);
+      else await chooseModel("Wollipog Default");
+      await mode.click();
+      const list = page.getByRole("listbox", { name: "Permission Mode" });
+      const options = list.getByRole("option");
+      const full = list.getByRole("option", { name: /^Full Permissions Mode/ });
+      await expect(options).toHaveCount(3);
+      await expect(full).toBeVisible();
+      for (const surface of [dialog, list]) {
+        await expectNoHorizontalOverflow(surface);
+        await expectFullyInViewport(surface);
+      }
+      await expectFullyInViewport(save);
+      await expectTextContrast(list);
+      await expectTextContrast(save);
+      const controls = [mode, save, ...await options.all()];
+      for (const control of controls) {
+        const bounds = await control.boundingBox();
+        expect(bounds?.width).toBeGreaterThanOrEqual(24);
+        expect(bounds?.height).toBeGreaterThanOrEqual(narrow ? 44 : 24);
+      }
+      const menuBounds = await options.evaluateAll((elements) => elements.map((element) => {
+        const { top, bottom } = element.getBoundingClientRect();
+        return { top, bottom };
+      }));
+      for (let i = 1; i < menuBounds.length; i++) {
+        expect(menuBounds[i]!.top - menuBounds[i - 1]!.bottom).toBeGreaterThanOrEqual(4);
+      }
+      expect((await save.boundingBox())!.y - menuBounds.at(-1)!.bottom).toBeGreaterThanOrEqual(4);
+      await capture(`agent-defaults-dialog-${dimensions}-permission-open${narrow ? "-stress-target44csspx" : ""}`);
+      await full.click();
+      if (narrow) await chooseModel("Wollipog Default");
+      await expect(mode).toHaveAccessibleName("Permission Mode: Full Permissions Mode");
+      await save.click();
+      await expect(dialog).toHaveCount(0);
+      await expect(row.locator(".setting-row-desc")).toHaveText("Full Permissions Mode");
+      await page.reload();
+      await expect(row.locator(".setting-row-desc")).toHaveText("Full Permissions Mode");
+      await row.scrollIntoViewIfNeeded();
+      await expectFullyInViewport(edit);
+      await expectTextContrast(edit);
+      await capture(`agent-defaults-list-${dimensions}-saved-after-reload`);
+
+      if (!narrow) {
+        await edit.click();
+        await expect(mode).toHaveAccessibleName("Permission Mode: Full Permissions Mode");
+        await expectFullyInViewport(save);
+        await capture(`agent-defaults-dialog-${dimensions}-saved-after-reload`);
+        await dialog.getByRole("button", { name: "Cancel" }).click();
+
+        const legacy = new URL(page.url());
+        legacy.hash = "legacy";
+        await page.goto(legacy.href);
+        await page.reload();
+        await expect(row.locator(".setting-row-desc")).toContainText("Not available on any machine");
+        await edit.click();
+        await expect(dialog.getByText(/The saved Full Permissions Mode is unsupported/)).toBeVisible();
+        await expectFullyInViewport(save);
+        await capture(`agent-defaults-dialog-${dimensions}-unsupported`);
+      }
+
+      const openNewSession = async (machine: "ready" | "legacy") => {
+        await page.goto(`/new-session-choices-e2e.html?antigravity=${machine}&defaults=antigravity&savedAgent=google-antigravity`);
+        await expect(page.getByRole("heading", { name: "New Session" })).toBeVisible();
+      };
+      const launchMode = page.getByRole("button", { name: /^Permission Mode:/ });
+      const create = page.getByRole("button", { name: "Create Session" });
+      const postedMode = () => page.evaluate(() => {
+        const request = document.documentElement.dataset.createSessionRequest;
+        return request ? (JSON.parse(request).config?.permissionMode ?? "using the saved default") : null;
+      });
+      await openNewSession("ready");
+      await expect(launchMode).toHaveAccessibleName("Permission Mode: Full Permissions Mode");
+      await expectFullyInViewport(launchMode);
+      await expectFullyInViewport(create);
+      await expectNoHorizontalOverflow(page.getByRole("dialog", { name: "New Session" }));
+      await expectTextContrast(launchMode);
+      await capture(`new-session-${dimensions}-saved-full-permissions`);
+      await create.click();
+      await expect.poll(postedMode).toBe("using the saved default");
+
+      await openNewSession("legacy");
+      await expect(launchMode).toHaveAttribute("aria-invalid", "true");
+      await expect(page.getByText(/The saved Full Permissions Mode is unsupported here/)).toBeVisible();
+      await create.click();
+      await expect(launchMode).toBeFocused();
+      expect(await postedMode()).toBeNull();
+      await launchMode.click();
+      const launchChoices = page.getByRole("listbox", { name: "Permission Mode" });
+      await expect(launchChoices.getByRole("option", { name: /^Full Permissions Mode/ })).toHaveAttribute("aria-disabled", "true");
+      await launchChoices.getByRole("option", { name: /^Auto Mode/ }).click();
+      await create.click();
+      await expect.poll(postedMode).toBe("auto");
+
+      await page.goto("/transcript-states-e2e.html?scenario=antigravity&agState=full-permissions");
+      const header = page.locator(".session-bar");
+      const badge = header.getByText("Full Permissions Mode", { exact: true });
+      await expectFullyInViewport(badge);
+      if (narrow) await page.locator(".composer-box").click();
+      const composerMode = page.getByRole("button", { name: "Permission Mode: Full Permissions Mode" });
+      await expectFullyInViewport(composerMode);
+      await expectTextContrast(badge);
+      await expectTextContrast(composerMode);
+      await expectNoHorizontalOverflow(header);
+      await composerMode.click();
+      const composerChoices = page.getByRole("menu", { name: "Permission Mode" });
+      const selected = composerChoices.locator('[aria-checked="true"]');
+      await expect(selected).toContainText("Full Permissions Mode");
+      await expectNoHorizontalOverflow(composerChoices);
+      await capture(`session-${dimensions}-full-permissions`);
+    });
+
     test("shows each model's effort choices, including when discovery found none", async ({ page }, testInfo) => {
       await useHarness(page, "dark", { section: "behavior", defaults: "agent-antigravity" });
       const row = page.locator(".setting-row").filter({ has: page.getByText("Google Antigravity", { exact: true }) });

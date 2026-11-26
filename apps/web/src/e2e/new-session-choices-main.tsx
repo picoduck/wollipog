@@ -123,6 +123,7 @@ if (savedAgent) saveAgentDefault({}, "runner-1", savedAgent);
  * parameter the runner advertises no row, as it does when the runtime is missing.
  */
 const antigravityState = fixtureParams.get("antigravity");
+const antigravityReady = antigravityState === "ready" || antigravityState === "legacy";
 const antigravityAgent: RunnerView["agents"][number] | null = antigravityState ? {
   id: ANTIGRAVITY_AGENT_ID,
   name: "Google Antigravity",
@@ -134,20 +135,21 @@ const antigravityAgent: RunnerView["agents"][number] | null = antigravityState ?
   source: "discovered",
   acpTransport: "stdio",
   version: "1.5.14",
-  available: antigravityState === "ready",
+  available: antigravityReady,
   authStatus: antigravityState === "signin" ? "unauthenticated" : antigravityState === "check-failed" ? "unknown" : "authenticated",
   ...(antigravityState === "network-denied"
     ? { unavailableReason: "Google Antigravity needs network access, which this runner's execution isolation denies." }
     : antigravityState === "check-failed" ? { unavailableReason: "The Google Antigravity check failed on this runner." } : {}),
   capabilities: {
-    models: antigravityState === "ready" ? [
+    models: antigravityReady ? [
       ["gemini-4-neon", "Gemini 4 Neon"], ["gemini-4-argon", "Gemini 4 Argon"], ["gemini-4-hydrogen", "Gemini 4 Hydrogen"],
       ["orchestrator-neon", "Orchestrator (Neon)"], ["orchestrator-argon", "Orchestrator (Argon)"],
       ["gemini-3-8-flash", "Gemini 3.8 Flash"], ["claude-opus-5-5", "Claude Opus 5.5"],
       ["claude-sonnet-5-5", "Claude Sonnet 5.5"], ["gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"],
     ].map(([id, displayName]) => ({ id: id!, displayName })) : [],
     effortLevels: [],
-    permissionModes: [ANTIGRAVITY_AUTO_MODE.id, ANTIGRAVITY_FULL_PERMISSIONS_MODE.id],
+    permissionModes: antigravityState === "legacy" ? [ANTIGRAVITY_AUTO_MODE.id]
+      : [ANTIGRAVITY_AUTO_MODE.id, ANTIGRAVITY_FULL_PERMISSIONS_MODE.id],
     slashCommands: [],
     supportsImages: true,
     supportsApprovals: true,
@@ -468,6 +470,14 @@ const defaults: AgentHarnessDefaultsView = {
     installations: [],
     compatibleInstallations: 1,
     preference: { permissionMode: "orchestrator" },
+  }] : antigravityAgent && savedDefaults === "antigravity" ? [{
+    agentId: ANTIGRAVITY_AGENT_ID,
+    driver: "acp",
+    context: { kind: "native" },
+    name: "Google Antigravity",
+    installations: [],
+    compatibleInstallations: antigravityState === "legacy" ? 0 : 1,
+    preference: JSON.parse(sessionStorage.getItem("fixture-antigravity-harness-default") ?? "null") ?? undefined,
   }] : [],
 };
 

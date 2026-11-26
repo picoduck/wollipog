@@ -1,6 +1,11 @@
 import { ModelPicker } from "./ModelPicker.js";
 import { useEffect, useRef, useState } from "react";
-import type { AgentHarnessDefaultConfig, AgentHarnessDefaultOption } from "@wollipog/protocol";
+import {
+  ANTIGRAVITY_AGENT_ID,
+  ANTIGRAVITY_FULL_PERMISSIONS_MODE,
+  type AgentHarnessDefaultConfig,
+  type AgentHarnessDefaultOption,
+} from "@wollipog/protocol";
 import { effortLabel } from "../format.js";
 import { modelOptionLabel } from "../agent-presentation.js";
 import { Modal } from "./common.js";
@@ -107,6 +112,9 @@ export function AgentDefaultsDialog({
   const effortWaitsForModel = models.length > 0 && !draft.model;
   const showEffort = models.length > 0 || efforts.length > 0;
   const offersPermissionModes = option.installations.some((installation) => installation.permissionModes.length > 0);
+  const antigravity = option.driver === "acp" && option.agentId === ANTIGRAVITY_AGENT_ID;
+  const savedFullPermissionsUnavailable = antigravity &&
+    option.preference?.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id && option.compatibleInstallations === 0;
   const busy = pending !== null;
   const discovered = option.installations.length > 0;
 
@@ -210,11 +218,16 @@ export function AgentDefaultsDialog({
             This agent is no longer discovered on any machine. Use Wollipog defaults to clear what is saved.
           </Notice>
         )}
+        {savedFullPermissionsUnavailable && (
+          <Notice tone="warning" compact role="status">
+            The saved Full Permissions Mode is unsupported on your machines with these defaults.
+          </Notice>
+        )}
         {/* Always in the DOM, so the polite region exists before it has something to say. */}
         <div role="status" aria-atomic="true" className={repairNotice ? undefined : "sr-only"}>
           {repairNotice && <Notice tone="info" compact>{repairNotice}</Notice>}
         </div>
-        <div className="agent-defaults-fields">
+        <div className="agent-defaults-fields" data-antigravity={antigravity || undefined}>
           {models.length > 0 && (
             <div className="field">
               <span>Model</span>
@@ -248,7 +261,7 @@ export function AgentDefaultsDialog({
               <span>Reasoning Effort</span>
               <Select
                 label="Reasoning Effort"
-                className="agent-defaults-effort-select"
+                className="agent-defaults-inline-select"
                 inlineMenu
                 value={draft.effort ?? UNSET}
                 disabled={busy || effortWaitsForModel}
@@ -280,12 +293,19 @@ export function AgentDefaultsDialog({
               <span>Permission Mode</span>
               <Select
                 label="Permission Mode"
+                inlineMenu={antigravity}
+                className={antigravity ? "agent-defaults-inline-select" : undefined}
                 value={draft.permissionMode ?? UNSET}
                 disabled={busy}
                 describedBy={HELPER_ID}
                 options={[
                   { value: UNSET, label: "Wollipog Default", description: "The mode the agent starts in on its own." },
-                  ...permissionModes.map((mode) => ({ value: mode, label: permissionModeDisplayLabel(mode, option.driver) })),
+                  ...permissionModes.map((mode) => ({
+                    value: mode, label: permissionModeDisplayLabel(mode, option.driver),
+                    ...(mode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id ? {
+                      description: "Skips Antigravity’s approval prompts in sessions you start. Runner isolation and Wollipog governance still apply.",
+                    } : {}),
+                  })),
                 ]}
                 onChange={(permissionMode) => {
                   const next: AgentHarnessDefaultConfig = { ...draft };

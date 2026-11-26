@@ -11860,7 +11860,7 @@ test("a generic ACP agent is refused a managed worktree on a Linux provider runn
   } finally { db.close(); }
 });
 
-test("createSession launches Antigravity in Auto Mode by default, persists an explicit Full Permissions Mode, and both stay switchable", () => {
+test("only direct human Antigravity launches inherit Full Permissions Mode and both modes stay switchable", () => {
   const { db, hub, svc } = makeHarness();
   const agent = {
     ...runnerMeta().agents.find(({ id }) => id === AGENT_ID)!,
@@ -11871,39 +11871,76 @@ test("createSession launches Antigravity in Auto Mode by default, persists an ex
       permissionModes: ["auto", "antigravity-full-permissions"],
     },
   };
-  const legacy = { ...agent, id: "legacy-acp", capabilities: { ...agent.capabilities, permissionModes: ["default", "auto"] } };
-  db.updateRunnerAgents(RUNNER_ID, [agent, legacy], Date.now());
-  const localUser = db.localIdentityContext().userId;
-  db.setAgentHarnessDefault(localUser, { agentId: agent.id, driver: "acp", context: { kind: "native" } },
-    { permissionMode: "antigravity-full-permissions" });
-  for (const { agentId, explicit, expected } of [
-    { agentId: agent.id, explicit: undefined, expected: "auto" },
-    { agentId: agent.id, explicit: "antigravity-full-permissions", expected: "antigravity-full-permissions" },
-    { agentId: legacy.id, explicit: undefined, expected: undefined },
-  ]) {
-    const result = svc.createSession({
-      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId,
-      ...(explicit ? { config: { permissionMode: explicit } } : {}),
-    }, undefined, undefined, false, false, false, { defaultOwnerUserId: localUser });
-    assert.ok(result.ok && result.data, JSON.stringify(result));
-    assert.equal(db.getSession(result.data.id)!.permissionMode, expected ?? null);
-    assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, expected);
-    if (agentId === agent.id) {
-      // Full Permissions Mode is a live Antigravity mode (agy stays in Default and the runner approves
-      // its requests), so a session moves in and out of it between turns like any other mode.
-      const otherMode = { permissionMode: explicit ? "auto" : "antigravity-full-permissions" };
-      const changed = svc.setConfig(result.data.id, otherMode);
-      assert.ok(changed.ok, JSON.stringify(changed));
-      const prompted = svc.prompt(result.data.id, "Change permissions", [], undefined, otherMode);
-      assert.doesNotMatch(prompted.error ?? "", /fixed at session creation/u);
+  try {
+    const meta = runnerMeta();
+    const planner = meta.agents.find(({ id }) => id === "test-orchestrator")!;
+    planner.capabilities = { ...agent.capabilities, permissionModes: ["default", "orchestrator"] };
+    meta.agents.push(agent);
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const base = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: agent.id };
+    const owner = { defaultOwnerUserId: db.localIdentityContext().userId };
+    const human = { ...owner, inheritAntigravityFullPermissionsDefault: true };
+    const launch = (context: Parameters<typeof svc.createSession>[6], config?: SessionConfig) =>
+      svc.createSession({ ...base, config }, undefined, undefined, false, false, false, context);
+    const checkLaunch = (result: ReturnType<typeof launch>, mode: string) => {
+      assert.ok(result.ok && result.data, result.error);
+      assert.equal(db.getSession(result.data.id)!.permissionMode, mode);
+      assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, mode);
+      return result.data;
+    };
+    const full = "antigravity-full-permissions";
+    const parent = checkLaunch(launch(human), "auto");
+    const campaign = svc.createSession({ ...base, agentId: planner.id, config: { permissionMode: "orchestrator" } });
+    assert.ok(campaign.ok && campaign.data, campaign.error);
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    db.updateSessionStatus(campaign.data.id, "running", Date.now());
+    db.setAgentHarnessDefault(owner.defaultOwnerUserId, { agentId: agent.id, driver: "acp", context: { kind: "native" } },
+      { permissionMode: full });
+
+    for (const [explicit, expected] of [[undefined, full], ["auto", "auto"]]) {
+      const session = checkLaunch(launch(human, explicit ? { permissionMode: explicit } : undefined), expected!);
+      const otherMode = { permissionMode: expected === full ? "auto" : full };
+      const changed = svc.setConfig(session.id, otherMode);
+      assert.ok(changed.ok, changed.error);
+      assert.doesNotMatch(svc.prompt(session.id, "Change permissions", [], undefined, otherMode).error ?? "",
+        /fixed at session creation/u);
     }
+    // Owner attribution by itself does not opt in, even when a non-UI caller has the saved config.
+    for (const context of [owner, { ...owner, parentSessionId: parent.id }, { ...owner, parentSessionId: campaign.data.id }]) {
+      const create = (config?: SessionConfig) => {
+        const result = launch(context, config);
+        if (result.status !== 428 || !("parentSessionId" in context)) return result;
+        const id = context.parentSessionId;
+        const approval = db.getSession(id)!.pendingApproval!;
+        assert.ok(svc.approve(id, approval.requestId, "allow").ok);
+        return launch(context, config);
+      };
+      checkLaunch(create(), "auto");
+      checkLaunch(create({ permissionMode: full }), full);
+    }
+
+    const orchestrator = (permissionMode?: string) => svc.createSession({
+      ...base, role: "orchestrator", config: { permissionMode },
+    }, undefined, undefined, false, false, false, human);
+    const explicit = orchestrator(full);
+    assert.equal(explicit.status, 409);
+    assert.match(explicit.error ?? "", /only for normal Antigravity sessions/u);
+    const inherited = orchestrator();
+    assert.equal(inherited.status, 409);
+    assert.match(inherited.error ?? "", /orchestrator/i);
+    assert.doesNotMatch(inherited.error ?? "", /Full Permissions Mode/u);
+
+    agent.capabilities.permissionModes = ["auto"];
+    db.updateRunnerAgents(RUNNER_ID, meta.agents, Date.now());
+    const starts = hub.sentOfType("start_session").length;
+    const unsupported = launch(human);
+    assert.equal(unsupported.status, 409);
+    assert.match(unsupported.error ?? "", /saved Full Permissions Mode is unsupported/u);
+    assert.equal(hub.sentOfType("start_session").length, starts);
+    checkLaunch(launch(human, { permissionMode: "auto" }), "auto");
+  } finally {
+    db.close();
   }
-  const orchestrator = svc.createSession({
-    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: agent.id, role: "orchestrator",
-    config: { permissionMode: "antigravity-full-permissions" },
-  });
-  assert.equal(orchestrator.status, 409);
-  assert.match(orchestrator.error ?? "", /only for normal Antigravity sessions/u);
 });
 
 test("createSession passes saved Antigravity model efforts through to ACP and leaves unknown efforts unset", () => {

@@ -7,9 +7,19 @@ import {
   runnerSupportsProtocol,
   type AgentDefinition,
   type AgentDriverKind,
+  type AgentHarnessDefaultConfig,
   type AgentHarnessDefaultsView,
   type OrchestratorDefaults,
 } from "@wollipog/protocol";
+
+export function savedSessionHarnessDefault(
+  view: AgentHarnessDefaultsView | null,
+  agent: AgentDefinition | undefined,
+): AgentHarnessDefaultConfig | undefined {
+  if (!agent) return undefined;
+  const key = agentHarnessIdentityKey({ agentId: agent.id, driver: agent.driver ?? "acp", context: agent.context ?? { kind: "native" } });
+  return view?.defaults.find((option) => agentHarnessIdentityKey(option) === key)?.preference;
+}
 
 /** Match the server's harness identity and whole-preference capability check. */
 export function savedSessionPermissionMode(
@@ -17,8 +27,7 @@ export function savedSessionPermissionMode(
   agent: AgentDefinition | undefined,
 ): string | undefined {
   if (!agent?.capabilities) return undefined;
-  const key = agentHarnessIdentityKey({ agentId: agent.id, driver: agent.driver ?? "acp", context: agent.context ?? { kind: "native" } });
-  const preference = view?.defaults.find((option) => agentHarnessIdentityKey(option) === key)?.preference;
+  const preference = savedSessionHarnessDefault(view, agent);
   if (!preference || !installationSupportsDefault({
     models: [...agent.capabilities.models.filter((model) => model.id !== "default" && !model.hidden),
       ...managedModelChoices(agent.driver, agent.capabilities)],
