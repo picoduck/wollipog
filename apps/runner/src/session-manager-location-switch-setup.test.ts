@@ -1427,6 +1427,7 @@ test("Location-switch replacement teardown waits for its proof-deletion writer",
       server.listen(socketPath, resolve);
     });
     const hook = join(h.docs, ".git", "hooks", "reference-transaction");
+    mkdirSync(join(h.docs, ".git", "hooks"), { recursive: true });
     writeFileSync(hook, `#!${process.execPath}
 let input = '';
 process.stdin.on('data', chunk => { input += chunk; });
@@ -1469,7 +1470,7 @@ process.stdin.on('end', () => {
       }
     }
   });
-  assert.equal(existsSync(root), false, "bounded teardown allowed fixture directory removal");
+  assert.equal(existsSync(root), false, "fixture directory was removed after the writer finished");
 });
 
 /** A rollback a crash left: `git worktree add --no-checkout` done, and nothing or part of a checkout after it. */
