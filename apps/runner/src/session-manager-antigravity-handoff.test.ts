@@ -123,6 +123,8 @@ async function launchWith(conversationCwd: "elsewhere" | "here" | "unknown", pro
       assert.equal(await internals.launch(current, current.agentSessionId ?? undefined), true);
       return launched.at(-1)!;
     },
+    deleteSession: () => manager.delete("s1"),
+    hasDeliveredHandoff: () => manager["deliveredHandoffs"].has("s1"),
     cleanup: () => { manager.shutdownAll(); rmSync(root, { recursive: true, force: true }); },
   };
 }
@@ -190,6 +192,22 @@ test("a failure clearing a delivered handoff's marker never fails the turn the a
     assert.notEqual(after?.status, "failed", f.store.readEvents("s1").map((event) => JSON.stringify(event.payload)).join("\n"));
     assert.ok(!f.store.readEvents("s1").some((event) => event.payload.kind === "error"),
       "no prompt failure for bookkeeping the agent never saw");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("permanently deleting a session releases its delivered handoff after a failed marker clear", async () => {
+  const f = await launchWith("elsewhere", "antigravity", { failMarkerClear: "always" });
+  try {
+    const after = await f.promptAndSettle("What was the code word?");
+    assert.equal(after?.pendingConversationHandoffFrom, f.elsewhere, "the clear did not land");
+    assert.equal(f.hasDeliveredHandoff(), true, "the runner recorded acceptance in memory");
+
+    await f.deleteSession();
+
+    assert.equal(f.store.has("s1"), false);
+    assert.equal(f.hasDeliveredHandoff(), false);
   } finally {
     f.cleanup();
   }
