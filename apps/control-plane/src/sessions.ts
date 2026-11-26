@@ -11691,7 +11691,17 @@ export class SessionsService {
         }
       }
     }
-    const workspacePath = this.db.getAdHocWorkspacePath(session.id) ?? undefined;
+    // Runner snapshots persist `sessions.workspace_path` for registered workspaces too. Only pass an
+    // explicit `workspacePath` to `createSession` (which clears `workspaceId` to mark the launch
+    // ad-hoc) when the requester is not running in its registered workspace's directory.
+    const storedWorkspacePath = this.db.getAdHocWorkspacePath(session.id);
+    const registeredWorkspacePath = session.workspaceId
+      ? this.db.getWorkspacePath(session.runnerId, session.workspaceId)
+      : null;
+    const workspacePath = !storedWorkspacePath ||
+        (registeredWorkspacePath !== null && workspacePathsEqual(storedWorkspacePath, registeredWorkspacePath))
+      ? undefined
+      : storedWorkspacePath;
     const created = this.createSession({
       runnerId: session.runnerId,
       workspaceId: session.workspaceId ?? "",

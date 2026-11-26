@@ -2517,3 +2517,161 @@ test("legacy campaigns keep live personal settings and all-Automatic new campaig
     } finally { h.db.close(); }
   }
 });
+
+test("owner-launched Custom campaign admits reviews for registered-workspace children with stored workspace_path", () => {
+  for (const driver of ["codex-app-server", "claude-code"] as const) {
+    const h = harness({ driver, configuration: true });
+    try {
+      const identity = h.db.localIdentityContext();
+      h.db.setUsageRateTable(new Map(["claude-opus-5-5", "gpt-6.1-sol"].map((model) => [model,
+        { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001, cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }])));
+      const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+      policy.issueScope = { repository: "picoduck/wollipog", issueNumbers: [4941], revision: 1,
+        authorizedByUserId: identity.userId, authorizedAt: 1 };
+      policy.issueNumbers = [4941];
+      const budget: CampaignBudgetAuthority = {
+        version: 1, accounting: "managed_workers_only", unpriced: "stop", costUsd: 140, toolCalls: 140, concurrency: 4, acceptedFollowUps: 0,
+      };
+      h.db.createHumanCampaignLaunch({
+        id: "custom-root", runnerId: "r", workspaceId: "w", agentId: "claude", title: "Custom Campaign",
+        useWorktree: false, driver: "claude-code", config: { model: "claude-opus-5-5" }, now: 2,
+        role: "orchestrator", orchestratorPolicy: policy, creationActor: "human",
+        parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
+        scope: { organizationId: identity.organizationId, owner: { kind: "user", userId: identity.userId } },
+      }, { ...identity, kind: "human", actorId: identity.userId }, "custom-launch", "a".repeat(64), budget);
+      h.db.updateSessionStatus("custom-root", "running", 3);
+      h.db.setSessionWorkspacePath("custom-root", "/repo");
+
+      const childAgent = driver === "codex-app-server" ? "codex" : "claude";
+      const childModel = driver === "codex-app-server" ? "gpt-6.1-sol" : "claude-opus-5-5";
+      const createdChild = h.svc.createSession({
+        runnerId: "r", workspaceId: "w", agentId: childAgent, title: "Child", useWorktree: true,
+        config: { model: childModel },
+      }, undefined, undefined, false, false, false, { parentSessionId: "custom-root" });
+      assert.ok(createdChild.ok && createdChild.data, createdChild.error ?? "child creation refused");
+      const childId = createdChild.data!.id;
+      h.db.updateSessionStatus(childId, "running", 4);
+      // Runner snapshots populate `sessions.workspace_path` for registered workspaces too.
+      h.db.setSessionWorkspacePath(childId, "/repo");
+      assert.equal(h.db.getAdHocWorkspacePath(childId), "/repo");
+      h.sent.length = 0;
+
+      const before = h.db.campaignBudgets.view("custom-root")!;
+      const view = requested(h, childId);
+      const reviewId = view.reviewSessionId;
+      const start = h.starts()[0]!;
+      const allocation = h.db.campaignBudgets.allocation(reviewId)!;
+      assert.equal(h.db.getSession(reviewId)!.workspaceId, "w");
+      assert.equal(start.spec.workspaceId, "w");
+      assert.equal(start.spec.workspacePath, "/repo");
+      assert.equal(h.db.campaignBudgets.root(reviewId), "custom-root");
+      assert.deepEqual(start.spec.campaignBudgetDispatch, h.db.campaignBudgets.dispatch(reviewId));
+      assert.equal(start.spec.config?.costBudgetUsd, allocation.costUsd);
+      assert.equal(start.spec.config?.maxToolCalls, allocation.toolCalls);
+      assert.equal(h.db.campaignBudgets.view("custom-root")!.outstanding.costUsd, before.outstanding.costUsd + allocation.costUsd!);
+
+      h.db.addSessionUsage(reviewId, { costUsd: 2.5 }, 5);
+      h.db.appendEvent(reviewId, { kind: "tool_call", toolCallId: "read", title: "Read", status: "completed" }, 6);
+      assert.equal(h.db.campaignBudgets.view("custom-root")!.actual.costUsd, 2.5);
+      assert.equal(h.db.campaignBudgets.view("custom-root")!.actual.toolCalls, 1);
+
+      // Reconnect recovery preserves the review session even after its snapshot records the review checkout path.
+      h.db.setSessionWorkspacePath(reviewId, "/runner/review-checkout");
+      h.db.updateSessionStatus(reviewId, "running", 7);
+      h.sent.length = 0;
+      h.svc.recoverCampaignBudgetAllocations("r");
+      assert.equal(h.db.getSession(reviewId)!.status, "running");
+      assert.ok(h.sent.some((message) => message.type === "rearm_governance" && message.sessionId === reviewId));
+    } finally { h.db.close(); }
+  }
+});
+
+test("owner-launched Custom campaign still refuses reviews outside the root's approved Location", () => {
+  const scenarios = ["other-runner", "other-workspace", "ad-hoc", "refiled-directory"] as const;
+  for (const scenario of scenarios) {
+    const h = harness({ driver: "codex-app-server", configuration: true });
+    try {
+      const identity = h.db.localIdentityContext();
+      h.db.setUsageRateTable(new Map(["claude-opus-5-5", "gpt-6.1-sol"].map((model) => [model,
+        { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001, cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }])));
+      const metadataWithExtraWorkspace: RunnerMetadata = {
+        ...h.metadata,
+        workspaces: [...h.metadata.workspaces, { id: "w2", name: "Other Repo", path: "/repo-other" }],
+      };
+      h.db.registerRunner(metadataWithExtraWorkspace, 2, PROTOCOL_VERSION);
+      h.db.registerRunner({ ...h.metadata, runnerId: "r2", hostname: "test-2" }, 2, PROTOCOL_VERSION);
+
+      const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+      policy.issueScope = { repository: "picoduck/wollipog", issueNumbers: [4941], revision: 1,
+        authorizedByUserId: identity.userId, authorizedAt: 1 };
+      policy.issueNumbers = [4941];
+      const budget: CampaignBudgetAuthority = {
+        version: 1, accounting: "managed_workers_only", unpriced: "stop", costUsd: 140, toolCalls: 140, concurrency: 4, acceptedFollowUps: 0,
+      };
+      h.db.createHumanCampaignLaunch({
+        id: "custom-root", runnerId: "r", workspaceId: "w", agentId: "claude", title: "Custom Campaign",
+        useWorktree: false, driver: "claude-code", config: { model: "claude-opus-5-5" }, now: 2,
+        role: "orchestrator", orchestratorPolicy: policy, creationActor: "human",
+        parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
+        scope: { organizationId: identity.organizationId, owner: { kind: "user", userId: identity.userId } },
+      }, { ...identity, kind: "human", actorId: identity.userId }, "custom-launch", "b".repeat(64), budget);
+      h.db.updateSessionStatus("custom-root", "running", 3);
+
+      const childId = `child-${scenario}`;
+      const runnerId = scenario === "other-runner" ? "r2" : "r";
+      const workspaceId = scenario === "other-workspace" ? "w2" : scenario === "ad-hoc" ? null : "w";
+      const workspacePath = scenario === "other-workspace" ? "/repo-other"
+        : scenario === "ad-hoc" || scenario === "refiled-directory" ? "/elsewhere" : "/repo";
+      h.db.createSession({
+        id: childId, parentSessionId: "custom-root", runnerId, workspaceId, workspacePath,
+        agentId: "codex", title: childId, useWorktree: true, driver: "codex-app-server",
+        config: { model: "gpt-6.1-sol" }, now: 4, creationActor: "agent",
+        scope: { organizationId: identity.organizationId, owner: { kind: "user", userId: identity.userId } },
+      });
+      h.db.updateSessionStatus(childId, "running", 5);
+      const membersBefore = h.db.campaignBudgets.members("custom-root");
+      h.sent.length = 0;
+
+      const refused = h.svc.requestReviewSession(childId, request());
+      assert.equal(refused.ok, false, scenario);
+      assert.equal(refused.status, 409, scenario);
+      assert.match(refused.error!, /Custom campaign allowance requires its approved root Location and accounting support/u, scenario);
+      assert.equal(h.starts().length, 0, scenario);
+      assert.deepEqual(h.db.campaignBudgets.members("custom-root"), membersBefore, scenario);
+    } finally { h.db.close(); }
+  }
+});
+
+test("Full Control campaign review admission stays intact when the child row stores workspace_path", () => {
+  const h = harness({ campaign: true, driver: "codex-app-server" });
+  try {
+    h.enableCampaign();
+    h.db.setSessionWorkspacePath("root", "/repo");
+    h.db.setSessionWorkspacePath("s1", "/repo");
+    const view = requested(h);
+    const start = h.starts()[0]!;
+    assert.equal(h.db.getSession(view.reviewSessionId)!.workspaceId, "w");
+    assert.equal(start.spec.workspaceId, "w");
+    assert.equal(start.spec.workspacePath, "/repo");
+    assert.equal(h.db.campaignBudgets.root(view.reviewSessionId), "root");
+  } finally { h.db.close(); }
+});
+
+test("ad-hoc non-campaign review requester still forwards its ad-hoc workspacePath", () => {
+  const h = harness({ driver: "codex-app-server" });
+  try {
+    const identity = h.db.localIdentityContext();
+    h.db.createSession({
+      id: "adhoc-child", runnerId: "r", workspaceId: null, workspacePath: "/repos/adhoc",
+      agentId: "codex", title: "Ad-hoc", useWorktree: true, driver: "codex-app-server", config: {}, now: 4,
+      creationActor: "human",
+      scope: { organizationId: identity.organizationId, owner: { kind: "user", userId: identity.userId } },
+    });
+    h.db.updateSessionStatus("adhoc-child", "running", 5);
+    const view = requested(h, "adhoc-child");
+    const start = h.starts()[0]!;
+    assert.equal(h.db.getSession(view.reviewSessionId)!.workspaceId, null);
+    assert.equal(start.spec.workspaceId, null);
+    assert.equal(start.spec.workspacePath, "/repos/adhoc");
+  } finally { h.db.close(); }
+});
