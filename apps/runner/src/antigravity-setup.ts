@@ -149,6 +149,7 @@ const DOWNLOAD_TIMEOUT_MS = 20 * 60_000;
 const HANDSHAKE_TIMEOUT_MS = 20_000;
 const SESSION_TIMEOUT_MS = 30_000;
 const EFFORT_DISCOVERY_TIMEOUT_MS = 5_000;
+const EFFORT_DISCOVERY_RESTORE_MS = 1_000;
 const SIGN_IN_TIMEOUT_MS = 10 * 60_000;
 const SIGN_IN_LINK_TIMEOUT_MS = 15_000;
 const OUTPUT_LIMIT = 64 * 1024;
@@ -276,17 +277,25 @@ async function discoverAntigravityEfforts(
   if (models.some(({ id }) => id === model.currentValue)) remember(model.currentValue, initial);
 
   const deadlineAt = now() + EFFORT_DISCOVERY_TIMEOUT_MS;
+  const probeDeadline = deadlineAt - EFFORT_DISCOVERY_RESTORE_MS;
+  let attemptedSwitch = false;
+  const select = (value: string, deadlineAt: number) =>
+    peer.request("session/set_config_option", { sessionId, configId: model.id, value }, { deadlineAt });
   for (const { id } of models) {
-    if (now() >= deadlineAt) break;
+    if (now() >= probeDeadline) break;
     if (id === model.currentValue) continue;
+    attemptedSwitch = true;
     try {
-      const updated = await peer.request("session/set_config_option", { sessionId, configId: model.id, value: id }, { deadlineAt });
+      const updated = await select(id, probeDeadline);
       remember(id, readOptions(updated));
     } catch (error) {
       if (timedOut(error)) break;
       // One rejected model does not invalidate the account or a confirmed list for another model.
     }
   }
+  // Leave the disposable session on its original model even if a switch failed to confirm.
+  // Restoration is best effort and shares the same overall deadline as discovery.
+  if (attemptedSwitch) await select(model.currentValue, deadlineAt).catch(() => undefined);
   return efforts;
 }
 

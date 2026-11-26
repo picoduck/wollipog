@@ -192,6 +192,11 @@ test("the Antigravity catalog uses confirmed per-model effort choices and degrad
     { ...flash, efforts: ["quick", "adaptive"] },
   ]);
   assert.deepEqual(choices()?.effortLevels, [], "never use one model's efforts as the agent-wide list");
+  const calls = readFileSync(join(state, "calls.jsonl"), "utf8").trim().split("\n")
+    .map((line) => JSON.parse(line) as { method: string; configId?: string; value?: string });
+  assert.deepEqual(calls.filter((call) => call.configId === "model").map((call) => call.value),
+    ["fixture-flash", "fixture-pro"], "the probe restores the original model");
+  assert.ok(!calls.some((call) => call.method === "session/prompt"));
 
   mode("model_switch_unconfirmed");
   assert.equal((await setup.check()).status, "ready");

@@ -128,6 +128,35 @@ for (const [driver, permissionModes] of [
   });
 }
 
+test("Antigravity automation previews leave unset model and effort choices to the provider", () => {
+  const h = harness();
+  try {
+    const agentId = "google-antigravity";
+    const base = metadata.agents[0]!;
+    h.db.registerRunner({ ...metadata, agents: [base, {
+      ...base, id: agentId, source: "discovered",
+      capabilities: {
+        ...base.capabilities!, permissionModes: ["auto", "antigravity-full-permissions"], effortLevels: [],
+        models: [{ id: "pro", efforts: ["high"] }, { id: "experimental" }],
+      },
+    }] }, Date.now(), PROTOCOL_VERSION);
+    for (const model of [undefined, "experimental", "pro"]) {
+      const draft = spec();
+      assert.equal(draft.action.kind, "create_session");
+      draft.action.request.agentId = agentId;
+      draft.action.request.useWorktree = false;
+      if (model) draft.action.request.config = { model };
+      const result = h.request(`request-${model}`, `resource-${model}`, draft);
+      assert.ok(result.ok, result.error ?? "Antigravity automation preview should succeed");
+      const snapshot = result.data?.resourceSnapshot;
+      assert.equal(snapshot?.category, "automation_creation");
+      const config = snapshot.effectiveTargets[0]?.config;
+      assert.equal(config?.model, model);
+      assert.equal(config?.effort, undefined);
+    }
+  } finally { h.db.close(); }
+});
+
 test("expired pending proposals are retired and cleared without a human denial", () => {
   const h = harness();
   try {

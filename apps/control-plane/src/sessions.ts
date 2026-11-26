@@ -1,5 +1,5 @@
 import { isManagedModelChoice, resolveManagedModelChoice } from "@wollipog/protocol";
-import { ANTIGRAVITY_AGENT_ID, ANTIGRAVITY_AUTO_MODE, ANTIGRAVITY_FULL_PERMISSIONS_MODE, managedWorktreeUnsupportedReason } from "@wollipog/protocol";
+import { ANTIGRAVITY_AUTO_MODE, ANTIGRAVITY_FULL_PERMISSIONS_MODE, managedWorktreeUnsupportedReason } from "@wollipog/protocol";
 import type { WollipogPromptOrigin } from "@wollipog/protocol";
 import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
 import { personalRuleDelegation } from "./personal-rule-delegation.js";
@@ -2183,6 +2183,10 @@ export function resolveEffectiveModelEffort(
   driver: AgentDriverKind,
 ): { value?: EffectiveModelEffort; error?: string } {
   if (!capabilities?.models?.length) return {};
+  // Antigravity's setup catalog offers per-model choices without resolving provider defaults.
+  // An empty agent-wide list distinguishes that catalog from a live thought_level snapshot.
+  if (driver === "acp" && !capabilities.effortLevels?.length &&
+      capabilities.permissionModes?.includes(ANTIGRAVITY_FULL_PERMISSIONS_MODE.id)) return {};
   const concrete = capabilities.models.filter((model) => model.id !== "default");
   const selectable = concrete.filter((model) => !model.hidden);
   const effortsFor = (model: AgentCapabilities["models"][number]) =>
@@ -4922,13 +4926,9 @@ export class SessionsService {
         claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver), agentCapabilities,
       );
       if (explicitConfigError) return fail(explicitConfigError, 409);
-      // Antigravity can start with a model whose effort choices were unavailable during the
-      // setup probe. Leave unset controls to ACP, and pass through the saved or explicit choices.
-      if (!(launch.driver === "acp" && req.agentId === ANTIGRAVITY_AGENT_ID && agentDefinition?.source === "discovered")) {
-        const resolved = resolveEffectiveModelEffort(requestedConfig, agentCapabilities, launch.driver);
-        if (resolved.error) return fail(resolved.error, 409);
-        if (resolved.value) Object.assign(requestedConfig, resolved.value);
-      }
+      const resolved = resolveEffectiveModelEffort(requestedConfig, agentCapabilities, launch.driver);
+      if (resolved.error) return fail(resolved.error, 409);
+      if (resolved.value) Object.assign(requestedConfig, resolved.value);
     }
     const supportsServiceTiers = runnerSupportsProtocol(
       this.db.getRunner(req.runnerId)?.protocolVersion,

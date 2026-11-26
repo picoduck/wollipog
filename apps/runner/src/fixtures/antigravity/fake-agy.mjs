@@ -217,6 +217,7 @@ if (args[0] === "acp" && args[1] === "--login") {
       clientCapabilities: request.params?.clientCapabilities ?? null, fullPermissions } : {}),
       ...(request.method === "session/prompt" ? { activeMode: config.mode,
         promptTexts: (request.params?.prompt ?? []).filter((block) => block.type === "text").map((block) => block.text) } : {}),
+      ...(request.method === "session/set_config_option" ? { configId: request.params?.configId, value: request.params?.value } : {}),
       ...(request.params?.sessionId ? { sessionId: request.params.sessionId } : {}),
       ...(Array.isArray(request.params?.mcpServers)
         ? { mcpServerNames: request.params.mcpServers.map((server) => server.name) } : {}) });
