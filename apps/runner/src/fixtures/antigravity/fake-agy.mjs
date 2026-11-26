@@ -205,10 +205,11 @@ if (args[0] === "acp" && args[1] === "--login") {
       required: ["q2"],
     };
     if (scenario === "unsupported") requestedSchema.properties.q1_other.pattern = ".*";
-    turn.elicitation = id;
+    const questionTurn = turn;
+    if (questionTurn) questionTurn.elicitation = id;
     clientRequests.set(id, ({ result, error }) => {
       record({ method: "elicitation_response", result, error });
-      if (!turn || turn.elicitation !== id) return;
+      if (turn !== questionTurn) return;
       if (result?.action === "cancel") return endTurn("cancelled");
       const text = result?.action === "accept" ? "Question answers received by Antigravity." : "Question declined by Wollipog.";
       update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
@@ -309,6 +310,10 @@ if (args[0] === "acp" && args[1] === "--login") {
       }
       turn = { id: request.id, permission: null };
       update(sessionId, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Reading the request." } });
+      if (/schedule fixture question/iu.test(text)) {
+        endTurn("end_turn");
+        return askQuestion(sessionId, "form");
+      }
       const elicitation = /ask fixture question (form|unsupported|url|foreign)/iu.exec(text);
       if (elicitation) return askQuestion(sessionId, elicitation[1]);
       if (/run (a |the )?command/iu.test(text)) return runCommand(sessionId, sessionCwds.get(sessionId) ?? process.cwd());

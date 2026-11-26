@@ -75,7 +75,7 @@ const BWRAP = { mode: "bwrap", network: "inherit" } as const;
 
 function calls(): Array<{ method: string; clientInfo?: { name?: string } | null; outcome?: unknown;
   mcpServerNames?: string[]; fullPermissions?: boolean; activeMode?: string; promptTexts?: string[];
-  clientCapabilities?: { elicitation?: unknown }; result?: unknown }> {
+  clientCapabilities?: { elicitation?: unknown }; result?: unknown; error?: { code: number } }> {
   const path = join(state, "calls.jsonl");
   return existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
 }
@@ -109,6 +109,61 @@ test("Antigravity advertises form elicitation and receives schema values in the 
   assert.equal(calls().filter(({ method }) => method === "session/prompt").length, 1);
   assert.ok(seen.events.some((event) =>
     event.kind === "agent_message" && event.text === "Question answers received by Antigravity."));
+  assert.equal(driver.answerQuestion(request.requestId, {}, "dismiss"), false);
+});
+
+test("a provider-initiated Antigravity form holds the turn open until answered", { timeout: 15_000 }, async () => {
+  signIn();
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy, version: "1.5.14" } }), PROVIDER, root,
+    undefined, { providerTurnSettleMs: 20 });
+  await driver.initialize();
+  await driver.newSession(root);
+  assert.equal(await driver.prompt("Schedule fixture question"), "end_turn");
+  const request = await waitFor(() => seen.events.find((event) => event.kind === "question_request"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(seen.providerTurns, [["started", "acp-provider:1"]]);
+
+  assert.equal(driver.answerQuestion(request.requestId, { q1: "Red", q2: ["Gold"] }, "submit"), true);
+  await waitFor(() => seen.providerTurns.find(([state]) => state === "settled"));
+  assert.deepEqual(seen.providerTurns, [["started", "acp-provider:1"], ["settled", "acp-provider:1"]]);
+  assert.deepEqual(calls().find(({ method }) => method === "elicitation_response")?.result, {
+    action: "accept", content: { q1: "1", q2: ["G"] },
+  });
+});
+
+test("generic ACP sessions neither advertise nor handle elicitation", { timeout: 15_000 }, async () => {
+  signIn();
+  const events: SessionEventPayload[] = [];
+  const driver = new AcpDriver({ command: agy, args: ["acp"], cwd: root, env: {}, config: {}, context: { kind: "native" } }, {
+    onEvent: (event) => events.push(event),
+    onStderr: () => {},
+    onExit: () => {},
+  });
+  try {
+    await driver.initialize();
+    await driver.newSession(root);
+    assert.equal(calls().find(({ method }) => method === "initialize")?.clientCapabilities?.elicitation, undefined);
+    // This fixture mode bypasses capability negotiation to exercise the RPC handler boundary.
+    assert.equal(await driver.prompt("Ask fixture question url"), "end_turn");
+    assert.equal(calls().find(({ method }) => method === "elicitation_response")?.error?.code, -32601);
+    assert.ok(!events.some(({ kind }) => kind === "question_request"));
+  } finally {
+    driver.dispose();
+  }
+});
+
+test("disposing Antigravity leaves the durable question available for restart recovery", { timeout: 15_000 }, async () => {
+  signIn();
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy, version: "1.5.14" } }), PROVIDER, root);
+  await driver.initialize();
+  await driver.newSession(root);
+  const turn = driver.prompt("Ask fixture question form");
+  const request = await waitFor(() => seen.events.find((event) => event.kind === "question_request"));
+  const rejected = assert.rejects(turn, (error: unknown) =>
+    typeof error === "object" && error !== null && "message" in error && error.message === "client disposed");
+  driver.dispose();
+  await rejected;
+  assert.ok(!seen.events.some(({ kind }) => kind === "question_resolved"));
   assert.equal(driver.answerQuestion(request.requestId, {}, "dismiss"), false);
 });
 
@@ -162,6 +217,7 @@ interface Observed {
   acp: AcpRuntimeCapabilities[];
   state: Array<{ capabilities: AgentCapabilities; config: SessionConfig }>;
   handoffDelivered: number;
+  providerTurns: Array<["started" | "settled", string]>;
 }
 
 /** An Antigravity session driver launched exactly as the runner launches one. */
@@ -174,11 +230,11 @@ function launchDriver(
     resolveLaunch?: AcpCompatibility["resolveLaunch"]; sessionContext?: DriverOptions["acpSessionContext"];
     fixtureIsolation?: DriverOptions["isolation"];
     appArmorFix?: (executable: string | undefined) => string | undefined; handoff?: string;
-    handoffRecordFails?: boolean } = {},
+    handoffRecordFails?: boolean; providerTurnSettleMs?: number } = {},
 ): { driver: AcpDriver; seen: Observed } {
   const context = antigravityCredentialContext();
   const launch = antigravitySessionLaunch(view, context, isolation);
-  const seen: Observed = { events: [], stderr: [], auth: [], acp: [], state: [], handoffDelivered: 0 };
+  const seen: Observed = { events: [], stderr: [], auth: [], acp: [], state: [], handoffDelivered: 0, providerTurns: [] };
   const options: DriverOptions = {
     command: launch.command!,
     args: launch.args,
@@ -199,6 +255,7 @@ function launchDriver(
     onEvent: (event: SessionEventPayload) => seen.events.push(event),
     onStderr: (text: string) => seen.stderr.push(text),
     onExit: () => {},
+    onProviderInitiatedTurn: (state: "started" | "settled", id: string) => seen.providerTurns.push([state, id]),
     onAuthStatus: (status: string) => seen.auth.push(status),
     onAcpCapabilities: (capabilities: AcpRuntimeCapabilities) => seen.acp.push(capabilities),
     onAcpSessionState: (update: { capabilities: AgentCapabilities; config: SessionConfig }) => seen.state.push(update),
@@ -209,6 +266,10 @@ function launchDriver(
   } as never, {
     // Tests never read the real host's AppArmor setting.
     antigravityAppArmorFix: overrides.appArmorFix ?? (() => undefined),
+    ...(overrides.providerTurnSettleMs === undefined ? {} : {
+      providerTurnSettleMs: overrides.providerTurnSettleMs,
+      providerTurnResponseSettleMs: overrides.providerTurnSettleMs,
+    }),
     ...(overrides.fixtureIsolation ? { spawn: (opts) => spawnAgent({ ...opts, isolation: undefined }) } : {}),
   });
   cleanup.push(() => driver.dispose());

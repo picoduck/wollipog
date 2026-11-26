@@ -941,7 +941,11 @@ export class AcpClient {
     for (const [requestId, { reply }] of this.pendingElicitations) {
       this.pendingElicitations.delete(requestId);
       reply({ action: "cancel" });
-      this.ev.onEvent({ kind: "question_resolved", requestId, answered: false, resolutionReason: "provider_resolved" });
+      // Disposing the process during runner shutdown leaves the durable question available for
+      // provider-restart recovery. Turn cancellation and session/close resolve it normally.
+      if (!this.disposed) {
+        this.ev.onEvent({ kind: "question_resolved", requestId, answered: false, resolutionReason: "provider_resolved" });
+      }
     }
   }
 
