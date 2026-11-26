@@ -402,7 +402,7 @@ export class CampaignRecoveryStore {
         const changedResource = old !== undefined && JSON.stringify(old.resource) !== JSON.stringify(observation.resource);
         const freshOccurrence = old !== undefined && (old.resource.occurrenceId !== observation.resource.occurrenceId ||
           old.resource.sessionId !== observation.resource.sessionId);
-        let dispatchFenced = (!authorized || old?.dispatchFenced === true || old?.state === "cancelled" ||
+        const dispatchFenced = (!authorized || old?.dispatchFenced === true || old?.state === "cancelled" ||
           old !== undefined && old.policyRevision !== policyRevision) && !(authorized && freshOccurrence);
         const currentDispatch = old?.state === "dispatched" && row?.signal === observation.signal && !changedResource;
         // A wake the Orchestrator received and finished without changing anything is no longer in
@@ -417,9 +417,10 @@ export class CampaignRecoveryStore {
           extension.snapshot.record.policyRevision === policyRevision && observation.owner === "orchestrator" &&
           ["failed_checks", "reviewer_objection"].includes(observation.reason);
         if (extension && extension.revokedAt === null && !extensionCurrent) this.revokeExtension(campaignId, extension.requestId, now);
-        if (extension && !extensionCurrent) dispatchFenced = true;
+        // Revoking unused allowance restores exhaustion, not an unrelated permanent fence.
+        // The receipt retains the original authorized ceiling; spent attempts never decrease.
         const maxAttempts = extensionCurrent ? extension.snapshot.record.attempts + extension.snapshot.extraInstructions
-          : old?.maxAttempts ?? CAMPAIGN_RECOVERY_LIMITS.maxAttempts;
+          : extension ? Math.max(attempts, CAMPAIGN_RECOVERY_LIMITS.maxAttempts) : old?.maxAttempts ?? CAMPAIGN_RECOVERY_LIMITS.maxAttempts;
         // Exhaustion must never hide a denial or a human-only restriction observed later.
         let reason = old && hard.has(old.reason) && old.reason !== "attempts_exhausted" && !terminal.has(old.state) && !observation.resolved && !escalatedStop ? old.reason
           : hard.has(observation.reason) || human.has(observation.reason) ? observation.reason

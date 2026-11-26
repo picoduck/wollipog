@@ -49,6 +49,22 @@ test("owner extension receipts survive lost responses and reopening, retain atte
     assert.equal(db.campaignRecovery.activeRecords("root")[0]!.reason, "attempts_exhausted");
     assert.equal(db.campaignRecovery.activeRecords("root")[0]!.attempts, 5);
     assert.deepEqual(db.campaignRecovery.extend("root", "request", snapshot, 17), receipt);
+    const second = { ...snapshot, record: db.campaignRecovery.activeRecords("root")[0]!, extraInstructions: 2 };
+    db.campaignRecovery.extend("root", "second", second, 18);
+    db.campaignRecovery.synchronize("root", 1, true, [obs], 19, undefined, () => "exact");
+    assert.equal(db.campaignRecovery.activeRecords("root")[0]!.maxAttempts, 7);
+    db.campaignRecovery.dispatchDue("root", 1, 20, () => {});
+    const pushed = { ...obs, resource: { ...obs.resource, occurrenceId: "new-head" } };
+    db.campaignRecovery.synchronize("root", 1, true, [pushed], 21, undefined, () => "new-binding");
+    const exhausted = db.campaignRecovery.activeRecords("root")[0]!;
+    assert.equal(exhausted.attempts, 6);
+    assert.equal(exhausted.maxAttempts, 6, "only the unspent allowance is revoked");
+    assert.equal(exhausted.reason, "attempts_exhausted");
+    assert.equal(exhausted.dispatchFenced, undefined, "a stale extension does not create an unrelated permanent fence");
+    db.campaignRecovery.extend("root", "third", { ...snapshot, record: exhausted, binding: "new-binding" }, 22);
+    db.campaignRecovery.synchronize("root", 1, true, [pushed], 23, undefined, () => "new-binding");
+    assert.equal(db.campaignRecovery.dispatchDue("root", 1, 24, next => assert.equal(next.attempts, 7)), 1);
+    assert.equal(db.campaignRecovery.extensions("root").length, 3);
   } finally { db.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -65,6 +81,7 @@ for (const change of ["head", "owner", "lifecycle", "policy", "denial", "access"
       db.campaignRecovery.synchronize("root", 1, true, [obs], 10);
       db.campaignRecovery.extend("root", "request", { record: db.campaignRecovery.activeRecords("root")[0]!,
         extraInstructions: 2, ownerUserId: "owner", requesterSessionId: "original", binding: "exact" }, 11);
+      db.campaignRecovery.synchronize("root", 1, true, [obs], 11, undefined, () => "exact");
       if (change === "revoke") db.campaignRecovery.revokeExtension("root", "request", 12);
       const changed = { ...obs, ...(change === "denial" ? { reason: "hard_denial" as const } : {}),
         ...(change === "access" ? { reason: "missing_access" as const, owner: "human" as const } : {}),
@@ -76,6 +93,7 @@ for (const change of ["head", "owner", "lifecycle", "policy", "denial", "access"
       assert.equal(db.campaignRecovery.dispatchDue("root", 1, 16, () => assert.fail("revived grant")), 0);
       assert.notEqual(db.campaignRecovery.extensions("root")[0]!.revokedAt, null);
       assert.equal(db.campaignRecovery.activeRecords("root")[0]!.attempts, 4);
+      assert.equal(db.campaignRecovery.activeRecords("root")[0]!.maxAttempts, 4);
     } finally { db.close(); }
   });
 }

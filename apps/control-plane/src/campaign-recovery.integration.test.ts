@@ -946,6 +946,11 @@ test("owner API restores the original requester separately and retains worktree 
     const restored = await post("/preview", { recoveryId: record.id, extraInstructions: 1 });
     assert.equal(restored.statusCode, 200, restored.body);
     payload.snapshot = restored.json().snapshot;
+    h.db.raw().prepare(`INSERT INTO review_sessions(review_session_id,requester_session_id,runner_id,repository,pr_number,
+      head_sha,reviewer,state,created_at,updated_at) VALUES('replacement-review','deleted-original','r','picoduck/wollipog',42,?,
+      'claude-code','completed',1,2)`).run(h.observation.headSha);
+    assert.equal((await post("/apply", payload)).statusCode, 409, "unknown original ownership cannot be erased by replacement");
+    h.db.raw().prepare("DELETE FROM review_sessions WHERE review_session_id='replacement-review'").run();
     assert.equal((await post("/apply", { ...payload, snapshot: { ...payload.snapshot, ownerUserId: "another-owner" } })).statusCode, 409);
     assert.equal((await post("/preview", { recoveryId: record.id, extraInstructions: 100 })).statusCode, 409);
     assert.equal((await post("/apply", { requestId: "malformed", snapshot: { record: {} } })).statusCode, 409);
@@ -959,9 +964,13 @@ test("owner API restores the original requester separately and retains worktree 
     const applied = await post("/apply", payload);
     assert.equal(applied.statusCode, 200, applied.body);
     assert.equal((await post("/apply", payload)).body, applied.body, "lost response reconciles the same receipt");
-    const context = recoveryExtensionContext(h.db, "root", record, h.now + 7)!;
-    h.db.campaignRecovery.synchronize("root", record.policyRevision, true, [obs], h.now + 7, undefined, () => context.binding);
-    assert.equal(h.db.campaignRecovery.dispatchDue("root", record.policyRevision, h.now + 8, () => {}), 1);
+    const context = recoveryExtensionContext(h.db, "root", record, Date.now())!;
+    h.db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id='child'").run(JSON.stringify([
+      { ...worktree, pullRequest: { ...worktree.pullRequest, mergeQueue: { position: 1 } } }]));
+    assert.equal(recoveryExtensionContext(h.db, "root", record, Date.now())!.binding, context.binding,
+      "routine reconciliation metadata does not change authority or worktree identity");
+    h.db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id='child'").run(JSON.stringify([worktree]));
+    h.recovery.maintain(Date.now());
     assert.equal(h.db.campaignRecovery.activeRecords("root")[0]!.attempts, 5);
     assert.deepEqual(h.db.raw().prepare("SELECT * FROM review_sessions").all(), before);
     assert.deepEqual(h.db.getSession("child")!.worktrees, [worktree]);

@@ -43,7 +43,8 @@ export function recoveryExtensionContext(db: ControlPlaneDb, campaignId: string,
   const binding = createHash("sha256").update(JSON.stringify({ campaignId, control, scope,
     policy: root.parentControlPolicy, repository: ref.repository, number: ref.number, head: fact.value.headSha,
     action: record.action, requester: requester.id, requesterScope: db.sessionScope(requester.id),
-    runner: requester.runnerId, worktree })).digest("hex");
+    runner: requester.runnerId, worktree: { id: worktree.id, path: worktree.path, branch: worktree.branch,
+      source: worktree.source, pullRequestUrl: worktree.pullRequest!.url } })).digest("hex");
   return { binding, requesterSessionId: requester.id, ownerUserId: scope.owner.userId, restorationRequired,
     guidance: "Restore the original requester through human Unarchive and Restart if needed. Preserve its linked unmerged worktree and review history. Admission does not restore a session or authorize CI reruns, review extensions, merges, credentials or spending." };
 }
