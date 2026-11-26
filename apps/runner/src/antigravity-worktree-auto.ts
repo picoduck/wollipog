@@ -73,13 +73,9 @@ const COMMANDS = new Map<string, CommandRule>([
   ["git add", (args, { gitPaths }) => args.length > 0 && gitPaths(args, ["-A", "--all", "-u", "--update"])],
   ["git commit", (args) => args.length === 2 && (args[0] === "-m" || args[0] === "--message") && !!args[1]],
   ["git restore", (args, { gitPaths }) => gitPaths(args, ["--staged", "--worktree", "-S", "-W"])],
-  ["git stash", (args, { gitPaths }) => args.length === 0 || (
-    args[0] === "push" ? gitPaths(args.slice(1), ["-u", "--include-untracked", "--keep-index"])
-      : args.length === 1 && ["list", "show", "apply", "pop"].includes(args[0]!)
-  )],
-  // --no-guess prevents creating a branch from a remote-tracking branch. Use switch for
-  // branches and checkout -- for paths, so checkout cannot interpret a revision as a branch.
-  ["git switch", (args) => args.length === 2 && args[0] === "--no-guess" && revisions(args.slice(1))],
+  // Linked worktrees share the stash and branch refs. Stash writes and switching the active
+  // branch need approval. Checkout is eligible only for explicit paths in this worktree.
+  ["git stash", (args) => args.length === 1 && args[0] === "list"],
   ["git checkout", (args, { gitPaths }) => args[0] === "--" && args.length > 1 && gitPaths(args)],
   ["git reset", (args, { gitPaths }) => args.length === 0 || (
     (args[0] === "--" || (args[0] === "--mixed" && args[1] === "--")) && gitPaths(args, ["--mixed"])

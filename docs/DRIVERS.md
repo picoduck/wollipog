@@ -1785,8 +1785,9 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   confirms that it is in Default mode. The transcript explains the fallback. It allows routine
   file operations confined to the selected worktree and direct local commands such as `git status`,
   `git add`, and `git commit -m "message"`. Ordinary Git hooks and filters run under the same
-  runner isolation. Remote Git operations, compound shell commands, config overrides, unknown tool
-  inputs, and requests that only offer a lasting grant still ask. The runner never retries a
+  runner isolation. Branch switching and stash writes still ask because branches and the stash are
+  shared across linked worktrees. Remote Git operations, compound shell commands, config overrides,
+  unknown tool inputs, and requests that only offer a lasting grant also ask. The runner never retries a
   failed command and keeps the same filesystem and network boundary.
   **Full Permissions Mode** is Wollipog's own live mode, listed after agy's modes for every
   non-Orchestrator session, as T3 Code runs Antigravity full access: agy stays in its `default`

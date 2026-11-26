@@ -21,8 +21,8 @@ test("Antigravity worktree Auto allows literal local commands and keeps other re
     "grep -r fixture subdir", "git status", "git status --short", "git diff --cached -- notes.txt",
     "git log -3 --oneline", "git show HEAD", "git branch --list", "git rev-parse --show-toplevel",
     "git ls-files --others --exclude-standard", "git add -A", 'git add -- "space name.txt"',
-    'git commit -m "Update the notes (Refs #123)"', "git restore --staged notes.txt", "git stash push -u",
-    "git switch --no-guess main", "git checkout -- notes.txt", "git reset",
+    'git commit -m "Update the notes (Refs #123)"', "git restore --staged notes.txt", "git stash list",
+    "git checkout -- notes.txt", "git reset",
     "git reset --mixed -- notes.txt", "git rm --cached notes.txt", "git mv notes.txt new.txt",
   ]) assert.equal(allows(command), true, command);
   for (const command of [
@@ -31,7 +31,8 @@ test("Antigravity worktree Auto allows literal local commands and keeps other re
     "git --work-tree=/etc status", "git -C subdir status", "git merge main", "git rebase main",
     "git reset --hard", "git reset --mixed HEAD^", "git reset main", "git checkout origin/main",
     "git checkout --no-guess origin/main", "git switch origin/main", "git switch --detach HEAD",
-    "git checkout --recurse-submodules -- notes.txt", "git branch -D main", "git stash drop",
+    "git switch --no-guess main", "git checkout --recurse-submodules -- notes.txt", "git branch -D main",
+    "git stash", "git stash push -u", "git stash apply", "git stash pop", "git stash drop", "git stash show",
     "git commit --no-verify -m test", "git commit -F /etc/passwd", "git add --pathspec-from-file=notes.txt",
     "git diff --output=../other", "git diff --no-index notes.txt /etc/passwd", "git show --ext-diff HEAD",
     "git rev-parse --sq", "git add -- .git", "git add -- ../outside", "git add -- ':(glob)*'",
