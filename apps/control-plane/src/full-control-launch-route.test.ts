@@ -4241,6 +4241,22 @@ test("an initial proposal with a CI rerun restriction cannot bypass operations_r
     assert.equal(boundaryOf(f, cWithheld.id).operations.includes("ci_rerun"), false);
     assert.equal(f.db.campaignProjection(cWithheld.id)?.ciRerunOwner, "human");
   } finally { await server.close(); f.db.close(); }
+
+  // A truncated first message (> 65,536 chars) cannot verify the absence of trailing restrictions
+  // (such as "Keep CI/CD reruns disabled."), so neither the repository fast path nor scope_check
+  // may self-admit it; it must route directly to owner approval and keep ciRerunOwner human.
+  const truncated = await threeRepositoryProposals(
+    `Fix #12 in owner/repo.\n${"= ".repeat(33_000)}Keep CI/CD reruns disabled.`,
+  );
+  try {
+    const proposed = await truncated.propose([named(12)]);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "human");
+    assert.equal(truncated.apply(proposed.data!.occurrenceId).ok, false);
+    assert.equal(establishedOf(truncated.f, truncated.id).initialScope, undefined);
+    assert.equal(truncated.f.db.campaignProjection(truncated.id)?.ciRerunOwner, "human");
+    assert.equal(truncated.f.decision.checkCalls.length, 0);
+  } finally { await truncated.server.close(); truncated.f.db.close(); }
 });
 
 /** A launched multi-repository campaign (#4118): `owner/repo` (launch) and `other/repo`, whose one

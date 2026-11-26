@@ -13710,7 +13710,10 @@ export class SessionsService {
     // Floor 2: owner-named issues are written in the owner's exact message, the one the server knows
     // the owner wrote: the transcript's first message when it still matches, else the boundary's record.
     const exact = this.db.initialUserMessageText(sessionId);
-    const ownerMessage = exact !== null && firstMessageDigest(exact) === first.messageDigest ? exact : boundary.objective;
+    const exactMatches = exact !== null && firstMessageDigest(exact) === first.messageDigest;
+    const ownerMessage = exactMatches ? exact : boundary.objective;
+    // SHA-256 digest match proves `ownerMessage` is the complete, untruncated first message (#4915).
+    const fullFirstMessage = exactMatches || firstMessageDigest(boundary.objective) === first.messageDigest;
     // Normalize initial range members so they spend no choice slots, including in later cumulative
     // accounting. Unwritten interiors remain unreferenced named issues: the constraint check's
     // per-issue questions must confirm intent (or the proposal goes to the owner).
@@ -13831,10 +13834,10 @@ export class SessionsService {
     // completeness/operations questions for all such text, even when the agent listed nothing.
     if (repositoryLimitVerified && /[\p{L}\p{N}]/u.test(ownerMessage.slice(ownerMessage.toLowerCase().indexOf(exactRepository!) + exactRepository!.length)) && !checks.includes("constraints")) checks.push("constraints");
     if (repositoryLimitVerified && proposal?.requestedCount !== null && !checks.includes("requested_count")) checks.push("requested_count");
-    // An initial proposal whose boundary delegates `ci_rerun` only skips `scope_check` for a
-    // deterministically recognized issue-only request (or a `repositoryLimitVerified` request with no
-    // trailing text, which line 13832 already checks); any other wording (such as "Fix #12. Keep
-    // CI/CD reruns disabled.") must run `operations_respected` or obtain direct owner approval (#4915).
+    // An initial proposal whose boundary delegates `ci_rerun` requires the digest-matched complete
+    // first message before either fast path or `scope_check` can activate CI reruns; without it
+    // (for example, a message truncated above 65,536 characters), route directly to the owner (#4915).
+    const ciRerunMessageIncomplete = initial && latestBoundary.operations.includes("ci_rerun") && !fullFirstMessage;
     const bareIssueRef = String.raw`(?:[\w.-]+\/[\w.-]+)?#\d+`;
     const bareIssueOnlyRequest = new RegExp(
       String.raw`^(?:Use the orchestrate-issues skill to\s+)?(?:fix|implement|work on)\s+` +
@@ -13842,7 +13845,9 @@ export class SessionsService {
       String.raw`(?:\s+as\s+well)?[.!\s]*$`,
       "iu",
     );
-    if (initial && structured && !checks.length && latestBoundary.operations.includes("ci_rerun") &&
+    if (ciRerunMessageIncomplete) {
+      if (!checks.includes("withheld_operations")) checks.push("withheld_operations");
+    } else if (initial && structured && !checks.length && latestBoundary.operations.includes("ci_rerun") &&
         !repositoryLimitVerified && !bareIssueOnlyRequest.test(ownerMessage.trim())) {
       checks.push("withheld_operations");
     }
@@ -13935,9 +13940,10 @@ export class SessionsService {
     }
     // Nothing checkable: admitted by the floors alone, with no model call.
     if (!checks.length) return admit(record, { kind: "scope_proposal_floors" });
-    // An older runner's unstructured proposal can't be checked, and a repository name that means
-    // nothing can't be answered by any check: each is the owner's.
-    if (!structured || unresolvedName) return ownerApproval(record);
+    // An older runner's unstructured proposal can't be checked, a repository name that means
+    // nothing can't be answered by any check, and a truncated first message can't prove no
+    // CI rerun restriction was omitted: each is the owner's.
+    if (!structured || unresolvedName || ciRerunMessageIncomplete) return ownerApproval(record);
     // The Decision Model's constraint check, on typed questions in one call (#4282, #4283).
     const organizationId = this.db.sessionScope(sessionId)?.organizationId;
     if (!organizationId) return ownerApproval(record);
