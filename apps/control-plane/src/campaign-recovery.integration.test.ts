@@ -15,6 +15,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DurableCommandStore, isDurableSessionCommandMessage } from "../../runner/src/durable-command-store.js";
+import Fastify from "fastify";
+import { registerCampaignRecoveryExtensionRoutes, recoveryExtensionContext } from "./campaign-recovery-extensions.js";
+import type { AuthPrincipal } from "./identity.js";
 
 function fixture(budgetAuthority?: CampaignBudgetAuthority, completion?: "retain" | "stop_and_archive") {
   const db = ControlPlaneDb.open(":memory:");
@@ -901,6 +904,66 @@ function completedPrFixture() {
   h.db.updateSessionStatus("root", "idle", now);
   return { ...h, now, itemId, ref, observation };
 }
+
+test("owner API restores the original requester separately and retains worktree and review history", async () => {
+  const h = completedPrFixture();
+  const app = Fastify();
+  let principal: AuthPrincipal = { ...h.identity, kind: "human", actorId: h.identity.userId };
+  registerCampaignRecoveryExtensionRoutes(app, { db: h.db, requestPrincipal: () => principal });
+  const base = "/api/sessions/root/campaign/recovery-extensions";
+  const post = (path: string, payload: unknown) => app.inject({ method: "POST", url: base + path,
+    headers: { "content-type": "application/json" }, payload: JSON.stringify(payload) });
+  try {
+    // All state below belongs to this isolated in-memory fixture. No live worker is restored.
+    const worktree = { id: "preserved", path: "/fixture/original", branch: "original-branch", source: "created",
+      pullRequest: { url: "https://github.com/picoduck/wollipog/pull/42", state: "open", headOid: h.observation.headSha } };
+    h.db.raw().prepare("UPDATE sessions SET worktrees=?,worktree_path=? WHERE id='child'").run(JSON.stringify([worktree]), worktree.path);
+    h.db.raw().prepare(`INSERT INTO review_sessions(review_session_id,requester_session_id,runner_id,repository,pr_number,
+      head_sha,reviewer,state,created_at,updated_at,round_json,output) VALUES('historical-review','child','r','picoduck/wollipog',42,?,
+      'claude-code','completed',1,2,?,?)`).run(h.observation.headSha,
+      JSON.stringify({ epoch: 2, round: 3, attempt: 1, findings: ["retained finding"] }), "Original report");
+    const before = h.db.raw().prepare("SELECT * FROM review_sessions").all();
+    const obs = { action: "repair_checks" as const, owner: "orchestrator" as const, reason: "failed_checks" as const,
+      resource: { kind: "pull_request" as const, sessionId: "root", repository: h.ref.repository,
+        pullRequest: h.ref.number, occurrenceId: h.observation.headSha }, signal: "failed" };
+    for (let n = 0; n < 4; n++) {
+      h.db.campaignRecovery.synchronize("root", h.db.getSession("root")!.parentControlPolicy!.revision, true, [{ ...obs, signal: String(n) }], h.now + n);
+      h.db.campaignRecovery.dispatchDue("root", h.db.getSession("root")!.parentControlPolicy!.revision, h.now + n, () => {});
+    }
+    h.db.campaignRecovery.synchronize("root", h.db.getSession("root")!.parentControlPolicy!.revision, true, [obs], h.now + 5);
+    const record = h.db.campaignRecovery.activeRecords("root")[0]!;
+    principal = { kind: "agent", actorId: "root", organizationId: h.identity.organizationId,
+      credentialSessionId: "root", orchestrator: true, delegatedScope: h.db.sessionScope("root")! };
+    assert.equal((await post("/preview", { recoveryId: record.id, extraInstructions: 1 })).statusCode, 403);
+    principal = { ...h.identity, kind: "human", actorId: h.identity.userId };
+    const preview = await post("/preview", { recoveryId: record.id, extraInstructions: 1 });
+    assert.equal(preview.statusCode, 200, preview.body);
+    assert.equal(preview.json().restorationRequired, true);
+    const payload = { requestId: "owner-one", snapshot: preview.json().snapshot };
+    assert.equal((await post("/apply", payload)).statusCode, 409, "admission never restores an archived requester");
+    assert.equal(h.db.getSession("child")!.archived, true);
+    h.db.setSessionArchived("child", false, h.now + 6);
+    const restored = await post("/preview", { recoveryId: record.id, extraInstructions: 1 });
+    assert.equal(restored.statusCode, 200, restored.body);
+    payload.snapshot = restored.json().snapshot;
+    assert.equal((await post("/apply", { ...payload, snapshot: { ...payload.snapshot, ownerUserId: "another-owner" } })).statusCode, 409);
+    assert.equal((await post("/preview", { recoveryId: record.id, extraInstructions: 100 })).statusCode, 409);
+    const stale = { ...payload, snapshot: { ...payload.snapshot, record: { ...record, attempts: 3 } } };
+    assert.equal((await post("/apply", stale)).statusCode, 409);
+    const applied = await post("/apply", payload);
+    assert.equal(applied.statusCode, 200, applied.body);
+    assert.equal((await post("/apply", payload)).body, applied.body, "lost response reconciles the same receipt");
+    const context = recoveryExtensionContext(h.db, "root", record, h.now + 7)!;
+    h.db.campaignRecovery.synchronize("root", record.policyRevision, true, [obs], h.now + 7, undefined, () => context.binding);
+    assert.equal(h.db.campaignRecovery.dispatchDue("root", record.policyRevision, h.now + 8, () => {}), 1);
+    assert.equal(h.db.campaignRecovery.activeRecords("root")[0]!.attempts, 5);
+    assert.deepEqual(h.db.raw().prepare("SELECT * FROM review_sessions").all(), before);
+    assert.deepEqual(h.db.getSession("child")!.worktrees, [worktree]);
+    assert.equal(h.db.getSession("child")!.worktreePath, worktree.path);
+    assert.equal((await post("/owner-one/revoke", {})).statusCode, 200);
+    assert.equal((await post("/apply", payload)).json().receipt.revokedAt !== null, true, "retry cannot reauthorize revoked history");
+  } finally { await app.close(); h.db.close(); }
+});
 
 for (const kind of ["checks", "forge_review", "steering", "native_objection", "native_invalid"] as const) {
   test(`recovery-only ${kind} wake delivers an actionable parent prompt`, () => {

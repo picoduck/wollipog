@@ -5,6 +5,15 @@ import { CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, CAMPAIGN_RECOVERY_EXPLANATIONS
   type CampaignRecoveryReason, type CampaignRecoveryRecord, type CampaignRecoveryResource } from "@wollipog/protocol";
 
 export const CAMPAIGN_RECOVERY_SCHEMA = `
+CREATE TABLE IF NOT EXISTS campaign_recovery_extensions (
+  campaign_session_id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  recovery_id TEXT NOT NULL,
+  authorization_json TEXT NOT NULL,
+  revoked_at INTEGER,
+  PRIMARY KEY(campaign_session_id,request_id),
+  FOREIGN KEY(campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS campaign_recovery (
   id TEXT PRIMARY KEY,
   campaign_session_id TEXT NOT NULL,
@@ -150,6 +159,40 @@ function identity(campaignId: string, resource: CampaignRecoveryResource, action
  * underlying effect; all existing typed gates and provider admission still apply at execution. */
 export class CampaignRecoveryStore {
   constructor(private readonly db: DatabaseSync, private readonly atomic: <T>(work: () => T) => T) {}
+
+  extensions(campaignId: string): RecoveryExtension[] {
+    return (this.db.prepare("SELECT authorization_json,revoked_at FROM campaign_recovery_extensions WHERE campaign_session_id=? ORDER BY rowid")
+      .all(campaignId) as Array<{ authorization_json: string; revoked_at: number | null }>).map(row => ({
+        ...JSON.parse(row.authorization_json) as RecoveryExtension, revokedAt: row.revoked_at }));
+  }
+
+  /** Durable admission receipt. A lost response is reconciled without another allowance. */
+  extend(campaignId: string, requestId: string, snapshot: RecoveryExtensionSnapshot, now: number): RecoveryExtension {
+    return this.atomic(() => {
+      const previous = this.extensions(campaignId).find(item => item.requestId === requestId);
+      if (previous) {
+        if (JSON.stringify(previous.snapshot) !== JSON.stringify(snapshot)) throw new Error("request_id_reused");
+        return previous;
+      }
+      const row = this.rows(campaignId).find(item => item.id === snapshot.record.id);
+      const record = row ? JSON.parse(row.record_json) as CampaignRecoveryRecord : undefined;
+      if (!record || JSON.stringify(record) !== JSON.stringify(snapshot.record) || record.state !== "blocked" ||
+          record.reason !== "attempts_exhausted" || record.dispatchFenced || record.attempts !== record.maxAttempts ||
+          !Number.isSafeInteger(snapshot.extraInstructions) || snapshot.extraInstructions < 1 || snapshot.extraInstructions > 4 ||
+          this.extensions(campaignId).some(item => item.snapshot.record.id === record.id && item.revokedAt === null &&
+            record.attempts < item.snapshot.record.attempts + item.snapshot.extraInstructions))
+        throw new Error("recovery_changed_or_ineligible");
+      const receipt: RecoveryExtension = { requestId, snapshot, admittedAt: now, revokedAt: null };
+      this.db.prepare("INSERT INTO campaign_recovery_extensions(campaign_session_id,request_id,recovery_id,authorization_json) VALUES(?,?,?,?)")
+        .run(campaignId, requestId, record.id, JSON.stringify(receipt));
+      return receipt;
+    });
+  }
+
+  revokeExtension(campaignId: string, requestId: string, now: number): void {
+    this.db.prepare("UPDATE campaign_recovery_extensions SET revoked_at=COALESCE(revoked_at,?) WHERE campaign_session_id=? AND request_id=?")
+      .run(now, campaignId, requestId);
+  }
 
   /** Retire only this denied occurrence after authoritative report verification. Reusing the
    * session cannot resurrect it or clear a newer denial. No permission/status is changed. */
@@ -343,7 +386,8 @@ export class CampaignRecoveryStore {
    * only while the campaign is quiet; a record still unanswered after its delay is woken again. */
   synchronize(campaignId: string, policyRevision: number, authorized: boolean,
     observations: readonly CampaignRecoveryObservation[], now: number,
-    settledWakeAt?: (record: CampaignRecoveryRecord) => number | undefined): boolean {
+    settledWakeAt?: (record: CampaignRecoveryRecord) => number | undefined,
+    extensionBinding?: (record: CampaignRecoveryRecord) => string | null): boolean {
     return this.atomic(() => {
       const previous = new Map(this.rows(campaignId).map((row) => [row.id, row]));
       const observed = new Set<string>();
@@ -358,7 +402,7 @@ export class CampaignRecoveryStore {
         const changedResource = old !== undefined && JSON.stringify(old.resource) !== JSON.stringify(observation.resource);
         const freshOccurrence = old !== undefined && (old.resource.occurrenceId !== observation.resource.occurrenceId ||
           old.resource.sessionId !== observation.resource.sessionId);
-        const dispatchFenced = (!authorized || old?.dispatchFenced === true || old?.state === "cancelled" ||
+        let dispatchFenced = (!authorized || old?.dispatchFenced === true || old?.state === "cancelled" ||
           old !== undefined && old.policyRevision !== policyRevision) && !(authorized && freshOccurrence);
         const currentDispatch = old?.state === "dispatched" && row?.signal === observation.signal && !changedResource;
         // A wake the Orchestrator received and finished without changing anything is no longer in
@@ -367,8 +411,20 @@ export class CampaignRecoveryStore {
         const stalled = settledAt !== undefined && now >= settledAt + stalledRecoveryWakeDelayMs(attempts);
         const escalatedStop = old?.action === "replace_worker" &&
           (stopSeverity[observation.reason] ?? 0) > (stopSeverity[old.reason] ?? Infinity);
-        let reason = attempts >= CAMPAIGN_RECOVERY_LIMITS.maxAttempts && !observation.resolved && (!currentDispatch || stalled)
-          ? "attempts_exhausted" : old && hard.has(old.reason) && !terminal.has(old.state) && !observation.resolved && !escalatedStop
+        const extension = this.extensions(campaignId).filter(item => item.snapshot.record.id === id).at(-1);
+        const extensionCurrent = extension && extension.revokedAt === null && authorized &&
+          extension.snapshot.binding === extensionBinding?.({ ...old!, resource: observation.resource }) &&
+          extension.snapshot.record.policyRevision === policyRevision && observation.owner === "orchestrator" &&
+          ["failed_checks", "reviewer_objection"].includes(observation.reason);
+        if (extension && extension.revokedAt === null && !extensionCurrent) this.revokeExtension(campaignId, extension.requestId, now);
+        if (extension && !extensionCurrent) dispatchFenced = true;
+        const maxAttempts = extensionCurrent ? extension.snapshot.record.attempts + extension.snapshot.extraInstructions
+          : old?.maxAttempts ?? CAMPAIGN_RECOVERY_LIMITS.maxAttempts;
+        // Exhaustion must never hide a denial or a human-only restriction observed later.
+        let reason = old && hard.has(old.reason) && old.reason !== "attempts_exhausted" && !terminal.has(old.state) && !observation.resolved && !escalatedStop ? old.reason
+          : hard.has(observation.reason) || human.has(observation.reason) ? observation.reason
+          : attempts >= maxAttempts && !observation.resolved && (!currentDispatch || stalled)
+          ? "attempts_exhausted" : old && hard.has(old.reason) && !(old.reason === "attempts_exhausted" && extensionCurrent) && !terminal.has(old.state) && !observation.resolved && !escalatedStop
             ? old.reason : observation.reason;
         const state = observation.resolved ? "resolved" : !authorized && observation.owner !== "human"
           ? reason === "uncertain_outcome" ? "blocked" : "cancelled" : hard.has(reason) ? "blocked"
@@ -377,12 +433,12 @@ export class CampaignRecoveryStore {
           : reason === "transient_failure" ? "backoff" : "ready";
         if (state === "blocked" && dispatchFenced && !hard.has(reason) && reason !== "uncertain_outcome") reason = "authority_changed";
         if (old && !stalled && row!.signal === observation.signal && !changedResource && old.policyRevision === policyRevision &&
-            old.effectiveOwner === observation.owner && old.reason === reason && Boolean(old.dispatchFenced) === dispatchFenced &&
+            old.maxAttempts === maxAttempts && old.effectiveOwner === observation.owner && old.reason === reason && Boolean(old.dispatchFenced) === dispatchFenced &&
             (observation.resolved ? old.state === "resolved" : !terminal.has(old.state) || state === old.state)) continue;
         const next: CampaignRecoveryRecord = {
           id, action: observation.action, resource: structuredClone(observation.resource), reason, state,
           effectiveOwner: observation.owner, policyRevision, ...(dispatchFenced ? { dispatchFenced: true } : {}),
-          attempts, maxAttempts: CAMPAIGN_RECOVERY_LIMITS.maxAttempts,
+          attempts, maxAttempts,
           attemptedRecovery: old?.attemptedRecovery ?? [], requiredInput: inputFor[reason] ?? "none",
           explanation: CAMPAIGN_RECOVERY_EXPLANATIONS[reason] + (observation.admissionFailure && reason === observation.reason
             ? ` ${CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[observation.admissionFailure]}` : ""),
@@ -415,7 +471,7 @@ export class CampaignRecoveryStore {
       for (const row of this.rows(campaignId)) {
         const record = JSON.parse(row.record_json) as CampaignRecoveryRecord;
         if (dispatched >= CAMPAIGN_RECOVERY_LIMITS.dispatchPerPass) break;
-        if (record.dispatchFenced || record.policyRevision !== policyRevision || record.effectiveOwner !== "orchestrator" ||
+        if (record.attempts >= record.maxAttempts || record.dispatchFenced || record.policyRevision !== policyRevision || record.effectiveOwner !== "orchestrator" ||
             !["ready", "backoff"].includes(record.state) || (record.nextAttemptAt ?? 0) > now || !eligible(record)) continue;
         const next: CampaignRecoveryRecord = { ...record, state: "dispatched", attempts: record.attempts + 1,
           attemptedRecovery: [...record.attemptedRecovery, record.action], updatedAt: now };
@@ -437,4 +493,18 @@ export class CampaignRecoveryStore {
       records: records.slice(0, CAMPAIGN_RECOVERY_LIMITS.visibleRecords),
       truncated: records.length > CAMPAIGN_RECOVERY_LIMITS.visibleRecords };
   }
+}
+
+export interface RecoveryExtensionSnapshot {
+  record: CampaignRecoveryRecord;
+  extraInstructions: number;
+  ownerUserId: string;
+  requesterSessionId: string;
+  binding: string;
+}
+export interface RecoveryExtension {
+  requestId: string;
+  snapshot: RecoveryExtensionSnapshot;
+  admittedAt: number;
+  revokedAt: number | null;
 }

@@ -6247,6 +6247,13 @@ export class ControlPlaneDb {
     return this.campaignRecoveryStore;
   }
 
+  /** Review ownership is persisted independently of worker lifecycle and ledger reassignment. */
+  campaignRecoveryRequesters(campaignId: string, repository: string, number: number): string[] {
+    return (this.stmt(`SELECT DISTINCT requester_session_id AS id FROM review_sessions
+      WHERE repository=? COLLATE NOCASE AND pr_number=? ORDER BY rowid`).all(repository, number) as Array<{ id: string }>)
+      .map(row => row.id).filter(id => this.campaignRootForMember(id) === campaignId);
+  }
+
   /** A child's human gate cannot starve unrelated work, but only a current Full Control
    * boundary permits that continuation. This never clears the child's gate. */
   campaignMayContinueWhileHumanWaiting(campaignId: string): boolean {

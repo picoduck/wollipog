@@ -18,6 +18,68 @@ const observation = (signal = "failure-1"): CampaignRecoveryObservation => ({
   owner: "orchestrator", reason: "transient_failure", signal,
 });
 
+test("owner extension receipts survive lost responses and reopening, retain attempts and exhaust again", () => {
+  const directory = mkdtempSync(join(tmpdir(), "recovery-extension-"));
+  const path = join(directory, "db.sqlite");
+  let db = database(path);
+  const obs: CampaignRecoveryObservation = { action: "repair_checks", owner: "orchestrator", reason: "failed_checks",
+    resource: { kind: "pull_request", sessionId: "root", repository: "o/r", pullRequest: 42, occurrenceId: "head" }, signal: "failed" };
+  try {
+    for (let n = 0; n < 4; n++) {
+      db.campaignRecovery.synchronize("root", 1, true, [{ ...obs, signal: String(n) }], n);
+      assert.equal(db.campaignRecovery.dispatchDue("root", 1, n, () => {}), 1);
+    }
+    db.campaignRecovery.synchronize("root", 1, true, [obs], 10);
+    const record = db.campaignRecovery.activeRecords("root")[0]!;
+    assert.equal(db.campaignRecovery.dispatchDue("root", 1, 10, () => assert.fail("no authorization")), 0);
+    const snapshot = { record, extraInstructions: 1, ownerUserId: "owner", requesterSessionId: "original", binding: "exact" };
+    const receipt = db.campaignRecovery.extend("root", "request", snapshot, 11);
+    assert.throws(() => db.campaignRecovery.extend("root", "duplicate", snapshot, 12));
+    db.close(); db = ControlPlaneDb.open(path);
+    assert.deepEqual(db.campaignRecovery.extend("root", "request", snapshot, 13), receipt);
+    assert.throws(() => db.campaignRecovery.extend("root", "request", { ...snapshot, extraInstructions: 2 }, 13));
+    db.campaignRecovery.synchronize("root", 1, true, [obs], 14, undefined, () => "exact");
+    assert.equal(db.campaignRecovery.dispatchDue("root", 1, 14, (next) => {
+      assert.equal(next.attempts, 5);
+      assert.equal(next.maxAttempts, 5);
+      assert.deepEqual(next.attemptedRecovery, Array(5).fill("repair_checks"));
+    }), 1);
+    assert.equal(db.campaignRecovery.dispatchDue("root", 1, 15, () => assert.fail("single flight")), 0);
+    db.campaignRecovery.synchronize("root", 1, true, [{ ...obs, signal: "still failing" }], 16, undefined, () => "exact");
+    assert.equal(db.campaignRecovery.activeRecords("root")[0]!.reason, "attempts_exhausted");
+    assert.equal(db.campaignRecovery.activeRecords("root")[0]!.attempts, 5);
+    assert.deepEqual(db.campaignRecovery.extend("root", "request", snapshot, 17), receipt);
+  } finally { db.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+for (const change of ["head", "owner", "lifecycle", "policy", "denial", "access", "revoke"] as const) {
+  test(`an extension fails closed after ${change} changes and cannot revive`, () => {
+    const db = database();
+    try {
+      const obs: CampaignRecoveryObservation = { action: "repair_checks", owner: "orchestrator", reason: "failed_checks",
+        resource: { kind: "pull_request", sessionId: "root", repository: "o/r", pullRequest: 42, occurrenceId: "head" }, signal: "failed" };
+      for (let n = 0; n < 4; n++) {
+        db.campaignRecovery.synchronize("root", 1, true, [{ ...obs, signal: String(n) }], n);
+        db.campaignRecovery.dispatchDue("root", 1, n, () => {});
+      }
+      db.campaignRecovery.synchronize("root", 1, true, [obs], 10);
+      db.campaignRecovery.extend("root", "request", { record: db.campaignRecovery.activeRecords("root")[0]!,
+        extraInstructions: 2, ownerUserId: "owner", requesterSessionId: "original", binding: "exact" }, 11);
+      if (change === "revoke") db.campaignRecovery.revokeExtension("root", "request", 12);
+      const changed = { ...obs, ...(change === "denial" ? { reason: "hard_denial" as const } : {}),
+        ...(change === "access" ? { reason: "missing_access" as const, owner: "human" as const } : {}),
+        ...(change === "head" ? { resource: { ...obs.resource, occurrenceId: "new-head" } } : {}) };
+      db.campaignRecovery.synchronize("root", change === "policy" ? 2 : 1, change !== "lifecycle", [changed], 13,
+        undefined, () => change === "owner" || change === "head" ? "changed" : "exact");
+      assert.equal(db.campaignRecovery.dispatchDue("root", 1, 14, () => assert.fail("invalidated grant")), 0);
+      db.campaignRecovery.synchronize("root", 1, true, [obs], 15, undefined, () => "exact");
+      assert.equal(db.campaignRecovery.dispatchDue("root", 1, 16, () => assert.fail("revived grant")), 0);
+      assert.notEqual(db.campaignRecovery.extensions("root")[0]!.revokedAt, null);
+      assert.equal(db.campaignRecovery.activeRecords("root")[0]!.attempts, 4);
+    } finally { db.close(); }
+  });
+}
+
 test("backoff, atomic wakeup, duplicates, and attempt ceilings survive reopening", () => {
   const directory = mkdtempSync(join(tmpdir(), "campaign-recovery-"));
   const path = join(directory, "db.sqlite");
