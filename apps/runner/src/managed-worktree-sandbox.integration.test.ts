@@ -3,9 +3,16 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
+import { ANTIGRAVITY_AGENT_ID } from "@wollipog/protocol";
+import { quote } from "shell-quote";
+import { AcpDriver } from "./drivers/acp-driver.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { managedWorktreeGitLayout, managedWorktreeGitWritableRoots, managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
+import { SessionManager } from "./session-manager.js";
+import { SessionStore, type SessionMeta } from "./session-store.js";
 import { buildBwrapArgs, spawnAgent } from "./spawn.js";
 import { confinedGitRunner, deleteOwnedWorktreeRefs, findBubblewrap, SEQUENCER_LEFTOVER_REFS } from "./worktree-ref-deletion.js";
 
@@ -127,6 +134,102 @@ test("an Antigravity provider can write and run its shell helper inside a real m
   assert.equal(existsSync(helper), false, "the executable never reaches the host");
   assert.equal(exec("/usr/bin/test", ["!", "-e", helper]).status, 0, "a subsequent launch gets a fresh mount");
 });
+
+test("Antigravity relaunches before edits and continues with worktree Auto under real bubblewrap", {
+  skip: bubblewrapUsable() ? false : "bubblewrap cannot create a user namespace on this host",
+  timeout: 60_000,
+}, () => antigravityWorktreeAutoScenario(false));
+
+test("Antigravity relaunch and worktree Auto permission flow completes with a simulated bubblewrap launch", {
+  skip: process.platform !== "linux",
+  timeout: 60_000,
+}, () => antigravityWorktreeAutoScenario(true));
+
+async function antigravityWorktreeAutoScenario(simulateBoundary: boolean): Promise<void> {
+  const { root, repoPath, worktreePath: sibling, home } = managedWorktreeFixture(process.cwd());
+  const dataDir = join(root, "runner");
+  const state = join(home, ".gemini", "antigravity-cli");
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(state, "signed-in"), "synthetic\n");
+  const agy = join(root, "agy");
+  const fake = fileURLToPath(new URL("./fixtures/antigravity/fake-agy.mjs", import.meta.url));
+  writeFileSync(agy, `#!/bin/sh\nexec ${quote([process.execPath, fake])} "$@"\n`, { mode: 0o755 });
+
+  const store = new SessionStore(join(dataDir, "sessions"));
+  const sessionId = "s_antigravity_worktree_auto";
+  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+    simulateBoundary ? (_kind, opts, callbacks) => new AcpDriver(opts, callbacks, {
+      spawn: (spawnOptions) => spawnAgent({ ...spawnOptions, isolation: undefined }),
+    }) : undefined, dataDir, 1);
+  Object.defineProperty(manager, "prepareLaunch", {
+    value: (meta: SessionMeta) => {
+      meta.env = { HOME: home, FAKE_AGY_STATE: state, FAKE_AGY_EXECUTABLE: agy,
+        FAKE_AGY_MODE: "auto_sandbox_denied,worktree_auto_fixture" };
+      return { acpCompatibility: { profile: "antigravity", resumable: true } };
+    },
+  });
+  if (simulateBoundary) {
+    Object.defineProperty(manager, "resolveIsolationBoundary", {
+      value: ((policy, context, deps, input) => resolveExecutionIsolation(policy, context, {
+        ...deps,
+        resolveNative: async () => ({ path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] } }),
+      }, input)) satisfies typeof resolveExecutionIsolation,
+    });
+  }
+  const events = () => store.readEvents(sessionId).map(({ payload }) => payload);
+  async function until<T>(read: () => T | undefined | false, description: string): Promise<T> {
+    const deadline = Date.now() + 8_000;
+    do {
+      const result = read();
+      if (result) return result;
+      await delay(10);
+    } while (Date.now() < deadline);
+    assert.fail(`${description}: ${JSON.stringify(events().slice(-8))}`);
+  }
+  try {
+    assert.equal(await manager.start({
+      sessionId, workspaceId: "repo", workspacePath: repoPath, agentId: ANTIGRAVITY_AGENT_ID,
+      driver: "acp", command: agy, args: ["acp"], context: { kind: "native" }, useWorktree: false,
+      config: { permissionMode: "auto" }, env: {},
+    }), true, JSON.stringify(events().slice(-8)));
+    // The fixture's form holds the original turn open while its worktree request is processed.
+    manager.prompt(sessionId, "Ask fixture question form");
+    const form = await until(() => events().find((event) => event.kind === "question_request"), "initial turn never started");
+    const { worktree, isolation } = await manager.requestWorktree(sessionId, {
+      baseRef: "HEAD", branch: "agent/antigravity-auto",
+    }, undefined, { requestedBySession: true });
+    assert.deepEqual(isolation, { writableNow: false, writableAtNextLaunch: true, continuesAfterRelaunch: true });
+    assert.equal(readFileSync(join(worktree.path, "tracked.txt"), "utf8"), "base\n");
+    manager.answerQuestion(sessionId, form.requestId, {}, "dismiss");
+    // The relaunch continuation tries git status once in native Auto. The fixture emits the
+    // exact nesting-refusal diagnostic even on CI kernels where nested user namespaces work.
+    await until(() => store.readMeta(sessionId)?.status === "idle" &&
+      events().find((event) => event.kind === "error" && event.source === "antigravity_worktree_auto"),
+    "native Auto did not fall back after relaunch");
+    assert.equal(store.readMeta(sessionId)?.config.permissionMode, "auto");
+    assert.ok(events().some((event) => event.kind === "stderr" &&
+      event.text.includes("Runner continued the task in worktree agent/antigravity-auto")));
+    for (const action of ["read", "edit", "status", "add", "commit"]) {
+      const from = events().length;
+      manager.prompt(sessionId, `fixture worktree ${action}`);
+      await until(() => store.readMeta(sessionId)?.status === "idle" && events().slice(from).find((event) =>
+        event.kind === "tool_call_update" && event.status === "completed"), `${action} never completed`);
+    }
+    assert.ok(!events().some((event) => event.kind === "permission_request"));
+    assert.equal(run("git", ["log", "-1", "--format=%s"], worktree.path).output.trim(), "Fixture worktree edit");
+    assert.equal(readFileSync(join(worktree.path, "tracked.txt"), "utf8"), "edited after relaunch\n");
+    assert.equal(readFileSync(join(repoPath, "tracked.txt"), "utf8"), "base\n");
+    assert.equal(readFileSync(join(sibling, "tracked.txt"), "utf8"), "base\n");
+    manager.prompt(sessionId, "fixture worktree push");
+    const permission = await until(() => events().find((event) => event.kind === "permission_request"), "push never asked");
+    assert.equal(permission.title, "git push --dry-run");
+    manager.resolvePermission(sessionId, permission.requestId, "deny");
+    await until(() => store.readMeta(sessionId)?.status === "idle", "the denied push did not settle");
+  } finally {
+    manager.stop(sessionId);
+    manager.shutdownAll();
+  }
+}
 
 /** A managed-worktree Antigravity launch on a provider-isolation runner, as the session manager
  * requests it: its own state directory preserved, its shell helper still private. */

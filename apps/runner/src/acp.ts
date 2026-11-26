@@ -89,6 +89,7 @@ import {
 } from "./acp-compatibility.js";
 import { materializeAcpMcpServers } from "./acp-session-context.js";
 import { antigravityAppArmorFix } from "./antigravity-apparmor.js";
+import { antigravityWorktreeAutoAllows, ANTIGRAVITY_WORKTREE_AUTO_NOTICE } from "./antigravity-worktree-auto.js";
 import {
   assertClaudeAgentAcpOrchestratorIdentity,
   orchestratorAcpSessionMeta,
@@ -199,6 +200,10 @@ export class AcpClient {
   private readonly appArmorFix: AcpClientDeps["antigravityAppArmorFix"];
   private antigravitySandboxDeniedInTurn = false;
   private antigravityAutoModeRejected = false;
+  private readonly antigravityWorktree?: string;
+  private sessionCwd?: string;
+  private antigravityWorktreeAutoAvailable = false;
+  private antigravityWorktreeAutoSelected = false;
 
   constructor(
     opts: {
@@ -251,6 +256,9 @@ export class AcpClient {
         opts.isolation?.backend === "bwrap" && opts.isolation.antigravityTerminalHelper) {
       try { this.antigravitySandboxExecutable = realpathSync.native(launch.command); }
       catch { /* The provider's spawn reports missing executables. */ }
+      if (opts.isolation.protectedWorktree?.path === opts.cwd && !opts.orchestrator && !opts.orchestratorRole) {
+        this.antigravityWorktree = opts.cwd;
+      }
     }
     // An AppArmor profile attaches to the path the kernel executes. Under bwrap agy runs inside
     // bwrap's own profile, which that host fix would not change, so it is offered only outside it.
@@ -411,6 +419,8 @@ export class AcpClient {
   }
 
   async newSession(cwd: string): Promise<string> {
+    this.sessionCwd = cwd;
+    this.antigravityWorktreeAutoSelected = false;
     if (this.sessionId) this.terminals.releaseSession(this.sessionId);
     this.terminalEventOutput.clear();
     this.filesystem.setRoot(cwd);
@@ -444,6 +454,8 @@ export class AcpClient {
   }
 
   async resumeSession(sessionId: string, cwd: string): Promise<string> {
+    this.sessionCwd = cwd;
+    this.antigravityWorktreeAutoSelected = false;
     // The caller supplies the durable ACP id, so establish the notification boundary before the
     // request. Agents may publish same-session state immediately around the resume/load response.
     if (this.sessionId) this.terminals.releaseSession(this.sessionId);
@@ -587,18 +599,22 @@ export class AcpClient {
     if (config.model !== undefined) await this.setSelectConfig("model", config.model);
     if (config.effort !== undefined) await this.setSelectConfig("thought_level", config.effort);
     if (permissionMode === undefined) return;
+    if (permissionMode === ANTIGRAVITY_AUTO_MODE.id && this.antigravityWorktreeAutoAvailable &&
+        await this.enableAntigravityWorktreeAuto()) return;
     if (permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) {
       if (!this.offersAntigravityFullPermissions()) {
         throw new Error("Full Permissions Mode is available only for normal Google Antigravity sessions");
       }
       await this.setPermissionMode("default");
       this.antigravityFullPermissions = true;
+      this.antigravityWorktreeAutoSelected = false;
       this.emitSessionState();
       return;
     }
     await this.setPermissionMode(permissionMode);
-    if (this.antigravityFullPermissions) {
+    if (this.antigravityFullPermissions || this.antigravityWorktreeAutoSelected) {
       this.antigravityFullPermissions = false;
+      this.antigravityWorktreeAutoSelected = false;
       this.emitSessionState();
     }
   }
@@ -626,21 +642,11 @@ export class AcpClient {
         await this.setPermissionMode(ANTIGRAVITY_AUTO_MODE.id);
       } catch {
         this.antigravityAutoModeRejected = true;
-        this.emitSessionState();
-        const withheld = this.modes?.availableModes.some((mode) => mode.id === ANTIGRAVITY_AUTO_MODE.id) === false;
-        const fixCommand = withheld ? this.appArmorFix(this.antigravityHostExecutable) : undefined;
-        const meanwhile = "This session uses Default mode. Choose Full Permissions Mode to skip Antigravity’s approval prompts.";
-        this.ev.onEvent({
-          kind: "error",
-          nonFatal: true,
-          source: "antigravity_auto_mode_fallback",
-          message: fixCommand
-            ? "Google Antigravity does not offer Auto Mode on this machine: AppArmor blocks the user namespaces its terminal sandbox needs (kernel.apparmor_restrict_unprivileged_userns = 1). To allow them for Antigravity only, run the command below on this machine, then start a new Antigravity session. " + meanwhile
-            : withheld
-              ? "Google Antigravity does not offer Auto Mode on this machine: it needs Antigravity’s terminal sandbox, which this host does not provide. " + meanwhile
-              : "Google Antigravity could not enable Auto Mode. " + meanwhile,
-          ...(fixCommand ? { fixCommand } : {}),
-        });
+        const withheld = this.modes
+          ? !this.modes.availableModes.some((mode) => mode.id === ANTIGRAVITY_AUTO_MODE.id)
+          : !modeOption?.options.some((mode) => mode.value === ANTIGRAVITY_AUTO_MODE.id);
+        const bounded = (withheld || this.antigravityWorktreeAutoAvailable) && await this.enableAntigravityWorktreeAuto();
+        if (!bounded) this.reportAntigravityAutoUnavailable(withheld);
       }
     } else if (this.antigravityFullPermissions) {
       // A provider process always starts in agy's Default mode; only a resumed conversation may not.
@@ -693,6 +699,7 @@ export class AcpClient {
 
   private async fallBackFromAntigravitySandbox(): Promise<void> {
     this.antigravityAutoModeRejected = true;
+    if (await this.enableAntigravityWorktreeAuto()) return;
     let message = "Google Antigravity’s terminal sandbox could not start inside this managed worktree.";
     try {
       await this.setPermissionMode("default");
@@ -701,6 +708,52 @@ export class AcpClient {
       message += " The provider could not switch this session to Default mode.";
     }
     this.ev.onEvent({ kind: "error", nonFatal: true, source: "antigravity_auto_mode_fallback", message });
+  }
+
+  private reportAntigravityAutoUnavailable(withheld: boolean): void {
+    this.emitSessionState();
+    const fixCommand = withheld ? this.appArmorFix(this.antigravityHostExecutable) : undefined;
+    const meanwhile = "This session uses Default mode. Choose Full Permissions Mode to skip Antigravity’s approval prompts.";
+    this.ev.onEvent({
+      kind: "error",
+      nonFatal: true,
+      source: "antigravity_auto_mode_fallback",
+      message: fixCommand
+        ? "Google Antigravity does not offer Auto Mode on this machine: AppArmor blocks the user namespaces its terminal sandbox needs (kernel.apparmor_restrict_unprivileged_userns = 1). To allow them for Antigravity only, run the command below on this machine, then start a new Antigravity session. " + meanwhile
+        : withheld
+          ? "Google Antigravity does not offer Auto Mode on this machine: it needs Antigravity’s terminal sandbox, which this host does not provide. " + meanwhile
+          : "Google Antigravity could not enable Auto Mode. " + meanwhile,
+      ...(fixCommand ? { fixCommand } : {}),
+    });
+  }
+
+  private currentPermissionMode(): string | undefined {
+    return this.modes?.currentModeId ?? optionForCategory(this.configOptions, "mode")?.currentValue;
+  }
+
+  /** The initial mode refusal or the exact nested-sandbox diagnostic precedes this call. The
+   * launched process already has the protected worktree boundary; changing agy's mode does not
+   * spawn a new process or replace any part of that boundary. */
+  private async enableAntigravityWorktreeAuto(): Promise<boolean> {
+    if (!this.antigravityWorktree || this.sessionCwd !== this.antigravityWorktree) return false;
+    try {
+      await this.setPermissionMode("default");
+    } catch {
+      return false;
+    }
+    if (this.currentPermissionMode() !== "default") return false;
+    const alreadySelected = this.antigravityWorktreeAutoSelected;
+    this.antigravityWorktreeAutoAvailable = true;
+    this.antigravityWorktreeAutoSelected = true;
+    this.antigravityFullPermissions = false;
+    this.emitSessionState();
+    if (!alreadySelected) {
+      this.ev.onEvent({
+        kind: "error", nonFatal: true, source: "antigravity_worktree_auto",
+        message: ANTIGRAVITY_WORKTREE_AUTO_NOTICE,
+      });
+    }
+    return true;
   }
 
   private async setSelectConfig(
@@ -1127,7 +1180,18 @@ export class AcpClient {
   private emitSessionState(): void {
     const state = acpSessionPresentation(this.modes, this.configOptions, this.commands, this.supportsImages);
     if (this.compatibility?.profile === "antigravity") {
-      if (this.antigravityAutoModeRejected && state.config.permissionMode !== ANTIGRAVITY_AUTO_MODE.id) {
+      const offersWorktreeAuto = this.antigravityWorktreeAutoAvailable && this.sessionCwd === this.antigravityWorktree;
+      if (offersWorktreeAuto) {
+        const auto = { ...ANTIGRAVITY_AUTO_MODE, source: "runner" as const,
+          description: "Wollipog approves routine worktree actions and asks about the rest." };
+        state.capabilities.permissionModes = [...new Set([...(state.capabilities.permissionModes ?? []), auto.id])];
+        state.capabilities.agentPermissionModes = [...(state.capabilities.agentPermissionModes ?? [])
+          .filter((mode) => mode.id !== auto.id), auto];
+        state.capabilities.elicitation = { ...state.capabilities.elicitation, [auto.id]: ["acp-permission"] };
+        if (this.antigravityWorktreeAutoSelected && this.currentPermissionMode() === "default") {
+          state.config.permissionMode = auto.id;
+        }
+      } else if (this.antigravityAutoModeRejected && state.config.permissionMode !== ANTIGRAVITY_AUTO_MODE.id) {
         const autoId = ANTIGRAVITY_AUTO_MODE.id;
         state.capabilities.permissionModes = state.capabilities.permissionModes?.filter((mode) => mode !== autoId);
         state.capabilities.agentPermissionModes = state.capabilities.agentPermissionModes?.filter((mode) => mode.id !== autoId);
@@ -1217,7 +1281,7 @@ export class AcpClient {
       case "tool_call_update": {
         const toolCallId = u.toolCallId ?? "tool";
         if (this.promptInFlight && u.status === "completed" && this.antigravitySandboxExecutable &&
-            (this.modes?.currentModeId ?? optionForCategory(this.configOptions, "mode")?.currentValue) === ANTIGRAVITY_AUTO_MODE.id &&
+            this.currentPermissionMode() === ANTIGRAVITY_AUTO_MODE.id &&
             antigravitySandboxSpawnDenied(u.rawOutput, this.antigravitySandboxExecutable)) {
           this.antigravitySandboxDeniedInTurn = true;
         }
@@ -1341,9 +1405,14 @@ export class AcpClient {
     if (trackedProviderTurn && !this.ensureProviderInitiatedTurnStarted()) {
       return Promise.resolve({ outcome: { outcome: "cancelled" } });
     }
-    if (this.antigravityFullPermissions && this.offersAntigravityFullPermissions()) {
+    const full = this.antigravityFullPermissions && this.offersAntigravityFullPermissions();
+    const worktreeAuto = this.antigravityWorktreeAutoSelected && this.antigravityWorktree &&
+      this.sessionCwd === this.antigravityWorktree && this.currentPermissionMode() === "default" &&
+      this.promptInFlight && !this.promptCancelling && params.sessionId === this.sessionId &&
+      antigravityWorktreeAutoAllows(this.antigravityWorktree, params.toolCall);
+    if (full || worktreeAuto) {
       const allow = params.options?.find((option) => option.kind === "allow_once") ??
-        params.options?.find((option) => option.kind === "allow_always");
+        (full ? params.options?.find((option) => option.kind === "allow_always") : undefined);
       if (allow) {
         if (trackedProviderTurn) {
           this.providerTurnLastWasMessage = false;

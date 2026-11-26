@@ -1777,9 +1777,17 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   - An agy self-update that replaces the symlink drops Auto again, and the warning returns with
     the command.
 
-  Unlike setting the sysctl to `0`, the restriction stays on for every other program. On Linux managed worktrees where agy's Auto sandbox cannot create its
-  nested namespace, a failed sandbox launch switches the session to Default mode once agy
-  confirms the change. The runner displays the effective mode and never retries the command.
+  Unlike setting the sysctl to `0`, the restriction stays on for every other program.
+  When an Auto Mode session creates or selects a different worktree, the worktree tool tells the
+  session to end its turn so the runner can relaunch it there before it edits. Under the runner's
+  protected Linux worktree boundary, if agy withholds Auto or its nested namespace is refused,
+  Wollipog keeps Auto Mode selected and handles a limited set of ACP permission requests once agy
+  confirms that it is in Default mode. The transcript explains the fallback. It allows routine
+  file operations confined to the selected worktree and direct local commands such as `git status`,
+  `git add`, and `git commit -m "message"`. Ordinary Git hooks and filters run under the same
+  runner isolation. Remote Git operations, compound shell commands, config overrides, unknown tool
+  inputs, and requests that only offer a lasting grant still ask. The runner never retries a
+  failed command and keeps the same filesystem and network boundary.
   **Full Permissions Mode** is Wollipog's own live mode, listed after agy's modes for every
   non-Orchestrator session, as T3 Code runs Antigravity full access: agy stays in its `default`
   mode and the runner answers each `session/request_permission` with its allow option. It needs

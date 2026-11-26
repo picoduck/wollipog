@@ -18,7 +18,8 @@
 // FAKE_AGY_VERSION: the version `--version` prints. A fake managed release (fake-release.ts) sets
 // it, and its own FAKE_AGY_MODE, in the wrapper script inside its archive.
 // FAKE_AGY_LABEL: names the copy (for example a managed release) in environments.jsonl.
-import { appendFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -153,12 +154,14 @@ if (args[0] === "acp" && args[1] === "--login") {
     turn = null;
     send({ id, result: { stopReason } });
   };
-  const runCommand = (sessionId, cwd) => {
+  const runCommand = (sessionId, cwd, fixture = null) => {
     const toolCallId = "call_fixture_command";
-    const args = { CommandLine: "touch fixture-command-ran", WaitMsBeforeAsync: 5000, toolSummary: "Create a marker file" };
-    const tool = { toolCallId, name: "run_command", args, kind: "execute", title: "touch fixture-command-ran", rawInput: args };
+    const title = fixture?.title ?? "touch fixture-command-ran";
+    const args = fixture?.input ?? { CommandLine: title, Cwd: cwd, WaitMsBeforeAsync: 5000, toolSummary: "Create a marker file" };
+    const kind = fixture?.kind ?? "execute";
+    const tool = { toolCallId, name: fixture?.name ?? "run_command", args, kind, title, rawInput: args };
     update(sessionId, { sessionUpdate: "tool_call", ...tool, status: "in_progress" });
-    if (modes.has("auto_sandbox_denied") && config.mode === "auto") {
+    if (modes.has("auto_sandbox_denied") && config.mode === "auto" && kind === "execute") {
       const output = `Created At: 2026-11-23T12:00:00Z\nCompleted At: 2026-11-23T12:00:01Z\nCommand failed to run: fork/exec ${process.env.FAKE_AGY_EXECUTABLE}: operation not permitted.\n\nNo output from the command.`;
       update(sessionId, { sessionUpdate: "tool_call_update", toolCallId, status: "completed", rawOutput: { output },
         content: [{ type: "content", content: { type: "text", text: output } }] });
@@ -169,10 +172,15 @@ if (args[0] === "acp" && args[1] === "--login") {
     turn.permission = { id: permissionId, settle: (outcome) => {
       turn.permission = null;
       if (outcome?.outcome === "selected" && outcome.optionId === "allow") {
-        writeFileSync(join(cwd, "fixture-command-ran"), "");
-        update(sessionId, { sessionUpdate: "tool_call_update", ...tool, status: "completed", rawOutput: { output: "" },
-          content: [{ type: "content", content: { type: "text", text: modes.has("long_tool_output") ? "output line ".repeat(2_000) : "" } }] });
-        update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "The marker file was created." } });
+        if (!fixture) writeFileSync(join(cwd, "fixture-command-ran"), "");
+        const execution = fixture?.run(cwd) ?? { status: 0, output: "" };
+        const output = modes.has("long_tool_output") ? "output line ".repeat(2_000) : execution.output;
+        const status = execution.status === 0 ? "completed" : "failed";
+        update(sessionId, { sessionUpdate: "tool_call_update", ...tool, status, rawOutput: { output },
+          content: [{ type: "content", content: { type: "text", text: output } }] });
+        update(sessionId, { sessionUpdate: "agent_message_chunk", content: {
+          type: "text", text: fixture ? (output || status) : "The marker file was created.",
+        } });
         return endTurn("end_turn");
       }
       update(sessionId, { sessionUpdate: "tool_call_update", ...tool, status: "failed", rawOutput: { output: "" },
@@ -184,8 +192,38 @@ if (args[0] === "acp" && args[1] === "--login") {
     if (fullPermissions) return turn.permission.settle({ outcome: "selected", optionId: "allow" });
     send({ id: permissionId, method: "session/request_permission", params: { sessionId, toolCall: {
       sessionUpdate: "tool_call", ...tool, status: "pending" },
-      options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }] } });
+      options: [{ optionId: "allow", name: "Allow", kind: modes.has("allow_always_only") ? "allow_always" : "allow_once" },
+        { optionId: "deny", name: "Deny", kind: "reject_once" }] } });
   };
+  function worktreeOperation(action, cwd) {
+    const path = join(cwd, "tracked.txt");
+    if (action === "read" || action === "edit") {
+      return {
+        name: action === "read" ? "read_file" : "write_file",
+        input: { path }, kind: action, title: `${action} tracked.txt`,
+        run: () => {
+          if (action === "edit") writeFileSync(path, "edited after relaunch\n");
+          return { status: 0, output: readFileSync(path, "utf8") };
+        },
+      };
+    }
+    const argv = {
+      status: ["status", "--short"],
+      add: ["add", "--", "tracked.txt"],
+      commit: ["commit", "-m", "Fixture worktree edit"],
+      push: ["push", "--dry-run"],
+    }[action];
+    const title = action === "commit" ? 'git commit -m "Fixture worktree edit"' : ["git", ...argv].join(" ");
+    return {
+      title, input: { CommandLine: title, Cwd: cwd },
+      run: () => {
+        // A disallowed request tests the approval path without contacting a remote.
+        if (action === "push") return { status: 1, output: "Unexpected fixture push approval" };
+        const result = spawnSync("git", argv, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 });
+        return { status: result.status, output: (result.stdout ?? "") + (result.stderr ?? "") };
+      },
+    };
+  }
   const sessionCwds = new Map();
   /** Answers awaited for requests the fixture sent the client, by request id. */
   const clientRequests = new Map();
@@ -324,6 +362,12 @@ if (args[0] === "acp" && args[1] === "--login") {
       if (/schedule fixture question/iu.test(text)) {
         endTurn("end_turn");
         return askQuestion(sessionId, "form");
+      }
+      const operation = /fixture worktree (read|edit|status|add|commit|push)/u.exec(text)?.[1] ??
+        (text.includes("Wollipog relaunched this session in the worktree you switched to:") ? "status" : undefined);
+      if (modes.has("worktree_auto_fixture") && operation) {
+        const cwd = sessionCwds.get(sessionId);
+        return runCommand(sessionId, cwd, worktreeOperation(operation, cwd));
       }
       const elicitation = /ask fixture question (form|unsupported|url|foreign)/iu.exec(text);
       if (elicitation) return askQuestion(sessionId, elicitation[1]);

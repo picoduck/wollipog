@@ -4320,6 +4320,12 @@ export class SessionManager {
     // writable, so the attached path is always writable then — that is what makes "next launch" a
     // real remedy rather than a hope.
     const writableAtNextLaunch = true;
+    // Antigravity Auto Mode scopes edits to the workspace it was launched in, even when the
+    // outer isolation already allows writes (such as a second worktree bound at launch).
+    if (meta.driver === "acp" && meta.agentId === ANTIGRAVITY_AGENT_ID &&
+        meta.config.permissionMode === ANTIGRAVITY_AUTO_MODE.id && !sameWorktreePath(meta.context, path, live.cwd)) {
+      return { writableNow: false, writableAtNextLaunch };
+    }
     // A provider launched in a runner-created worktree runs in this bwrap boundary whatever mode the
     // runner is configured with, so read the live process rather than the configuration (#3810).
     // Git writes a worktree's index and HEAD under its own admin directory, and the boundary binds

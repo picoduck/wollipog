@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
+import { ANTIGRAVITY_AGENT_ID } from "@wollipog/protocol";
 import type { RunnerToControlPlane, SessionLaunchSpec, SessionWorktreeIsolationNotice } from "@wollipog/protocol";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -52,7 +53,7 @@ function fakeProvider(options: {
   const launchEnvironments: DriverOptions["env"][] = [];
   let launches = 0;
   const factory = (
-    _driver: unknown,
+    driver: unknown,
     launch: Pick<DriverOptions, "cwd" | "env">,
     cb: DriverCallbacks,
   ) => {
@@ -65,6 +66,9 @@ function fakeProvider(options: {
       initialize: async () => {
         await options.beforeInitialize?.(generation);
         if (relaunch && options.failRelaunch) throw new Error("provider failed to start");
+        if (driver === "acp") cb.onAcpCapabilities?.({
+          sessionResume: true, logout: false, loadSession: false, sessionList: false, sessionDelete: false, sessionClose: false,
+        });
       },
       newSession: async () => {},
       close: async () => {},
@@ -110,6 +114,7 @@ async function withSession(
     failRelaunch?: boolean;
     beforeInitialize?: (launch: number) => Promise<void>;
     prepareLaunch?: (meta: SessionMeta) => void;
+    antigravity?: boolean;
   },
   body: (harness: Harness) => Promise<void>,
 ): Promise<void> {
@@ -132,10 +137,18 @@ async function withSession(
     });
     manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
       fake.factory as never, dataDir, 1);
+    if (options.antigravity) {
+      // The fake provider simulates a writable worktree. This test is about rebind scheduling,
+      // independent of whether the unit-test host can launch bubblewrap.
+      Object.defineProperty(manager, "resolveIsolationBoundary", { value: async () => undefined });
+    }
     if (options.prepareLaunch) Object.defineProperty(manager, "prepareLaunch", { value: options.prepareLaunch });
     const sessionId = `s_continuation_${name.replaceAll("-", "_")}`;
     harness = { manager, store, sessionId, fake, sent };
-    await manager.start(claudeSpec(sessionId, repo));
+    const spec = claudeSpec(sessionId, repo);
+    await manager.start(options.antigravity ? {
+      ...spec, driver: "acp", agentId: ANTIGRAVITY_AGENT_ID, command: "agy", config: { permissionMode: "auto" },
+    } : spec);
     if (options.managedGitBoundary !== false) {
       const internals = manager as unknown as { active: Map<string, { managedGitBoundary?: true }> };
       internals.active.get(sessionId)!.managedGitBoundary = true;
@@ -198,6 +211,29 @@ test("a session's own switch to a worktree it cannot write continues there once 
       notices.join("\n"));
     // The automatic turn is never shown as something a person typed.
     assert.equal(store.readEvents(sessionId).filter((event) => event.payload.kind === "user_message").length, 1);
+  });
+});
+
+test("Antigravity Auto Mode continues only after rebinding its live workspace, even when the outer sandbox permits writes", {
+  skip: !haveGit(),
+}, async () => {
+  let switched: Switched | undefined;
+  await withSession("antigravity-auto", {
+    antigravity: true,
+    managedGitBoundary: false,
+    during: async ({ manager, sessionId, fake }, prompt) => {
+      if (prompt !== "start the fix") return;
+      switched = await manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/antigravity" }, undefined,
+        { requestedBySession: true });
+      assert.equal(fake.launches(), 1, "the original process remains alive until the turn ends");
+    },
+  }, async ({ manager, store, sessionId, fake }) => {
+    manager.prompt(sessionId, "start the fix");
+    await waitFor(() => fake.prompts.length === 2 && store.readMeta(sessionId)?.status === "idle",
+      "Antigravity did not continue in the selected worktree");
+    assert.deepEqual(switched?.isolation, { writableNow: false, writableAtNextLaunch: true, continuesAfterRelaunch: true });
+    assert.equal(fake.launches(), 2);
+    assert.equal(fake.prompts[1]?.cwd, switched?.worktree.path);
   });
 });
 
