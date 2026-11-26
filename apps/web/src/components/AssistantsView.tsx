@@ -304,10 +304,16 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   const cancelNewThread = () => navigate({ name: "assistants" }, { replace: true });
   const startThread = () => navigate({ name: "assistants", newThread: true });
   // The new thread opens ready for its first message, as a new session does.
+  // Only while New Thread is still what the person is looking at: creation can finish after they
+  // followed Assistant Settings or went Back, and the page they moved to stays theirs. The thread
+  // is in the list either way.
   const finishNewThread = ({ thread, setupFailure }: NewAssistantThreadResult) => {
     replace(thread);
-    setShowArchive(false);
-    navigate({ name: "assistants", threadId: thread.id }, { replace: true });
+    const view = currentView.read();
+    if (view.name === "assistants" && view.newThread) {
+      setShowArchive(false);
+      navigate({ name: "assistants", threadId: thread.id }, { replace: true });
+    }
     if (setupFailure) showToast(setupFailure, { tone: "warning" });
   };
 

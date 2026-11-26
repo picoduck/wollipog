@@ -182,6 +182,21 @@ for (const theme of ["light", "dark"] as const) {
         await expect(page.locator("body")).not.toHaveAttribute("data-thread-create-count", /./);
       });
 
+      test("a creation that finishes after the owner left keeps them where they went", async ({ page }) => {
+        await open(page, "new-thread=hold-create&limits=enabled");
+        await list(page).getByRole("button", { name: "New Thread" }).click();
+        await create(page).click();
+        await expect(page.locator("body")).toHaveAttribute("data-thread-create-held", "true");
+        await dialog(page).getByRole("link", { name: "Assistant Settings" }).click();
+        const defaults = page.getByRole("region", { name: "Thread Defaults" });
+        await expect(defaults).toBeVisible();
+        await page.evaluate(() => Reflect.get(window, "assistantsReleaseCreate")());
+        await expect(page.locator("body")).toHaveAttribute("data-thread-create-count", "1");
+        // Settings stays open; the thread is waiting in the list.
+        await expect(defaults).toBeVisible();
+        await expect(dialog(page)).toHaveCount(0);
+      });
+
       test("changing the harness starts from that harness's own model and effort", async ({ page }) => {
         await open(page, "limits=enabled");
         await list(page).getByRole("button", { name: "New Thread" }).click();

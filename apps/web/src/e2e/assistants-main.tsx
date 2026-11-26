@@ -102,6 +102,9 @@ const fixtureAccounts: AssistantThreadAccountChoices["accounts"] = [
 const triageAccount = fixtureAccounts[accountScenario === "stress" ? 1 : 6]!;
 const accountSelections = new Map([["thr_triage", triageAccount.accountRef]]);
 
+const workEmail = "work.me@example.com";
+const homeEmail = "home.me@example.org";
+
 function fixtureAccountChoices(harness: string, currentAccountRef?: string): AssistantThreadAccountChoices {
   const accounts = accountScenario === "composer-stress" ? [
     ...fixtureAccounts,
@@ -109,6 +112,12 @@ function fixtureAccountChoices(harness: string, currentAccountRef?: string): Ass
     { accountRef: fixtureAccountRef(12), label: "Operations Subscription" },
   ] : accountScenario === "stress" ? fixtureAccounts
     : accountScenario === "choices" ? [fixtureAccounts[0]!, ...fixtureAccounts.slice(2, 6)]
+    // Two eligible accounts named by an email each, for hidden-email choices.
+    : accountScenario === "emails" ? [
+      { accountRef: fixtureAccountRef(12), label: workEmail },
+      { accountRef: fixtureAccountRef(13), label: homeEmail },
+      fixtureAccounts[0]!,
+    ]
     : [fixtureAccounts[0]!, fixtureAccounts[6]!, fixtureAccounts[2]!];
   return harness === "codex"
     ? { accounts: [{ accountRef: fixtureAccountRef(10), label: "Codex Studio" }], policyAccountRef: fixtureAccountRef(10), currentAccountRef }
@@ -620,7 +629,11 @@ const defaults: AssistantThreadDefaults = {
 if (limitsScenario && limitsScenario !== "old") {
   defaults.launchDefaults = { harness: "claude-code", providerAccount: null };
   if (limitsScenario !== "older-defaults") {
-    defaults.decisionDefault = null;
+    defaults.decisionDefault = params.get("default-grant") === "all-before-releases" ? {
+      categories: (Object.keys(ASSISTANT_DECISION_CATEGORIES) as AssistantDecisionCategory[]).filter((category) =>
+        !["ci_rerun", "release_tag", "release_publish", "ui_evidence_review"].includes(category)),
+      selectionMode: "all", projects: "all", campaigns: "all", expiresAfterMs: 7 * 24 * 60 * 60_000,
+    } : null;
     // A control plane that saves a model and effort for new threads, and lists each harness's.
     defaults.launchDefaults = { ...defaults.launchDefaults, model: null, effort: null };
     defaults.harnesses[0] = { ...defaults.harnesses[0]!, driver: "claude-code", effortLevels: ["low", "medium", "high", "max"], models: [
@@ -639,6 +652,8 @@ if (accountScenario || defaults.launchDefaults) {
   }
 }
 
+/** `new-thread=hold-create`: a thread creation waits for `assistantsReleaseCreate()`. */
+let releaseCreate: (() => void) | undefined;
 let seq = 0;
 const event = (sessionId: string, ts: number, payload: SessionEvent["payload"]): SessionEvent =>
   ({ id: ++seq, sessionId, seq, ts, payload }) as SessionEvent;
@@ -907,10 +922,15 @@ const client = {
   },
   patchAssistantThreadLaunchDefaults: async (update: AssistantThreadLaunchDefaultsPatch) => {
     const current = defaults.launchDefaults!;
+    if ("expectedHarness" in update && update.expectedHarness !== current.harness) {
+      throw new ApiError("The default harness changed. Reopen Assistant Settings to choose its account.", 409);
+    }
     defaults.launchDefaults = "harness" in update
       ? current.harness === update.harness ? current : { ...current, harness: update.harness, providerAccount: null,
         ...("model" in current ? { model: null, effort: null } : {}) }
-      : { ...current, providerAccount: update.providerAccount };
+      : "model" in update ? { ...current, model: update.model, effort: update.effort }
+        : { ...current, providerAccount: update.providerAccount };
+    document.body.dataset.savedLaunchDefaults = JSON.stringify(defaults.launchDefaults);
     defaults.harness = defaults.launchDefaults.harness;
     return structuredClone(defaults);
   },
@@ -938,7 +958,9 @@ const client = {
     return structuredClone(limitDefaults);
   },
   patchAssistantThreadLimitDefaults: async (update: Partial<AssistantThreadLimits>) => {
+    document.body.dataset.patchedLimitDefaults = JSON.stringify(update);
     limitDefaults = { ...limitDefaults, ...update };
+    document.body.dataset.savedLimitDefaults = JSON.stringify(limitDefaults);
     return structuredClone(limitDefaults);
   },
   setAssistantThreadLimits: async (threadId: string, limits: AssistantThreadLimits) => {
@@ -995,6 +1017,10 @@ const client = {
     if (refusal) return refusal;
     if (newThreadScenario === "create-failure") {
       throw new ApiError("The selected Machine went offline.", 409);
+    }
+    if (newThreadScenario === "hold-create") {
+      document.body.dataset.threadCreateHeld = "true";
+      await new Promise<void>((resolve) => { releaseCreate = resolve; });
     }
     document.body.dataset.threadCreateCount = String(Number(document.body.dataset.threadCreateCount ?? 0) + 1);
     const id = `thr_new_${threads.length + 1}`;
@@ -1292,6 +1318,9 @@ Object.assign(window, {
     publish(threads.find((candidate) => candidate.id === threadId)!);
   },
   assistantsHoldNextList: () => { holdNextList = true; },
+  assistantsReleaseCreate: () => { releaseCreate?.(); releaseCreate = undefined; },
+  /** Another tab saving limit defaults behind this page. */
+  assistantsSaveLimitDefaultsElsewhere: (update: Partial<AssistantThreadLimits>) => { limitDefaults = { ...limitDefaults, ...update }; },
   assistantsSlowLists: (ms: number) => { slowListMs = ms; },
   assistantsReleaseList: () => {
     initialListGate = undefined;

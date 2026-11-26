@@ -499,9 +499,9 @@ export class AssistantThreads {
     }
     const defaultAccount = requestedAccount === undefined && harness === defaults.harness ? defaults.providerAccount : null;
     // An omitted model or effort is the saved default, but only for the harness it was saved for.
-    const model = input.model !== undefined ? modelChoiceOf(input.model, "model")
+    let model = input.model !== undefined ? modelChoiceOf(input.model, "model")
       : harness === defaults.harness ? defaults.model ?? null : null;
-    const effort = input.effort !== undefined ? modelChoiceOf(input.effort, "effort")
+    let effort = input.effort !== undefined ? modelChoiceOf(input.effort, "effort")
       : harness === defaults.harness ? defaults.effort ?? null : null;
     const runners = this.deps.listRunners(owner);
     const workspaceRunnerId = workspaceId === undefined ? undefined : runners.find((runner) =>
@@ -544,6 +544,18 @@ export class AssistantThreads {
       throw new AssistantThreadRefusal(workspaceId === undefined ? "This Machine has no Location. Add one, or choose another Machine." : "Location not found on this Machine.", workspaceId === undefined ? 409 : 404);
     }
     const agent = harnessAgent(runner, harness)!;
+    // A saved default the installation no longer offers falls back to the harness's own choice,
+    // so a stale default never refuses every new thread. A model or effort the request names is
+    // still checked, and refused, by the session itself.
+    const capabilities = agent.capabilities;
+    if (input.model === undefined && model !== null && capabilities?.models.length &&
+        !capabilities.models.some((candidate) => candidate.id === model)) {
+      model = null;
+    }
+    if (input.effort === undefined && effort !== null && capabilities) {
+      const chosen = model === null ? undefined : capabilities.models.find((candidate) => candidate.id === model);
+      if (!(chosen?.efforts?.length ? chosen.efforts : capabilities.effortLevels).includes(effort)) effort = null;
+    }
     if (accountRef && !runnerSupportsProtocol(runner.protocolVersion, "assistantThreadProviderAccount")) {
       const { error, ...details } = runnerCapabilityRequirementError(runner.protocolVersion, "assistantThreadProviderAccount", "choosing an assistant thread's account");
       throw new AssistantThreadRefusal(error, 409, details);

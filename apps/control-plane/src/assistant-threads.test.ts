@@ -603,6 +603,30 @@ test("new threads start with the saved or chosen model and effort, which belong 
   } finally { await h.close(); }
 });
 
+test("a saved model or effort the installation no longer offers falls back instead of refusing new threads", async () => {
+  const caps = (models: { id: string; displayName: string; efforts?: string[] }[]) =>
+    ({ ...claude.capabilities!, models, effortLevels: ["low", "medium", "high"] });
+  const h = await harness({ agents: [{ ...claude, capabilities: caps([
+    { id: "opus", displayName: "Opus", efforts: ["high"] }, { id: "sonnet", displayName: "Sonnet", efforts: ["low"] },
+  ]) }] });
+  try {
+    const saved = await h.call("PATCH", "/api/assistant-threads/defaults/launch", { expectedHarness: "claude-code", model: "opus", effort: "high" });
+    assert.equal(saved.status, 200, saved.raw);
+    // The Machine's catalog drops the saved model.
+    h.db.registerRunner({ runnerId: "r", hostname: "fixture", os: "linux", version: "fixture",
+      workspaces: [{ id: "w", name: "Home", path: "/fixture/home" }],
+      agents: [{ ...claude, capabilities: caps([{ id: "sonnet", displayName: "Sonnet", efforts: ["low"] }]) }] }, Date.now(), PROTOCOL_VERSION);
+    // A client that leaves the model to the default, such as an older web app, still starts a thread.
+    const inherited = await h.call("POST", "/api/assistant-threads", {});
+    assert.equal(inherited.status, 200, inherited.raw);
+    assert.deepEqual([h.sent.at(-1)!.spec.config?.model, h.sent.at(-1)!.spec.config?.effort], ["sonnet", "low"]);
+    // Naming the missing model is still refused, and nothing launches for it.
+    const sent = h.sent.length;
+    assert.ok((await h.call("POST", "/api/assistant-threads", { model: "opus" })).status >= 400);
+    assert.equal(h.sent.length, sent);
+  } finally { await h.close(); }
+});
+
 test("creation previews the Machine's policy, validates an explicit reference, and keeps the fallback", async () => {
   const h = await harness({ accounts, agents: [{ ...claude,
     providerAccountReadiness: { defaultAuthStatus: "authenticated", readyAccountIds: ["work", "studio", "credits"] },

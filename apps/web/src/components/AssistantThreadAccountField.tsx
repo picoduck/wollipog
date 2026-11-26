@@ -18,13 +18,20 @@ export function canUseMachineAccountPolicy(choices: AssistantThreadAccountChoice
  * account it resolves to now), then eligible accounts, then the rest disabled with their reasons.
  * `titles` are the accounts' labels as they should show, masked or revealed, in `choices` order.
  */
-export function assistantAccountOptions(choices: AssistantThreadAccountChoices | undefined, titles: readonly string[]): SelectOption<string>[] {
+export function assistantAccountOptions(
+  choices: AssistantThreadAccountChoices | undefined,
+  titles: readonly string[],
+  /** `default` keeps Machine Policy choosable while the Machine refuses it right now, since it is
+   * resolved again when each thread starts, and it is the way to clear a stale saved account. */
+  purpose: "launch" | "default" = "launch",
+): SelectOption<string>[] {
   const accounts = choices?.accounts ?? [];
   const policyIndex = accounts.findIndex((account) => account.accountRef === choices?.policyAccountRef);
   const options: SelectOption<string>[] = [];
-  if (!choices || canUseMachineAccountPolicy(choices)) {
+  const policyUsable = !choices || canUseMachineAccountPolicy(choices);
+  if (policyUsable || purpose === "default") {
     options.push({ value: MACHINE_ACCOUNT_POLICY, label: "Machine Policy",
-      description: policyIndex >= 0 ? `Uses ${titles[policyIndex]} now. The Machine picks again for each thread.`
+      description: policyUsable && policyIndex >= 0 ? `Uses ${titles[policyIndex]} now. The Machine picks again for each thread.`
         : "The Machine picks the account each time a thread starts." });
   }
   accounts.forEach((account, index) => {

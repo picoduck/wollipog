@@ -29,10 +29,23 @@ function modelOf(option: AssistantThreadHarnessOption | undefined, model: string
   return model === null ? undefined : option?.models?.find((candidate) => candidate.id === model);
 }
 
-/** The efforts a model accepts: its own list, else the installation's. */
+/**
+ * The efforts a model accepts: its own list, else the installation's. For Automatic, the efforts of
+ * the model the launch will pick: the advertised default model's, or else only those every listed
+ * model accepts. The installation's list is a union across models, and an effort outside the
+ * resolved model's would be silently replaced at launch.
+ */
 export function effortsFor(option: AssistantThreadHarnessOption | undefined, model: string | null): string[] {
-  const own = modelOf(option, model)?.efforts;
-  return own?.length ? own : option?.effortLevels ?? [];
+  const installation = option?.effortLevels ?? [];
+  const own = (candidate: AgentModel) => candidate.efforts?.length ? candidate.efforts : installation;
+  if (model !== null) {
+    const chosen = modelOf(option, model);
+    return chosen ? own(chosen) : installation;
+  }
+  const models = option?.models ?? [];
+  const advertised = models.find((candidate) => candidate.default);
+  if (advertised) return own(advertised);
+  return models.length ? installation.filter((effort) => models.every((candidate) => own(candidate).includes(effort))) : installation;
 }
 
 export function assistantModelChoices(option: AssistantThreadHarnessOption | undefined, selected: string | null): AssistantModelChoice[] {

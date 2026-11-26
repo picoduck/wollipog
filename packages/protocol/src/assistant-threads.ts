@@ -307,7 +307,9 @@ export interface AssistantThreadLaunchDefaults {
 
 export type AssistantThreadLaunchDefaultsPatch =
   | Pick<AssistantThreadLaunchDefaults, "harness">
-  | (Pick<AssistantThreadLaunchDefaults, "providerAccount"> & { expectedHarness: AssistantThreadHarness });
+  | (Pick<AssistantThreadLaunchDefaults, "providerAccount"> & { expectedHarness: AssistantThreadHarness })
+  /** Both together, for the harness the owner saw. Advertised by `launchDefaults.model`. */
+  | { model: string | null; effort: string | null; expectedHarness: AssistantThreadHarness };
 
 /** A thread credential authenticates for this long after the runner registers it. The runner
  * proxy registers a fresh one at each launch and before half of this has passed (#4663). */

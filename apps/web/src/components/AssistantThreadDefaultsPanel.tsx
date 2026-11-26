@@ -29,7 +29,7 @@ import {
 import { parseCount, parseUsd } from "../guardrail-values.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { useLeaveGuard } from "../leave-guard.js";
-import { accountLabelText } from "../personal-identifiers.js";
+import { maskedAccountTitles } from "../personal-identifiers.js";
 import { useOptionalStoreSelector } from "../store.js";
 import { AssistantDecisionDelegationDialog } from "./AssistantDecisionDelegationDialog.js";
 import { MACHINE_ACCOUNT_POLICY, assistantAccountOptions } from "./AssistantThreadAccountField.js";
@@ -195,8 +195,11 @@ function AssistantThreadDefaultsForm() {
   const launchDefaults = defaults?.launchDefaults;
   const option = defaults?.harnesses.find((candidate) => candidate.id === draft.harness);
   const choices = option?.accountSelection;
-  const titles = choices?.accounts.map((account) => accountLabelText(account.label, undefined, privacy.hide)) ?? [];
-  const accountOptions = assistantAccountOptions(choices, titles);
+  // Hidden emails are numbered ("Hidden Account 2") so two accounts stay distinguishable.
+  const labels = choices?.accounts.map((account) => account.label) ?? [];
+  const titles = privacy.hide ? maskedAccountTitles(labels) : labels;
+  // Machine Policy stays choosable for the default, the way back from a stale saved account.
+  const accountOptions = assistantAccountOptions(choices, titles, "default");
   const savedAccountGone = draft.account !== MACHINE_ACCOUNT_POLICY && !accountOptions.some((candidate) =>
     candidate.value === draft.account && !candidate.disabled);
   if (savedAccountGone && !accountOptions.some((candidate) => candidate.value === draft.account)) {
@@ -230,20 +233,49 @@ function AssistantThreadDefaultsForm() {
     setBusy(true);
     setSaveError(null);
     let next = saved;
+    const base = draftFrom(saved);
+    // Control planes with decision defaults also take per-field PATCHes. Sending only what changed,
+    // with the harness the owner saw, keeps another tab's newer edits of the other fields.
+    const patchable = decisionDefault !== undefined;
     try {
       if (launchDirty && defaults) {
         const providerAccount = draft.account === MACHINE_ACCOUNT_POLICY || !choices ? null
           : { runnerId: choices.runnerId, accountRef: draft.account };
-        const updated = await api.setAssistantThreadLaunchDefaults({ harness: draft.harness, providerAccount,
-          ...(modelsSaved ? { model: draft.model, effort: draft.effort } : {}) });
-        next = { ...next, defaults: { ...updated, decisionDefault: next.defaults?.decisionDefault ?? updated.decisionDefault } };
+        let updated: AssistantThreadDefaults | undefined;
+        if (!patchable) {
+          updated = await api.setAssistantThreadLaunchDefaults({ harness: draft.harness, providerAccount });
+        } else {
+          let current = base;
+          if (draft.harness !== base.harness) {
+            // The server resets the account, model and effort with the harness.
+            updated = await api.patchAssistantThreadLaunchDefaults({ harness: draft.harness });
+            current = draftFrom({ defaults: updated, limits: saved.limits });
+          }
+          if (draft.account !== current.account) {
+            updated = await api.patchAssistantThreadLaunchDefaults({ expectedHarness: draft.harness, providerAccount });
+          }
+          if (modelsSaved && (draft.model !== current.model || draft.effort !== current.effort)) {
+            updated = await api.patchAssistantThreadLaunchDefaults({ expectedHarness: draft.harness, model: draft.model, effort: draft.effort });
+          }
+        }
+        if (updated) next = { ...next, defaults: { ...updated, decisionDefault: next.defaults?.decisionDefault ?? updated.decisionDefault } };
       }
       if (limitsDirty && limits && budget.ok && launches.ok) {
-        next = { ...next, limits: await api.setAssistantThreadLimitDefaults({ costUsd: budget.value, launchedSessions: launches.value }) };
+        const changed: Partial<AssistantThreadLimits> = {
+          ...(budget.value !== limits.costUsd ? { costUsd: budget.value } : {}),
+          ...(launches.value !== limits.launchedSessions ? { launchedSessions: launches.value } : {}),
+        };
+        next = { ...next, limits: patchable ? await api.patchAssistantThreadLimitDefaults(changed)
+          : await api.setAssistantThreadLimitDefaults({ costUsd: budget.value, launchedSessions: launches.value }) };
       }
       if (delegationDirty && next.defaults && decisionDefault !== undefined) {
+        // A saved Delegate All is the snapshot the owner granted: changing only its expiry or scope
+        // never adds a category supported since. Choosing Delegate All anew takes today's set. A
+        // saved category that is unavailable here stays as it was, as the delegation editor keeps it.
         const grant: AssistantDecisionDefault | null = draft.mode === "ask" ? null : {
-          categories: draft.mode === "all" ? delegable : draft.categories.filter((category) => delegable.includes(category)),
+          categories: draft.mode === "all"
+            ? base.mode === "all" ? base.categories : delegable
+            : draft.categories.filter((category) => delegable.includes(category) || base.categories.includes(category)),
           selectionMode: draft.mode, projects: draft.projects, campaigns: draft.campaigns,
           expiresAfterMs: ASSISTANT_DECISION_DEFAULT_DURATIONS[draft.expiry],
         };
@@ -330,7 +362,7 @@ function AssistantThreadDefaultsForm() {
       {draft.mode === "choose" && <>
         <h4 className="assistant-gates-label">Who Decides in Each Category</h4>
         {ORDERED_CATEGORIES.map((category) => <SegmentedRow key={category} title={ASSISTANT_DECISION_CATEGORIES[category]}
-          value={draft.categories.includes(category) && !unavailable[category] ? "assistant" : "owner"} disabled={busy}
+          value={draft.categories.includes(category) ? "assistant" : "owner"} disabled={busy}
           disabledReason={unavailable[category]}
           options={[
             { value: "owner", label: "You" },

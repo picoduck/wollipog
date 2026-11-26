@@ -106,6 +106,48 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
         await expectNoHorizontalOverflow(defaults, "Defaults with a long account name");
       });
 
+      test("saving one default sends only what changed, keeping another tab's newer edit", async ({ page }) => {
+        await open(page);
+        const limits = page.getByRole("region", { name: "Limits", exact: true });
+        const budget = limits.getByRole("textbox", { name: "Budget per Thread USD" });
+        await expect(budget).toHaveValue("25");
+        // Another tab pauses launches after this page loaded.
+        await page.evaluate(() => Reflect.get(window, "assistantsSaveLimitDefaultsElsewhere")({ launchedSessions: 0 }));
+        await budget.fill("40");
+        await page.getByRole("button", { name: "Save Defaults" }).click();
+        const body = page.locator("body");
+        await expect(body).toHaveAttribute("data-patched-limit-defaults", JSON.stringify({ costUsd: 40 }));
+        await expect(body).toHaveAttribute("data-saved-limit-defaults", JSON.stringify({ costUsd: 40, launchedSessions: 0 }));
+      });
+
+      test("changing only a saved Delegate All's expiry never adds a category supported since", async ({ page }) => {
+        // Saved before CI reruns and releases could be delegated; this control plane now supports both.
+        await open(page, "enabled", "stress&default-grant=all-before-releases");
+        const delegation = page.getByRole("region", { name: "Decision Delegation", exact: true });
+        await expect(delegation.getByRole("button", { name: /^New Threads:/ })).toHaveAccessibleName("New Threads: Delegate All");
+        await delegation.getByRole("button", { name: /^Expires:/ }).click();
+        await page.getByRole("option", { name: "30 Days", exact: true }).click();
+        await page.getByRole("button", { name: "Save Defaults" }).click();
+        await expect(page.getByRole("button", { name: "Save Defaults" })).toHaveCount(0);
+        const grant = JSON.parse(await page.locator("body").getAttribute("data-saved-decision-default") ?? "null");
+        expect(grant.selectionMode).toBe("all");
+        expect(grant.expiresAfterMs).toBe(30 * 24 * 60 * 60_000);
+        expect(grant.categories).toContain("pr_merge");
+        for (const added of ["ci_rerun", "release_tag", "release_publish", "ui_evidence_review"]) expect(grant.categories).not.toContain(added);
+      });
+
+      test("hidden emails keep two accounts distinguishable in the default Account", async ({ page }) => {
+        await page.addInitScript(() => window.localStorage.setItem("wollipog.hide-account-emails", "true"));
+        await page.clock.setFixedTime(new Date("2025-11-19T18:00:00Z"));
+        await page.goto(`/assistants-e2e.html?path=${settings}&limits=enabled&accounts=emails`);
+        const defaults = page.getByRole("region", { name: "Thread Defaults" });
+        await defaults.getByRole("button", { name: /^Account:/ }).click();
+        const list = page.getByRole("listbox", { name: "Account" });
+        await expect(list.getByRole("option", { name: /^Hidden Account 1/ })).toBeVisible();
+        await expect(list.getByRole("option", { name: /^Hidden Account 2/ })).toBeVisible();
+        await expect(list).not.toContainText("@example");
+      });
+
       test("revokes an active grant with confirmation and removes an expired grant", async ({ page }) => {
         await open(page, "enabled", "active-expired");
         const grants = page.getByRole("region", { name: "Active Delegations" });
