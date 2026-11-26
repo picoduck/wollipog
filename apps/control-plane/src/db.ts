@@ -58,7 +58,7 @@ import {
   validProviderHomeLaunchRefusal, validProviderHomeWait, validWorktreeSwitch,
 } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
-import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, campaignIssueInScope, campaignLaunchRepository, campaignOtherRepository, campaignRefusedRepositories, campaignRepositoryLimits, campaignRepositoryOutsideLimit, campaignScopeRepositories, campaignOwnerId, campaignUnreadLocations, remintCampaignBoundary, rememberRefusedRepositories } from "./campaign-authority.js";
+import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignAwaitsFirstMessageOrInitialScope, campaignDispatchScopeRefusal, campaignBoundaryCurrent, campaignIssueInScope, campaignLaunchRepository, campaignOtherRepository, campaignRefusedRepositories, campaignRepositoryLimits, campaignRepositoryOutsideLimit, campaignScopeRepositories, campaignOwnerId, campaignUnreadLocations, remintCampaignBoundary, rememberRefusedRepositories } from "./campaign-authority.js";
 import { campaignBoundaryRepositoryAt, campaignLocationRepository, campaignRepositoryPlaces, limitedLaunchLocations } from "./campaign-repository-boundary.js";
 import { genericRequestScreenData, storedCredentialScreenFact } from "./credential-screen.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
@@ -24758,6 +24758,7 @@ export class ControlPlaneDb {
        FROM orchestrator_campaign_follow_ups WHERE campaign_session_id=?`,
     ).get(resolvedCampaignId) as { unique_count: number | null; duplicate_count: number | null };
     const effectiveOwners = { ...policy.delegation.decisions };
+    let ciRerunOwner: "human" | "orchestrator" = "human";
     if (policy.control?.mode === "full_control") {
       const protocol = this.getRunner(campaign.runner_id)?.protocolVersion;
       const supported = campaignAuthorityPreflight(policy.control, campaign.driver,
@@ -24767,6 +24768,9 @@ export class ControlPlaneDb {
       // each occurrence also checks its requester's runner and the durable count.
       const cappedExtensions = runnerSupportsProtocol(protocol, "fullControlReviewExtensions");
       for (const category of WORKFLOW_DECISION_CATEGORIES) effectiveOwners[category] = campaignWorkflowOwner(policy.control, policy.delegation.decisions, category, supported, cappedExtensions);
+      ciRerunOwner = supported && runnerSupportsProtocol(protocol, "fullControlCiRerun") &&
+        !campaignAwaitsFirstMessageOrInitialScope(policy)
+        ? campaignWorkflowOwner(policy.control, policy.delegation.decisions, "ci_rerun", true) : "human";
     }
     // Preserve the saved choice while routing the effective gate to the human whenever this
     // Orchestrator's runner, harness, or model cannot inspect evidence bytes. A supported client
@@ -24833,6 +24837,7 @@ export class ControlPlaneDb {
         ? { budget } : {}),
       ...(recovery ? { recovery } : {}),
       decisionOwners: effectiveOwners,
+      ciRerunOwner,
       ...(policy.control?.mode === "full_control" && effectiveOwners.review_round_extension === "orchestrator" &&
         policy.delegation.decisions.review_round_extension !== "orchestrator"
         ? { reviewRoundExtensionCap: { scope: "pull_request" as const, extraRounds: "configured_round_budget" as const } } : {}),

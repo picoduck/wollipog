@@ -65,7 +65,7 @@ function campaign(patch: Partial<CampaignAuthorityView> = {}, objective = "Deliv
     control: { mode: "full_control", boundary: { version: 1, revision: 4, issueScopeRevision: 1, repository: "owner/repo", objective,
       authorizedByUserId: "user", authorizedAt: Date.UTC(2026, 10, 5, 11, 0),
       operations: ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval",
-        "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"],
+        "issue_closure", "campaign_issue_scope", "ci_rerun", "question", "tool_approval", "policy_ask"],
       delegatablePolicyIds: [],
       issueAuthority: { epics: [12], relatedFollowUps: true, maxIssues: 6, closureReasons: ["completed"] },
       budgetAuthority: { version: 1, costUsd: 40, concurrency: 3, acceptedFollowUps: 2, accounting: "managed_workers_only", unpriced: "stop" } } },
@@ -88,7 +88,7 @@ test("the Full Control section shows the boundary, Human Required rules, recorde
       "The Orchestrator runs this campaign end to end, except the decisions listed under Human Required.");
     const boundary = facts(container, "Full Control");
     assert.equal(boundary.Objective, "Deliver owner/repo #12.");
-    assert.equal(boundary.Operations, "Implementation Questions, PR Merge, Merged Branch Deletion, Follow-Up Issue Publication, UI Evidence Approval, Issue Closure, Issue Scope Changes, Questions, Tool Approvals, Policy Asks");
+    assert.equal(boundary.Operations, "Implementation Questions, PR Merge, Merged Branch Deletion, Follow-Up Issue Publication, UI Evidence Approval, Issue Closure, Issue Scope Changes, CI Rerun, Questions, Tool Approvals, Policy Asks");
     assert.equal(boundary["Maximum Issues"], "6 Derived");
     assert.equal(boundary["Related Follow-Ups"], "Allowed");
     assert.equal(boundary["Closure Reasons"], "Completed");

@@ -11,7 +11,7 @@ import type { EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import type { HumanPrincipal } from "./identity.js";
 import { childHarnessAgents, childModelMachines, parseOrchestratorOverrides, type OrchestratorSettings } from "./orchestrator-settings.js";
 import { parseAgentHarnessIdentity } from "./agent-harness-defaults.js";
-import { campaignLaunchDigest, campaignLaunchPreflight, parseFullControlLaunchRequest } from "./campaign-launch-admission.js";
+import { FULL_CONTROL_LAUNCH_OPERATIONS, campaignLaunchDigest, campaignLaunchPreflight, parseFullControlLaunchRequest } from "./campaign-launch-admission.js";
 import { authorizeFullControl } from "./campaign-authority.js";
 import { inspectCampaignWorkspace } from "./project-location-inspection.js";
 import { evaluateUiEvidenceReviewClient } from "./ui-evidence-review.js";
@@ -418,9 +418,13 @@ export class ScheduledCampaignRuntime {
       return this.sessions.createSession(body, delivery, ownerScope, false, false, false,
         { ...context, scheduledCampaign: scheduled });
     }
+    // Schedules without an explicit operations list keep the pre-v414 operation set rather than
+    // silently gaining newly added Full Control operations (such as ci_rerun) on upgrade (#4915).
+    const scheduledOperations = campaign.fullControl?.operations ??
+      FULL_CONTROL_LAUNCH_OPERATIONS.filter((operation) => operation !== "ci_rerun");
     const request: FullControlLaunchRequest = { runnerId: target.runnerId, workspaceId: target.workspaceId,
       task: (campaign.fullControl?.objective ?? stored.prompt?.trim() ?? automation.name).slice(0, 4000),
-      overrides: { ...campaign.fullControl, budget: { ...campaign.fullControl?.budget, ...budget } } };
+      overrides: { ...campaign.fullControl, operations: scheduledOperations, budget: { ...campaign.fullControl?.budget, ...budget } } };
     const agent = runner.agents.find(a => a.id === launch.agentId);
     const { preflight, proposal } = campaignLaunchPreflight({ request, plan: launch, runner, inspection,
       organizationId: human.organizationId, projectDefaults: launch.projectId ? this.db.projectChildSessionDefaults(launch.projectId) : null,

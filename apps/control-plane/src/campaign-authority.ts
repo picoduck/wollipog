@@ -55,10 +55,22 @@ export function campaignRepositoryOutsideLimit(policy: Pick<OrchestratorCampaign
   return limits.length > 0 && !limits.includes(repository.toLowerCase());
 }
 
+/** Whether a Full Control campaign has not yet finished establishing its initial first-message
+ * scope (#4915): while the first message is still pending/delivering or awaiting its initial scope
+ * proposal, provisional launch operations that can be withheld must not yet self-authorize. */
+export function campaignAwaitsFirstMessageOrInitialScope(
+  policy: Pick<OrchestratorCampaignPolicy, "control" | "firstMessageScope"> | null | undefined,
+): boolean {
+  if (policy?.control?.mode !== "full_control") return false;
+  const first = policy.firstMessageScope;
+  return first?.state === "pending" || first?.state === "delivering" ||
+    (first?.state === "established" && first.grant?.status === "proposal" && !first.initialScope);
+}
+
 /** The runner's diagnostic copy of a campaign's control. A pre-v288 runner rejects a boundary with
- * a `repositories` list (#4117), and a pre-v322 one an issue authority with `otherEpics` (#4118), so
- * each receives the boundary without them, which names the same first repository and its epics. The
- * server keeps and enforces the full boundary. */
+ * a `repositories` list (#4117), a pre-v322 one an issue authority with `otherEpics` (#4118), and a
+ * pre-v414 one a `ci_rerun` operation (#4915), so each receives the boundary without what it cannot
+ * validate. The server keeps and enforces the full boundary. */
 export function campaignControlForRunner(control: CampaignControl, protocolVersion: number | null | undefined): CampaignControl {
   if (control.mode !== "full_control") return control;
   let boundary = control.boundary;
@@ -69,6 +81,9 @@ export function campaignControlForRunner(control: CampaignControl, protocolVersi
   if (boundary.issueAuthority?.otherEpics !== undefined && !runnerSupportsProtocol(protocolVersion, "repositoryQualifiedEpics")) {
     const { otherEpics: _otherEpics, ...issueAuthority } = boundary.issueAuthority;
     boundary = { ...boundary, issueAuthority };
+  }
+  if (boundary.operations.includes("ci_rerun") && !runnerSupportsProtocol(protocolVersion, "fullControlCiRerun")) {
+    boundary = { ...boundary, operations: boundary.operations.filter((operation) => operation !== "ci_rerun") };
   }
   return boundary === control.boundary ? control : { mode: "full_control", boundary };
 }
@@ -316,7 +331,12 @@ export function evaluateCampaignAuthority(
     snapshot.category !== "campaign_repository_addition" ? snapshot.repository : null;
   const outsideLimit = (repository: string | null) => repository !== null && campaignRepositoryOutsideLimit(controller.orchestratorPolicy, repository);
   const limitBound = !outsideLimit(gatedRepository) && (controller.id === requester.id || !outsideLimit(placeRepository));
-  if (full && (!campaignBoundaryCurrent({ ...controller, parentControlPolicy: policy }) || !repositoryBound || !pullRequestBound || !issueBound || !limitBound)) {
+  // Full Control CI rerun delegation requires a controller runner that supports withholding
+  // `ci_rerun` in scope proposals (v414+) and a settled initial scope (#4915).
+  const ciRerunBound = !full || snapshot?.category !== "ci_rerun" ||
+    (runnerSupportsProtocol(controllerProtocol, "fullControlCiRerun") &&
+      !campaignAwaitsFirstMessageOrInitialScope(controller.orchestratorPolicy));
+  if (full && (!campaignBoundaryCurrent({ ...controller, parentControlPolicy: policy }) || !repositoryBound || !pullRequestBound || !issueBound || !limitBound || !ciRerunBound)) {
     // A stale boundary authorizes nothing, including the server's own Full Control declines.
     const { requestClass: _requestClass, disposition: _disposition, ...rest } = evaluated;
     return { ...rest, owner: "human", basis: "human_required",

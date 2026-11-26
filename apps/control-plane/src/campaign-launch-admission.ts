@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import {
-  CAMPAIGN_LAUNCH_INSPECTION_ERRORS, campaignAuthorityPreflight, campaignRepositoryLocation, canonicalCampaignIssues, runnerSupportsProtocol, validCampaignControl,
+  CAMPAIGN_LAUNCH_INSPECTION_ERRORS, campaignAuthorityPreflight, campaignRepositoryLocation, canonicalCampaignIssues, runnerCapabilityRequirementError, runnerSupportsProtocol, validCampaignControl,
   FULL_CONTROL_EVIDENCE_EXCEPTIONS, FULL_CONTROL_HUMAN_REQUIRED_LABELS, FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON,
   FULL_CONTROL_DECLINED_NOTE, fullControlStandingHumanRequired,
   CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION, CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
@@ -21,7 +21,7 @@ const keys = ["repository", "repositories", "issueNumbers", "otherIssues", "obje
 /** The derived default: every operation Full Control can own. Overrides may only narrow it. */
 export const FULL_CONTROL_LAUNCH_OPERATIONS: readonly CampaignAuthorityOperation[] = [
   "implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication",
-  "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask",
+  "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "ci_rerun", "question", "tool_approval", "policy_ask",
 ];
 const MAX_DERIVED_FOLLOW_UPS = 10;
 
@@ -394,7 +394,11 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   // uses the regular cross-model review workflow and admits children with their own limits as before.
   const controlledReview = advertisedReview && reviewPeer && reviewOwnerScope && !facts.dailyLimit &&
     !rootCeiling && !workerCeiling && !participantCeiling ? advertisedReview : undefined;
-  const operations = overrides.operations ?? [...FULL_CONTROL_LAUNCH_OPERATIONS];
+  const ciRerunSupported = runnerSupportsProtocol(runner.protocolVersion, "fullControlCiRerun");
+  const defaultOperations = ciRerunSupported
+    ? [...FULL_CONTROL_LAUNCH_OPERATIONS]
+    : FULL_CONTROL_LAUNCH_OPERATIONS.filter((operation) => operation !== "ci_rerun");
+  const operations = overrides.operations ?? defaultOperations;
   const delegatablePolicyIds = overrides.delegatablePolicyIds ?? [];
 
   const proposal = repository ? parseCampaignLaunchProposal({
@@ -433,10 +437,12 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
     issueAuthority: { epics: [], relatedFollowUps: false, maxIssues: 1, closureReasons: ["completed"] },
     budgetAuthority: { version: 1, costUsd: 1, toolCalls: 1, concurrency: 1, acceptedFollowUps: 0, accounting: "managed_workers_only", unpriced: "stop" },
   }), plan.driver, runner.protocolVersion);
-  add("authority_contract", "Full Control Authority", authority.supported && !facts.invalidPolicyIds.length ? "verified" : "unsupported",
+  const ciRerunUnsupported = operations.includes("ci_rerun") && !ciRerunSupported
+    ? runnerCapabilityRequirementError(runner.protocolVersion, "fullControlCiRerun", "delegated CI reruns").error : null;
+  add("authority_contract", "Full Control Authority", authority.supported && !ciRerunUnsupported && !facts.invalidPolicyIds.length ? "verified" : "unsupported",
     !authority.supported ? authority.reason ?? "This provider path cannot enforce Full Control."
-      : facts.invalidPolicyIds.length ? `Named policy asks are unknown, disabled, built in or Human Required: ${facts.invalidPolicyIds.join(", ")}.`
-      : `The ${plan.driver} root's runner enforces the Full Control authority contract.`);
+      : ciRerunUnsupported ?? (facts.invalidPolicyIds.length ? `Named policy asks are unknown, disabled, built in or Human Required: ${facts.invalidPolicyIds.join(", ")}.`
+      : `The ${plan.driver} root's runner enforces the Full Control authority contract.`));
 
   // Only limits the Human set must be enforceable, so only then is this row mandatory: an explicit
   // ceiling, or derived limits the schema refuses, such as a paused campaign's zero concurrency. With

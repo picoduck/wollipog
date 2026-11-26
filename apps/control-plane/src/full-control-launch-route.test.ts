@@ -4176,10 +4176,92 @@ test("a one-Location Project yields a one-entry boundary that reads like today's
     const { repositories: _omitted, ...stored } = boundary;
     assert.ok(validCampaignControl({ mode: "full_control", boundary: stored }));
     assert.deepEqual(campaignBoundaryRepositories(stored), [{ repository: "owner/repo", locationIds: [] }]);
-    // A pre-v288 runner's diagnostic copy drops the list; v288 keeps it.
-    assert.deepEqual(campaignControlForRunner(policy.control!, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryBoundary - 1), { mode: "full_control", boundary: stored });
+    // A pre-v288 runner's diagnostic copy drops the list and newer boundary operations; pre-v414 drops ci_rerun; current keeps all.
+    assert.deepEqual(campaignControlForRunner(policy.control!, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryBoundary - 1),
+      { mode: "full_control", boundary: { ...stored, operations: stored.operations.filter((operation) => operation !== "ci_rerun") } });
+    assert.deepEqual(campaignControlForRunner(policy.control!, RUNNER_CAPABILITY_MIN_PROTOCOL.fullControlCiRerun - 1),
+      { mode: "full_control", boundary: { ...boundary, operations: boundary.operations.filter((operation) => operation !== "ci_rerun") } });
     assert.equal(campaignControlForRunner(policy.control!, PROTOCOL_VERSION), policy.control);
   } finally { await server.close(); f.db.close(); }
+});
+
+test("Full Control launch preflight omits ci_rerun on pre-v414 runners and rejects explicit ci_rerun overrides (#4915)", async () => {
+  const f = fixture({ protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.fullControlCiRerun - 1 });
+  const { server } = await app(f);
+  try {
+    const { preflight: derived } = await preflight(server, launch);
+    assert.equal(derived!.ready, true, JSON.stringify(derived!.summary.blockers));
+    assert.equal(derived!.advanced.proposal!.operations.includes("ci_rerun"), false);
+
+    const { preflight: explicit } = await preflight(server, {
+      ...launch,
+      overrides: { operations: ["implementation_question", "ci_rerun"] },
+    });
+    assert.equal(explicit!.ready, false);
+    const authorityCap = explicit!.capabilities.find((item) => item.id === "authority_contract");
+    assert.equal(authorityCap?.state, "unsupported");
+    assert.match(authorityCap?.reason ?? "", /delegated CI reruns/u);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("an initial proposal with a CI rerun restriction cannot bypass operations_respected on the fast path (#4915)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    for (const message of ["Fix #12, but do not rerun CI.", "Fix #12. Keep CI/CD reruns disabled."]) {
+      const beforeCalls = f.decision.checkCalls.length;
+      const c = await proposalCampaign(f, server, message);
+      // If the Orchestrator omits ci_rerun from withheldOperations, the constraint check must run
+      // rather than admitting via the no-model fast path.
+      f.decision.state.check = (msg) => scopeCheckAnswer(msg, (question) =>
+        question === "operations_respected" ? { value: "not_respected" } : undefined);
+      const refused = await c.propose([named(12)]);
+      assert.equal(refused.ok, false, message);
+      assert.equal(refused.errorDetails?.code, "constraint_check_refused", message);
+      assert.equal(f.decision.checkCalls.length, beforeCalls + 1, message);
+      assert.equal(establishedOf(f, c.id).initialScope, undefined, message);
+      assert.equal(f.db.campaignProjection(c.id)?.ciRerunOwner, "human", message);
+    }
+
+    // If the check is uncertain, the proposal goes to direct owner approval rather than self-admitting.
+    const cUncertain = await proposalCampaign(f, server, "Fix #12. Keep CI/CD reruns disabled.");
+    f.decision.state.check = uncertainCheck;
+    const ownerReview = await cUncertain.propose([named(12)]);
+    assert.equal(ownerReview.ok, true, ownerReview.error ?? "");
+    assert.equal(ownerReview.data!.authority, "human");
+    assert.equal(establishedOf(f, cUncertain.id).initialScope, undefined);
+
+    // Withholding ci_rerun in the proposal passes the check and strips ci_rerun from the boundary.
+    const cWithheld = await proposalCampaign(f, server, "Fix #12. Keep CI/CD reruns disabled.");
+    f.decision.state.check = (message) => scopeCheckAnswer(message);
+    const withheld = await cWithheld.propose([named(12)], { withheldOperations: ["ci_rerun"] });
+    assert.equal(withheld.ok, true, withheld.error ?? "");
+    assert.equal(withheld.data!.authority, "orchestrator");
+    assert.equal(cWithheld.apply(withheld.data!.occurrenceId).ok, true);
+    assert.equal(boundaryOf(f, cWithheld.id).operations.includes("ci_rerun"), false);
+    assert.equal(f.db.campaignProjection(cWithheld.id)?.ciRerunOwner, "human");
+  } finally { await server.close(); f.db.close(); }
+
+  // A truncated first message (> 65,536 chars) cannot verify the absence of trailing restrictions
+  // (such as "Keep CI/CD reruns disabled."), so neither the repository fast path nor scope_check
+  // may self-admit it; it must route directly to owner approval and keep ciRerunOwner human.
+  const truncated = await threeRepositoryProposals(
+    `Fix #12 in owner/repo.\n${"= ".repeat(33_000)}Keep CI/CD reruns disabled.`,
+  );
+  try {
+    const proposed = await truncated.propose([named(12)]);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "human");
+    assert.equal(truncated.apply(proposed.data!.occurrenceId).ok, false);
+    assert.equal(establishedOf(truncated.f, truncated.id).initialScope, undefined);
+    assert.equal(truncated.f.db.campaignProjection(truncated.id)?.ciRerunOwner, "human");
+    assert.equal(truncated.f.decision.checkCalls.length, 0);
+    // Approving the scope admits issue #12 while keeping CI reruns withheld and human-owned.
+    assert.equal(truncated.answer({ scope_proposal_answer: "Approve Scope" }).ok, true);
+    assert.deepEqual(truncated.f.db.getSession(truncated.id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+    assert.equal(boundaryOf(truncated.f, truncated.id).operations.includes("ci_rerun"), false);
+    assert.equal(truncated.f.db.campaignProjection(truncated.id)?.ciRerunOwner, "human");
+  } finally { await truncated.server.close(); truncated.f.db.close(); }
 });
 
 /** A launched multi-repository campaign (#4118): `owner/repo` (launch) and `other/repo`, whose one

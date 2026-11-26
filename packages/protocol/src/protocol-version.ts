@@ -1578,6 +1578,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 413: Google Antigravity subscription usage snapshots and source-targeted subscription refresh (Refs #4922).
   413,
   // v414 slot
+  // 414: Full Control boundary operation for Orchestrator-owned child CI reruns (Refs #4915).
+  414,
   // v415 slot
   // v416 slot
   // v417 slot

@@ -289,6 +289,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   forgeDecisionActions: 284,
   /** v399 adds exact, requester-executed GitHub Actions rerun decisions. */
   typedCiRerun: 399,
+  /** v414 (#4915): runner accepts `ci_rerun` in a Full Control boundary's `operations` list;
+   * older runners receive the boundary without it while the control plane enforces the full list. */
+  fullControlCiRerun: 414,
   /** v401 adds exact GitHub release tag and draft publication decisions. */
   typedReleaseDecisions: 401,
   /** v275 campaign handoffs and recorded delivery (#4070). Gates the `complete_with_handoffs`
@@ -2641,6 +2644,8 @@ export interface OrchestratorCampaignProjection {
   recovery?: import("./campaign-recovery.js").CampaignRecoveryProjection;
   policyRevision: number;
   decisionOwners: ParentControlDecisionPolicy;
+  /** v414 (#4915): live server-evaluated ownership of typed `ci_rerun` requests for this campaign. */
+  ciRerunOwner?: "human" | "orchestrator";
   /** v277 (#4075): present when Full Control, not a Parent Control grant, makes review_round_extension
    * the Orchestrator's. It may grant each pull request at most its run's configured round budget of
    * extra rounds in total; past that a request is the person's. */

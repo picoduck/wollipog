@@ -4,7 +4,7 @@ import type { CampaignAuthorityOperation, OrchestratorCampaignProjection } from 
 import { campaignActiveDescription, FULL_CONTROL_LINE, fullControlReadiness, type ReadinessCampaign } from "./full-control-readiness.js";
 
 const ALL_OPERATIONS: CampaignAuthorityOperation[] = ["implementation_question", "pr_merge", "merged_branch_deletion",
-  "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"];
+  "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "ci_rerun", "question", "tool_approval", "policy_ask"];
 const orchestratorOwners = {
   implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
   follow_up_issue_publication: "orchestrator", ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator",
@@ -58,6 +58,14 @@ test("a decision the boundary leaves out, or one Wollipog can't delegate now, is
   ]);
   const extensions = fullControlReadiness(campaign({ decisionOwners: { ...orchestratorOwners, review_round_extension: "human" } }));
   assert.deepEqual(extensions.humanRequired.map((fact) => fact.label), ["Review Round Extensions"]);
+  const noCiRerun = fullControlReadiness(campaign({}, ALL_OPERATIONS.filter((operation) => operation !== "ci_rerun")));
+  assert.equal(noCiRerun.state, "qualified");
+  assert.deepEqual(noCiRerun.humanRequired.map((fact) => [fact.label, fact.reason]),
+    [["CI Rerun", "This campaign's Full Control authorization leaves it out, so it comes to you."]]);
+  const downgradedCiRerun = fullControlReadiness(campaign({ ciRerunOwner: "human" }));
+  assert.equal(downgradedCiRerun.state, "qualified");
+  assert.deepEqual(downgradedCiRerun.humanRequired.map((fact) => [fact.label, fact.reason]),
+    [["CI Rerun", "Wollipog can't currently enforce Full Control for this decision on the campaign's machines, so it comes to you."]]);
 });
 
 test("a boundary that leaves out questions, tool approvals or policy asks lists them as Human Required (#2940 review)", () => {

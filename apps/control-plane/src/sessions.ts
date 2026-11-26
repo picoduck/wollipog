@@ -1134,6 +1134,9 @@ function ownerKeptTargets(category: WorkflowDecisionCategory, resourceKey: strin
       if (snapshot.recommendationId) targets.push(`${snapshot.category}:recommendation:${snapshot.recommendationId}`);
       targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}:title:${text(snapshot.sanitizedTitle)}`);
       break;
+    case "ci_rerun":
+      targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}:${snapshot.runId}:${snapshot.attempt}:${snapshot.jobId ?? ""}`);
+      break;
   }
   return targets;
 }
@@ -11108,6 +11111,11 @@ export class SessionsService {
           return capabilityFail(campaignIssueLimitsRequirement(this.db.getRunner(outdated.runnerId)?.protocolVersion));
         }
       }
+      if (control.boundary.operations.includes("ci_rerun") &&
+          !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "fullControlCiRerun")) {
+        return capabilityFail(runnerCapabilityRequirementError(
+          this.db.getRunner(session.runnerId)?.protocolVersion, "fullControlCiRerun", "delegated CI reruns"));
+      }
       if (proposal.mode === "full_control" && proposal.evidenceAuthority !== undefined) {
         if (!this.evidenceAuthorityDisclosures || !control.boundary.operations.includes("ui_evidence_approval")) {
           return fail("Evidence authority requires an available private destination/provider disclosure and the existing UI evidence operation", 409);
@@ -13702,7 +13710,10 @@ export class SessionsService {
     // Floor 2: owner-named issues are written in the owner's exact message, the one the server knows
     // the owner wrote: the transcript's first message when it still matches, else the boundary's record.
     const exact = this.db.initialUserMessageText(sessionId);
-    const ownerMessage = exact !== null && firstMessageDigest(exact) === first.messageDigest ? exact : boundary.objective;
+    const exactMatches = exact !== null && firstMessageDigest(exact) === first.messageDigest;
+    const ownerMessage = exactMatches ? exact : boundary.objective;
+    // SHA-256 digest match proves `ownerMessage` is the complete, untruncated first message (#4915).
+    const fullFirstMessage = exactMatches || firstMessageDigest(boundary.objective) === first.messageDigest;
     // Normalize initial range members so they spend no choice slots, including in later cumulative
     // accounting. Unwritten interiors remain unreferenced named issues: the constraint check's
     // per-issue questions must confirm intent (or the proposal goes to the owner).
@@ -13823,12 +13834,35 @@ export class SessionsService {
     // completeness/operations questions for all such text, even when the agent listed nothing.
     if (repositoryLimitVerified && /[\p{L}\p{N}]/u.test(ownerMessage.slice(ownerMessage.toLowerCase().indexOf(exactRepository!) + exactRepository!.length)) && !checks.includes("constraints")) checks.push("constraints");
     if (repositoryLimitVerified && proposal?.requestedCount !== null && !checks.includes("requested_count")) checks.push("requested_count");
+    // An initial proposal whose boundary delegates `ci_rerun` requires the digest-matched complete
+    // first message before either fast path or `scope_check` can activate CI reruns; without it
+    // (for example, a message truncated above 65,536 characters), route directly to the owner (#4915).
+    const ciRerunMessageIncomplete = initial && latestBoundary.operations.includes("ci_rerun") && !fullFirstMessage;
+    const bareIssueRef = String.raw`(?:[\w.-]+\/[\w.-]+)?#\d+`;
+    const bareIssueOnlyRequest = new RegExp(
+      String.raw`^(?:Use the orchestrate-issues skill to\s+)?(?:fix|implement|work on)\s+` +
+      String.raw`${bareIssueRef}(?:\s+here)?(?:(?:\s*,\s*(?:and\s+)?|\s+and\s+)${bareIssueRef}(?:\s+here)?)*` +
+      String.raw`(?:\s+as\s+well)?[.!\s]*$`,
+      "iu",
+    );
+    if (ciRerunMessageIncomplete) {
+      if (!checks.includes("withheld_operations")) checks.push("withheld_operations");
+    } else if (initial && structured && !checks.length && latestBoundary.operations.includes("ci_rerun") &&
+        !repositoryLimitVerified && !bareIssueOnlyRequest.test(ownerMessage.trim())) {
+      checks.push("withheld_operations");
+    }
     const issues = proposal?.issues ?? refs.map((r) => ({ ...r, origin: "orchestrator_chosen" as const, rationale: "" }));
+    // When the first message was truncated, withhold `ci_rerun` by default on the owner-reviewed
+    // initial proposal so clicking Approve Scope admits the proposed issues without silently
+    // activating CI rerun delegation behind an unread restriction (#4915).
+    const withheldOperations: CampaignScopeProposal["withheldOperations"] = ciRerunMessageIncomplete
+      ? [...new Set([...(proposal?.withheldOperations ?? []), "ci_rerun" as const])].sort()
+      : proposal?.withheldOperations ?? [];
     // The proposal as recorded, before any route: the floors' facts beside the Orchestrator's words.
     const base: CampaignScopeProposal = { initial, messageDigest: first.messageDigest,
       issues: issues.map((issue) => ({ ...(issue.repository === launch ? {} : { repository: issue.repository }), number: issue.number, origin: issue.origin, rationale: issue.rationale,
         title: (titles.get(issueKey(issue)) ?? "").replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim().slice(0, 300) })),
-      requestedCount: proposal?.requestedCount ?? null, constraints: proposal?.constraints ?? [], withheldOperations: proposal?.withheldOperations ?? [],
+      requestedCount: proposal?.requestedCount ?? null, constraints: proposal?.constraints ?? [], withheldOperations,
       ...(repositoryConstraints ? { repositoryConstraints } : {}), ...(repositoryLimitVerified ? { repositoryLimitVerified: true as const } : {}), checks, route: "admitted" };
     const ownerRecord = (cause: ScopeProposalOwnerCause, constraintCheck?: CampaignScopeProposal["constraintCheck"]): CampaignScopeProposal => ({
       ...base, route: "owner", ownerCause: cause, ownerMessage: boundary.objective.replace(/[\p{Cc}]+/gu, " ").slice(0, 4000),
@@ -13912,9 +13946,10 @@ export class SessionsService {
     }
     // Nothing checkable: admitted by the floors alone, with no model call.
     if (!checks.length) return admit(record, { kind: "scope_proposal_floors" });
-    // An older runner's unstructured proposal can't be checked, and a repository name that means
-    // nothing can't be answered by any check: each is the owner's.
-    if (!structured || unresolvedName) return ownerApproval(record);
+    // An older runner's unstructured proposal can't be checked, a repository name that means
+    // nothing can't be answered by any check, and a truncated first message can't prove no
+    // CI rerun restriction was omitted: each is the owner's.
+    if (!structured || unresolvedName || ciRerunMessageIncomplete) return ownerApproval(record);
     // The Decision Model's constraint check, on typed questions in one call (#4282, #4283).
     const organizationId = this.db.sessionScope(sessionId)?.organizationId;
     if (!organizationId) return ownerApproval(record);
@@ -16234,9 +16269,14 @@ export class SessionsService {
     const customClosure = snapshot.category === "issue_closure" && reason === "protected_request" &&
       controller?.orchestratorPolicy?.control?.mode !== "full_control";
     const evidenceFallback = snapshot.category === "ui_evidence_approval" && reason === "evidence_review_unavailable";
+    // Owner-held CI reruns outside Full Control delegation (omitted from boundary, awaiting initial
+    // scope, or on an older/unsupported peer) remain eligible for an existing scoped Assistant grant,
+    // while explicit owner rules, handoffs, and owner-kept targets still require a direct human response.
+    const ownerHeldCiRerun = snapshot.category === "ci_rerun" &&
+      (reason === "outside_boundary" || reason === "unsupported_provider");
     const explicitlyKept = !ownerQuestion && this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, snapshot);
     if (decision.ownerRule || decision.ownerHandoff || explicitlyKept || decision.authorityEvaluation?.disposition ||
-        (reason !== "custom_owner" && !(ownerQuestion && reason === "owner_kept") && !customClosure && !evidenceFallback) ||
+        (reason !== "custom_owner" && !(ownerQuestion && reason === "owner_kept") && !customClosure && !evidenceFallback && !ownerHeldCiRerun) ||
         isReservedOwnerQuestion(decision) || (ownerQuestion && credentialFormFloor(snapshot)) ||
         (snapshot.category === "merged_branch_deletion" && snapshot.merged === false)) {
       return fail("This occurrence requires a direct human response.", 403);
@@ -16448,10 +16488,12 @@ export class SessionsService {
     const currentChild = this.db.getSession(childSessionId);
     const currentParent = this.db.getSession(parentSessionId);
     const directForge = isRequesterForgeDecisionCategory(decision.category);
+    const ownerOnlyForge = isReleaseDecisionCategory(decision.category) ||
+      (decision.category === "ci_rerun" && decision.authority === "human");
     const directOwner = Boolean(currentChild && currentParent && this.directOwnerSelfDecision(currentChild, currentParent, decision));
-    if ((directForge || directOwner) && (authority !== "human" || actor.kind !== "human" || !actor.id ||
+    if ((ownerOnlyForge || directOwner) && (authority !== "human" || actor.kind !== "human" || !actor.id ||
         !this.db.campaignOwnerUser(parentSessionId, actor.id))) {
-      return fail(directForge
+      return fail(ownerOnlyForge
         ? "Only the owner can resolve this forge decision"
         : currentParent && sessionRole(currentParent) === "orchestrator"
           ? "Only the campaign owner can decide a root Orchestrator's own decision"
@@ -17207,7 +17249,7 @@ export class SessionsService {
       return Boolean(latest && latest.status === decision.status && latest.resourceDigest === decision.resourceDigest &&
         currentChild && currentParent && policy && !isTerminal(currentChild.status) && !isTerminal(currentParent.status) &&
         canAccess(currentChild.id) && canAccess(currentParent.id) &&
-        (directForge || directOwner || this.workflowDecisionRelationship(currentParent.id, currentChild.id)) &&
+        ((directForge && latest.authority === "human") || directOwner || this.workflowDecisionRelationship(currentParent.id, currentChild.id)) &&
         policy.revision === decision.policyRevision &&
         this.workflowDecisionAuthorityCurrent(currentParent, policy, latest, { observingPublication: lookOnly }));
     };
@@ -18527,9 +18569,16 @@ export class SessionsService {
           decision.resourceSnapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
           this.campaignPeerContracts(controller, requester.id)).boundaryRevision !== decision.authorityEvaluation.boundaryRevision ||
         !campaignBoundaryCurrent(controller))) return false;
-    if (isRequesterForgeDecisionCategory(decision.category)) {
+    if (isReleaseDecisionCategory(decision.category)) {
       return decision.authority === "human" && Boolean(requester && this.requesterForgeDecisionLocation(requester) &&
         runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, requesterForgeCapability(decision.category)));
+    }
+    if (decision.category === "ci_rerun") {
+      if (!requester || !this.requesterForgeDecisionLocation(requester) ||
+          !runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, "typedCiRerun")) {
+        return false;
+      }
+      if (decision.authority === "human") return true;
     }
     if (requester && this.directOwnerSelfDecision(requester, controller, decision)) {
       // Exact verifiedLocationId equality gates arming, manual consumption, and new writes; read-only
