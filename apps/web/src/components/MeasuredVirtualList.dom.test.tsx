@@ -3,7 +3,7 @@ import test from "node:test";
 import React, { act, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
+import { MeasuredVirtualList, VirtualMeasurementCommitTestProvider } from "./MeasuredVirtualList.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -22,7 +22,7 @@ for (const [name, value] of Object.entries({
 
 /** The Inbox's measured geometry either side of the phone breakpoint (#2541): eleven rows, 7px of
  * list padding, and a viewport whose height and width both change when the layout does. */
-const breakpointGeometry = { width: 390, rowHeight: 98, viewportHeight: 637 };
+const breakpointGeometry = { width: 390, rowHeight: 98, viewportHeight: 637, rowShift: 0 };
 const breakpointMaxScrollTop = () =>
   14 + 11 * breakpointGeometry.rowHeight - breakpointGeometry.viewportHeight;
 
@@ -34,10 +34,10 @@ Object.defineProperty(domWindow.Element.prototype, "getBoundingClientRect", {
       ? element
       : element.closest<HTMLElement>("[data-testid='breakpoint-reader']");
     if (breakpointReader) {
-      const { width, rowHeight, viewportHeight } = breakpointGeometry;
+      const { width, rowHeight, viewportHeight, rowShift } = breakpointGeometry;
       const row = element.hasAttribute("data-virtual-row");
       const top = element === breakpointReader ? 0
-        : 7 + (row ? Number(element.dataset.index ?? 0) * rowHeight : 0) - breakpointReader.scrollTop;
+        : 7 + (row ? Number(element.dataset.index ?? 0) * rowHeight + rowShift : 0) - breakpointReader.scrollTop;
       const height = element === breakpointReader ? viewportHeight : row ? rowHeight : 11 * rowHeight;
       return { x: 0, y: top, top, left: 0, right: width, bottom: top + height, width, height, toJSON: () => ({}) };
     }
@@ -882,3 +882,142 @@ test("pausing in the render that prepends history holds the row the reader was o
     container.remove();
   }
 });
+
+for (const path of ["reveal settle", "width reflow", "layout commit", "measurement settle"] as const) {
+  test(`${path} writes before notifying synchronously and ignores subpixel noise`, async (t) => {
+    for (const adjustment of [-0.25, 0.5]) {
+      await t.test(`${adjustment}px adjustment`, async () => {
+        const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+        domWindow.document.body.append(container as never);
+        const root = createRoot(container);
+        const frames = new Map<number, FrameRequestCallback>();
+        let nextFrameId = 0;
+        const scheduleFrame = (callback: FrameRequestCallback) => {
+          const id = ++nextFrameId;
+          frames.set(id, callback);
+          return id;
+        };
+        const cancelFrameById = (id: number) => { frames.delete(id); };
+        domWindow.requestAnimationFrame = scheduleFrame as unknown as typeof domWindow.requestAnimationFrame;
+        domWindow.cancelAnimationFrame = cancelFrameById as unknown as typeof domWindow.cancelAnimationFrame;
+        Object.defineProperty(globalThis, "requestAnimationFrame", { value: scheduleFrame });
+        Object.defineProperty(globalThis, "cancelAnimationFrame", { value: cancelFrameById });
+        const runFrame = async () => {
+          await act(async () => {
+            for (const [id, callback] of [...frames]) {
+              if (frames.delete(id)) callback(performance.now());
+            }
+          });
+        };
+
+        const OriginalResizeObserver = globalThis.ResizeObserver;
+        let resizeViewport: (() => void) | undefined;
+        globalThis.ResizeObserver = class extends OriginalResizeObserver {
+          constructor(private readonly callback: ResizeObserverCallback) {
+            super(callback);
+          }
+
+          observe(target: Element) {
+            if (target.matches("[data-testid='breakpoint-reader']")) {
+              resizeViewport = () => this.callback([], this);
+            }
+          }
+        };
+
+        function Fixture({ version, reveal }: { version: number; reveal: boolean }) {
+          const scrollRef = useRef<HTMLDivElement>(null);
+          return (
+            <div ref={scrollRef} data-testid="breakpoint-reader">
+              <MeasuredVirtualList
+                items={BREAKPOINT_ROWS}
+                itemsVersion={version}
+                getKey={(item) => item}
+                renderItem={(item) => item}
+                scrollRef={scrollRef}
+                estimateSize={() => 98}
+                overscan={6}
+                preserveAnchor={path !== "reveal settle"}
+                revealRequest={reveal ? { key: "row-4", requestId: 1, align: "start", focus: false } : null}
+              />
+            </div>
+          );
+        }
+        const render = async (version = 0, reveal = false) => {
+          await act(async () => root.render(
+            // Leave the resize-triggered commit queued so the width correction runs in isolation.
+            <VirtualMeasurementCommitTestProvider deferred={path === "width reflow"}>
+              <Fixture version={version} reveal={reveal} />
+            </VirtualMeasurementCommitTestProvider>,
+          ));
+        };
+
+        try {
+          await render();
+          for (let frame = 0; frame < 20 && frames.size > 0; frame += 1) await runFrame();
+          assert.equal(frames.size, 0, "mount frames settled");
+          const reader = container.querySelector<HTMLElement>("[data-testid='breakpoint-reader']");
+          assert.ok(reader);
+          assert.ok(container.querySelector("[data-virtual-measurements='ready']"));
+
+          if (path === "reveal settle") {
+            await render(0, true);
+            const target = reader.querySelector<HTMLElement>("[data-virtual-key='row-4']");
+            assert.ok(target);
+            // Model a residual alignment error after the virtualizer's initial jump.
+            breakpointGeometry.rowShift = -target.getBoundingClientRect().top;
+          } else if (path === "measurement settle") {
+            // Open the measurement window with unchanged geometry. Shift the rows before its
+            // next frame, with no intervening render or observer delivery.
+            await render(1);
+          }
+
+          const before = reader.scrollTop;
+          let scrollTop = before;
+          const events: Array<[string, number]> = [];
+          Object.defineProperty(reader, "scrollTop", {
+            configurable: true,
+            get: () => scrollTop,
+            set: (value: number) => {
+              scrollTop = value;
+              events.push(["write", value]);
+              // Capture dispatches that were deferred even if they precede the modeled scroll event.
+              queueMicrotask(() => events.push(["microtask", scrollTop]));
+            },
+          });
+          reader.addEventListener("wollipog:virtual-viewport-correction", () => {
+            events.push(["correction", reader.scrollTop]);
+          });
+          reader.addEventListener("scroll", () => events.push(["scroll", reader.scrollTop]));
+
+          breakpointGeometry.rowShift += adjustment;
+          if (path === "width reflow") {
+            breakpointGeometry.width = 800;
+            const resize = resizeViewport;
+            assert.ok(resize);
+            await act(async () => resize());
+          } else if (path === "layout commit") {
+            await render(1);
+          } else {
+            assert.ok(frames.size > 0);
+            await runFrame();
+          }
+          await act(async () => reader.dispatchEvent(new domWindow.Event("scroll") as never));
+
+          const corrected = before + adjustment;
+          assert.deepEqual(events, adjustment === 0.5
+            ? [["write", corrected], ["correction", corrected], ["microtask", corrected], ["scroll", corrected]]
+            : [["scroll", before]]);
+        } finally {
+          await act(async () => root.unmount());
+          container.remove();
+          Object.assign(breakpointGeometry, { width: 390, rowShift: 0 });
+          globalThis.ResizeObserver = OriginalResizeObserver;
+          domWindow.requestAnimationFrame = requestFrame;
+          domWindow.cancelAnimationFrame = cancelFrame;
+          Object.defineProperty(globalThis, "requestAnimationFrame", { value: requestFrame });
+          Object.defineProperty(globalThis, "cancelAnimationFrame", { value: cancelFrame });
+        }
+      });
+    }
+  });
+}
