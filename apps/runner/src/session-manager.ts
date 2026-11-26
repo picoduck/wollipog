@@ -20116,6 +20116,7 @@ export class SessionManager {
       // provider retirement settles. Remove the row only after its exact client has retired so
       // a failed attempt remains retryable with complete cleanup provenance.
       this.store.remove(sessionId);
+      this.deliveredHandoffs.delete(sessionId);
       this.forgetCapacityInventorySession(sessionId);
       if (meta?.providerAuthBlock) this.surfaceProviderAuthentication(meta.providerAuthBlock.credentialScopeId);
       // A replacement provider is published in `active` before initialization settles. Deletion
