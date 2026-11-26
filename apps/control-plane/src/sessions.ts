@@ -13831,12 +13831,19 @@ export class SessionsService {
     // completeness/operations questions for all such text, even when the agent listed nothing.
     if (repositoryLimitVerified && /[\p{L}\p{N}]/u.test(ownerMessage.slice(ownerMessage.toLowerCase().indexOf(exactRepository!) + exactRepository!.length)) && !checks.includes("constraints")) checks.push("constraints");
     if (repositoryLimitVerified && proposal?.requestedCount !== null && !checks.includes("requested_count")) checks.push("requested_count");
-    // An initial proposal whose boundary delegates `ci_rerun` must not take the no-model fast path
-    // when the owner's message contains restriction, negation, manual-approval, or CI/operation
-    // wording that could withhold `ci_rerun` (for example "Fix #12, but do not rerun CI.") (#4915).
-    const messageWithoutRepoRefs = ownerMessage.replace(/\S*[\w.-]+\/[\w.-]+(?:#\d+|\/(?:issues|pull)\/\d+)?\S*/gu, " ");
-    const mayWithholdOperation = /\b(?:not|no|never|without|don'?t|do\s+not|cannot|can'?t|won'?t|shouldn'?t|mustn'?t|avoid|skip|forbid|prohibit|disallow|withhold|restrict|limit|except|unless|but|however|only|manual(?:ly)?|human|owner|approval|approve|ask\s+me|let\s+me|leave\s+.*to\s+me|keep\s+.*(?:to\s+me|human|owner|manual)|ci|rerun|re-?run|retry|retrigger|re-?trigger|workflow|actions?|pipeline|jobs?|checks?)\b/iu.test(messageWithoutRepoRefs);
-    if (initial && structured && !checks.length && latestBoundary.operations.includes("ci_rerun") && mayWithholdOperation) {
+    // An initial proposal whose boundary delegates `ci_rerun` only skips `scope_check` for a
+    // deterministically recognized issue-only request (or a `repositoryLimitVerified` request with no
+    // trailing text, which line 13832 already checks); any other wording (such as "Fix #12. Keep
+    // CI/CD reruns disabled.") must run `operations_respected` or obtain direct owner approval (#4915).
+    const bareIssueRef = String.raw`(?:[\w.-]+\/[\w.-]+)?#\d+`;
+    const bareIssueOnlyRequest = new RegExp(
+      String.raw`^(?:Use the orchestrate-issues skill to\s+)?(?:fix|implement|work on)\s+` +
+      String.raw`${bareIssueRef}(?:\s+here)?(?:(?:\s*,\s*(?:and\s+)?|\s+and\s+)${bareIssueRef}(?:\s+here)?)*` +
+      String.raw`(?:\s+as\s+well)?[.!\s]*$`,
+      "iu",
+    );
+    if (initial && structured && !checks.length && latestBoundary.operations.includes("ci_rerun") &&
+        !repositoryLimitVerified && !bareIssueOnlyRequest.test(ownerMessage.trim())) {
       checks.push("withheld_operations");
     }
     const issues = proposal?.issues ?? refs.map((r) => ({ ...r, origin: "orchestrator_chosen" as const, rationale: "" }));

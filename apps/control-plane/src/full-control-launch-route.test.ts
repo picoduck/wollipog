@@ -4208,20 +4208,23 @@ test("an initial proposal with a CI rerun restriction cannot bypass operations_r
   const f = fixture();
   const { server } = await app(f);
   try {
-    const c = await proposalCampaign(f, server, "Fix #12, but do not rerun CI.");
-    // If the Orchestrator omits ci_rerun from withheldOperations, the constraint check must run
-    // rather than admitting via the no-model fast path.
-    f.decision.state.check = (message) => scopeCheckAnswer(message, (question) =>
-      question === "operations_respected" ? { value: "not_respected" } : undefined);
-    const refused = await c.propose([named(12)]);
-    assert.equal(refused.ok, false);
-    assert.equal(refused.errorDetails?.code, "constraint_check_refused");
-    assert.equal(f.decision.checkCalls.length, 1);
-    assert.equal(establishedOf(f, c.id).initialScope, undefined);
-    assert.equal(f.db.campaignProjection(c.id)?.ciRerunOwner, "human");
+    for (const message of ["Fix #12, but do not rerun CI.", "Fix #12. Keep CI/CD reruns disabled."]) {
+      const beforeCalls = f.decision.checkCalls.length;
+      const c = await proposalCampaign(f, server, message);
+      // If the Orchestrator omits ci_rerun from withheldOperations, the constraint check must run
+      // rather than admitting via the no-model fast path.
+      f.decision.state.check = (msg) => scopeCheckAnswer(msg, (question) =>
+        question === "operations_respected" ? { value: "not_respected" } : undefined);
+      const refused = await c.propose([named(12)]);
+      assert.equal(refused.ok, false, message);
+      assert.equal(refused.errorDetails?.code, "constraint_check_refused", message);
+      assert.equal(f.decision.checkCalls.length, beforeCalls + 1, message);
+      assert.equal(establishedOf(f, c.id).initialScope, undefined, message);
+      assert.equal(f.db.campaignProjection(c.id)?.ciRerunOwner, "human", message);
+    }
 
     // If the check is uncertain, the proposal goes to direct owner approval rather than self-admitting.
-    const cUncertain = await proposalCampaign(f, server, "Fix #12, but do not rerun CI.");
+    const cUncertain = await proposalCampaign(f, server, "Fix #12. Keep CI/CD reruns disabled.");
     f.decision.state.check = uncertainCheck;
     const ownerReview = await cUncertain.propose([named(12)]);
     assert.equal(ownerReview.ok, true, ownerReview.error ?? "");
@@ -4229,13 +4232,14 @@ test("an initial proposal with a CI rerun restriction cannot bypass operations_r
     assert.equal(establishedOf(f, cUncertain.id).initialScope, undefined);
 
     // Withholding ci_rerun in the proposal passes the check and strips ci_rerun from the boundary.
+    const cWithheld = await proposalCampaign(f, server, "Fix #12. Keep CI/CD reruns disabled.");
     f.decision.state.check = (message) => scopeCheckAnswer(message);
-    const withheld = await c.propose([named(12)], { withheldOperations: ["ci_rerun"] });
+    const withheld = await cWithheld.propose([named(12)], { withheldOperations: ["ci_rerun"] });
     assert.equal(withheld.ok, true, withheld.error ?? "");
     assert.equal(withheld.data!.authority, "orchestrator");
-    assert.equal(c.apply(withheld.data!.occurrenceId).ok, true);
-    assert.equal(boundaryOf(f, c.id).operations.includes("ci_rerun"), false);
-    assert.equal(f.db.campaignProjection(c.id)?.ciRerunOwner, "human");
+    assert.equal(cWithheld.apply(withheld.data!.occurrenceId).ok, true);
+    assert.equal(boundaryOf(f, cWithheld.id).operations.includes("ci_rerun"), false);
+    assert.equal(f.db.campaignProjection(cWithheld.id)?.ciRerunOwner, "human");
   } finally { await server.close(); f.db.close(); }
 });
 
