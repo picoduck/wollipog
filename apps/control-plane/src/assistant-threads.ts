@@ -434,8 +434,12 @@ export class AssistantThreads {
       if (harnessOf(body.expectedHarness) !== current.harness) {
         throw new AssistantThreadRefusal("The default harness changed. Reopen Assistant Settings to choose its model.", 409);
       }
-      return this.setLaunchDefaults(owner, { harness: current.harness, providerAccount: current.providerAccount,
-        model: body.model, effort: body.effort });
+      // Only the model and effort change. The saved account is not chosen here, so it is not checked
+      // again: its Machine being away must not refuse a model change. Creation still checks it.
+      this.store.setDefaultLaunch(owner, { ...current,
+        model: modelChoiceOf((body as { model: unknown }).model, "model"),
+        effort: modelChoiceOf((body as { effort: unknown }).effort, "effort") });
+      return this.defaults(owner);
     }
     throw new AssistantThreadRefusal("Specify either a harness or an account to update.", 400);
   }

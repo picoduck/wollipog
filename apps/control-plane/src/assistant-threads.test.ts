@@ -603,6 +603,33 @@ test("new threads start with the saved or chosen model and effort, which belong 
   } finally { await h.close(); }
 });
 
+test("a model change keeps the saved account while that account's Machine is offline", async () => {
+  const h = await harness({ accounts, agents: [{ ...claude,
+    capabilities: { ...claude.capabilities!, models: [{ id: "opus", displayName: "Opus", efforts: ["high"] }], effortLevels: ["high"] },
+    providerAccountReadiness: { defaultAuthStatus: "authenticated", readyAccountIds: ["work", "studio"] },
+  }] });
+  try {
+    const launchDefaults = "/api/assistant-threads/defaults/launch";
+    const account = { runnerId: "r", accountRef: accountRef("studio") };
+    assert.equal((await h.call("PATCH", launchDefaults, { expectedHarness: "claude-code", providerAccount: account })).status, 200);
+    const original = h.db.getRunner("r")!;
+    h.db.registerRunner({ runnerId: "fallback", hostname: "other machine", os: "linux", version: "fixture",
+      workspaces: [{ id: "fallback-workspace", name: "Home", path: "/fixture/other" }],
+      agents: original.agents, providerAccounts: accounts }, Date.now(), PROTOCOL_VERSION);
+    h.hub.isRunnerOnline = (runnerId) => runnerId === "fallback";
+    for (const model of ["opus", null]) {
+      const changed = await h.call("PATCH", launchDefaults, { expectedHarness: "claude-code", model, effort: model && "high" });
+      assert.equal(changed.status, 200, changed.raw);
+      assert.deepEqual(changed.body.launchDefaults, { harness: "claude-code", providerAccount: account, model, effort: model && "high" });
+    }
+    // Changing the account itself, and starting a thread on the saved one, still check its Machine.
+    assert.equal((await h.call("PATCH", launchDefaults, { expectedHarness: "claude-code", providerAccount: account })).status, 409);
+    const refused = await h.call("POST", "/api/assistant-threads", {});
+    assert.equal(refused.status, 409);
+    assert.match(refused.body.error, /default Assistant account is unavailable/);
+  } finally { await h.close(); }
+});
+
 test("a saved model or effort the installation no longer offers falls back instead of refusing new threads", async () => {
   const caps = (models: { id: string; displayName: string; efforts?: string[] }[]) =>
     ({ ...claude.capabilities!, models, effortLevels: ["low", "medium", "high"] });
