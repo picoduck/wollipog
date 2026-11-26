@@ -974,6 +974,9 @@ export function advertisedPermissionMode(
   }
   const entry = capabilities?.agentPermissionModes?.find((candidate) => candidate.id === mode);
   if (!entry) return undefined;
+  if (entry.source === "runner" && entry.description) {
+    return { label: titleCaseLabel(entry.name), description: entry.description };
+  }
   // The agent's words, said as its own: Wollipog can't verify what an agent-owned mode permits (agy
   // 1.5.14 edited a file without asking in its Default), only that it shows what the agent asks.
   const claim = entry.description

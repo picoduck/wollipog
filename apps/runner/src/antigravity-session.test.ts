@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 import type { AcpRuntimeCapabilities, AgentCapabilities, AgentDefinition, AntigravitySetupView, SessionConfig, SessionEventPayload } from "@wollipog/protocol";
@@ -624,6 +624,61 @@ test("a denied native Auto sandbox switches to interactive Default mode without 
     assert.equal(existsSync(marker), decision === "allow");
   }
 });
+
+for (const nativeMode of ["auto_unavailable", "auto_sandbox_denied", "auto_unavailable,allow_always_only"]) {
+  test(`managed-worktree Auto keeps bounded permissions when agy reports ${nativeMode}`, { timeout: 15_000 }, async () => {
+    signIn();
+    process.env.FAKE_AGY_MODE = `${nativeMode},worktree_auto_fixture`;
+    const cwd = realpathSync.native(mkdtempSync(join(root, "worktree-")));
+    writeFileSync(join(cwd, "tracked.txt"), "base\n");
+    const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), BWRAP, cwd, undefined, {
+      config: { permissionMode: "auto" }, layeredEnv: { FAKE_AGY_EXECUTABLE: agy },
+      fixtureIsolation: { backend: "bwrap", command: "bwrap", args: [], network: "inherit",
+        antigravityTerminalHelper: join(root, "bin"),
+        protectedWorktree: { parent: dirname(cwd), path: cwd, gitWritableRoots: [] } },
+    });
+    await driver.initialize();
+    await driver.newSession(cwd);
+    if (nativeMode === "auto_sandbox_denied") {
+      await driver.prompt("Please run the command.");
+      assert.equal(existsSync(join(cwd, "fixture-command-ran")), false, "do not replay a failed Auto command");
+    }
+    assert.equal(seen.state.at(-1)?.config.permissionMode, "auto");
+    const notice = seen.events.find((e) => e.kind === "error" && e.source === "antigravity_worktree_auto");
+    assert.match(notice?.kind === "error" ? notice.message : "",
+      /terminal sandbox could not start.*still need approval/);
+
+    const read = driver.prompt("fixture worktree read");
+    if (nativeMode.includes("allow_always_only")) {
+      const request = await waitFor(() => seen.events.find((event) => event.kind === "permission_request"));
+      assert.equal(request.options[0]?.kind, "allow_always");
+      driver.resolvePermission(request.requestId, "deny");
+      assert.equal(await read, "end_turn");
+      return;
+    }
+    assert.equal(await read, "end_turn");
+    assert.equal(await driver.prompt("fixture worktree edit"), "end_turn");
+    assert.equal(readFileSync(join(cwd, "tracked.txt"), "utf8"), "edited after relaunch\n");
+    assert.ok(!seen.events.some(({ kind }) => kind === "permission_request"));
+
+    const push = driver.prompt("fixture worktree push");
+    const request = await waitFor(() => seen.events.find((event) => event.kind === "permission_request"));
+    assert.equal(request.title, "git push --dry-run");
+    driver.resolvePermission(request.requestId, "deny");
+    assert.equal(await push, "end_turn");
+
+    await driver.setConfig({ permissionMode: "default" });
+    assert.equal(seen.state.at(-1)?.config.permissionMode, "default");
+    const from = seen.events.length;
+    const inDefault = driver.prompt("fixture worktree read");
+    driver.resolvePermission((await waitFor(() => seen.events.slice(from)
+      .find((event) => event.kind === "permission_request"))).requestId, "deny");
+    assert.equal(await inDefault, "end_turn");
+    await driver.setConfig({ permissionMode: "auto" });
+    assert.equal(seen.state.at(-1)?.config.permissionMode, "auto");
+    assert.equal(await driver.prompt("fixture worktree read"), "end_turn");
+  });
+}
 
 test("Full Permissions Mode is a live mode: agy stays in Default and Wollipog approves its requests", async () => {
   signIn();

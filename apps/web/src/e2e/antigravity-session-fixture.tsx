@@ -46,7 +46,8 @@ import { SessionDetail } from "../components/SessionDetail.js";
  * agy's account is the runner's redaction placeholder `[account]`.
  */
 const params = new URLSearchParams(window.location.search);
-type AntigravityState = "pickers" | "pickers-stress40" | "modes" | "modes-stress" | "attach-menu" | "resume-failed" | "streaming" | "approval" | "denied" | "stopped" | "install-failed" | "signin-failed" | "turn-failed" | "auto-fallback" | "full-permissions";
+type AntigravityState = "pickers" | "pickers-stress40" | "modes" | "modes-stress" | "attach-menu" | "resume-failed" | "streaming" | "approval" | "denied" | "stopped" | "install-failed" | "signin-failed" | "turn-failed" | "auto-fallback" | "full-permissions"
+  | "worktree-auto-before" | "worktree-auto";
 const state = (params.get("agState") ?? "pickers") as AntigravityState;
 
 const SESSION_ID = "antigravity-session-e2e";
@@ -92,9 +93,15 @@ const FULL_PERMISSIONS = { ...ANTIGRAVITY_FULL_PERMISSIONS_MODE,
   description: "Approve every Antigravity action without asking. Runner isolation still applies." };
 /** Where agy's terminal sandbox is unavailable (AppArmor-restricted user namespaces), agy omits Auto. */
 const WITHOUT_AUTO = AGY_MODES.filter(({ id }) => id !== ANTIGRAVITY_AUTO_MODE.id);
-const agentModes = fullPermissions || state === "auto-fallback" ? [...WITHOUT_AUTO, FULL_PERMISSIONS]
+const worktreeAuto = state === "worktree-auto";
+const legacyWorktreeAuto = state === "worktree-auto-before";
+const agentModes = worktreeAuto ? [...WITHOUT_AUTO, {
+  ...ANTIGRAVITY_AUTO_MODE, source: "runner" as const,
+  description: "Wollipog approves routine worktree actions and asks about the rest.",
+}, FULL_PERMISSIONS] : fullPermissions || state === "auto-fallback" || legacyWorktreeAuto ? [...WITHOUT_AUTO, FULL_PERMISSIONS]
   : modesStress ? STRESS_MODES : AGY_MODES;
-const currentMode = fullPermissions ? ANTIGRAVITY_FULL_PERMISSIONS_MODE.id : modesStress ? "mode-5" : "default";
+const currentMode = worktreeAuto ? ANTIGRAVITY_AUTO_MODE.id
+  : fullPermissions ? ANTIGRAVITY_FULL_PERMISSIONS_MODE.id : modesStress ? "mode-5" : "default";
 
 /** What acpSessionPresentation (apps/runner/src/acp-session-state.ts) makes of agy's session: its
  * `model` and `thought_level` options and its four modes, each approving through ACP permission. */
@@ -170,6 +177,18 @@ const payloads: SessionEvent["payload"][] = [];
 const prompt = (text = PROMPT) => payloads.push({ kind: "user_message", text, images: [] });
 const touch = (status: string) => payloads.push({ kind: "tool_call", toolCallId: "call_touch", title: "touch notes.txt", toolKind: "execute", status });
 switch (state) {
+  case "worktree-auto-before":
+  case "worktree-auto":
+    prompt("Edit notes.txt, then check git status in the worktree.");
+    payloads.push({
+      kind: "error", nonFatal: true, source: worktreeAuto ? "antigravity_worktree_auto" : "antigravity_auto_mode_fallback",
+      message: "Google Antigravity’s terminal sandbox could not start inside this managed worktree. " +
+        (worktreeAuto
+          ? "Wollipog’s Auto Mode approves routine file operations and local Git commands inside this worktree. " +
+            "Other requests, including remote Git operations and compound shell commands, still need approval."
+          : "This session switched to Default mode and uses the provider’s approval settings."),
+    });
+    break;
   case "auto-fallback":
     payloads.push({
       kind: "error", nonFatal: true, source: "antigravity_auto_mode_fallback",
@@ -258,7 +277,7 @@ const events: SessionEvent[] = payloads.map((payload, index) => ({
 const statusByState: Record<AntigravityState, SessionStatus> = {
   pickers: "idle", "pickers-stress40": "idle", modes: "idle", "modes-stress": "idle", "attach-menu": "idle", "resume-failed": "failed", streaming: "running", approval: "input_required", denied: "idle", stopped: "idle",
   "install-failed": "failed", "signin-failed": "failed", "turn-failed": "idle",
-  "auto-fallback": "idle", "full-permissions": "idle",
+  "auto-fallback": "idle", "full-permissions": "idle", "worktree-auto": "idle", "worktree-auto-before": "idle",
 };
 
 const session = {
@@ -272,8 +291,8 @@ const session = {
   title: "Add a Notes File",
   status: statusByState[state],
   column: launchFailed ? "review" : state === "streaming" || state === "approval" ? "running" : "review",
-  useWorktree: false,
-  worktreePath: null,
+  useWorktree: worktreeAuto || legacyWorktreeAuto,
+  worktreePath: worktreeAuto || legacyWorktreeAuto ? "/home/fixture/worktrees/notes-app" : null,
   archived: false,
   createdAt: STARTED,
   updatedAt: events.at(-1)?.ts ?? STARTED,

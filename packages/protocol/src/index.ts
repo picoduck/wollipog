@@ -1767,10 +1767,10 @@ export interface AgentCapabilities {
   claudeMutableSystemPromptFlag?: "--system-prompt-recording" | "--system-prompt-snapshot";
   /** Approval presets (claude: default|acceptEdits|plan|…; codex: untrusted|on-request|never). */
   permissionModes?: string[];
-  /** ACP only (#4779): the agent's own bounded name and description for each advertised mode, from
-   * its live session. Mode ids belong to the agent, so a client names an ACP mode from here rather
-   * than from a native harness's meaning for the same id. Additive; older peers ignore it. */
-  agentPermissionModes?: Array<{ id: string; name: string; description?: string }>;
+  /** ACP only (#4779): the bounded name and description for each mode in the live session.
+   * The runner identifies its own descriptions, such as Antigravity's worktree Auto fallback.
+   * Mode ids otherwise belong to the agent. Additive; older peers ignore it. */
+  agentPermissionModes?: Array<{ id: string; name: string; description?: string; source?: "runner" }>;
   /** How approvals reach the UI per permission mode. Absent = not probed (unknown, not false). */
   elicitation?: Partial<Record<string, ElicitationTransport[]>>;
   /**
@@ -6677,7 +6677,7 @@ export type SessionEventPayload =
        * dashboard shows it without Retry Turn. Older peers ignore the flag and show a failed turn. */
       nonFatal?: true;
       /** A non-fatal warning that can be shown before the first turn. */
-      source?: "worktree_base_fallback" | "antigravity_auto_mode_fallback";
+      source?: "worktree_base_fallback" | "antigravity_auto_mode_fallback" | "antigravity_worktree_auto";
       /** The exact shell command, run on the runner's host, that fixes what the message reports
        * (Antigravity's Auto Mode on an AppArmor-restricted host). Older dashboards show only the
        * message, which still says what to do. */
