@@ -4256,6 +4256,11 @@ test("an initial proposal with a CI rerun restriction cannot bypass operations_r
     assert.equal(establishedOf(truncated.f, truncated.id).initialScope, undefined);
     assert.equal(truncated.f.db.campaignProjection(truncated.id)?.ciRerunOwner, "human");
     assert.equal(truncated.f.decision.checkCalls.length, 0);
+    // Approving the scope admits issue #12 while keeping CI reruns withheld and human-owned.
+    assert.equal(truncated.answer({ scope_proposal_answer: "Approve Scope" }).ok, true);
+    assert.deepEqual(truncated.f.db.getSession(truncated.id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+    assert.equal(boundaryOf(truncated.f, truncated.id).operations.includes("ci_rerun"), false);
+    assert.equal(truncated.f.db.campaignProjection(truncated.id)?.ciRerunOwner, "human");
   } finally { await truncated.server.close(); truncated.f.db.close(); }
 });
 

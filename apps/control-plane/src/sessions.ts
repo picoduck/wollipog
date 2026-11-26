@@ -13852,11 +13852,17 @@ export class SessionsService {
       checks.push("withheld_operations");
     }
     const issues = proposal?.issues ?? refs.map((r) => ({ ...r, origin: "orchestrator_chosen" as const, rationale: "" }));
+    // When the first message was truncated, withhold `ci_rerun` by default on the owner-reviewed
+    // initial proposal so clicking Approve Scope admits the proposed issues without silently
+    // activating CI rerun delegation behind an unread restriction (#4915).
+    const withheldOperations: CampaignScopeProposal["withheldOperations"] = ciRerunMessageIncomplete
+      ? [...new Set([...(proposal?.withheldOperations ?? []), "ci_rerun" as const])].sort()
+      : proposal?.withheldOperations ?? [];
     // The proposal as recorded, before any route: the floors' facts beside the Orchestrator's words.
     const base: CampaignScopeProposal = { initial, messageDigest: first.messageDigest,
       issues: issues.map((issue) => ({ ...(issue.repository === launch ? {} : { repository: issue.repository }), number: issue.number, origin: issue.origin, rationale: issue.rationale,
         title: (titles.get(issueKey(issue)) ?? "").replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim().slice(0, 300) })),
-      requestedCount: proposal?.requestedCount ?? null, constraints: proposal?.constraints ?? [], withheldOperations: proposal?.withheldOperations ?? [],
+      requestedCount: proposal?.requestedCount ?? null, constraints: proposal?.constraints ?? [], withheldOperations,
       ...(repositoryConstraints ? { repositoryConstraints } : {}), ...(repositoryLimitVerified ? { repositoryLimitVerified: true as const } : {}), checks, route: "admitted" };
     const ownerRecord = (cause: ScopeProposalOwnerCause, constraintCheck?: CampaignScopeProposal["constraintCheck"]): CampaignScopeProposal => ({
       ...base, route: "owner", ownerCause: cause, ownerMessage: boundary.objective.replace(/[\p{Cc}]+/gu, " ").slice(0, 4000),
