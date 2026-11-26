@@ -789,8 +789,7 @@ export function Shell() {
   const dialogTitle = dialog?.kind === "session" ? "New Session"
     : palette !== null ? "Search" : "Keyboard Shortcuts";
   const shell = (
-    <RemoteAccessProvider><div className={`app${rightPanel.dragging ? " panel-dragging" : ""}`}
-      data-assistant-composing={view.name === "assistants" && view.newThread ? "" : undefined}>
+    <RemoteAccessProvider><div className={`app${rightPanel.dragging ? " panel-dragging" : ""}`}>
       <Rail
         view={view}
         blockedCount={blockedSessions}

@@ -340,7 +340,20 @@ for (const theme of ["light", "dark"] as const) {
       test("Assistant Settings aligns defaults with their controls", async ({ page }) => {
         await open(page, theme, "/settings/assistant", "limits=stress&accounts=stress&delegation=settings");
         const defaults = page.getByRole("region", { name: "Thread Defaults" });
-        await expectAligned(defaults.locator(".setting-row"), ".setting-row-title", ".setting-row-control > button");
+        // The shared settings rows, as on the Orchestrator and Reviews pages: on a desktop each select
+        // is centred in its row beside the title and description; on a phone it drops under them.
+        await expect(defaults.locator(".setting-row")).toHaveCount(4);
+        const phone = page.viewportSize()!.width === 390;
+        const layouts = await defaults.locator(".setting-row").evaluateAll((rows) => rows.map((row) => {
+          const box = row.getBoundingClientRect();
+          const text = row.querySelector(".setting-row-title")!.parentElement!.getBoundingClientRect();
+          const control = row.querySelector(".setting-row-control button")!.getBoundingClientRect();
+          return { centre: Math.abs((box.top + box.bottom) / 2 - (control.top + control.bottom) / 2), below: control.top - text.bottom };
+        }));
+        for (const layout of layouts) {
+          if (phone) expect(layout.below).toBeGreaterThanOrEqual(-1);
+          else expect(layout.centre).toBeLessThanOrEqual(1);
+        }
         const grants = page.getByRole("region", { name: "Active Delegations" });
         await expectAligned(grants.locator(".setting-row-trailing"), ".setting-row-title", ".setting-row-control > button");
         await check(page.locator(".settings-panel"), "assistant-settings", theme, "defaults-and-delegations");
@@ -355,24 +368,24 @@ for (const theme of ["light", "dark"] as const) {
         await check(surface, "assistant-connections", theme, "nine-connections");
       });
 
-      test("New Thread aligns option text with the trailing chevrons", async ({ page }) => {
+      test("New Thread aligns its heading and keeps Create Thread reachable with eleven accounts", async ({ page }) => {
         await open(page, theme, viewPath({ name: "assistants", newThread: true }), "accounts=composer-stress&limits=enabled");
-        const surface = page.getByRole("form", { name: "What should the assistant work on?" });
-        await expectAligned(surface.locator(".new-assistant-option"), "span", "svg:last-child");
-        await surface.getByRole("textbox", { name: "First Message" }).fill("Review the open work for the next release.");
-        await expect(surface.getByRole("button", { name: "Start Thread" })).toBeInViewport({ ratio: 1 });
-        await check(surface, "new-thread", theme, "first-message");
-        await surface.getByRole("button", { name: /^Account / }).click();
-        const picker = page.getByRole("dialog", { name: "Account", exact: true });
-        await expect(picker.getByRole("radio")).toHaveCount(8);
-        await picker.locator("summary").click();
-        const unavailable = picker.getByRole("list");
-        await expect(unavailable.getByRole("listitem")).toHaveCount(4);
-        await expect(unavailable.locator("li > span")).toHaveText([
-          /needs sign-in/u, /can't run/u, /would spend API credits/u, /at a usage limit/u,
-        ]);
-        await expect(unavailable.locator("button, a[href], input, [tabindex]")).toHaveCount(0);
-        await check(picker, "new-thread", theme, "eleven-accounts");
+        const dialog = page.getByRole("dialog", { name: "New Thread" });
+        await expect(dialog.getByRole("button", { name: "Create Thread" })).toBeInViewport({ ratio: 1 });
+        // The head is the shared Modal's with a description under the title, as New Session's is.
+        await check(dialog, "new-thread", theme, "dialog");
+        await dialog.getByRole("button", { name: /^Account:/ }).click();
+        const list = page.getByRole("listbox", { name: "Account" });
+        // Machine Policy, seven eligible accounts, then four unavailable ones that say why.
+        await expect(list.getByRole("option")).toHaveCount(12);
+        const unavailable = list.locator('[role="option"][aria-disabled="true"]');
+        await expect(unavailable).toHaveCount(4);
+        for (const reason of [/needs sign-in/u, /can't run/u, /would spend API credits/u, /at a usage limit/u]) {
+          await expect(unavailable.filter({ hasText: reason })).toHaveCount(1);
+        }
+        // The list is the shared Select's, as New Session's Account list is; what this surface adds is
+        // an 80-character account name, which wraps inside it rather than widening it.
+        await expectNoHorizontalOverflow(list, "Account choices");
       });
 
       test("toasts align the dismiss control and icon with the message", async ({ page }) => {

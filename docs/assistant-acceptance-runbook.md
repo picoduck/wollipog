@@ -246,10 +246,11 @@ zero audit gaps never proves a live end-to-end workflow.
 **Prerequisites:** 1 and two eligible accounts for one harness on the same disposable Machine.
 Use an existing ineligible account for the refusal check. Keep account identifiers private.
 
-1. In **Assistants**, select **New Thread**. Choose the **Harness**, then select an eligible
-   entry under **Account**. Verify an ineligible entry is disabled and explains why. Choose
-   **Start Thread**. Check the thread header shows the chosen account. Send a harmless marker
-   message and wait for the genuine provider response.
+1. In **Assistants**, select **New Thread**. In the dialog, choose the **Harness**, then select an
+   eligible entry under **Account**. Verify an ineligible entry is disabled and explains why.
+   Choose a **Model** and **Effort**, then select **Create Thread**. Check the thread opens with
+   its composer's **Model Settings** showing that model and effort, and the thread header shows
+   the chosen account. Send a harmless marker message and wait for the genuine provider response.
 2. Once the thread is idle, open **Thread Actions → Change Account**. Choose the other eligible
    account, leave **Start a Fresh Conversation** unchecked, and select **Change Account**. Check
    that the same thread now shows the new account, with earlier messages and launched work still
@@ -286,9 +287,9 @@ resolution. **Mark REAL** after desktop and phone update without a reload.
 
 **Prerequisites:** 1, an eligible thread harness, and a disposable Location for ordinary sessions.
 
-1. In **Settings → Behavior → Assistant Threads**, select **Edit Limits**. In **Default Thread
-   Limits**, enter a safe **Cost Budget (USD)** and a **Session Launch Limit** of **2**, then select
-   **Save Limits**. Start a new thread. Check its **Thread Details** show those values and another
+1. In **Settings → Assistant → Limits**, enter a safe **Budget per Thread** and **2** for
+   **Session Launches per Thread**, then select **Save Defaults**. Start a new thread and verify
+   the **New Thread** dialog shows those values. Check its **Thread Details** show them and another
    existing thread keeps its previous limits.
 2. In **Thread Actions → Thread Limits**, select **Save Limits** with a **Session Launch Limit** of
    **0**. Verify **Launches Paused** in the thread header. Ask the thread to launch a harmless

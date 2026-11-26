@@ -32,7 +32,7 @@ import { AgentIcon } from "./AgentIcon.js";
 import { AssistantsIcon, ChevronLeftIcon, ChevronRightIcon, PlusIcon, SearchIcon } from "./Icons.js";
 import { ListFoot } from "./ListFoot.js";
 import { Modal } from "./Modal.js";
-import { NewAssistantThreadComposer, THREADS_UNAVAILABLE_MESSAGE, type NewAssistantThreadResult } from "./NewAssistantThreadComposer.js";
+import { NewAssistantThreadDialog, THREADS_UNAVAILABLE_MESSAGE, type NewAssistantThreadResult } from "./NewAssistantThreadDialog.js";
 import { Notice } from "./Notice.js";
 import { ActionsMenu, DetailBar, PageHeader, type ActionsMenuChoice, type PageMenuAction } from "./PageHeader.js";
 import { SessionDetail } from "./SessionDetail.js";
@@ -69,13 +69,6 @@ function replayComplete(kept: readonly { seq: number }[], afterSeq: number): boo
   return kept.length === 0 || kept[0]!.seq <= afterSeq + 1;
 }
 
-/** Why New Thread can't start one here, when the list already knows. */
-function newThreadBlock(list: ListState): { title: string; message: string } | undefined {
-  if (list.kind === "unavailable") return { title: "Threads Aren't Available Yet", message: THREADS_UNAVAILABLE_MESSAGE };
-  if (list.kind === "ownerOnly") return { title: "Threads Are for Owners", message: list.message };
-  return undefined;
-}
-
 /**
  * The Assistants section (#4664): threads listed newest activity first
  * with New Thread, and the open thread beside them. On a phone the list and the thread are two
@@ -102,13 +95,9 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   const waitingDock = useRef<AssistantWaitingDockHandle>(null);
   const [list, setList] = useState<ListState>({ kind: "loading" });
   const [showArchive, setShowArchive] = useState(false);
-  const [emptyCreationPending, setEmptyCreationPending] = useState(false);
   /** A deep link that the list doesn't carry, read on its own. */
   const [extra, setExtra] = useState<AssistantThread | null>(null);
   const [missing, setMissing] = useState(false);
-  const [unsentFirstMessage, setUnsentFirstMessage] = useState<
-    (NonNullable<NewAssistantThreadResult["firstMessageFailure"]> & { sessionId: string; dismissed?: true }) | null
-  >(null);
   const [renaming, setRenaming] = useState<AssistantThread | null>(null);
   const [archiving, setArchiving] = useState(false);
   const [budgetDismissal, setBudgetDismissal] = useState(() => ({
@@ -184,12 +173,10 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   // A reconnect may have missed changes.
   useEffect(() => { if (conn === "online") refresh(); }, [conn, refresh]);
 
-  const titleForDisplay = (thread: AssistantThread) => thread.sessionId === unsentFirstMessage?.sessionId &&
-    assistantThreadTitle(thread) === "New Thread" ? { ...thread, title: "Untitled Thread" } : thread;
   const threads = list.kind === "ready" ? list.threads : [];
   const listed = threadId === undefined ? undefined : threads.find((thread) => thread.id === threadId);
   const selectedThread = listed ?? (extra?.id === threadId ? extra : undefined);
-  const selected = selectedThread && titleForDisplay(selectedThread);
+  const selected = selectedThread;
   const problemsFor = (thread: AssistantThread) => assistantThreadProblems(thread, conn,
     thread.runnerId ? runners.get(thread.runnerId) : undefined);
   const badgeFor = (thread: AssistantThread, hideDone = false) => threadStatusBadge(thread, problemsFor(thread)[0], hideDone);
@@ -198,11 +185,6 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
     return backing?.resolvedModel ?? backing?.model;
   });
   const effort = useStoreSelector((state) => selected ? state.sessions.get(selected.sessionId)?.effort : undefined);
-  const firstMessageDelivered = useStoreSelector((state) => unsentFirstMessage !== null &&
-    (state.sessions.get(unsentFirstMessage.sessionId)?.messageCount ?? 0) > 0);
-  useEffect(() => {
-    if (firstMessageDelivered) setUnsentFirstMessage(null);
-  }, [firstMessageDelivered]);
   const canTogglePanel = useStoreSelector((state) => Boolean(selected && state.sessions.has(selected.sessionId)));
   const togglePanel = panel.toggle;
   useEffect(() => {
@@ -321,15 +303,12 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   const toList = () => navigate({ name: "assistants" });
   const cancelNewThread = () => navigate({ name: "assistants" }, { replace: true });
   const startThread = () => navigate({ name: "assistants", newThread: true });
-  const finishNewThread = ({ thread, firstMessageFailure }: NewAssistantThreadResult, fromEmptyInbox: boolean, composerOpen: boolean) => {
+  // The new thread opens ready for its first message, as a new session does.
+  const finishNewThread = ({ thread, setupFailure }: NewAssistantThreadResult) => {
     replace(thread);
-    if (firstMessageFailure) setUnsentFirstMessage({ sessionId: thread.sessionId, ...firstMessageFailure });
-    const view = currentView.read();
-    if (composerOpen && view.name === "assistants" &&
-        (fromEmptyInbox ? !view.newThread && view.threadId === undefined : view.newThread)) {
-      setShowArchive(false);
-      navigate({ name: "assistants", threadId: thread.id }, { replace: true });
-    }
+    setShowArchive(false);
+    navigate({ name: "assistants", threadId: thread.id }, { replace: true });
+    if (setupFailure) showToast(setupFailure, { tone: "warning" });
   };
 
   const archive = async (thread: AssistantThread, reopen: () => void) => {
@@ -384,9 +363,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
   };
 
   const emptyInbox = list.kind === "ready" && threads.length === 0;
-  // Creation is published to the list before the first message finishes sending.
-  const showEmptyComposer = (emptyInbox || emptyCreationPending) && !showArchive && threadId === undefined && !newThread;
-  const phoneDetail = isMobile && (threadId !== undefined || newThread);
+  const phoneDetail = isMobile && threadId !== undefined;
   // The open thread's launched work, for the header toggle and the Work tab. Kept
   // the same object while the thread's lists are, so their live counts don't recompute each render.
   const launchedSessionIds = selected?.launchedSessionIds;
@@ -452,37 +429,18 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
     rightPanel.show(mode);
     navigate({ name: "session", id: selected.sessionId });
   };
-  const creationBlock = newThreadBlock(list);
-  const firstMessageNoticeTitle = unsentFirstMessage?.deliveryUnconfirmed
-    ? "First Message Delivery Unconfirmed" : "First Message Wasn't Sent";
-  const firstMessageNotice: SessionNoticeEntry | null =
-    unsentFirstMessage && !unsentFirstMessage.dismissed && !firstMessageDelivered &&
-      selected?.sessionId === unsentFirstMessage.sessionId ? {
-      key: "assistant-first-message-unsent",
-      severity: "warning",
-      rank: SESSION_NOTICE_RANK.composerError,
-      title: firstMessageNoticeTitle,
-      render: ({ trailing }) => (
-        <Notice tone="warning" role="status" title={firstMessageNoticeTitle} trailing={trailing}
-          onDismiss={() => setUnsentFirstMessage((current) => current && { ...current, dismissed: true })}>
-          Your draft is kept. {unsentFirstMessage.reason}
-          {unsentFirstMessage.deliveryUnconfirmed && " Check the transcript before sending again."}
-        </Notice>
-      ),
-    } : null;
-
   return (
     <section className="page full fill">
       {phoneDetail ? (
         <DetailBar
-          title={newThread ? "New Thread" : selected ? assistantThreadTitle(selected) : "Thread"}
+          title={selected ? assistantThreadTitle(selected) : "Thread"}
           backLabel={backLabel("assistants")}
-          onBack={newThread ? cancelNewThread : toList}
+          onBack={toList}
           status={selected ? badgeFor(selected, true) : undefined}
           menu={selected ? threadMenu(selected) : []}
           menuLabel="Thread Actions"
           menuSheetTitle={selected ? assistantThreadTitle(selected) : undefined}
-          hideSearch={Boolean(selected || newThread)}
+          hideSearch={Boolean(selected)}
           controls={canTogglePanel && launchedWork
             ? <AssistantSidePanelToggle work={launchedWork} open={panel.open} onToggle={panel.toggle} />
             : undefined}
@@ -492,12 +450,11 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
         // New Thread belongs to the assistant's Threads list, so the page header offers no second one.
         <PageHeader title={ASSISTANTS.name} description={ASSISTANTS.description} />
       )}
-      <div className="master-detail assistants-md" data-detail-open={threadId !== undefined || newThread || showEmptyComposer ? "" : undefined}>
+      <div className="master-detail assistants-md" data-detail-open={threadId !== undefined ? "" : undefined}>
         <aside className="master-detail-list" aria-label={ASSISTANTS.name} data-focus-zone="list" tabIndex={-1}>
           <ThreadList
-            list={unsentFirstMessage && list.kind === "ready" ? { ...list, threads: threads.map(titleForDisplay) } : list}
+            list={list}
             showArchive={showArchive}
-            composingFirstThread={showEmptyComposer}
             onShowArchive={setShowArchive}
             selectedId={threadId ?? null}
             onOpen={openThread}
@@ -507,17 +464,17 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
           />
         </aside>
         <div className="assistant-thread-pane" data-focus-zone="main" tabIndex={-1}>
-          {newThread || showEmptyComposer ? creationBlock ? (
-            <div className="assistant-thread-pane-state"><State compact icon={<AssistantsIcon />}
-              title={creationBlock.title} headingLevel={2}>{creationBlock.message}</State></div>
-          ) : <NewAssistantThreadComposer key={newThread ? "explicit" : "empty"}
-            onCancel={newThread && !isMobile ? cancelNewThread : undefined}
-            onCreationPendingChange={showEmptyComposer ? setEmptyCreationPending : undefined}
-            onCreated={(result, composerOpen) => finishNewThread(result, showEmptyComposer, composerOpen)} />
-          : threadId === undefined && (list.kind === "unavailable" || list.kind === "ownerOnly") ? (
+          {threadId === undefined && (list.kind === "unavailable" || list.kind === "ownerOnly") ? (
             // The list already says why there are no threads here; an invitation to choose one would
             // contradict it, so the pane stays empty.
             null
+          ) : threadId === undefined && emptyInbox ? (
+            <div className="assistant-thread-pane-state">
+              <State icon={<AssistantsIcon />} title="No Threads Yet" headingLevel={2}
+                actions={<button type="button" className="btn primary" onClick={startThread}>New Thread</button>}>
+                An assistant thread is a conversation that can start sessions, check on your work and make the decisions you delegate.
+              </State>
+            </div>
           ) : threadId === undefined ? (
             <div className="assistant-thread-pane-state">
               {/* The detail pane's placeholder beside a list that offers New Thread itself (§21.4), not
@@ -595,7 +552,7 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
                 onConfirmationAnswered={replace}
                 focusComposer={focusComposer}
               />}
-              assistantSpendingNotices={firstMessageNotice ? [firstMessageNotice, ...spendingNotices] : spendingNotices}
+              assistantSpendingNotices={spendingNotices}
               assistantThreadHealth={selected.health && selected.status !== "archived" ? {
                 thread: selected,
                 problems: problemsFor(selected),
@@ -642,15 +599,16 @@ export function AssistantsView({ threadId, limits, delegation, newThread, rightP
         : <Modal title="Decision Delegation" onClose={() => navigate({ name: "assistants", threadId: selected.id }, { replace: true })}>
             <p>{selected.status === "archived" ? "Archived threads cannot hold delegation grants." : "This control plane does not support decision delegation."}</p>
           </Modal>)}
+      {/* New Thread is a dialog over the list, as New Session is; its route keeps it linkable. */}
+      {newThread && <NewAssistantThreadDialog onClose={cancelNewThread} onCreated={finishNewThread} />}
     </section>
   );
 }
 
 /** The list pane's threads and New Thread action. */
-function ThreadList({ list, showArchive, composingFirstThread, onShowArchive, selectedId, onOpen, onNewThread, onRetry, badgeFor }: {
+function ThreadList({ list, showArchive, onShowArchive, selectedId, onOpen, onNewThread, onRetry, badgeFor }: {
   list: ListState;
   showArchive: boolean;
-  composingFirstThread: boolean;
   onShowArchive: (show: boolean) => void;
   selectedId: string | null;
   onOpen: (threadId: string) => void;
@@ -740,7 +698,7 @@ function ThreadList({ list, showArchive, composingFirstThread, onShowArchive, se
               }
             }}><SearchIcon /></button>
         )}
-        {!showArchive && !composingFirstThread && (threads.length > 0 || list.kind === "loading" || list.kind === "failed") && (
+        {!showArchive && list.kind !== "unavailable" && list.kind !== "ownerOnly" && (
           <button type="button" className="btn primary" onClick={onNewThread}><PlusIcon />New Thread</button>
         )}
       </div>
@@ -813,7 +771,7 @@ function ThreadList({ list, showArchive, composingFirstThread, onShowArchive, se
           </>
         )}
       </section>
-      {list.kind === "ready" && threads.length > 0 && !showArchive && !composingFirstThread && (
+      {list.kind === "ready" && threads.length > 0 && !showArchive && (
         <div className="assistant-threads-foot">
           <ListFoot>
             <button ref={archiveButton} type="button" className="row" onClick={() => openArchive(true)}>

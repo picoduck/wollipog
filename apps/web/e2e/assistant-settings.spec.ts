@@ -6,8 +6,6 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from "./layout-inva
 
 const evidence = process.env.ASSISTANT_SETTINGS_EVIDENCE_DIR;
 const settings = encodeURIComponent("/settings/assistant");
-const budgetValues = ["$25", "$50", "$100", "$250", "Custom…", "No Limit"];
-const defaultDelegation = "Decision Delegation for New Threads";
 
 test.use({ timezoneId: "UTC", locale: "en-US", reducedMotion: "reduce" });
 
@@ -35,55 +33,76 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
         appendFileSync(join(evidence, "claims.jsonl"), JSON.stringify({ id, claim }) + "\n");
       }
 
-      test("each default has its own value, budget exposes exactly six choices, and delegation can be changed", async ({ page }) => {
+      test("each default is edited in place and saved together with Save Defaults", async ({ page }) => {
         await open(page);
         const defaults = page.getByRole("region", { name: "Thread Defaults" });
-        const values = ["Claude Code Harness", "Machine Policy Account", "$25 Budget per Thread",
-          "10 Session Launches per Thread", `Ask Me ${defaultDelegation}`];
-        for (const name of values) await expectFullyInViewport(defaults.getByRole("button", { name, exact: true }), name);
-        await expect(defaults.getByRole("button")).toHaveCount(5);
-        await capture(defaults, "defaults-ask-me", "Five visible value buttons show Claude Code, Machine Policy, $25, 10 launches and Ask Me.");
+        const limits = page.getByRole("region", { name: "Limits", exact: true });
+        const delegation = page.getByRole("region", { name: "Decision Delegation", exact: true });
+        const select = (scope: Locator, title: string) => scope.getByRole("button", { name: new RegExp(`^${title}:`) });
+        const budget = limits.getByRole("textbox", { name: "Budget per Thread USD" });
+        const launches = limits.getByRole("textbox", { name: "Session Launches per Thread" });
+        const save = page.getByRole("button", { name: "Save Defaults" });
+        // Values are the rows' own controls, as on the Orchestrator and Reviews pages: no button per
+        // value that opens its own dialog and saves on its own.
+        await expect(defaults.getByRole("button")).toHaveCount(4);
+        await expect(select(defaults, "Harness")).toHaveAccessibleName("Harness: Claude Code");
+        await expect(select(defaults, "Model")).toHaveAccessibleName("Model: Automatic");
+        await expect(select(defaults, "Effort")).toHaveAccessibleName("Effort: Automatic");
+        await expect(select(defaults, "Account")).toHaveAccessibleName(/^Account: Machine Policy/);
+        await expect(budget).toHaveValue("25");
+        await expect(launches).toHaveValue("10");
+        await expect(select(delegation, "New Threads")).toHaveAccessibleName("New Threads: Ask Me");
+        await expect(select(delegation, "Expires")).toHaveCount(0);
+        await expect(save).toHaveCount(0);
+        await capture(defaults, "defaults", "Thread Defaults shows Harness, Model, Effort and Account as select rows; nothing is unsaved.");
 
-        await defaults.getByRole("button", { name: "$25 Budget per Thread", exact: true }).click();
-        const dialog = page.getByRole("dialog", { name: "Budget per Thread" });
-        await expect(dialog.getByRole("radio")).toHaveCount(budgetValues.length);
-        for (const name of budgetValues) await expect(dialog.getByRole("radio", { name, exact: true })).toBeVisible();
-        const saveBudget = dialog.getByRole("button", { name: "Save Default" });
-        await expectFullyInViewport(saveBudget, "Save Default");
-        await capture(dialog, "budget-presets", "Exactly $25, $50, $100, $250, Custom… and No Limit are available. Save Default is fully visible.", "button");
-        await dialog.getByRole("radio", { name: "Custom…", exact: true }).click();
-        const amount = dialog.getByRole("textbox", { name: "Custom Budget (USD)" });
-        await amount.fill("73.50");
-        await expect(amount).toHaveValue("73.50");
-        await expectFullyInViewport(saveBudget, "Save Default");
-        await capture(dialog, "budget-custom", "Custom… shows the amount field populated with 73.50 and Save Default remains fully visible.", "button, input:not([type=radio])");
-        await saveBudget.click();
-        await expect(defaults.getByRole("button", { name: "$73.50 Budget per Thread", exact: true })).toBeVisible();
+        await select(defaults, "Model").click();
+        await page.getByRole("option", { name: /Opus 4\.7/ }).click();
+        await select(defaults, "Effort").click();
+        await page.getByRole("option", { name: "Max", exact: true }).click();
+        await budget.fill("73.50");
+        await launches.fill("0");
+        await select(delegation, "New Threads").click();
+        await page.getByRole("option", { name: /^Choose Categories/ }).click();
+        await expect(select(delegation, "Expires")).toHaveAccessibleName("Expires: 7 Days");
+        const category = (title: string) => delegation.getByRole("radiogroup", { name: title, exact: true });
+        await expect(category("Merge Pull Requests").getByRole("radio", { name: "Assistant" })).toBeChecked();
+        // Approving UI evidence needs each thread's own provider disclosure, so a default can't grant it.
+        await expect(category("Approve UI Evidence").getByRole("radio", { name: "Assistant" })).toHaveAttribute("aria-disabled", "true");
+        await expect(delegation).toContainText("Approving UI evidence needs the provider disclosure");
+        await category("Publish Releases").getByRole("radio", { name: "You" }).click();
+        await expectFullyInViewport(save, "Save Defaults");
+        // The You / Assistant pills are the shared settings segmented control, whose touch target is
+        // its 44px row (settings-rows checks every section); the selects and Save bar are measured here.
+        await capture(delegation, "unsaved", "Choose Categories shows a You or Assistant row per category, Approve UI Evidence explains why it stays with you, and Save Defaults is fully visible.",
+          "button:not(.seg-option)");
 
-        await defaults.getByRole("button", { name: `Ask Me ${defaultDelegation}`, exact: true }).click();
-        const editor = page.getByRole("dialog", { name: defaultDelegation });
-        await expect(editor.getByText("Decisions stay with you.")).toBeVisible();
-        await editor.getByRole("radio", { name: "Delegate All", exact: true }).click();
-        await expect(editor.getByText("The expiry starts when each thread is created.")).toBeVisible();
-        await expect(editor.getByText("Approving UI evidence requires accepting the provider disclosure in each thread.")).toBeVisible();
-        const saveDelegation = editor.getByRole("button", { name: "Save Delegation" });
-        await expectFullyInViewport(saveDelegation, "Save Delegation");
-        await capture(editor, "default-delegation-editor", "Delegate All describes creation-time expiry and the per-thread provider disclosure. Save Delegation is fully visible.");
-        await saveDelegation.click();
-        const delegated = defaults.getByRole("button", { name: `Delegate All · 7 Days ${defaultDelegation}`, exact: true });
-        await expectFullyInViewport(delegated, "Delegated default");
-        await capture(defaults, "defaults-delegated", "The default row displays Delegate All · 7 Days after saving.");
-        await delegated.click();
-        await editor.getByRole("radio", { name: "Ask Me", exact: true }).click();
-        await saveDelegation.click();
-        await expect(defaults.getByRole("button", { name: `Ask Me ${defaultDelegation}`, exact: true })).toBeVisible();
+        await save.click();
+        await expect(save).toHaveCount(0);
+        const body = page.locator("body");
+        await expect(body).toHaveAttribute("data-saved-launch-defaults",
+          JSON.stringify({ harness: "claude-code", providerAccount: null, model: "claude-opus-4-7", effort: "max" }));
+        await expect(body).toHaveAttribute("data-saved-limit-defaults", JSON.stringify({ costUsd: 73.5, launchedSessions: 0 }));
+        const grant = JSON.parse(await body.getAttribute("data-saved-decision-default") ?? "null");
+        expect(grant.selectionMode).toBe("choose");
+        expect(grant.categories).toContain("pr_merge");
+        expect(grant.categories).not.toContain("release_publish");
+        expect(grant.categories).not.toContain("ui_evidence_review");
+        expect(grant.expiresAfterMs).toBe(7 * 24 * 60 * 60_000);
 
-        await defaults.getByRole("button", { name: "Machine Policy Account" }).click();
-        const account = page.getByRole("dialog", { name: "Account", exact: true });
-        await account.getByRole("radio", { name: /^DesignResearchAndEngineeringSubscription/ }).check();
-        await account.getByRole("button", { name: "Save Default" }).click();
-        const accountValue = defaults.getByRole("button", { name: /^DesignResearchAndEngineeringSubscription.* Account$/ });
-        await expectFullyInViewport(accountValue, "The saved long account value");
+        // Another harness's models aren't this one's; Discard puts back what was saved.
+        await select(defaults, "Harness").click();
+        await page.getByRole("option", { name: "Codex" }).click();
+        await expect(select(defaults, "Model")).toHaveAccessibleName("Model: Automatic");
+        await page.getByRole("button", { name: "Discard" }).click();
+        await expect(select(defaults, "Harness")).toHaveAccessibleName("Harness: Claude Code");
+        await expect(select(defaults, "Model")).toHaveAccessibleName("Model: Opus 4.7");
+
+        await select(defaults, "Account").click();
+        await page.getByRole("option", { name: /^DesignResearchAndEngineeringSubscription/ }).click();
+        await save.click();
+        await expect(save).toHaveCount(0);
+        await expectFullyInViewport(select(defaults, "Account"), "The saved long account value");
         await expectNoHorizontalOverflow(defaults, "Defaults with a long account name");
       });
 
@@ -164,12 +183,14 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
         await expect(page.getByRole("textbox", { name: "Connection Name" })).toBeVisible();
       });
 
-      test("a control plane without the feature still shows the four earlier defaults", async ({ page }) => {
+      test("a control plane without the newer defaults shows only the ones it saves", async ({ page }) => {
         await open(page, "older-defaults");
         const defaults = page.getByRole("region", { name: "Thread Defaults" });
-        await expect(defaults.getByRole("button")).toHaveCount(4);
-        await expect(defaults.getByText(defaultDelegation, { exact: true })).toHaveCount(0);
-        await capture(defaults, "older-server", "Thread Defaults has four value buttons and no Decision Delegation for New Threads row.");
+        await expect(defaults.getByRole("button")).toHaveCount(2);
+        await expect(defaults.getByRole("button", { name: /^Model:/ })).toHaveCount(0);
+        await expect(page.getByRole("region", { name: "Decision Delegation", exact: true })).toHaveCount(0);
+        await expect(page.getByRole("region", { name: "Limits", exact: true }).getByRole("textbox")).toHaveCount(2);
+        await capture(defaults, "older-server", "Thread Defaults has Harness and Account only, and there is no Decision Delegation group.");
       });
     });
   }

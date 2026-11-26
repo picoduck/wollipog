@@ -2,13 +2,12 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { join } from "node:path";
 import { expectFullyInViewport, expectNoHorizontalOverflow, expectPageNoHorizontalOverflow, expectTextContrast } from "./layout-invariants.js";
 
-const heading = "What should the assistant work on?";
 const message = "Plan the next release\nReview the open work that's ready to ship.";
 const firstLine = "Plan the next release";
 const pane = (page: Page) => page.locator(".assistant-thread-pane");
-const form = (page: Page) => page.getByRole("form", { name: heading });
-const messageBox = (page: Page) => form(page).getByRole("textbox", { name: "First Message" });
-const start = (page: Page) => form(page).getByRole("button", { name: "Start Thread" });
+const dialog = (page: Page) => page.getByRole("dialog", { name: "New Thread" });
+const create = (page: Page) => dialog(page).getByRole("button", { name: "Create Thread" });
+const picker = (page: Page, label: string) => dialog(page).getByRole("button", { name: new RegExp(`^${label}:`) });
 const list = (page: Page) => page.getByRole("complementary", { name: "Assistants" });
 const transcript = (page: Page) => pane(page).getByRole("region", { name: "Session Activity" });
 const sentMessage = (page: Page) => transcript(page).getByText("Review the open work that's ready to ship.", { exact: false });
@@ -16,9 +15,14 @@ const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
 const evidenceStates = process.env.WOLLIPOG_EVIDENCE_STATES?.split(",");
 
 async function expectTargetLayout(targets: Locator, phone: boolean) {
-  const boxes = await targets.evaluateAll((nodes) => nodes.map((target) => {
+  // Only targets a person can reach where they are now: one scrolled under a sticky footer is not
+  // drawn there. Callers scroll and measure again to cover the rest.
+  const boxes = await targets.evaluateAll((nodes) => nodes.flatMap((target) => {
+    if (!target.getClientRects().length) return [];
     const { top, bottom, left, right, width, height } = target.getBoundingClientRect();
-    return { top, bottom, left, right, width, height, name: target.textContent?.trim() };
+    const hit = document.elementFromPoint(left + width / 2, top + height / 2);
+    if (!hit || !(target === hit || target.contains(hit))) return [];
+    return [{ top, bottom, left, right, width, height, name: target.getAttribute("aria-label") ?? target.textContent?.trim() }];
   }));
   expect(boxes.length).toBeGreaterThan(0);
   for (const [index, a] of boxes.entries()) {
@@ -71,174 +75,123 @@ for (const theme of ["light", "dark"] as const) {
         }
       }
 
-      test("composes the first message and opens its conversation with the chosen settings", async ({ page }) => {
+      test("creates a thread from the dialog with the chosen harness, account, model, effort and limits", async ({ page }) => {
         await open(page, "accounts=composer-stress&limits=enabled");
         await list(page).getByRole("button", { name: "New Thread" }).click();
-        await expect(pane(page).getByRole("heading", { name: heading })).toBeVisible();
-        await expect(page.getByRole("dialog")).toHaveCount(0);
-        if (phone) {
-          await expect(list(page)).toBeHidden();
-          await expect(page.getByRole("heading", { name: "New Thread", exact: true })).toBeVisible();
-          await expect(page.getByRole("button", { name: "Back to Assistants" })).toBeVisible();
-        } else {
-          await expect(list(page)).toBeVisible();
-          await expect(list(page).locator("[data-thread-id]")).toHaveCount(3);
-        }
-        await expect(form(page).getByRole("button", { name: "Harness Claude Code" })).toBeVisible();
-        await expect(form(page).getByRole("button", { name: "Account Machine Policy · Studio Subscription" })).toBeVisible();
-        await expect(form(page).getByRole("button", { name: "Budget $25 · 10 Launches" })).toBeVisible();
-        await expect(start(page)).toBeDisabled();
-        await expectFullyInViewport(start(page), "Start Thread");
-        await expectNoHorizontalOverflow(form(page), "New Thread");
+        await expect(dialog(page)).toBeVisible();
+        // A dialog over the list, as New Session is, never a screen of its own in the thread pane.
+        if (!phone) await expect(list(page).locator("[data-thread-id]")).toHaveCount(3);
+        await expect(dialog(page).getByText("Write your first message once it opens.", { exact: false })).toBeVisible();
+        await expect(picker(page, "Harness")).toHaveAccessibleName("Harness: Claude Code");
+        await expect(picker(page, "Account")).toHaveAccessibleName(/^Account: Machine Policy/);
+        await expect(picker(page, "Model")).toHaveAccessibleName("Model: Automatic");
+        await expect(picker(page, "Effort")).toHaveAccessibleName("Effort: Automatic");
+        await expect(picker(page, "Decision Delegation")).toHaveAccessibleName("Decision Delegation: Ask Me");
+        const budget = dialog(page).getByRole("textbox", { name: "Budget USD" });
+        const launches = dialog(page).getByRole("textbox", { name: "Session Launches" });
+        await expect(budget).toHaveValue("25");
+        await expect(launches).toHaveValue("10");
+        // No first message is needed: the thread opens ready for one, as a new session does.
+        await expect(create(page)).toBeEnabled();
+        await expectFullyInViewport(create(page), "Create Thread");
+        await expectNoHorizontalOverflow(dialog(page), "New Thread");
         await expectPageNoHorizontalOverflow(page);
-        await expectTargetLayout(form(page).locator("button.btn, textarea"), phone);
-        await expectReadable(form(page));
-        await capture(page, "empty", true);
+        await expectTargetLayout(dialog(page).locator("button"), phone);
+        await expectReadable(dialog(page));
+        await capture(page, "dialog", true);
+        // The rows below the fold, once scrolled to, are as reachable as the ones above it.
+        await picker(page, "Decision Delegation").scrollIntoViewIfNeeded();
+        await expectFullyInViewport(picker(page, "Decision Delegation"), "Decision Delegation");
+        await expectTargetLayout(dialog(page).locator("button"), phone);
+        await capture(page, "dialog-scrolled", true);
 
-        await messageBox(page).fill(" \n   ");
-        await expect(start(page)).toBeDisabled();
-        const starterPrompts = form(page).getByRole("group", { name: "Starter Prompts" });
-        await expect(starterPrompts.getByRole("button")).toHaveCount(3);
-        for (const [label, prompt] of [
-          ["Check On Running Work", "Check on my running work and tell me what needs attention."],
-          ["Review Open Decisions", "Show me the open decisions that need my input."],
-          ["Plan a Task", "Help me plan a task and decide how to break it into sessions."],
-        ]) {
-          await starterPrompts.getByRole("button", { name: label }).click();
-          await expect(messageBox(page)).toHaveValue(prompt!);
-          await expect(messageBox(page)).toBeFocused();
-        }
-        await messageBox(page).fill(message);
-        await expect(start(page)).toBeEnabled();
-        await expectReadable(form(page));
-        await capture(page, "typed");
+        await picker(page, "Account").click();
+        await expect(page.getByRole("option", { name: /^Machine Policy/ })).toHaveAttribute("aria-selected", "true");
+        const signIn = page.getByRole("option", { name: /Field Subscription/ });
+        await expect(signIn).toHaveAttribute("aria-disabled", "true");
+        await expect(signIn).toContainText("This account needs sign-in.");
+        await capture(page, "accounts");
+        await page.getByRole("option", { name: /DesignResearchAndEngineering/ }).click();
+        await expect(picker(page, "Account")).toHaveAccessibleName(/DesignResearchAndEngineering/);
+        await expectNoHorizontalOverflow(dialog(page), "New Thread with a long selected account");
 
-        await form(page).getByRole("button", { name: /^Harness/ }).click();
-        const harness = page.getByRole("dialog", { name: "Harness" });
-        await expect(harness.getByRole("radio", { name: "Claude Code" })).toBeChecked();
-        await expect(harness.getByRole("radio", { name: "Codex" })).toBeEnabled();
-        await expectTargetLayout(harness.locator(".choice-row, .icon-btn"), phone);
-        await expectReadable(harness);
-        await capture(page, "harness", true);
-        await page.keyboard.press("Escape");
-        await expect(harness).toHaveCount(0);
-        await expect(form(page).getByRole("button", { name: /^Harness/ })).toBeFocused();
+        await picker(page, "Model").click();
+        await expect(page.getByRole("option")).toHaveText([/Automatic/, /Opus 4\.7/, /Sonnet 4\.6/, /Haiku 4\.5/]);
+        await capture(page, "models");
+        await page.getByRole("option", { name: /Sonnet 4\.6/ }).click();
+        await picker(page, "Effort").click();
+        // Sonnet's own efforts, not the harness's Max.
+        await expect(page.getByRole("option")).toHaveText([/Automatic/, "Low", "Medium", "High"]);
+        await page.getByRole("option", { name: "High", exact: true }).click();
+        await expect(picker(page, "Effort")).toHaveAccessibleName("Effort: High");
 
-        await form(page).getByRole("button", { name: /^Account/ }).click();
-        const account = page.getByRole("dialog", { name: "Account" });
-        const eligible = account.getByRole("radiogroup", { name: "Eligible Accounts" });
-        await expect(eligible.getByRole("radio")).toHaveCount(8); // Seven accounts and Machine Policy.
-        await expect(eligible.getByRole("radio", { name: "Machine Policy · Studio Subscription" })).toBeChecked();
-        const unavailable = account.locator("details");
-        await expect(unavailable).toHaveJSProperty("open", false);
-        await expect(account.getByText("Field Subscription")).toBeHidden();
-        expect(await eligible.evaluate((choices) =>
-          Boolean(choices.compareDocumentPosition(choices.parentElement!.querySelector("details")!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
-        await expectFullyInViewport(eligible.getByText("Operations Subscription"), "Last eligible account");
-        await expectFullyInViewport(unavailable.locator("summary"), "Folded Unavailable group");
-        expect(await account.evaluate((panel) => panel.scrollHeight - panel.clientHeight)).toBeLessThanOrEqual(1);
-        await expectNoHorizontalOverflow(account, "Account choices");
-        await expectTargetLayout(account.locator(".choice-row, .icon-btn, summary"), phone);
-        await expectReadable(account);
-        await capture(page, "accounts-folded", true);
+        await budget.fill("4.005");
+        await expect(create(page)).toBeDisabled();
+        await expect(dialog(page)).toContainText("Enter an amount in whole cents, such as 2.50.");
+        await budget.fill("40");
+        await launches.fill("4");
+        await picker(page, "Decision Delegation").click();
+        await page.getByRole("option", { name: /^Delegate All/ }).click();
+        await expect(create(page)).toBeEnabled();
+        await expectReadable(dialog(page));
+        await capture(page, "chosen");
 
-        await unavailable.locator("summary").click();
-        await expect(unavailable).toHaveJSProperty("open", true);
-        await expect(unavailable.locator("li")).toHaveCount(4);
-        await expect.poll(() => account.evaluate((panel) => panel.scrollHeight - panel.clientHeight)).toBeLessThanOrEqual(1);
-        await expectFullyInViewport(eligible.getByText("Machine Policy · Studio Subscription"), "First eligible choice");
-        for (const reason of [
-          "This account needs sign-in.",
-          "This account can't run in this agent's environment.",
-          "This account would spend API credits.",
-          "This account is at a usage limit until",
-        ]) await expectFullyInViewport(unavailable.getByText(reason, { exact: !reason.endsWith("until") }), reason);
-        await expect(unavailable.getByText(/usage limit until .+\./)).toBeVisible();
-        expect(await account.evaluate((panel) => {
-          const heading = panel.querySelector(".menu-head")!;
-          const head = heading.getBoundingClientRect();
-          const firstChoice = panel.querySelector(".choice-row")!.getBoundingClientRect();
-          return firstChoice.top >= head.bottom &&
-            heading.contains(document.elementFromPoint(head.left + 32, head.top + 4));
-        })).toBe(true);
-        await expectNoHorizontalOverflow(account, "Expanded account choices");
-        await expectReadable(account);
-        await capture(page, "accounts-expanded");
+        await create(page).click();
+        const body = page.locator("body");
+        await expect(body).toHaveAttribute("data-thread-create-count", "1");
+        await expect(body).toHaveAttribute("data-created-account", "acct:0000000000000002");
+        await expect(body).toHaveAttribute("data-created-model", "claude-sonnet-4-6");
+        await expect(body).toHaveAttribute("data-created-effort", "high");
+        await expect(body).toHaveAttribute("data-thread-limits", JSON.stringify({ costUsd: 40, launchedSessions: 4 }));
+        await expect(body).toHaveAttribute("data-delegation-grant", /"selectionMode":"all"/);
+        await expect(dialog(page)).toHaveCount(0);
 
-        await eligible.getByRole("radio", { name: /DesignResearchAndEngineering/ }).check();
-        await account.getByRole("button", { name: "Close Account" }).click();
-        const selectedAccount = form(page).getByRole("button", { name: /^Account DesignResearchAndEngineering/ });
-        await expect(selectedAccount).toBeVisible();
-        expect(await selectedAccount.evaluate((chip) => {
-          const label = chip.querySelector("span")!.getBoundingClientRect();
-          const box = chip.getBoundingClientRect();
-          return label.top >= box.top && label.bottom <= box.bottom;
-        })).toBe(true);
-        await expectNoHorizontalOverflow(form(page), "New Thread with a long selected account");
-
-        await form(page).getByRole("button", { name: /^Budget/ }).click();
-        const budget = page.getByRole("dialog", { name: "Budget", exact: true });
-        await expect(budget.getByRole("textbox", { name: "Budget (USD)" })).toHaveValue("25");
-        await expect(budget.getByRole("textbox", { name: "Session Launch Limit" })).toHaveValue("10");
-        await expectTargetLayout(budget.locator("input, button"), phone);
-        await expectReadable(budget);
-        await capture(page, "budget", true);
-        await budget.getByRole("textbox", { name: "Budget (USD)" }).fill("40");
-        await budget.getByRole("textbox", { name: "Session Launch Limit" }).fill("4");
-        await budget.getByRole("button", { name: "Apply Budget" }).click();
-        await expect(form(page).getByRole("button", { name: "Budget $40 · 4 Launches" })).toBeVisible();
-
-        await start(page).click();
-        await expect(page.locator("body")).toHaveAttribute("data-thread-create-count", "1");
-        await expect(page.locator("body")).toHaveAttribute("data-created-account", "acct:0000000000000002");
-        await expect(page.locator("body")).toHaveAttribute("data-thread-limits", JSON.stringify({ costUsd: 40, launchedSessions: 4 }));
-        await expect(form(page)).toHaveCount(0);
-        const title = phone ? page.locator("#page-title") : pane(page).getByRole("heading", { name: firstLine, exact: true });
-        await expect(title).toHaveText(firstLine);
-        await expect(sentMessage(page)).toBeVisible();
-        await expect(page.locator(phone ? "header:has(#page-title)" : ".assistant-thread-bar").getByText("Working")).toBeVisible();
-        if (phone) await expect(page.getByRole("link", { name: "Assistants", exact: true })).toHaveAccessibleDescription(/1 thread waiting on you/);
+        // The new thread opens on its own composer, where the first message is written.
+        const composer = pane(page).locator(".composer");
+        const input = composer.locator("textarea.composer-input");
+        await expect(composer).toBeVisible();
+        // A phone's idle composer is a capsule until it is tapped.
+        if (!await input.isVisible()) await composer.locator(".composer-box").click();
+        await expect(input).toBeVisible();
+        // The composer's own Model Settings carry what the dialog chose, for this and later turns.
+        await expect(pane(page).getByRole("button", { name: /^Model Settings:/ })).toHaveAccessibleName("Model Settings: claude-sonnet-4-6, High");
         await expectPageNoHorizontalOverflow(page);
         await capture(page, "created");
-      });
-
-      test("keeps the draft after creation is refused", async ({ page }) => {
-        await open(page, "new-thread=create-failure&limits=enabled");
-        await list(page).getByRole("button", { name: "New Thread" }).click();
-        await messageBox(page).fill(message);
-        await start(page).click();
-        await expect(form(page).getByRole("alert")).toContainText("The selected Machine went offline.");
-        await expect(messageBox(page)).toHaveValue(message);
-        await expect(start(page)).toBeEnabled();
-        await expectFullyInViewport(start(page), "Start Thread after refusal");
-        await expectPageNoHorizontalOverflow(page);
-        await capture(page, "create-failed");
-      });
-
-      test("opens the created thread with an unsent draft and retries without creating again", async ({ page }) => {
-        await open(page, "new-thread=first-message-failure&limits=enabled");
-        await list(page).getByRole("button", { name: "New Thread" }).click();
-        await messageBox(page).fill(message);
-        await start(page).click();
-        await expect(form(page)).toHaveCount(0);
-        const notice = pane(page).getByText("First Message Wasn't Sent", { exact: true });
-        const title = phone ? page.locator("#page-title") : pane(page).locator(".assistant-thread-bar h2");
-        await expect(title).toHaveText("Untitled Thread");
-        if (!phone) await expect(list(page).locator("[aria-current]")).not.toContainText("Done");
-        await expect(notice).toBeVisible();
-        await expect(pane(page)).toContainText("The Machine did not accept the message.");
-        const draft = pane(page).locator(".composer textarea");
-        await expect(draft).toHaveValue(message);
-        await expect(sentMessage(page)).toHaveCount(0);
-        await expectFullyInViewport(pane(page).getByRole("button", { name: "Send", exact: true }), "Send");
-        await expectPageNoHorizontalOverflow(page);
-        await capture(page, "first-message-failed");
-
+        await input.fill(message);
         await pane(page).getByRole("button", { name: "Send", exact: true }).click();
         await expect(sentMessage(page)).toBeVisible();
+        const title = phone ? page.locator("#page-title") : pane(page).getByRole("heading", { name: firstLine, exact: true });
         await expect(title).toHaveText(firstLine);
-        await expect(notice).toHaveCount(0);
-        await expect(page.locator("body")).toHaveAttribute("data-thread-create-count", "1");
+        await expect(body).toHaveAttribute("data-thread-create-count", "1");
+      });
+
+      test("keeps every choice after creation is refused", async ({ page }) => {
+        await open(page, "new-thread=create-failure&limits=enabled");
+        await list(page).getByRole("button", { name: "New Thread" }).click();
+        await picker(page, "Model").click();
+        await page.getByRole("option", { name: /Opus 4\.7/ }).click();
+        await create(page).click();
+        await expect(dialog(page).getByRole("alert")).toContainText("The selected Machine went offline.");
+        await expect(picker(page, "Model")).toHaveAccessibleName("Model: Opus 4.7");
+        await expect(create(page)).toBeEnabled();
+        await expectFullyInViewport(create(page), "Create Thread after refusal");
+        await expectPageNoHorizontalOverflow(page);
+        await capture(page, "create-failed");
+        await dialog(page).getByRole("button", { name: "Cancel" }).click();
+        await expect(dialog(page)).toHaveCount(0);
+        await expect(page.locator("body")).not.toHaveAttribute("data-thread-create-count", /./);
+      });
+
+      test("changing the harness starts from that harness's own model and effort", async ({ page }) => {
+        await open(page, "limits=enabled");
+        await list(page).getByRole("button", { name: "New Thread" }).click();
+        await picker(page, "Model").click();
+        await page.getByRole("option", { name: /Opus 4\.7/ }).click();
+        await picker(page, "Harness").click();
+        await page.getByRole("option", { name: "Codex" }).click();
+        await expect(picker(page, "Model")).toHaveAccessibleName("Model: Automatic");
+        await picker(page, "Model").click();
+        await expect(page.getByRole("option")).toHaveText([/Automatic/, /GPT-5\.5/]);
       });
 
       for (const [scenario, explanation] of [
@@ -249,7 +202,6 @@ for (const theme of ["light", "dark"] as const) {
           await open(page, "threads=" + scenario);
           await expect(list(page).getByText(explanation!, { exact: true })).toBeVisible();
           await expect(page.getByRole("button", { name: "New Thread", exact: true })).toHaveCount(0);
-          await expect(start(page)).toHaveCount(0);
           await expectPageNoHorizontalOverflow(page);
           await capture(page, scenario!);
         });

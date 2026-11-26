@@ -208,31 +208,25 @@ async function editThread(page: Page) {
   return page.getByRole("dialog", { name: "Thread Settings", exact: true });
 }
 
-async function editDefault(page: Page, name: string) {
-  const group = page.getByRole("region", { name: "Thread Defaults" });
-  await group.getByRole("button", { name: new RegExp(name + "$") }).click();
-  return page.getByRole("dialog", { name, exact: true });
-}
-
 test("the owner edits future defaults from Settings and an existing thread from its header", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await open(page, SETTINGS);
-  const budget = await editDefault(page, "Budget per Thread");
-  await budget.getByRole("radio", { name: "Custom…" }).click();
-  await budget.getByRole("textbox", { name: "Custom Budget (USD)" }).fill("40");
-  await budget.getByRole("button", { name: "Save Default" }).click();
-  const launches = await editDefault(page, "Session Launches per Thread");
-  await launches.getByRole("textbox", { name: "Session Launch Limit" }).fill("4");
-  await launches.getByRole("button", { name: "Save Default" }).click();
-  await expect(launches).toHaveCount(0);
-  const defaults = page.getByRole("region", { name: "Thread Defaults" });
-  await expect(defaults.getByRole("button", { name: "$40.00 Budget per Thread" })).toBeVisible();
-  await expect(defaults.getByRole("button", { name: "4 Session Launches per Thread" })).toBeVisible();
+  const defaultLimits = page.getByRole("region", { name: "Limits", exact: true });
+  await defaultLimits.getByRole("textbox", { name: "Budget per Thread USD" }).fill("40");
+  await defaultLimits.getByRole("textbox", { name: "Session Launches per Thread" }).fill("4");
+  const saveDefaults = page.getByRole("button", { name: "Save Defaults" });
+  await saveDefaults.click();
+  await expect(saveDefaults).toHaveCount(0);
+  await expect(defaultLimits.getByRole("textbox", { name: "Budget per Thread USD" })).toHaveValue("40");
+  await expect(defaultLimits.getByRole("textbox", { name: "Session Launches per Thread" })).toHaveValue("4");
 
   await page.getByRole("link", { name: "Assistants", exact: true }).click();
   await page.getByRole("button", { name: "New Thread", exact: true }).first().click();
-  await page.getByRole("textbox", { name: "First Message" }).fill("Check the current budget.");
-  await page.getByRole("button", { name: "Start Thread" }).click();
+  const newThread = page.getByRole("dialog", { name: "New Thread" });
+  await expect(newThread.getByRole("textbox", { name: "Budget USD" })).toHaveValue("40");
+  await expect(newThread.getByRole("textbox", { name: "Session Launches" })).toHaveValue("4");
+  await newThread.getByRole("button", { name: "Create Thread" }).click();
+  await expect(newThread).toHaveCount(0);
   await expect(await openDetails(page)).toContainText("$0.00 of $40.00 spent");
   await closeDetails(page);
   await page.getByText("Triage Open Issues", { exact: true }).click();
@@ -267,29 +261,28 @@ test("the owner edits future defaults from Settings and an existing thread from 
 test("a new thread uses the saved harness, provider account and both unlimited defaults", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await open(page, SETTINGS);
-  const harness = await editDefault(page, "Harness");
-  await harness.getByRole("radio", { name: "Codex", exact: true }).check();
-  await harness.getByRole("button", { name: "Save Default" }).click();
-  const account = await editDefault(page, "Account");
-  await account.getByRole("radio", { name: "Codex Studio", exact: true }).check();
-  await account.getByRole("button", { name: "Save Default" }).click();
-  const budget = await editDefault(page, "Budget per Thread");
-  await budget.getByRole("radio", { name: "No Limit" }).click();
-  await budget.getByRole("button", { name: "Save Default" }).click();
-  const launches = await editDefault(page, "Session Launches per Thread");
-  await launches.getByRole("checkbox", { name: "No Limit" }).check();
-  await launches.getByRole("button", { name: "Save Default" }).click();
-  await expect(launches).toHaveCount(0);
   const defaults = page.getByRole("region", { name: "Thread Defaults" });
-  await expect(defaults.getByRole("button", { name: /^No Limit/ })).toHaveCount(2);
-  await expect(defaults.getByText("Existing Threads", { exact: true })).toHaveCount(0);
+  await defaults.getByRole("button", { name: /^Harness:/ }).click();
+  await page.getByRole("option", { name: "Codex", exact: true }).click();
+  await defaults.getByRole("button", { name: /^Account:/ }).click();
+  await page.getByRole("option", { name: /^Codex Studio/ }).click();
+  const defaultLimits = page.getByRole("region", { name: "Limits", exact: true });
+  await defaultLimits.getByRole("textbox", { name: "Budget per Thread USD" }).fill("");
+  await defaultLimits.getByRole("textbox", { name: "Session Launches per Thread" }).fill("");
+  const saveDefaults = page.getByRole("button", { name: "Save Defaults" });
+  await saveDefaults.click();
+  await expect(saveDefaults).toHaveCount(0);
+  await expect(defaults.getByRole("button", { name: /^Account:/ })).toHaveAccessibleName("Account: Codex Studio");
+  await expect(defaultLimits.getByRole("textbox", { name: "Budget per Thread USD" })).toHaveValue("");
+  await expect(defaultLimits.getByRole("textbox", { name: "Session Launches per Thread" })).toHaveValue("");
   await page.getByRole("link", { name: "Assistants", exact: true }).click();
   await page.getByRole("button", { name: "New Thread" }).first().click();
-  const newThread = page.getByRole("form", { name: "What should the assistant work on?" });
-  await expect(newThread.getByRole("button", { name: "Harness Codex", exact: true })).toBeVisible();
-  await expect(newThread.getByRole("button", { name: "Account Codex Studio", exact: true })).toBeVisible();
-  await newThread.getByRole("textbox", { name: "First Message" }).fill("Check the launch limit.");
-  await newThread.getByRole("button", { name: "Start Thread" }).click();
+  const newThread = page.getByRole("dialog", { name: "New Thread" });
+  await expect(newThread.getByRole("button", { name: /^Harness:/ })).toHaveAccessibleName("Harness: Codex");
+  await expect(newThread.getByRole("button", { name: /^Account:/ })).toHaveAccessibleName("Account: Codex Studio");
+  await expect(newThread.getByRole("textbox", { name: "Budget USD" })).toHaveValue("");
+  await newThread.getByRole("button", { name: "Create Thread" }).click();
+  await expect(newThread).toHaveCount(0);
   await expect(await openDetails(page)).toContainText("No Budget");
   await expect(await openDetails(page)).toContainText("No Launch Limit");
 });
@@ -337,20 +330,22 @@ for (const [layout, width, height] of [["desktop", 1440, 900], ["phone", 390, 84
       await expectPageNoHorizontalOverflow(page);
       await open(page, OLD_SETTINGS, theme, "stress");
       expect(new URL(page.url()).searchParams.get("path")).toBe(SETTINGS);
-      const group = page.getByRole("region", { name: "Thread Defaults" });
-      const action = group.getByRole("button", { name: /Budget per Thread/ });
-      await action.scrollIntoViewIfNeeded();
-      await expectFullyInViewport(action, "Edit Default Thread Limits");
+      const defaultLimits = page.getByRole("region", { name: "Limits", exact: true });
+      const budgetField = defaultLimits.getByRole("textbox", { name: "Budget per Thread USD" });
+      await budgetField.scrollIntoViewIfNeeded();
+      await expectFullyInViewport(budgetField, "Default Budget per Thread");
       await expect(page.getByRole("region", { name: "Active Delegations" })).toContainText("No Delegation Grants");
       await expect(page.getByRole("alert")).toHaveCount(0);
       await expectPageNoHorizontalOverflow(page);
       await capture(page, "assistant-settings");
       if (layout === "desktop" && theme === "light") await capture(page, "redirected-assistant-settings");
-      const defaults = await editDefault(page, "Budget per Thread");
-      await expect(defaults.getByRole("radio", { name: "No Limit" })).toBeVisible();
-      await expectFullyInViewport(defaults.getByRole("button", { name: "Save Default" }), "Save Default Thread Limits");
+      // An empty budget is No Limit, and the unsaved change is saved from the page's own Save bar.
+      await budgetField.fill("");
+      await expect(budgetField).toHaveAttribute("placeholder", "No Limit");
+      await expectFullyInViewport(page.getByRole("button", { name: "Save Defaults" }), "Save Defaults");
       if (layout === "phone" && theme === "light") await capture(page, "default-no-limit-choices");
-      await defaults.getByRole("button", { name: "Cancel", exact: true }).click();
+      await page.getByRole("button", { name: "Discard", exact: true }).click();
+      await expect(budgetField).not.toHaveValue("");
       await page.getByRole("button", { name: /^All Connections/ }).click();
       await expect(page.getByRole("heading", { name: "Assistant Connections", exact: true })).toBeVisible();
       expect(new URL(page.url()).searchParams.get("path")).toBe("/settings/assistant/connections");

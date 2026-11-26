@@ -1177,7 +1177,8 @@ for (const theme of THEMES) {
     skipWithoutBaselines();
     await useHarness(page, theme, { section: "assistant" });
     const defaults = page.getByRole("region", { name: "Thread Defaults", exact: true });
-    await expect(defaults.getByRole("button")).toHaveCount(5);
+    // Harness, Model, Effort and Account, each a select row edited in place.
+    await expect(defaults.getByRole("button")).toHaveCount(4);
     await expect(defaults.locator(".settings-group-surface")).toHaveScreenshot(`assistant-thread-defaults-${theme}.png`, PIXELS);
   });
 
