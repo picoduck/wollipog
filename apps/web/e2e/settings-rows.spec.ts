@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { devices, expect, test, type Locator, type Page } from "@playwright/test";
 import { SETTINGS_SECTIONS, type SettingsSection } from "../src/navigation.js";
+import { expectFullyInViewport, expectNoHorizontalOverflow, expectTextContrast } from "./layout-invariants.js";
 
 /**
  * What the unit tests for these rows cannot answer.
@@ -133,7 +134,8 @@ interface HarnessOptions {
   topology?: "full" | "minimal";
   section?: SettingsSection;
   copy?: "default" | "long";
-  defaults?: "pending" | "agent" | "agent-missing" | "agent-repair" | "agent-empty" | "agent-loading" | "agent-save-fails";
+  defaults?: "pending" | "agent" | "agent-missing" | "agent-repair" | "agent-empty" | "agent-loading" | "agent-save-fails"
+    | "agent-managed" | "agent-managed-skew" | "agent-antigravity";
   /** Notifications where the browser blocks alerts, or where neither kind can work (#3022). */
   alerts?: "available" | "blocked" | "unavailable";
   /** Settings › Network's Tailnet Access in one reported state, or `browser` (#3027). */
@@ -1483,6 +1485,83 @@ test.describe("with a touch pointer", () => {
     await expect(codexEdit).toBeFocused();
   });
 });
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  const narrow = viewport.width === 390;
+  const dimensions = `${viewport.width}x${viewport.height}`;
+  test.describe(`Antigravity Agent Defaults at ${dimensions}`, () => {
+    test.use({ viewport, hasTouch: narrow });
+
+    test("shows each model's effort choices, including when discovery found none", async ({ page }, testInfo) => {
+      await useHarness(page, "dark", { section: "behavior", defaults: "agent-antigravity" });
+      const row = page.locator(".setting-row").filter({ has: page.getByText("Google Antigravity", { exact: true }) });
+      const edit = row.getByRole("button", { name: /^Edit…/ });
+      const capture = async (surface: string, state: string) => {
+        if (process.env.WOLLIPOG_CAPTURE_ANTIGRAVITY_DEFAULTS === "1") {
+          await page.screenshot({ path: testInfo.outputPath(`${surface}-${dimensions}-${state}.png`), animations: "disabled" });
+        }
+      };
+      await expect(row.locator(".setting-row-desc")).toHaveText("Fixture Pro, high effort");
+      await row.scrollIntoViewIfNeeded();
+      await expectFullyInViewport(edit);
+      await expectTextContrast(edit);
+      await capture("agent-defaults-list", "saved");
+
+      await edit.click();
+      const dialog = page.getByRole("dialog", { name: "Google Antigravity Defaults" });
+      const effort = dialog.getByRole("button", { name: /^Reasoning Effort:/ });
+      const save = dialog.getByRole("button", { name: "Save Defaults" });
+      const list = page.getByRole("listbox", { name: "Reasoning Effort" });
+      const chooseModel = async (name: string | RegExp) => {
+        await dialog.getByRole("button", { name: /^Model:/ }).click();
+        await page.getByRole("radio", { name }).click();
+      };
+      const showEfforts = async (names: string[]) => {
+        await effort.click();
+        const options = list.getByRole("option");
+        await expect(options.locator(".ui-select-option-body > span")).toHaveText(["Wollipog Default", ...names]);
+        await expectNoHorizontalOverflow(dialog);
+        await expectNoHorizontalOverflow(list);
+        await expectFullyInViewport(dialog);
+        await expectFullyInViewport(save);
+        await expectFullyInViewport(list);
+        const menuBottom = await list.evaluate((element) => element.getBoundingClientRect().bottom);
+        const saveTop = await save.evaluate((element) => element.getBoundingClientRect().top);
+        expect(saveTop - menuBottom).toBeGreaterThanOrEqual(4);
+        const controls = [edit, effort, save, ...await options.all()];
+        for (const control of controls) {
+          const bounds = await control.boundingBox();
+          expect(bounds?.width).toBeGreaterThanOrEqual(24);
+          expect(bounds?.height).toBeGreaterThanOrEqual(narrow ? 44 : 24);
+        }
+        const optionBounds = await options.evaluateAll((elements) => elements.map((element) => {
+          const { top, bottom } = element.getBoundingClientRect();
+          return { top, bottom };
+        }));
+        for (const [index, bounds] of optionBounds.entries()) {
+          if (index > 0) expect(bounds.top - optionBounds[index - 1]!.bottom).toBeGreaterThanOrEqual(4);
+        }
+        await expectTextContrast(list);
+        await expectTextContrast(save);
+      };
+
+      if (narrow) await chooseModel(/^Fixture Pro With a Deliberately Long Model/);
+      await showEfforts(["High", "Low", "Medium", "Extra High"]);
+      await capture("agent-defaults-dialog", narrow ? "effort-open-stress-target44csspx" : "effort-open");
+      await page.keyboard.press("Escape");
+      await chooseModel("Fixture Experimental");
+      await showEfforts([]);
+      if (!narrow) await capture("agent-defaults-dialog", "effort-unavailable");
+      await page.keyboard.press("Escape");
+      await chooseModel("Fixture Flash");
+      await showEfforts(["Adaptive", "Quick"]);
+      await list.getByRole("option", { name: "Adaptive", exact: true }).click();
+      await save.click();
+      await expect(dialog).toHaveCount(0);
+      await expect(row.locator(".setting-row-desc")).toHaveText("Fixture Flash, adaptive effort");
+    });
+  });
+}
 
 test("Agent Defaults explain an older server, no agents and a rejected save", async ({ page }) => {
   await useHarness(page, "light", { section: "behavior", defaults: "agent-missing" });

@@ -1831,6 +1831,7 @@ export function Select<T extends string>({
   invalid = false,
   className,
   menuWidth,
+  inlineMenu = false,
   estimatedOptionHeight,
   triggerLabel,
   triggerClassName,
@@ -1875,6 +1876,8 @@ export function Select<T extends string>({
   className?: string;
   /** Requested open-list width; collision handling still clamps it to the viewport. */
   menuWidth?: number;
+  /** Keep the open menu in the form's scroll flow, clear of a fixed dialog footer. */
+  inlineMenu?: boolean;
   /** Row budget for content that may wrap. The viewport remains the final height bound. */
   estimatedOptionHeight?: number;
   /** Stable toolbar label; the accessible name still includes the selected value. */
@@ -1984,7 +1987,7 @@ export function Select<T extends string>({
   // The listbox is positioned by the shared anchored-menu helper, which flips it above the trigger
   // when there is no room below. Hardcoding `top: 100%` put the list off-screen for any control in
   // the lower half of the viewport — which is most of them, since selects sit inside dialogs.
-  const listStyle = useAnchoredMenuStyle(open, popover.triggerRef, {
+  const listStyle = useAnchoredMenuStyle(open && !inlineMenu, popover.triggerRef, {
     // A described option is TWO lines, and a touch option is 44px whatever it contains, so the row
     // budget answers to both. Still a request rather than a size — the helper clamps to the
     // viewport and flips above the trigger.
@@ -2015,7 +2018,9 @@ export function Select<T extends string>({
   // A searchable list that opened ABOVE its trigger holds the height it was placed at. It is anchored
   // by its bottom edge, so shrinking to its matches slid the filter being typed into down the screen
   // with every keystroke. A list anchored by its top edge keeps its filter still as it shrinks.
-  const panelStyle = searchable && listStyle?.top === "auto"
+  const panelStyle: CSSProperties | undefined = inlineMenu
+    ? { position: "static", width: "100%", maxHeight: SELECT_MENU_MAX_HEIGHT_PX }
+    : searchable && listStyle?.top === "auto"
     ? { ...listStyle, height: listStyle.maxHeight }
     : listStyle;
 

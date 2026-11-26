@@ -183,7 +183,7 @@ import { inspectProviderHomeLeaseCommand, recoverProviderHomeLeaseCommand, type 
 import { ProviderProfileGrants } from "./provider-profile-grants.js";
 import { managedProviderProfileRoot } from "./provider-profile-home.js";
 import { providerLoginStartFailure } from "./provider-login-start-failure.js";
-import { AntigravitySetupSupervisor, antigravitySetupForControlPlane } from "./antigravity-setup.js";
+import { AntigravitySetupSupervisor, antigravitySetupForControlPlane, type AntigravityModelEfforts } from "./antigravity-setup.js";
 import {
   ANTIGRAVITY_AGENT_ID,
   antigravityAgentDefinition,
@@ -1014,7 +1014,7 @@ function defaultCodexImportSource(): ProviderCredentialImportSourceHome | undefi
 const antigravitySetup = new AntigravitySetupSupervisor({
   dataDir: config.dataDir,
   log,
-  onUpdate: (setup) => {
+  onUpdate: (setup, modelEfforts) => {
     // The register frame carries the latest setup, so registration stores it atomically: nothing
     // later in the registration handler (session recovery, say) can leave it unpublished. The peer's
     // version is unknown when it is sent, so it carries the v403 shape every peer accepts; the
@@ -1023,7 +1023,7 @@ const antigravitySetup = new AntigravitySetupSupervisor({
     if (registered && runnerSupportsProtocol(controlPlaneProtocolVersion, "antigravitySetup")) {
       sendUp({ type: "antigravity_setup_updated", runnerId: config.runnerId, setup: antigravitySetupForPeer(setup) });
     }
-    publishAntigravityAgent(setup);
+    publishAntigravityAgent(setup, modelEfforts);
   },
 });
 metadata.antigravitySetup = antigravitySetupForControlPlane(antigravitySetup.current(), false);
@@ -1051,13 +1051,13 @@ let antigravityLaunchableKey: string | null = null;
 /** When a session last reported the shared Antigravity sign-in gone. */
 let antigravitySignedOutAt: number | undefined;
 const configuredAgentIds = new Set(config.agents.map((agent) => agent.id));
-function publishAntigravityAgent(setup: AntigravitySetupView): void {
+function publishAntigravityAgent(setup: AntigravitySetupView, modelEfforts: AntigravityModelEfforts): void {
   // An operator's configured agent owns the id, its row and its auth status; the setup touches none.
   if (setup.status === "checking" || configuredAgentIds.has(ANTIGRAVITY_AGENT_ID)) return;
   const launchable = antigravitySetup.launchableTarget();
   const launchableKey = launchable ? `${launchable.command}\0${launchable.version ?? ""}` : null;
   const row = antigravityAgentDefinition(setup, antigravityLaunchContext(), config.executionIsolation,
-    launchable !== null);
+    launchable !== null, modelEfforts);
   // A sign-in confirmed by a check that finished after a session's sign-out report replaces it.
   const runtime = acpAuthStatus.get(ANTIGRAVITY_AGENT_ID);
   const staleSignOut = runtime?.status !== undefined &&

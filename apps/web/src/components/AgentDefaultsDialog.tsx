@@ -248,6 +248,8 @@ export function AgentDefaultsDialog({
               <span>Reasoning Effort</span>
               <Select
                 label="Reasoning Effort"
+                className="agent-defaults-effort-select"
+                inlineMenu
                 value={draft.effort ?? UNSET}
                 disabled={busy || effortWaitsForModel}
                 invalid={!!effortError}

@@ -61,9 +61,9 @@ function supervisor(server: FakeReleaseServer, options: Partial<AntigravitySetup
     resolveExecutable: async () => null,
     fetch: server.fetch,
     ...options,
-    onUpdate: (view) => {
+    onUpdate: (view, modelEfforts) => {
       published.push(view);
-      options.onUpdate?.(view);
+      options.onUpdate?.(view, modelEfforts);
     },
     log: (message) => {
       logs.push(message);

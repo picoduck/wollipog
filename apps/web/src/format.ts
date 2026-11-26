@@ -62,8 +62,7 @@ export function titleCaseLabel(value: string): string {
         // A name cased on purpose (ChatGPT, OpenCode) keeps its casing, as an acronym does.
         if (/^[A-Z][a-z0-9]*[A-Z]/.test(segment)) return segment;
         const lower = segment.toLowerCase();
-        const override = TITLE_CASE_OVERRIDES[lower];
-        if (override) return override;
+        if (Object.hasOwn(TITLE_CASE_OVERRIDES, lower)) return TITLE_CASE_OVERRIDES[lower]!;
         const isFirst = index === first && segmentIndex === 0;
         const isLast = index === last && segmentIndex === segments.length - 1;
         if (!isFirst && !isLast && TITLE_CASE_MINOR_WORDS.has(lower)) return lower;
@@ -305,7 +304,7 @@ const PERMISSION_DESCRIPTIONS: Record<string, string> = {
 
 export function effortLabel(value: string): string {
   const labels: Record<string, string> = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra High", max: "Max" };
-  return labels[value] ?? value.charAt(0).toUpperCase() + value.slice(1);
+  return Object.hasOwn(labels, value) ? labels[value]! : titleCaseLabel(value.replace(/[-_]+/g, " ").trim()) || value;
 }
 
 /** Display name for a provider service-tier id, for a tier no catalog names (a carried-over tier the

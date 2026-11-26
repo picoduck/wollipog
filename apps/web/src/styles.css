@@ -20310,6 +20310,8 @@ a.tab { text-decoration: none; }
   gap: var(--space-3);
 }
 .agent-defaults-fields > .field { min-width: 0; }
+.agent-defaults-effort-select .listbox,
+.agent-defaults-effort-select .ui-select-option + .ui-select-option { margin-top: var(--space-1); }
 @media (max-width: 760px) {
   .agent-defaults-fields { grid-template-columns: minmax(0, 1fr); }
 }

@@ -287,6 +287,19 @@ test("setup, readiness check and session share one executable and credential con
   }
 });
 
+test("Antigravity applies the saved effort after switching to its saved startup model", async () => {
+  signIn();
+  process.env.FAKE_AGY_MODE = "model_specific_efforts";
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined,
+    { config: { model: "fixture-flash", effort: "adaptive" } });
+  await driver.initialize();
+  await driver.newSession(cwd);
+  assert.equal(seen.state.at(-1)?.config.model, "fixture-flash");
+  assert.equal(seen.state.at(-1)?.config.effort, "adaptive");
+  assert.deepEqual(seen.state.at(-1)?.capabilities.effortLevels, ["quick", "adaptive"]);
+});
+
 test("Antigravity starts and resumes with stdio MCP when configured remote transports are unsupported", async () => {
   signIn();
   const cwd = mkdtempSync(join(root, "worktree-"));

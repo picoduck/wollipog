@@ -11906,6 +11906,44 @@ test("createSession launches Antigravity in Auto Mode by default, persists an ex
   assert.match(orchestrator.error ?? "", /only for normal Antigravity sessions/u);
 });
 
+test("createSession passes saved Antigravity model efforts through to ACP and leaves unknown efforts unset", () => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    const agentId = "google-antigravity";
+    const agent = {
+      ...runnerMeta().agents.find(({ id }) => id === AGENT_ID)!,
+      id: agentId,
+      driver: "acp" as const,
+      source: "discovered" as const,
+      capabilities: {
+        models: [
+          { id: "pro", efforts: ["low", "high"] },
+          { id: "flash", efforts: ["quick", "adaptive"] },
+          { id: "experimental" },
+        ],
+        effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+        permissionModes: ["auto", "antigravity-full-permissions"],
+      },
+    };
+    db.updateRunnerAgents(RUNNER_ID, [agent], Date.now());
+    const userId = db.localIdentityContext().userId;
+    const identity = { agentId, driver: "acp", context: { kind: "native" } } as const;
+    const create = () => svc.createSession(
+      { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId, useWorktree: false },
+      undefined, undefined, false, false, false, { defaultOwnerUserId: userId },
+    );
+
+    for (const config of [{ model: "flash", effort: "adaptive" }, { model: "experimental" }]) {
+      db.setAgentHarnessDefault(userId, identity, config);
+      const result = create();
+      assert.ok(result.ok, result.error);
+      assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.config, { ...config, permissionMode: "auto" });
+    }
+  } finally {
+    db.close();
+  }
+});
+
 test("createSession persists and launches the resolved concrete model and effort", () => {
   const { db, hub, svc } = makeHarness();
   db.updateRunnerAgents(

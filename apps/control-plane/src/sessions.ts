@@ -1,5 +1,5 @@
 import { isManagedModelChoice, resolveManagedModelChoice } from "@wollipog/protocol";
-import { ANTIGRAVITY_AUTO_MODE, ANTIGRAVITY_FULL_PERMISSIONS_MODE, managedWorktreeUnsupportedReason } from "@wollipog/protocol";
+import { ANTIGRAVITY_AGENT_ID, ANTIGRAVITY_AUTO_MODE, ANTIGRAVITY_FULL_PERMISSIONS_MODE, managedWorktreeUnsupportedReason } from "@wollipog/protocol";
 import type { WollipogPromptOrigin } from "@wollipog/protocol";
 import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
 import { personalRuleDelegation } from "./personal-rule-delegation.js";
@@ -4837,8 +4837,9 @@ export class SessionsService {
     }
     // A target-local executable has not advertised the host agent's model or permission catalog.
     // Keep validation honest until that exact target can provide its own capabilities.
+    const agentDefinition = runner.agents.find((agent) => agent.id === req.agentId);
     const agentCapabilities = selectedInstallationId ? undefined :
-      snapshotSpec?.capabilities ?? runner.agents.find((agent) => agent.id === req.agentId)?.capabilities;
+      snapshotSpec?.capabilities ?? agentDefinition?.capabilities;
     const requestedConfig = { ...(snapshotSpec?.config ?? req.config ?? {}) };
     const explicitManagedModel = !snapshotSpec && isManagedModelChoice(requestedConfig.model);
     if (!snapshotSpec) {
@@ -4921,9 +4922,13 @@ export class SessionsService {
         claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver), agentCapabilities,
       );
       if (explicitConfigError) return fail(explicitConfigError, 409);
-      const resolved = resolveEffectiveModelEffort(requestedConfig, agentCapabilities, launch.driver);
-      if (resolved.error) return fail(resolved.error, 409);
-      if (resolved.value) Object.assign(requestedConfig, resolved.value);
+      // Antigravity can start with a model whose effort choices were unavailable during the
+      // setup probe. Leave unset controls to ACP, and pass through the saved or explicit choices.
+      if (!(launch.driver === "acp" && req.agentId === ANTIGRAVITY_AGENT_ID && agentDefinition?.source === "discovered")) {
+        const resolved = resolveEffectiveModelEffort(requestedConfig, agentCapabilities, launch.driver);
+        if (resolved.error) return fail(resolved.error, 409);
+        if (resolved.value) Object.assign(requestedConfig, resolved.value);
+      }
     }
     const supportsServiceTiers = runnerSupportsProtocol(
       this.db.getRunner(req.runnerId)?.protocolVersion,
