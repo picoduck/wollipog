@@ -960,6 +960,7 @@ test("Full Control CI rerun delegation waits for initial scope and requires a v4
     assert.ok(provisional.ok && provisional.data, provisional.error ?? "expected pending provisional rerun");
     assert.equal(provisional.data.authority, "human");
     assert.equal(provisional.data.authorityEvaluation?.reason, "outside_boundary");
+    assert.equal(h.db.campaignProjection("root")?.ciRerunOwner, "human");
     assert.equal(h.svc.resolveDescendantRequest("root", "root", provisional.data.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true).status, 403);
 
@@ -972,6 +973,7 @@ test("Full Control CI rerun delegation waits for initial scope and requires a v4
         initialScope: { admittedAt: 11, occurrenceId: "wd_scope_init", requestedCount: null, constraints: [], withheldOperations: [] },
       },
     }), "root");
+    assert.equal(h.db.campaignProjection("root")?.ciRerunOwner, "orchestrator");
     const settledSnapshot = { ...snapshot, runId: 301 };
     const settled = await h.svc.createWorkflowDecisionWithVideo("child", {
       requestId: "settled-child-rerun", resourceKey: ciRerunResourceKey(settledSnapshot), resourceSnapshot: settledSnapshot,
@@ -992,6 +994,7 @@ test("Full Control CI rerun delegation waits for initial scope and requires a v4
       workspaces: [{ id: "w", name: "Home", path: "/fixture/home" }], agents: [claude],
       runtime: { dataDir: "/fixture", worktreeRoot: "/fixture/worktrees", maxConcurrentSessions: 4, campaignLaunchInspection: { version: 3 } },
     }, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.fullControlCiRerun - 1);
+    assert.equal(h.db.campaignProjection("root")?.ciRerunOwner, "human");
     const oldControllerSnapshot = { ...snapshot, runId: 302 };
     const oldController = await h.svc.createWorkflowDecisionWithVideo("child", {
       requestId: "old-controller-rerun", resourceKey: ciRerunResourceKey(oldControllerSnapshot), resourceSnapshot: oldControllerSnapshot,
@@ -1002,7 +1005,7 @@ test("Full Control CI rerun delegation waits for initial scope and requires a v4
     const refusedEnable = h.svc.setCampaignControl("root", { mode: "full_control", objective: "Deliver #4915",
       operations: ["implementation_question", "ci_rerun"], delegatablePolicyIds: [] }, 2, h.owner);
     assert.equal(refusedEnable.status, 409);
-    assert.match(refusedEnable.error ?? "", /Full Control CI rerun delegation/u);
+    assert.match(refusedEnable.error ?? "", /delegated CI reruns/u);
   } finally { await h.close(); }
 });
 

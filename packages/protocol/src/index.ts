@@ -2644,6 +2644,8 @@ export interface OrchestratorCampaignProjection {
   recovery?: import("./campaign-recovery.js").CampaignRecoveryProjection;
   policyRevision: number;
   decisionOwners: ParentControlDecisionPolicy;
+  /** v414 (#4915): live server-evaluated ownership of typed `ci_rerun` requests for this campaign. */
+  ciRerunOwner?: "human" | "orchestrator";
   /** v277 (#4075): present when Full Control, not a Parent Control grant, makes review_round_extension
    * the Orchestrator's. It may grant each pull request at most its run's configured round budget of
    * extra rounds in total; past that a request is the person's. */

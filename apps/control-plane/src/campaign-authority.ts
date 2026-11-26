@@ -58,7 +58,7 @@ export function campaignRepositoryOutsideLimit(policy: Pick<OrchestratorCampaign
 /** Whether a Full Control campaign has not yet finished establishing its initial first-message
  * scope (#4915): while the first message is still pending/delivering or awaiting its initial scope
  * proposal, provisional launch operations that can be withheld must not yet self-authorize. */
-function campaignAwaitsFirstMessageOrInitialScope(
+export function campaignAwaitsFirstMessageOrInitialScope(
   policy: Pick<OrchestratorCampaignPolicy, "control" | "firstMessageScope"> | null | undefined,
 ): boolean {
   if (policy?.control?.mode !== "full_control") return false;

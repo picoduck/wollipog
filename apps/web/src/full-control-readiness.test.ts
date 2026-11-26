@@ -62,6 +62,10 @@ test("a decision the boundary leaves out, or one Wollipog can't delegate now, is
   assert.equal(noCiRerun.state, "qualified");
   assert.deepEqual(noCiRerun.humanRequired.map((fact) => [fact.label, fact.reason]),
     [["CI Rerun", "This campaign's Full Control authorization leaves it out, so it comes to you."]]);
+  const downgradedCiRerun = fullControlReadiness(campaign({ ciRerunOwner: "human" }));
+  assert.equal(downgradedCiRerun.state, "qualified");
+  assert.deepEqual(downgradedCiRerun.humanRequired.map((fact) => [fact.label, fact.reason]),
+    [["CI Rerun", "Wollipog can't currently enforce Full Control for this decision on the campaign's machines, so it comes to you."]]);
 });
 
 test("a boundary that leaves out questions, tool approvals or policy asks lists them as Human Required (#2940 review)", () => {

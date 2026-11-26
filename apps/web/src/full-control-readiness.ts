@@ -52,7 +52,7 @@ export interface FullControlReadiness {
 }
 
 /** The projection facts readiness reads. */
-export type ReadinessCampaign = Pick<OrchestratorCampaignProjection, "control" | "decisionOwners" | "uiEvidenceReview" |
+export type ReadinessCampaign = Pick<OrchestratorCampaignProjection, "control" | "decisionOwners" | "ciRerunOwner" | "uiEvidenceReview" |
   "fullControlHumanRequired" | "recovery">;
 /** The projection facts Campaign Status's Full Control section reads. */
 export type CampaignAuthorityView = ReadinessCampaign &
@@ -103,9 +103,11 @@ export function fullControlReadiness(campaign: ReadinessCampaign | undefined): F
       ? "This campaign has no issue authority, so it comes to you."
       : "This campaign's Full Control authorization leaves it out, so it comes to you." });
   }
-  if (!boundary.operations.includes("ci_rerun")) {
+  if (!boundary.operations.includes("ci_rerun") || campaign.ciRerunOwner === "human") {
     humanRequired.push({ key: "ci_rerun", label: "CI Rerun",
-      reason: "This campaign's Full Control authorization leaves it out, so it comes to you." });
+      reason: boundary.operations.includes("ci_rerun")
+        ? "Wollipog can't currently enforce Full Control for this decision on the campaign's machines, so it comes to you."
+        : "This campaign's Full Control authorization leaves it out, so it comes to you." });
   }
   for (const [operation, label] of REQUEST_OPERATIONS) {
     if (boundary.operations.includes(operation)) continue;

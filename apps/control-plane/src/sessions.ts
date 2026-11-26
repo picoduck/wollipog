@@ -11114,7 +11114,7 @@ export class SessionsService {
       if (control.boundary.operations.includes("ci_rerun") &&
           !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "fullControlCiRerun")) {
         return capabilityFail(runnerCapabilityRequirementError(
-          this.db.getRunner(session.runnerId)?.protocolVersion, "fullControlCiRerun", "Full Control CI rerun delegation"));
+          this.db.getRunner(session.runnerId)?.protocolVersion, "fullControlCiRerun", "delegated CI reruns"));
       }
       if (proposal.mode === "full_control" && proposal.evidenceAuthority !== undefined) {
         if (!this.evidenceAuthorityDisclosures || !control.boundary.operations.includes("ui_evidence_approval")) {
@@ -13831,6 +13831,14 @@ export class SessionsService {
     // completeness/operations questions for all such text, even when the agent listed nothing.
     if (repositoryLimitVerified && /[\p{L}\p{N}]/u.test(ownerMessage.slice(ownerMessage.toLowerCase().indexOf(exactRepository!) + exactRepository!.length)) && !checks.includes("constraints")) checks.push("constraints");
     if (repositoryLimitVerified && proposal?.requestedCount !== null && !checks.includes("requested_count")) checks.push("requested_count");
+    // An initial proposal whose boundary delegates `ci_rerun` must not take the no-model fast path
+    // when the owner's message contains restriction, negation, manual-approval, or CI/operation
+    // wording that could withhold `ci_rerun` (for example "Fix #12, but do not rerun CI.") (#4915).
+    const messageWithoutRepoRefs = ownerMessage.replace(/\S*[\w.-]+\/[\w.-]+(?:#\d+|\/(?:issues|pull)\/\d+)?\S*/gu, " ");
+    const mayWithholdOperation = /\b(?:not|no|never|without|don'?t|do\s+not|cannot|can'?t|won'?t|shouldn'?t|mustn'?t|avoid|skip|forbid|prohibit|disallow|withhold|restrict|limit|except|unless|but|however|only|manual(?:ly)?|human|owner|approval|approve|ask\s+me|let\s+me|leave\s+.*to\s+me|keep\s+.*(?:to\s+me|human|owner|manual)|ci|rerun|re-?run|retry|retrigger|re-?trigger|workflow|actions?|pipeline|jobs?|checks?)\b/iu.test(messageWithoutRepoRefs);
+    if (initial && structured && !checks.length && latestBoundary.operations.includes("ci_rerun") && mayWithholdOperation) {
+      checks.push("withheld_operations");
+    }
     const issues = proposal?.issues ?? refs.map((r) => ({ ...r, origin: "orchestrator_chosen" as const, rationale: "" }));
     // The proposal as recorded, before any route: the floors' facts beside the Orchestrator's words.
     const base: CampaignScopeProposal = { initial, messageDigest: first.messageDigest,

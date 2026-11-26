@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION,
+  DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL,
   type AutomationSessionRequest, type AutomationSpec, type ControlPlaneToRunner, type RunnerMetadata,
 } from "@wollipog/protocol";
+import { FULL_CONTROL_LAUNCH_OPERATIONS } from "./campaign-launch-admission.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import { AutomationCreationService } from "./automation-creation.js";
 import { ControlPlaneDb } from "./db.js";
@@ -807,5 +808,40 @@ test("campaign input refuses forged authority, duplicate tasks and an ordinary r
     assert.equal(campaign.kind, "create_session");
     if (campaign.kind === "create_session") assert.match(scheduledCampaignPrompt("Objective", campaign.request.campaign!), /human-owned decision/);
     assert.equal(f.service.create(f.spec(), { kind: "agent", id: "forged" }).ok, false);
+  } finally { f.db.close(); }
+});
+
+test("a Full Control schedule without explicit operations excludes ci_rerun after runner upgrade until explicitly authorized (#4915)", async () => {
+  const f = fixture();
+  try {
+    // Save the schedule while the runner is pre-v414 and omits fullControl.operations.
+    f.db.registerRunner(f.meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.fullControlCiRerun - 1);
+    const saved = f.service.create(f.spec(), f.actor);
+    assert.equal(saved.ok, true, saved.error ?? "expected schedule save");
+
+    // Upgrade the runner to v414 and dispatch: the unchanged schedule must not silently gain ci_rerun.
+    f.db.registerRunner(f.meta, Date.now(), PROTOCOL_VERSION);
+    f.service.tick(saved.data!.nextFireAt!);
+    await f.drain();
+    const firstExec = f.service.get(saved.data!.automationId).data!.executions[0]!;
+    assert.notEqual(firstExec.status, "failed", firstExec.error ?? "expected dispatch");
+    const firstControl = f.db.getSession(firstExec.sessionId!)!.orchestratorPolicy!.control;
+    assert.equal(firstControl?.mode, "full_control");
+    assert.equal(firstControl.boundary.operations.includes("ci_rerun"), false);
+
+    // Explicitly authorizing operations including ci_rerun enables it on the next occurrence.
+    const updatedSpec = { ...f.spec(), concurrencyPolicy: "parallel" as const };
+    if (updatedSpec.action.kind !== "create_session") assert.fail();
+    updatedSpec.action.request.campaign!.fullControl = { operations: [...FULL_CONTROL_LAUNCH_OPERATIONS] };
+    const updated = f.service.update(saved.data!.automationId, updatedSpec, f.actor, saved.data!.nextFireAt! + 1);
+    assert.equal(updated.ok, true, updated.error ?? "expected schedule update");
+    f.service.tick(updated.data!.nextFireAt!);
+    await f.drain();
+    const secondExec = f.service.get(saved.data!.automationId).data!.executions[0]!;
+    assert.notEqual(secondExec.executionId, firstExec.executionId);
+    assert.notEqual(secondExec.status, "failed", secondExec.error ?? "expected second dispatch");
+    const secondControl = f.db.getSession(secondExec.sessionId!)!.orchestratorPolicy!.control;
+    assert.equal(secondControl?.mode, "full_control");
+    assert.equal(secondControl.boundary.operations.includes("ci_rerun"), true);
   } finally { f.db.close(); }
 });

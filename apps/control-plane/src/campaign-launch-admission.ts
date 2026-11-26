@@ -438,7 +438,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
     budgetAuthority: { version: 1, costUsd: 1, toolCalls: 1, concurrency: 1, acceptedFollowUps: 0, accounting: "managed_workers_only", unpriced: "stop" },
   }), plan.driver, runner.protocolVersion);
   const ciRerunUnsupported = operations.includes("ci_rerun") && !ciRerunSupported
-    ? runnerCapabilityRequirementError(runner.protocolVersion, "fullControlCiRerun", "Full Control CI rerun delegation").error : null;
+    ? runnerCapabilityRequirementError(runner.protocolVersion, "fullControlCiRerun", "delegated CI reruns").error : null;
   add("authority_contract", "Full Control Authority", authority.supported && !ciRerunUnsupported && !facts.invalidPolicyIds.length ? "verified" : "unsupported",
     !authority.supported ? authority.reason ?? "This provider path cannot enforce Full Control."
       : ciRerunUnsupported ?? (facts.invalidPolicyIds.length ? `Named policy asks are unknown, disabled, built in or Human Required: ${facts.invalidPolicyIds.join(", ")}.`
