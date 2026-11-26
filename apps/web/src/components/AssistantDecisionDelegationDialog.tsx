@@ -132,6 +132,8 @@ type DelegationEditorProps = { onClose: () => void } & (
   }
   | {
     defaultGrant: AssistantDecisionDefault | null;
+    /** The grant goes back to a settings draft, saved later with the rest of it. */
+    draft?: boolean;
     onSaveDefault: (grant: AssistantDecisionDefault | null) => Promise<void>;
   }
 );
@@ -141,7 +143,7 @@ export function AssistantDecisionDelegationDialog(props: DelegationEditorProps) 
   const isDefault = "defaultGrant" in props;
   const phone = useIsMobile();
   const saveInHeader = phone && !isDefault;
-  const draft = !isDefault && props.draft === true;
+  const draft = props.draft === true;
   const threadGrant = isDefault ? null : props.delegation.grant;
   const grant = isDefault ? props.defaultGrant : threadGrant;
   const evidenceReview = isDefault ? undefined : props.evidenceReview;

@@ -244,21 +244,29 @@ function AssistantThreadDefaultsForm() {
     // Control planes with decision defaults also take per-field PATCHes. Sending only what changed,
     // with the harness the owner saw, keeps another tab's newer edits of the other fields.
     const patchable = decisionDefault !== undefined;
+    // A harness change resets the account to Machine Policy and the model and effort to Automatic.
+    // Only a value that differs from that reset is the owner's choice. Otherwise whatever the server
+    // holds for that harness now, such as an account another tab saved for it, stays.
+    const harnessChanged = draft.harness !== base.harness;
+    const accountChosen = draft.account !== (harnessChanged ? MACHINE_ACCOUNT_POLICY : base.account);
+    const modelChosen = harnessChanged ? draft.model !== null || draft.effort !== null
+      : draft.model !== base.model || draft.effort !== base.effort;
     try {
       if (launchDirty && defaults) {
         const providerAccount = draft.account === MACHINE_ACCOUNT_POLICY || !choices ? null
           : { runnerId: choices.runnerId, accountRef: draft.account };
         if (patchable) {
           let current = base;
-          if (draft.harness !== base.harness) {
-            // The server resets the account, model and effort with the harness.
+          if (harnessChanged) {
+            // The server resets the account, model and effort with the harness, unless it already
+            // holds this harness, when it keeps them.
             recordLaunch(await api.patchAssistantThreadLaunchDefaults({ harness: draft.harness }));
             current = draftFrom(next);
           }
-          if (draft.account !== current.account) {
+          if (accountChosen && draft.account !== current.account) {
             recordLaunch(await api.patchAssistantThreadLaunchDefaults({ expectedHarness: draft.harness, providerAccount }));
           }
-          if (modelsSaved && (draft.model !== current.model || draft.effort !== current.effort)) {
+          if (modelsSaved && modelChosen && (draft.model !== current.model || draft.effort !== current.effort)) {
             recordLaunch(await api.patchAssistantThreadLaunchDefaults({ expectedHarness: draft.harness, model: draft.model, effort: draft.effort }));
           }
         } else {
@@ -267,12 +275,12 @@ function AssistantThreadDefaultsForm() {
           // chosen for a harness another tab has since replaced.
           const fresh = await api.assistantThreadDefaults();
           const freshHarness = fresh.launchDefaults?.harness ?? fresh.harness;
-          if (draft.harness === base.harness && freshHarness !== base.harness) {
+          if (!harnessChanged && freshHarness !== base.harness) {
             throw new Error("The default harness changed. Reopen Assistant Settings to choose its account.");
           }
-          const accountChosen = draft.harness !== base.harness || draft.account !== base.account;
+          const kept = freshHarness === draft.harness ? fresh.launchDefaults?.providerAccount ?? null : null;
           recordLaunch(await api.setAssistantThreadLaunchDefaults({ harness: draft.harness,
-            providerAccount: accountChosen ? providerAccount : fresh.launchDefaults?.providerAccount ?? null }));
+            providerAccount: accountChosen ? providerAccount : kept }));
         }
         settled.add("launch");
       }
@@ -391,8 +399,8 @@ function AssistantThreadDefaultsForm() {
           options={DEFAULT_DELEGATION_EXPIRY_OPTIONS.map(({ value, label }) => ({ value, label }))} value={draft.expiry}
           onChange={(value) => change({ expiry: value as DefaultExpiry })} />
         <ActionRow title="Projects and Campaigns" actionLabel="Edit…" hasPopup="dialog"
-          description={delegationDirty ? "Save or discard your changes to edit where delegation applies." : scopeSentence(draft.projects, draft.campaigns)}
-          disabled={busy || delegationDirty} onAction={() => setEditingScope(true)} />
+          description={scopeSentence(draft.projects, draft.campaigns)}
+          disabled={busy} onAction={() => setEditingScope(true)} />
       </>}
       {draft.mode === "choose" && <>
         <h4 className="assistant-gates-label">Who Decides in Each Category</h4>
@@ -406,14 +414,16 @@ function AssistantThreadDefaultsForm() {
           onChange={(value) => change({ categories: value === "assistant"
             ? [...new Set([...draft.categories, category])] : draft.categories.filter((candidate) => candidate !== category) })} />)}
       </>}
-      {editingScope && decisionDefault && <AssistantDecisionDelegationDialog defaultGrant={decisionDefault}
-        onClose={() => setEditingScope(false)} onSaveDefault={async (grant) => {
-          const result = await api.setAssistantThreadDecisionDefault(grant);
-          const next = { ...saved, defaults: saved.defaults && { ...saved.defaults, decisionDefault: result.grant } };
-          setSaved(next);
-          setDraft((current) => current && { ...current, ...(({ mode, expiry, categories, projects, campaigns }) =>
-            ({ mode, expiry, categories, projects, campaigns }))(draftFrom(next)) });
-        }} />}
+      {/* The full delegation editor, for where delegation applies. What it returns joins this
+          draft, so Save Defaults and Discard cover it with everything else. */}
+      {editingScope && draft.mode !== "ask" && <AssistantDecisionDelegationDialog draft defaultGrant={{
+        categories: draft.mode === "all" ? draftFrom(saved).mode === "all" ? draftFrom(saved).categories : delegable : draft.categories,
+        selectionMode: draft.mode, projects: draft.projects, campaigns: draft.campaigns,
+        expiresAfterMs: ASSISTANT_DECISION_DEFAULT_DURATIONS[draft.expiry],
+      }} onClose={() => setEditingScope(false)} onSaveDefault={async (grant) => {
+        const chosen = draftFrom({ defaults: saved.defaults && { ...saved.defaults, decisionDefault: grant }, limits: saved.limits });
+        change({ mode: chosen.mode, expiry: chosen.expiry, categories: chosen.categories, projects: chosen.projects, campaigns: chosen.campaigns });
+      }} />}
     </SettingsGroup>}
 
     <SaveBar dirty={dirty} busy={busy} error={saveError} blockedReason={blockedReason} saveLabel="Save Defaults"

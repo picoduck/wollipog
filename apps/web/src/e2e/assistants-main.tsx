@@ -1330,10 +1330,13 @@ Object.assign(window, {
   },
   assistantsHoldNextList: () => { holdNextList = true; },
   assistantsReleaseCreate: () => { releaseCreate?.(); releaseCreate = undefined; },
+  /** The launch defaults the fixture holds now, whatever wrote them. */
+  assistantsSavedLaunchDefaults: () => structuredClone(defaults.launchDefaults),
   /** Another tab saving the default harness behind this page. */
-  assistantsSaveHarnessElsewhere: (harness: "claude-code" | "codex") => {
+  assistantsSaveHarnessElsewhere: (harness: "claude-code" | "codex", accountRef?: string) => {
     defaults.harness = harness;
-    defaults.launchDefaults = { ...defaults.launchDefaults!, harness, providerAccount: null };
+    defaults.launchDefaults = { ...defaults.launchDefaults!, harness,
+      providerAccount: accountRef ? { runnerId: "runner-1", accountRef } : null };
   },
   /** Another tab saving limit defaults behind this page. */
   assistantsSaveLimitDefaultsElsewhere: (update: Partial<AssistantThreadLimits>) => { limitDefaults = { ...limitDefaults, ...update }; },

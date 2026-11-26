@@ -149,6 +149,38 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
         await expect(page.locator("body")).not.toHaveAttribute("data-saved-launch-defaults", /DesignResearch|acct:/);
       });
 
+      for (const limits of ["enabled", "older-defaults"]) {
+        test(`a harness-only change keeps the account another tab saved for that harness (${limits})`, async ({ page }) => {
+          await open(page, limits);
+          const defaults = page.getByRole("region", { name: "Thread Defaults" });
+          await expect(defaults.getByRole("button", { name: /^Harness:/ })).toHaveAccessibleName("Harness: Claude Code");
+          // Another tab saves Codex with a specific account.
+          await page.evaluate(() => Reflect.get(window, "assistantsSaveHarnessElsewhere")("codex", "acct:0000000000000001"));
+          await defaults.getByRole("button", { name: /^Harness:/ }).click();
+          await page.getByRole("option", { name: "Codex", exact: true }).click();
+          await page.getByRole("button", { name: "Save Defaults" }).click();
+          await expect(page.getByRole("button", { name: "Save Defaults" })).toHaveCount(0);
+          const saved = await page.evaluate(() => Reflect.get(window, "assistantsSavedLaunchDefaults")());
+          expect(saved).toMatchObject({ harness: "codex", providerAccount: { accountRef: "acct:0000000000000001" } });
+        });
+      }
+
+      test("a scope edit joins the draft, and Discard drops it with the rest", async ({ page }) => {
+        await open(page, "enabled", "stress&default-grant=all-before-releases");
+        const delegation = page.getByRole("region", { name: "Decision Delegation", exact: true });
+        await delegation.getByRole("button", { name: /Projects and Campaigns/ }).click();
+        const editor = page.getByRole("dialog", { name: "Decision Delegation for New Threads" });
+        await editor.getByRole("button", { name: "Use Delegation Settings" }).click();
+        await expect(editor).toHaveCount(0);
+        // Nothing is saved until Save Defaults; the editor is reachable alongside other edits.
+        await delegation.getByRole("button", { name: /^Expires:/ }).click();
+        await page.getByRole("option", { name: "30 Days", exact: true }).click();
+        await expect(delegation.getByRole("button", { name: /Projects and Campaigns/ })).toBeEnabled();
+        await page.getByRole("button", { name: "Discard" }).click();
+        await expect(page.locator("body")).not.toHaveAttribute("data-saved-decision-default", /./);
+        await expect(delegation.getByRole("button", { name: /^Expires:/ })).toHaveAccessibleName("Expires: 7 Days");
+      });
+
       test("a launch write that fails after an earlier one landed keeps the earlier one", async ({ page }) => {
         await open(page, "enabled", "&account-patch=fail");
         const defaults = page.getByRole("region", { name: "Thread Defaults" });
