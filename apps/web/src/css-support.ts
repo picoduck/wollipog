@@ -260,7 +260,7 @@ export const CSS_SURFACE = {
   "inset-inline-end", "inset-inline-start", "justify-content",
   "justify-items", "justify-self", "left", "letter-spacing", "line-height", "list-style",
   // These logical margins and paddings predate the floor (MDN browser-compat-data).
-  "margin", "margin-block", "margin-block-start", "margin-bottom", "margin-inline", "margin-inline-start", "margin-left",
+  "margin", "margin-bottom", "margin-inline-start", "margin-left",
   "margin-right", "margin-top", "mask-image", "max-height", "max-width", "min-height",
   "min-inline-size", "min-width", "object-fit", "opacity", "order", "outline", "outline-offset",
   "overflow", "overflow-anchor", "overflow-wrap", "overflow-x", "overflow-y",
@@ -268,7 +268,7 @@ export const CSS_SURFACE = {
   "padding-inline-end", "padding-inline-start", "padding-left", "padding-right", "padding-top",
   "place-items", "pointer-events", "position", "resize", "right", "row-gap",
   // Logical scroll padding shipped by Chromium 69, Firefox 68, and Safari 15.
-  "scroll-behavior", "scroll-margin-bottom", "scroll-margin-inline-end", "scroll-padding-block-start", "scroll-padding-inline",
+  "scroll-behavior", "scroll-margin-bottom", "scroll-margin-inline-end", "scroll-padding-inline",
   "scrollbar-color", "scrollbar-width", "src", "stroke", "stroke-linecap", "stroke-width",
   "table-layout", "text-align", "text-decoration", "text-overflow", "text-transform", "text-wrap", "top",
   "touch-action", "transform", "transform-origin", "transition", "transition-duration", "transition-property",
