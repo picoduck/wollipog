@@ -4928,6 +4928,7 @@ app.post("/api/sessions", async (req, reply) => {
       defaultOwnerUserId: principal?.userId,
       parentSessionId,
       ...(principal ? {
+        inheritAntigravityFullPermissionsDefault: true,
         allowManagedModelChoice: !initialNativeTui,
         orchestratorDefaults: orchestratorSettings.view(principal),
         validateOrchestratorDefaults: (defaults: import("@wollipog/protocol").OrchestratorCampaignPolicy) =>

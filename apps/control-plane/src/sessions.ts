@@ -4387,6 +4387,9 @@ export class SessionsService {
       /** Trusted Assistant command origin. Never copied from CreateSessionRequest JSON. */
       assistantWorkOrigin?: {connectionId: string; commandId: string};
       defaultOwnerUserId?: string;
+      /** Only direct, authenticated human session creation opts into this saved permission mode.
+       * Owner attribution alone also occurs on automated and agent-initiated launches. */
+      inheritAntigravityFullPermissionsDefault?: boolean;
       /** Ordinary human session creation and ordinary create-session automations may pin Latest
        * before validation. Protected launches keep the exact model inputs their approvals bind. */
       allowManagedModelChoice?: boolean;
@@ -4873,12 +4876,20 @@ export class SessionsService {
         if (!model) return fail("Latest is unavailable for this installation. Choose a specific model or rediscover the harness.", 409);
         requestedConfig.model = model.id;
       }
-      const savedPreference = creationContext?.defaultOwnerUserId
+      let savedPreference = creationContext?.defaultOwnerUserId
         ? this.db.getAgentHarnessDefault(
           creationContext.defaultOwnerUserId,
           agentHarnessIdentityFor({ id: req.agentId, driver: launch.driver, context: launch.context }),
         )?.config
         : undefined;
+      if (savedPreference?.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id &&
+          (!creationContext?.inheritAntigravityFullPermissionsDefault || parentSessionId ||
+            req.role === "orchestrator" || req.orchestrator !== undefined ||
+            usesOrchestratorPresetPermissions(requestedConfig))) {
+        savedPreference = { ...savedPreference };
+        // Keep the other saved settings when this launch does not inherit Full Permissions Mode.
+        delete savedPreference.permissionMode;
+      }
       const managedId = savedPreference?.model;
       const managed = isManagedModelChoice(managedId);
       const managedModel = managed && managedId ? resolveManagedModelChoice(launch.driver, agentCapabilities, managedId) : undefined;
@@ -4891,6 +4902,12 @@ export class SessionsService {
         effortLevels: agentCapabilities.effortLevels ?? [],
         permissionModes: agentCapabilities.permissionModes ?? [],
       }, preference);
+      if (savedPreference?.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id &&
+          requestedConfig.permissionMode === undefined &&
+          (!compatible || executionTarget.adapter !== "host")) {
+        return fail("The saved Full Permissions Mode is unsupported on this machine or with these Agent Defaults. " +
+          "Choose another permission mode or update Agent Defaults.", 409);
+      }
       if (managed && !compatible && requestedConfig.model === undefined && requestedConfig.effort === undefined) {
         return fail("The saved Latest model is unavailable with these defaults. Choose a specific model or update Agent Defaults.", 409);
       }

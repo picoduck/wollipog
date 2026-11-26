@@ -64,21 +64,37 @@ function localHuman(db: ControlPlaneDb, role: HumanPrincipal["role"] = "viewer")
   };
 }
 
-test("Antigravity Full Permissions Mode is never offered or saved as a harness default", () => {
-  const db = ControlPlaneDb.open(":memory:");
+test("Antigravity Full Permissions Mode is saved and reports machine compatibility from discovery", () => {
+  const path = mkdtempSync(join(tmpdir(), "agy-defaults-"));
+  const dbPath = join(path, "control-plane.sqlite");
+  let db = ControlPlaneDb.open(dbPath);
   try {
     const metadata = runner("runner-a", ["gemini"], ["auto", "antigravity-full-permissions"]);
     metadata.agents[0] = { ...metadata.agents[0]!, id: "google-antigravity", name: "Google Antigravity", driver: "acp" };
     db.registerRunner(metadata, 1, PROTOCOL_VERSION);
     const settings = new AgentHarnessDefaultsSettings(db);
     const principal = localHuman(db);
-    assert.deepEqual(settings.view(principal).defaults[0]?.installations[0]?.permissionModes, ["auto"]);
-    assert.throws(() => settings.update(principal, {
+    assert.deepEqual(settings.view(principal).defaults[0]?.installations[0]?.permissionModes,
+      ["auto", "antigravity-full-permissions"]);
+    const request = {
       agentId: "google-antigravity", driver: "acp", context: { kind: "native" },
       config: { permissionMode: "antigravity-full-permissions" },
-    }), /not supported/u);
+    };
+    assert.equal(settings.update(principal, request).defaults[0]?.compatibleInstallations, 1);
+    db.close();
+    db = ControlPlaneDb.open(dbPath);
+    const reloaded = new AgentHarnessDefaultsSettings(db);
+    assert.deepEqual(reloaded.view(principal).defaults[0]?.preference, request.config);
+
+    metadata.agents[0]!.capabilities!.permissionModes = ["auto"];
+    db.updateRunnerAgents("runner-a", metadata.agents, Date.now());
+    const drifted = reloaded.view(principal).defaults[0];
+    assert.deepEqual(drifted?.preference, request.config);
+    assert.equal(drifted?.compatibleInstallations, 0);
+    assert.throws(() => reloaded.update(principal, request), /not supported/u);
   } finally {
     db.close();
+    rmSync(path, { recursive: true, force: true });
   }
 });
 

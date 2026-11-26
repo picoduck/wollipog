@@ -1,6 +1,11 @@
 import { ModelPicker } from "./ModelPicker.js";
 import { useEffect, useRef, useState } from "react";
-import type { AgentHarnessDefaultConfig, AgentHarnessDefaultOption } from "@wollipog/protocol";
+import {
+  ANTIGRAVITY_AGENT_ID,
+  ANTIGRAVITY_FULL_PERMISSIONS_MODE,
+  type AgentHarnessDefaultConfig,
+  type AgentHarnessDefaultOption,
+} from "@wollipog/protocol";
 import { effortLabel } from "../format.js";
 import { modelOptionLabel } from "../agent-presentation.js";
 import { Modal } from "./common.js";
@@ -9,6 +14,7 @@ import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { Select } from "./ui/ChoiceControls.js";
 import {
+  AGENT_DEFAULT_NOT_AVAILABLE,
   draftRepairNotice,
   effortsForDraft,
   managedModelDriftText,
@@ -24,6 +30,7 @@ const UNSET = "";
 const EFFORT_ERROR_ID = "agent-defaults-effort-error";
 const EFFORT_HELPER_ID = "agent-defaults-effort-helper";
 const HELPER_ID = "agent-defaults-helper";
+const PERMISSION_UNAVAILABLE_ID = "agent-defaults-permission-unavailable";
 
 /** Which footer button is running: it shows the busy state and keeps focus, whatever it requested. */
 type Pending = "save" | "reset" | null;
@@ -74,6 +81,7 @@ export function AgentDefaultsDialog({
   const [pending, setPending] = useState<Pending>(null);
   const pendingRef = useRef<Pending>(null);
   const effortFieldRef = useRef<HTMLDivElement>(null);
+  const permissionFieldRef = useRef<HTMLDivElement>(null);
   const openedWith = useRef(option);
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -107,6 +115,14 @@ export function AgentDefaultsDialog({
   const effortWaitsForModel = models.length > 0 && !draft.model;
   const showEffort = models.length > 0 || efforts.length > 0;
   const offersPermissionModes = option.installations.some((installation) => installation.permissionModes.length > 0);
+  const antigravity = option.driver === "acp" && option.agentId === ANTIGRAVITY_AGENT_ID;
+  const fullPermissionsUnavailable = draft.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id &&
+    !permissionModes.includes(ANTIGRAVITY_FULL_PERMISSIONS_MODE.id);
+  const fullPermissionsAvailableWithOtherDefaults = fullPermissionsUnavailable &&
+    option.installations.some((installation) => installation.permissionModes.includes(ANTIGRAVITY_FULL_PERMISSIONS_MODE.id));
+  const fullPermissionsUnavailableReason = fullPermissionsAvailableWithOtherDefaults
+    ? "Not available on any machine with the selected model and reasoning effort."
+    : AGENT_DEFAULT_NOT_AVAILABLE;
   const busy = pending !== null;
   const discovered = option.installations.length > 0;
 
@@ -142,6 +158,10 @@ export function AgentDefaultsDialog({
   };
 
   const save = () => {
+    if (fullPermissionsUnavailable) {
+      permissionFieldRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+      return;
+    }
     // A model that has efforts needs one (§8.5: the primary stays enabled and reveals the error).
     if (needsEffort(option, draft)) {
       setEffortError("Choose a reasoning effort for this model.");
@@ -210,11 +230,19 @@ export function AgentDefaultsDialog({
             This agent is no longer discovered on any machine. Use Wollipog defaults to clear what is saved.
           </Notice>
         )}
+        {fullPermissionsUnavailable && (
+          <Notice tone="warning" compact role="status" id={PERMISSION_UNAVAILABLE_ID}>
+            {ANTIGRAVITY_FULL_PERMISSIONS_MODE.name}. {fullPermissionsUnavailableReason}{" "}
+            {fullPermissionsAvailableWithOtherDefaults
+              ? "Choose another model, reasoning effort, or permission mode to save."
+              : "Choose another permission mode to save."}
+          </Notice>
+        )}
         {/* Always in the DOM, so the polite region exists before it has something to say. */}
         <div role="status" aria-atomic="true" className={repairNotice ? undefined : "sr-only"}>
           {repairNotice && <Notice tone="info" compact>{repairNotice}</Notice>}
         </div>
-        <div className="agent-defaults-fields">
+        <div className="agent-defaults-fields" data-antigravity={antigravity || undefined}>
           {models.length > 0 && (
             <div className="field">
               <span>Model</span>
@@ -232,12 +260,9 @@ export function AgentDefaultsDialog({
                   const next: AgentHarnessDefaultConfig = { ...draft };
                   if (model) next.model = model;
                   else delete next.model;
-                  if (next.effort && !effortsForDraft(option, next).includes(next.effort)) delete next.effort;
-                  if (next.permissionMode && !permissionModesForDraft(option, next).includes(next.permissionMode)) {
-                    delete next.permissionMode;
-                  }
-                  if (!next.model || !next.effort) setEffortError(null);
-                  update(next);
+                  const repaired = repairDraft(option, next);
+                  if (!repaired.model || !repaired.effort) setEffortError(null);
+                  update(repaired);
                 }}
               />
               {managedDrift && <p className="field-helper">{managedDrift}</p>}
@@ -248,7 +273,7 @@ export function AgentDefaultsDialog({
               <span>Reasoning Effort</span>
               <Select
                 label="Reasoning Effort"
-                className="agent-defaults-effort-select"
+                className="agent-defaults-inline-select"
                 inlineMenu
                 value={draft.effort ?? UNSET}
                 disabled={busy || effortWaitsForModel}
@@ -262,11 +287,8 @@ export function AgentDefaultsDialog({
                   const next: AgentHarnessDefaultConfig = { ...draft };
                   if (effort) next.effort = effort;
                   else delete next.effort;
-                  if (next.permissionMode && !permissionModesForDraft(option, next).includes(next.permissionMode)) {
-                    delete next.permissionMode;
-                  }
                   setEffortError(null);
-                  update(next);
+                  update(repairDraft(option, next));
                 }}
               />
               {/* Why the field is unavailable, visible (§3.1), or the error that replaces it (§8.5). */}
@@ -275,17 +297,31 @@ export function AgentDefaultsDialog({
                 : effortWaitsForModel && <p className="field-helper" id={EFFORT_HELPER_ID}>Choose a model first.</p>}
             </div>
           )}
-          {offersPermissionModes && (
-            <div className="field">
+          {(offersPermissionModes || fullPermissionsUnavailable) && (
+            <div className="field" ref={permissionFieldRef}>
               <span>Permission Mode</span>
               <Select
                 label="Permission Mode"
+                inlineMenu={antigravity}
+                className={antigravity ? "agent-defaults-inline-select" : undefined}
                 value={draft.permissionMode ?? UNSET}
                 disabled={busy}
-                describedBy={HELPER_ID}
+                invalid={fullPermissionsUnavailable}
+                describedBy={fullPermissionsUnavailable ? PERMISSION_UNAVAILABLE_ID : HELPER_ID}
                 options={[
                   { value: UNSET, label: "Wollipog Default", description: "The mode the agent starts in on its own." },
-                  ...permissionModes.map((mode) => ({ value: mode, label: permissionModeDisplayLabel(mode, option.driver) })),
+                  ...(fullPermissionsUnavailable ? [{
+                    value: ANTIGRAVITY_FULL_PERMISSIONS_MODE.id,
+                    label: ANTIGRAVITY_FULL_PERMISSIONS_MODE.name,
+                    disabled: true,
+                    disabledReason: fullPermissionsUnavailableReason,
+                  }] : []),
+                  ...permissionModes.map((mode) => ({
+                    value: mode, label: permissionModeDisplayLabel(mode, option.driver),
+                    ...(mode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id ? {
+                      description: "Skips Antigravity’s approval prompts in sessions you start. Runner isolation and Wollipog governance still apply.",
+                    } : {}),
+                  })),
                 ]}
                 onChange={(permissionMode) => {
                   const next: AgentHarnessDefaultConfig = { ...draft };

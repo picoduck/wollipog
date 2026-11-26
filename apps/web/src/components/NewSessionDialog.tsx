@@ -58,6 +58,7 @@ import {
   controlPlaneSupportsIntegrationIsolation,
   orchestratorPresetPermissionsReason,
   orchestratorUnavailableReason,
+  savedSessionHarnessDefault,
   savedSessionPermissionMode,
 } from "../session-preset-defaults.js";
 import { loadAgentDefaults, saveAgentDefault } from "../agent-defaults.js";
@@ -146,6 +147,7 @@ function createFailureSentence(error: unknown, kept: boolean): string {
 type ProblemField = "project" | "location" | "machine" | "folder" | "agent" | "role" | "harness" | "mode" | "form";
 /** The control a submit problem moved focus to, which is described by the problem's error. */
 type ProblemControl =
+  | "antigravity-mode"
   | "project" | "location" | "add-location" | "machine" | "folder" | "browse" | "agent" | "account"
   | "retained-session" | "open-connections" | "role" | "defaults" | "orchestrator-retry" | "orchestrator"
   | "harness" | "mode" | "execution-target" | "cloud-budget" | "create";
@@ -321,7 +323,7 @@ export function NewSessionDialog({
   const initialAgentOptions = agentOptions(runner?.agents ?? []);
   const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId], runner?.agents);
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
-  const [antigravityFullPermissionsRunner, setAntigravityFullPermissionsRunner] = useState<string | null>(null);
+  const [antigravityModeOverride, setAntigravityModeOverride] = useState<{ runnerId: string; mode: string } | null>(null);
   const [providerAccountId, setProviderAccountId] = useState("");
   const [accountSelectionRefresh, setAccountSelectionRefresh] = useState(0);
   // `undefined` until the user chooses: a saved Orchestrator harness default then selects the role
@@ -591,7 +593,8 @@ export function NewSessionDialog({
   }, [accountSelectionKey, agent?.defaultProviderAccountId, savedProviderAccount?.accountId,
     savedProviderAccountMissing, providerAccountId, providerAccounts.map((account) => account.id).join("\0"),
     policyMode, accountSelection?.status, accountSelection?.accountId]);
-  const savedPermissionMode = savedSessionPermissionMode(defaultsReady ? harnessDefaults?.view ?? null : null, agent);
+  const savedDefaults = defaultsReady ? harnessDefaults?.view ?? null : null;
+  const savedPermissionMode = savedSessionPermissionMode(savedDefaults, agent);
   const savedPiModeUnavailableForTarget = agent?.driver === "pi" && executionTarget !== undefined &&
     executionTarget.adapter !== "host" && savedPermissionMode !== undefined &&
     savedPermissionMode !== "bypassPermissions" && savedPermissionMode !== "orchestrator";
@@ -604,10 +607,26 @@ export function NewSessionDialog({
     runnerSupportsProtocol(runner?.protocolVersion, "wslSafeLauncher") &&
     runner?.runtime?.executionIsolation?.mode === "bwrap";
   const hostExecutionTarget = !executionTarget || executionTarget.adapter === "host";
-  const antigravityPermissionMode = !orchestrator && hostExecutionTarget && agent?.id === ANTIGRAVITY_AGENT_ID &&
-    agent.capabilities?.permissionModes?.includes(ANTIGRAVITY_FULL_PERMISSIONS_MODE.id)
-    ? (antigravityFullPermissionsRunner === runnerId ? ANTIGRAVITY_FULL_PERMISSIONS_MODE.id : ANTIGRAVITY_AUTO_MODE.id)
-    : undefined;
+  const antigravity = !orchestrator && agent?.id === ANTIGRAVITY_AGENT_ID && (agent.driver ?? "acp") === "acp";
+  const savedFullPermissions = antigravity &&
+    savedSessionHarnessDefault(savedDefaults, agent)?.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id;
+  const offersFullPermissions = antigravity && hostExecutionTarget &&
+    agent.capabilities?.permissionModes?.includes(ANTIGRAVITY_FULL_PERMISSIONS_MODE.id);
+  const offersAntigravityAuto = antigravity && hostExecutionTarget &&
+    agent.capabilities?.permissionModes?.includes(ANTIGRAVITY_AUTO_MODE.id);
+  const antigravityOverride = antigravityModeOverride?.runnerId === runnerId &&
+    (antigravityModeOverride.mode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id ? offersFullPermissions : offersAntigravityAuto)
+    ? antigravityModeOverride.mode : undefined;
+  const antigravityPermissionMode = antigravityOverride ?? (savedFullPermissions
+    ? ANTIGRAVITY_FULL_PERMISSIONS_MODE.id
+    : offersFullPermissions && offersAntigravityAuto ? ANTIGRAVITY_AUTO_MODE.id : undefined);
+  const launchAntigravityMode = antigravityOverride ?? (savedFullPermissions ? undefined : antigravityPermissionMode);
+  const unsupportedSavedFullPermissions = savedFullPermissions && !antigravityOverride &&
+    (!offersFullPermissions || savedPermissionMode !== ANTIGRAVITY_FULL_PERMISSIONS_MODE.id);
+  const unsupportedFullPermissionsId = `${generatedFormId}-full-permissions`;
+  const unsupportedFullPermissionsMessage = offersAntigravityAuto
+    ? "The saved Full Permissions Mode is unsupported here. Choose Auto Mode, another machine, or update Agent Defaults."
+    : "The saved Full Permissions Mode is unsupported here. Choose another machine or update Agent Defaults.";
   const missingRequiredAccountChoice = hostExecutionTarget && (savedProviderAccountMissing || policyChoiceRequired) && !providerAccountId;
   // Availability is DERIVED from the sentence that explains it, so the two cannot disagree. The
   // preset card is rendered either way now — §11.3 — and a disabled card whose reason contradicted
@@ -813,7 +832,7 @@ export function NewSessionDialog({
 
   const selectAgent = (id: string) => {
     setAgentId(id);
-    if (id !== agentId) setAntigravityFullPermissionsRunner(null);
+    if (id !== agentId) setAntigravityModeOverride(null);
     setAgentDefaults((defaults) => saveAgentDefault(
       defaults, runnerId, id, instanceScope, runner?.agents.find((candidate) => candidate.id === id),
     ));
@@ -984,7 +1003,7 @@ export function NewSessionDialog({
     !missingRequiredAccountChoice &&
     (!executionTarget || executionTarget.available) && cloudBudgetValid &&
     (launchSurface !== "native_tui" || nativeTuiSupported) &&
-    (defaultsReady || orchestrator) &&
+    (defaultsReady || orchestrator) && !unsupportedSavedFullPermissions &&
     // Maximum Concurrent Children is part of the policy: under Full Control it is also the
     // campaign's concurrency, which must be at least 1, so the policy refuses 0 there.
     (!orchestrator || (orchestratorSupported && orchestratorSettingsReady && !policyProblem)) &&
@@ -1023,6 +1042,7 @@ export function NewSessionDialog({
     projectSelection, selectedProject?.id, projectLocationId, projectLocationLaunchable,
     runnerId, workspaceId, browsedPath, agentId, selectedAgentOption?.disabled, providerAccountId,
     defaultsReady, harnessDefaults?.error, roleOverride, orchestrator, orchestratorSupported, controlPreview,
+    unsupportedSavedFullPermissions,
     directWslRequiresSafeOrchestrator, launchSurface, nativeTuiSupported,
     executionTargetId, executionTarget?.id, executionTarget?.available,
     cloudBudgetUsd, cloudBudgetValid, retainedSessionId,
@@ -1061,6 +1081,7 @@ export function NewSessionDialog({
 
   /** Where each control a submit problem can land on is found, in the dialog (the form or its footer). */
   const problemTargets: Record<ProblemControl, string> = {
+    "antigravity-mode": '[data-validation-target="antigravity-mode"] button',
     project: '[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]',
     location: 'button[aria-label^="Location:"]:not([aria-disabled="true"])',
     "add-location": '[data-validation-target="add-location"]',
@@ -1125,7 +1146,7 @@ export function NewSessionDialog({
     const config: SessionConfig = {
       ...(roleOverride === "orchestrator" && (providerPermissionsPreset || !orchestratorRoleSupported)
         ? { permissionMode: "orchestrator" }
-        : antigravityPermissionMode ? { permissionMode: antigravityPermissionMode } : {}),
+        : launchAntigravityMode ? { permissionMode: launchAntigravityMode } : {}),
       ...(executionTarget?.adapter === "cloud" ? { costBudgetUsd: cloudBudget } : {}),
     };
     const orchestratorDraft = policyDraft.values;
@@ -1238,6 +1259,8 @@ export function NewSessionDialog({
           ? "Retry loading saved permission defaults before creating a session."
           : "Wait for saved permission defaults to finish loading.",
         ...(harnessDefaults?.error ? ["defaults", "role"] as const : ["role"] as const));
+      } else if (unsupportedSavedFullPermissions) {
+        report("agent", null, "antigravity-mode", "agent");
       } else if (orchestrator && !orchestratorSupported) {
         report("role", "Choose an available Role.", "role");
       } else if (orchestrator && !orchestratorSettingsReady) {
@@ -1698,22 +1721,26 @@ export function NewSessionDialog({
           </div>
 
           {antigravityPermissionMode && (
-            <div className="field">
+            <div className="field" data-validation-target="antigravity-mode">
               <label className="new-session-field-label">Permission Mode</label>
               <Select
                 className="new-session-choice-control"
                 label="Permission Mode"
                 value={antigravityPermissionMode}
-                onChange={(mode) => setAntigravityFullPermissionsRunner(
-                  mode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id ? runnerId : null,
-                )}
+                onChange={(mode) => setAntigravityModeOverride({ runnerId, mode })}
+                invalid={unsupportedSavedFullPermissions}
+                describedBy={unsupportedSavedFullPermissions ? unsupportedFullPermissionsId : undefined}
                 options={[
-                  { value: ANTIGRAVITY_AUTO_MODE.id, label: ANTIGRAVITY_AUTO_MODE.name,
-                    description: "Uses Antigravity’s Auto Mode when available. Otherwise Antigravity uses its regular approval settings." },
+                  ...(offersAntigravityAuto ? [{ value: ANTIGRAVITY_AUTO_MODE.id, label: ANTIGRAVITY_AUTO_MODE.name,
+                    description: "Uses Antigravity’s Auto Mode when available. Otherwise Antigravity uses its regular approval settings." }] : []),
                   { value: ANTIGRAVITY_FULL_PERMISSIONS_MODE.id, label: ANTIGRAVITY_FULL_PERMISSIONS_MODE.name,
+                    disabled: !offersFullPermissions || unsupportedSavedFullPermissions,
                     description: "Skips Antigravity’s own approval prompts for this session. Runner isolation and Wollipog governance still apply." },
                 ]}
               />
+              {unsupportedSavedFullPermissions && <FieldError id={unsupportedFullPermissionsId}>
+                {unsupportedFullPermissionsMessage}
+              </FieldError>}
             </div>
           )}
 

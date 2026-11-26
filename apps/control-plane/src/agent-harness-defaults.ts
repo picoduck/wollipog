@@ -11,6 +11,7 @@ import type {
 } from "@wollipog/protocol";
 import {
   ANTIGRAVITY_FULL_PERMISSIONS_MODE,
+  ANTIGRAVITY_AGENT_ID,
   agentHarnessIdentityKey,
   builtInAgentHarnessName,
   canonicalAgentHarnessIdentity,
@@ -90,7 +91,8 @@ export class AgentHarnessDefaultsSettings {
           models: [...visibleModels(agent.capabilities), ...managed],
           effortLevels: [...(agent.capabilities?.effortLevels ?? [])],
           permissionModes: (agent.capabilities?.permissionModes ?? [])
-            .filter((mode) => mode !== ANTIGRAVITY_FULL_PERMISSIONS_MODE.id),
+            .filter((mode) => mode !== ANTIGRAVITY_FULL_PERMISSIONS_MODE.id ||
+              (agent.id === ANTIGRAVITY_AGENT_ID && identity.driver === "acp")),
         };
         const current = options.get(key);
         if (current) {

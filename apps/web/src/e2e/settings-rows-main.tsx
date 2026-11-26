@@ -11,6 +11,7 @@ import {
   SettingsView,
 } from "../components/SettingsView.js";
 import {
+  ANTIGRAVITY_FULL_PERMISSIONS_MODE,
   ARCHIVED_HISTORY_RETENTION_LIMITS,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   managedModelChoices,
@@ -233,7 +234,7 @@ const antigravityDefaultsState: AgentHarnessDefaultsView = {
         { id: "fixture-unknown", displayName: "Fixture Experimental" },
       ],
       effortLevels: [],
-      permissionModes: ["auto"],
+      permissionModes: ["auto", ANTIGRAVITY_FULL_PERMISSIONS_MODE.id],
     }],
     preference: { model: "fixture-pro", effort: "high" },
     compatibleInstallations: 1,
@@ -534,11 +535,20 @@ const harnessDefaultsTransport: ApiTransport = {
     if (mode === "agent-empty") return Response.json({ defaults: [] });
     const method = init?.method ?? "GET";
     if (mode === "agent-antigravity") {
+      const option = structuredClone(antigravityDefaultsState.defaults[0]!);
+      const storageKey = "fixture-antigravity-harness-default";
       if (method === "PUT") {
         const request = JSON.parse(String(init?.body)) as { config: AgentHarnessDefaultConfig };
-        antigravityDefaultsState.defaults[0]!.preference = request.config;
+        sessionStorage.setItem(storageKey, JSON.stringify(request.config));
       }
-      return Response.json(antigravityDefaultsState);
+      if (method === "DELETE") sessionStorage.setItem(storageKey, "null");
+      const saved = sessionStorage.getItem(storageKey);
+      if (saved) option.preference = JSON.parse(saved) ?? undefined;
+      if (window.location.hash === "#legacy") {
+        option.installations[0]!.permissionModes = ["auto"];
+        if (option.preference?.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) option.compatibleInstallations = 0;
+      }
+      return Response.json({ defaults: [option] });
     }
     if (method !== "GET") {
       // `agent-save-fails` refuses a save the way an overloaded server does.

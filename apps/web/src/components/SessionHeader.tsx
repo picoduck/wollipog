@@ -1,6 +1,7 @@
 import { useDashboardPublicOrigin } from "../remote-access-context.js";
 import React, { useEffect, useLayoutEffect, useRef, useState, type MutableRefObject, type ReactNode, type RefObject } from "react";
 import {
+  ANTIGRAVITY_FULL_PERMISSIONS_MODE,
   isTerminal,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
@@ -50,6 +51,7 @@ import { unarchiveSession } from "../session-unarchive.js";
 import { writeClipboardText } from "../clipboard.js";
 import { sessionHeaderStatusSummary } from "../session-row-status.js";
 import { SessionStatusButton } from "./SessionStatusButton.js";
+import { StatusBadge } from "./StatusBadge.js";
 import { SessionTypeIcon } from "./SessionTypeIcon.js";
 import { useBackgroundDeliveryStep } from "./useBackgroundDeliveryStep.js";
 import { historicalBackgroundResultRecovery } from "../background-delivery-status.js";
@@ -761,6 +763,9 @@ export function SessionHeader({
           deliveryStep,
         }}
       />
+      {session.driver === "acp" && session.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id && (
+        <StatusBadge className="session-bar-permission" label={ANTIGRAVITY_FULL_PERMISSIONS_MODE.name} tone="warning" noDot />
+      )}
       {/* Background work changes are announced politely wherever the badge shows (#784). The region
           stays mounted, so its first state is announced too, and it is text, not a second badge. */}
       <span className="sr-only" data-live="background-work" role="status" aria-live="polite">
