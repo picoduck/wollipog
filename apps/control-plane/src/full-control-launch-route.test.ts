@@ -4185,6 +4185,25 @@ test("a one-Location Project yields a one-entry boundary that reads like today's
   } finally { await server.close(); f.db.close(); }
 });
 
+test("Full Control launch preflight omits ci_rerun on pre-v414 runners and rejects explicit ci_rerun overrides (#4915)", async () => {
+  const f = fixture({ protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.fullControlCiRerun - 1 });
+  const { server } = await app(f);
+  try {
+    const { preflight: derived } = await preflight(server, launch);
+    assert.equal(derived!.ready, true, JSON.stringify(derived!.summary.blockers));
+    assert.equal(derived!.advanced.proposal!.operations.includes("ci_rerun"), false);
+
+    const { preflight: explicit } = await preflight(server, {
+      ...launch,
+      overrides: { operations: ["implementation_question", "ci_rerun"] },
+    });
+    assert.equal(explicit!.ready, false);
+    const authorityCap = explicit!.capabilities.find((item) => item.id === "authority_contract");
+    assert.equal(authorityCap?.state, "unsupported");
+    assert.match(authorityCap?.reason ?? "", /Full Control CI rerun delegation/u);
+  } finally { await server.close(); f.db.close(); }
+});
+
 /** A launched multi-repository campaign (#4118): `owner/repo` (launch) and `other/repo`, whose one
  * Location is on runner `r2`. Each runner request is recorded with the runner it went to. */
 async function multiRepositoryCampaign() {

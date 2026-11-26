@@ -1134,6 +1134,9 @@ function ownerKeptTargets(category: WorkflowDecisionCategory, resourceKey: strin
       if (snapshot.recommendationId) targets.push(`${snapshot.category}:recommendation:${snapshot.recommendationId}`);
       targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}:title:${text(snapshot.sanitizedTitle)}`);
       break;
+    case "ci_rerun":
+      targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}:${snapshot.runId}:${snapshot.attempt}:${snapshot.jobId ?? ""}`);
+      break;
   }
   return targets;
 }
@@ -11108,6 +11111,11 @@ export class SessionsService {
           return capabilityFail(campaignIssueLimitsRequirement(this.db.getRunner(outdated.runnerId)?.protocolVersion));
         }
       }
+      if (control.boundary.operations.includes("ci_rerun") &&
+          !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "fullControlCiRerun")) {
+        return capabilityFail(runnerCapabilityRequirementError(
+          this.db.getRunner(session.runnerId)?.protocolVersion, "fullControlCiRerun", "Full Control CI rerun delegation"));
+      }
       if (proposal.mode === "full_control" && proposal.evidenceAuthority !== undefined) {
         if (!this.evidenceAuthorityDisclosures || !control.boundary.operations.includes("ui_evidence_approval")) {
           return fail("Evidence authority requires an available private destination/provider disclosure and the existing UI evidence operation", 409);
@@ -16234,9 +16242,14 @@ export class SessionsService {
     const customClosure = snapshot.category === "issue_closure" && reason === "protected_request" &&
       controller?.orchestratorPolicy?.control?.mode !== "full_control";
     const evidenceFallback = snapshot.category === "ui_evidence_approval" && reason === "evidence_review_unavailable";
+    // Owner-held CI reruns outside Full Control delegation (omitted from boundary, awaiting initial
+    // scope, or on an older/unsupported peer) remain eligible for an existing scoped Assistant grant,
+    // while explicit owner rules, handoffs, and owner-kept targets still require a direct human response.
+    const ownerHeldCiRerun = snapshot.category === "ci_rerun" &&
+      (reason === "outside_boundary" || reason === "unsupported_provider");
     const explicitlyKept = !ownerQuestion && this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, snapshot);
     if (decision.ownerRule || decision.ownerHandoff || explicitlyKept || decision.authorityEvaluation?.disposition ||
-        (reason !== "custom_owner" && !(ownerQuestion && reason === "owner_kept") && !customClosure && !evidenceFallback) ||
+        (reason !== "custom_owner" && !(ownerQuestion && reason === "owner_kept") && !customClosure && !evidenceFallback && !ownerHeldCiRerun) ||
         isReservedOwnerQuestion(decision) || (ownerQuestion && credentialFormFloor(snapshot)) ||
         (snapshot.category === "merged_branch_deletion" && snapshot.merged === false)) {
       return fail("This occurrence requires a direct human response.", 403);

@@ -41,6 +41,7 @@ import { registerAssistantDecisionOperations, registerAssistantDecisionHistory }
 import { fakeScreenRuntime } from "./credential-screen-test-fixture.js";
 import type { HumanPrincipal } from "./identity.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
+import { evaluateCampaignAuthority } from "./campaign-authority.js";
 
 const claude: AgentDefinition = { id: "claude", name: "Claude", driver: "claude-code", context: { kind: "native" }, command: "claude", args: [], env: {}, available: true,
   capabilities: { models: [{ id: "claude-opus-5-5", displayName: "Opus", default: true },
@@ -760,7 +761,8 @@ test("Full Control routes eligible child CI reruns to the Orchestrator while Cus
         resourceKey: ciRerunResourceKey(resourceSnapshot), resourceSnapshot });
     };
 
-    // Full Control without ci_rerun in operations keeps CI reruns human-owned (not Orchestrator or Assistant).
+    // Full Control without ci_rerun in operations keeps CI reruns owner-held: Orchestrator gets no
+    // request and cannot resolve it, while an existing scoped Assistant grant still works.
     const withoutCi = h.svc.setCampaignControl("root", { mode: "full_control", objective: "Deliver #4915",
       operations: ["implementation_question", "pr_merge", "question", "tool_approval", "policy_ask"], delegatablePolicyIds: [] }, 1, h.owner);
     assert.ok(withoutCi.ok, withoutCi.error ?? "expected full control without ci_rerun");
@@ -773,9 +775,14 @@ test("Full Control routes eligible child CI reruns to the Orchestrator while Cus
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true).status, 403);
     const [assistantOutside] = await h.callTools(env, { jsonrpc: "2.0", id: 1, method: "tools/call", params: {
       name: "assistant_decision_resolve", arguments: { sessionId: "child", occurrenceId: outsideBoundary.data.occurrenceId,
-        resourceDigest: outsideBoundary.data.resourceDigest, outcome: "approve", reason: "Try outside boundary." },
+        resourceDigest: outsideBoundary.data.resourceDigest, outcome: "approve", reason: "Approved via existing Assistant grant." },
     } });
-    assert.match(assistantOutside.result.content[0].text, /direct human response/u);
+    assert.equal(assistantOutside.result.isError, undefined, assistantOutside.result.content[0].text);
+    const outsideExec = await h.svc.executeWorkflowDecision("child", outsideBoundary.data.occurrenceId,
+      { resourceDigest: outsideBoundary.data.resourceDigest });
+    assert.equal(outsideExec.data?.status, "consumed");
+    assert.equal(calls.length, 1);
+    calls.length = 0;
 
     // Full Control authorizing ci_rerun routes child reruns to the controlling Orchestrator.
     const withCi = h.svc.setCampaignControl("root", { mode: "full_control", objective: "Deliver #4915",
@@ -863,6 +870,25 @@ test("Full Control routes eligible child CI reruns to the Orchestrator while Cus
     assert.equal((await h.svc.executeWorkflowDecision("child", denied.data.occurrenceId,
       { resourceDigest: denied.data.resourceDigest })).status, 409);
 
+    // Orchestrator handoff keeps the CI rerun strictly with the human (refuses both Orchestrator and Assistant).
+    const handedTarget = await requestRerun(206, "handoff-ci-rerun");
+    assert.ok(handedTarget.ok && handedTarget.data);
+    assert.equal(handedTarget.data.authority, "orchestrator");
+    const handed = h.svc.handWorkflowDecisionToOwner("root", handedTarget.data.occurrenceId,
+      { sessionId: "child", reason: "Needs direct owner review." });
+    assert.ok(handed.ok && handed.data, handed.error ?? "expected owner handoff");
+    assert.equal(handed.data.authority, "human");
+    assert.equal(handed.data.authorityEvaluation?.reason, "owner_kept");
+    assert.equal(h.svc.resolveDescendantRequest("root", "child", handed.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).status, 403);
+    const [assistantHanded] = await h.callTools(env, { jsonrpc: "2.0", id: 4, method: "tools/call", params: {
+      name: "assistant_decision_resolve", arguments: { sessionId: "child", occurrenceId: handed.data.occurrenceId,
+        resourceDigest: handed.data.resourceDigest, outcome: "approve", reason: "Try handed-off rerun." },
+    } });
+    assert.match(assistantHanded.result.content[0].text, /direct human response/u);
+    assert.ok(h.svc.resolveWorkflowDecision("root", "child", handed.data.occurrenceId,
+      { outcome: "deny" }, "human", { kind: "human", id: h.owner.userId }, () => true).ok);
+
     // Revoking Full Control after Orchestrator approval invalidates the approval before execution.
     const superseded = await requestRerun(204, "revoked-before-exec");
     assert.ok(superseded.ok && superseded.data);
@@ -891,6 +917,92 @@ test("Full Control routes eligible child CI reruns to the Orchestrator while Cus
     const customExec = await h.svc.executeWorkflowDecision("child", customRerun.data.occurrenceId,
       { resourceDigest: customRerun.data.resourceDigest });
     assert.equal(customExec.data?.status, "consumed");
+  } finally { await h.close(); }
+});
+
+test("Full Control CI rerun delegation waits for initial scope and requires a v414 controller runner (#4915)", async () => {
+  const h = await harness();
+  try {
+    decisionSession(h, "root");
+    decisionSession(h, "child", "root");
+    h.hub.requestFromRunner = async (_runnerId, requestId, frame) => {
+      if (frame.type === "campaign_issue_scope" && frame.operation === "synchronize") {
+        return { type: "campaign_issue_scope_result", requestId, sessionId: frame.sessionId, ok: true,
+          repository: "picoduck/wollipog", revision: frame.scope.revision };
+      }
+      if (frame.type === "campaign_launch_inspect") {
+        return { type: "campaign_launch_inspection_result", requestId, workspaceId: frame.workspaceId,
+          ok: true, repository: "picoduck/wollipog", issueNumbers: [], digest: "0".repeat(64) };
+      }
+      throw new Error(`unexpected runner frame ${frame.type}`);
+    };
+    const enabled = h.svc.setCampaignControl("root", { mode: "full_control", objective: "Deliver #4915",
+      operations: ["implementation_question", "pr_merge", "ci_rerun", "question", "tool_approval", "policy_ask"],
+      delegatablePolicyIds: [] }, 1, h.owner);
+    assert.ok(enabled.ok, enabled.error ?? "expected full control");
+
+    const snapshot = { category: "ci_rerun" as const, repository: "picoduck/wollipog",
+      runId: 300, attempt: 1, headSha: "b".repeat(40) };
+
+    // While awaiting a first-message initial scope proposal, provisional launch operations must not
+    // let the root self-authorize ci_rerun before the proposal can withhold it.
+    const rootPolicy = h.db.sessionOrchestratorPolicy("root")!;
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify({
+      ...rootPolicy,
+      firstMessageScope: {
+        state: "established", messageDigest: "c".repeat(64), establishedAt: 10,
+        grant: { status: "proposal", messageDigest: "c".repeat(64), decidedAt: 10, mode: "proposal" },
+      },
+    }), "root");
+    const provisional = await h.svc.createWorkflowDecisionWithVideo("root", {
+      requestId: "provisional-root-rerun", resourceKey: ciRerunResourceKey(snapshot), resourceSnapshot: snapshot,
+    });
+    assert.ok(provisional.ok && provisional.data, provisional.error ?? "expected pending provisional rerun");
+    assert.equal(provisional.data.authority, "human");
+    assert.equal(provisional.data.authorityEvaluation?.reason, "outside_boundary");
+    assert.equal(h.svc.resolveDescendantRequest("root", "root", provisional.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).status, 403);
+
+    // Once initial scope is settled (and did not withhold ci_rerun), delegation activates.
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify({
+      ...rootPolicy,
+      firstMessageScope: {
+        state: "established", messageDigest: "c".repeat(64), establishedAt: 10,
+        grant: { status: "proposal", messageDigest: "c".repeat(64), decidedAt: 10, mode: "proposal" },
+        initialScope: { admittedAt: 11, occurrenceId: "wd_scope_init", requestedCount: null, constraints: [], withheldOperations: [] },
+      },
+    }), "root");
+    const settledSnapshot = { ...snapshot, runId: 301 };
+    const settled = await h.svc.createWorkflowDecisionWithVideo("child", {
+      requestId: "settled-child-rerun", resourceKey: ciRerunResourceKey(settledSnapshot), resourceSnapshot: settledSnapshot,
+    });
+    assert.ok(settled.ok && settled.data);
+    assert.equal(settled.data.authority, "orchestrator");
+
+    // A v414 controller still delegates for a v411 (typedCiRerun) child runner.
+    const rootSession = h.db.getSession("root")!;
+    const childSession = h.db.getSession("child")!;
+    const mixedEval = evaluateCampaignAuthority(rootSession, childSession,
+      RUNNER_CAPABILITY_MIN_PROTOCOL.typedCiRerun, settledSnapshot, rootSession.parentControlPolicy, PROTOCOL_VERSION);
+    assert.equal(mixedEval.owner, "orchestrator");
+    assert.equal(mixedEval.reason, "authorized_operation");
+
+    // A pre-v414 controller runner fails closed at evaluation time and cannot authorize ci_rerun.
+    h.db.registerRunner({ runnerId: "r", hostname: "fixture", os: "linux", version: "fixture",
+      workspaces: [{ id: "w", name: "Home", path: "/fixture/home" }], agents: [claude],
+      runtime: { dataDir: "/fixture", worktreeRoot: "/fixture/worktrees", maxConcurrentSessions: 4, campaignLaunchInspection: { version: 3 } },
+    }, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.fullControlCiRerun - 1);
+    const oldControllerSnapshot = { ...snapshot, runId: 302 };
+    const oldController = await h.svc.createWorkflowDecisionWithVideo("child", {
+      requestId: "old-controller-rerun", resourceKey: ciRerunResourceKey(oldControllerSnapshot), resourceSnapshot: oldControllerSnapshot,
+    });
+    assert.ok(oldController.ok && oldController.data);
+    assert.equal(oldController.data.authority, "human");
+    assert.equal(oldController.data.authorityEvaluation?.reason, "outside_boundary");
+    const refusedEnable = h.svc.setCampaignControl("root", { mode: "full_control", objective: "Deliver #4915",
+      operations: ["implementation_question", "ci_rerun"], delegatablePolicyIds: [] }, 2, h.owner);
+    assert.equal(refusedEnable.status, 409);
+    assert.match(refusedEnable.error ?? "", /Full Control CI rerun delegation/u);
   } finally { await h.close(); }
 });
 
