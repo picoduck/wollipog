@@ -1,5 +1,6 @@
 import {
   ANTIGRAVITY_AGENT_ID,
+  ANTIGRAVITY_FULL_PERMISSIONS_MODE,
   isManagedModelChoice,
   managedModelChoiceLabel,
   modelResolutionDrift,
@@ -128,7 +129,7 @@ export function isConfigurable(option: AgentHarnessDefaultOption): boolean {
     installation.models.length > 0 || installation.effortLevels.length > 0 || installation.permissionModes.length > 0);
 }
 
-/** Drops whatever the agent no longer offers, so a saved choice never names a missing option. */
+/** Repair stale choices. Keep Full Permissions visible until the user explicitly replaces it. */
 export function repairDraft(
   option: AgentHarnessDefaultOption,
   candidate: AgentHarnessDefaultConfig,
@@ -139,7 +140,8 @@ export function repairDraft(
     delete next.effort;
   }
   if (next.effort && !effortsForDraft(option, next).includes(next.effort)) delete next.effort;
-  if (next.permissionMode && !permissionModesForDraft(option, next).includes(next.permissionMode)) {
+  if (next.permissionMode && next.permissionMode !== ANTIGRAVITY_FULL_PERMISSIONS_MODE.id &&
+      !permissionModesForDraft(option, next).includes(next.permissionMode)) {
     delete next.permissionMode;
   }
   return next;
@@ -163,6 +165,8 @@ export function draftRepairNotice(fields: string[]): string | null {
     : `${fields.slice(0, -1).join(", ")} and ${fields.at(-1)}`;
   return `Capabilities changed. Removed unavailable draft selections for ${names}.`;
 }
+
+export const AGENT_DEFAULT_NOT_AVAILABLE = "Not available on any machine.";
 
 /**
  * The row's description (§17): what is set as a sentence-case list, "Luna, low effort, Approve for
@@ -188,7 +192,7 @@ export function agentDefaultsDescription(option: AgentHarnessDefaultOption): str
   const drift = preference?.model ? modelResolutionDrift(option.installations, preference.model) : null;
   const resolution = managedModelDriftText(option, preference?.model) ?? (drift ? modelDriftText(drift) : "");
   const driftText = resolution ? ` ${resolution}` : "";
-  if (option.compatibleInstallations === 0) return `${summary}. Not available on any machine.${driftText}`;
+  if (option.compatibleInstallations === 0) return `${summary}. ${AGENT_DEFAULT_NOT_AVAILABLE}${driftText}`;
   if (option.compatibleInstallations < option.installations.length) {
     const total = option.installations.length;
     return `${summary}. Available on ${option.compatibleInstallations} of ${total} machine${total === 1 ? "" : "s"}.${driftText}`;

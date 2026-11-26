@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentHarnessDefaultOption } from "@wollipog/protocol";
-import { agentDefaultsDescription, isConfigurable, repairDraft, uniqueModels } from "./agent-defaults-options.js";
+import { agentDefaultsDescription, isConfigurable, permissionModesForDraft, repairDraft, uniqueModels } from "./agent-defaults-options.js";
 
 function installation(machineName: string, models: AgentHarnessDefaultOption["installations"][number]["models"]) {
   return {
@@ -63,6 +63,22 @@ test("repair drops a model the agent no longer offers along with its effort", ()
   assert.deepEqual(repairDraft(option(), { model: "sol", effort: "xhigh", permissionMode: "approve-for-me" }),
     { permissionMode: "approve-for-me" });
   assert.deepEqual(repairDraft(option(), { model: "luna", effort: "high" }), { model: "luna" });
+});
+
+test("repair keeps the saved Antigravity Full Permissions Mode visible when discovery no longer offers it", () => {
+  const permissionMode = "antigravity-full-permissions";
+  const defaults = option({
+    agentId: "google-antigravity",
+    driver: "acp",
+    name: "Google Antigravity",
+    installations: [{ ...installation("Laptop", []), permissionModes: ["auto"] }],
+    compatibleInstallations: 0,
+    preference: { permissionMode },
+  });
+  assert.deepEqual(repairDraft(defaults, defaults.preference!), { permissionMode });
+  assert.deepEqual(permissionModesForDraft(defaults, { permissionMode }), ["auto"]);
+  assert.deepEqual(repairDraft(defaults, { permissionMode: "auto" }), { permissionMode: "auto" });
+  assert.equal(agentDefaultsDescription(defaults), "Full Permissions Mode. Not available on any machine.");
 });
 
 test("a saved model that resolves differently on two machines says what it is on each (#3248)", () => {

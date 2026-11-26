@@ -1499,6 +1499,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
         }
       };
       await useHarness(page, "dark", { section: "behavior", defaults: "agent-antigravity" });
+      const settingsUrl = page.url();
       const row = page.locator(".setting-row").filter({ has: page.getByText("Google Antigravity", { exact: true }) });
       const edit = row.getByRole("button", { name: /^Edit…/ });
       await edit.click();
@@ -1557,17 +1558,6 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
         await expect(mode).toHaveAccessibleName("Permission Mode: Full Permissions Mode");
         await expectFullyInViewport(save);
         await capture(`agent-defaults-dialog-${dimensions}-saved-after-reload`);
-        await dialog.getByRole("button", { name: "Cancel" }).click();
-
-        const legacy = new URL(page.url());
-        legacy.hash = "legacy";
-        await page.goto(legacy.href);
-        await page.reload();
-        await expect(row.locator(".setting-row-desc")).toContainText("Not available on any machine");
-        await edit.click();
-        await expect(dialog.getByText(/The saved Full Permissions Mode is unsupported/)).toBeVisible();
-        await expectFullyInViewport(save);
-        await capture(`agent-defaults-dialog-${dimensions}-unsupported`);
       }
 
       const openNewSession = async (machine: "ready" | "legacy") => {
@@ -1619,6 +1609,29 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await expect(selected).toContainText("Full Permissions Mode");
       await expectNoHorizontalOverflow(composerChoices);
       await capture(`session-${dimensions}-full-permissions`);
+
+      if (!narrow) {
+        await page.goto(`${settingsUrl}#legacy`);
+        const description = row.locator(".setting-row-desc");
+        await expect(description).toHaveText("Full Permissions Mode. Not available on any machine.");
+        await edit.click();
+        await expect(mode).toHaveAccessibleName("Permission Mode: Full Permissions Mode");
+        await expect(mode).toHaveAttribute("aria-invalid", "true");
+        await expect(mode).toHaveAccessibleDescription(/Not available on any machine/);
+        await expectTextContrast(dialog.getByRole("status").filter({ hasText: "Not available on any machine" }));
+        await expectFullyInViewport(save);
+        await capture(`agent-defaults-dialog-${dimensions}-unsupported`);
+        await save.click();
+        await expect(mode).toBeFocused();
+        await expect(description).toContainText("Full Permissions Mode");
+        await mode.click();
+        await expect(full).toHaveAttribute("aria-disabled", "true");
+        await expect(full).toHaveAttribute("aria-selected", "true");
+        await list.getByRole("option", { name: "Auto (AI-Reviewed)" }).click();
+        await save.click();
+        await expect(dialog).toHaveCount(0);
+        await expect(description).toHaveText("Auto (AI-Reviewed)");
+      }
     });
 
     test("shows each model's effort choices, including when discovery found none", async ({ page }, testInfo) => {

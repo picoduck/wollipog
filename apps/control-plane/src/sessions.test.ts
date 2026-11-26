@@ -11930,9 +11930,24 @@ test("only direct human Antigravity launches inherit Full Permissions Mode and b
     assert.match(inherited.error ?? "", /orchestrator/i);
     assert.doesNotMatch(inherited.error ?? "", /Full Permissions Mode/u);
 
+    const container = {
+      id: `runner:${RUNNER_ID}:container:antigravity`, runnerId: RUNNER_ID, name: "Antigravity Container",
+      kind: "container", workspaceStrategy: "worktree", adapter: "container",
+      boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" },
+      environment: { id: "antigravity", revision: 1, image: `example/agent@sha256:${"a".repeat(64)}`,
+        setupCheckDigest: "b".repeat(64) },
+      compatibleAgentIds: [agent.id], available: true,
+    } satisfies NonNullable<RunnerMetadata["executionTargets"]>[number];
+    db.registerRunner({ ...meta, executionTargets: [container] }, Date.now(), PROTOCOL_VERSION);
+    const starts = hub.sentOfType("start_session").length;
+    const nonHost = svc.createSession({ ...base, executionTargetId: container.id, useWorktree: true },
+      undefined, undefined, false, false, false, human);
+    assert.equal(nonHost.status, 409);
+    assert.match(nonHost.error ?? "", /saved Full Permissions Mode is unsupported/u);
+    assert.equal(hub.sentOfType("start_session").length, starts);
+
     agent.capabilities.permissionModes = ["auto"];
     db.updateRunnerAgents(RUNNER_ID, meta.agents, Date.now());
-    const starts = hub.sentOfType("start_session").length;
     const unsupported = launch(human);
     assert.equal(unsupported.status, 409);
     assert.match(unsupported.error ?? "", /saved Full Permissions Mode is unsupported/u);

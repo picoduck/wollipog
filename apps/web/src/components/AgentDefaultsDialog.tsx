@@ -14,6 +14,7 @@ import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { Select } from "./ui/ChoiceControls.js";
 import {
+  AGENT_DEFAULT_NOT_AVAILABLE,
   draftRepairNotice,
   effortsForDraft,
   managedModelDriftText,
@@ -29,6 +30,7 @@ const UNSET = "";
 const EFFORT_ERROR_ID = "agent-defaults-effort-error";
 const EFFORT_HELPER_ID = "agent-defaults-effort-helper";
 const HELPER_ID = "agent-defaults-helper";
+const PERMISSION_UNAVAILABLE_ID = "agent-defaults-permission-unavailable";
 
 /** Which footer button is running: it shows the busy state and keeps focus, whatever it requested. */
 type Pending = "save" | "reset" | null;
@@ -79,6 +81,7 @@ export function AgentDefaultsDialog({
   const [pending, setPending] = useState<Pending>(null);
   const pendingRef = useRef<Pending>(null);
   const effortFieldRef = useRef<HTMLDivElement>(null);
+  const permissionFieldRef = useRef<HTMLDivElement>(null);
   const openedWith = useRef(option);
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -113,8 +116,8 @@ export function AgentDefaultsDialog({
   const showEffort = models.length > 0 || efforts.length > 0;
   const offersPermissionModes = option.installations.some((installation) => installation.permissionModes.length > 0);
   const antigravity = option.driver === "acp" && option.agentId === ANTIGRAVITY_AGENT_ID;
-  const savedFullPermissionsUnavailable = antigravity &&
-    option.preference?.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id && option.compatibleInstallations === 0;
+  const fullPermissionsUnavailable = draft.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id &&
+    !permissionModes.includes(ANTIGRAVITY_FULL_PERMISSIONS_MODE.id);
   const busy = pending !== null;
   const discovered = option.installations.length > 0;
 
@@ -150,6 +153,10 @@ export function AgentDefaultsDialog({
   };
 
   const save = () => {
+    if (fullPermissionsUnavailable) {
+      permissionFieldRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+      return;
+    }
     // A model that has efforts needs one (§8.5: the primary stays enabled and reveals the error).
     if (needsEffort(option, draft)) {
       setEffortError("Choose a reasoning effort for this model.");
@@ -218,9 +225,9 @@ export function AgentDefaultsDialog({
             This agent is no longer discovered on any machine. Use Wollipog defaults to clear what is saved.
           </Notice>
         )}
-        {savedFullPermissionsUnavailable && (
-          <Notice tone="warning" compact role="status">
-            The saved Full Permissions Mode is unsupported on your machines with these defaults.
+        {fullPermissionsUnavailable && (
+          <Notice tone="warning" compact role="status" id={PERMISSION_UNAVAILABLE_ID}>
+            {ANTIGRAVITY_FULL_PERMISSIONS_MODE.name}. {AGENT_DEFAULT_NOT_AVAILABLE} Choose another permission mode to save.
           </Notice>
         )}
         {/* Always in the DOM, so the polite region exists before it has something to say. */}
@@ -245,12 +252,9 @@ export function AgentDefaultsDialog({
                   const next: AgentHarnessDefaultConfig = { ...draft };
                   if (model) next.model = model;
                   else delete next.model;
-                  if (next.effort && !effortsForDraft(option, next).includes(next.effort)) delete next.effort;
-                  if (next.permissionMode && !permissionModesForDraft(option, next).includes(next.permissionMode)) {
-                    delete next.permissionMode;
-                  }
-                  if (!next.model || !next.effort) setEffortError(null);
-                  update(next);
+                  const repaired = repairDraft(option, next);
+                  if (!repaired.model || !repaired.effort) setEffortError(null);
+                  update(repaired);
                 }}
               />
               {managedDrift && <p className="field-helper">{managedDrift}</p>}
@@ -275,11 +279,8 @@ export function AgentDefaultsDialog({
                   const next: AgentHarnessDefaultConfig = { ...draft };
                   if (effort) next.effort = effort;
                   else delete next.effort;
-                  if (next.permissionMode && !permissionModesForDraft(option, next).includes(next.permissionMode)) {
-                    delete next.permissionMode;
-                  }
                   setEffortError(null);
-                  update(next);
+                  update(repairDraft(option, next));
                 }}
               />
               {/* Why the field is unavailable, visible (§3.1), or the error that replaces it (§8.5). */}
@@ -288,8 +289,8 @@ export function AgentDefaultsDialog({
                 : effortWaitsForModel && <p className="field-helper" id={EFFORT_HELPER_ID}>Choose a model first.</p>}
             </div>
           )}
-          {offersPermissionModes && (
-            <div className="field">
+          {(offersPermissionModes || fullPermissionsUnavailable) && (
+            <div className="field" ref={permissionFieldRef}>
               <span>Permission Mode</span>
               <Select
                 label="Permission Mode"
@@ -297,9 +298,16 @@ export function AgentDefaultsDialog({
                 className={antigravity ? "agent-defaults-inline-select" : undefined}
                 value={draft.permissionMode ?? UNSET}
                 disabled={busy}
-                describedBy={HELPER_ID}
+                invalid={fullPermissionsUnavailable}
+                describedBy={fullPermissionsUnavailable ? PERMISSION_UNAVAILABLE_ID : HELPER_ID}
                 options={[
                   { value: UNSET, label: "Wollipog Default", description: "The mode the agent starts in on its own." },
+                  ...(fullPermissionsUnavailable ? [{
+                    value: ANTIGRAVITY_FULL_PERMISSIONS_MODE.id,
+                    label: ANTIGRAVITY_FULL_PERMISSIONS_MODE.name,
+                    disabled: true,
+                    disabledReason: AGENT_DEFAULT_NOT_AVAILABLE,
+                  }] : []),
                   ...permissionModes.map((mode) => ({
                     value: mode, label: permissionModeDisplayLabel(mode, option.driver),
                     ...(mode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id ? {
