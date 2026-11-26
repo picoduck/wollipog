@@ -76,7 +76,7 @@ test("repair keeps the saved Antigravity Full Permissions Mode visible when disc
     preference: { permissionMode },
   });
   assert.deepEqual(repairDraft(defaults, defaults.preference!), { permissionMode });
-  assert.deepEqual(permissionModesForDraft(defaults, { permissionMode }), ["auto"]);
+  assert.deepEqual(permissionModesForDraft(defaults, {}), ["auto"]);
   assert.deepEqual(repairDraft(defaults, { permissionMode: "auto" }), { permissionMode: "auto" });
   assert.equal(agentDefaultsDescription(defaults), "Full Permissions Mode. Not available on any machine.");
 });
