@@ -13,6 +13,20 @@ const integer = (minimum: number, maximum?: number) => ({type: "integer", minimu
 const safe = Number.MAX_SAFE_INTEGER;
 const files = {type: "array", minItems: 1, items: object({path: text, content: text, encoding: {enum: ["utf8", "base64"]}}, ["path", "content", "encoding"])};
 const nullableText = {type: ["string", "null"]};
+
+export const campaignStartSchema = {
+  type: "object",
+  properties: {
+    commandId: text, locationId: text, agentId: text,
+    mode: {type: "string", enum: ["custom", "full_control"]}, prompt: {type: "string", maxLength: 4000},
+    model: text, effort: text, childAgentId: text, childModel: text,
+    childEffort: {...nullableText, description: "Use null for Automatic, omit to inherit the saved default, or specify a supported effort."},
+    issueNumbers: {type: "array", items: integer(1), maxItems: 100, uniqueItems: true},
+  },
+  required: ["commandId", "locationId", "agentId", "mode", "prompt"] as const,
+  additionalProperties: false,
+};
+
 const selector = {oneOf: [object({kind: {const: "all"}}, ["kind"]),
   object({kind: {const: "driver"}, driver: text}, ["kind", "driver"]),
   object({kind: {const: "agent"}, agentId: text}, ["kind", "agentId"])]};

@@ -70,7 +70,7 @@ const pacedVideoContract = { id: "wollipog-paced-video-review-v1", revision: 1 }
 const reviewerAttestation = syntheticMediaReviewerAttestation("claude");
 
 function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: number; priced?: boolean; images?: boolean; pacedVideo?: boolean;
-  hostingVideo?: boolean; videoPort?: boolean; executionTargets?: ExecutionTargetDefinition[] } = {}) {
+  hostingVideo?: boolean; videoPort?: boolean; executionTargets?: ExecutionTargetDefinition[]; extraAgents?: RunnerMetadata["agents"] } = {}) {
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
   const human: HumanPrincipal = { ...identity, kind: "human", actorId: identity.userId };
@@ -80,7 +80,8 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
       capabilities: { models: [{ id: "claude-opus-5-5", default: true }, { id: "claude-sonnet-5-5" }], effortLevels: ["high"], slashCommands: [],
         permissionModes: ["default", "orchestrator"], supportsImages: true, supportsApprovals: true,
         ...(options.images === false ? {} : { imageToolResults: true }),
-        ...(options.pacedVideo ? { pacedVideoReviewContract: pacedVideoContract, mediaReviewerAttestation: reviewerAttestation } : {}) } }],
+        ...(options.pacedVideo ? { pacedVideoReviewContract: pacedVideoContract, mediaReviewerAttestation: reviewerAttestation } : {}) } },
+      ...(options.extraAgents ?? [])],
     runtime: "runtime" in options ? options.runtime : runtime, ...(options.executionTargets ? { executionTargets: options.executionTargets } : {}) };
   const reconnect = (at: number) => db.registerRunner(meta, at, options.protocolVersion ?? PROTOCOL_VERSION);
   reconnect(Date.now());
@@ -188,8 +189,8 @@ async function preflight(server: Awaited<ReturnType<typeof app>>["server"], body
 }
 const sessionCount = (f: ReturnType<typeof fixture>) => f.db.raw().prepare("SELECT count(*) AS n FROM sessions").get()!.n;
 
-async function assistantCampaignFixture(protocolVersion = PROTOCOL_VERSION) {
-  const f = fixture({ protocolVersion });
+async function assistantCampaignFixture(protocolVersion = PROTOCOL_VERSION, extraAgents?: RunnerMetadata["agents"]) {
+  const f = fixture({ protocolVersion, extraAgents });
   const workspace = f.db.createWorkspace("r", { name: "Assistant Test Project", path: "/fixture/assistant-project" }, f.scope);
   const location = f.db.findProjectLocation("r", workspace.id)!;
   const operations = createAssistantOperations(f.db);
@@ -301,6 +302,80 @@ test("an Assistant campaign uses the reviewed New Session settings and its own f
     } finally { await h.close(); }
   }
 });
+
+test("Assistant campaign discovery advertises optional nullable child effort", async () => {
+  const h = await assistantCampaignFixture();
+  try {
+    const { operations: [operation] } = await h.call({ operations: ["campaign_start"] }, "assistant_discover") as {
+      operations: Array<{ name: string; inputSchema: { properties: { childEffort: { type: string[] } }; required: string[] } }>;
+    };
+    assert.equal(operation!.name, "campaign_start");
+    assert.deepEqual(operation!.inputSchema.properties.childEffort.type, ["string", "null"]);
+    assert.ok(!operation!.inputSchema.required.includes("childEffort"));
+  } finally { await h.close(); }
+});
+
+for (const mode of ["custom", "full_control"] as const) {
+  test(`Assistant ${mode} campaigns inherit omitted child effort and honor explicit Automatic or supported fixed effort`, async () => {
+    const h = await assistantCampaignFixture(PROTOCOL_VERSION, [{
+      id: "child-codex", name: "Child Codex", command: "codex", args: [], env: {}, driver: "codex-app-server",
+      context: { kind: "native" }, available: true,
+      capabilities: { models: [{ id: "automatic-only" }, { id: "configurable", efforts: ["medium"] }],
+        effortLevels: [], slashCommands: [], permissionModes: ["default"], supportsImages: true, supportsApprovals: true },
+    }]);
+    try {
+      const defaults = { ...DEFAULT_ORCHESTRATOR_DEFAULTS,
+        behavior: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.behavior, childEffort: "high" },
+        campaignBudget: { costUsd: 40, toolCalls: 400 } };
+      h.db.setOrchestratorDefaults(h.human.userId, defaults, Date.now());
+      const { childEffort: _fixtureEffort, ...base } = h.args;
+      const args = { ...base, mode, ...(mode === "custom" ? { issueNumbers: undefined } : {}) };
+      const automaticOnly = { ...args, childAgentId: "child-codex", childModel: "automatic-only" };
+      const configurable = { ...automaticOnly, childModel: "configurable" };
+      const count = sessionCount(h);
+      await assert.rejects(h.call({ ...automaticOnly, commandId: "incompatible-inherited" }), /Child Effort together/);
+      await assert.rejects(h.call({ ...configurable, commandId: "incompatible-fixed", childEffort: "low" }), /Child Effort together/);
+      assert.deepEqual(h.pending(), []);
+      assert.equal(sessionCount(h), count);
+
+      const cases = [
+        { request: { ...args, commandId: "inherited" }, driver: "claude-code", harness: "Claude Code (claude-code)", expectedEffort: "high" },
+        { request: { ...automaticOnly, commandId: "automatic", childEffort: null }, driver: "codex-app-server", harness: "Codex App Server (codex-app-server)", expectedEffort: null },
+        { request: { ...configurable, commandId: "supported-fixed", childEffort: "medium" }, driver: "codex-app-server", harness: "Codex App Server (codex-app-server)", expectedEffort: "medium" },
+      ];
+      for (const { request, driver, harness, expectedEffort } of cases) {
+        const starts = h.starts.length;
+        const before = sessionCount(h);
+        await h.call(request);
+        const [card] = h.pending();
+        const facts = new Map(card!.impact.map(({ label, value }) => [label, value]));
+        assert.equal(facts.get("Child Harness"), harness);
+        assert.equal(facts.get("Child Model"), request.childModel);
+        assert.equal(facts.get("Child Effort"), expectedEffort ?? "Automatic");
+        assert.equal(facts.get("Orchestrator Model"), request.model);
+        assert.equal(facts.get("Orchestrator Effort"), request.effort);
+        assert.deepEqual(card!.campaign?.budget, defaults.campaignBudget);
+        assert.equal(sessionCount(h), before);
+        assert.equal(h.starts.length, starts);
+
+        const response = await h.answer(card!.id, "approve-campaign", { digest: card!.campaign!.digest });
+        assert.equal(response.statusCode, 200, response.body);
+        const { outcome } = response.json().confirmation;
+        assert.equal(outcome.receiptStatus, "succeeded", response.body);
+        const root = h.db.getSession(outcome.sessionId)!;
+        assert.equal(root.model, request.model);
+        assert.equal(root.effort, request.effort);
+        assert.deepEqual(root.orchestratorPolicy?.behavior.childHarness, {
+          agentId: driver, driver, context: { kind: "native" },
+        });
+        assert.equal(root.orchestratorPolicy?.behavior.childModel, request.childModel);
+        assert.equal(root.orchestratorPolicy?.behavior.childEffort, expectedEffort);
+        assert.equal(h.starts.length, starts + 1);
+      }
+      assert.deepEqual(h.db.getOrchestratorDefaults(h.human.userId)?.defaults, defaults);
+    } finally { await h.close(); }
+  });
+}
 
 test("an Assistant launch pause blocks campaign previews and previously prepared campaign starts", async () => {
   const h = await assistantCampaignFixture();

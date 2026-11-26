@@ -6,6 +6,7 @@ import {
 import { AssistantCommandConfirmations } from "./assistant-command-confirmations.js";
 import { assistantRequestDigest, type AssistantCommandReceipts } from "./assistant-command-receipts.js";
 import { AssistantRefusal, assistantCallContext, type AssistantConnection, type AssistantOperations } from "./assistant-connections.js";
+import { campaignStartSchema } from "./assistant-management-schemas.js";
 import {
   ASSISTANT_CAMPAIGN_START, assistantCampaignLaunchId, type CampaignConfirmationPreview, type OwnerConfirmationBinding,
 } from "./assistant-owner-confirmations.js";
@@ -14,16 +15,10 @@ import { prepareFullControlLaunch, type FullControlLaunchDependencies } from "./
 import type { HumanPrincipal } from "./identity.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 
-const string = { type: "string" };
-const properties = { commandId: string, locationId: string, agentId: string,
-  mode: { type: "string", enum: ["custom", "full_control"] }, prompt: { type: "string", maxLength: 4000 },
-  model: string, effort: string, childAgentId: string, childModel: string, childEffort: string,
-  issueNumbers: { type: "array", items: { type: "integer", minimum: 1 }, maxItems: 100, uniqueItems: true },
-};
-const required = ["commandId", "locationId", "agentId", "mode", "prompt"] as const;
+const { properties, required } = campaignStartSchema;
 type CampaignArgs = Record<string, unknown> & {
   commandId: string; locationId: string; agentId: string; mode: "custom" | "full_control"; prompt: string;
-  model?: string; effort?: string; childAgentId?: string; childModel?: string; childEffort?: string; issueNumbers?: number[];
+  model?: string; effort?: string; childAgentId?: string; childModel?: string; childEffort?: string | null; issueNumbers?: number[];
 };
 
 function parseArgs(value: unknown): CampaignArgs {
@@ -36,8 +31,9 @@ function parseArgs(value: unknown): CampaignArgs {
       args.prompt.length > 4000 ||
       /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\p{Cf}]/u.test(args.prompt) ||
       Object.keys(properties).filter(key => key !== "prompt" && key !== "issueNumbers").some(key =>
-        args[key] !== undefined && (typeof args[key] !== "string" || !(args[key] as string).trim() ||
-          (args[key] as string).length > 256 || /[\p{Cc}\p{Cf}]/u.test(args[key] as string))) ||
+        args[key] !== undefined && !(key === "childEffort" && args[key] === null) &&
+          (typeof args[key] !== "string" || !(args[key] as string).trim() ||
+            (args[key] as string).length > 256 || /[\p{Cc}\p{Cf}]/u.test(args[key] as string))) ||
       (args.issueNumbers !== undefined && (args.mode !== "full_control" || !Array.isArray(args.issueNumbers) || args.issueNumbers.length > 100 ||
         args.issueNumbers.some(n => !Number.isSafeInteger(n) || n < 1) || new Set(args.issueNumbers).size !== args.issueNumbers.length))) {
     throw new AssistantRefusal("Specify a Location, Orchestrator agent, first message and Custom or Full Control mode. Only Full Control accepts explicit issue numbers. The owner sets budgets and authority.");
@@ -183,7 +179,7 @@ export function registerAssistantCampaignStart(operations: AssistantOperations, 
   operations.register({
     name: ASSISTANT_CAMPAIGN_START, destructive: true,
     description: "Ask the thread owner to start one independent Orchestrator campaign. Supply a Project Location, first message and Custom or Full Control mode, with optional model settings. Only the owner can approve. Read command_get for the launched Session.",
-    inputSchema: { type: "object", properties, required, additionalProperties: false },
+    inputSchema: campaignStartSchema,
     resolveTarget, ownerCanAccess: (owner, target) => target.kind === "session"
       ? db.canAccessSession(owner, target.id)
       : target.kind === "receipt" || (target.kind === "project" && db.canAccessProject(owner, target.id)),
