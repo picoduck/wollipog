@@ -6,6 +6,7 @@
  * See docs/ACP-NOTES.md for the exact wire shapes.
  */
 
+import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import type {
   AuthenticateRequest,
@@ -13,6 +14,7 @@ import type {
   ContentBlock,
   CreateTerminalRequest,
   CreateTerminalResponse,
+  CreateElicitationResponse,
   KillTerminalRequest,
   LoadSessionRequest,
   LoadSessionResponse,
@@ -45,6 +47,7 @@ import type {
 import {
   ANTIGRAVITY_AUTO_MODE,
   ANTIGRAVITY_FULL_PERMISSIONS_MODE,
+  validateQuestionAnswers,
   type AcpRuntimeCapabilities, type AcpSessionContextConfig, type AgentCapabilities, type AgentContext,
   type AgentSlashCommand, type PermissionOption, type PromptImage, type SessionConfig, type SessionEventPayload,
 } from "@wollipog/protocol";
@@ -56,6 +59,7 @@ import {
 } from "./acp-contract.js";
 import type { RpcError } from "./jsonrpc.js";
 import { JsonRpcPeer } from "./jsonrpc.js";
+import { normalizeAcpFormElicitation } from "./form-elicitation.js";
 import { spawnAgent, killTree, provenProcessTreeExit, type AgentProcess, type SpawnIsolation } from "./spawn.js";
 import {
   acpSessionPresentation,
@@ -141,6 +145,13 @@ export class AcpClient {
   private readonly child: AgentProcess;
   private sessionId: string | null = null;
   private readonly permPending = new Map<string, (optionId: string | null) => void>();
+  private readonly pendingElicitations = new Map<string, {
+    form: NonNullable<ReturnType<typeof normalizeAcpFormElicitation>>;
+    reply: (response: CreateElicitationResponse) => void;
+  }>();
+  private readonly offersFormElicitation: boolean;
+  private promptCancelling = false;
+  private closingSession = false;
   private permCounter = 0;
   private disposed = false;
   private transportClosed = false;
@@ -231,6 +242,8 @@ export class AcpClient {
     // when it was prepared. A refusal throws before anything is spawned.
     const launch = resolveAcpLaunch(opts.command, opts.compatibility);
     this.compatibility = launch.compatibility;
+    this.offersFormElicitation = launch.compatibility?.profile === "antigravity" &&
+      !opts.initializeOnly && !opts.orchestrator && !opts.orchestratorRole;
     this.antigravityFullPermissions = launch.compatibility?.profile === "antigravity" &&
       !opts.orchestrator && !opts.orchestratorRole &&
       opts.initialPermissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id;
@@ -287,6 +300,7 @@ export class AcpClient {
       this.terminals.dispose();
       this.peer.dispose("agent process exited");
       this.settlePendingPermissions();
+      this.cancelElicitations();
       this.settleProviderInitiatedTurn(false, !this.disposed);
       if (!this.disposed) this.ev.onExit(code);
     });
@@ -300,6 +314,7 @@ export class AcpClient {
       this.terminals.dispose();
       this.peer.dispose(`spawn error: ${err.message}`);
       this.settlePendingPermissions();
+      this.cancelElicitations();
       this.settleProviderInitiatedTurn(false, false);
       this.ev.onExit(null);
     });
@@ -325,6 +340,9 @@ export class AcpClient {
     this.peer.onRequest("session/request_permission", (params) =>
       this.handlePermission(params as RequestPermissionRequest),
     );
+    if (this.offersFormElicitation) {
+      this.peer.onDeferredRequest("elicitation/create", (params, reply) => this.handleElicitation(params, reply));
+    }
     this.peer.onRequest("fs/read_text_file", (params) =>
       this.handleRead(params as ReadTextFileRequest),
     );
@@ -352,7 +370,8 @@ export class AcpClient {
 
   async initialize(): Promise<void> {
     try {
-      const res = await this.peer.request("initialize", compatibleAcpInitializeRequest(acpInitializeRequest(), this.compatibility) as unknown as Record<string, unknown>,
+      const request = acpInitializeRequest({ formElicitation: this.offersFormElicitation });
+      const res = await this.peer.request("initialize", compatibleAcpInitializeRequest(request, this.compatibility),
         acpLaunchRequestOptions(this.compatibility, "handshake"));
       this.negotiation = compatibleAcpNegotiation(negotiateAcpInitialize(res), this.compatibility);
     } catch (error) {
@@ -494,6 +513,9 @@ export class AcpClient {
   }
 
   async closeSession(): Promise<boolean> {
+    this.closingSession = true;
+    // A provider may wait on the form before acknowledging session/close.
+    this.cancelElicitations();
     if (!this.sessionId) return false;
     if (!this.negotiation?.stable.sessionClose) {
       return false;
@@ -846,7 +868,9 @@ export class AcpClient {
       return stopReason;
     } finally {
       // User-write barriers exist only to reject stale notifications racing the write/next turn.
+      this.cancelElicitations();
       this.promptInFlight = false;
+      this.promptCancelling = false;
       this.modeBarrier = null;
       this.configBarriers.clear();
       this.streamedAgentResponse = false;
@@ -861,7 +885,9 @@ export class AcpClient {
   }
 
   cancel(): void {
+    this.promptCancelling = this.promptInFlight;
     if (this.sessionId) this.peer.notify("session/cancel", { sessionId: this.sessionId });
+    this.cancelElicitations();
     // ACP: after session/cancel the client answers every pending permission request as
     // `cancelled`, so the agent never waits on an approval for a stopped turn. Like the native
     // drivers, nothing is emitted here: settling the turn settles its approval card. A sign-in
@@ -897,6 +923,32 @@ export class AcpClient {
     return true;
   }
 
+  answerQuestion(requestId: string, answers: Record<string, string | string[]>, action?: "submit" | "dismiss"): boolean {
+    const pending = this.pendingElicitations.get(requestId);
+    if (!pending) return false;
+    const answerAction = action ?? (Object.keys(answers).length > 0 ? "submit" : "dismiss");
+    if (validateQuestionAnswers(pending.form.questions, answers, answerAction)) return false;
+    this.pendingElicitations.delete(requestId);
+    pending.reply(answerAction === "submit" ? pending.form.accept(answers) : { action: "decline" });
+    if (!this.promptInFlight && this.providerTurnId !== null) {
+      this.providerTurnLastWasMessage = false;
+      this.refreshProviderTurnSettleTimer();
+    }
+    return true;
+  }
+
+  private cancelElicitations(): void {
+    for (const [requestId, { reply }] of this.pendingElicitations) {
+      this.pendingElicitations.delete(requestId);
+      reply({ action: "cancel" });
+      // Disposing the process during runner shutdown leaves the durable question available for
+      // provider-restart recovery. Turn cancellation and session/close resolve it normally.
+      if (!this.disposed) {
+        this.ev.onEvent({ kind: "question_resolved", requestId, answered: false, resolutionReason: "provider_resolved" });
+      }
+    }
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -904,6 +956,7 @@ export class AcpClient {
     this.transportClosed = true;
     this.terminals.dispose();
     this.settlePendingPermissions();
+    this.cancelElicitations();
     this.settleProviderInitiatedTurn(false, false);
     this.peer.dispose("client disposed");
     this.kill(this.child);
@@ -944,6 +997,7 @@ export class AcpClient {
   private hasActiveProviderTurnWork(): boolean {
     return this.providerTurnToolCalls.size > 0 ||
       this.providerTurnInFlightRequests.size > 0 ||
+      this.pendingElicitations.size > 0 ||
       this.hasPendingTurnPermission();
   }
 
@@ -977,6 +1031,7 @@ export class AcpClient {
   private settleProviderInitiatedTurn(emitResponseCompleted: boolean, notify: boolean): void {
     this.clearProviderTurnSettleTimer();
     const turnId = this.providerTurnId;
+    if (turnId) this.cancelElicitations();
     const streamed = this.providerTurnStreamedResponse;
     this.providerTurnId = null;
     this.providerTurnStreamedResponse = false;
@@ -1322,6 +1377,33 @@ export class AcpClient {
       options,
     });
     return result;
+  }
+
+  private handleElicitation(params: unknown, reply: (response: CreateElicitationResponse) => void): void {
+    if (this.disposed || this.transportClosed || this.closingSession || this.promptCancelling ||
+        this.providerTurnCancelling || this.establishingSession || this.suppressUpdates ||
+        !this.sessionId || !isRecord(params) || params.sessionId !== this.sessionId) {
+      reply({ action: "cancel" });
+      return;
+    }
+    const form = normalizeAcpFormElicitation(params);
+    if (!form || this.pendingElicitations.size >= 16) {
+      this.ev.onEvent({
+        kind: "error", nonFatal: true,
+        message: "Google Antigravity's question was declined because Wollipog could not display the form.",
+      });
+      reply({ action: "decline" });
+      return;
+    }
+    const providerTurn = !this.promptInFlight;
+    if (providerTurn && !this.ensureProviderInitiatedTurnStarted()) {
+      reply({ action: "cancel" });
+      return;
+    }
+    const requestId = `acp-elicitation:${randomUUID()}`;
+    this.pendingElicitations.set(requestId, { form, reply });
+    if (providerTurn) this.refreshProviderTurnSettleTimer();
+    this.ev.onEvent({ kind: "question_request", requestId, questions: form.questions, requestSource: "provider_elicitation" });
   }
 
   private async handleRead(params: ReadTextFileRequest): Promise<ReadTextFileResponse> {

@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import type { SessionEventsResponse, SessionView } from "@wollipog/protocol";
+import { ANTIGRAVITY_AGENT_ID, type SessionEventsResponse, type SessionView } from "@wollipog/protocol";
 import { readSessionEventHistory } from "../src/e2e/read-session-event-history.js";
 import {
   defaultLocalDeviceTokenPath,
@@ -26,6 +26,7 @@ const FAKE_CODEX = fileURLToPath(new URL(
   "../../runner/src/drivers/fixtures/fake-codex-app-server.mjs",
   import.meta.url,
 ));
+const FAKE_AGY = fileURLToPath(new URL("../../runner/src/fixtures/antigravity/fake-agy.mjs", import.meta.url));
 const RUNNER_ID = "agent-question-live-e2e-runner";
 const CONTROL_PLANE_TOKEN = "agent-question-live-e2e-control-plane-token";
 
@@ -157,7 +158,7 @@ async function expectQuestionControlsInsideCard(page: Page): Promise<void> {
 }
 
 async function startLiveStack(
-  provider: "claude" | "codex" = "claude",
+  provider: "claude" | "codex" | "antigravity" = "claude",
   codexScenario: "question" | "custom-question" | "dogfood-question" | "async-question" = "question",
   restartRecovery = false,
   asyncDelivery?: "accepted" | "rejected",
@@ -174,11 +175,17 @@ async function startLiveStack(
   const runnerHome = join(temp, "home");
   const runnerBin = join(temp, "bin");
   const configPath = join(temp, "runner.config.json");
-  const receiptPath = join(temp, "provider-receipt.json");
+  const receiptPath = join(temp, provider === "antigravity" ? "calls.jsonl" : "provider-receipt.json");
   const recoveryStatePath = join(temp, "provider-recovery-state.json");
+  const prompt = { antigravity: "Ask fixture question form", codex: "Ask the Codex release questions", claude: "Ask the release questions" }[provider];
   mkdirSync(workspaceDir, { recursive: true });
   mkdirSync(runnerHome, { recursive: true });
   mkdirSync(runnerBin, { recursive: true });
+  if (provider === "antigravity") {
+    const fakeAgyCommand = join(runnerBin, "agy");
+    writeFileSync(fakeAgyCommand, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(FAKE_AGY)} "$@"\n`, { mode: 0o755 });
+    writeFileSync(join(temp, "signed-in"), "fixture");
+  }
   if (provider === "codex") {
     mkdirSync(join(runnerHome, ".codex"), { recursive: true });
     writeFileSync(join(runnerHome, ".codex", "auth.json"), "{}");
@@ -235,6 +242,7 @@ async function startLiveStack(
     XDG_STATE_HOME: join(runnerHome, ".local", "state"),
     PATH: `${runnerBin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
     XDG_CACHE_HOME: join(runnerHome, ".cache"),
+    ...(provider === "antigravity" ? { FAKE_AGY_STATE: temp, DBUS_SESSION_BUS_ADDRESS: "", XDG_RUNTIME_DIR: "" } : {}),
     ...(journalFault ? { WOLLIPOG_TEST_JOURNAL_FAULT_MARKER: receiptPath + ".journal-fault" } : {}),
   });
   const spawnRunner = () => {
@@ -308,7 +316,8 @@ async function startLiveStack(
       token: runnerToken,
       dataDir: runnerDataDir,
       workspaces: [{ id: "repo", name: "Repo", path: workspaceDir }],
-      agents: [agent],
+      // Let the runner discover agy and apply the same compatibility profile as a real session.
+      agents: provider === "antigravity" ? [] : [agent],
     }));
 
     const initialRunner = spawnRunner();
@@ -323,10 +332,10 @@ async function startLiveStack(
         body: JSON.stringify({
           runnerId: RUNNER_ID,
           workspaceId: "repo",
-          agentId: provider === "codex" ? "codex-question" : "claude-question",
-          prompt: provider === "codex" ? "Ask the Codex release questions" : "Ask the release questions",
+          agentId: provider === "antigravity" ? ANTIGRAVITY_AGENT_ID : agent.id,
+          prompt,
           useWorktree: false,
-          config: { permissionMode: provider === "codex" ? "on-request" : "default" },
+          config: { permissionMode: { antigravity: "auto", codex: "on-request", claude: "default" }[provider] },
         }),
       });
       if (created.status === 201) {
@@ -395,7 +404,7 @@ async function startLiveStack(
       }
       await delay(100);
     }
-    throw new Error(`${provider === "codex" ? "Codex" : "Claude"} question never reached the control plane` +
+    throw new Error(`${provider} question never reached the control plane` +
       `${awaitIdle ? " with the session idle" : ""}\n` +
       `session: ${JSON.stringify(lastSession)}\nevents: ${JSON.stringify(await fetchEvents(stack).catch(String))}\n${logs()}`);
   } catch (error) {
@@ -403,6 +412,49 @@ async function startLiveStack(
     throw error;
   }
 }
+
+test("Antigravity form questions cross the live stack and resume the same turn", async ({ page }) => {
+  test.skip(process.platform !== "linux" && process.platform !== "darwin", "Antigravity runner setup requires Linux or macOS");
+  test.setTimeout(120_000);
+  const stack = await startLiveStack("antigravity");
+  try {
+    await expect.poll(() => fetchSession(stack)).toMatchObject({
+      status: "input_required", pendingApproval: { kind: "question" },
+    });
+    expect((await fetchEvents(stack)).events.map(({ payload }) => payload)).toContainEqual(expect.objectContaining({
+      kind: "question_request", requestSource: "provider_elicitation",
+    }));
+    const fragment = new URLSearchParams({ origin: stack.httpBase, token: stack.ownerToken, sessionId: stack.sessionId });
+    await page.addInitScript(() => localStorage.setItem("wollipog.question-response-style", "interactive"));
+    await page.goto(`/agent-questions-live-e2e.html#${fragment}`);
+    const card = page.getByRole("region", { name: "Agent Questions" });
+    await page.locator(".request-dock").waitFor();
+    await openMobileQuestion(page);
+    await card.getByRole("radio", { name: "Blue", exact: true }).click();
+    await card.getByRole("button", { name: "Next", exact: true }).click();
+    await card.getByRole("textbox").fill("Purple is also fine");
+    await card.getByRole("button", { name: "Next", exact: true }).click();
+    await card.getByRole("checkbox", { name: "Gold", exact: true }).click();
+    await card.getByRole("checkbox", { name: "Silver", exact: true }).click();
+    await card.getByRole("button", { name: "Submit Answers", exact: true }).click();
+
+    await expect(page.getByText("Question Answered", { exact: true })).toBeVisible();
+    await expect(card).toHaveCount(0);
+    await expect.poll(async () => {
+      const session = await fetchSession(stack);
+      return [session.status, session.pendingApproval];
+    }).toEqual(["idle", null]);
+    await expect.poll(async () => (await fetchSession(stack)).preview).toContain("Question answers received by Antigravity.");
+    const records = (await readFile(stack.receiptPath, "utf8")).trim().split("\n")
+      .map((line) => JSON.parse(line) as { method: string; result?: unknown });
+    expect(records.filter(({ method }) => method === "session/prompt")).toHaveLength(1);
+    expect(records.find(({ method }) => method === "elicitation_response")?.result).toEqual({
+      action: "accept", content: { q1: "2", q1_other: "Purple is also fine", q2: ["G", "S"] },
+    });
+  } finally {
+    await stack.stop();
+  }
+});
 
 for (const viewport of [
   { name: "desktop", width: 1280, height: 800 },

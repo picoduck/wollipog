@@ -149,6 +149,10 @@ export class AcpDriver implements Driver {
     return this.client.resolvePermission(requestId, optionId);
   }
 
+  answerQuestion(requestId: string, answers: Record<string, string | string[]>, action?: "submit" | "dismiss"): boolean {
+    return this.client.answerQuestion(requestId, answers, action);
+  }
+
   logout(): Promise<void> {
     return this.client.logout();
   }

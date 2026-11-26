@@ -185,6 +185,42 @@ if (args[0] === "acp" && args[1] === "--login") {
   const sessionCwds = new Map();
   /** Answers awaited for requests the fixture sent the client, by request id. */
   const clientRequests = new Map();
+  let formElicitation = false;
+  const askQuestion = (sessionId, scenario) => {
+    if (!formElicitation && scenario === "form") {
+      update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Do you prefer red or blue?" } });
+      return endTurn("end_turn");
+    }
+    const id = `elicitation-${++permissionCounter}`;
+    const question = "Do you prefer red or blue?";
+    const requestedSchema = {
+      type: "object",
+      properties: {
+        q1: { type: "string", title: question, oneOf: [{ const: "1", title: "Red" }, { const: "2", title: "Blue" }] },
+        q1_other: { type: "string", title: "Other", description: `Optional free-form answer to: ${question}` },
+        q2: { type: "array", title: "Which accents?", minItems: 1, uniqueItems: true, items: {
+          anyOf: [{ const: "G", title: "Gold" }, { const: "S", title: "Silver" }],
+        } },
+      },
+      required: ["q2"],
+    };
+    if (scenario === "unsupported") requestedSchema.properties.q1_other.pattern = ".*";
+    const questionTurn = turn;
+    if (questionTurn) questionTurn.elicitation = id;
+    clientRequests.set(id, ({ result, error }) => {
+      record({ method: "elicitation_response", result, error });
+      if (turn !== questionTurn) return;
+      if (result?.action === "cancel") return endTurn("cancelled");
+      const text = result?.action === "accept" ? "Question answers received by Antigravity." : "Question declined by Wollipog.";
+      update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+      endTurn("end_turn");
+    });
+    return send({ id, method: "elicitation/create", params: {
+      sessionId: scenario === "foreign" ? "another-session" : sessionId,
+      toolCallId: "fixture-ask-question", message: "The agent has a question.",
+      ...(scenario === "url" ? { mode: "url", url: "https://example.test/", elicitationId: id } : { mode: "form", requestedSchema }),
+    } });
+  };
   lines.on("line", (line) => {
     const request = JSON.parse(line);
     // The client's answer to a permission (or other client) request.
@@ -205,7 +241,7 @@ if (args[0] === "acp" && args[1] === "--login") {
       record({ method: "session/cancel" });
       // A pending permission is settled by the client's cancelled answer (ACP); otherwise the
       // turn ends here.
-      if (turn && !turn.permission) endTurn("cancelled");
+      if (turn && !turn.permission && !turn.elicitation) endTurn("cancelled");
       return;
     }
     if (request.id === undefined) return;
@@ -217,6 +253,7 @@ if (args[0] === "acp" && args[1] === "--login") {
       ...(Array.isArray(request.params?.mcpServers)
         ? { mcpServerNames: request.params.mcpServers.map((server) => server.name) } : {}) });
     if (request.method === "initialize") {
+      formElicitation = Boolean(request.params?.clientCapabilities?.elicitation?.form);
       // Valid JSON that is not a JSON-RPC message.
       if (modes.has("acp_null")) process.stdout.write("null\n5\n[]\n");
       if (modes.has("handshake_hang")) return;
@@ -273,6 +310,12 @@ if (args[0] === "acp" && args[1] === "--login") {
       }
       turn = { id: request.id, permission: null };
       update(sessionId, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Reading the request." } });
+      if (/schedule fixture question/iu.test(text)) {
+        endTurn("end_turn");
+        return askQuestion(sessionId, "form");
+      }
+      const elicitation = /ask fixture question (form|unsupported|url|foreign)/iu.exec(text);
+      if (elicitation) return askQuestion(sessionId, elicitation[1]);
       if (/run (a |the )?command/iu.test(text)) return runCommand(sessionId, sessionCwds.get(sessionId) ?? process.cwd());
       if (/wait/iu.test(text)) return; // Ends only on session/cancel.
       if (/client write/iu.test(text)) {
