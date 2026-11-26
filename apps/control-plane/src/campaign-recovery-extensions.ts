@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { campaignAuthorityPreflight, campaignIssueForgeUrl, type CampaignRecoveryRecord } from "@wollipog/protocol";
 import { campaignBoundaryCurrent, campaignIssueInScope } from "./campaign-authority.js";
+import { hasCampaignCheckFailure } from "./campaign-forge-observations.js";
 import type { ControlPlaneDb } from "./db.js";
 import type { AuthPrincipal } from "./identity.js";
 import type { RecoveryExtensionSnapshot } from "./campaign-recovery-store.js";
@@ -25,6 +26,8 @@ export function recoveryExtensionContext(db: ControlPlaneDb, campaignId: string,
   if (!item?.issue || work?.handoff || !campaignIssueInScope(root.orchestratorPolicy, item.issue)) return null;
   const fact = db.campaignForgeObservations.facts(root.id, [ref], now)[0]?.fact;
   if (fact?.availability !== "fresh" || fact.value.state !== "open" || fact.value.headSha !== record.resource.occurrenceId) return null;
+  if (record.action === "repair_checks" ? !hasCampaignCheckFailure(fact.value)
+    : fact.value.forge === "gitlab" || fact.value.reviewDecision !== "changes_requested") return null;
   const requesters = db.campaignRecoveryRequesters(root.id, ref.repository, ref.number);
   if (requesters.length !== 1) return null;
   const requester = db.getSession(requesters[0]!, { includeCampaignProjection: false });
@@ -88,7 +91,8 @@ export function registerCampaignRecoveryExtensionRoutes(app: FastifyInstance, de
     // Reconciliation precedes current-resource checks: a spent/revoked receipt is history only.
     const previous = db.campaignRecovery.extensions(target.id).find(item => item.requestId === body.requestId);
     if (!previous) {
-      const context = recoveryExtensionContext(db, target.id, snapshot.record, Date.now());
+      const current = db.campaignRecovery.activeRecords(target.id).find(item => item.id === snapshot.record.id);
+      const context = current && recoveryExtensionContext(db, target.id, current, Date.now());
       if (!context || context.restorationRequired || context.binding !== snapshot.binding ||
           context.requesterSessionId !== snapshot.requesterSessionId || context.ownerUserId !== snapshot.ownerUserId)
         return reply.code(409).send({ error: "Recovery changed or the original requester needs human restoration. Obtain a fresh preview." });

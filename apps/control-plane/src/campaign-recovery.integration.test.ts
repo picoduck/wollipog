@@ -948,6 +948,12 @@ test("owner API restores the original requester separately and retains worktree 
     payload.snapshot = restored.json().snapshot;
     assert.equal((await post("/apply", { ...payload, snapshot: { ...payload.snapshot, ownerUserId: "another-owner" } })).statusCode, 409);
     assert.equal((await post("/preview", { recoveryId: record.id, extraInstructions: 100 })).statusCode, 409);
+    assert.equal((await post("/apply", { requestId: "malformed", snapshot: { record: {} } })).statusCode, 409);
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, observation: { ...h.observation,
+      checks: { state: "passing", failing: 0, passing: 1, pending: 0 },
+      requiredChecks: { state: "passing", failing: 0, passing: 1, pending: 0 } } }], Date.now());
+    assert.equal((await post("/apply", payload)).statusCode, 409, "repaired checks invalidate the preview before the next sweep");
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, observation: h.observation }], Date.now());
     const stale = { ...payload, snapshot: { ...payload.snapshot, record: { ...record, attempts: 3 } } };
     assert.equal((await post("/apply", stale)).statusCode, 409);
     const applied = await post("/apply", payload);
