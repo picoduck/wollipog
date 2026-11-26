@@ -377,16 +377,23 @@ export class AssistantOwnerConfirmations {
     const target = JSON.parse(row.target_json) as AssistantTarget;
     const campaign = row.operation === ASSISTANT_CAMPAIGN_START && row.impact_json ? JSON.parse(row.impact_json) as CampaignConfirmationPreview : undefined;
     const args = JSON.parse(row.arguments_json) as Record<string, unknown>;
+    const mode = args.mode === "custom" || args.mode === "full_control" ? args.mode : undefined;
+    const budgetlessCustom = campaign && mode === "custom" && !campaign.budget;
+    // Pending previews saved before budgetless Custom approval still have the old budget copy.
+    const facts = budgetlessCustom
+      ? campaign.facts.map(fact => fact.label === "Campaign Budget" ? { ...fact, value: "No campaign budget applies." } : fact)
+      : campaign?.facts;
     return {
       id: row.id,
       threadId: row.thread_id,
       operation: row.operation,
       title: ownerConfirmationTitle(row.operation),
-      summary: ownerConfirmationSummary(row.operation),
+      summary: budgetlessCustom ? "Starts an independent Orchestrator campaign with the settings and authority shown here."
+        : ownerConfirmationSummary(row.operation),
       target: { kind: target.kind, id: target.id, label: row.target_label },
-      impact: campaign?.facts ?? impactLines(row.impact_json === null ? undefined : JSON.parse(row.impact_json)),
+      impact: facts ?? impactLines(row.impact_json === null ? undefined : JSON.parse(row.impact_json)),
       arguments: campaign ? [{ label: "First Message", value: String(args.prompt) }] : argumentLines(args),
-      ...(campaign ? { campaign: { digest: (JSON.parse(row.binding_json) as OwnerConfirmationBinding).targetDigest, budget: campaign.budget } } : {}),
+      ...(campaign ? { campaign: { digest: (JSON.parse(row.binding_json) as OwnerConfirmationBinding).targetDigest, budget: campaign.budget, mode } } : {}),
       status: row.status,
       createdAt: row.created_at,
       expiresAt: row.expires_at,
@@ -445,7 +452,7 @@ export class AssistantOwnerConfirmationService {
     if (current.campaign?.digest !== campaignDigest || (current.operation === ASSISTANT_CAMPAIGN_START && !current.campaign)) {
       throw new AssistantOwnerConfirmationRefusal("Review the current campaign settings before approving this launch.", 409);
     }
-    if (current.campaign && !current.campaign.budget) {
+    if (current.campaign && current.campaign.mode !== "custom" && !current.campaign.budget) {
       throw new AssistantOwnerConfirmationRefusal("Set a campaign budget before approving this launch.", 409);
     }
     const inFlight = this.running.get(id);

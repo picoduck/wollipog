@@ -235,8 +235,10 @@ test("an Assistant campaign uses the reviewed New Session settings and its own f
       assert.equal(card!.title, "Start Campaign");
       assert.deepEqual(card!.arguments, [{ label: "First Message", value: args.prompt }]);
       assert.deepEqual(card!.campaign?.budget, budget);
+      assert.equal(card!.campaign?.mode, mode);
       const facts = new Map(card!.impact.map(({ label, value }) => [label, value]));
       assert.equal(facts.get("Campaign Mode"), mode === "custom" ? "Custom" : "Full Control");
+      assert.equal(facts.get("Campaign Budget"), "$40 USD · 400 tool calls");
       assert.equal(facts.get("Orchestrator Model"), args.model);
       assert.equal(facts.get("Orchestrator Effort"), args.effort);
       assert.equal(facts.get("Child Model"), args.childModel);
@@ -409,9 +411,10 @@ test("campaign confirmation rejects agent approval, forged settings, stale plans
     await h.call(h.args);
     const [card] = h.pending();
     assert.equal(card!.campaign?.budget, null);
+    assert.equal(card!.campaign?.mode, "full_control");
     assert.equal((await h.answer(card!.id, "approve")).statusCode, 409, "old web route refuses");
     assert.equal((await h.answer(card!.id, "approve-campaign", { digest: "f".repeat(64) })).statusCode, 409);
-    assert.equal((await h.answer(card!.id, "approve-campaign", { digest: card!.campaign!.digest })).statusCode, 409, "owner must set a budget");
+    assert.equal((await h.answer(card!.id, "approve-campaign", { digest: card!.campaign!.digest })).statusCode, 409, "Full Control requires an owner-set budget");
     assert.equal((await h.answer(card!.id, "campaign-budget", { digest: card!.campaign!.digest, budget: { costUsd: 10, toolCalls: 100 } }, "Bearer agent")).statusCode, 403);
     const revised = await h.answer(card!.id, "campaign-budget", { digest: card!.campaign!.digest, budget: { costUsd: 10, toolCalls: 100 } });
     assert.equal(revised.statusCode, 200, revised.body);
@@ -438,25 +441,88 @@ test("campaign confirmation rejects agent approval, forged settings, stale plans
   } finally { await h.close(); }
 });
 
+test("a Custom Assistant campaign without a budget still requires exact owner approval", async () => {
+  const h = await assistantCampaignFixture();
+  try {
+    const args = { ...h.args, mode: "custom", issueNumbers: undefined };
+    const before = sessionCount(h);
+    const starts = h.starts.length;
+    const preview = async (commandId: string) => {
+      await h.call({ ...args, commandId });
+      const [card] = h.pending();
+      assert.equal(card!.campaign?.budget, null);
+      assert.equal(card!.campaign?.mode, "custom");
+      assert.equal(card!.impact.find(fact => fact.label === "Campaign Budget")?.value, "No campaign budget applies.");
+      return { id: card!.id, digest: card!.campaign!.digest };
+    };
+
+    const denied = await preview("denied");
+    assert.equal((await h.answer(denied.id, "deny")).json().confirmation.status, "denied");
+    assert.equal((await h.answer(denied.id, "approve-campaign", { digest: denied.digest })).json().confirmation.status, "denied");
+
+    const expired = await preview("expired");
+    h.db.raw().prepare("UPDATE assistant_owner_confirmations SET expires_at=0 WHERE id=?").run(expired.id);
+    assert.equal((await h.answer(expired.id, "approve-campaign", { digest: expired.digest })).json().confirmation.status, "expired");
+
+    const approved = await preview(args.commandId);
+    assert.equal((await h.answer(approved.id, "approve-campaign", { digest: approved.digest }, "Bearer agent")).statusCode, 403);
+    assert.equal((await h.answer(approved.id, "approve-campaign", { digest: "f".repeat(64) })).statusCode, 409);
+    assert.equal(sessionCount(h), before);
+    assert.equal(h.starts.length, starts);
+
+    const approvals = await Promise.all(Array.from({ length: 2 }, () =>
+      h.answer(approved.id, "approve-campaign", { digest: approved.digest })));
+    const outcomes = approvals.map(response => {
+      assert.equal(response.statusCode, 200, response.body);
+      const { outcome } = response.json().confirmation;
+      assert.equal(outcome.receiptStatus, "succeeded", response.body);
+      return outcome;
+    });
+    const id = outcomes[0].sessionId;
+    assert.equal(outcomes[1].sessionId, id);
+    assert.equal(sessionCount(h), Number(before) + 1);
+    assert.equal(h.starts.length, starts + 1);
+    const root = h.db.getSession(id)!;
+    assert.equal(root.parentSessionId, null);
+    assert.notEqual(root.orchestratorPolicy?.control?.mode, "full_control");
+    assert.equal(root.costBudgetUsd, null);
+    assert.equal(root.maxToolCalls, null);
+    const { costUsd, toolCalls } = h.db.campaignBudgets.view(id)!.authority;
+    assert.deepEqual({ costUsd, toolCalls }, { costUsd: undefined, toolCalls: undefined });
+    assert.equal(h.settings.view(h.human).defaults.campaignBudget, undefined);
+  } finally { await h.close(); }
+});
+
 test("approving an updated campaign preview funds the root with the owner's revised allowance", async () => {
   for (const mode of ["full_control", "custom"] as const) {
     const h = await assistantCampaignFixture();
     try {
-      saveBudget(h, { costUsd: 40, toolCalls: 400 });
+      const saved = mode === "full_control" ? { costUsd: 40, toolCalls: 400 } : null;
+      saveBudget(h, saved);
+      const defaults = h.settings.view(h.human).defaults;
       await h.call({ ...h.args, mode, ...(mode === "custom" ? { issueNumbers: undefined } : {}) });
       const [card] = h.pending();
+      assert.deepEqual(card!.campaign?.budget, saved);
       const edited = { costUsd: 10, toolCalls: 100 };
       const revised = await h.answer(card!.id, "campaign-budget", { digest: card!.campaign!.digest, budget: edited });
       assert.equal(revised.statusCode, 200, revised.body);
-      const digest = revised.json().confirmation.campaign.digest;
+      const { campaign, impact } = revised.json().confirmation;
+      const { digest } = campaign;
+      assert.deepEqual(campaign.budget, edited);
+      assert.ok(impact.some((fact: { label: string; value: string }) => fact.label === "Campaign Budget" && fact.value === "$10 USD · 100 tool calls"));
       assert.notEqual(digest, card!.campaign!.digest);
+      assert.equal((await h.answer(card!.id, "approve-campaign", { digest: card!.campaign!.digest })).statusCode, 409);
       const response = await h.answer(card!.id, "approve-campaign", { digest });
       assert.equal(response.statusCode, 200, response.body);
       const outcome = response.json().confirmation.outcome;
       assert.equal(outcome.receiptStatus, "succeeded", response.body);
       const { costUsd, toolCalls } = h.db.campaignBudgets.view(outcome.sessionId)!.authority;
       assert.deepEqual({ costUsd, toolCalls }, edited);
-      assert.deepEqual(h.settings.view(h.human).defaults.campaignBudget, { costUsd: 40, toolCalls: 400 });
+      const allocation = h.db.campaignBudgets.allocation(outcome.sessionId)!;
+      const root = h.db.getSession(outcome.sessionId)!;
+      assert.equal(root.costBudgetUsd, allocation.costUsd);
+      assert.equal(root.maxToolCalls, allocation.toolCalls);
+      assert.deepEqual(h.settings.view(h.human).defaults, defaults);
     } finally { await h.close(); }
   }
 });

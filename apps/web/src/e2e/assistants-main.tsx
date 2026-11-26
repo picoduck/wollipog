@@ -66,7 +66,7 @@ const spendingScenario = params.get("spending");
 const overBudgetBar = params.get("thread-bar") === "over-budget";
 const panelScenario = params.get("thread-panel");
 const healthScenario = params.get("thread-health");
-const campaignScenario = params.has("campaign");
+const campaignScenario = params.get("campaign");
 const resultScenario = params.get("confirmation-result");
 const receiptScenario = params.get("transcript-receipts");
 const delegationScenario = params.get("delegation");
@@ -343,15 +343,18 @@ const access = { level: "full_access", destructive: "ask" } as const;
  * for its owner: stop a session it launched, archive another, then stop a third, and so on round the
  * three. Approve Once and Deny settle one and republish the thread. */
 function confirmation(index: number): AssistantOwnerConfirmation {
-  if (campaignScenario) return {
+  const customCampaign = campaignScenario === "custom" || campaignScenario === "custom-saved";
+  const budget = campaignScenario === "custom" ? null : { costUsd: 20, toolCalls: 150 };
+  if (campaignScenario !== null) return {
     id: `aoc_campaign_${index}`, threadId: "thr_triage", operation: "campaign_start", title: "Start Campaign",
-    summary: "Starts an independent Orchestrator campaign with the settings and authority shown here. Its usage is charged to its own campaign allowance.",
+    summary: "Starts an independent Orchestrator campaign with the settings and authority shown here." +
+      (budget ? " Its usage is charged to its own campaign allowance." : ""),
     target: { kind: "project", id: "project-releases", label: index === 0
       ? "Release Engineering for Long-Running Cross-Platform Verification and Packaging · Build Machine"
       : "Release Engineering · Build Machine" },
     impact: [
-      { label: "Campaign Mode", value: "Full Control" },
-      { label: "Campaign Budget", value: "$20 USD · 150 tool calls" },
+      { label: "Campaign Mode", value: customCampaign ? "Custom" : "Full Control" },
+      { label: "Campaign Budget", value: budget ? "$20 USD · 150 tool calls" : "No campaign budget applies." },
       { label: "Orchestrator Harness", value: "Codex (App Server)" },
       { label: "Orchestrator Model", value: "gpt-6.2-sol" },
       { label: "Orchestrator Effort", value: "high" },
@@ -359,24 +362,31 @@ function confirmation(index: number): AssistantOwnerConfirmation {
       { label: "Child Model", value: index === 0
         ? "claude-opus-5-5-release-engineering-long-context-verification-preview-fixture"
         : "claude-opus-5-5" },
-      { label: "Child Effort", value: "high" },
+      { label: "Child Effort", value: customCampaign ? "Automatic" : "high" },
       { label: "Concurrent Children", value: "2" },
       { label: "Follow-Ups", value: "Recommend Only · 0 accepted follow-ups" },
       { label: "Completion", value: "Retain" },
       { label: "Provider Permissions", value: "Harness Default" },
       { label: "Isolation", value: "Strict Project Isolation off · Integration Isolation off" },
-      { label: "Repository Scope", value: "example/release-tools · Release Engineering" },
-      { label: "Initial Issues", value: "#38, #41" },
-      { label: "Issue Authority", value: "Up to 2 issues. Related follow-ups require owner admission. Closure reasons: Completed." },
-      { label: "Delegated Operations", value: "Issue Closure, Campaign Issue Scope, PR Merge, Merged Branch Deletion, Implementation Question, UI Evidence Approval" },
-      { label: "Review", value: "Regular cross-model review." },
-      { label: "Evidence", value: "The Orchestrator reviews screenshots. For video and external evidence it asks for screenshots." },
-      { label: "Human-Required Gates", value: "Authentication and Credentials\nGovernance and Standing Access\nBudget Increases" },
+      ...(customCampaign ? [
+        { label: "Issue Scope", value: "The first message goes through normal Custom campaign issue admission. Scope changes still require the owner's approval." },
+        { label: "Parent Control", value: "Human Approval" },
+        { label: "Decision Owners", value: "Implementation Question: Orchestrator\nPR Merge: Human\nMerged Branch Deletion: Human\nFollow Up Issue Publication: Human\nUI Evidence Approval: Human\nReview Round Extension: Human\nCampaign Issue Scope: Human\nIssue Closure: Human\nCI Rerun: Human" },
+      ] : [
+        { label: "Repository Scope", value: "example/release-tools · Release Engineering" },
+        { label: "Initial Issues", value: "#38, #41" },
+        { label: "Issue Authority", value: "Up to 2 issues. Related follow-ups require owner admission. Closure reasons: Completed." },
+        { label: "Delegated Operations", value: "Issue Closure, Campaign Issue Scope, PR Merge, Merged Branch Deletion, Implementation Question, UI Evidence Approval" },
+        { label: "Review", value: "Regular cross-model review." },
+        { label: "Evidence", value: "The Orchestrator reviews screenshots. For video and external evidence it asks for screenshots." },
+        { label: "Human-Required Gates", value: "Authentication and Credentials\nGovernance and Standing Access\nBudget Increases" },
+      ]),
     ],
     arguments: [{ label: "First Message", value: index === 0
       ? "Plan the release and check issues #38 and #41. Run the existing verification on the disposable Release Engineering project, then report the checks that passed and any fixes that need review. Match the results against ReleaseEngineeringCrossPlatformPackagingReadinessChecklistWithoutAdditionalSeparators."
-      : `Audit the release checklist for issue #38. ${"LongUnbrokenReleaseChecklistIdentifier".repeat(20)}` }],
-    campaign: { digest: index.toString(16).repeat(64), budget: { costUsd: 20, toolCalls: 150 } },
+      : customCampaign ? "Audit the release checklist and report the verification results."
+        : `Audit the release checklist for issue #38. ${"LongUnbrokenReleaseChecklistIdentifier".repeat(20)}` }],
+    campaign: { digest: index.toString(16).repeat(64), budget, mode: customCampaign ? "custom" : "full_control" },
     status: "pending", createdAt: NOW - minute + index, expiresAt: NOW + 59 * minute, resolvedAt: null,
   };
   const stop = index % 3 !== 1;
@@ -1084,7 +1094,8 @@ const client = {
     const current = found(threadId);
     const previous = current.confirmations?.find(candidate => candidate.id === confirmationId);
     if (!previous?.campaign || previous.campaign.digest !== digest) throw new Error("Review the campaign again.");
-    const confirmation = { ...previous, campaign: { digest: "e".repeat(64), budget },
+    const confirmation = { ...previous, campaign: { ...previous.campaign, digest: "e".repeat(64), budget },
+      summary: "Starts an independent Orchestrator campaign with the settings and authority shown here. Its usage is charged to its own campaign allowance.",
       impact: previous.impact.map(line => line.label === "Campaign Budget"
         ? { ...line, value: `$${budget.costUsd} USD · ${budget.toolCalls} tool calls` } : line) };
     const thread = { ...current, confirmations: current.confirmations!.map(candidate => candidate.id === confirmationId ? confirmation : candidate) };
