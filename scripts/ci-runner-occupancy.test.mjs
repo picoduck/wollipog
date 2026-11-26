@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
+import fs from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import {
   allocated, analyze, cachedApi, category, collectOccupancy, combineOccupancy, dropCopiedJobs, main, mergeGroupCriticalWaits,
@@ -212,26 +214,103 @@ test("the wrapper's own calls never take a quota below the floor", async (t) => 
   assert.equal(remaining, 1000);
 });
 
-test("concurrent callers share one quota refresh and cannot jointly cross the floor", async (t) => {
+// Hold real ENOENT cache misses at the filesystem boundary, before admission. Launching
+// Promise.all alone does not make those asynchronous misses finish in the same turn.
+async function gatedCacheMisses(t, dir) {
+  const readFile = fs.readFile;
+  const misses = [];
+  let completed = 0;
+  const ready = Promise.withResolvers();
+  t.mock.method(fs, "readFile", async (file, ...args) => {
+    if (dirname(file) !== dir) return readFile(file, ...args);
+    const gate = Promise.withResolvers();
+    // Record invocation order, independent of filesystem completion order.
+    misses.push(gate);
+    let miss;
+    try {
+      return await readFile(file, ...args);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      miss = error;
+    }
+    if (++completed === 6) ready.resolve();
+    await gate.promise;
+    throw miss;
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  return { misses, ready: ready.promise };
+}
+
+test("concurrent callers share an active quota refresh and cannot jointly cross the floor", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "occupancy-concurrent-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   let remaining = 1002, reads = 0;
+  const cache = await gatedCacheMisses(t, dir);
+  const refreshes = [Promise.withResolvers(), Promise.withResolvers()];
+  const started = refreshes.map(() => Promise.withResolvers());
+  const finishCalls = Promise.withResolvers();
   const api = async (path) => {
     if (path === "/rate_limit") {
-      reads++;
+      const index = reads++;
       const snapshot = remaining;
-      await new Promise((resolve) => setImmediate(resolve));
+      started[index]?.resolve();
+      await refreshes[index]?.promise;
       return { resources: { core: { remaining: snapshot }, graphql: { remaining: 5000 } } };
     }
-    await new Promise((resolve) => setImmediate(resolve));
+    await finishCalls.promise;
     remaining--;
     return { status: "completed" };
   };
   const cached = cachedApi(api, dir, { floor: 1000 });
-  const results = await Promise.allSettled(Array.from({ length: 6 }, (_, i) => cached(`/item/${i}`)));
+  const pending = Promise.allSettled(Array.from({ length: 6 }, (_, i) => cached(`/item/${i}`)));
+  await cache.ready;
+  cache.misses.forEach((gate) => gate.resolve());
+  await started[0].promise;
+  refreshes[0].resolve();
+  await started[1].promise;
+  // Both data calls remain in flight: the second read must reserve their quota.
+  refreshes[1].resolve();
+  finishCalls.resolve();
+  const results = await pending;
   assert.equal(results.filter((result) => result.status === "fulfilled").length, 2);
   assert.equal(remaining, 1000);
-  assert.ok(reads <= 3);
+  assert.equal(reads, 2, `expected two shared quota refreshes, observed ${reads}`);
+});
+
+test("late cache misses refresh separately after a shared quota refresh has settled", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "occupancy-late-misses-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const cache = await gatedCacheMisses(t, dir);
+  let remaining = 1002, reads = 0;
+  const api = async (path) => {
+    if (path === "/rate_limit") {
+      reads++;
+      return { resources: { core: { remaining }, graphql: { remaining: 5000 } } };
+    }
+    remaining--;
+    return { status: "in_progress" };
+  };
+  const cached = cachedApi(api, dir, { floor: 1000 });
+  const calls = Array.from({ length: 6 }, (_, i) => cached(`/item/${i}`));
+  const pending = Promise.allSettled(calls);
+  await cache.ready;
+  cache.misses[0].resolve();
+  cache.misses[1].resolve();
+  await Promise.all(calls.slice(0, 2));
+  for (let i = 2; i < 6; i++) {
+    cache.misses[i].resolve();
+    await assert.rejects(calls[i], /budget floor 1000 reached after 2 calls/);
+  }
+  const results = await pending;
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 2);
+  assert.equal(remaining, 1000);
+  // One initial refresh admits two calls. Four misses arriving after it settled each
+  // retry the exempt endpoint, so the old reads <= 3 bound was not valid.
+  assert.equal(reads, 5, `expected one shared and four late quota refreshes, observed ${reads}`);
 });
 
 test("a quota read that started before a call finished does not count that call as spent", async (t) => {
