@@ -1411,6 +1411,68 @@ process.stdin.on('end', () => {
   });
 });
 
+test("Location-switch replacement teardown waits for its proof-deletion writer", { timeout: 30_000 }, async () => {
+  if (process.platform === "win32") return;
+  let root!: string;
+  await withSession("replacement-proof-deletion", async (h) => {
+    root = h.root;
+    // Hold Git's actual proof-deletion transaction open after activation commits.
+    const socketPath = join(h.root, "proof.sock");
+    let socket: Socket | undefined;
+    let connected!: (socket: Socket) => void;
+    const connection = new Promise<Socket>((resolve) => { connected = resolve; });
+    const server = createServer((client) => { socket = client; connected(client); });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, resolve);
+    });
+    const hook = join(h.docs, ".git", "hooks", "reference-transaction");
+    mkdirSync(join(h.docs, ".git", "hooks"), { recursive: true });
+    writeFileSync(hook, `#!${process.execPath}
+let input = '';
+process.stdin.on('data', chunk => { input += chunk; });
+process.stdin.on('end', () => {
+  if (process.argv[2] !== 'prepared' || !input.split('\\n').some(line => /^[0-9a-f]+ 0+ refs\\/worktree\\/wollipog-rollback\\//.test(line))) return;
+  const socket = require('net').connect(${JSON.stringify(socketPath)});
+  socket.on('error', () => process.exit(1));
+  socket.resume();
+});
+`, { mode: 0o755 });
+    let gateTimeout: ReturnType<typeof setTimeout> | undefined;
+    let shutdown: Promise<void> | undefined;
+    try {
+      assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+      socket = await Promise.race([
+        connection,
+        new Promise<never>((_resolve, reject) => {
+          gateTimeout = setTimeout(() => reject(new Error("Git did not reach replacement proof deletion")), 10_000);
+        }),
+      ]);
+      clearTimeout(gateTimeout);
+      await waitFor(() => h.providers[1]?.prompts.length === 1, "the replacement did not launch");
+      const worktreePath = h.store.readMeta(h.sessionId)!.worktreePath!;
+      assert.equal(h.store.readMeta(h.sessionId)?.workspaceId, "docs", "the move committed before deletion");
+      let teardownSettled = false;
+      shutdown = shutdownLocationSwitchManagers([h.manager]).then(() => { teardownSettled = true; });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(teardownSettled, false, "teardown must await the replacement's blocked Git writer");
+      socket.end();
+      await shutdown;
+      assert.equal(git(worktreePath, "for-each-ref", "refs/worktree/wollipog-rollback"), "");
+    } finally {
+      clearTimeout(gateTimeout);
+      socket?.end();
+      try {
+        await shutdown;
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        rmSync(hook, { force: true });
+      }
+    }
+  });
+  assert.equal(existsSync(root), false, "fixture directory was removed after the writer finished");
+});
+
 /** A rollback a crash left: `git worktree add --no-checkout` done, and nothing or part of a checkout after it. */
 function plantInterruptedRollback(h: Harness, slot: string, branch: string, { proof, files: planted = {} }: { proof?: string; files?: Record<string, string> }): WorktreeCleanupRecord {
   const base = git(h.docs, "rev-parse", "main");
