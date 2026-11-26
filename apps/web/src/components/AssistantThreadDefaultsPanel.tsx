@@ -234,6 +234,13 @@ function AssistantThreadDefaultsForm() {
     setSaveError(null);
     let next = saved;
     const base = draftFrom(saved);
+    // The parts the server now holds. Their fields are refreshed from its answer below, so a value
+    // another tab saved never lingers here as an edit that the next save would write back.
+    const settled = new Set<"launch" | "limits" | "delegation">();
+    // Each write is recorded as it lands: a later one failing never hides an earlier one.
+    const recordLaunch = (updated: AssistantThreadDefaults) => {
+      next = { ...next, defaults: { ...updated, decisionDefault: next.defaults?.decisionDefault ?? updated.decisionDefault } };
+    };
     // Control planes with decision defaults also take per-field PATCHes. Sending only what changed,
     // with the harness the owner saw, keeps another tab's newer edits of the other fields.
     const patchable = decisionDefault !== undefined;
@@ -241,32 +248,50 @@ function AssistantThreadDefaultsForm() {
       if (launchDirty && defaults) {
         const providerAccount = draft.account === MACHINE_ACCOUNT_POLICY || !choices ? null
           : { runnerId: choices.runnerId, accountRef: draft.account };
-        let updated: AssistantThreadDefaults | undefined;
-        if (!patchable) {
-          updated = await api.setAssistantThreadLaunchDefaults({ harness: draft.harness, providerAccount });
-        } else {
+        if (patchable) {
           let current = base;
           if (draft.harness !== base.harness) {
             // The server resets the account, model and effort with the harness.
-            updated = await api.patchAssistantThreadLaunchDefaults({ harness: draft.harness });
-            current = draftFrom({ defaults: updated, limits: saved.limits });
+            recordLaunch(await api.patchAssistantThreadLaunchDefaults({ harness: draft.harness }));
+            current = draftFrom(next);
           }
           if (draft.account !== current.account) {
-            updated = await api.patchAssistantThreadLaunchDefaults({ expectedHarness: draft.harness, providerAccount });
+            recordLaunch(await api.patchAssistantThreadLaunchDefaults({ expectedHarness: draft.harness, providerAccount }));
           }
           if (modelsSaved && (draft.model !== current.model || draft.effort !== current.effort)) {
-            updated = await api.patchAssistantThreadLaunchDefaults({ expectedHarness: draft.harness, model: draft.model, effort: draft.effort });
+            recordLaunch(await api.patchAssistantThreadLaunchDefaults({ expectedHarness: draft.harness, model: draft.model, effort: draft.effort }));
           }
+        } else {
+          // An older control plane takes whole writes only. As the earlier editor did, read what is
+          // saved now, keep its account when only the harness is unchanged, and refuse an account
+          // chosen for a harness another tab has since replaced.
+          const fresh = await api.assistantThreadDefaults();
+          const freshHarness = fresh.launchDefaults?.harness ?? fresh.harness;
+          if (draft.harness === base.harness && freshHarness !== base.harness) {
+            throw new Error("The default harness changed. Reopen Assistant Settings to choose its account.");
+          }
+          const accountChosen = draft.harness !== base.harness || draft.account !== base.account;
+          recordLaunch(await api.setAssistantThreadLaunchDefaults({ harness: draft.harness,
+            providerAccount: accountChosen ? providerAccount : fresh.launchDefaults?.providerAccount ?? null }));
         }
-        if (updated) next = { ...next, defaults: { ...updated, decisionDefault: next.defaults?.decisionDefault ?? updated.decisionDefault } };
+        settled.add("launch");
       }
       if (limitsDirty && limits && budget.ok && launches.ok) {
         const changed: Partial<AssistantThreadLimits> = {
           ...(budget.value !== limits.costUsd ? { costUsd: budget.value } : {}),
           ...(launches.value !== limits.launchedSessions ? { launchedSessions: launches.value } : {}),
         };
-        next = { ...next, limits: patchable ? await api.patchAssistantThreadLimitDefaults(changed)
-          : await api.setAssistantThreadLimitDefaults({ costUsd: budget.value, launchedSessions: launches.value }) };
+        if (patchable) {
+          // The PATCH route takes one field per request.
+          if ("costUsd" in changed) next = { ...next, limits: await api.patchAssistantThreadLimitDefaults({ costUsd: changed.costUsd! }) };
+          if ("launchedSessions" in changed) {
+            next = { ...next, limits: await api.patchAssistantThreadLimitDefaults({ launchedSessions: changed.launchedSessions! }) };
+          }
+        } else {
+          // Whole writes only: overlay the changed fields on what is saved now.
+          next = { ...next, limits: await api.setAssistantThreadLimitDefaults({ ...await api.assistantThreadLimitDefaults(), ...changed }) };
+        }
+        settled.add("limits");
       }
       if (delegationDirty && next.defaults && decisionDefault !== undefined) {
         // A saved Delegate All is the snapshot the owner granted: changing only its expiry or scope
@@ -281,13 +306,22 @@ function AssistantThreadDefaultsForm() {
         };
         const result = await api.setAssistantThreadDecisionDefault(grant);
         next = { ...next, defaults: { ...next.defaults, decisionDefault: result.grant } };
+        settled.add("delegation");
       }
     } catch (cause) {
       if (alive.current) setSaveError(cause instanceof Error ? cause.message : "Assistant defaults could not be saved.");
     } finally {
       if (alive.current) {
-        // Whatever did save is the new baseline; the rest stays in the draft to try again.
+        // Whatever did save is the new baseline; a part that did not stays in the draft to try again.
         setSaved(next);
+        const fresh = draftFrom(next);
+        setDraft((current) => current && {
+          ...current,
+          ...(settled.has("launch") ? { harness: fresh.harness, account: fresh.account, model: fresh.model, effort: fresh.effort } : {}),
+          ...(settled.has("limits") ? { budget: fresh.budget, launches: fresh.launches } : {}),
+          ...(settled.has("delegation") ? { mode: fresh.mode, expiry: fresh.expiry, categories: fresh.categories,
+            projects: fresh.projects, campaigns: fresh.campaigns } : {}),
+        });
         setBusy(false);
       }
     }
@@ -326,10 +360,11 @@ function AssistantThreadDefaultsForm() {
           onChange={(value) => change({ effort: fromChoice(value) })} />
       </>}
       {launchDefaults && <SelectRow title="Account"
-        description={accountOptions.find((candidate) => candidate.value === draft.account)?.description
+        // A Machine that cannot choose an account says so, and Machine Policy stays choosable: the way
+        // back from a saved account that is gone.
+        description={choices?.unavailable ?? accountOptions.find((candidate) => candidate.value === draft.account)?.description
           ?? "The provider account new threads sign in with."}
-        options={accountOptions} value={draft.account} disabled={busy || Boolean(choices?.unavailable)}
-        disabledReason={choices?.unavailable ?? undefined}
+        options={accountOptions} value={draft.account} disabled={busy}
         error={savedAccountGone ? "The saved account is unavailable. Choose another account, or Machine Policy." : null}
         onChange={(account) => change({ account })} />}
     </SettingsGroup>}

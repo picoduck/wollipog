@@ -5,7 +5,7 @@ import { assistantEffortChoices, effortAfterModelChange, effortsFor, modelEffort
 
 // Codex discovery lists the union of its models' efforts as the installation's.
 const codex: AssistantThreadHarnessOption = {
-  id: "codex", label: "Codex", available: true, effortLevels: ["low", "medium", "high", "xhigh"],
+  id: "codex", label: "Codex", available: true, driver: "codex-app-server", effortLevels: ["low", "medium", "high", "xhigh"],
   models: [
     { id: "gpt-default", displayName: "Default", default: true, efforts: ["medium", "high"] },
     { id: "gpt-deep", displayName: "Deep", efforts: ["medium", "high", "xhigh"] },
@@ -21,11 +21,17 @@ test("Automatic offers only the efforts of the model the launch will pick", () =
   assert.deepEqual(effortsFor(codex, "gpt-deep"), ["medium", "high", "xhigh"]);
 });
 
-test("without an advertised default, Automatic offers only efforts every model accepts", () => {
-  const option = { ...codex, models: codex.models!.map((model) => ({ ...model, default: false })) };
-  assert.deepEqual(effortsFor(option, null), ["medium", "high"]);
-  // A model without its own list accepts the installation's.
-  assert.deepEqual(effortsFor({ ...option, models: [{ id: "plain" }] }, null), ["low", "medium", "high", "xhigh"]);
+test("without an advertised default, Automatic follows the model the launch prefers", () => {
+  // Claude Code's launch prefers Opus; the other model accepts only Low.
+  const claude: AssistantThreadHarnessOption = {
+    id: "claude-code", label: "Claude Code", available: true, driver: "claude-code", effortLevels: ["low", "high"],
+    models: [{ id: "claude-sonnet-4-6", efforts: ["low"] }, { id: "claude-opus-4-7", efforts: ["high"] }],
+  };
+  assert.deepEqual(effortsFor(claude, null), ["high"]);
+  assert.equal(modelEffortProblem(claude, null, "high"), null);
+  // With no preferred model either, the first compatible model by id.
+  const plain = { ...codex, models: codex.models!.map((model) => ({ ...model, default: false })) };
+  assert.deepEqual(effortsFor(plain, null), ["medium", "high", "xhigh"]);
 });
 
 test("a model the harness no longer reports is a problem, and Automatic never is", () => {

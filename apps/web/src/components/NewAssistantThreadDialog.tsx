@@ -84,7 +84,9 @@ export interface NewAssistantThreadResult {
  */
 export function NewAssistantThreadDialog({ onClose, onCreated }: {
   onClose: () => void;
-  onCreated: (result: NewAssistantThreadResult) => void;
+  /** `stillOpen` is false once this dialog has closed, as when the owner left before creation
+   * finished; a New Thread opened since is another dialog, and the thread must not replace it. */
+  onCreated: (result: NewAssistantThreadResult, stillOpen: boolean) => void;
 }) {
   const api = useApi();
   const formId = useId();
@@ -217,7 +219,8 @@ export function NewAssistantThreadDialog({ onClose, onCreated }: {
         }));
       } catch (cause) { failures.push("The decision delegation couldn't be applied: " + errorMessage(cause)); }
     }
-    onCreated({ thread, ...(failures.length ? { setupFailure: failures.join(" ") + " Change it in Thread Settings." } : {}) });
+    onCreated({ thread, ...(failures.length ? { setupFailure: failures.join(" ") + " Change it in Thread Settings." } : {}) },
+      mounted.current);
   };
 
   const harnessOptions = defaults?.harnesses.map((candidate) => ({

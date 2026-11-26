@@ -190,11 +190,17 @@ for (const theme of ["light", "dark"] as const) {
         await dialog(page).getByRole("link", { name: "Assistant Settings" }).click();
         const defaults = page.getByRole("region", { name: "Thread Defaults" });
         await expect(defaults).toBeVisible();
+        // Back to a second New Thread, started before the first creation finishes.
+        await page.goBack();
+        await expect(dialog(page)).toBeVisible();
+        await picker(page, "Effort").click();
+        await page.getByRole("option", { name: "Medium", exact: true }).click();
         await page.evaluate(() => Reflect.get(window, "assistantsReleaseCreate")());
         await expect(page.locator("body")).toHaveAttribute("data-thread-create-count", "1");
-        // Settings stays open; the thread is waiting in the list.
-        await expect(defaults).toBeVisible();
-        await expect(dialog(page)).toHaveCount(0);
+        // The first thread waits in the list; the second dialog and its choice stay.
+        await expect(list(page).locator("[data-thread-id]")).toHaveCount(4);
+        await expect(dialog(page)).toBeVisible();
+        await expect(picker(page, "Effort")).toHaveAccessibleName("Effort: Medium");
       });
 
       test("changing the harness starts from that harness's own model and effort", async ({ page }) => {

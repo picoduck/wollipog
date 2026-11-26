@@ -118,6 +118,62 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
         const body = page.locator("body");
         await expect(body).toHaveAttribute("data-patched-limit-defaults", JSON.stringify({ costUsd: 40 }));
         await expect(body).toHaveAttribute("data-saved-limit-defaults", JSON.stringify({ costUsd: 40, launchedSessions: 0 }));
+        // The form now shows what is saved, the other tab's pause included, with nothing left to save.
+        const launches = limits.getByRole("textbox", { name: "Session Launches per Thread" });
+        await expect(launches).toHaveValue("0");
+        await expect(page.getByRole("button", { name: "Save Defaults" })).toHaveCount(0);
+        // So the next save of another budget never lifts that pause.
+        await budget.fill("45");
+        await page.getByRole("button", { name: "Save Defaults" }).click();
+        await expect(body).toHaveAttribute("data-saved-limit-defaults", JSON.stringify({ costUsd: 45, launchedSessions: 0 }));
+      });
+
+      test("an older control plane keeps another tab's limit and refuses an account for a replaced harness", async ({ page }) => {
+        await open(page, "older-defaults");
+        const limits = page.getByRole("region", { name: "Limits", exact: true });
+        const budget = limits.getByRole("textbox", { name: "Budget per Thread USD" });
+        await expect(budget).toHaveValue("25");
+        await page.evaluate(() => Reflect.get(window, "assistantsSaveLimitDefaultsElsewhere")({ launchedSessions: 0 }));
+        await budget.fill("40");
+        await page.getByRole("button", { name: "Save Defaults" }).click();
+        await expect(page.locator("body")).toHaveAttribute("data-saved-limit-defaults", JSON.stringify({ costUsd: 40, launchedSessions: 0 }));
+        await expect(limits.getByRole("textbox", { name: "Session Launches per Thread" })).toHaveValue("0");
+
+        // Another tab replaces the harness; an account chosen here for the old one is refused.
+        const defaults = page.getByRole("region", { name: "Thread Defaults" });
+        await page.evaluate(() => Reflect.get(window, "assistantsSaveHarnessElsewhere")("codex"));
+        await defaults.getByRole("button", { name: /^Account:/ }).click();
+        await page.getByRole("option", { name: /^DesignResearchAndEngineeringSubscription/ }).click();
+        await page.getByRole("button", { name: "Save Defaults" }).click();
+        await expect(page.getByText("The default harness changed.", { exact: false })).toBeVisible();
+        await expect(page.locator("body")).not.toHaveAttribute("data-saved-launch-defaults", /DesignResearch|acct:/);
+      });
+
+      test("a launch write that fails after an earlier one landed keeps the earlier one", async ({ page }) => {
+        await open(page, "enabled", "&account-patch=fail");
+        const defaults = page.getByRole("region", { name: "Thread Defaults" });
+        await defaults.getByRole("button", { name: /^Harness:/ }).click();
+        await page.getByRole("option", { name: "Codex", exact: true }).click();
+        await defaults.getByRole("button", { name: /^Account:/ }).click();
+        await page.getByRole("option", { name: /^Codex Studio/ }).click();
+        await page.getByRole("button", { name: "Save Defaults" }).click();
+        await expect(page.getByText("The chosen account is no longer available", { exact: false })).toBeVisible();
+        // The harness was saved; Discard returns to what is saved, not to the earlier harness.
+        await page.getByRole("button", { name: "Discard" }).click();
+        await expect(defaults.getByRole("button", { name: /^Harness:/ })).toHaveAccessibleName("Harness: Codex");
+        await expect(defaults.getByRole("button", { name: /^Account:/ })).toHaveAccessibleName(/^Account: Machine Policy/);
+      });
+
+      test("Machine Policy clears a saved account even when no Machine can choose accounts", async ({ page }) => {
+        await open(page, "enabled", "&saved-account=unavailable");
+        const defaults = page.getByRole("region", { name: "Thread Defaults" });
+        const account = defaults.getByRole("button", { name: /^Account:/ });
+        await expect(account).toBeEnabled();
+        await expect(defaults).toContainText("Update this Machine's runner to choose an account.");
+        await account.click();
+        await page.getByRole("option", { name: /^Machine Policy/ }).click();
+        await page.getByRole("button", { name: "Save Defaults" }).click();
+        await expect(page.locator("body")).toHaveAttribute("data-saved-launch-defaults", /"providerAccount":null/);
       });
 
       test("changing only a saved Delegate All's expiry never adds a category supported since", async ({ page }) => {

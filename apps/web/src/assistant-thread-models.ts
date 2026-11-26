@@ -3,8 +3,9 @@
  * models and efforts the harness's installation reports, after Automatic, the same way the
  * Orchestrator's Child Model and Child Effort list them.
  */
-import type { AgentModel, AssistantThreadHarnessOption } from "@wollipog/protocol";
+import type { AgentCapabilities, AgentModel, AssistantThreadHarnessOption } from "@wollipog/protocol";
 import { modelOptionLabel } from "./agent-presentation.js";
+import { effectiveModelEffortForDisplay } from "./caps.js";
 import { effortLabel } from "./format.js";
 
 /** The Select value that stands for null: the harness's or model's own default. */
@@ -31,21 +32,19 @@ function modelOf(option: AssistantThreadHarnessOption | undefined, model: string
 
 /**
  * The efforts a model accepts: its own list, else the installation's. For Automatic, the efforts of
- * the model the launch will pick: the advertised default model's, or else only those every listed
- * model accepts. The installation's list is a union across models, and an effort outside the
- * resolved model's would be silently replaced at launch.
+ * the model the launch will pick, resolved the way the session's launch resolves it (the advertised
+ * default, then the harness's preferred model, then the first compatible one). The installation's
+ * list is a union across models, and an effort outside the resolved model's would be replaced.
  */
 export function effortsFor(option: AssistantThreadHarnessOption | undefined, model: string | null): string[] {
   const installation = option?.effortLevels ?? [];
-  const own = (candidate: AgentModel) => candidate.efforts?.length ? candidate.efforts : installation;
   if (model !== null) {
     const chosen = modelOf(option, model);
-    return chosen ? own(chosen) : installation;
+    return chosen?.efforts?.length ? chosen.efforts : installation;
   }
-  const models = option?.models ?? [];
-  const advertised = models.find((candidate) => candidate.default);
-  if (advertised) return own(advertised);
-  return models.length ? installation.filter((effort) => models.every((candidate) => own(candidate).includes(effort))) : installation;
+  if (!option?.models?.length || !option.driver) return installation;
+  const capabilities = { models: option.models, effortLevels: installation } as unknown as AgentCapabilities;
+  return effectiveModelEffortForDisplay(capabilities, option.driver, null).efforts;
 }
 
 export function assistantModelChoices(option: AssistantThreadHarnessOption | undefined, selected: string | null): AssistantModelChoice[] {

@@ -651,6 +651,12 @@ if (accountScenario || defaults.launchDefaults) {
     harness.accountSelection = { ...fixtureAccountChoices(harness.id), runnerId: "runner-1", workspaceId: "workspace-1" };
   }
 }
+if (params.get("saved-account") === "unavailable" && defaults.launchDefaults) {
+  // The saved account's Machine is offline; the one available predates account choices.
+  defaults.launchDefaults = { ...defaults.launchDefaults, providerAccount: { runnerId: "runner-old", accountRef: fixtureAccountRef(1) } };
+  defaults.harnesses[0]!.accountSelection = { accounts: [], unavailable: "Update this Machine's runner to choose an account.",
+    runnerId: "runner-1", workspaceId: "workspace-1" };
+}
 
 /** `new-thread=hold-create`: a thread creation waits for `assistantsReleaseCreate()`. */
 let releaseCreate: (() => void) | undefined;
@@ -925,6 +931,9 @@ const client = {
     if ("expectedHarness" in update && update.expectedHarness !== current.harness) {
       throw new ApiError("The default harness changed. Reopen Assistant Settings to choose its account.", 409);
     }
+    if ("providerAccount" in update && params.get("account-patch") === "fail") {
+      throw new ApiError("The chosen account is no longer available for this harness.", 409);
+    }
     defaults.launchDefaults = "harness" in update
       ? current.harness === update.harness ? current : { ...current, harness: update.harness, providerAccount: null,
         ...("model" in current ? { model: null, effort: null } : {}) }
@@ -958,7 +967,9 @@ const client = {
     return structuredClone(limitDefaults);
   },
   patchAssistantThreadLimitDefaults: async (update: Partial<AssistantThreadLimits>) => {
-    document.body.dataset.patchedLimitDefaults = JSON.stringify(update);
+    if (Object.keys(update).length !== 1) throw new ApiError("Specify either costUsd or launchedSessions to update.", 400);
+    document.body.dataset.patchedLimitDefaults = [document.body.dataset.patchedLimitDefaults, JSON.stringify(update)]
+      .filter(Boolean).join(" ");
     limitDefaults = { ...limitDefaults, ...update };
     document.body.dataset.savedLimitDefaults = JSON.stringify(limitDefaults);
     return structuredClone(limitDefaults);
@@ -1319,6 +1330,11 @@ Object.assign(window, {
   },
   assistantsHoldNextList: () => { holdNextList = true; },
   assistantsReleaseCreate: () => { releaseCreate?.(); releaseCreate = undefined; },
+  /** Another tab saving the default harness behind this page. */
+  assistantsSaveHarnessElsewhere: (harness: "claude-code" | "codex") => {
+    defaults.harness = harness;
+    defaults.launchDefaults = { ...defaults.launchDefaults!, harness, providerAccount: null };
+  },
   /** Another tab saving limit defaults behind this page. */
   assistantsSaveLimitDefaultsElsewhere: (update: Partial<AssistantThreadLimits>) => { limitDefaults = { ...limitDefaults, ...update }; },
   assistantsSlowLists: (ms: number) => { slowListMs = ms; },
