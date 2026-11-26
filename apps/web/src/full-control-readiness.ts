@@ -103,6 +103,10 @@ export function fullControlReadiness(campaign: ReadinessCampaign | undefined): F
       ? "This campaign has no issue authority, so it comes to you."
       : "This campaign's Full Control authorization leaves it out, so it comes to you." });
   }
+  if (!boundary.operations.includes("ci_rerun")) {
+    humanRequired.push({ key: "ci_rerun", label: "CI Rerun",
+      reason: "This campaign's Full Control authorization leaves it out, so it comes to you." });
+  }
   for (const [operation, label] of REQUEST_OPERATIONS) {
     if (boundary.operations.includes(operation)) continue;
     humanRequired.push({ key: operation, label,

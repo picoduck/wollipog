@@ -6,7 +6,7 @@ import { canonicalCampaignIssues } from "./campaign-issue-scope.js";
 import { campaignRepositoryLocation, type CampaignIssueRef } from "./campaign-work-ledger.js";
 import type { CampaignPublicationAdmissionFailure } from "./campaign-issue-publication.js";
 import type { ApprovalContext, GovernancePolicy, ParentControlDecisionPolicy, ParentControlMode, PendingApproval, WorkflowDecisionCategory, WorkflowDecisionResourceSnapshot } from "./index.js";
-import { isRequesterForgeDecisionCategory } from "./forge-decision-action.js";
+import { isReleaseDecisionCategory } from "./release-decision.js";
 
 export type CampaignControlMode = "custom" | "full_control";
 export type CampaignAuthorityOperation = WorkflowDecisionCategory | "question" | "tool_approval" | "policy_ask";
@@ -176,7 +176,8 @@ export interface CampaignAuthorityEvaluation {
 }
 
 const operations: CampaignAuthorityOperation[] = ["implementation_question", "pr_merge", "merged_branch_deletion",
-  "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"];
+  "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "ci_rerun",
+  "question", "tool_approval", "policy_ask"];
 
 /** Category-level projection only. A concrete request still needs provenance, resource and
  * sensitive-effect evaluation; this value is never a consumable grant. `fullControlReviewExtensions`
@@ -189,9 +190,11 @@ export function campaignWorkflowOwner(control: CampaignControl | undefined, deci
   // repository addition widens the campaign's (#4117).
   if (!supported || category === "automation_creation" || category === "campaign_follow_up_admission" ||
       category === "owner_decision" || category === "location_switch" || category === "campaign_repository_addition" ||
-      isRequesterForgeDecisionCategory(category)) return "human";
+      isReleaseDecisionCategory(category)) return "human";
   if (category === "issue_closure" || category === "campaign_issue_scope") return control?.mode === "full_control" &&
     validCampaignControl(control) && control.boundary.issueAuthority && control.boundary.operations.includes(category) ? "orchestrator" : "human";
+  if (category === "ci_rerun") return control?.mode === "full_control" &&
+    validCampaignControl(control) && control.boundary.operations.includes(category) ? "orchestrator" : "human";
   if (!control || control.mode === "custom") return decisions[category];
   // An explicit Parent Control grant delegates extra review rounds without a cap (#3369). Otherwise
   // Full Control owns them only up to the server-enforced cap per pull request (#4075).
@@ -483,8 +486,8 @@ export function resolveCampaignAuthority(input: {
   if (Boolean(request) === Boolean(input.snapshot)) return result("human", "human_required", "unverified_intent");
   // The owner kept this decision (#4064): no mode, boundary or grant makes it an agent's.
   if (category === "owner_decision") return result("human", "human_required", "owner_kept");
-  // These actions can be resolved by an Assistant grant through the owner route only.
-  if (isRequesterForgeDecisionCategory(category)) return result("human", "custom_policy", "custom_owner");
+  // Release tagging and publication can be resolved by an Assistant grant through the owner route only.
+  if (isReleaseDecisionCategory(category)) return result("human", "custom_policy", "custom_owner");
   if (category === "automation_creation" || category === "campaign_follow_up_admission" || category === "location_switch" ||
       category === "campaign_repository_addition") {
     return result("human", "human_required", "protected_request");

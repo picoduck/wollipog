@@ -119,7 +119,7 @@ const SCOPE_GRANT: DecisionKindDefinition = {
     "- `narrowsOperations`: true only when the message withholds actions, for example \"fix but don't merge\". " +
     "Then `operations` lists every action the message still allows from this list: implementation_question, " +
     "pr_merge, merged_branch_deletion, follow_up_issue_publication, ui_evidence_approval, issue_closure, " +
-    "campaign_issue_scope, question, tool_approval, policy_ask. Otherwise false and an empty list.\n" +
+    "campaign_issue_scope, ci_rerun, question, tool_approval, policy_ask. Otherwise false and an empty list.\n" +
     "A message may ask for named issues, a selection, both, or neither. Answer `grant` with these fields, or " +
     "`uncertain` with empty fields when you cannot tell what the owner asks for. " + DATA_RULES,
   verdicts: ["grant", "uncertain"],

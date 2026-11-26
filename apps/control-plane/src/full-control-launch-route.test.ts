@@ -4176,8 +4176,11 @@ test("a one-Location Project yields a one-entry boundary that reads like today's
     const { repositories: _omitted, ...stored } = boundary;
     assert.ok(validCampaignControl({ mode: "full_control", boundary: stored }));
     assert.deepEqual(campaignBoundaryRepositories(stored), [{ repository: "owner/repo", locationIds: [] }]);
-    // A pre-v288 runner's diagnostic copy drops the list; v288 keeps it.
-    assert.deepEqual(campaignControlForRunner(policy.control!, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryBoundary - 1), { mode: "full_control", boundary: stored });
+    // A pre-v288 runner's diagnostic copy drops the list and newer boundary operations; pre-v414 drops ci_rerun; current keeps all.
+    assert.deepEqual(campaignControlForRunner(policy.control!, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryBoundary - 1),
+      { mode: "full_control", boundary: { ...stored, operations: stored.operations.filter((operation) => operation !== "ci_rerun") } });
+    assert.deepEqual(campaignControlForRunner(policy.control!, RUNNER_CAPABILITY_MIN_PROTOCOL.fullControlCiRerun - 1),
+      { mode: "full_control", boundary: { ...boundary, operations: boundary.operations.filter((operation) => operation !== "ci_rerun") } });
     assert.equal(campaignControlForRunner(policy.control!, PROTOCOL_VERSION), policy.control);
   } finally { await server.close(); f.db.close(); }
 });

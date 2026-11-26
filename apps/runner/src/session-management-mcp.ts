@@ -863,7 +863,7 @@ function forgeActionSummary(decision: unknown): string {
 
 /** The operations a scope proposal may withhold (#4282): a Full Control boundary's own. */
 const CAMPAIGN_SCOPE_PROPOSAL_OPERATIONS = ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication",
-  "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"] as const;
+  "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "ci_rerun", "question", "tool_approval", "policy_ask"] as const;
 
 /** Whether the control plane reports at least `required`; an unreadable version counts as no. */
 async function controlPlaneSupports(deps: McpDeps, required: number): Promise<boolean> {

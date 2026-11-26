@@ -289,6 +289,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   forgeDecisionActions: 284,
   /** v399 adds exact, requester-executed GitHub Actions rerun decisions. */
   typedCiRerun: 399,
+  /** v414 (#4915): runner accepts `ci_rerun` in a Full Control boundary's `operations` list;
+   * older runners receive the boundary without it while the control plane enforces the full list. */
+  fullControlCiRerun: 414,
   /** v401 adds exact GitHub release tag and draft publication decisions. */
   typedReleaseDecisions: 401,
   /** v275 campaign handoffs and recorded delivery (#4070). Gates the `complete_with_handoffs`

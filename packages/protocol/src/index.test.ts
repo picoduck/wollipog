@@ -435,6 +435,8 @@ test("public runner capability floors retain their recorded version boundaries",
   assert.equal(runnerSupportsProtocol(290, "campaignIssueFacts"), false);
   assert.equal(runnerSupportsProtocol(291, "campaignIssueFacts"), true);
   // Campaign control metadata is ordered by its own revision on a v310 runner (#3363).
+  assert.equal(runnerSupportsProtocol(413, "fullControlCiRerun"), false);
+  assert.equal(runnerSupportsProtocol(414, "fullControlCiRerun"), true);
   assert.equal(runnerSupportsProtocol(309, "campaignControlRevision"), false);
   assert.equal(runnerSupportsProtocol(310, "campaignControlRevision"), true);
   // A regular session's Location switch needs a v287 runner and control plane (#4138), and

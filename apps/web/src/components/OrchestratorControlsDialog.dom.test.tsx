@@ -430,7 +430,7 @@ test("under Full Control the dialog's line claims end to end only when the serve
   const base = fullControlProjection();
   const every = { ...base.orchestratorCampaign!.control!, boundary: { ...(base.orchestratorCampaign!.control as { boundary: object }).boundary,
     operations: ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval",
-      "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"],
+      "issue_closure", "campaign_issue_scope", "ci_rerun", "question", "tool_approval", "policy_ask"],
     issueAuthority: { epics: [12], relatedFollowUps: true, maxIssues: 3, closureReasons: ["completed"] } } };
   const lineOf = async (campaign: Partial<OrchestratorCampaignProjection>) => {
     const harness = await open({ ...base, orchestratorCampaign: { ...base.orchestratorCampaign!, control: every, decisionOwners: owners,

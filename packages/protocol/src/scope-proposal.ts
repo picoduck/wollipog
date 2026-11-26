@@ -27,6 +27,7 @@ export const CAMPAIGN_OPERATION_LABELS: Readonly<Partial<Record<CampaignAuthorit
   ui_evidence_approval: "UI Evidence Approval",
   issue_closure: "Issue Closure",
   campaign_issue_scope: "Issue Scope Changes",
+  ci_rerun: "CI Rerun",
   question: "Questions",
   tool_approval: "Tool Approvals",
   policy_ask: "Policy Asks",
@@ -208,7 +209,7 @@ export interface CampaignScopeCheckView {
 }
 
 const OPERATIONS: readonly CampaignAuthorityOperation[] = ["implementation_question", "pr_merge", "merged_branch_deletion",
-  "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"];
+  "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "ci_rerun", "question", "tool_approval", "policy_ask"];
 const CHECKS: readonly ScopeProposalCheck[] = ["requested_count", "chosen_issues", "unreferenced_named_issues", "unproposed_references",
   "later_named_issues", "constraints", "withheld_operations", "proposal_unstructured", "repository_name_unresolved", "repository_limit", "repository_mentioned"];
 const OWNER_CAUSES: readonly ScopeProposalOwnerCause[] = ["constraint_check_uncertain", "constraint_check_failed", "constraint_check_unavailable",

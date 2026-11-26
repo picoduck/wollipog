@@ -56,9 +56,9 @@ export function campaignRepositoryOutsideLimit(policy: Pick<OrchestratorCampaign
 }
 
 /** The runner's diagnostic copy of a campaign's control. A pre-v288 runner rejects a boundary with
- * a `repositories` list (#4117), and a pre-v322 one an issue authority with `otherEpics` (#4118), so
- * each receives the boundary without them, which names the same first repository and its epics. The
- * server keeps and enforces the full boundary. */
+ * a `repositories` list (#4117), a pre-v322 one an issue authority with `otherEpics` (#4118), and a
+ * pre-v414 one a `ci_rerun` operation (#4915), so each receives the boundary without what it cannot
+ * validate. The server keeps and enforces the full boundary. */
 export function campaignControlForRunner(control: CampaignControl, protocolVersion: number | null | undefined): CampaignControl {
   if (control.mode !== "full_control") return control;
   let boundary = control.boundary;
@@ -69,6 +69,9 @@ export function campaignControlForRunner(control: CampaignControl, protocolVersi
   if (boundary.issueAuthority?.otherEpics !== undefined && !runnerSupportsProtocol(protocolVersion, "repositoryQualifiedEpics")) {
     const { otherEpics: _otherEpics, ...issueAuthority } = boundary.issueAuthority;
     boundary = { ...boundary, issueAuthority };
+  }
+  if (boundary.operations.includes("ci_rerun") && !runnerSupportsProtocol(protocolVersion, "fullControlCiRerun")) {
+    boundary = { ...boundary, operations: boundary.operations.filter((operation) => operation !== "ci_rerun") };
   }
   return boundary === control.boundary ? control : { mode: "full_control", boundary };
 }

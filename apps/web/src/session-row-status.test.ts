@@ -119,7 +119,7 @@ test("an at-rest root of an active Full Control campaign shows an informational 
       follow_up_issue_publication: "orchestrator", ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator" } };
   const everyOperation = { ...fullControl, boundary: { ...fullControl.boundary, operations: ["implementation_question", "pr_merge",
     "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope",
-    "question", "tool_approval", "policy_ask"],
+    "ci_rerun", "question", "tool_approval", "policy_ask"],
   issueAuthority: { epics: [], relatedFollowUps: true, maxIssues: 3, closureReasons: ["completed"] } } };
   const campaign = (status: string, control: unknown = everyOperation, facts: object = ready) =>
     ({ status, policyRevision: 3, control, ...facts }) as unknown as NonNullable<SessionView["orchestratorCampaign"]>;
@@ -339,7 +339,7 @@ test("the header's Campaign Active claims continuing automatically only when the
   const control = { mode: "full_control", boundary: { version: 1, revision: 3, issueScopeRevision: 1, repository: "owner/repo",
     objective: "Deliver", authorizedByUserId: "user", authorizedAt: 1, delegatablePolicyIds: [],
     operations: ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval",
-      "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"],
+      "issue_closure", "campaign_issue_scope", "ci_rerun", "question", "tool_approval", "policy_ask"],
     issueAuthority: { epics: [], relatedFollowUps: true, maxIssues: 3, closureReasons: ["completed"] } } };
   const ready = { status: "active", policyRevision: 3, control, decisionOwners: owners, fullControlHumanRequired: [],
     uiEvidenceReview: { status: "available", effectiveOwner: "orchestrator" },

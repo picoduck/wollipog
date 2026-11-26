@@ -572,3 +572,49 @@ test("an owner decision's floor declines a value or a credential store; the Deci
     material: "It reads ~/.codex/auth.json." }), true, "the material is floored too");
 });
 
+test("Full Control routes in-scope CI reruns to the Orchestrator while Custom and releases stay human (#4915)", () => {
+  const ciSnapshot: WorkflowDecisionResourceSnapshot = {
+    category: "ci_rerun", repository: "picoduck/wollipog", runId: 123, jobId: 456, headSha: "a".repeat(40), attempt: 2,
+  };
+  const releaseSnapshot: WorkflowDecisionResourceSnapshot = {
+    category: "release_tag", repository: "picoduck/wollipog", tag: "v1.2.3", commitSha: "a".repeat(40),
+    releasePayloadDigest: "b".repeat(64),
+  };
+  const withCi: CampaignControl = { ...control, boundary: { ...control.boundary, operations: [...control.boundary.operations, "ci_rerun"] } };
+  assert.equal(validCampaignControl(withCi), true);
+  assert.equal(campaignWorkflowOwner(withCi, HUMAN_ONLY_PARENT_CONTROL_POLICY, "ci_rerun", true), "orchestrator");
+  assert.equal(campaignWorkflowOwner(control, HUMAN_ONLY_PARENT_CONTROL_POLICY, "ci_rerun", true), "human", "omitted from boundary operations");
+  assert.equal(campaignWorkflowOwner(withCi, HUMAN_ONLY_PARENT_CONTROL_POLICY, "ci_rerun", false), "human", "unsupported provider");
+  assert.equal(campaignWorkflowOwner({ mode: "custom" }, HUMAN_ONLY_PARENT_CONTROL_POLICY, "ci_rerun", true), "human");
+  assert.equal(campaignWorkflowOwner(withCi, HUMAN_ONLY_PARENT_CONTROL_POLICY, "release_tag", true), "human");
+
+  const resolve = (snapshot: WorkflowDecisionResourceSnapshot, patch: Partial<Parameters<typeof resolveCampaignAuthority>[0]> = {}) =>
+    resolveCampaignAuthority({ ...base, control: withCi, snapshot, trustedSource: "workflow_route", ...patch });
+
+  const delegated = resolve(ciSnapshot);
+  assert.deepEqual([delegated.owner, delegated.basis, delegated.reason, delegated.operation],
+    ["orchestrator", "campaign_delegation", "authorized_operation", "ci_rerun"]);
+  assert.equal(delegated.boundaryRevision, withCi.boundary.revision);
+
+  const rootOwned = resolve(ciSnapshot, { root: true });
+  assert.deepEqual([rootOwned.owner, rootOwned.basis, rootOwned.reason],
+    ["orchestrator", "standing_authorization", "authorized_operation"]);
+
+  const omitted = resolve(ciSnapshot, { control });
+  assert.deepEqual([omitted.owner, omitted.basis, omitted.reason], ["human", "human_required", "outside_boundary"]);
+
+  const wrongRepo = resolve({ ...ciSnapshot, repository: "other/repo" });
+  assert.deepEqual([wrongRepo.owner, wrongRepo.basis, wrongRepo.reason], ["human", "human_required", "outside_boundary"]);
+
+  const unsupported = resolve(ciSnapshot, { supported: false });
+  assert.deepEqual([unsupported.owner, unsupported.basis, unsupported.reason], ["human", "human_required", "unsupported_provider"]);
+
+  const custom = resolve(ciSnapshot, { control: { mode: "custom" }, decisions: {
+    ...HUMAN_ONLY_PARENT_CONTROL_POLICY, pr_merge: "orchestrator",
+  } });
+  assert.deepEqual([custom.owner, custom.basis, custom.reason], ["human", "custom_policy", "custom_owner"]);
+
+  const release = resolve(releaseSnapshot);
+  assert.deepEqual([release.owner, release.basis, release.reason], ["human", "custom_policy", "custom_owner"]);
+});
+

@@ -435,7 +435,7 @@ function handoffProjection(state: "before" | "after"): Partial<import("@wollipog
 const fullControlScenario = ["rules", "ready", "old", "degraded"].includes(params.get("fullControl") ?? "")
   ? params.get("fullControl") as "rules" | "ready" | "old" | "degraded" : null;
 const FULL_CONTROL_OPERATIONS = ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication",
-  "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"] as const;
+  "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "ci_rerun", "question", "tool_approval", "policy_ask"] as const;
 function fullControlProjection(kind: "rules" | "ready" | "old" | "degraded"): Partial<import("@wollipog/protocol").OrchestratorCampaignProjection> {
   const objective = kind === "rules"
     ? "Fix Full Control authority, gate routing and admission in picoduck/wollipog: #4137, #3676, #3685, #3618, #3382 and #3237. " +
@@ -1015,7 +1015,7 @@ const visibleItems = epicTracking?.items ?? (params.has("closureRecovery") ? [it
 const SCOPE_GRANT_TARGET = { source: "automatic", runnerId: "r", machineName: "Studio", agentId: "claude", harnessName: "Claude Code",
   driver: "claude-code", provider: "claude", model: "claude-haiku-4-5", effort: "low" } as const;
 const LAUNCH_OPERATIONS: import("@wollipog/protocol").CampaignAuthorityOperation[] = ["implementation_question", "pr_merge",
-  "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question",
+  "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "ci_rerun", "question",
   "tool_approval", "policy_ask"];
 const launchCeilings = (maxIssues: number) => ({ repositories: ["team/repo"], maxIssues, maxIssuesSource: "derived" as const, operations: LAUNCH_OPERATIONS });
 // `let`: the owner's selection count change (#4102) replaces it, as the server would.

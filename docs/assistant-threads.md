@@ -217,8 +217,9 @@ its dependent jobs. Omitting the job ID reruns the entire workflow.
 Use `request_workflow_decision` (CLI `wollipog decision request`) with a unique request ID, the
 resource key `ci_rerun:owner/repo:runId:attempt` using a lowercase repository, and the snapshot
 `{ "category": "ci_rerun", "repository": "owner/repo", "runId": 123, "headSha": "<40 hex characters>", "attempt": 2, "jobId": 456 }`.
-The decision belongs to the owner. An Assistant thread with the **CI Rerun** grant can resolve
-it within the grant's scope.
+In a Full Control campaign whose current boundary authorizes `ci_rerun`, the controlling
+Orchestrator owns the decision for its repository's sessions. Otherwise the decision belongs to the
+owner, and an Assistant thread with the **CI Rerun** grant can resolve it within the grant's scope.
 
 The requesting session calls `execute_workflow_decision` (CLI `wollipog decision execute`) with
 the approved occurrence ID and resource digest. Wollipog rechecks the repository, run, commit,

@@ -16448,10 +16448,12 @@ export class SessionsService {
     const currentChild = this.db.getSession(childSessionId);
     const currentParent = this.db.getSession(parentSessionId);
     const directForge = isRequesterForgeDecisionCategory(decision.category);
+    const ownerOnlyForge = isReleaseDecisionCategory(decision.category) ||
+      (decision.category === "ci_rerun" && decision.authority === "human");
     const directOwner = Boolean(currentChild && currentParent && this.directOwnerSelfDecision(currentChild, currentParent, decision));
-    if ((directForge || directOwner) && (authority !== "human" || actor.kind !== "human" || !actor.id ||
+    if ((ownerOnlyForge || directOwner) && (authority !== "human" || actor.kind !== "human" || !actor.id ||
         !this.db.campaignOwnerUser(parentSessionId, actor.id))) {
-      return fail(directForge
+      return fail(ownerOnlyForge
         ? "Only the owner can resolve this forge decision"
         : currentParent && sessionRole(currentParent) === "orchestrator"
           ? "Only the campaign owner can decide a root Orchestrator's own decision"
@@ -17207,7 +17209,7 @@ export class SessionsService {
       return Boolean(latest && latest.status === decision.status && latest.resourceDigest === decision.resourceDigest &&
         currentChild && currentParent && policy && !isTerminal(currentChild.status) && !isTerminal(currentParent.status) &&
         canAccess(currentChild.id) && canAccess(currentParent.id) &&
-        (directForge || directOwner || this.workflowDecisionRelationship(currentParent.id, currentChild.id)) &&
+        ((directForge && latest.authority === "human") || directOwner || this.workflowDecisionRelationship(currentParent.id, currentChild.id)) &&
         policy.revision === decision.policyRevision &&
         this.workflowDecisionAuthorityCurrent(currentParent, policy, latest, { observingPublication: lookOnly }));
     };
@@ -18527,9 +18529,16 @@ export class SessionsService {
           decision.resourceSnapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
           this.campaignPeerContracts(controller, requester.id)).boundaryRevision !== decision.authorityEvaluation.boundaryRevision ||
         !campaignBoundaryCurrent(controller))) return false;
-    if (isRequesterForgeDecisionCategory(decision.category)) {
+    if (isReleaseDecisionCategory(decision.category)) {
       return decision.authority === "human" && Boolean(requester && this.requesterForgeDecisionLocation(requester) &&
         runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, requesterForgeCapability(decision.category)));
+    }
+    if (decision.category === "ci_rerun") {
+      if (!requester || !this.requesterForgeDecisionLocation(requester) ||
+          !runnerSupportsProtocol(this.db.getRunner(requester.runnerId)?.protocolVersion, "typedCiRerun")) {
+        return false;
+      }
+      if (decision.authority === "human") return true;
     }
     if (requester && this.directOwnerSelfDecision(requester, controller, decision)) {
       // Exact verifiedLocationId equality gates arming, manual consumption, and new writes; read-only

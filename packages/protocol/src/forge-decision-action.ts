@@ -257,7 +257,8 @@ export interface CampaignMergedBranch {
 
 /** Merged branches `get_campaign` lists at most, pending first; the counts stay complete. */
 export const CAMPAIGN_MERGED_BRANCHES_LIMIT = 50;
-/** Forge decisions approved by the owner (or a scoped Assistant grant) and executed only here. */
+/** Requester-executed forge decisions: release actions stay owner-only (or a scoped Assistant grant),
+ * while `ci_rerun` can also be owned by a Full Control Orchestrator whose boundary authorizes it. */
 export type RequesterForgeDecisionCategory = "ci_rerun" | ReleaseDecisionCategory;
 
 export function isRequesterForgeDecisionCategory(category: unknown): category is RequesterForgeDecisionCategory {

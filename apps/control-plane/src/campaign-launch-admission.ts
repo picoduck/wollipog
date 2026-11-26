@@ -21,7 +21,7 @@ const keys = ["repository", "repositories", "issueNumbers", "otherIssues", "obje
 /** The derived default: every operation Full Control can own. Overrides may only narrow it. */
 export const FULL_CONTROL_LAUNCH_OPERATIONS: readonly CampaignAuthorityOperation[] = [
   "implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication",
-  "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask",
+  "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "ci_rerun", "question", "tool_approval", "policy_ask",
 ];
 const MAX_DERIVED_FOLLOW_UPS = 10;
 

@@ -33,7 +33,7 @@ declare global {
 const params = new URLSearchParams(window.location.search);
 /** The boundary a default Full Control launch authorizes (#2940). */
 const FIXTURE_FULL_CONTROL_OPERATIONS = ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication",
-  "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"] as const;
+  "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "ci_rerun", "question", "tool_approval", "policy_ask"] as const;
 const FIXTURE_ISSUE_AUTHORITY = { epics: [12], relatedFollowUps: true, maxIssues: 3, closureReasons: ["completed" as const] };
 const FIXTURE_CODEX_HARNESS = { agentId: "codex-app-server", driver: "codex-app-server" as const, context: { kind: "native" as const } };
 const FIXTURE_CLAUDE_HARNESS = { agentId: "claude-code", driver: "claude-code" as const, context: { kind: "native" as const } };
