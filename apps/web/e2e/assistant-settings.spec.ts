@@ -155,30 +155,96 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
           const defaults = page.getByRole("region", { name: "Thread Defaults" });
           await expect(defaults.getByRole("button", { name: /^Harness:/ })).toHaveAccessibleName("Harness: Claude Code");
           // Another tab saves Codex with a specific account.
-          await page.evaluate(() => Reflect.get(window, "assistantsSaveHarnessElsewhere")("codex", "acct:0000000000000001"));
+          await page.evaluate(() => Reflect.get(window, "assistantsSaveHarnessElsewhere")("codex", "acct:000000000000000a"));
           await defaults.getByRole("button", { name: /^Harness:/ }).click();
           await page.getByRole("option", { name: "Codex", exact: true }).click();
           await page.getByRole("button", { name: "Save Defaults" }).click();
           await expect(page.getByRole("button", { name: "Save Defaults" })).toHaveCount(0);
           const saved = await page.evaluate(() => Reflect.get(window, "assistantsSavedLaunchDefaults")());
-          expect(saved).toMatchObject({ harness: "codex", providerAccount: { accountRef: "acct:0000000000000001" } });
+          expect(saved).toMatchObject({ harness: "codex", providerAccount: { accountRef: "acct:000000000000000a" } });
         });
       }
 
-      test("a scope edit joins the draft, and Discard drops it with the rest", async ({ page }) => {
+      test("a scope edit joins the draft: Discard drops it, and Save Defaults saves it", async ({ page }) => {
+        await open(page, "enabled", "stress&default-grant=all-before-releases");
+        const delegation = page.getByRole("region", { name: "Decision Delegation", exact: true });
+        const scope = delegation.getByRole("button", { name: /Projects and Campaigns/ });
+        const pickProject = async () => {
+          await scope.click();
+          const editor = page.getByRole("dialog", { name: "Decision Delegation for New Threads" });
+          const projects = editor.getByRole("group", { name: "Projects", exact: true });
+          await projects.getByRole("radio", { name: "Selected Projects" }).click();
+          await projects.getByRole("checkbox", { name: /Release Validation/ }).first().check();
+          await editor.getByRole("button", { name: "Use Delegation Settings" }).click();
+          await expect(editor).toHaveCount(0);
+        };
+        await expect(delegation).toContainText("All projects and campaigns.");
+        await pickProject();
+        // Staged, not saved: the summary shows it, and Discard takes it back.
+        await expect(delegation).toContainText("1 project · all campaigns.");
+        await expect(page.locator("body")).not.toHaveAttribute("data-saved-decision-default", /./);
+        await page.getByRole("button", { name: "Discard" }).click();
+        await expect(delegation).toContainText("All projects and campaigns.");
+        await pickProject();
+        await page.getByRole("button", { name: "Save Defaults" }).click();
+        await expect(page.getByRole("button", { name: "Save Defaults" })).toHaveCount(0);
+        const grant = JSON.parse(await page.locator("body").getAttribute("data-saved-decision-default") ?? "null");
+        expect(grant.projects).toEqual(["project_0"]);
+        expect(grant.campaigns).toBe("all");
+      });
+
+      test("Ask Me in the editor keeps a limited scope for returning to Delegate All", async ({ page }) => {
+        await open(page, "enabled", "stress&default-grant=all-scoped");
+        const delegation = page.getByRole("region", { name: "Decision Delegation", exact: true });
+        await expect(delegation).toContainText("1 project · 1 campaign.");
+        await delegation.getByRole("button", { name: /Projects and Campaigns/ }).click();
+        const editor = page.getByRole("dialog", { name: "Decision Delegation for New Threads" });
+        await editor.getByRole("radio", { name: "Ask Me", exact: true }).click();
+        await editor.getByRole("button", { name: "Use Delegation Settings" }).click();
+        await expect(delegation.getByRole("button", { name: /^New Threads:/ })).toHaveAccessibleName("New Threads: Ask Me");
+        await delegation.getByRole("button", { name: /^New Threads:/ }).click();
+        await page.getByRole("option", { name: /^Delegate All/ }).click();
+        await expect(delegation).toContainText("1 project · 1 campaign.");
+        // Back where it was saved: nothing to save, and the scope was never widened.
+        await expect(page.getByRole("button", { name: "Save Defaults" })).toHaveCount(0);
+        await delegation.getByRole("button", { name: /^Expires:/ }).click();
+        await page.getByRole("option", { name: "30 Days", exact: true }).click();
+        await page.getByRole("button", { name: "Save Defaults" }).click();
+        const grant = JSON.parse(await page.locator("body").getAttribute("data-saved-decision-default") ?? "null");
+        expect([grant.projects, grant.campaigns]).toEqual([["project_0"], ["campaign_0"]]);
+      });
+
+      test("choosing Delegate All again in the editor saves the categories supported since", async ({ page }) => {
         await open(page, "enabled", "stress&default-grant=all-before-releases");
         const delegation = page.getByRole("region", { name: "Decision Delegation", exact: true });
         await delegation.getByRole("button", { name: /Projects and Campaigns/ }).click();
         const editor = page.getByRole("dialog", { name: "Decision Delegation for New Threads" });
+        await editor.getByRole("radio", { name: "Choose", exact: true }).click();
+        await editor.getByRole("radio", { name: "Delegate All", exact: true }).click();
         await editor.getByRole("button", { name: "Use Delegation Settings" }).click();
-        await expect(editor).toHaveCount(0);
-        // Nothing is saved until Save Defaults; the editor is reachable alongside other edits.
-        await delegation.getByRole("button", { name: /^Expires:/ }).click();
-        await page.getByRole("option", { name: "30 Days", exact: true }).click();
-        await expect(delegation.getByRole("button", { name: /Projects and Campaigns/ })).toBeEnabled();
-        await page.getByRole("button", { name: "Discard" }).click();
-        await expect(page.locator("body")).not.toHaveAttribute("data-saved-decision-default", /./);
-        await expect(delegation.getByRole("button", { name: /^Expires:/ })).toHaveAccessibleName("Expires: 7 Days");
+        await page.getByRole("button", { name: "Save Defaults" }).click();
+        await expect(page.getByRole("button", { name: "Save Defaults" })).toHaveCount(0);
+        const grant = JSON.parse(await page.locator("body").getAttribute("data-saved-decision-default") ?? "null");
+        expect(grant.selectionMode).toBe("all");
+        for (const added of ["ci_rerun", "release_tag", "release_publish"]) expect(grant.categories).toContain(added);
+        expect(grant.categories).not.toContain("ui_evidence_review");
+      });
+
+      test("retrying a failed model save keeps the account another tab saved", async ({ page }) => {
+        await open(page, "enabled", "&model-patch=fail-once");
+        const defaults = page.getByRole("region", { name: "Thread Defaults" });
+        await expect(defaults.getByRole("button", { name: /^Harness:/ })).toHaveAccessibleName("Harness: Claude Code");
+        await page.evaluate(() => Reflect.get(window, "assistantsSaveHarnessElsewhere")("codex", "acct:000000000000000a"));
+        await defaults.getByRole("button", { name: /^Harness:/ }).click();
+        await page.getByRole("option", { name: "Codex", exact: true }).click();
+        await defaults.getByRole("button", { name: /^Model:/ }).click();
+        await page.getByRole("option", { name: /GPT-5\.5/ }).click();
+        await page.getByRole("button", { name: "Save Defaults" }).click();
+        await expect(page.getByText("The saved account's Machine is offline.", { exact: false })).toBeVisible();
+        await page.getByRole("button", { name: /^(Try Again|Save Defaults)$/ }).click();
+        await expect(page.getByRole("button", { name: /^(Try Again|Save Defaults)$/ })).toHaveCount(0);
+        const saved = await page.evaluate(() => Reflect.get(window, "assistantsSavedLaunchDefaults")());
+        expect(saved).toMatchObject({ harness: "codex", model: "gpt-5.5", providerAccount: { accountRef: "acct:000000000000000a" } });
       });
 
       test("a launch write that fails after an earlier one landed keeps the earlier one", async ({ page }) => {

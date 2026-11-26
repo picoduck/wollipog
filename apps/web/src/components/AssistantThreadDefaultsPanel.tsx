@@ -101,7 +101,7 @@ const limitPart = (draft: Draft) => {
   return [budget.ok ? budget.value : draft.budget, launches.ok ? launches.value : draft.launches];
 };
 const delegationPart = (draft: Draft) => draft.mode === "ask" ? ["ask"]
-  : [draft.mode, draft.expiry, draft.mode === "all" ? [] : [...draft.categories].sort(), draft.projects, draft.campaigns];
+  : [draft.mode, draft.expiry, [...draft.categories].sort(), draft.projects, draft.campaigns];
 const same = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
 
 function budgetEntry(text: string): { ok: true; value: number | null } | { ok: false; error: string } {
@@ -306,8 +306,9 @@ function AssistantThreadDefaultsForm() {
         // never adds a category supported since. Choosing Delegate All anew takes today's set. A
         // saved category that is unavailable here stays as it was, as the delegation editor keeps it.
         const grant: AssistantDecisionDefault | null = draft.mode === "ask" ? null : {
-          categories: draft.mode === "all"
-            ? base.mode === "all" ? base.categories : delegable
+          // Delegate All's list is the draft's own: the saved snapshot, today's set when Delegate All
+          // was chosen anew, or the delegation editor's refresh.
+          categories: draft.mode === "all" ? draft.categories
             : draft.categories.filter((category) => delegable.includes(category) || base.categories.includes(category)),
           selectionMode: draft.mode, projects: draft.projects, campaigns: draft.campaigns,
           expiresAfterMs: ASSISTANT_DECISION_DEFAULT_DURATIONS[draft.expiry],
@@ -323,9 +324,16 @@ function AssistantThreadDefaultsForm() {
         // Whatever did save is the new baseline; a part that did not stays in the draft to try again.
         setSaved(next);
         const fresh = draftFrom(next);
+        // A launch save that stopped partway still landed what it wrote: the fields the owner did not
+        // choose follow the server, so a retry never mistakes their reset values for choices.
+        const launchWritten = next.defaults !== saved.defaults;
         setDraft((current) => current && {
           ...current,
-          ...(settled.has("launch") ? { harness: fresh.harness, account: fresh.account, model: fresh.model, effort: fresh.effort } : {}),
+          ...(settled.has("launch") ? { harness: fresh.harness, account: fresh.account, model: fresh.model, effort: fresh.effort }
+            : launchWritten ? {
+              ...(accountChosen ? {} : { account: fresh.account }),
+              ...(modelChosen ? {} : { model: fresh.model, effort: fresh.effort }),
+            } : {}),
           ...(settled.has("limits") ? { budget: fresh.budget, launches: fresh.launches } : {}),
           ...(settled.has("delegation") ? { mode: fresh.mode, expiry: fresh.expiry, categories: fresh.categories,
             projects: fresh.projects, campaigns: fresh.campaigns } : {}),
@@ -392,7 +400,9 @@ function AssistantThreadDefaultsForm() {
       <SelectRow title="New Threads" description={modeDescription} options={MODE_OPTIONS} value={draft.mode} disabled={busy}
         onChange={(value) => {
           const mode = value as DelegationMode;
-          change({ mode, ...(mode === "choose" && draft.mode !== "choose" && !draft.categories.length ? { categories: delegable } : {}) });
+          // Delegate All is a snapshot: back to the saved one, or today's set when it is new.
+          if (mode === "all") change({ mode, categories: baseline!.mode === "all" ? baseline!.categories : delegable });
+          else change({ mode, ...(mode === "choose" && draft.mode !== "choose" && !draft.categories.length ? { categories: delegable } : {}) });
         }} />
       {draft.mode !== "ask" && <>
         <SelectRow title="Expires" description="Counted from when each thread starts." disabled={busy}
@@ -417,10 +427,13 @@ function AssistantThreadDefaultsForm() {
       {/* The full delegation editor, for where delegation applies. What it returns joins this
           draft, so Save Defaults and Discard cover it with everything else. */}
       {editingScope && draft.mode !== "ask" && <AssistantDecisionDelegationDialog draft defaultGrant={{
-        categories: draft.mode === "all" ? draftFrom(saved).mode === "all" ? draftFrom(saved).categories : delegable : draft.categories,
+        categories: draft.categories,
         selectionMode: draft.mode, projects: draft.projects, campaigns: draft.campaigns,
         expiresAfterMs: ASSISTANT_DECISION_DEFAULT_DURATIONS[draft.expiry],
       }} onClose={() => setEditingScope(false)} onSaveDefault={async (grant) => {
+        // Ask Me keeps the scope, expiry and categories in the draft, so returning to a delegating mode
+        // never widens a scope the owner limited.
+        if (!grant) return change({ mode: "ask" });
         const chosen = draftFrom({ defaults: saved.defaults && { ...saved.defaults, decisionDefault: grant }, limits: saved.limits });
         change({ mode: chosen.mode, expiry: chosen.expiry, categories: chosen.categories, projects: chosen.projects, campaigns: chosen.campaigns });
       }} />}

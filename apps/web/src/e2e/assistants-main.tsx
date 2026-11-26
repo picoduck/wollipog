@@ -629,10 +629,12 @@ const defaults: AssistantThreadDefaults = {
 if (limitsScenario && limitsScenario !== "old") {
   defaults.launchDefaults = { harness: "claude-code", providerAccount: null };
   if (limitsScenario !== "older-defaults") {
-    defaults.decisionDefault = params.get("default-grant") === "all-before-releases" ? {
+    const savedGrant = params.get("default-grant");
+    defaults.decisionDefault = savedGrant === "all-before-releases" || savedGrant === "all-scoped" ? {
       categories: (Object.keys(ASSISTANT_DECISION_CATEGORIES) as AssistantDecisionCategory[]).filter((category) =>
         !["ci_rerun", "release_tag", "release_publish", "ui_evidence_review"].includes(category)),
-      selectionMode: "all", projects: "all", campaigns: "all", expiresAfterMs: 7 * 24 * 60 * 60_000,
+      selectionMode: "all", expiresAfterMs: 7 * 24 * 60 * 60_000,
+      ...(savedGrant === "all-scoped" ? { projects: ["project_0"], campaigns: ["campaign_0"] } : { projects: "all", campaigns: "all" }),
     } : null;
     // A control plane that saves a model and effort for new threads, and lists each harness's.
     defaults.launchDefaults = { ...defaults.launchDefaults, model: null, effort: null };
@@ -933,6 +935,10 @@ const client = {
     }
     if ("providerAccount" in update && params.get("account-patch") === "fail") {
       throw new ApiError("The chosen account is no longer available for this harness.", 409);
+    }
+    if ("model" in update && params.get("model-patch") === "fail-once" && !document.body.dataset.modelPatchFailed) {
+      document.body.dataset.modelPatchFailed = "true";
+      throw new ApiError("The saved account's Machine is offline.", 409);
     }
     defaults.launchDefaults = "harness" in update
       ? current.harness === update.harness ? current : { ...current, harness: update.harness, providerAccount: null,
