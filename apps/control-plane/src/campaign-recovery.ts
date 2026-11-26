@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { campaignAuthorityPreflight, isTerminal, pendingRequests, runnerSupportsProtocol, FULL_CONTROL_DECLINED_CLASSES, type FullControlRequestClass,
   type CampaignAuthorityEvaluation, type CampaignRecoveryReason, type SessionView, type WorkflowDecisionCategory } from "@wollipog/protocol";
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
+import { recoveryExtensionContext } from "./campaign-recovery-extensions.js";
 import { hasCampaignCheckFailure } from "./campaign-forge-observations.js";
 import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
 import type { ControlPlaneDb, SessionStopProvenance } from "./db.js";
@@ -245,7 +246,11 @@ export class CampaignRecoveryService {
     const quiet = root.status === "idle" && !rootHasBlockingRequest && !working(rootFacts) &&
       descendants.every(session => session.archived || !working(session));
     const changed = this.db.campaignRecovery.synchronize(root.id, revision, current, observations, now,
-      quiet ? record => this.db.campaignRecoveryWakeSettledAt(root.id, `${record.id}:${record.attempts}`) : undefined);
+      quiet ? record => this.db.campaignRecoveryWakeSettledAt(root.id, `${record.id}:${record.attempts}`) : undefined,
+      record => {
+        const context = recoveryExtensionContext(this.db, root.id, record, now);
+        return context && !context.restorationRequired ? context.binding : null;
+      });
     const admission = this.db.campaignContinuationAdmission(root.id);
     const admissionKey = `${revision}:${admission.state}`;
     if (this.admissionStates.get(root.id) !== admissionKey) {
