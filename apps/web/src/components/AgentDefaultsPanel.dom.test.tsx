@@ -346,6 +346,33 @@ test("saving unsupported Antigravity Full Permissions Mode leaves the preference
   }
 });
 
+test("Antigravity explains when Full Permissions Mode is unavailable with the selected model", async () => {
+  const base = view().defaults[2]!;
+  const permissionMode = "antigravity-full-permissions";
+  const fixture = await renderPanel(transport(async () => json({ defaults: [{
+    ...base,
+    agentId: "google-antigravity",
+    name: "Google Antigravity",
+    installations: [
+      { ...base.installations[0]!, models: [{ id: "a", displayName: "Model A" }], permissionModes: ["auto", permissionMode] },
+      { ...base.installations[0]!, runnerId: "other", models: [{ id: "b", displayName: "Model B" }], permissionModes: ["auto"] },
+    ],
+    preference: { permissionMode },
+    compatibleInstallations: 1,
+  }] })));
+  try {
+    await openEditor(fixture.container, "Google Antigravity");
+    await choose("Model", "Model B");
+    const mode = buttonNamed("Permission Mode: Full Permissions Mode", dialog());
+    assert.equal(mode.getAttribute("aria-invalid"), "true");
+    assert.match(dialog().textContent ?? "", /Not available on any machine with the selected model and reasoning effort/);
+    await choose("Model", "Model A");
+    assert.equal(mode.getAttribute("aria-invalid"), null);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("a model with efforts needs an effort, shown on the field instead of saving", async () => {
   const methods: string[] = [];
   const fixture = await renderPanel(transport(async (_path, init) => {

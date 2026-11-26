@@ -118,6 +118,11 @@ export function AgentDefaultsDialog({
   const antigravity = option.driver === "acp" && option.agentId === ANTIGRAVITY_AGENT_ID;
   const fullPermissionsUnavailable = draft.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id &&
     !permissionModes.includes(ANTIGRAVITY_FULL_PERMISSIONS_MODE.id);
+  const fullPermissionsAvailableWithOtherDefaults = fullPermissionsUnavailable &&
+    option.installations.some((installation) => installation.permissionModes.includes(ANTIGRAVITY_FULL_PERMISSIONS_MODE.id));
+  const fullPermissionsUnavailableReason = fullPermissionsAvailableWithOtherDefaults
+    ? "Not available on any machine with the selected model and reasoning effort."
+    : AGENT_DEFAULT_NOT_AVAILABLE;
   const busy = pending !== null;
   const discovered = option.installations.length > 0;
 
@@ -227,7 +232,10 @@ export function AgentDefaultsDialog({
         )}
         {fullPermissionsUnavailable && (
           <Notice tone="warning" compact role="status" id={PERMISSION_UNAVAILABLE_ID}>
-            {ANTIGRAVITY_FULL_PERMISSIONS_MODE.name}. {AGENT_DEFAULT_NOT_AVAILABLE} Choose another permission mode to save.
+            {ANTIGRAVITY_FULL_PERMISSIONS_MODE.name}. {fullPermissionsUnavailableReason}{" "}
+            {fullPermissionsAvailableWithOtherDefaults
+              ? "Choose another model, reasoning effort, or permission mode to save."
+              : "Choose another permission mode to save."}
           </Notice>
         )}
         {/* Always in the DOM, so the polite region exists before it has something to say. */}
@@ -306,7 +314,7 @@ export function AgentDefaultsDialog({
                     value: ANTIGRAVITY_FULL_PERMISSIONS_MODE.id,
                     label: ANTIGRAVITY_FULL_PERMISSIONS_MODE.name,
                     disabled: true,
-                    disabledReason: AGENT_DEFAULT_NOT_AVAILABLE,
+                    disabledReason: fullPermissionsUnavailableReason,
                   }] : []),
                   ...permissionModes.map((mode) => ({
                     value: mode, label: permissionModeDisplayLabel(mode, option.driver),
