@@ -4051,9 +4051,10 @@ export class SessionManager {
       // have one; the local read is the fallback for a caller-chosen base, which never contacts
       // the remote and so can only offer the possibly stale tracked HEAD.
       const defaultBranch = advertised?.branch ?? await readRepositoryDefaultBranch(meta.repoPath, options);
-      const spendRequestProof = (): void => {
+      const spendRequestProof = async (): Promise<void> => {
         if (!requestProof) return;
-        void clearWorktreeRollbackProof(created.path, requestProof, options).catch((error) => {
+        // Keep the Git writer inside this worktree operation's lifetime, including shutdown.
+        await clearWorktreeRollbackProof(created.path, requestProof, options).catch((error) => {
           this.log(`session ${boundedSessionIdForLog(sessionId)} left a spent rollback proof in its worktree: ${errText(error)}`);
         });
       };
@@ -4102,7 +4103,7 @@ export class SessionManager {
         }
         report("activating");
         const activated = await this.activateWorktreeWithNotice(meta, worktree, requester);
-        spendRequestProof();
+        await spendRequestProof();
         return { worktree, ...activated };
       } catch (error) {
         // An activation that committed before it failed made the worktree the session's own (#4209): it
@@ -4110,7 +4111,7 @@ export class SessionManager {
         const latest = this.store.readMeta(sessionId);
         const committed = !!latest?.worktreePath && sameWorktreePath(latest.context, latest.worktreePath, created.path);
         // Kept for a retry of its setup, or committed, so no rollback will ever ask for this proof.
-        if ((error as { retainWorktree?: boolean }).retainWorktree || committed) spendRequestProof();
+        if ((error as { retainWorktree?: boolean }).retainWorktree || committed) await spendRequestProof();
         if (created.created && !committed && !(error as { retainWorktree?: boolean }).retainWorktree) {
           try {
             const cleanupMeta = this.store.readMeta(sessionId) ?? meta;
@@ -16848,6 +16849,7 @@ export class SessionManager {
       if (current?.pendingLocationSwitch && !current.running) setImmediate(() => this.scheduleDrain(sessionId));
       return;
     }
+    let proofDeletion: Promise<void> | undefined;
     const result = await this.replaceProviderProcess(sessionId, entry, {
       prepareReplacement: async () => {
         const conversation = this.store.readMeta(sessionId)?.agentSessionId;
@@ -16914,7 +16916,7 @@ export class SessionManager {
             this.removeWorktreeCleanupRecord(reservation.record);
             const proof = reservation.record.rollbackProof;
             if (proof) {
-              void clearWorktreeRollbackProof(worktree.path, proof, options).catch((error) => {
+              proofDeletion = clearWorktreeRollbackProof(worktree.path, proof, options).catch((error) => {
                 this.log(`session ${sessionId} left a spent rollback proof in its worktree: ${errText(error)}`);
               });
             }
@@ -16936,7 +16938,7 @@ export class SessionManager {
             (returning?.portBlock ? ` Its port block changed to ${returning.portBlock.start}-${returning.portBlock.end}.` : "") });
         this.queueLocationContinuation(sessionId, replacementEntry);
       },
-    });
+    }).finally(async () => { await proofDeletion; });
     if (result.status === "launched") {
       setImmediate(() => this.scheduleDrain(sessionId));
       // Reconciliation asks again later, after a restart too, if the forge cannot answer now.

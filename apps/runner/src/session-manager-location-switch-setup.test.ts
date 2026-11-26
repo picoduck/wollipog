@@ -3,6 +3,7 @@ import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import type { RunnerToControlPlane, SessionLaunchSpec, SessionLocationSwitchMessage, SessionWorktreeView } from "@wollipog/protocol";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { claudeProjectPathKey } from "./claude-background-work.js";
@@ -1328,7 +1329,7 @@ test("a proof that cannot be written on a switch leaves no empty tree and no bra
   });
 });
 
-test("a proof that cannot be written on a request fails it before any setup runs, and the next request goes ahead", async () => {
+test("a proof that cannot be written on a request fails it before any setup runs, and the next request goes ahead", { timeout: 30_000 }, async () => {
   if (process.platform === "win32") return;
   await withSession("stamp-fails-request", async (h) => {
     const ranLog = join(h.root, "ran");
@@ -1349,11 +1350,64 @@ test("a proof that cannot be written on a request fails it before any setup runs
     assert.throws(() => git(h.docs, "rev-parse", "--verify", "refs/heads/fix/other"));
 
     allow();
-    const creating = h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/other" });
-    await answerTrust(h, "trust");
-    const { worktree } = await creating;
-    assert.equal(existsSync(worktree.path), true);
-    assert.equal(readFileSync(ranLog, "utf8"), "x");
+    // Hold Git's actual proof-deletion transaction open after activation commits.
+    const socketPath = join(h.root, "proof.sock");
+    let socket: Socket | undefined;
+    let connected!: (socket: Socket) => void;
+    const connection = new Promise<Socket>((resolve) => { connected = resolve; });
+    const server = createServer((client) => { socket = client; connected(client); });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, resolve);
+    });
+    const hook = join(h.docs, ".git", "hooks", "reference-transaction");
+    writeFileSync(hook, `#!${process.execPath}
+let input = '';
+process.stdin.on('data', chunk => { input += chunk; });
+process.stdin.on('end', () => {
+  if (process.argv[2] !== 'prepared' || !input.split('\\n').some(line => /^[0-9a-f]+ 0+ refs\\/worktree\\/wollipog-rollback\\//.test(line))) return;
+  const socket = require('net').connect(${JSON.stringify(socketPath)});
+  socket.on('error', () => process.exit(1));
+  socket.resume();
+});
+`, { mode: 0o755 });
+    let requestSettled = false;
+    const creating = h.manager.requestWorktree(h.sessionId, { baseRef: "config-base", branch: "fix/other" })
+      .then((result) => { requestSettled = true; return result; });
+    let gateTimeout: ReturnType<typeof setTimeout> | undefined;
+    let shutdown: Promise<void> | undefined;
+    try {
+      await answerTrust(h, "trust");
+      socket = await Promise.race([
+        connection,
+        new Promise<never>((_resolve, reject) => {
+          gateTimeout = setTimeout(() => reject(new Error("Git did not reach proof deletion")), 10_000);
+        }),
+      ]);
+      clearTimeout(gateTimeout);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(requestSettled, false, "the request must await its proof-deletion writer");
+      let teardownSettled = false;
+      shutdown = shutdownLocationSwitchManagers([h.manager]).then(() => { teardownSettled = true; });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(teardownSettled, false, "teardown must await the blocked Git writer");
+      socket.end();
+      const { worktree } = await creating;
+      await shutdown;
+      assert.equal(existsSync(worktree.path), true);
+      assert.equal(readFileSync(ranLog, "utf8"), "x");
+      assert.equal(git(worktree.path, "for-each-ref", "refs/worktree/wollipog-rollback"), "");
+    } finally {
+      clearTimeout(gateTimeout);
+      socket?.end();
+      try {
+        await creating;
+        await shutdown;
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        rmSync(hook, { force: true });
+      }
+    }
   });
 });
 
