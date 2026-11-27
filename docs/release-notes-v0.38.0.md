@@ -21,6 +21,7 @@ Wollipog v0.38.0 adds Google Antigravity sessions, redesigns Assistant threads, 
 - Session WebSocket updates send less repeated data. Campaign views reuse projection reads, descendant polling focuses on pending approvals, and prompt retry maintenance performs less work.
 - Streamed timeline rows keep their positions as content grows. Registered Locations stay eligible after runner inventory refreshes.
 - Authenticated headless updates preserve executable permissions when staging downloads.
+- Wollipog refuses Codex merge requests when it cannot verify the evidence required for merge authorization.
 
 ## Install and Update
 
@@ -30,8 +31,15 @@ Headless installations can run `wollipog update --release v0.38.0`. Plain `wolli
 
 ## Upgrade and Rollback
 
-Upgrade the control plane and its dashboard first, then update standalone and remote runners. Use matching component versions for new capabilities. Before upgrading, stop writers and back up the control-plane database, any separate artifact store, and runner data and configuration. Keep the previous binaries and dashboard bundle. To roll back, stop the upgraded processes, restore the backup, and start the previous binaries and dashboard.
+Upgrade the control plane and its dashboard first, then update standalone and remote runners. Use matching component versions for new capabilities. Standalone owner questions and approvals require protocol v412 or later on the runner and control plane. Before upgrading, stop writers and back up the control-plane database, any separate artifact store, and runner data and configuration. Keep the previous binaries and dashboard bundle. To roll back, stop the upgraded processes, restore the backup, and start the previous binaries and dashboard.
 
 Where archived-history retention is enabled, capable runners trim full logs after completed control-plane pruning, including for previously pruned sessions. Back up runner data or disable the policy before upgrading if you need to retain full logs. **Reprocess** cannot restore a trimmed log. Older runners refuse manifest format 2 and need the pre-upgrade runner data for rollback. [Archived-history retention](https://github.com/picoduck/wollipog/blob/v0.38.0/docs/archived-history-retention.md#runner-logs-and-upgrades)
 
-The control plane advertises the `wollipog-control-plane` service identity. Desktop v0.15.0 and later accept both the current and legacy identities. Upgrade older clients before connecting if they report that the address is not a Wollipog control plane.
+The control plane advertises the `wollipog-control-plane` service identity. Desktop v0.15.0 and later accept both the current and legacy identities. If an older client reports `The address is not a Wollipog control plane.`, update the client before connecting.
+
+## Release Assets
+
+The workflow builds all six supported native targets. The base draft holds exactly 34 assets:
+14 desktop bundles, 12 runner names, 6 headless `wollipog-control-plane-<triple>` executables, the
+`wollipog-web.tar.gz` dashboard bundle, and `SHA256SUMS`. The signed release adds 12 updater
+signatures and `latest.json` for 47 assets. Publishing the verified draft remains a manual operator step.
