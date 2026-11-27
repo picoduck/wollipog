@@ -879,22 +879,43 @@ test("a receive-paused runner stays online while authenticated replay advances, 
     worktreePath: null, config: {}, preview: null, pendingApproval: null,
     tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: 1, updatedAt: 2 }];
 
-  // Fault injection is confined to this disposable child: delay shell frame application without
-  // blocking its event loop. This guarantees a real read pause longer than the 1.5s deadline on
-  // fast and slow filesystems alike. It does not alter credentials, arrivals, or liveness logic.
+  // Control only Date in the disposable child. Real timers, sockets, pressure and the production
+  // liveness sweep still run. Wall-clock scheduling cannot turn the synthetic 20ms processing
+  // delay into an idle timeout; each frame advances logical time instead. In particular, the
+  // injected long wait below proves immunity to a wall-clock gap longer than the idle deadline;
+  // liveness is asserted against logical replay time. After the full replay, age the idle peer.
   const preloadPath = join(temp, "slow-replay.mjs");
   writeFileSync(preloadPath, `
 import { setTimeout as delay } from 'node:timers/promises';
+import { mock } from 'node:test';
 import { RunnerFrameQueue } from ${JSON.stringify(new URL("./runner-frame-queue.ts", import.meta.url).href)};
+mock.timers.enable({ apis: ['Date'], now: Date.now() });
+process.on('message', (message) => {
+  if (message === 'expire-idle') mock.timers.setTime(Date.now() + 1501);
+});
 const enqueue = RunnerFrameQueue.prototype.enqueue;
 const wrapped = new WeakSet();
+let n = 0;
+let maxWaitMs = 0;
+let maxApplyMs = 0;
 RunnerFrameQueue.prototype.enqueue = function(message, bytes) {
   if (!wrapped.has(this)) {
     const handle = Reflect.get(this, 'handle');
     const pressure = Reflect.get(this, 'onPressure');
     if (typeof handle !== 'function' || typeof pressure !== 'function') throw new Error('queue fault injection seam changed');
     Reflect.set(this, 'handle', async (frame) => {
-      if (frame.type === 'shell_output') await delay(20);
+      if (frame.type === 'shell_output') {
+        const start = performance.now();
+        await delay(n === 200 ? 1600 : 20);
+        const ready = performance.now();
+        maxWaitMs = Math.max(maxWaitMs, ready - start);
+        mock.timers.setTime(Date.now() + 20);
+        const result = await Reflect.apply(handle, this, [frame]);
+        maxApplyMs = Math.max(maxApplyMs, performance.now() - ready);
+        if (++n === 600) process.send({ type: 'replay-drained', frames: n, logicalElapsedMs: n * 20,
+          maxWaitMs: Math.round(maxWaitMs), maxApplyMs: Math.round(maxApplyMs) });
+        return result;
+      }
       return Reflect.apply(handle, this, [frame]);
     });
     Reflect.set(this, 'onPressure', (paused) => {
@@ -910,7 +931,14 @@ RunnerFrameQueue.prototype.enqueue = function(message, bytes) {
   const child = spawn(process.execPath, ["--import", "tsx", "--import", preloadPath, "apps/control-plane/src/index.ts"], {
     cwd: REPO_ROOT, env: { ...process.env, CONTROL_PLANE_HOST: "127.0.0.1",
       CONTROL_PLANE_PORT: String(port), CONTROL_PLANE_DB: databasePath, CONTROL_PLANE_HEARTBEAT_MS: "500" },
-    stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe", "ipc"], windowsHide: true,
+  });
+  const drained = new Promise<Record<string, unknown>>((resolvePromise) => {
+    child.on("message", (message) => {
+      if (message && typeof message === "object" && "type" in message && message.type === "replay-drained") {
+        resolvePromise(message as Record<string, unknown>);
+      }
+    });
   });
   child.stdout?.on("data", (chunk) => { output = (output + String(chunk)).slice(-128_000); });
   child.stderr?.on("data", (chunk) => { output = (output + String(chunk)).slice(-128_000); });
@@ -948,7 +976,13 @@ RunnerFrameQueue.prototype.enqueue = function(message, bytes) {
     count, `the authenticated replay did not finish\n${output}`);
   assert.match(output, /TEST_REPLAY_PRESSURE=true/, "the test must exercise an actual socket read pause");
   assert.match(output, /TEST_REPLAY_PRESSURE=false/, "draining must release socket read pressure");
-  assert.equal((await waitForClose(socket)).code, 1006,
+  const timing = await drained;
+  assert.equal(timing.logicalElapsedMs, 12_000, "replay crosses the 1.5s liveness deadline repeatedly");
+  assert.ok(Number(timing.maxWaitMs) >= 1500, "exercise a scheduler gap longer than the idle deadline");
+  t.diagnostic(JSON.stringify(timing));
+  const closed = waitForClose(socket);
+  child.send("expire-idle");
+  assert.equal((await closed).code, 1006,
     "after the bounded backlog drains, a silent runner still reaches forced half-open termination");
 });
 
