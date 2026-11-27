@@ -38,8 +38,11 @@ import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { isGuardianRequest, isolatedProbeEnv, unavailableProbeOutput, probeResult, GUARD_DOCUMENTATION, ownProbeProcess, RecordedAssumptionChanged } from "./codex-probe-support.js";
+
+import { guardPhase } from "./codex-guard-probe-phases.js";
 
 const CODEX = process.env.CODEX_BIN || "codex";
 const TURN_TIMEOUT_MS = 90_000;
@@ -130,8 +133,19 @@ function killTree(child: ChildProcess): void {
   try { child.kill("SIGKILL"); } catch { /* already exited */ }
 }
 
+function runTurn(fixture: Fixture, args: readonly string[], extras: Json, accept: boolean): Promise<string> {
+  return guardPhase("app-server", TURN_TIMEOUT_MS, () => runTurnImpl(fixture, args, extras, accept));
+}
+function readInventory(fixture: Fixture, args: readonly string[]): Promise<Json[]> {
+  return guardPhase("inventory", 30_000, () => readInventoryImpl(fixture, args));
+}
+function runCliTurn(fixture: Fixture, args: string[], entry: "exec" | "tui"): Promise<string> {
+  return guardPhase(entry === "exec" ? "cli-exec" : "cli-tui", TURN_TIMEOUT_MS + 5_000,
+    () => runCliTurnImpl(fixture, args, entry));
+}
+
 /** Drive one real `codex app-server` turn and report what the command did. */
-function runTurn(
+function runTurnImpl(
   fixture: Fixture,
   args: readonly string[],
   turnExtras: Json,
@@ -212,7 +226,7 @@ function runTurn(
 }
 
 /** Ask a throwaway app-server what hooks this argv installs, and how it rates their trust. */
-function readInventory(fixture: Fixture, args: readonly string[]): Promise<Json[]> {
+function readInventoryImpl(fixture: Fixture, args: readonly string[]): Promise<Json[]> {
   const child = ownProbeProcess(spawn(CODEX, [...args, "app-server"], {
     cwd: fixture.repo,
     env: probeEnv(fixture),
@@ -279,43 +293,54 @@ function hookArgs(fixture: Fixture): string[] {
 }
 
 /** A real interactive terminal, including the cursor-position handshake Codex requires. */
-function runCliTurn(fixture: Fixture, args: string[], entry: "exec" | "tui"): Promise<string> {
+export function runCliTurnImpl(fixture: Fixture, args: string[], entry: "exec" | "tui", spawnImpl = spawn): Promise<string> {
   const common = [...args, "-a", "never", "-s", "danger-full-access"];
   return new Promise((resolve) => {
     let output = "";
     let settled = false;
     let stopping = false;
     let ending = "";
+    let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
     let stop: () => void = () => {};
+    let forceStop: () => void = () => {};
     const finish = (suffix = "") => {
       if (stopping || settled) return;
       stopping = true;
       ending = suffix;
       stop();
+      // A PTY helper/descendant can retain its pipes after termination. Never wait forever
+      // for close: preserve the timeout as unavailable and force the helper down after grace.
+      shutdownTimer = setTimeout(() => {
+        forceStop();
+        complete("\nTIMED OUT: CLI shutdown did not close within 5000ms");
+      }, 5_000);
     };
     const complete = (suffix = "") => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(shutdownTimer);
       resolve(output + ending + suffix);
     };
     const timer = setTimeout(() => finish("\nTIMED OUT"), TURN_TIMEOUT_MS);
     if (entry === "exec") {
-      const child = ownProbeProcess(spawn(CODEX, [...common, "exec", "--json", "go"], {
+      const child = ownProbeProcess(spawnImpl(CODEX, [...common, "exec", "--json", "go"], {
         cwd: fixture.repo, env: probeEnv(fixture), stdio: ["ignore", "pipe", "pipe"], detached: true,
       }));
       stop = () => killTree(child);
+      forceStop = stop;
       child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
       child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
       child.on("error", (error) => complete(`\nSPAWN FAILED: ${error.message}`));
       child.on("close", (code) => complete(code === 0 ? "" : `\nEXIT ${code}`));
     } else {
       // Python's standard-library PTY avoids a native node-pty build prerequisite for this probe.
-      const terminal = ownProbeProcess(spawn("python3", ["-u", "-c", PTY_DRIVER,
+      const terminal = ownProbeProcess(spawnImpl("python3", ["-u", "-c", PTY_DRIVER,
         CODEX, ...common, "--no-alt-screen", "go"], {
         cwd: fixture.repo, env: probeEnv(fixture), stdio: ["ignore", "pipe", "pipe"],
       }), false);
       stop = () => { terminal.kill("SIGTERM"); };
+      forceStop = () => { terminal.kill("SIGKILL"); terminal.stdout.destroy(); terminal.stderr.destroy(); };
       terminal.stdout.on("data", (chunk: Buffer) => {
         if (process.env.PROBE_DEBUG) process.stderr.write(chunk);
         output += chunk.toString();
@@ -366,6 +391,10 @@ stop()
 `;
 
 /** Controls prove silent skipping separately from a hook that fires and allows the command. */
+export function cliProbeStatus(output: string, modelRequests: number, ok: boolean): "could not run" | "unchanged" | "changed" {
+  return unavailableProbeOutput(output) || modelRequests === 0 ? "could not run" : ok ? "unchanged" : "changed";
+}
+
 async function cliMeasurements(fixture: Fixture, model: { tool: Json | null; calls: number; input: string }): Promise<number> {
   const foreignLog = join(fixture.codexHome, "foreign-calls.log");
   const foreignHook = join(fixture.codexHome, "foreign.sh");
@@ -422,7 +451,7 @@ async function cliMeasurements(fixture: Fixture, model: { tool: Json | null; cal
       const ok = calls === test.calls && foreignCalls === test.foreign && ran === test.ran &&
         (test.ran || denied) && model.calls >= 2 && !output.includes("TIMED OUT");
       if (!ok) failures++;
-      probeResult(`${entry} hook trust: ${test.name}`, unavailableProbeOutput(output) ? "could not run" : ok ? "unchanged" : "changed",
+      probeResult(`${entry} hook trust: ${test.name}`, cliProbeStatus(output, model.calls, ok),
         `ownCalls=${calls}; foreignCalls=${foreignCalls}; executed=${ran}; denied=${denied}; modelRequests=${model.calls}`, GUARD_DOCUMENTATION);
       process.stdout.write(`${ok ? "ok  " : "FAIL"}  ${entry} · ${test.name}: own×${calls} foreign×${foreignCalls} ran=${ran} denied=${denied} model×${model.calls}\n`);
       if (!ok || process.env.PROBE_DEBUG) process.stderr.write(output.slice(-6000) + "\n");
@@ -457,8 +486,9 @@ async function main(): Promise<number> {
       `"permissionDecision":"deny","permissionDecisionReason":"MANAGED_WORKTREE_REFUSAL: probe"}}'\n` +
       "    exit 0\n    ;;\nesac\nexit 0\n", { mode: 0o755 });
     writeFileSync(fixture.hookLog, "");
-    await gitInit(fixture);
-    const versionOutput = execFileSync(CODEX, ["--version"], { env: probeEnv(fixture), encoding: "utf8", timeout: 30_000 });
+    await guardPhase("fixture", FIXTURE_TIMEOUT_MS * 3, () => gitInit(fixture));
+    const versionOutput = await guardPhase("version", 30_000, async () =>
+      execFileSync(CODEX, ["--version"], { env: probeEnv(fixture), encoding: "utf8", timeout: 30_000 }));
     process.stdout.write(versionOutput);
     // Installed older/newer catalogs offer apply_patch under different model families. These
     // select fixture tool metadata only: every response still comes from our loopback script.
@@ -611,7 +641,7 @@ function gitInit(fixture: Fixture): Promise<void> {
     .then(() => run(["commit", "-qm", "init"]));
 }
 
-main().then((code) => { process.exitCode = code; }, (error: unknown) => {
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main().then((code) => { process.exitCode = code; }, (error: unknown) => {
   const changed = error instanceof RecordedAssumptionChanged;
   probeResult("hook inventory/trust contract", changed ? "changed" : "could not run",
     changed ? error.message : "fixture, PTY, inventory or compatible app-server unavailable", GUARD_DOCUMENTATION);

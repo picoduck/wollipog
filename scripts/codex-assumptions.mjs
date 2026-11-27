@@ -39,6 +39,17 @@ export function acknowledgeUnavailable(result, configured = "") {
 }
 
 export function collectResult(probe, execution) {
+  // Whitelist metadata only. Raw stdout/stderr and exception messages remain excluded.
+  const phases = execution.stdout.split("\n").flatMap(line => {
+    try {
+      const e = JSON.parse(line);
+      return probe.id === "guard" && e.event === "codex_guard_phase" &&
+        ["fixture", "version", "inventory", "cli-exec", "cli-tui", "app-server"].includes(e.phase) &&
+        ["started", "completed", "failed"].includes(e.state) &&
+        [e.id, e.limitMs, e.elapsedMs].every(n => Number.isSafeInteger(n) && n >= 0) && e.limitMs <= 120_000
+        ? [{ phase: e.phase, id: e.id, state: e.state, limitMs: e.limitMs, elapsedMs: e.elapsedMs }] : [];
+    } catch { return []; }
+  }).slice(-128);
   const events = execution.stdout.split("\n").flatMap(line => {
     try { const value = JSON.parse(line); return value.event === "codex_assumption" ? [value] : []; } catch { return []; }
   });
@@ -50,7 +61,7 @@ export function collectResult(probe, execution) {
     changed ? "changed" : events.some(e => e.status === "optional drift") ? "optional drift" : "unchanged";
   const namespaceUnavailable = probe.id === "escalation" && !execution.unavailable && execution.code === 2 && valid && events.length === 1 &&
     events[0].status === "could not run" && events[0].unavailableReason === "sandbox_namespace_unavailable";
-  return { probe: probe.id, status, assumptions: valid ? events.map(({ event, ...value }) => value) : [],
+  return { probe: probe.id, status, ...(phases.length ? { phases } : {}), assumptions: valid ? events.map(({ event, ...value }) => value) : [],
     ...(namespaceUnavailable ? { unavailableReason: "sandbox_namespace_unavailable" } : {}),
     observed: namespaceUnavailable ? events[0].observed : status === "could not run" ? "missing/incompatible binary, sandbox, timeout, dependency or incomplete probe result" : "see measured assumptions",
     documentation: probe.documentation };
@@ -72,6 +83,7 @@ export function markdown(report) {
     `Completed: ${report.completedAt}; complete=${report.complete}; exit=${report.exitCode}`,
     `Guard trust: ${report.guardTrust?.status ?? "could not run"}; range=${CODEX_GUARD_TRUST_VERSION_RANGE}`, "",
     ...report.results.flatMap(result => [`## ${result.probe}: ${result.status}`, "", result.observed, `Old measurement: ${result.documentation}`, "",
+      ...(result.phases ?? []).map(p => `- Guard phase ${p.id}: ${p.phase} ${p.state}; elapsed=${p.elapsedMs}ms; limit=${p.limitMs}ms`),
       ...result.assumptions.flatMap(a => [`- ${a.assumption}: **${a.status}**. ${a.observed}. Old measurement: ${a.documentation}`]), ""]),
     "## Excluded", "", ...EXCLUSIONS.map(e => `- ${e.command}: ${e.reason}`), ""].join("\n");
 }

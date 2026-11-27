@@ -11,6 +11,23 @@ import { withoutMcpApproval } from "../apps/runner/scripts/codex-mcp-wait-probe.
 import { additiveCodexMcpServerArg, sessionCodexMcpServerArg, CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC } from "../apps/runner/src/orchestrator-preset.ts";
 
 const probe = { id: "fixture", documentation: "old-measurement.md" };
+test("guard phases survive interruption without counting as measurements or retaining output", () => {
+  const phase = { event: "codex_guard_phase", phase: "cli-tui", id: 12, state: "started", elapsedMs: 0, limitMs: 95000, privateOutput: "secret" };
+  const result = collectResult({ id: "guard", minimum: 26, documentation: "old.md" }, {
+    code: 2, unavailable: true, stdout: JSON.stringify(phase) + "\nprivate transcript\n",
+  });
+  assert.equal(result.status, "could not run");
+  assert.deepEqual(result.assumptions, []);
+  assert.deepEqual(result.phases, [{ phase: "cli-tui", id: 12, state: "started", elapsedMs: 0, limitMs: 95000 }]);
+  const text = markdown({ results: [result], guardTrust: {}, complete: false });
+  assert.match(text, /cli-tui started; elapsed=0ms; limit=95000ms/);
+  assert.doesNotMatch(JSON.stringify(result) + text, /secret|transcript/);
+  for (const invalid of [{ phase: "private-path" }, { elapsedMs: -1 }, { limitMs: Infinity }, { state: "private error" }]) {
+    const rejected = collectResult({ id: "guard" }, { code: 2, stdout: JSON.stringify({ ...phase, ...invalid }) });
+    assert.equal(rejected.phases, undefined);
+  }
+  assert.equal(collectResult(probe, { code: 2, stdout: JSON.stringify(phase) }).phases, undefined);
+});
 function execution(status = "unchanged", extra = {}) {
   return { code: status === "changed" ? 1 : 0, unavailable: false, stdout: JSON.stringify({ event: "codex_assumption", assumption: "fixture contract", status, observed: "fixture observation", documentation: "old-measurement.md", ...extra }) };
 }

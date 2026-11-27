@@ -1,5 +1,19 @@
 # Codex Assumption Probes
 
+## Guard Phase Diagnostics
+
+The guard probe records fixture setup, version lookup, CLI exec/TUI turns, inventory reads and
+app-server turns. JSON and Markdown retain the last 128 phase records, including elapsed milliseconds
+and operation limits. A final `started` record without a terminal record locates an interrupted
+operation; `completed` means it returned, not that its measurement passed. CLI turns allow 90 seconds
+plus five seconds for shutdown; inventory and version lookup allow 30 seconds. Phase records exclude
+provider output, exception text, prompts and transcripts. Zero-model-request CLI results remain
+unavailable rather than evidence of changed hook enforcement.
+
+Scheduled run 45880098515 (Refs #4969) established a 40-minute guard-suite timeout and two TUI cases
+with no model requests, but its artifact cannot identify the original stalled operation. This is
+diagnostics and bounded shutdown work, not a reproduction or a claim that guard behavior changed.
+
 Run `pnpm probe:codex-assumptions` on a Linux machine with an installed standalone `codex`, Node 24,
 the repository dependencies, Git, `/bin/sh`, Bash, curl and Python 3. Set `CODEX_BIN` to test another
 installed executable. This is an operator maintenance command, independent of provider discovery
