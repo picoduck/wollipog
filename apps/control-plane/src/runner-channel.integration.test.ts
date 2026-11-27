@@ -882,8 +882,8 @@ test("a receive-paused runner stays online while authenticated replay advances, 
   // Control only Date in the disposable child. Real timers, sockets, pressure and the production
   // liveness sweep still run. Wall-clock scheduling cannot turn the synthetic 20ms processing
   // delay into an idle timeout; each frame advances logical time instead. In particular, the
-  // injected long wait below reproduces the old fixture's scheduler-gap failure without retries
-  // or a wider production deadline. After observing the full replay, explicitly age the idle peer.
+  // injected long wait below proves immunity to a wall-clock gap longer than the idle deadline;
+  // liveness is asserted against logical replay time. After the full replay, age the idle peer.
   const preloadPath = join(temp, "slow-replay.mjs");
   writeFileSync(preloadPath, `
 import { setTimeout as delay } from 'node:timers/promises';
