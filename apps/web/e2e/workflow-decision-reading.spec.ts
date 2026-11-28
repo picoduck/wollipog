@@ -1,7 +1,30 @@
 import { expect, test, type Page } from "@playwright/test";
+import { join } from "node:path";
 
 const card = (page: Page) => page.locator(".request-dock .request-card");
 const submissions = (page: Page) => page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.submissions());
+
+for (const width of [1440, 390]) {
+  test(`campaign recovery shows and submits the exact owner approval at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/request-surfaces-e2e.html?scenario=campaign-recovery");
+    const dock = card(page);
+    await dock.getByRole("button", { name: "Expand Decision" }).click();
+    const details = dock.getByRole("region", { name: "Campaign Recovery Details" });
+    await expect(details.getByRole("link", { name: "example/repository#42" })).toBeVisible();
+    for (const fact of ["ab".repeat(20), "session-original-requester", "archived-original-requester/repair-branch",
+      "One additional instruction after 4 spent", "PR #41", "Restore the original requester"]) {
+      await expect(details).toContainText(fact);
+    }
+    expect(await details.evaluate(element => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+    const approve = dock.getByRole("button", { name: "Authorize Recovery", exact: true });
+    await expect(approve).toBeInViewport();
+    const evidence = process.env.WOLLIPOG_EVIDENCE_DIR;
+    if (evidence) await page.screenshot({ path: join(evidence, `campaign-recovery-${width}.png`) });
+    await approve.click();
+    await expect.poll(() => submissions(page)).toEqual([{ requestId: "evidence-occurrence", optionId: "approve" }]);
+  });
+}
 
 async function expectReadingMode(page: Page) {
   await expect(page.locator(".request-dock")).toHaveAttribute("data-reading", "");

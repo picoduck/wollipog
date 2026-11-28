@@ -227,6 +227,11 @@ export class SessionPromptOutbox {
       // A prompt or answer queued for a persisted exec session before the retirement (#3259) never
       // reaches a runner that may still resume that driver. One already sent may have landed.
       const target = this.db.getSession(row.sessionId);
+      if (row.commandId.startsWith(RECOVERY_PROMPT_PREFIX) &&
+          !requesterRecoveryMaySend(this.db, row.commandId, row.sessionId, now)) {
+        this.db.deferSessionPromptCommand(row.commandId, now + CAMPAIGN_HOLD_RECHECK_MS, now);
+        continue;
+      }
       // A campaign resume is a wake-up, never an answer or an interruption of protected work.
       // Its server-owned durable identity keeps the one notification held through reconnects.
       if (row.commandId.startsWith("campaign_resume_") && (!target || target.status !== "idle" || target.pendingApproval ||
@@ -477,3 +482,4 @@ function validReceipt(message: Receipt): boolean {
   return message.userEventSeq === undefined ||
     (Number.isSafeInteger(message.userEventSeq) && Number(message.userEventSeq) >= 0);
 }
+import { RECOVERY_PROMPT_PREFIX, requesterRecoveryMaySend } from "./campaign-recovery-decision.js";

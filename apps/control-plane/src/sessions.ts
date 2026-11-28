@@ -85,6 +85,9 @@ import { SCOPE_CHECKS_PER_ADDITIONS, scopeCheckAdditionsPrefix, scopeCheckInputD
 import { scopeGrantDigest, scopeReviewInputDigest, scopeReviewInputs, scopeReviewKey } from "./scope-selection.js";
 import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type CampaignScopeOwnerReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
+import { RECOVERY_PROMPT_PREFIX, RECOVERY_REQUEST_PREFIX, recoveryDecisionRefs, recoveryDecisionTarget, recoverySnapshotRecord } from "./campaign-recovery-decision.js";
+import { exhaustedPullRequest } from "./campaign-recovery-store.js";
+import type { CampaignRecoveryDecisionSnapshot } from "@wollipog/protocol";
 import { CAMPAIGN_HANDOFF_QUESTION_KEY, isCampaignHandoffQuestion } from "@wollipog/protocol";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision, outstandingDecisionsBearOnScopeRequest, campaignAwaitsInitialScope, campaignScopeIsProposed, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
@@ -707,7 +710,7 @@ const CAMPAIGN_REQUEST_WITHDRAWN_OUTCOME = "withdrawn";
  * that person, so neither the requester nor an Orchestrator can withdraw one. */
 const PERSON_SETTLED_WORKFLOW_DECISION_CATEGORIES: ReadonlySet<WorkflowDecisionCategory> = new Set([
   "issue_closure", "campaign_issue_scope", "campaign_follow_up_admission", "automation_creation", "location_switch",
-  "campaign_repository_addition",
+  "campaign_repository_addition", "campaign_recovery",
 ]);
 
 /** A request resolution a person made, or a server revocation a person's action led to, asks the
@@ -2528,6 +2531,10 @@ export class SessionsService {
   private readonly registrationNotifiedHumanTokens = new Map<string, Set<string>>();
   private readonly promptOutbox: SessionPromptOutbox;
   private readonly campaignRecovery: CampaignRecoveryService;
+  private readonly requesterRecoveriesInFlight = new Set<string>();
+  private readonly requesterRecoveryReadDue = new Map<string, number>();
+  /** Runner-managed selection, on the same validated path as the owner's Select Worktree. */
+  selectCampaignRecoveryWorktree?: (sessionId: string, path: string, owner: HumanPrincipal) => Promise<boolean>;
   /** When each campaign's children's waits were last checked against the stall bound (#4073).
    * Process-local: after a restart the first check covers every wait that has already expired. */
   private readonly campaignChildWaitsCheckedAt = new Map<string, number>();
@@ -6828,6 +6835,9 @@ export class SessionsService {
       durable?: boolean;
       /** Only server-created review notifications may preserve pending async questions. */
       reviewContinuation?: true;
+      /** Recovery permission is bound to the original requester. A stale mode must not be healed
+       * by silently selecting a different permission mode while staging this instruction. */
+      preservePermissionMode?: true;
     },
     // What the agent credential sending the prompt may do to this session, so the hold advice in
     // its refusal or delivery report names only tools it can call (#1863).
@@ -7041,6 +7051,10 @@ export class SessionsService {
       agentCapabilities,
       session.driver,
     );
+    if (binding?.preservePermissionMode && mergedConfig.permissionMode !== (session.permissionMode ?? undefined)) {
+      return { ok: false, status: 409, error: "The original requester's permission mode is no longer supported.",
+        errorDetails: { code: "requester_recovery_permission_mode_unavailable" } };
+    }
     const effectiveCostBudgetUsd = effectiveConfig?.costBudgetUsd !== undefined
       ? (effectiveConfig.costBudgetUsd > 0 ? effectiveConfig.costBudgetUsd : null)
       : session.costBudgetUsd;
@@ -7206,6 +7220,7 @@ export class SessionsService {
       void this.reconcileUncertainIssueClosures(targetSessionId).catch(() => this.log.warn(`Issue closure recovery is pending for ${targetSessionId}`));
     }
     this.campaignRecovery.maintain(now, runnerId);
+    this.maintainRequesterRecoveries(now, runnerId);
     // A first message whose command expired or failed without a receipt reopens its wait.
     for (const { sessionId } of this.db.firstMessageDeliveries()) {
       if (!this.firstMessagesInFlight.has(sessionId)) this.reconcileFirstMessageDelivery(sessionId, now);
@@ -15320,6 +15335,167 @@ export class SessionsService {
     return created ? ok({ ...receipt, ...proof }) : fail("Creation was refused or could not be proven. No receipt was issued; an existing or uncertain ref remains person-owned.", 409);
   }
 
+  async requestCampaignPrRecovery(campaignId: string, request: {
+    requestId: string; repository: string; pullRequest: number; headSha: string; after?: number;
+  }, requestingThreadId: string, recheck: () => Promise<HumanPrincipal>,
+    checkRequester: (sessionId: string) => void): Promise<ServiceResult<WorkflowDecisionView>> {
+    const ref = { repository: request.repository.toLowerCase(), number: request.pullRequest };
+    const previous = this.db.workflowDecisionByRequestId(campaignId, request.requestId);
+    if (previous) {
+      const s = previous.resourceSnapshot;
+      if (s.category !== "campaign_recovery" || s.requestingThreadId !== requestingThreadId ||
+          s.repository !== ref.repository || s.pullRequest !== ref.number || s.headSha !== request.headSha || s.after !== request.after) {
+        return fail("This request ID already names a different decision.", 409);
+      }
+      await recheck();
+      checkRequester(s.requesterSessionId);
+      if (previous.status === "pending") this.restorePendingWorkflowDecisionCards(campaignId);
+      return ok(this.db.workflowDecisionByOccurrence(previous.occurrenceId)!);
+    }
+    // The registry has checked root access. Check worker placement before exposing or reading its
+    // recovery context, and recheck authorization again after the asynchronous forge read.
+    const requesters = this.db.campaignRecoveryRequesters(campaignId, ref.repository, ref.number);
+    if (requesters.length !== 1) return fail("This PR does not have one proven original review requester in the campaign.", 409);
+    checkRequester(requesters[0]!);
+    const refs = recoveryDecisionRefs(this.db, campaignId, ref, request.after);
+    const read = await this.campaignForgeReadNow?.(campaignId, refs);
+    const owner = await recheck();
+    if (!read || read.some(entry => !entry.observation) ||
+        JSON.stringify(refs) !== JSON.stringify(recoveryDecisionRefs(this.db, campaignId, ref, request.after))) {
+      return fail("The current PR and its prerequisites could not be verified. Retry once the forge read succeeds.", 409);
+    }
+    const record = this.db.campaignRecovery.pullRequestRecords(campaignId, ref.repository, ref.number)
+      .find(record => exhaustedPullRequest(record) && record.resource.occurrenceId === request.headSha &&
+        (record.action === "repair_checks" || record.action === "rereview"));
+    if (!record || (record.action !== "repair_checks" && record.action !== "rereview")) {
+      return fail("There is no eligible exhausted recovery record at this exact head.", 409);
+    }
+    const now = Date.now();
+    const target = recoveryDecisionTarget(this.db, campaignId, ref, record, request.after, now);
+    if (!target.ok) return fail(target.error, 409);
+    if (target.owner.userId !== owner.userId || target.owner.organizationId !== owner.organizationId) {
+      return fail("Only the campaign owner's Assistant may request recovery.", 403);
+    }
+    checkRequester(target.requester.id);
+    const snapshot: CampaignRecoveryDecisionSnapshot = { category: "campaign_recovery", repository: ref.repository,
+      pullRequest: ref.number, headSha: request.headSha, recoveryId: record.id, action: record.action,
+      attempts: record.attempts, extraInstructions: 1, requesterSessionId: target.requester.id, worktree: target.worktree,
+      restoreRequester: target.restoreRequester, ...(request.after !== undefined ? { after: request.after } : {}),
+      binding: target.binding, requestingThreadId };
+    // Resource-key prefixes are reserved below. A durable denial holds this PR/head, and a live
+    // approval is never superseded by another request.
+    const resourceKey = `campaign_recovery:${ref.repository}#${ref.number}:${snapshot.headSha}`;
+    const prior = this.db.latestRequesterRecoveryDecision(campaignId, resourceKey);
+    if (prior?.status === "denied") return fail("The owner declined recovery for this PR head.", 409);
+    if (prior?.status === "pending" || prior?.status === "approved") {
+      if (prior.resourceDigest !== workflowDecisionResourceDigest(snapshot)) return fail("An exact recovery decision already exists for this PR head.", 409);
+      if (prior.status === "pending") this.restorePendingWorkflowDecisionCards(campaignId);
+      return ok(prior);
+    }
+    const created = this.db.createWorkflowDecision({ requestId: request.requestId,
+      occurrenceId: `workflow_${randomUUID().replace(/-/gu, "")}`, sessionId: campaignId, controllingSessionId: campaignId,
+      category: snapshot.category, authority: "human", resourceKey, resourceSnapshot: snapshot,
+      resourceDigest: workflowDecisionResourceDigest(snapshot), policyRevision: record.policyRevision, createdAt: now });
+    if (!created) return fail("This request ID already names a different decision.", 409);
+    const decision = created.decision;
+    const before = this.db.getSession(campaignId)!;
+    this.db.setPendingApproval(campaignId, appendPendingApproval(before.pendingApproval, this.workflowDecisionApproval(decision)));
+    this.recordWorkflowDecisionAudit(decision, "pending", { kind: "agent", id: requestingThreadId }, now);
+    this.notifyTransition(before, campaignId);
+    this.hub.sessionChangedById(campaignId);
+    return ok(decision, 201);
+  }
+
+  private maintainRequesterRecoveries(now: number, runnerId?: string): void {
+    const approved = this.db.approvedRequesterRecoveryDecisions(runnerId);
+    if (!runnerId) {
+      const outstanding = new Set(approved.map(decision => decision.occurrenceId));
+      for (const id of this.requesterRecoveryReadDue.keys()) if (!outstanding.has(id)) this.requesterRecoveryReadDue.delete(id);
+    }
+    for (const decision of approved) {
+      const snapshot = decision.resourceSnapshot;
+      if (snapshot.category !== "campaign_recovery" || this.requesterRecoveriesInFlight.has(snapshot.requesterSessionId) ||
+          now < (this.requesterRecoveryReadDue.get(decision.occurrenceId) ?? 0)) continue;
+      this.requesterRecoveriesInFlight.add(snapshot.requesterSessionId);
+      this.requesterRecoveryReadDue.set(decision.occurrenceId, now + 30_000);
+      void this.deliverRequesterRecovery(decision, snapshot)
+        .catch(() => this.log.warn(`Recovery delivery deferred for ${decision.occurrenceId}`))
+        .finally(() => this.requesterRecoveriesInFlight.delete(snapshot.requesterSessionId));
+    }
+  }
+
+  private async deliverRequesterRecovery(decision: WorkflowDecisionView, snapshot: CampaignRecoveryDecisionSnapshot): Promise<void> {
+    const campaignId = decision.sessionId;
+    const ref = { repository: snapshot.repository, number: snapshot.pullRequest };
+    const refs = recoveryDecisionRefs(this.db, campaignId, ref, snapshot.after);
+    const read = await this.campaignForgeReadNow?.(campaignId, refs);
+    if (!read || read.some(entry => !entry.observation) ||
+        JSON.stringify(refs) !== JSON.stringify(recoveryDecisionRefs(this.db, campaignId, ref, snapshot.after)) ||
+        this.db.workflowDecisionByOccurrence(decision.occurrenceId)?.status !== "approved") return;
+    const now = Date.now();
+    const record = recoverySnapshotRecord(this.db, campaignId, snapshot);
+    const target = record && recoveryDecisionTarget(this.db, campaignId, ref, record, snapshot.after, now);
+    if (target && !target.ok && target.retry) return;
+    if (!record || !target?.ok || target.binding !== snapshot.binding || target.restoreRequester && !snapshot.restoreRequester) {
+      this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "system", id: "campaign_recovery" } });
+      return;
+    }
+    const { requester, owner } = target;
+    if (!this.hub.isRunnerOnline(requester.runnerId) || !["idle", "stopped", "failed", "completed"].includes(requester.status) ||
+        requester.pendingApproval || this.db.sessionsWithLiveBackgroundJobs([requester.id], now).has(requester.id) ||
+        requester.backgroundWorkState === "running" || requester.backgroundWorkState === "continuation_pending" ||
+        this.db.campaignBudgets.admissionError(requester.id)) return;
+    const daily = this.dailyBudgetFor(requester.id);
+    if (daily && daily.spentUsd >= daily.budgetUsd) return;
+    if (requester.worktreePath !== snapshot.worktree.path) {
+      await this.selectCampaignRecoveryWorktree?.(requester.id, snapshot.worktree.path, owner);
+      // Selection can wait on the runner. Revalidate placement and forge state on the next pass.
+      return;
+    }
+    if (target.restoreRequester) {
+      // A lost launch response is not permission to launch again. A known refusal releases the
+      // claim so the ordinary preflight can try later (capacity, budget, an offline runner).
+      const stopped = this.db.sessionStopProvenance(requester.id);
+      if (stopped && sessionStopRestorable(stopped)) return; // wait for the runner's lifecycle state
+      if (stopped?.confirmedAt && stopped.confirmedAt > decision.resolvedAt! ||
+          launchForRestart(this.db, requester)?.driver !== requester.driver) {
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition",
+          triggeredBy: { kind: "system", id: "campaign_recovery_restoration" } });
+        return;
+      }
+      if (!this.db.campaignRecovery.claimRestoration(campaignId, decision.occurrenceId)) {
+        // The online runner still reports a terminal requester. No receipt can safely authorize
+        // another launch. Retire this occurrence so the owner can explicitly decide a new one.
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition",
+          triggeredBy: { kind: "system", id: "campaign_recovery_restoration" } });
+        return;
+      }
+      const restored = requester.archived ? this.unarchiveAndRestart(requester.id) : this.restart(requester.id);
+      if (!restored.ok) this.db.campaignRecovery.releaseUnsentRestoration(decision.occurrenceId);
+      return;
+    }
+    const prompt = [
+      "Wollipog Campaign Recovery",
+      `Your campaign's owner approved one recovery instruction for ${snapshot.repository}#${snapshot.pullRequest} at head ${snapshot.headSha}.`,
+      `Use your original selected worktree on ${snapshot.worktree.branch}. Inspect and ${snapshot.action === "repair_checks" ? "repair the failing checks" : "address the review findings"} for this exact PR. If its head has moved, stop and report it.`,
+      "Retain prior attempts, review history, handoffs and merge prerequisites. Use the ordinary CI, review, and merge gates for every follow-on effect. Report the outcome to the original campaign.",
+    ].join("\n\n");
+    const sent = this.prompt(requester.id, prompt, [], undefined, undefined, undefined, false, {
+      durable: true, preservePermissionMode: true, admitAs: "queued", claimImmediate: () => false,
+      stage: (runnerId, command, at) => this.db.dispatchRequesterRecovery(decision.occurrenceId, campaignId, {
+        record, extraInstructions: 1, binding: snapshot.binding, requesterSessionId: requester.id, ownerUserId: owner.userId,
+      }, at, consumed => {
+        this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "system", id: "campaign_recovery" }, at);
+        return this.promptOutbox.stage(requester.id, runnerId, command, at, RECOVERY_PROMPT_PREFIX + decision.occurrenceId);
+      }),
+    }, undefined, false, { kind: "system_notice" });
+    if (sent.ok) this.hub.sessionChangedById(campaignId);
+    else if (sent.errorDetails?.code === "requester_recovery_permission_mode_unavailable") {
+      this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition",
+        triggeredBy: { kind: "system", id: "campaign_recovery" } });
+    }
+  }
+
   createWorkflowDecision(
     sessionId: string,
     request: CreateWorkflowDecisionRequest,
@@ -15365,6 +15541,9 @@ export class SessionsService {
     }
     if ((request.requestId.startsWith("campaign_handoffs_") || request.resourceKey === CAMPAIGN_HANDOFF_QUESTION_KEY) &&
         !internal?.trustedCampaignHandoffs) return fail("Campaign handoff question coordinates are reserved for the server", 400);
+    if (request.resourceKey.startsWith("campaign_recovery:") || request.requestId.startsWith(RECOVERY_REQUEST_PREFIX)) {
+      return fail("Campaign recovery coordinates are reserved for the server", 400);
+    }
     const ownerRule = normalizeWorkflowDecisionOwnerRule(request.ownerRule);
     if (!ownerRule.ok) return fail(ownerRule.message, 400);
     // Handoff material is a complete report of the already bounded ledger, not an agent-authored
@@ -16306,9 +16485,10 @@ export class SessionsService {
     // while explicit owner rules, handoffs, and owner-kept targets still require a direct human response.
     const ownerHeldCiRerun = snapshot.category === "ci_rerun" &&
       (reason === "outside_boundary" || reason === "unsupported_provider");
+    const requesterRecovery = snapshot.category === "campaign_recovery";
     const explicitlyKept = !ownerQuestion && this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, snapshot);
     if (decision.ownerRule || decision.ownerHandoff || explicitlyKept || decision.authorityEvaluation?.disposition ||
-        (reason !== "custom_owner" && !(ownerQuestion && reason === "owner_kept") && !customClosure && !evidenceFallback && !ownerHeldCiRerun) ||
+        (reason !== "custom_owner" && !(ownerQuestion && reason === "owner_kept") && !customClosure && !evidenceFallback && !ownerHeldCiRerun && !requesterRecovery) ||
         isReservedOwnerQuestion(decision) || (ownerQuestion && credentialFormFloor(snapshot)) ||
         (snapshot.category === "merged_branch_deletion" && snapshot.merged === false)) {
       return fail("This occurrence requires a direct human response.", 403);
@@ -16356,6 +16536,50 @@ export class SessionsService {
   ): ServiceResult<WorkflowDecisionView> {
     if (canAccess(childSessionId)) this.expireAutomationCreationDecisions(Date.now(), childSessionId);
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    if (decision?.resourceSnapshot.category === "campaign_recovery") {
+      const snapshot = decision.resourceSnapshot;
+      const scope = this.db.sessionScope(childSessionId);
+      if (decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
+          parentSessionId !== childSessionId || !canAccess(childSessionId) || !canAccess(snapshot.requesterSessionId)) {
+        return fail("workflow decision not found", 404);
+      }
+      const owner = actor.kind === "human" && actor.id && scope && this.db.operatingHumanPrincipal(actor.id, scope.organizationId);
+      if (authority !== "human" || decision.authority !== "human" || !owner || !this.db.isSessionOwner(owner, childSessionId)) {
+        return fail("Only the campaign's owner can decide this recovery.", 403);
+      }
+      const checked = this.validateWorkflowDecisionResolution(decision, resolution);
+      if (!checked.ok) return failAs(checked);
+      const approving = resolution.outcome === "approve";
+      if (decision.status !== "pending") {
+        const sameActor = internal?.assistantDelegation
+          ? decision.assistantDelegation?.threadId === internal.assistantDelegation.threadId
+          : !decision.assistantDelegation;
+        return sameActor && (approving ? ["approved", "consumed"].includes(decision.status) : decision.status === "denied")
+          ? ok(decision) : fail("This recovery decision was already settled.", 409);
+      }
+      const now = Date.now();
+      if (approving) {
+        const record = recoverySnapshotRecord(this.db, childSessionId, snapshot);
+        const context = record && recoveryDecisionTarget(this.db, childSessionId,
+          { repository: snapshot.repository, number: snapshot.pullRequest }, record, snapshot.after, now);
+        if (context && !context.ok && context.retry) return fail(context.error, 409);
+        if (!context?.ok || context.binding !== snapshot.binding || context.restoreRequester && !snapshot.restoreRequester) {
+          this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: actor });
+          return fail("The exact recovery target or authority changed. Request a new decision.", 409);
+        }
+      }
+      const delegation = internal?.assistantDelegation;
+      const resolved = this.db.resolveWorkflowDecision(occurrenceId, "human", approving ? "approved" : "denied", now,
+        undefined, undefined, auditDigest(resolution.rationale), undefined, false, undefined, undefined,
+        delegation ? { kind: "agent", id: delegation.threadId } : actor,
+        delegation && { ...delegation, resolvedAt: now, outcome: approving ? "approved" : "denied" });
+      if (!resolved) return fail("The recovery decision changed concurrently.", 409);
+      this.settleWorkflowDecisionPause(childSessionId, occurrenceId, now);
+      this.recordWorkflowDecisionAudit(resolved, approving ? "allowed" : "denied", actor, now, resolution.rationale);
+      this.hub.sessionChangedById(childSessionId);
+      if (approving) this.maintainRequesterRecoveries(now);
+      return ok(resolved);
+    }
     // An Owner Question (#4270) is answered only by the campaign's owner and is bound to no policy
     // revision, so no other resolution, nor a refused one, may revoke it here.
     if (decision && isOwnerQuestionSnapshot(decision.resourceSnapshot)) {
@@ -16840,6 +17064,7 @@ export class SessionsService {
     if (decision.category === "automation_creation") return fail("use execute_automation_creation to consume and create the approved automation atomically", 403);
     if (decision.category === "location_switch") return fail("use execute_location_switch to carry out the exact Location its owner chose", 403);
     if (decision.category === "campaign_repository_addition") return fail("use execute_campaign_repository_addition to carry out the exact Location the campaign's owner approved", 403);
+    if (decision.category === "campaign_recovery") return fail("Wollipog delivers and consumes the exact recovery automatically.", 403);
     if (decision.category === "issue_closure") return fail("use close_github_issue to consume and execute the exact approved closure", 403);
     if (decision.category === "campaign_follow_up_admission") {
       return fail("accept the follow-up again: the approval is consumed when the campaign admits exactly that follow-up", 403);
@@ -18577,6 +18802,8 @@ export class SessionsService {
       decision.actionAdmission?.kind === "pr_merge_enqueue" && superseded !== undefined;
     if (superseded && !recordingSupersededMerge &&
         this.approvedPersonalRule(controller.id, decision.category, superseded.rule) !== superseded.occurrenceId) return false;
+    if (decision.category === "campaign_recovery") return decision.authority === "human" &&
+      decision.controllingSessionId === decision.sessionId && decision.policyRevision === policy.revision;
     if (decision.category === "automation_creation" || decision.category === "location_switch" ||
         decision.category === "campaign_repository_addition") return decision.authority === "human" &&
       decision.controllingSessionId === decision.sessionId;
@@ -19476,6 +19703,7 @@ export class SessionsService {
       owner_decision: "Owner Decision Required",
       location_switch: "Location Switch Approval Required",
       campaign_repository_addition: "Add Repository to Campaign Approval Required",
+      campaign_recovery: "Campaign Recovery Approval Required",
     };
     const options = snapshot.category === "owner_decision" && snapshot.ruleDelegation
       ? snapshot.options.map((option) => ({ optionId: option.optionId, name: option.label,
@@ -19496,7 +19724,7 @@ export class SessionsService {
           kind: "reject_once" as const },
         ]
       : [
-          { optionId: "approve", name: "Approve", kind: "allow_once" as const },
+          { optionId: "approve", name: decision.category === "campaign_recovery" ? "Authorize Recovery" : "Approve", kind: "allow_once" as const },
           { optionId: "deny", name: "Deny", kind: "reject_once" as const },
         ];
     return {
@@ -19516,7 +19744,7 @@ export class SessionsService {
       // Full Control root decisions with human-owned proof gaps also wait without parking the
       // root (#4536). Existing owner-kept cards retain their behavior (#4064); other root cards
       // need a runner supporting owner decisions. This changes delivery, never authority.
-      ...(decision.sessionId === decision.controllingSessionId && decision.authority === "human" &&
+      ...(decision.category === "campaign_recovery" || decision.sessionId === decision.controllingSessionId && decision.authority === "human" &&
         requester && sessionRole(requester) === "orchestrator" &&
         (decision.category === "owner_decision" || decision.ownerHandoff || decision.ownerRule ||
           decision.authorityEvaluation?.reason === "owner_kept" ||

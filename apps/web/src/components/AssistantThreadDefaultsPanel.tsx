@@ -225,6 +225,7 @@ function AssistantThreadDefaultsForm() {
   const decisionDefault = defaults?.decisionDefault;
   const unavailable: Partial<Record<AssistantDecisionCategory, string>> = {
     ui_evidence_review: "Approving UI evidence needs the provider disclosure, which you accept in each thread's settings.",
+    campaign_recovery: "Choose Campaign Recovery for a selected campaign in an individual thread’s settings.",
   };
   if (!ciRerunSupported) unavailable.ci_rerun = "Update the control plane to delegate CI reruns.";
   if (!releaseSupported) {

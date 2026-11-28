@@ -58,6 +58,7 @@ export const ASSISTANT_DECISION_CATEGORIES = {
   ui_evidence_approval: "Send Back UI Evidence",
   ui_evidence_review: "Approve UI Evidence",
   review_round_extension: "Extend Review Rounds",
+  campaign_recovery: "Authorize Campaign Recovery",
 } as const;
 
 export type AssistantDecisionCategory = keyof typeof ASSISTANT_DECISION_CATEGORIES;

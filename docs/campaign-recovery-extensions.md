@@ -45,3 +45,33 @@ leave the resource blocked. No counter reset or internal-state edit is a support
 
 Verification uses isolated synthetic SQLite/session/forge fixtures. It does not demonstrate that a
 historical campaign has been restored, nor authorize touching live exhausted records.
+
+## Request One Recovery Instruction in Wollipog
+
+In a Wollipog Assistant thread, ask to recover an exhausted campaign PR and give the
+campaign, GitHub PR and current head. The Assistant uses `campaign_recovery_request`
+to place an exact approval in the campaign owner's Inbox. Include `after` when a
+separate same-repository PR must merge first. Wollipog also checks the campaign's
+recorded merge prerequisites. The card identifies the original review requester,
+preserved worktree, spent attempts and the single additional instruction.
+
+On approval, Wollipog reads the forge again, selects the linked worktree, and
+restores the original requester if specified by the approval. It stages the
+instruction through the durable prompt outbox and commits the attempt and
+consumption together. An unavailable read holds delivery for a retry. A changed
+target or binding requires a new request. A decline holds recovery for that head.
+Handoffs, older decision revocations and the parent continuation's fence are retained.
+This operates on one PR in the original session and leaves approval for CI reruns,
+review rounds, merges and other effects to their existing workflows.
+
+The typed path accepts an exhausted, current-policy GitHub PR repair. A fenced
+or historical record also needs a recorded owner handoff. The forge must confirm
+the open PR, exact branch tip and check failure or review objection. There must be
+one proven original review requester with a matching preserved worktree.
+
+The owner can grant **Authorize Campaign Recovery** in an individual Assistant
+thread's **Decision Delegation** settings by choosing the category and selecting the
+campaign. **Delegate All** and default grants exclude this category. Use a separate
+thread from the one that requested recovery. Instruct it to resolve the exact
+occurrence using its current digest. Resolution is recorded with the thread and
+grant revision.

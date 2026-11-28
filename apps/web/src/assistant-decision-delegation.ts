@@ -7,6 +7,7 @@ export const ASSISTANT_DECISION_GROUPS = [
   { label: "Cleanup", categories: ["merged_branch_deletion"] },
   { label: "Questions", categories: ["owner_question"] },
   { label: "UI Evidence", categories: ["ui_evidence_review", "ui_evidence_approval"] },
+  { label: "Campaign Recovery", categories: ["campaign_recovery"] },
 ] as const satisfies readonly { label: string; categories: readonly AssistantDecisionCategory[] }[];
 
 const hour = 60 * 60_000;

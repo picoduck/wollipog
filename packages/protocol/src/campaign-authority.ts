@@ -189,7 +189,7 @@ export function campaignWorkflowOwner(control: CampaignControl | undefined, deci
   // decision its owner kept (#4064). A Location switch widens a session's reach (#4138), and a
   // repository addition widens the campaign's (#4117).
   if (!supported || category === "automation_creation" || category === "campaign_follow_up_admission" ||
-      category === "owner_decision" || category === "location_switch" || category === "campaign_repository_addition" ||
+      category === "owner_decision" || category === "location_switch" || category === "campaign_repository_addition" || category === "campaign_recovery" ||
       isReleaseDecisionCategory(category)) return "human";
   if (category === "issue_closure" || category === "campaign_issue_scope") return control?.mode === "full_control" &&
     validCampaignControl(control) && control.boundary.issueAuthority && control.boundary.operations.includes(category) ? "orchestrator" : "human";
@@ -489,7 +489,7 @@ export function resolveCampaignAuthority(input: {
   // Release tagging and publication can be resolved by an Assistant grant through the owner route only.
   if (isReleaseDecisionCategory(category)) return result("human", "custom_policy", "custom_owner");
   if (category === "automation_creation" || category === "campaign_follow_up_admission" || category === "location_switch" ||
-      category === "campaign_repository_addition") {
+      category === "campaign_repository_addition" || category === "campaign_recovery") {
     return result("human", "human_required", "protected_request");
   }
   if (!input.supported) return result("human", "human_required", "unsupported_provider");

@@ -622,7 +622,9 @@ if (panelScenario) {
   current.usage ??= { costUsd: { used: 8.13, limit: 25 }, launchedSessions: { used: 42, limit: 60 } };
   current.earlierConversations = [{ sessionId: "sess-cleanup", harness: "codex", nextHarness: "claude-code", switchedAt: NOW - minute }];
   current.decisionDelegation = { revision: 1, grant: panelScenario === "delegated" ? {
-    categories: Object.keys(ASSISTANT_DECISION_CATEGORIES) as AssistantDecisionCategory[],
+    categories: (Object.keys(ASSISTANT_DECISION_CATEGORIES) as AssistantDecisionCategory[])
+      .filter((category) => category !== "campaign_recovery"),
+    selectionMode: "all",
     campaigns: "all", projects: "all", expiresAt: NOW + 8 * 24 * 60 * minute,
   } : null };
   const backing = sessions.get(current.sessionId)!;
@@ -644,7 +646,7 @@ if (limitsScenario && limitsScenario !== "old") {
     const savedGrant = params.get("default-grant");
     defaults.decisionDefault = savedGrant === "all-before-releases" || savedGrant === "all-scoped" ? {
       categories: (Object.keys(ASSISTANT_DECISION_CATEGORIES) as AssistantDecisionCategory[]).filter((category) =>
-        !["ci_rerun", "release_tag", "release_publish", "ui_evidence_review"].includes(category)),
+        !["ci_rerun", "release_tag", "release_publish", "ui_evidence_review", "campaign_recovery"].includes(category)),
       selectionMode: "all", expiresAfterMs: 7 * 24 * 60 * 60_000,
       ...(savedGrant === "all-scoped" ? { projects: ["project_0"], campaigns: ["campaign_0"] } : { projects: "all", campaigns: "all" }),
     } : null;

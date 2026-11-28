@@ -67,6 +67,20 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck, scope
       return <AutomationCreationSummary snapshot={snapshot} />;
     case "location_switch":
       return <LocationSwitchSummary snapshot={snapshot} />;
+    case "campaign_recovery":
+      return <section aria-label="Campaign Recovery Details">
+        <dl className="facts">
+          <div><dt>Pull Request</dt><dd><a href={`https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest}`} target="_blank" rel="noreferrer">{snapshot.repository}#{snapshot.pullRequest}</a></dd></div>
+          <div><dt>Commit</dt><dd><code>{snapshot.headSha}</code></dd></div>
+          <div><dt>Original Requester</dt><dd><code>{snapshot.requesterSessionId}</code></dd></div>
+          <div><dt>Worktree</dt><dd><code>{snapshot.worktree.path}</code> on <code>{snapshot.worktree.branch}</code></dd></div>
+          <div><dt>Allowance</dt><dd>One additional instruction after {snapshot.attempts} spent.</dd></div>
+          {snapshot.after !== undefined && <div><dt>After Merge</dt><dd>PR #{snapshot.after}</dd></div>}
+          <div><dt>Next Operation</dt><dd>{snapshot.restoreRequester ? "Restore the original requester, then " : ""}
+            {snapshot.action === "repair_checks" ? "send one instruction to repair the failing checks." : "send one instruction to address the review findings."}</dd></div>
+        </dl>
+        <p>Wollipog selects the preserved worktree and delivers the instruction when the PR and requester are ready. Existing CI, review and merge gates still apply.</p>
+      </section>;
     case "campaign_repository_addition":
       // A repository addition (#4117): the Location and the repository it verified as come from the
       // server's inspection; the reason is the Orchestrator's own words, shown as such.

@@ -98,3 +98,21 @@ export const CAMPAIGN_RECOVERY_EXPLANATIONS: Record<CampaignRecoveryReason, stri
   intentional_stop: "The worker was stopped on purpose by a recorded Stop or archive request; nothing was denied. It remains blocked and recovery will not replace or restart it automatically.",
   unverified_stop: "The worker stopped without a recorded Stop request, denial or failure that explains why, so the cause is unverified. It remains blocked and recovery will not replace or restart it automatically.",
 };
+/** Server-derived approval to deliver one instruction to the original review requester. */
+export interface CampaignRecoveryDecisionSnapshot {
+  category: "campaign_recovery";
+  repository: string;
+  pullRequest: number;
+  headSha: string;
+  recoveryId: string;
+  action: "repair_checks" | "rereview";
+  attempts: number;
+  extraInstructions: 1;
+  requesterSessionId: string;
+  worktree: { id: string; path: string; branch: string };
+  restoreRequester: boolean;
+  /** An additional ordering constraint explicitly included in the request. */
+  after?: number;
+  binding: string;
+  requestingThreadId: string;
+}

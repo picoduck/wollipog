@@ -5,6 +5,10 @@ import { CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, CAMPAIGN_RECOVERY_EXPLANATIONS
   type CampaignRecoveryReason, type CampaignRecoveryRecord, type CampaignRecoveryResource } from "@wollipog/protocol";
 
 export const CAMPAIGN_RECOVERY_SCHEMA = `
+CREATE TABLE IF NOT EXISTS campaign_recovery_restorations (
+  occurrence_id TEXT PRIMARY KEY,
+  campaign_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS campaign_recovery_extensions (
   campaign_session_id TEXT NOT NULL,
   request_id TEXT NOT NULL,
@@ -164,6 +168,48 @@ export class CampaignRecoveryStore {
     return (this.db.prepare("SELECT authorization_json,revoked_at FROM campaign_recovery_extensions WHERE campaign_session_id=? ORDER BY rowid")
       .all(campaignId) as Array<{ authorization_json: string; revoked_at: number | null }>).map(row => ({
         ...JSON.parse(row.authorization_json) as RecoveryExtension, revokedAt: row.revoked_at }));
+  }
+
+  record(campaignId: string, id: string): CampaignRecoveryRecord | undefined {
+    const row = this.db.prepare("SELECT record_json FROM campaign_recovery WHERE campaign_session_id=? AND id=?")
+      .get(campaignId, id) as Pick<Row, "record_json"> | undefined;
+    return row && JSON.parse(row.record_json) as CampaignRecoveryRecord;
+  }
+
+  pullRequestRecords(campaignId: string, repository: string, pullRequest: number): CampaignRecoveryRecord[] {
+    return (["repair_checks", "rereview"] as const).flatMap(action => {
+      const id = identity(campaignId, { kind: "pull_request", sessionId: campaignId, repository, pullRequest, occurrenceId: "" }, action);
+      const record = this.record(campaignId, id);
+      return record?.resource.kind === "pull_request" ? [record] : [];
+    });
+  }
+
+  claimRestoration(campaignId: string, occurrenceId: string): boolean {
+    return this.db.prepare("INSERT OR IGNORE INTO campaign_recovery_restorations VALUES (?,?)")
+      .run(occurrenceId, campaignId).changes === 1;
+  }
+
+  releaseUnsentRestoration(occurrenceId: string): void {
+    this.db.prepare("DELETE FROM campaign_recovery_restorations WHERE occurrence_id=?").run(occurrenceId);
+  }
+
+  /** Typed delivery owns a single requester prompt. Keep any legacy fence in place so this
+   * authorization never also admits a parent continuation or revives the handed-off item. */
+  dispatchToRequester(campaignId: string, occurrenceId: string, snapshot: RecoveryExtensionSnapshot, now: number): void {
+    const row = this.db.prepare("SELECT signal,record_json FROM campaign_recovery WHERE campaign_session_id=? AND id=?")
+      .get(campaignId, snapshot.record.id) as Omit<Row, "id"> | undefined;
+    const record = snapshot.record;
+    if (!row || row.record_json !== JSON.stringify(record) || snapshot.extraInstructions !== 1 ||
+        !exhaustedPullRequest(record) ||
+        this.extensions(campaignId).some(item => item.snapshot.record.id === record.id && item.revokedAt === null &&
+          record.attempts < item.snapshot.record.attempts + item.snapshot.extraInstructions)) {
+      throw new Error("recovery_changed_or_ineligible");
+    }
+    const receipt: RecoveryExtension = { requestId: occurrenceId, snapshot, admittedAt: now, revokedAt: null, delivery: "requester" };
+    this.db.prepare("INSERT INTO campaign_recovery_extensions(campaign_session_id,request_id,recovery_id,authorization_json) VALUES(?,?,?,?)")
+      .run(campaignId, occurrenceId, record.id, JSON.stringify(receipt));
+    this.save(campaignId, row.signal, { ...record, state: "resolved", attempts: record.attempts + 1, maxAttempts: record.maxAttempts + 1,
+      attemptedRecovery: [...record.attemptedRecovery, record.action], updatedAt: now });
   }
 
   /** Durable admission receipt. A lost response is reconciled without another allowance. */
@@ -411,7 +457,7 @@ export class CampaignRecoveryStore {
         const stalled = settledAt !== undefined && now >= settledAt + stalledRecoveryWakeDelayMs(attempts);
         const escalatedStop = old?.action === "replace_worker" &&
           (stopSeverity[observation.reason] ?? 0) > (stopSeverity[old.reason] ?? Infinity);
-        const extension = this.extensions(campaignId).filter(item => item.snapshot.record.id === id).at(-1);
+        const extension = this.extensions(campaignId).filter(item => item.snapshot.record.id === id && item.delivery !== "requester").at(-1);
         const extensionCurrent = extension && extension.revokedAt === null && authorized &&
           extension.snapshot.binding === extensionBinding?.({ ...old!, resource: observation.resource }) &&
           extension.snapshot.record.policyRevision === policyRevision && observation.owner === "orchestrator" &&
@@ -508,4 +554,12 @@ export interface RecoveryExtension {
   snapshot: RecoveryExtensionSnapshot;
   admittedAt: number;
   revokedAt: number | null;
+  delivery?: "requester";
+}
+
+export function exhaustedPullRequest(record: CampaignRecoveryRecord): boolean {
+  return record.resource.kind === "pull_request" && record.reason === "attempts_exhausted" &&
+    record.effectiveOwner === "orchestrator" && record.attempts === record.maxAttempts &&
+    record.attemptedRecovery.length === record.attempts && record.attemptedRecovery.every(action => action === record.action) &&
+    (record.state === "blocked" || record.state === "resolved");
 }

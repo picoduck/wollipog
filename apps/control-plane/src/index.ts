@@ -5358,6 +5358,16 @@ registerUsageRoutes(app, db, requestPrincipal, hub, {
 });
 
 const runSessionWorktreeRequest = createSessionWorktreeManagement({db, hub, svc, worktreeCreates, runnerCapabilityError});
+svc.selectCampaignRecoveryWorktree = async (sessionId, path, owner) => {
+  let status = 200;
+  const response = {
+    code(value: number) { status = value; return response; },
+    send() { return undefined; },
+    header() { return response; },
+  };
+  await runSessionWorktreeRequest(sessionId, { operation: "select", path }, owner, response);
+  return status === 200 && db.getSession(sessionId, { includeCampaignProjection: false })?.worktreePath === path;
+};
 registerAssistantOwnerManagement(assistantOperations, {db, svc, receipts: assistantCommandReceipts,
   projects: ownerProjectManagement, runners: ownerRunnerManagement, worktree: runSessionWorktreeRequest});
 registerAssistantMachineManagement(assistantOperations, db, ownerMachineManagement, assistantCommandReceipts);

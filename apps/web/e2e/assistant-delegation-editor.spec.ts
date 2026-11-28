@@ -33,7 +33,7 @@ test("upgrading capabilities does not widen a saved Delegate All grant", async (
   await page.goto(`/assistants-e2e.html?delegation=stress&evidence=available&saved-narrow&path=${encodeURIComponent(thread)}`);
   const dialog = await openEditor(page);
   await expect(dialog.getByRole("radio", { name: "Delegate All" })).toBeChecked();
-  await expect(dialog).toContainText("1 of 11 categories included.");
+  await expect(dialog).toContainText("1 of 12 categories included.");
   await dialog.getByRole("radio", { name: "1 Hour", exact: true }).click();
   await dialog.getByRole("button", { name: "Save Delegation" }).click();
   await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", JSON.stringify({
@@ -60,6 +60,25 @@ test("a control plane can offer CI reruns before it supports release grants", as
   await dialog.getByRole("button", { name: "Save Delegation" }).click();
   await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", JSON.stringify({
     categories: ["release_tag", "ci_rerun"], selectionMode: "choose", projects: "all", campaigns: "all", expiresAt: null,
+  }));
+});
+
+test("Campaign Recovery can be delegated on one thread for a selected campaign", async ({ page }) => {
+  await page.clock.setFixedTime(now);
+  await page.goto(`/assistants-e2e.html?delegation=stress&evidence=available&path=${encodeURIComponent(thread)}`);
+  const dialog = await openEditor(page);
+  await dialog.getByRole("radio", { name: "Choose" }).click();
+  await dialog.getByRole("checkbox", { name: "Authorize Campaign Recovery" }).check();
+  const save = dialog.getByRole("button", { name: "Save Delegation" });
+  await save.click();
+  await expect(dialog).toContainText("Select the campaigns for Campaign Recovery.");
+  const campaigns = dialog.getByRole("group", { name: "Campaigns", exact: true });
+  await campaigns.getByRole("radio", { name: "Selected Campaigns" }).click();
+  await campaigns.getByRole("checkbox", { name: "Release Campaign 0", exact: true }).check();
+  await save.click();
+  await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", JSON.stringify({
+    categories: ["campaign_recovery"], selectionMode: "choose", projects: "all", campaigns: ["campaign_0"],
+    expiresAt: now.getTime() + 7 * 24 * 3600_000,
   }));
 });
 
@@ -102,7 +121,7 @@ for (const theme of ["light", "dark"] as const) {
         await screenshot(page, "ask-me");
 
         await all.click();
-        await expect(dialog).toContainText("10 of 11 categories included.");
+        await expect(dialog).toContainText("10 of 12 categories included.");
         await expect(dialog).toContainText("Excluded until you accept the provider disclosure.");
         await expect(dialog).toContainText(/Claude Code.*provider may retain/);
         await expectEditorLayout(dialog, width);
@@ -118,7 +137,7 @@ for (const theme of ["light", "dark"] as const) {
         await screenshot(page, "active-grant");
 
         await consent.check();
-        await expect(dialog).toContainText("11 of 11 categories included.");
+        await expect(dialog).toContainText("11 of 12 categories included.");
         await expect(dialog).toContainText("Included. You accepted the provider disclosure.");
         await expectEditorLayout(dialog, width);
         await screenshot(page, "all-after-disclosure");
@@ -129,7 +148,7 @@ for (const theme of ["light", "dark"] as const) {
         expect(persisted.categories).toHaveLength(11);
 
         await openEditor(page);
-        await expect(dialog).toContainText("11 of 11 categories included.");
+        await expect(dialog).toContainText("11 of 12 categories included.");
         const revoke = dialog.getByRole("button", { name: "Revoke Delegation" });
         await expectFullyInViewport(revoke, "Revoke Delegation");
         await revoke.click();
@@ -269,7 +288,7 @@ for (const theme of ["light", "dark"] as const) {
         await expectEditorLayout(dialog, width);
         await screenshot(page, "older-control-plane");
         await dialog.getByRole("radio", { name: "Delegate All" }).click();
-        await expect(dialog).toContainText("7 of 11 categories included.");
+        await expect(dialog).toContainText("7 of 12 categories included.");
         await dialog.getByRole("button", { name: "Save Delegation" }).click();
         await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", JSON.stringify({
           categories: categories.filter((category) => !["ci_rerun", "release_tag", "release_publish"].includes(category)),

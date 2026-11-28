@@ -5,6 +5,7 @@ export function ownerResourceLabel(snapshot: WorkflowDecisionResourceSnapshot): 
   const text = (() => {
     switch (snapshot.category) {
     case "pr_merge":
+    case "campaign_recovery":
     case "review_round_extension": return `PR #${snapshot.pullRequest} in ${snapshot.repository}`;
     case "ci_rerun": return `CI run ${snapshot.runId} in ${snapshot.repository}`;
     case "release_tag":
@@ -29,6 +30,7 @@ export function ownerResourceLabel(snapshot: WorkflowDecisionResourceSnapshot): 
 export function ownerResourceNoun(category: WorkflowDecisionCategory): string {
   switch (category) {
   case "pr_merge":
+  case "campaign_recovery":
   case "review_round_extension": return "PR";
   case "ci_rerun": return "CI run";
   case "release_tag":

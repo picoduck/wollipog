@@ -18,6 +18,7 @@ import { DurableCommandStore, isDurableSessionCommandMessage } from "../../runne
 import Fastify from "fastify";
 import { registerCampaignRecoveryExtensionRoutes, recoveryExtensionContext } from "./campaign-recovery-extensions.js";
 import type { AuthPrincipal } from "./identity.js";
+import { RECOVERY_PROMPT_PREFIX } from "./campaign-recovery-decision.js";
 
 function fixture(budgetAuthority?: CampaignBudgetAuthority, completion?: "retain" | "stop_and_archive") {
   const db = ControlPlaneDb.open(":memory:");
@@ -978,6 +979,229 @@ test("owner API restores the original requester separately and retains worktree 
     assert.equal((await post("/owner-one/revoke", {})).statusCode, 200);
     assert.equal((await post("/apply", payload)).json().receipt.revokedAt !== null, true, "retry cannot reauthorize revoked history");
   } finally { await app.close(); h.db.close(); }
+});
+
+function handedOffRecoveryFixture() {
+  const h = completedPrFixture();
+  const { db, svc, ref, itemId, now } = h;
+  h.metadata.agents[0]!.capabilities = { models: [{ id: "gpt-6.1-sol", displayName: "Fixture", default: true, defaultEffort: "high" }],
+    effortLevels: ["high"], slashCommands: [], supportsImages: true, supportsApprovals: true, permissionModes: ["default"] };
+  db.registerRunner(h.metadata, now, PROTOCOL_VERSION);
+  const branch = "original-work";
+  const worktree = { id: "preserved", path: "/fixture/original", branch, source: "created" };
+  // The archived requester has preserved inventory but no selected path. The pre-handoff
+  // recovery record remains exhausted and fenced even after it stops being a forge target.
+  db.raw().prepare("UPDATE sessions SET worktrees=?,worktree_path=NULL WHERE id='child'").run(JSON.stringify([worktree]));
+  db.updateSessionStatus("child", "stopped", now, RUNNER_REPORTED_STOP);
+  db.raw().prepare(`INSERT INTO review_sessions(review_session_id,requester_session_id,runner_id,repository,pr_number,
+    head_sha,reviewer,state,created_at,updated_at,round_json,output) VALUES('original-review','child','r',?,42,?,
+    'claude-code','completed',1,2,?,?)`).run(ref.repository, h.observation.headSha,
+    JSON.stringify({ epoch: 2, round: 4, attempt: 1 }), "Original report");
+  const revision = db.getSession("root")!.parentControlPolicy!.revision;
+  const observation = { ...h.observation, headBranch: { name: branch, tipSha: h.observation.headSha } };
+  const previousApproval = db.createWorkflowDecision({ requestId: "previous-rerun", occurrenceId: "workflow_previous_rerun",
+    sessionId: "child", controllingSessionId: "root", authority: "human", category: "ci_rerun", resourceKey: "previous-rerun",
+    resourceSnapshot: { category: "ci_rerun", repository: ref.repository, runId: 191, attempt: 1, headSha: observation.headSha },
+    resourceDigest: "b".repeat(64), policyRevision: revision, createdAt: now - 3 })!.decision;
+  assert.ok(db.resolveWorkflowDecision(previousApproval.occurrenceId, "human", "approved", now - 2));
+  assert.equal(db.markWorkflowDecisionRevoked(previousApproval.occurrenceId, now - 1)?.status, "revoked");
+  const failure = { action: "repair_checks" as const, reason: "failed_checks" as const, owner: "orchestrator" as const,
+    signal: "failure", resource: { kind: "pull_request" as const, sessionId: "root", repository: ref.repository,
+      pullRequest: ref.number, occurrenceId: observation.headSha } };
+  for (let n = 0; n < 4; n++) {
+    db.campaignRecovery.synchronize("root", revision, true, [{ ...failure, signal: `failure-${n}` }], now + n);
+    db.campaignRecovery.dispatchDue("root", revision, now + n, () => {});
+  }
+  db.campaignRecovery.synchronize("root", revision, false, [], now + 4);
+  db.campaignRecovery.synchronize("root", revision, true, [failure], now + 5);
+  assert.ok(db.campaignWorkLedger.updateItem("root", "root", { workItemId: itemId,
+    handoff: { responsibleActor: "human", reason: "Recovery exhausted", nextAction: "Restore the original requester when exact recovery is available." } }, now + 6).ok);
+  db.campaignRecovery.synchronize("root", revision, true, [], now + 7);
+  const record = db.campaignRecovery.pullRequestRecords("root", ref.repository, ref.number)[0]!;
+  assert.deepEqual({ state: record.state, reason: record.reason, attempts: record.attempts, maxAttempts: record.maxAttempts,
+    dispatchFenced: record.dispatchFenced },
+  { state: "resolved", reason: "attempts_exhausted", attempts: 4, maxAttempts: 4, dispatchFenced: true });
+  assert.equal(db.campaignRecovery.activeRecords("root").some(active => active.id === record.id), false);
+  assert.equal(recoveryExtensionContext(db, "root", record, now), null);
+  const owner = db.operatingHumanPrincipal(h.identity.userId, h.identity.organizationId)!;
+  const actor = { kind: "human" as const, id: owner.userId };
+  const read = async (id: string, refs: readonly typeof ref[]) => {
+    const results = refs.map(target => ({ ref: target, observation }));
+    db.campaignForgeObservations.record(id, "r", results, Date.now());
+    return results;
+  };
+  svc.campaignForgeReadNow = read;
+  const request = (requestId = "recover", after?: number) => svc.requestCampaignPrRecovery("root",
+    { requestId, repository: ref.repository, pullRequest: ref.number, headSha: observation.headSha, after },
+    "requesting-thread", async () => owner, id => assert.equal(id, "child"));
+  const resolve = (occurrenceId: string, outcome: "approve" | "deny") =>
+    svc.resolveWorkflowDecision("root", "root", occurrenceId, { outcome }, "human", actor, () => true);
+  let passes = 0;
+  const tick = async () => {
+    svc.retryDuePrompts(Date.now() + 31_000 * ++passes);
+    await new Promise<void>(done => setImmediate(done));
+  };
+  return { ...h, owner, observation, worktree, record, read, request, resolve, tick };
+}
+
+test("typed recovery restores the archived requester and dispatches one bounded original-worktree prompt", async () => {
+  const h = handedOffRecoveryFixture();
+  const { db, svc, sent, record, worktree } = h;
+  try {
+    const reviews = db.raw().prepare("SELECT * FROM review_sessions").all();
+    const handoff = db.campaignWorkLedger.pullRequestWorkItems("root").get(`${h.ref.repository}#42`)!.handoff;
+    svc.selectCampaignRecoveryWorktree = async (id, path) => {
+      assert.equal(id, "child");
+      assert.equal(path, worktree.path);
+      db.setWorktreePath(id, path);
+      return true;
+    };
+    const requested = await h.request();
+    assert.ok(requested.ok, requested.error ?? "recovery request refused");
+    const decision = requested.data!;
+    assert.equal(decision.authority, "human");
+    assert.equal(db.getSession("root")!.pendingApproval?.occurrenceId, decision.occurrenceId);
+    assert.equal(db.getSession("root")!.status, "idle", "the Inbox card is asynchronous");
+    assert.ok((await h.request()).ok);
+    assert.equal(svc.resolveWorkflowDecision("root", "root", decision.occurrenceId, { outcome: "approve" }, "orchestrator",
+      { kind: "agent", id: "root" }, () => true).status, 403);
+    svc.campaignForgeReadNow = async () => null;
+    assert.equal((await h.request()).data?.occurrenceId, decision.occurrenceId, "lost responses can be reconciled during a forge gap");
+    assert.ok(svc.approve("root", decision.occurrenceId, "approve", { kind: "human", id: h.owner.userId }).ok);
+    await h.tick();
+    assert.equal(db.getSession("child")!.archived, true, "a missing read cannot spend or restore from cached proof");
+    assert.equal(db.campaignRecovery.record("root", record.id)!.attempts, 4);
+    svc.campaignForgeReadNow = h.read;
+    await h.tick();
+    assert.equal(db.getSession("child")!.worktreePath, worktree.path, JSON.stringify({
+      decision: db.workflowDecisionByOccurrence(decision.occurrenceId)?.status,
+      admission: db.campaignRequesterRecoveryAdmission("root"),
+      budget: db.campaignBudgets.admissionError("child"),
+      record: db.campaignRecovery.record("root", record.id),
+      worker: db.getSession("child")?.status,
+    }));
+    assert.equal(db.getSession("child")!.archived, true);
+    await h.tick();
+    assert.equal(db.getSession("child")!.archived, false);
+    assert.equal(db.getSession("child")!.status, "starting");
+    assert.equal(sent.filter(message => (message as { type: string }).type === "start_session").length, 1);
+    db.updateSessionStatus("child", "idle", Date.now());
+    await h.tick();
+    await h.tick();
+    const commandId = RECOVERY_PROMPT_PREFIX + decision.occurrenceId;
+    const command = db.getSessionPromptCommand(commandId);
+    assert.equal(command?.sessionId, "child");
+    assert.equal(db.getSession("child")!.effort, "high", "ordinary default effort resolution leaves this recovery current");
+    assert.match(command!.payloadJson, /owner approved one recovery instruction/u);
+    assert.equal(db.workflowDecisionByOccurrence(decision.occurrenceId)?.status, "consumed");
+    assert.equal(db.campaignRecovery.record("root", record.id)!.attempts, 5);
+    assert.equal(db.campaignRecovery.record("root", record.id)!.dispatchFenced, true);
+    assert.deepEqual(db.raw().prepare("SELECT * FROM review_sessions").all(), reviews);
+    assert.deepEqual(db.getSession("child")!.worktrees, [worktree]);
+    assert.deepEqual(db.campaignWorkLedger.pullRequestWorkItems("root").get(`${h.ref.repository}#42`)!.handoff, handoff);
+    assert.equal(h.resolve(decision.occurrenceId, "approve").data?.status, "consumed");
+    assert.equal(db.campaignRecovery.extensions("root").length, 1);
+    assert.equal(db.workflowDecisionByOccurrence("workflow_previous_rerun")?.status, "revoked");
+    assert.ok(sent.some(message => (message as { commandId?: string }).commandId === commandId));
+    const deliveries = () => sent.filter(message => (message as { commandId?: string }).commandId === commandId).length;
+    const beforeGap = deliveries();
+    db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, failure: "forge_unreachable" }], Date.now());
+    await h.tick();
+    assert.equal(deliveries(), beforeGap, "a durable resend is held during a forge read gap");
+    db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, observation: h.observation }], Date.now());
+    await h.tick();
+    assert.ok(deliveries() > beforeGap, "the same durable identity is retried once the forge answers");
+    assert.equal(db.campaignRecovery.record("root", record.id)!.attempts, 5);
+  } finally { db.close(); }
+});
+
+test("typed recovery retains explicit denial and revokes stale worktree or head directions", async () => {
+  for (const change of ["denied", "worktree", "head"] as const) {
+    const h = handedOffRecoveryFixture();
+    try {
+      const requested = await h.request();
+      assert.ok(requested.ok, requested.error ?? "recovery request refused");
+      const { occurrenceId } = requested.data!;
+      if (change === "denied") {
+        assert.ok(h.resolve(occurrenceId, "deny").ok);
+        assert.match((await h.request("new-id")).error!, /declined/u);
+      } else {
+        if (change === "worktree") h.db.raw().prepare("UPDATE sessions SET worktrees='[]' WHERE id='child'").run();
+        else h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref,
+          observation: { ...h.observation, headSha: "b".repeat(40) } }], Date.now());
+        assert.equal(h.resolve(occurrenceId, "approve").ok, false);
+        assert.equal(h.db.workflowDecisionByOccurrence(occurrenceId)?.status, "revoked");
+      }
+      assert.equal(h.db.getSession("child")!.archived, true);
+      assert.equal(h.db.campaignRecovery.record("root", h.record.id)!.attempts, 4);
+    } finally { h.db.close(); }
+  }
+});
+
+test("typed recovery retires an interrupted restoration without replaying the launch", async () => {
+  const h = handedOffRecoveryFixture();
+  try {
+    h.db.setWorktreePath("child", h.worktree.path);
+    const requested = await h.request();
+    assert.ok(requested.ok, requested.error ?? "recovery request refused");
+    const { occurrenceId } = requested.data!;
+    assert.ok(h.resolve(occurrenceId, "approve").ok);
+    await h.tick();
+    assert.equal(h.db.getSession("child")!.status, "starting");
+    h.db.updateSessionStatus("child", "failed", Date.now());
+    await h.tick();
+    assert.equal(h.db.workflowDecisionByOccurrence(occurrenceId)?.status, "revoked");
+    assert.equal(h.sent.filter(message => (message as { type: string }).type === "start_session").length, 1);
+    assert.equal(h.db.campaignRecovery.record("root", h.record.id)!.attempts, 4);
+    const replacement = await h.request("after-failure");
+    assert.ok(replacement.ok, replacement.error ?? "a new exact decision should be possible");
+    assert.notEqual(replacement.data!.occurrenceId, occurrenceId);
+    assert.equal(replacement.data!.status, "pending");
+  } finally { h.db.close(); }
+});
+
+test("typed recovery retires a turn that cannot preserve the original permission mode", async () => {
+  const h = handedOffRecoveryFixture();
+  try {
+    const base = h.metadata.agents[0]!;
+    h.metadata.agents.push({ ...base, id: "claude", driver: "claude-code", command: "claude",
+      capabilities: { ...base.capabilities!, models: [], effortLevels: [], permissionModes: ["default"] } });
+    h.db.registerRunner(h.metadata, Date.now(), PROTOCOL_VERSION);
+    h.db.raw().prepare("UPDATE sessions SET driver='claude-code',agent_id='claude',permission_mode='bypassPermissions' WHERE id='child'").run();
+    h.db.setSessionArchived("child", false, Date.now());
+    h.db.setWorktreePath("child", h.worktree.path);
+    h.db.updateSessionStatus("child", "idle", Date.now());
+    const requested = await h.request();
+    assert.ok(requested.ok, requested.error ?? "recovery request refused");
+    const { occurrenceId } = requested.data!;
+    assert.ok(h.resolve(occurrenceId, "approve").ok);
+    await h.tick();
+    assert.equal(h.db.workflowDecisionByOccurrence(occurrenceId)?.status, "revoked");
+    assert.equal(h.db.getSession("child")?.permissionMode, "bypassPermissions");
+    assert.equal(h.db.getSessionPromptCommand(RECOVERY_PROMPT_PREFIX + occurrenceId), null);
+    assert.equal(h.db.campaignRecovery.record("root", h.record.id)!.attempts, 4);
+  } finally { h.db.close(); }
+});
+
+test("typed recovery requires an actual merge of an explicitly ordered predecessor", async () => {
+  const h = handedOffRecoveryFixture();
+  const before = { ...h.ref, number: 41 };
+  try {
+    assert.ok(h.db.campaignWorkLedger.updateItem("root", "root", { workItemId: h.itemId,
+      stage: { stage: "awaiting_checks", pullRequests: [before, h.ref] } }, Date.now()).ok);
+    assert.match((await h.request("ordered", 41)).error!, /PR #41 must merge/u);
+    assert.equal(h.db.getSession("root")!.pendingApproval, null);
+    h.svc.campaignForgeReadNow = async (campaignId, refs) => {
+      const results = refs.map(ref => ({ ref, observation: ref.number === 41
+        ? { ...h.observation, state: "merged" as const, mergeCommitSha: "c".repeat(40) } : h.observation }));
+      h.db.campaignForgeObservations.record(campaignId, "r", results, Date.now());
+      return results;
+    };
+    const admitted = await h.request("ordered", 41);
+    assert.ok(admitted.ok, admitted.error ?? "predecessor was not recognized");
+    const snapshot = admitted.data!.resourceSnapshot;
+    assert.equal(snapshot.category === "campaign_recovery" && snapshot.after, 41);
+  } finally { h.db.close(); }
 });
 
 for (const kind of ["checks", "forge_review", "steering", "native_objection", "native_invalid"] as const) {

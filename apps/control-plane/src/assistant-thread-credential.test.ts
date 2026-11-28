@@ -115,6 +115,56 @@ async function harness(protocolVersion = PROTOCOL_VERSION) {
 
 const discover = { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "assistant_discover", arguments: {} } };
 
+test("campaign recovery delegation is explicit, scoped, and cannot be exercised by the requesting thread", async () => {
+  const h = await harness();
+  try {
+    decisionSession(h, "root");
+    decisionSession(h, "child", "root");
+    const first = (await h.ownerCall("POST", "/api/assistant-threads", { title: "Request Recovery" })).body.thread as AssistantThread;
+    const second = (await h.ownerCall("POST", "/api/assistant-threads", { title: "Resolve Recovery" })).body.thread as AssistantThread;
+    const grant: AssistantDecisionGrant = { categories: ["campaign_recovery"], selectionMode: "choose",
+      projects: [h.project.id], campaigns: ["root"], expiresAt: null };
+    const grantTo = (thread: AssistantThread, revision: number, grantValue: AssistantDecisionGrant) =>
+      h.ownerCall("PUT", `/api/assistant-threads/${thread.id}/delegation`, { revision, grant: grantValue });
+    assert.equal((await grantTo(first, 0, { ...grant, selectionMode: "all" })).status, 400);
+    assert.equal((await grantTo(first, 0, { ...grant, campaigns: "all" })).status, 400);
+    assert.equal((await grantTo(first, 0, grant)).status, 200);
+    assert.equal((await grantTo(second, 0, { ...grant, campaigns: ["different-campaign"] })).status, 200);
+    const firstEnv = await h.provision(first.sessionId), secondEnv = await h.provision(second.sessionId);
+    const snapshot = { category: "campaign_recovery" as const, repository: "owner/repo", pullRequest: 42,
+      headSha: "a".repeat(40), recoveryId: "past-recovery", action: "repair_checks" as const,
+      attempts: 4, extraInstructions: 1 as const, binding: "b".repeat(64),
+      worktree: { id: "preserved", path: "/fixture/original", branch: "original" }, requesterSessionId: "child",
+      restoreRequester: true, requestingThreadId: first.id };
+    const decision = h.db.createWorkflowDecision({ requestId: "recovery-exact", occurrenceId: "workflow_recovery",
+      sessionId: "root", controllingSessionId: "root", category: snapshot.category, authority: "human",
+      resourceKey: "campaign_recovery:owner/repo#42", resourceSnapshot: snapshot,
+      resourceDigest: "c".repeat(64), createdAt: Date.now(), policyRevision: 1 })!.decision;
+    const args = { sessionId: "root", occurrenceId: decision.occurrenceId, resourceDigest: decision.resourceDigest,
+      outcome: "deny", reason: "The owner asked me to decline this exact recovery." };
+    const call = async (env: Record<string, string>, name: string, input: object) => {
+      const [response] = await h.callTools(env, { jsonrpc: "2.0", id: 1, method: "tools/call",
+        params: { name, arguments: input } });
+      return response.result;
+    };
+    const request = await call(firstEnv, "campaign_recovery_request", { sessionId: "root", requestId: "ask",
+      repository: "owner/repo", pullRequest: 42, headSha: snapshot.headSha });
+    assert.match(request.content[0].text, /one proven original review requester/u);
+    assert.match((await call(firstEnv, "assistant_decision_resolve", args)).content[0].text, /did not request/u);
+    assert.match((await call(secondEnv, "assistant_decision_resolve", args)).content[0].text, /campaign is outside/u);
+    assert.equal((await grantTo(second, 1, grant)).status, 200);
+    assert.match((await call(secondEnv, "assistant_decision_resolve", { ...args, resourceDigest: "d".repeat(64) })).content[0].text,
+      /snapshot changed/u);
+    const denied = await call(secondEnv, "assistant_decision_resolve", args);
+    assert.equal(denied.isError, undefined, denied.content[0].text);
+    const recorded = h.db.workflowDecisionByOccurrence(decision.occurrenceId)!;
+    assert.equal(recorded.status, "denied");
+    assert.equal(recorded.assistantDelegation?.threadId, second.id);
+    assert.equal(recorded.assistantDelegation?.grantRevision, 2);
+    assert.equal(h.db.listGovernanceAudit("root").find(entry => entry.requestId === decision.occurrenceId)?.actor.id, second.id);
+  } finally { await h.close(); }
+});
+
 function decisionSession(h: Awaited<ReturnType<typeof harness>>, id: string, parentSessionId?: string,
   budget?: CampaignBudgetAuthority) {
   const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
@@ -186,7 +236,7 @@ test("the owner grants and revokes exact typed resolution, and Assistant calls n
     // A Delegate All grant saved against a previous catalog has no wildcard authority.
     // Simulate a newly supported merged-branch deletion and an unaccepted evidence disclosure.
     const previousCategories = (Object.keys(ASSISTANT_DECISION_CATEGORIES) as AssistantDecisionGrant["categories"])
-      .filter((category) => category !== "merged_branch_deletion" && category !== "ui_evidence_review");
+      .filter((category) => category !== "merged_branch_deletion" && category !== "ui_evidence_review" && category !== "campaign_recovery");
     await setGrant(0, { ...grant, selectionMode: "all", categories: previousCategories });
     await refuse(/outside the thread's decision delegation grant/u);
     await setGrant(1, { ...grant, campaigns: ["different-root"] });
