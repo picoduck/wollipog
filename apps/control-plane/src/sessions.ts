@@ -85,7 +85,7 @@ import { SCOPE_CHECKS_PER_ADDITIONS, scopeCheckAdditionsPrefix, scopeCheckInputD
 import { scopeGrantDigest, scopeReviewInputDigest, scopeReviewInputs, scopeReviewKey } from "./scope-selection.js";
 import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type CampaignScopeOwnerReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
-import { RECOVERY_PROMPT_PREFIX, recoveryDecisionRefs, recoveryDecisionTarget, recoverySnapshotRecord } from "./campaign-recovery-decision.js";
+import { RECOVERY_PROMPT_PREFIX, RECOVERY_REQUEST_PREFIX, recoveryDecisionRefs, recoveryDecisionTarget, recoverySnapshotRecord } from "./campaign-recovery-decision.js";
 import { exhaustedPullRequest } from "./campaign-recovery-store.js";
 import type { CampaignRecoveryDecisionSnapshot } from "@wollipog/protocol";
 import { CAMPAIGN_HANDOFF_QUESTION_KEY, isCampaignHandoffQuestion } from "@wollipog/protocol";
@@ -6835,6 +6835,9 @@ export class SessionsService {
       durable?: boolean;
       /** Only server-created review notifications may preserve pending async questions. */
       reviewContinuation?: true;
+      /** Recovery permission is bound to the original requester. A stale mode must not be healed
+       * by silently selecting a different permission mode while staging this instruction. */
+      preservePermissionMode?: true;
     },
     // What the agent credential sending the prompt may do to this session, so the hold advice in
     // its refusal or delivery report names only tools it can call (#1863).
@@ -7048,6 +7051,9 @@ export class SessionsService {
       agentCapabilities,
       session.driver,
     );
+    if (binding?.preservePermissionMode && mergedConfig.permissionMode !== (session.permissionMode ?? undefined)) {
+      return fail("The original requester's permission mode is no longer supported.", 409);
+    }
     const effectiveCostBudgetUsd = effectiveConfig?.costBudgetUsd !== undefined
       ? (effectiveConfig.costBudgetUsd > 0 ? effectiveConfig.costBudgetUsd : null)
       : session.costBudgetUsd;
@@ -15333,6 +15339,18 @@ export class SessionsService {
   }, requestingThreadId: string, recheck: () => Promise<HumanPrincipal>,
     checkRequester: (sessionId: string) => void): Promise<ServiceResult<WorkflowDecisionView>> {
     const ref = { repository: request.repository.toLowerCase(), number: request.pullRequest };
+    const previous = this.db.workflowDecisionByRequestId(campaignId, request.requestId);
+    if (previous) {
+      const s = previous.resourceSnapshot;
+      if (s.category !== "campaign_recovery" || s.requestingThreadId !== requestingThreadId ||
+          s.repository !== ref.repository || s.pullRequest !== ref.number || s.headSha !== request.headSha || s.after !== request.after) {
+        return fail("This request ID already names a different decision.", 409);
+      }
+      await recheck();
+      checkRequester(s.requesterSessionId);
+      if (previous.status === "pending") this.restorePendingWorkflowDecisionCards(campaignId);
+      return ok(this.db.workflowDecisionByOccurrence(previous.occurrenceId)!);
+    }
     // The registry has checked root access. Check worker placement before exposing or reading its
     // recovery context, and recheck authorization again after the asynchronous forge read.
     const requesters = this.db.campaignRecoveryRequesters(campaignId, ref.repository, ref.number);
@@ -15344,17 +15362,6 @@ export class SessionsService {
     if (!read || read.some(entry => !entry.observation) ||
         JSON.stringify(refs) !== JSON.stringify(recoveryDecisionRefs(this.db, campaignId, ref, request.after))) {
       return fail("The current PR and its prerequisites could not be verified. Retry once the forge read succeeds.", 409);
-    }
-    const previous = this.db.workflowDecisionByRequestId(campaignId, request.requestId);
-    if (previous) {
-      const s = previous.resourceSnapshot;
-      if (s.category !== "campaign_recovery" || s.requestingThreadId !== requestingThreadId ||
-          s.repository !== ref.repository || s.pullRequest !== ref.number || s.headSha !== request.headSha || s.after !== request.after) {
-        return fail("This request ID already names a different decision.", 409);
-      }
-      checkRequester(s.requesterSessionId);
-      if (previous.status === "pending") this.restorePendingWorkflowDecisionCards(campaignId);
-      return ok(previous);
     }
     const record = this.db.campaignRecovery.pullRequestRecords(campaignId, ref.repository, ref.number)
       .find(record => exhaustedPullRequest(record) && record.resource.occurrenceId === request.headSha &&
@@ -15437,6 +15444,8 @@ export class SessionsService {
         requester.pendingApproval || this.db.sessionsWithLiveBackgroundJobs([requester.id], now).has(requester.id) ||
         requester.backgroundWorkState === "running" || requester.backgroundWorkState === "continuation_pending" ||
         this.db.campaignBudgets.admissionError(requester.id)) return;
+    const daily = this.dailyBudgetFor(requester.id);
+    if (daily && daily.spentUsd >= daily.budgetUsd) return;
     if (requester.worktreePath !== snapshot.worktree.path) {
       await this.selectCampaignRecoveryWorktree?.(requester.id, snapshot.worktree.path, owner);
       // Selection can wait on the runner. Revalidate placement and forge state on the next pass.
@@ -15445,7 +15454,21 @@ export class SessionsService {
     if (target.restoreRequester) {
       // A lost launch response is not permission to launch again. A known refusal releases the
       // claim so the ordinary preflight can try later (capacity, budget, an offline runner).
-      if (!this.db.campaignRecovery.claimRestoration(campaignId, decision.occurrenceId)) return;
+      const stopped = this.db.sessionStopProvenance(requester.id);
+      if (stopped && sessionStopRestorable(stopped)) return; // wait for the runner's lifecycle state
+      if (stopped?.confirmedAt && stopped.confirmedAt > decision.resolvedAt! ||
+          launchForRestart(this.db, requester)?.driver !== requester.driver) {
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition",
+          triggeredBy: { kind: "system", id: "campaign_recovery_restoration" } });
+        return;
+      }
+      if (!this.db.campaignRecovery.claimRestoration(campaignId, decision.occurrenceId)) {
+        // The online runner still reports a terminal requester. No receipt can safely authorize
+        // another launch. Retire this occurrence so the owner can explicitly decide a new one.
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition",
+          triggeredBy: { kind: "system", id: "campaign_recovery_restoration" } });
+        return;
+      }
       const restored = requester.archived ? this.unarchiveAndRestart(requester.id) : this.restart(requester.id);
       if (!restored.ok) this.db.campaignRecovery.releaseUnsentRestoration(decision.occurrenceId);
       return;
@@ -15457,7 +15480,7 @@ export class SessionsService {
       "Retain prior attempts, review history, handoffs and merge prerequisites. Use the ordinary CI, review, and merge gates for every follow-on effect. Report the outcome to the original campaign.",
     ].join("\n\n");
     const sent = this.prompt(requester.id, prompt, [], undefined, undefined, undefined, false, {
-      durable: true, admitAs: "queued", claimImmediate: () => false,
+      durable: true, preservePermissionMode: true, admitAs: "queued", claimImmediate: () => false,
       stage: (runnerId, command, at) => this.db.dispatchRequesterRecovery(decision.occurrenceId, campaignId, {
         record, extraInstructions: 1, binding: snapshot.binding, requesterSessionId: requester.id, ownerUserId: owner.userId,
       }, at, consumed => {
@@ -15513,7 +15536,7 @@ export class SessionsService {
     }
     if ((request.requestId.startsWith("campaign_handoffs_") || request.resourceKey === CAMPAIGN_HANDOFF_QUESTION_KEY) &&
         !internal?.trustedCampaignHandoffs) return fail("Campaign handoff question coordinates are reserved for the server", 400);
-    if (request.resourceKey.startsWith("campaign_recovery:") || request.requestId.startsWith("recovery_")) {
+    if (request.resourceKey.startsWith("campaign_recovery:") || request.requestId.startsWith(RECOVERY_REQUEST_PREFIX)) {
       return fail("Campaign recovery coordinates are reserved for the server", 400);
     }
     const ownerRule = normalizeWorkflowDecisionOwnerRule(request.ownerRule);

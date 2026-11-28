@@ -1,12 +1,13 @@
 import { ASSISTANT_DECISION_DEFAULT_DURATIONS, type AssistantDecisionCategory, type AssistantDecisionDefault, type AssistantDecisionGrant } from "@wollipog/protocol";
 
 export const ASSISTANT_DECISION_GROUPS = [
-  { label: "Pull Requests", categories: ["pr_merge", "review_round_extension", "campaign_recovery"] },
+  { label: "Pull Requests", categories: ["pr_merge", "review_round_extension"] },
   { label: "CI and Releases", categories: ["ci_rerun", "release_tag", "release_publish"] },
   { label: "Issues", categories: ["follow_up_issue_publication", "issue_closure"] },
   { label: "Cleanup", categories: ["merged_branch_deletion"] },
   { label: "Questions", categories: ["owner_question"] },
   { label: "UI Evidence", categories: ["ui_evidence_review", "ui_evidence_approval"] },
+  { label: "Campaign Recovery", categories: ["campaign_recovery"] },
 ] as const satisfies readonly { label: string; categories: readonly AssistantDecisionCategory[] }[];
 
 const hour = 60 * 60_000;

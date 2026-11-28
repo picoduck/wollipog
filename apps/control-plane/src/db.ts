@@ -1172,6 +1172,8 @@ CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resource
   ON workflow_decisions(session_id, category, resource_key, created_at);
 CREATE INDEX IF NOT EXISTS idx_workflow_decisions_automation_expiry
   ON workflow_decisions(category, status) WHERE category='automation_creation' AND status IN ('pending','approved');
+CREATE INDEX IF NOT EXISTS idx_workflow_decisions_campaign_recovery
+  ON workflow_decisions(status, created_at) WHERE category='campaign_recovery';
 -- A lifecycle revocation keeps a bounded, read-only forge observation alive after the child ends.
 CREATE TABLE IF NOT EXISTS workflow_merge_settlement_checks (
   occurrence_id TEXT PRIMARY KEY REFERENCES workflow_decisions(occurrence_id) ON DELETE CASCADE,
@@ -36407,6 +36409,7 @@ function ownerDecisionSummary(snapshot: Exclude<WorkflowDecisionView["resourceSn
       case "follow_up_issue_publication": return `Publish ${JSON.stringify(snapshot.sanitizedTitle)} in ${snapshot.repository}`;
       case "ui_evidence_approval": return `Review ${snapshot.evidence.length} UI evidence item${snapshot.evidence.length === 1 ? "" : "s"}`;
       case "campaign_repository_addition": return `Add ${snapshot.repository} to the campaign`;
+      case "campaign_recovery": return `Recover ${snapshot.repository}#${snapshot.pullRequest}`;
       default: return snapshot.category;
     }
   })().replace(/\s+/gu, " ").trim();

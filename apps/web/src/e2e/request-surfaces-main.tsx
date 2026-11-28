@@ -10,6 +10,7 @@ import {
   type PendingApproval,
   type SessionView,
   type AutomationCreationSnapshot,
+  type CampaignRecoveryDecisionSnapshot,
   type CampaignRepositoryAdditionSnapshot,
   type LocationSwitchSnapshot,
 } from "@wollipog/protocol";
@@ -416,6 +417,23 @@ function repositoryAdditionSession(): SessionView {
     workflowDecision: { ...base.pendingApproval!.workflowDecision!, category: "campaign_repository_addition",
       resourceKey: "campaign_repository_addition:acme/docs", resourceSnapshot: snapshot, controllingSessionId: base.id, sessionId: base.id,
       authority: "human" } } };
+}
+
+function campaignRecoverySession(): SessionView {
+  const base = evidenceSession();
+  const snapshot: CampaignRecoveryDecisionSnapshot = {
+    category: "campaign_recovery", repository: "example/repository", pullRequest: 42, headSha: "ab".repeat(20),
+    recoveryId: "recovery-fixture", action: "repair_checks", attempts: 4, extraInstructions: 1, after: 41,
+    requesterSessionId: "session-original-requester", worktree: { id: "preserved-worktree",
+      path: "/fixture/worktrees/archived-original-requester/repair-branch", branch: "repair-branch" },
+    restoreRequester: true, binding: "b".repeat(64), requestingThreadId: "assistant-fixture",
+  };
+  return { ...base, title: "Release Campaign", status: "idle", pendingApproval: { ...base.pendingApproval!,
+    title: "Campaign Recovery Approval Required", async: true,
+    options: [{ optionId: "approve", name: "Authorize Recovery", kind: "allow_once" },
+      { optionId: "deny", name: "Deny", kind: "reject_once" }],
+    workflowDecision: { ...base.pendingApproval!.workflowDecision!, category: snapshot.category,
+      resourceSnapshot: snapshot, controllingSessionId: base.id, sessionId: base.id, authority: "human" } } };
 }
 
 /** `scenario=location-switch` (#4138): a regular session's repository mismatch, with `locations=2`
@@ -1011,7 +1029,8 @@ function ReadingKeys({ scrollRef }: {
 function Fixture() {
   const [keyboard, updateKeyboard] = useState(keyboardOpen);
   setKeyboard = updateKeyboard;
-  const [session, setSession] = useState(() => scenario === "temporary-branch" ? temporaryBranchSession() : scenario === "follow-up-batch" ? followUpBatchSession() : scenario === "automation-creation" ? automationCreationSession() : scenario === "location-switch" ? locationSwitchSession() : scenario === "repository-addition" ? repositoryAdditionSession() : scenario === "issue-scope" ? issueScopeSession() : scenario === "follow-up-admission" ? followUpAdmissionSession() : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true) : scenario === "issue-closure-refused" ? issueClosureSession(true) : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
+  const [session, setSession] = useState(() => scenario === "campaign-recovery" ? campaignRecoverySession()
+    : scenario === "temporary-branch" ? temporaryBranchSession() : scenario === "follow-up-batch" ? followUpBatchSession() : scenario === "automation-creation" ? automationCreationSession() : scenario === "location-switch" ? locationSwitchSession() : scenario === "repository-addition" ? repositoryAdditionSession() : scenario === "issue-scope" ? issueScopeSession() : scenario === "follow-up-admission" ? followUpAdmissionSession() : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true) : scenario === "issue-closure-refused" ? issueClosureSession(true) : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
     ? continuationSession()
     : scenario === "held" || scenario === "both"
     ? heldCampaignSession()

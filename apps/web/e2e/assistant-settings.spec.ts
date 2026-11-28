@@ -214,6 +214,20 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
         expect([grant.projects, grant.campaigns]).toEqual([["project_0"], ["campaign_0"]]);
       });
 
+      test("new-thread defaults exclude the thread-only Campaign Recovery decision", async ({ page }) => {
+        await open(page);
+        const delegation = page.getByRole("region", { name: "Decision Delegation", exact: true });
+        const mode = delegation.getByRole("button", { name: /^New Threads:/ });
+        for (const choice of [/^Delegate All/, /^Choose Categories/]) {
+          await mode.click();
+          await page.getByRole("option", { name: choice }).click();
+          await page.getByRole("button", { name: "Save Defaults" }).click();
+          await expect(page.getByRole("button", { name: "Save Defaults" })).toHaveCount(0);
+          const grant = JSON.parse(await page.locator("body").getAttribute("data-saved-decision-default") ?? "null");
+          expect(grant.categories).not.toContain("campaign_recovery");
+        }
+      });
+
       test("choosing Delegate All again in the editor saves the categories supported since", async ({ page }) => {
         await open(page, "enabled", "stress&default-grant=all-before-releases");
         const delegation = page.getByRole("region", { name: "Decision Delegation", exact: true });

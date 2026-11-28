@@ -20,6 +20,7 @@ import type { ControlPlaneDb } from "./db.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { HumanPrincipal } from "./identity.js";
 import { isReservedOwnerQuestion, type SessionsService } from "./sessions.js";
+import { RECOVERY_REQUEST_PREFIX } from "./campaign-recovery-decision.js";
 
 const coordinate = { type: "string", minLength: 1, maxLength: 128 };
 const sessionProperties = { sessionId: coordinate };
@@ -93,7 +94,7 @@ export function registerAssistantDecisionOperations(operations: AssistantOperati
         throw new AssistantRefusal("Supply an exact GitHub repository, PR number, head SHA, request ID and any distinct predecessor PR.");
       }
       const result = await svc.requestCampaignPrRecovery(sessionId,
-        { requestId: `recovery_${requestId}`, repository, headSha, pullRequest: args.pullRequest, after: args.after },
+        { requestId: RECOVERY_REQUEST_PREFIX + requestId, repository, headSha, pullRequest: args.pullRequest, after: args.after },
         connection.threadId, recheck, id => { operations.authorize(connection.id, requestRecovery, target({ sessionId: id })); });
       if (!result.ok) throw new AssistantRefusal(result.error ?? "Recovery request was refused.");
       return { decision: result.data };

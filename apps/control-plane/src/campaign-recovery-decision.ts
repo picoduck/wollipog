@@ -8,6 +8,7 @@ import { exhaustedPullRequest } from "./campaign-recovery-store.js";
 import type { ControlPlaneDb } from "./db.js";
 
 export const RECOVERY_PROMPT_PREFIX = "campaign_recovery_prompt_";
+export const RECOVERY_REQUEST_PREFIX = "campaign_recovery_request_";
 
 export function recoveryDecisionRefs(db: ControlPlaneDb, campaignId: string, ref: CampaignPullRequestRef, after?: number) {
   const work = db.campaignWorkLedger.pullRequestWorkItems(campaignId).get(forgeRefKey(ref));
@@ -27,7 +28,8 @@ export function recoveryDecisionTarget(db: ControlPlaneDb, campaignId: string, r
   const control = root?.orchestratorPolicy?.control;
   if (!root || root.parentSessionId || control?.mode !== "full_control" ||
       scope?.owner.kind !== "user" || scope.owner.userId !== control.boundary.authorizedByUserId ||
-      record.policyRevision !== root.parentControlPolicy?.revision || record.resource.sessionId !== root.id) {
+      record.policyRevision !== root.parentControlPolicy?.revision || record.resource.sessionId !== root.id ||
+      db.roleConversionBlocksSession(root.id)) {
     return refuse("The original campaign or its current authority could not be verified.");
   }
   const admission = db.campaignRequesterRecoveryAdmission(campaignId);
@@ -62,6 +64,7 @@ export function recoveryDecisionTarget(db: ControlPlaneDb, campaignId: string, r
       requesterScope.owner.userId !== scope.owner.userId || requesterScope.organizationId !== scope.organizationId ||
       !campaignAuthorityPreflight(control, root.driver, runnerProtocol).supported ||
       !runnerSupportsProtocol(runnerProtocol, "durablePromptQueueIdentity") ||
+      db.roleConversionBlocksSession(requester.id) ||
       db.campaignSessionRepository(campaignId, requester.id)?.toLowerCase() !== ref.repository.toLowerCase()) {
     return refuse("A supported original review requester owned by this campaign's owner is required.");
   }
@@ -95,8 +98,10 @@ export function recoveryDecisionTarget(db: ControlPlaneDb, campaignId: string, r
     item: item.id, issue: item.issue, handoff: work.handoff,
     prerequisites: prerequisites.map(prerequisite => [prerequisite.id, prerequisite.pullRequests.map(entry => entry.ref)]),
     requester: requester.id, requesterScope, runner: requester.runnerId, workspace: requester.workspaceId,
-    project: requester.projectId, agent: requester.agentId, driver: requester.driver, model: requester.model,
-    effort: requester.effort, permissionMode: requester.permissionMode, account: requester.providerAccountRef,
+    // The normal prompt path resolves unset model and effort from the current harness. Keep the
+    // durable binding on the requester and its execution permission, including its account.
+    project: requester.projectId, agent: requester.agentId, driver: requester.driver,
+    permissionMode: requester.permissionMode, account: requester.providerAccountRef,
     worktree, source: tree.source, head: pr.headSha, base: pr.baseRef,
   })).digest("hex");
   return { ok: true as const, root, requester, worktree, binding, owner,

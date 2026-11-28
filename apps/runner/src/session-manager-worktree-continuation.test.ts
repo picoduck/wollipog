@@ -396,6 +396,22 @@ test("a selection made while the relaunch runs supersedes the switch, even one b
   });
 });
 
+test("a stopped session can select its preserved worktree before restarting", { skip: !haveGit() }, async () => {
+  await withSession("restore-selection", {}, async ({ manager, store, sessionId, fake }) => {
+    const original = await manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/preserved" });
+    manager.stop(sessionId);
+    await waitFor(() => store.readMeta(sessionId)?.status === "stopped", "worker did not stop");
+    store.patchMeta(sessionId, { worktreePath: null });
+    const prior = store.readMeta(sessionId);
+    const selected = await manager.selectWorktree(sessionId, original.worktree.path);
+    assert.equal(selected.worktreePath, original.worktree.path);
+    assert.equal(selected.status, "stopped");
+    assert.equal(selected.worktrees?.find(tree => tree.path === original.worktree.path)?.id,
+      prior?.worktrees?.find(tree => tree.path === original.worktree.path)?.id);
+    assert.equal(fake.launches(), 1, "selection does not launch the stopped provider");
+  });
+});
+
 /** Every distinct `worktreeSwitch` the runner published for the session, in order. */
 function publishedSwitches(sent: RunnerToControlPlane[], sessionId: string): unknown[] {
   const values: unknown[] = [];

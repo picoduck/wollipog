@@ -984,6 +984,9 @@ test("owner API restores the original requester separately and retains worktree 
 function handedOffRecoveryFixture() {
   const h = completedPrFixture();
   const { db, svc, ref, itemId, now } = h;
+  h.metadata.agents[0]!.capabilities = { models: [{ id: "gpt-6.1-sol", displayName: "Fixture", default: true, defaultEffort: "high" }],
+    effortLevels: ["high"], slashCommands: [], supportsImages: true, supportsApprovals: true, permissionModes: ["default"] };
+  db.registerRunner(h.metadata, now, PROTOCOL_VERSION);
   const branch = "original-work";
   const worktree = { id: "preserved", path: "/fixture/original", branch, source: "created" };
   // The archived requester has preserved inventory but no selected path. The pre-handoff
@@ -996,6 +999,12 @@ function handedOffRecoveryFixture() {
     JSON.stringify({ epoch: 2, round: 4, attempt: 1 }), "Original report");
   const revision = db.getSession("root")!.parentControlPolicy!.revision;
   const observation = { ...h.observation, headBranch: { name: branch, tipSha: h.observation.headSha } };
+  const previousApproval = db.createWorkflowDecision({ requestId: "previous-rerun", occurrenceId: "workflow_previous_rerun",
+    sessionId: "child", controllingSessionId: "root", authority: "human", category: "ci_rerun", resourceKey: "previous-rerun",
+    resourceSnapshot: { category: "ci_rerun", repository: ref.repository, runId: 191, attempt: 1, headSha: observation.headSha },
+    resourceDigest: "b".repeat(64), policyRevision: revision, createdAt: now - 3 })!.decision;
+  assert.ok(db.resolveWorkflowDecision(previousApproval.occurrenceId, "human", "approved", now - 2));
+  assert.equal(db.markWorkflowDecisionRevoked(previousApproval.occurrenceId, now - 1)?.status, "revoked");
   const failure = { action: "repair_checks" as const, reason: "failed_checks" as const, owner: "orchestrator" as const,
     signal: "failure", resource: { kind: "pull_request" as const, sessionId: "root", repository: ref.repository,
       pullRequest: ref.number, occurrenceId: observation.headSha } };
@@ -1057,6 +1066,7 @@ test("typed recovery restores the archived requester and dispatches one bounded 
     assert.equal(svc.resolveWorkflowDecision("root", "root", decision.occurrenceId, { outcome: "approve" }, "orchestrator",
       { kind: "agent", id: "root" }, () => true).status, 403);
     svc.campaignForgeReadNow = async () => null;
+    assert.equal((await h.request()).data?.occurrenceId, decision.occurrenceId, "lost responses can be reconciled during a forge gap");
     assert.ok(svc.approve("root", decision.occurrenceId, "approve", { kind: "human", id: h.owner.userId }).ok);
     await h.tick();
     assert.equal(db.getSession("child")!.archived, true, "a missing read cannot spend or restore from cached proof");
@@ -1081,6 +1091,7 @@ test("typed recovery restores the archived requester and dispatches one bounded 
     const commandId = RECOVERY_PROMPT_PREFIX + decision.occurrenceId;
     const command = db.getSessionPromptCommand(commandId);
     assert.equal(command?.sessionId, "child");
+    assert.equal(db.getSession("child")!.effort, "high", "ordinary default effort resolution leaves this recovery current");
     assert.match(command!.payloadJson, /owner approved one recovery instruction/u);
     assert.equal(db.workflowDecisionByOccurrence(decision.occurrenceId)?.status, "consumed");
     assert.equal(db.campaignRecovery.record("root", record.id)!.attempts, 5);
@@ -1090,7 +1101,17 @@ test("typed recovery restores the archived requester and dispatches one bounded 
     assert.deepEqual(db.campaignWorkLedger.pullRequestWorkItems("root").get(`${h.ref.repository}#42`)!.handoff, handoff);
     assert.equal(h.resolve(decision.occurrenceId, "approve").data?.status, "consumed");
     assert.equal(db.campaignRecovery.extensions("root").length, 1);
+    assert.equal(db.workflowDecisionByOccurrence("workflow_previous_rerun")?.status, "revoked");
     assert.ok(sent.some(message => (message as { commandId?: string }).commandId === commandId));
+    const deliveries = () => sent.filter(message => (message as { commandId?: string }).commandId === commandId).length;
+    const beforeGap = deliveries();
+    db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, failure: "forge_unreachable" }], Date.now());
+    await h.tick();
+    assert.equal(deliveries(), beforeGap, "a durable resend is held during a forge read gap");
+    db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, observation: h.observation }], Date.now());
+    await h.tick();
+    assert.ok(deliveries() > beforeGap, "the same durable identity is retried once the forge answers");
+    assert.equal(db.campaignRecovery.record("root", record.id)!.attempts, 5);
   } finally { db.close(); }
 });
 
@@ -1115,6 +1136,28 @@ test("typed recovery retains explicit denial and revokes stale worktree or head 
       assert.equal(h.db.campaignRecovery.record("root", h.record.id)!.attempts, 4);
     } finally { h.db.close(); }
   }
+});
+
+test("typed recovery retires an interrupted restoration without replaying the launch", async () => {
+  const h = handedOffRecoveryFixture();
+  try {
+    h.db.setWorktreePath("child", h.worktree.path);
+    const requested = await h.request();
+    assert.ok(requested.ok, requested.error ?? "recovery request refused");
+    const { occurrenceId } = requested.data!;
+    assert.ok(h.resolve(occurrenceId, "approve").ok);
+    await h.tick();
+    assert.equal(h.db.getSession("child")!.status, "starting");
+    h.db.updateSessionStatus("child", "failed", Date.now());
+    await h.tick();
+    assert.equal(h.db.workflowDecisionByOccurrence(occurrenceId)?.status, "revoked");
+    assert.equal(h.sent.filter(message => (message as { type: string }).type === "start_session").length, 1);
+    assert.equal(h.db.campaignRecovery.record("root", h.record.id)!.attempts, 4);
+    const replacement = await h.request("after-failure");
+    assert.ok(replacement.ok, replacement.error ?? "a new exact decision should be possible");
+    assert.notEqual(replacement.data!.occurrenceId, occurrenceId);
+    assert.equal(replacement.data!.status, "pending");
+  } finally { h.db.close(); }
 });
 
 test("typed recovery requires an actual merge of an explicitly ordered predecessor", async () => {
