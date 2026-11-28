@@ -26,8 +26,9 @@ import type { AcpNegotiation } from "./acp-contract.js";
 
 export interface AcpCompatibility {
   profile: "antigravity";
-  /** Runner-owned opt-in for an admitted Full Control launch. Older control planes and ordinary
-   * Antigravity sessions retain the original approval envelope and governance matching. */
+  /** Runner-owned opt-in for an admitted Full Control launch. It delegates all tool approvals,
+   * attests tool effects and identifies the provider's own questions. Ordinary Antigravity
+   * sessions retain their approval modes, envelopes and governance matching. */
   campaignOperationAttestation?: true;
   /** Whether this launch can persist the agent's conversations, so resume by id may be offered. */
   resumable: boolean;

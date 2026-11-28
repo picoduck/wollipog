@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 import type { AcpRuntimeCapabilities, AgentCapabilities, AgentDefinition, AntigravitySetupView, SessionConfig, SessionEventPayload } from "@wollipog/protocol";
-import { campaignContainedOperation } from "@wollipog/protocol";
+import { campaignContainedOperation, HUMAN_ONLY_PARENT_CONTROL_POLICY, resolveCampaignAuthority } from "@wollipog/protocol";
 import { negotiateAcpInitialize } from "./acp-contract.js";
 import { resolveAcpSessionContext } from "./acp-session-context.js";
 import {
@@ -131,6 +131,66 @@ test("a provider-initiated Antigravity form holds the turn open until answered",
   assert.deepEqual(calls().find(({ method }) => method === "elicitation_response")?.result, {
     action: "accept", content: { q1: "1", q2: ["G"] },
   });
+});
+
+test("Full Control matches a native question by its active ACP tool-call identity", { timeout: 15_000 }, async () => {
+  signIn();
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, root, undefined,
+    { campaignOperationAttestation: true });
+  await driver.initialize();
+  await driver.newSession(root);
+  for (const scenario of ["native", "form", "wrong-tool", "wrong-id", "completed", "duplicate"]) {
+    const from = seen.events.length;
+    const turn = driver.prompt(`Ask fixture question ${scenario}`);
+    const request = await waitFor(() => seen.events.slice(from).find((event) => event.kind === "question_request"));
+    const native = scenario === "native";
+    assert.equal(request.requestSource, native ? "provider_question" : "provider_elicitation", scenario);
+    if (native) {
+      assert.equal(driver.answerQuestion(request.requestId, { q1: "Blue", q2: ["Silver"] }, "submit"), true);
+    } else {
+      assert.equal(driver.answerQuestion(request.requestId, {}, "dismiss"), true);
+    }
+    assert.equal(await turn, "end_turn");
+    assert.deepEqual(calls().filter(({ method }) => method === "elicitation_response").at(-1)?.result,
+      native ? { action: "accept", content: { q1: "2", q2: ["S"] } } : { action: "decline" }, scenario);
+  }
+
+  const from = seen.events.length;
+  const turn = driver.prompt("Ask fixture question native");
+  const request = await waitFor(() => seen.events.slice(from).find((event) => event.kind === "question_request"));
+  assert.equal(request.requestSource, "provider_question");
+  driver.cancel();
+  assert.equal(await turn, "cancelled");
+  assert.deepEqual(calls().filter(({ method }) => method === "elicitation_response").at(-1)?.result, { action: "cancel" });
+  assert.equal(driver.answerQuestion(request.requestId, {}, "dismiss"), false);
+  assert.equal(await driver.prompt("Say hello."), "end_turn");
+});
+
+test("a correlated credential question is declined by Full Control and the ACP turn settles", { timeout: 15_000 }, async () => {
+  signIn();
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, root, undefined,
+    { campaignOperationAttestation: true });
+  await driver.initialize();
+  await driver.newSession(root);
+  const turn = driver.prompt("Ask fixture question credentials");
+  const event = await waitFor(() => seen.events.find((event) => event.kind === "question_request"));
+  assert.equal(event.requestSource, "provider_question");
+  const authority = resolveCampaignAuthority({
+    control: { mode: "full_control", boundary: {
+      version: 1, revision: 1, issueScopeRevision: 1, repository: "example/repo",
+      objective: "Implement the fixture", authorizedByUserId: "owner", authorizedAt: 1,
+      operations: ["question"], delegatablePolicyIds: [],
+    } },
+    parentControl: "off", decisions: HUMAN_ONLY_PARENT_CONTROL_POLICY, root: false, supported: true,
+    trustedSource: event.requestSource,
+    request: { requestId: event.requestId, kind: "question", title: event.questions[0]!.question, options: [],
+      questions: event.questions, requestSource: event.requestSource },
+  });
+  assert.equal(authority.requestClass, "secrets_and_sign_in");
+  assert.equal(authority.disposition, "decline");
+  assert.equal(driver.answerQuestion(event.requestId, {}, "dismiss"), true);
+  assert.equal(await turn, "end_turn");
+  assert.deepEqual(calls().find(({ method }) => method === "elicitation_response")?.result, { action: "decline" });
 });
 
 test("generic ACP sessions neither advertise nor handle elicitation", { timeout: 15_000 }, async () => {
@@ -862,6 +922,85 @@ test("Full Permissions Mode is a live mode: agy stays in Default and Wollipog ap
   assert.equal(existsSync(marker), true);
   assert.equal(resumed.seen.events.some((event) => event.kind === "permission_request"), false);
   assert.ok(calls().filter((call) => call.method === "initialize").every((call) => call.fullPermissions === false));
+});
+
+test("Full Control refuses Full Permissions on launch, mode change and resume", { timeout: 15_000 }, async () => {
+  signIn();
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const view = setup({ executable: { path: agy } });
+  const full = { permissionMode: "antigravity-full-permissions" };
+  const refused = /Full Control Google Antigravity sessions require Default mode/;
+  assert.throws(() => launchDriver(view, PROVIDER, cwd, undefined, {
+    campaignOperationAttestation: true, config: full,
+  }), refused);
+  assert.deepEqual(calls(), []);
+
+  const { driver, seen } = launchDriver(view, PROVIDER, cwd, undefined, { campaignOperationAttestation: true });
+  await driver.initialize();
+  const id = await driver.newSession(cwd);
+  assert.deepEqual(seen.state.at(-1)?.capabilities.permissionModes, ["default"]);
+  for (const config of [full, { permissionMode: "auto" }, { permissionMode: "accept-edits" }]) {
+    await assert.rejects(driver.setConfig(config), refused);
+  }
+  assert.ok(!calls().some(({ method }) => method === "session/set_mode"));
+  driver.dispose();
+
+  assert.throws(() => launchDriver(view, PROVIDER, cwd, id, {
+    campaignOperationAttestation: true, config: full,
+  }), refused);
+  assert.ok(!calls().some(({ method }) => method === "session/resume"));
+  process.env.FAKE_AGY_MODE = "resume_native_auto";
+  const resumed = launchDriver(view, PROVIDER, cwd, id, { campaignOperationAttestation: true });
+  await resumed.driver.initialize();
+  assert.equal(await resumed.driver.newSession(cwd), id);
+  assert.equal(resumed.seen.state.at(-1)?.config.permissionMode, "default");
+  assert.equal(await resumed.driver.prompt("Say hello."), "end_turn");
+  assert.equal(calls().find(({ method }) => method === "session/prompt")?.activeMode, "default");
+  resumed.driver.dispose();
+
+  process.env.FAKE_AGY_MODE = "resume_native_auto,refuse_default";
+  const unconfirmed = launchDriver(view, PROVIDER, cwd, id, { campaignOperationAttestation: true });
+  await unconfirmed.driver.initialize();
+  await assert.rejects(unconfirmed.driver.newSession(cwd), /mode update failed/);
+  await assert.rejects(unconfirmed.driver.prompt("Say hello."), refused);
+  assert.equal(calls().filter(({ method }) => method === "session/prompt").length, 1);
+});
+
+test("Full Control managed Worktree Auto sends even contained operations to the server", { timeout: 15_000 }, async () => {
+  signIn();
+  process.env.FAKE_AGY_MODE = "worktree_auto_fixture";
+  const cwd = realpathSync.native(mkdtempSync(join(root, "worktree-")));
+  const path = join(cwd, "tracked.txt");
+  writeFileSync(path, "base\n");
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), BWRAP, cwd, undefined, {
+    campaignOperationAttestation: true, config: { permissionMode: "auto" },
+    layeredEnv: { FAKE_AGY_EXECUTABLE: agy },
+    fixtureIsolation: { backend: "bwrap", command: "bwrap", args: [], network: "inherit",
+      antigravityTerminalHelper: join(root, "bin"),
+      protectedWorktree: { parent: dirname(cwd), path: cwd, gitWritableRoots: [] } },
+  });
+  await driver.initialize();
+  await driver.newSession(cwd);
+  assert.deepEqual(seen.state.at(-1)?.capabilities.permissionModes, ["default", "auto"]);
+  assert.equal(seen.state.at(-1)?.config.permissionMode, "auto");
+  await driver.setConfig({ permissionMode: "default" });
+  assert.equal(seen.state.at(-1)?.config.permissionMode, "default");
+  await driver.setConfig({ permissionMode: "auto" });
+  assert.equal(seen.state.at(-1)?.config.permissionMode, "auto");
+  for (const decision of ["deny", "allow"]) {
+    const from = seen.events.length;
+    const turn = driver.prompt("fixture worktree edit");
+    const request = await waitFor(() => seen.events.slice(from).find((event) => event.kind === "permission_request"));
+    assert.equal(request.requestSource, "provider_tool");
+    assert.equal(request.context?.toolName, "write_file");
+    assert.ok(campaignContainedOperation({ ...request, kind: "permission" }, cwd));
+    assert.equal(readFileSync(path, "utf8"), "base\n", "the edit is still pending");
+    assert.equal(driver.resolvePermission(request.requestId, decision), true);
+    assert.equal(await turn, "end_turn");
+    assert.equal(readFileSync(path, "utf8"), decision === "allow" ? "edited after relaunch\n" : "base\n");
+  }
+  assert.deepEqual(calls().filter(({ method }) => method === "session/prompt").map(({ activeMode }) => activeMode),
+    ["default", "default"], "the native Auto mode was never enabled");
 });
 
 test("a fresh conversation's handoff rides once, ahead of its first prompt", async () => {
