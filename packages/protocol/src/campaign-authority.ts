@@ -804,7 +804,7 @@ export function campaignAuthorityPreflight(control: CampaignControl | undefined,
   }
   if (driver === "acp" && antigravityChild) {
     return runnerSupportsProtocol(protocolVersion, "antigravityFullControlChild") ? { supported: true }
-      : olderRunner(runnerCapabilityRequirementError(protocolVersion, "antigravityFullControlChild", "Google Antigravity Full Control children"));
+      : olderRunner(runnerCapabilityRequirementError(protocolVersion, "antigravityFullControlChild", "Google Antigravity full control children"));
   }
   const authorityFloor = control.boundary.issueAuthority ? "fullControlIssueAuthority" : "fullControlAuthority";
   if (driver === "acp") return { supported: false, reason: "Full Control supports ACP only for a runner-discovered native Google Antigravity worker. Choose that worker or use Custom." };

@@ -12569,7 +12569,7 @@ export class SessionsService {
     }
     if (!runnerSupportsProtocol(runner.protocolVersion, "antigravityFullControlChild")) {
       return { ready: false, reason: runnerCapabilityRequirementError(runner.protocolVersion, "antigravityFullControlChild",
-        "Google Antigravity Full Control children").error };
+        "Google Antigravity full control children").error };
     }
     const agent = runner.agents.find(entry => entry.id === ANTIGRAVITY_AGENT_ID);
     if (!agent || !agentAvailableForImplicitLaunch(agent)) {
@@ -18812,6 +18812,19 @@ export class SessionsService {
         decision.authorityEvaluation?.reason === "credential_screen_review") return true;
     if (decision.status === "approved" && this.uiEvidenceApprovalNeedsDirectRoute(decision, "approve") &&
         !this.uiEvidenceDirectRouteCurrent(controller, policy, decision)) return false;
+    // A setup refresh may temporarily omit the agent after an enqueue was armed. For this
+    // record-only path the durable worker admission and armed action establish the profile.
+    // Keep the current protocol, repository, and campaign authority checks for the receipt.
+    if (options.recordingCompletedMerge && decision.authority === "orchestrator" && requester &&
+        this.antigravityArmedMerge(requester, decision) && this.db.antigravityFullControlRoot(requester.id) === controller.id) {
+      const runner = this.db.getRunner(requester.runnerId);
+      if (runner && !runner.agents.some(agent => agent.id === requester.agentId)) {
+        return evaluateCampaignAuthority(controller, {
+          ...this.campaignPlaced(controller, requester), antigravityFullControlChild: true,
+        }, runner.protocolVersion, decision.resourceSnapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
+        this.campaignPeerContracts(controller, requester.id)).owner === "orchestrator";
+      }
+    }
     return this.evaluateWorkflowDecisionAuthority(
       controller, policy, decision.sessionId, decision.resourceSnapshot,
     ).effectiveOwner === decision.authority;
