@@ -27111,18 +27111,20 @@ export class ControlPlaneDb {
   }
 
   /** A lifecycle cleanup may revoke an exact action admission before its delayed provider receipt
-   * is reconciled. Only the original request -> Orchestrator allow -> compatible lifecycle revoke
-   * audit sequence is recoverable; every other revoked decision remains terminal. A forge-proven
-   * merge also recovers from the stop and guardrail revocations its caller names. */
+   * is reconciled. Only the original request, exact approval and compatible lifecycle revocation
+   * audit sequence is recoverable. Antigravity forge reconciliation can also recover the original
+   * human approval in a Custom campaign. */
   isRecoverableWorkflowDecisionActionRevocation(
     sessionId: string,
     occurrenceId: string,
     revocationActors: readonly string[] = RECOVERABLE_ACTION_REVOCATION_ACTORS,
+    allowHumanApproval = false,
   ): boolean {
     const decision = this.workflowDecisionByOccurrence(occurrenceId);
     const admission = decision?.actionAdmission;
     if (!decision || decision.sessionId !== sessionId || decision.status !== "revoked" ||
-        decision.category !== "pr_merge" || decision.authority !== "orchestrator" ||
+        decision.category !== "pr_merge" ||
+        (decision.authority !== "orchestrator" && !(allowHumanApproval && decision.authority === "human")) ||
         decision.consumedAt !== undefined || !admission || admission.kind !== "pr_merge_enqueue" ||
         !Number.isSafeInteger(admission.armedAt) || admission.armedAt < 1 ||
         decision.resolvedAt === undefined) return false;
@@ -27142,12 +27144,15 @@ export class ControlPlaneDb {
     }>;
     if (rows.length !== 3) return false;
     const [requested, allowed, revoked] = rows;
+    const exactApprover = decision.authority === "orchestrator"
+      ? allowed?.actor_kind === "agent" && allowed.actor_id === decision.controllingSessionId
+      : allowed?.actor_kind === "human";
     if (!requested || !allowed || !revoked ||
         requested.stage !== "request" || requested.outcome !== "pending" ||
         requested.actor_kind !== "agent" || requested.actor_id !== decision.sessionId ||
         requested.created_at !== decision.createdAt ||
         allowed.stage !== "resolution" || allowed.outcome !== "allowed" ||
-        allowed.actor_kind !== "agent" || allowed.actor_id !== decision.controllingSessionId ||
+        !exactApprover ||
         allowed.created_at !== decision.resolvedAt ||
         revoked.stage !== "resolution" || revoked.outcome !== "revoked" ||
         revoked.actor_kind !== "system" ||
@@ -27232,7 +27237,7 @@ export class ControlPlaneDb {
     commandDigest: string,
     receiptDigest: string,
     now: number,
-    options: { forgeAttested?: boolean; externalMerge?: boolean; recoverSuperseded?: boolean } = {},
+    options: { forgeAttested?: boolean; externalMerge?: boolean; recoverSuperseded?: boolean; allowHumanLifecycleRecovery?: boolean } = {},
   ): { decision: WorkflowDecisionView; supersededOccurrenceIds: string[] } | null {
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -27246,6 +27251,7 @@ export class ControlPlaneDb {
             sessionId,
             occurrenceId,
             options.forgeAttested ? FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS : RECOVERABLE_ACTION_REVOCATION_ACTORS,
+            options.forgeAttested && options.allowHumanLifecycleRecovery,
           ))));
       const unarmedExternal = options.externalMerge === true && decision?.status === "approved" && !decision.actionAdmission;
       // A provider receipt names one session's command; a forge merge is one fact for every session.

@@ -1,5 +1,5 @@
 import { isManagedModelChoice, resolveManagedModelChoice } from "@wollipog/protocol";
-import { ANTIGRAVITY_AUTO_MODE, ANTIGRAVITY_FULL_PERMISSIONS_MODE, managedWorktreeUnsupportedReason } from "@wollipog/protocol";
+import { ANTIGRAVITY_AGENT_ID, ANTIGRAVITY_AUTO_MODE, ANTIGRAVITY_FULL_PERMISSIONS_MODE, managedWorktreeUnsupportedReason } from "@wollipog/protocol";
 import type { WollipogPromptOrigin } from "@wollipog/protocol";
 import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
 import { personalRuleDelegation } from "./personal-rule-delegation.js";
@@ -16991,9 +16991,17 @@ export class SessionsService {
       if (stale) return fail(stale, 409);
     }
     if (action.data) {
-      if (child.driver !== "claude-code" && child.driver !== "codex-app-server") {
+      const antigravity = this.antigravityMergeProfile(child);
+      if (child.driver !== "claude-code" && child.driver !== "codex-app-server" && !antigravity) {
         this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition", triggeredBy: { kind: "agent", id: sessionId } });
         return fail(`${child.driver} does not expose trusted correlated command-decision evidence`, 409);
+      }
+      if (antigravity) {
+        const unsupported = this.antigravityMergeCapabilityFailure(child);
+        if (unsupported) {
+          this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition", triggeredBy: { kind: "agent", id: sessionId } });
+          return unsupported;
+        }
       }
       for (const owner of [child, parent]) {
         const unsupported = this.capabilityFailure(
@@ -17142,6 +17150,13 @@ export class SessionsService {
           !this.workflowDecisionAuthorityCurrent(armingParent, armingPolicy, decision)) {
         this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
         return fail("Merge review evidence or authority changed while arming; request a new exact merge decision.", 409);
+      }
+      if (child.driver === "acp") {
+        const unsupported = this.antigravityMergeCapabilityFailure(armingChild);
+        if (unsupported) {
+          this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition", triggeredBy: { kind: "agent", id: sessionId } });
+          return unsupported;
+        }
       }
       // #4120: the ledger may have gained a hold while the forge was read above.
       const heldNow = normalized.data.category === "pr_merge" ? this.campaignMergeHoldNow(child, normalized.data) : null;
@@ -17818,10 +17833,9 @@ export class SessionsService {
     }
   }
 
-  /** Reconcile a command that already completed without replaying it. This exists for durable
-   * approved admissions whose provider took the Guardian-direct path before correlated receipts
-   * were available. The runner must prove the exact command item and the forge's merged head.
-   * Claude Code has no correlated command receipt at all, so its proof is the forge alone. */
+  /** Reconcile a command that already completed without replaying it. Codex requires the exact
+   * command receipt and the forge's merged head. Claude Code, native Antigravity and managed
+   * enqueues can prove the merge from the forge alone. */
   async reconcileWorkflowDecision(
     sessionId: string,
     occurrenceId: string,
@@ -17834,6 +17848,8 @@ export class SessionsService {
       return fail("externalMerge must be true when supplied", 400);
     }
     const externalMerge = request?.externalMerge === true;
+    const child = this.db.getSession(sessionId);
+    const antigravity = child !== null && this.antigravityArmedMerge(child, decision);
     const superseded = !externalMerge && decision.status === "superseded" &&
       this.db.reconcilableSupersededMerge(occurrenceId) !== null;
     if (decision.status === "superseded" && decision.supersededBy && !superseded) {
@@ -17842,7 +17858,8 @@ export class SessionsService {
           "it is settled and has nothing left to reconcile" };
     }
     if (decision.status !== "approved" && (externalMerge || (!superseded && decision.status !== "retired" &&
-        !this.db.isRecoverableWorkflowDecisionActionRevocation(sessionId, occurrenceId)))) {
+        !this.db.isRecoverableWorkflowDecisionActionRevocation(sessionId, occurrenceId,
+          antigravity ? FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS : undefined, antigravity)))) {
       return fail(`workflow decision cannot be reconciled from ${decision.status} state`, 409);
     }
     const normalized = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot);
@@ -17851,12 +17868,11 @@ export class SessionsService {
         auditDigest(normalized.data) !== decision.resourceDigest) {
       return fail("workflow decision resource snapshot is stale", 409);
     }
-    const child = this.db.getSession(sessionId);
     const parent = this.db.getSession(decision.controllingSessionId);
     const directOwner = Boolean(child && parent && this.directOwnerSelfDecision(child, parent, decision));
     const policy = directOwner ? this.directOwnerPolicy(parent!) : parent?.parentControlPolicy;
     const wollipogQueued = this.wollipogMayHaveEnqueued(decision);
-    if (!child || (child.driver !== "codex-app-server" && child.driver !== "claude-code" && !wollipogQueued) ||
+    if (!child || (child.driver !== "codex-app-server" && child.driver !== "claude-code" && !antigravity && !wollipogQueued) ||
         !parent || isTerminal(child.status) ||
         isTerminal(parent.status) || !canAccess(child.id) || !canAccess(parent.id) ||
         !(directOwner || this.workflowDecisionRelationship(parent.id, child.id)) || !policy ||
@@ -17896,7 +17912,7 @@ export class SessionsService {
     }
     if (!admission && !wollipogQueued) return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     // An enqueue Wollipog ran itself left no provider receipt in any harness, so the forge settles it.
-    if (decision.retirement || child.driver === "claude-code" || wollipogQueued) {
+    if (decision.retirement || child.driver === "claude-code" || antigravity || wollipogQueued) {
       const proven = await this.forgeAttestedMergeProof(child, decision, normalized.data);
       if (!proven.ok) return fail(proven.error!, 409);
       const current = this.mergeSettlementAuthority(decision, true, canAccess);
@@ -20204,7 +20220,7 @@ export class SessionsService {
     if (pause && pause.resumedAt === undefined && pause.stoppedSessionIds.includes(sessionId)) return;
     const child = this.db.getSession(sessionId);
     for (const decision of this.db.unconsumedWorkflowDecisionsForSession(sessionId)) {
-      const settle = child && decision.authority === "orchestrator" &&
+      const settle = child && (decision.authority === "orchestrator" || this.antigravityArmedMerge(child, decision)) &&
         FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS.includes(actorId) && this.forgeSettlesArmedMerge(child, decision);
       this.revokeWorkflowDecision(decision, {
         reason: actorId === "session-restarted" ? "session_restarted" : "session_ended", systemId: actorId,
@@ -20232,13 +20248,30 @@ export class SessionsService {
     }
   }
 
-  /** A Claude Code child's armed enqueue never produces a permission receipt in auto or Full Access
-   * mode, and neither does one Wollipog ran itself in any harness (#4067), so a lifecycle end would
-   * leave a merge that already landed revoked. The grant is still revoked first, so a relaunched
-   * provider can never reuse it and a crash leaves it terminal; the forge then moves it to consumed
-   * only when it reports the approved head merged. */
+  private antigravityMergeProfile(session: SessionView): boolean {
+    if (session.driver !== "acp" || session.agentId !== ANTIGRAVITY_AGENT_ID ||
+        (session.executionTarget && session.executionTarget.adapter !== "host")) return false;
+    const row = this.db.getRunner(session.runnerId)?.agents.find((agent) => agent.id === ANTIGRAVITY_AGENT_ID);
+    return row?.driver === "acp" && row.context?.kind === "native" && row.source === "discovered";
+  }
+
+  private antigravityMergeCapabilityFailure(session: SessionView): ServiceResult<never> | null {
+    if (!this.antigravityMergeProfile(session)) return fail("the native Google Antigravity profile is no longer registered", 409);
+    return this.capabilityFailure(session.runnerId, "antigravityMergeReconciliation", "Google Antigravity merge reconciliation");
+  }
+
+  /** An ACP action admission could only have been written for the native Antigravity profile.
+   * The durable admission survives a setup refresh that temporarily omits the agent row. */
+  private antigravityArmedMerge(session: SessionView, decision: WorkflowDecisionView): boolean {
+    return session.driver === "acp" && session.agentId === ANTIGRAVITY_AGENT_ID &&
+      decision.category === "pr_merge" && decision.actionAdmission?.kind === "pr_merge_enqueue";
+  }
+
+  /** An enqueue may have run without a permission receipt. Revoke the grant before checking the
+   * forge so a relaunched provider cannot reuse it. Only an exact merged head can settle it. */
   private forgeSettlesArmedMerge(child: SessionView, decision: WorkflowDecisionView): boolean {
-    return (child.driver === "claude-code" || this.wollipogMayHaveEnqueued(decision)) && decision.status === "approved" &&
+    return (child.driver === "claude-code" || this.wollipogMayHaveEnqueued(decision) ||
+      this.antigravityArmedMerge(child, decision)) && decision.status === "approved" &&
       decision.category === "pr_merge" && decision.actionAdmission?.kind === "pr_merge_enqueue" &&
       !this.capabilityFailure(
         child.runnerId,
@@ -20290,8 +20323,10 @@ export class SessionsService {
           !this.db.deferLifecycleMergeCheck(occurrenceId, now, now + LIFECYCLE_MERGE_RECHECK_MS)) continue;
       const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
       const snapshot = decision?.resourceSnapshot;
-      if (!decision || snapshot?.category !== "pr_merge" || !this.mergeSettlementAuthority(decision, false) ||
-          !this.db.isRecoverableWorkflowDecisionActionRevocation(decision.sessionId, occurrenceId, FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS)) {
+      const child = decision && this.db.getSession(decision.sessionId);
+      if (!decision || !child || snapshot?.category !== "pr_merge" || !this.mergeSettlementAuthority(decision, false) ||
+          !this.db.isRecoverableWorkflowDecisionActionRevocation(decision.sessionId, occurrenceId,
+            FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS, this.antigravityArmedMerge(child, decision))) {
         this.db.finishLifecycleMergeCheck(occurrenceId);
         continue;
       }
@@ -20336,10 +20371,10 @@ export class SessionsService {
         admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command }))) {
       return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     }
-    // Claude Code's proof below reads the forge alone. Another harness's proof is a provider receipt
-    // that an enqueue Wollipog ran never produced, so that one is read the same way Wollipog ran it:
-    // from the filesystem root through the session's own login, read only, never enqueuing.
-    if (decision.retirement || !admission || child.driver !== "claude-code" && wollipogQueued) {
+    // A managed enqueue has no provider receipt. If the harness normally requires one, observe
+    // the merge through the same read-only forge path that Wollipog uses for managed actions.
+    if (decision.retirement || !admission ||
+        (wollipogQueued && child.driver !== "claude-code")) {
       const unsupported = this.capabilityFailure(child.runnerId, "forgeDecisionActions", "Wollipog-performed forge actions");
       if (unsupported) return failAs(unsupported);
       const requestId = `forge_decision_action_${randomUUID()}`;
@@ -20361,6 +20396,10 @@ export class SessionsService {
         return fail("forge did not prove the exact approved head was merged", 409);
       }
       return ok({ forgeHeadSha: snapshot.headSha });
+    }
+    if (this.antigravityArmedMerge(child, decision)) {
+      const unsupported = this.capabilityFailure(child.runnerId, "antigravityMergeReconciliation", "Google Antigravity merge reconciliation");
+      if (unsupported) return unsupported;
     }
     const pullRequestUrl = prMergeChangeRequestUrl(snapshot);
     const requestId = `workflow_action_reconcile_${randomUUID()}`;
@@ -20462,6 +20501,7 @@ export class SessionsService {
       headSha: proof.forgeHeadSha,
     })!;
     const now = Date.now();
+    const child = this.db.getSession(decision.sessionId);
     const reconciled = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(
       decision.sessionId,
       decision.occurrenceId,
@@ -20469,7 +20509,8 @@ export class SessionsService {
         command: canonicalPrMergeEnqueueCommand(snapshot) })!,
       receiptDigest,
       now,
-      { forgeAttested: true, externalMerge, recoverSuperseded: decision.status === "superseded" },
+      { forgeAttested: true, externalMerge, recoverSuperseded: decision.status === "superseded",
+        allowHumanLifecycleRecovery: child !== null && this.antigravityArmedMerge(child, decision) },
     );
     if (!reconciled) return null;
     const consumed = reconciled.decision;
