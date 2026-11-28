@@ -80,6 +80,9 @@ function decisionDelegation(body: unknown, now: number): AssistantDecisionDelega
     return [...new Set<string>(value)];
   };
   const expiresAt = grant?.expiresAt;
+  if (categories.includes("campaign_recovery") && (grant?.selectionMode !== "choose" || !Array.isArray(grant.campaigns))) {
+    throw new AssistantThreadRefusal("Select Campaign Recovery explicitly for one or more named campaigns.", 400);
+  }
   if (expiresAt !== null && (typeof expiresAt !== "number" || !Number.isSafeInteger(expiresAt) ||
       expiresAt <= now || expiresAt > 8_640_000_000_000_000)) {
     throw new AssistantThreadRefusal("The expiration must be a future date.", 400);
@@ -325,6 +328,9 @@ export class AssistantThreads {
       throw new AssistantThreadRefusal("Choose a supported expiry duration.", 400);
     }
     const { grant } = decisionDelegation({ revision: 0, grant: { ...input?.grant, expiresAt: null } }, this.now());
+    if (grant?.categories.includes("campaign_recovery")) {
+      throw new AssistantThreadRefusal("Campaign Recovery can only be delegated on an individual thread.", 400);
+    }
     if (!grant || grant.categories.includes("ui_evidence_review")) {
       throw new AssistantThreadRefusal("Approving UI evidence requires accepting the provider disclosure for an individual thread.", 400);
     }

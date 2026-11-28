@@ -168,7 +168,7 @@ export function NewAssistantThreadDialog({ onClose, onCreated }: {
             : limitsOffered && !launchValue.ok ? launchValue.error : null;
 
   const allGrant = (base: AssistantDecisionDefault | null | undefined) => {
-    const unavailable = new Set<AssistantDecisionCategory>(["ui_evidence_review"]);
+    const unavailable = new Set<AssistantDecisionCategory>(["ui_evidence_review", "campaign_recovery"]);
     if (!ciRerunSupported) unavailable.add("ci_rerun");
     if (!releaseSupported) { unavailable.add("release_tag"); unavailable.add("release_publish"); }
     const expiresAfterMs = base ? base.expiresAfterMs : ASSISTANT_DECISION_DEFAULT_DURATIONS.week;

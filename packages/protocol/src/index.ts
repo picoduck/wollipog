@@ -2193,7 +2193,7 @@ export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEG
  * server inspects that Location; always the campaign owner's, in Full Control and Custom alike, and
  * the Orchestrator carries out only the exact approved Location. */
 export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope" | "automation_creation" |
-  "campaign_follow_up_admission" | "owner_decision" | "location_switch" | "campaign_repository_addition" |
+  "campaign_follow_up_admission" | "owner_decision" | "location_switch" | "campaign_repository_addition" | "campaign_recovery" |
   import("./forge-decision-action.js").RequesterForgeDecisionCategory;
 export type WorkflowDecisionAuthority = "human" | "orchestrator";
 
@@ -5313,6 +5313,7 @@ export type WorkflowDecisionResourceSnapshot =
   | AutomationCreationSnapshot
   | import("./location-switch.js").LocationSwitchSnapshot
   | import("./campaign-repository-addition.js").CampaignRepositoryAdditionSnapshot
+  | import("./campaign-recovery.js").CampaignRecoveryDecisionSnapshot
   | GithubIssueClosureSnapshot
   | CampaignIssueScopeSnapshot
   | CampaignFollowUpAdmissionSnapshot

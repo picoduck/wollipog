@@ -69,6 +69,36 @@ export function registerAssistantDecisionOperations(operations: AssistantOperati
   };
   const ownerCanAccess = (owner: HumanPrincipal, resource: { id: string }) =>
     db.canAccessSession(owner, resource.id) && db.isSessionOwner(owner, resource.id);
+  const requestRecovery = "campaign_recovery_request";
+  const recoveryProperties = { ...sessionProperties, requestId: coordinate,
+    repository: { type: "string", pattern: "^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$", maxLength: 200 },
+    pullRequest: { type: "integer", minimum: 1 }, headSha: { type: "string", pattern: "^[a-f0-9]{40}$" },
+    after: { type: "integer", minimum: 1 } };
+  operations.register({
+    name: requestRecovery, threadOnly: true,
+    description: "Ask a Full Control campaign's owner to approve one recovery instruction for its existing exhausted GitHub PR at the exact head. Supply after when another PR must merge first. This only creates an Inbox approval.",
+    inputSchema: { type: "object", additionalProperties: false, properties: recoveryProperties,
+      required: ["sessionId", "requestId", "repository", "pullRequest", "headSha"] },
+    resolveTarget: target, ownerCanAccess,
+    async execute(value, { connection, recheck }) {
+      const args = parseArgs(value, recoveryProperties);
+      const sessionId = requiredText(args.sessionId, "sessionId", 128);
+      const requestId = requiredText(args.requestId, "requestId", 128);
+      const repository = requiredText(args.repository, "repository", 200);
+      const headSha = requiredText(args.headSha, "headSha", 40);
+      const prNumber = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n > 0;
+      if (!connection.threadId || !/^[a-zA-Z0-9_-]+$/u.test(requestId) || !/^[\w.-]+\/[\w.-]+$/u.test(repository) ||
+          !/^[a-f0-9]{40}$/u.test(headSha) || !prNumber(args.pullRequest) ||
+          args.after !== undefined && (!prNumber(args.after) || args.after === args.pullRequest)) {
+        throw new AssistantRefusal("Supply an exact GitHub repository, PR number, head SHA, request ID and any distinct predecessor PR.");
+      }
+      const result = await svc.requestCampaignPrRecovery(sessionId,
+        { requestId: `recovery_${requestId}`, repository, headSha, pullRequest: args.pullRequest, after: args.after },
+        connection.threadId, recheck, id => { operations.authorize(connection.id, requestRecovery, target({ sessionId: id })); });
+      if (!result.ok) throw new AssistantRefusal(result.error ?? "Recovery request was refused.");
+      return { decision: result.data };
+    },
+  });
   const liveGrant = (owner: HumanPrincipal, connection: AssistantConnection) => {
     const thread = connection.threadId ? db.assistantThreads.get(connection.threadId) : null;
     const session = thread?.session_id ? db.getSession(thread.session_id) : null;
@@ -113,9 +143,21 @@ export function registerAssistantDecisionOperations(operations: AssistantOperati
       throw new AssistantRefusal("This project is outside the thread's decision delegation grant.");
     }
     const snapshot = decision.resourceSnapshot;
+    if (snapshot.category === "campaign_recovery") {
+      if (grant.selectionMode !== "choose" || grant.campaigns === "all" || snapshot.requestingThreadId === connection.threadId) {
+        throw new AssistantRefusal("Recovery requires an explicit campaign-scoped grant on a thread that did not request the decision.");
+      }
+      const original = db.getSession(snapshot.requesterSessionId);
+      if (!original || !ownerCanAccess(owner, original) ||
+          grant.projects !== "all" && (!original.projectId || !grant.projects.includes(original.projectId))) {
+        throw new AssistantRefusal("The original recovery requester is outside this thread's grant.");
+      }
+      operations.authorize(connection.id, name, target({ sessionId: original.id }));
+    }
     // Requester forge decisions already bind the repository to the session's registered Project
     // Location on the server, including for standalone sessions with no campaign repository.
-    if ("repository" in snapshot && (grant.projects !== "all" || connection.grant.projects !== "all")) {
+    if ("repository" in snapshot && snapshot.category !== "campaign_recovery" &&
+        (grant.projects !== "all" || connection.grant.projects !== "all")) {
       const repository = db.campaignSessionRepository(campaign, requester.id);
       if ((repository || !isRequesterForgeDecisionCategory(snapshot.category)) &&
           repository?.toLowerCase() !== snapshot.repository.toLowerCase()) {
@@ -248,7 +290,7 @@ export function registerAssistantDecisionOperations(operations: AssistantOperati
         const recorded = result.data?.assistantDelegation;
         if (decision.status === "pending" && recorded?.threadId === live.threadId) {
           const snapshot = decision.resourceSnapshot;
-          const subject = snapshot.category === "pr_merge" ? `${snapshot.repository}#${snapshot.pullRequest}`
+          const subject = snapshot.category === "pr_merge" || snapshot.category === "campaign_recovery" ? `${snapshot.repository}#${snapshot.pullRequest}`
             : snapshot.category === "ci_rerun" ? ciRerunSubject(snapshot)
             : snapshot.category === "release_tag" || snapshot.category === "release_publish" ? releaseDecisionSubject(snapshot)
             : snapshot.category === "merged_branch_deletion" ? snapshot.branch

@@ -24,6 +24,19 @@ test("a whole CI rerun shows all target fields and exposes the exact commit", ()
   assert.ok(html.includes(`title="${headSha}"`));
 });
 
+test("campaign recovery shows the original placement, remaining work and exact consent", () => {
+  const headSha = "a".repeat(40);
+  const snapshot = { category: "campaign_recovery" as const, repository: "owner/repo", pullRequest: 42, headSha,
+    recoveryId: "recovery", action: "repair_checks" as const, attempts: 4, extraInstructions: 1 as const,
+    requesterSessionId: "original", worktree: { id: "preserved", path: "/fixture/original", branch: "existing-branch" },
+    restoreRequester: true, after: 41, binding: "internal-binding", requestingThreadId: "internal-thread" };
+  const markup = renderToStaticMarkup(<WorkflowDecisionSummary snapshot={snapshot} />);
+  assert.match(markup, /https:\/\/github.com\/owner\/repo\/pull\/42/u);
+  assert.match(text(snapshot), new RegExp(`Commit ${headSha} Original Requester original Worktree /fixture/original on existing-branch`, "u"));
+  assert.match(text(snapshot), /One additional instruction after 4 spent. After Merge PR #41 Next Operation Restore the original requester/u);
+  assert.doesNotMatch(markup, /internal-binding|internal-thread/u);
+});
+
 test("a CI job rerun shows the named job and visibly discloses the dependent jobs it includes", () => {
   const snapshot = { category: "ci_rerun" as const, repository: "owner/repo", runId: 123, headSha: "ab".repeat(20),
     attempt: 2, jobId: 987, jobName: "Build and Bundle" };

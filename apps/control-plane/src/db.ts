@@ -402,6 +402,7 @@ import { matchWorkspaceId, matchWorkspaceIds, workspacePathsEqual } from "./work
 import { installMaintenanceIndexes } from "./maintenance-indexes.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { CAMPAIGN_RECOVERY_SCHEMA, CampaignRecoveryStore, type CampaignRecoveryVerifiedReport } from "./campaign-recovery-store.js";
+import { RECOVERY_PROMPT_PREFIX, recoveryDecisionRefs } from "./campaign-recovery-decision.js";
 import { CAMPAIGN_HANDOFF_QUESTION_KEY, CAMPAIGN_HANDOFF_TITLE, isCampaignHandoffQuestion } from "@wollipog/protocol";
 import {
   CAMPAIGN_FORGE_OBSERVATION_SCHEMA,
@@ -6282,9 +6283,16 @@ export class ControlPlaneDb {
     return this.readCampaignContinuationAdmission(campaignId, () => this.campaignRecoveryCompletion(campaignId));
   }
 
+  /** This owner-authorized turn goes to one worker. It does not resume the campaign outbox or
+   * reinterpret completion. Keep the same root lifecycle, authority, capability and budget checks. */
+  campaignRequesterRecoveryAdmission(campaignId: string): ReturnType<ControlPlaneDb["campaignContinuationAdmission"]> {
+    return this.readCampaignContinuationAdmission(campaignId, () => ({ state: "children_unfinished", recoveryIds: [] }), true);
+  }
+
   private readCampaignContinuationAdmission(
     campaignId: string,
     readCompletion: () => ReturnType<ControlPlaneDb["campaignRecoveryCompletion"]>,
+    requesterTurn = false,
   ): ReturnType<ControlPlaneDb["campaignContinuationAdmission"]> {
     if (this.campaignPaused(campaignId)) return { state: "lifecycle_held", reason: "The campaign is paused." };
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignId) as unknown as SessionRow | undefined;
@@ -6306,7 +6314,7 @@ export class ControlPlaneDb {
       return { state: "lifecycle_held", reason: completion.state === "complete"
         ? CAMPAIGN_AUTOMATION_HOLD_REASONS.complete : CAMPAIGN_AUTOMATION_HOLD_REASONS.recoveryHeld };
     }
-    const active = this.activeCampaignContinuation(campaignId);
+    const active = requesterTurn ? null : this.activeCampaignContinuation(campaignId);
     if (active) {
       const binding = active.authorityDigest;
       if ((full || binding !== undefined) && binding !== this.campaignContinuationAuthorityDigest(campaignId)) {
@@ -24464,8 +24472,18 @@ export class ControlPlaneDb {
    * pull requests, merged campaign pull requests whose branch is pending (#4067), and the
    * prerequisites held merges are parked on (#4120). */
   campaignForgeBackgroundTargets(include: (campaignId: string) => boolean): Array<{ campaignId: string; refs: CampaignPullRequestRef[] }> {
+    const recovery = (this.stmt(`SELECT d.* FROM workflow_decisions d
+      LEFT JOIN session_prompt_commands p ON p.command_id=?||d.occurrence_id
+      WHERE d.category='campaign_recovery' AND (d.status IN ('pending','approved') OR
+        p.state IN ('pending','sent','accepted','queued','started'))`).all(RECOVERY_PROMPT_PREFIX) as unknown[])
+      .map(workflowDecisionFromRow).flatMap(decision => {
+        const s = decision?.resourceSnapshot;
+        if (!decision || s?.category !== "campaign_recovery" || !include(decision.sessionId)) return [];
+        return [{ campaignId: decision.sessionId, refs: recoveryDecisionRefs(this, decision.sessionId,
+          { repository: s.repository, number: s.pullRequest }, s.after) }];
+      });
     return [...this.campaignWorkLedger.forgeBackgroundTargets(include), ...this.campaignMergedBranchTargets(include),
-      ...this.campaignPrerequisiteWatchTargets(include)];
+      ...this.campaignPrerequisiteWatchTargets(include), ...recovery];
   }
 
   /** #4120: the prerequisite pull requests held merges are parked on, per campaign. They are read in
@@ -25308,6 +25326,34 @@ export class ControlPlaneDb {
     ).all(sessionId) as unknown[]).map(workflowDecisionFromRow).filter(
       (decision): decision is WorkflowDecisionView => decision !== null,
     );
+  }
+
+  latestRequesterRecoveryDecision(campaignId: string, resourceKey: string): WorkflowDecisionView | null {
+    return workflowDecisionFromRow(this.stmt(`SELECT * FROM workflow_decisions
+      WHERE session_id=? AND category='campaign_recovery' AND resource_key=? ORDER BY rowid DESC LIMIT 1`)
+      .get(campaignId, resourceKey));
+  }
+
+  approvedRequesterRecoveryDecisions(runnerId?: string): WorkflowDecisionView[] {
+    return (this.stmt(`SELECT d.* FROM workflow_decisions d JOIN sessions s
+        ON s.id=json_extract(d.resource_snapshot,'$.requesterSessionId')
+      WHERE d.category='campaign_recovery' AND d.status='approved' ${runnerId ? "AND s.runner_id=?" : ""}
+      ORDER BY d.created_at,d.rowid`).all(...(runnerId ? [runnerId] : [])) as unknown[])
+      .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null);
+  }
+
+  /** The attempt, the one-shot consumption and its durable prompt are one write. */
+  dispatchRequesterRecovery(occurrenceId: string, campaignId: string,
+    snapshot: import("./campaign-recovery-store.js").RecoveryExtensionSnapshot, now: number,
+    stage: (consumed: WorkflowDecisionView) => SessionPromptCommandRecord): SessionPromptCommandRecord {
+    return this.atomic(() => {
+      const consumed = this.consumeWorkflowDecision(occurrenceId, now);
+      if (!consumed || consumed.category !== "campaign_recovery" || consumed.sessionId !== campaignId) {
+        throw new Error("the recovery decision is no longer approved");
+      }
+      this.campaignRecovery.dispatchToRequester(campaignId, occurrenceId, snapshot, now);
+      return stage(consumed);
+    });
   }
 
   /** Only outstanding grants are swept; consumed creation receipts never expire. */

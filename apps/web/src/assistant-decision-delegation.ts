@@ -1,7 +1,7 @@
 import { ASSISTANT_DECISION_DEFAULT_DURATIONS, type AssistantDecisionCategory, type AssistantDecisionDefault, type AssistantDecisionGrant } from "@wollipog/protocol";
 
 export const ASSISTANT_DECISION_GROUPS = [
-  { label: "Pull Requests", categories: ["pr_merge", "review_round_extension"] },
+  { label: "Pull Requests", categories: ["pr_merge", "review_round_extension", "campaign_recovery"] },
   { label: "CI and Releases", categories: ["ci_rerun", "release_tag", "release_publish"] },
   { label: "Issues", categories: ["follow_up_issue_publication", "issue_closure"] },
   { label: "Cleanup", categories: ["merged_branch_deletion"] },

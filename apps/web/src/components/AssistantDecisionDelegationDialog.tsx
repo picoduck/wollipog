@@ -178,6 +178,7 @@ export function AssistantDecisionDelegationDialog(props: DelegationEditorProps) 
     ? `${evidenceReview.provider} · ${evidenceReview.model}. ${ASSISTANT_EVIDENCE_RETENTION_DISCLOSURE}`
     : undefined;
   const unavailable: Partial<Record<AssistantDecisionCategory, string>> = {};
+  if (isDefault || mode === "all") unavailable.campaign_recovery = "Choose Campaign Recovery on an individual thread with a selected campaign.";
   if (!ciRerunSupported) unavailable.ci_rerun = "Update the control plane to grant CI rerun decisions.";
   if (!releaseSupported) {
     unavailable.release_tag = "Update the control plane to grant release tag decisions.";
@@ -227,6 +228,7 @@ export function AssistantDecisionDelegationDialog(props: DelegationEditorProps) 
       if (evidenceSelected && !digest) return setError("Clear Approve UI Evidence to save while it is unavailable.");
       if (evidenceSelected && !disclosed) return setError("Accept the provider disclosure to grant Approve UI Evidence.");
       if (!projectScope.length || !campaignScope.length) return setError("Select at least one item in each selected scope, or choose All.");
+      if (selected.includes("campaign_recovery") && campaignScope === "all") return setError("Select the campaigns for Campaign Recovery.");
       if (!isDefault && expiresAt !== null && (!Number.isFinite(expiresAt) || expiresAt <= Date.now())) return setError("Choose a future expiration time.");
     }
     setError(null);
