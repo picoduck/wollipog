@@ -773,8 +773,8 @@ test("credential roots cover default and configured provider homes, session home
     workspacePaths: ["/u/src/repo"], userHome: "/u" });
   assert.deepEqual(roots.roots, ["/d", "/u/.agent-manager/profiles", "/d/provider-accounts/a",
     // An agent with no configured home uses these, so they are always screened.
-    "/u/.claude", "/u/.claude.json", "/u/.codex", "/u/.pi", "/d/provider-homes/session-1",
-    "/runner/codex", "/accounts/codex-b", "/u/.claude", "/u/.codex", "/u/.pi", "/cfg/claude"]);
+    "/u/.claude", "/u/.codex", "/u/.gemini", "/u/.pi", "/u/.claude.json", "/d/provider-homes/session-1",
+    "/runner/codex", "/accounts/codex-b", "/u/.claude", "/u/.codex", "/u/.gemini", "/u/.pi", "/cfg/claude"]);
   assert.deepEqual(roots.except, ["/d/worktrees"]);
 });
 
