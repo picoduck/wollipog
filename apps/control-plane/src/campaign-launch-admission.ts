@@ -251,6 +251,7 @@ export interface CampaignLaunchFacts {
   /** `campaignBudgetAccountingError` for the root's driver and model; `costProtected` when the
    * launch has a cost ceiling, which needs priced usage. */
   accountingError: (costProtected: boolean) => string | null;
+  antigravityChildReview?: { ready: boolean; reason: string };
   /** The owner's organization enforces a per-user daily limit native review cannot honor. */
   dailyLimit: boolean;
   /** Named policy asks that are unknown, disabled, built in or Human Required. */
@@ -465,6 +466,11 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
     : ceiling ? ["verified", `${metering}; the campaign is limited to ${limitText}.`]
     : [priced ? "verified" : "informational", `No limit. ${metering}, and Campaign Status shows the campaign's usage.`];
   add("accounting_budget", "Campaign Accounting and Budget", ...accounting, ceiling || limitsInvalid);
+
+  if (facts.antigravityChildReview) {
+    const review = facts.antigravityChildReview;
+    add("antigravity_child_review", "Google Antigravity Child Review", review.ready ? "verified" : "informational", review.reason, false);
+  }
 
   const isolation = runner.runtime?.executionIsolation;
   const regular = "; the campaign uses the regular cross-model review workflow.";

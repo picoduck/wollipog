@@ -1587,6 +1587,8 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 416: Google Antigravity armed merges reconcile against the exact head read from the forge (Refs #4974).
   416,
   // v417 slot
+  // 417: Native Google Antigravity Full Control child admission and runner-enforced permission and question contract (Refs #4973).
+  417,
   // v418 slot
   // v419 slot
   // v420 slot

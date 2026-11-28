@@ -368,7 +368,8 @@ if (args[0] === "acp" && args[1] === "--login") {
     if (request.method === "session/close") return send({ id: request.id, result: {} });
     if (request.method === "session/prompt") {
       const sessionId = request.params?.sessionId;
-      const text = (request.params?.prompt ?? []).filter((block) => block.type === "text").map((block) => block.text).join("\n");
+      const textBlocks = (request.params?.prompt ?? []).filter((block) => block.type === "text").map((block) => block.text);
+      const text = textBlocks.join("\n");
       if (modes.has("prompt_auth")) return send({ id: request.id, error: { code: -32000, message: "Authentication required" } });
       if (modes.has("prompt_error")) {
         return send({ id: request.id, error: { code: -32603, message: "Quota exhausted for fixture-user@example.com; try again later" } });
@@ -387,8 +388,8 @@ if (args[0] === "acp" && args[1] === "--login") {
       }
       const elicitation = /ask fixture question (form|unsupported|url|foreign|native|credentials|wrong-tool|wrong-id|completed|duplicate)/iu.exec(text);
       if (elicitation) return askQuestion(sessionId, elicitation[1]);
-      if (text.startsWith("Fixture permission ")) {
-        const fixture = JSON.parse(text.slice("Fixture permission ".length));
+      if (textBlocks[0]?.startsWith("Fixture permission ")) {
+        const fixture = JSON.parse(textBlocks[0].slice("Fixture permission ".length));
         return runCommand(sessionId, sessionCwds.get(sessionId) ?? process.cwd(), {
           ...fixture, run: () => ({ status: 0, output: "Fixture permission allowed" }),
         });
