@@ -136,8 +136,11 @@ function DelegationSummary({ thread, onDelegation }: { thread: AssistantThread; 
   const grant = thread.decisionDelegation?.grant;
   const expiresAt = grant?.expiresAt;
   const now = useTimelineClock(expiresAt != null);
-  const scope = grant?.categories.length === Object.keys(ASSISTANT_DECISION_CATEGORIES).length &&
-    grant.projects === "all" && grant.campaigns === "all" ? "Delegate All" : "Selected Decisions";
+  const legacyAll = grant?.selectionMode === undefined &&
+    grant?.categories.length === Object.keys(ASSISTANT_DECISION_CATEGORIES).length - 1 &&
+    !grant.categories.includes("campaign_recovery");
+  const scope = grant?.projects === "all" && grant.campaigns === "all" &&
+    (grant.selectionMode === "all" || legacyAll) ? "Delegate All" : "Selected Decisions";
   return <div className="assistant-delegation-summary">
     <strong>{grant ? scope : "Not Delegated"}</strong>
     {grant && <p className="muted">
