@@ -13,6 +13,7 @@ import type {
 } from "./driver.js";
 
 export class AcpDriver implements Driver {
+  readonly requiresCurrentDelegatedPermission: boolean;
   private readonly client: AcpClient;
   private sessionId: string | null = null;
   private readonly resumeId: string | undefined;
@@ -34,6 +35,8 @@ export class AcpDriver implements Driver {
       providerTurnSettleMs?: number;
       providerTurnResponseSettleMs?: number } = {},
   ) {
+    this.requiresCurrentDelegatedPermission = opts.acpCompatibility?.profile === "antigravity" &&
+      opts.acpCompatibility.campaignOperationAttestation === true;
     this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup, processOwnership: opts.processOwnership });
     this.orchestrator = opts.config.permissionMode === "orchestrator";
     // The coupled preset above is only one way to hold the Orchestrator role; runner-owned role

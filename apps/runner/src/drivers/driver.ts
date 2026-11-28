@@ -385,6 +385,8 @@ export interface Driver {
    * decision landed. `automaticResponse` is present only on a Full Control policy decline (#4063);
    * a driver whose provider result carries text says so instead of naming a person. */
   resolvePermission(requestId: string, optionId: string | null, automaticResponse?: FullControlAutomaticResponse): boolean;
+  /** Delegated selections cannot reach a parked callback after its pending evidence is displaced. */
+  readonly requiresCurrentDelegatedPermission?: boolean;
 
   /** Answer a structured agent question (question_request event). Answers are keyed by
    * AgentQuestion.id verbatim. Explicit action distinguishes an accepted all-optional form from

@@ -90,6 +90,7 @@ import {
 import { materializeAcpMcpServers } from "./acp-session-context.js";
 import { antigravityAppArmorFix } from "./antigravity-apparmor.js";
 import { antigravityWorktreeAutoAllows, ANTIGRAVITY_WORKTREE_AUTO_NOTICE } from "./antigravity-worktree-auto.js";
+import { antigravityPermissionContext } from "./antigravity-tool-operation.js";
 import {
   assertClaudeAgentAcpOrchestratorIdentity,
   orchestratorAcpSessionMeta,
@@ -1440,11 +1441,19 @@ export class AcpClient {
       this.providerTurnLastWasMessage = false;
       this.refreshProviderTurnSettleTimer();
     }
+    // The permission payload is already correlated to a tool call by ACP. Do not combine a
+    // partial payload with title text or cached updates that might describe another effect.
+    const attestationRoot = this.compatibility?.profile === "antigravity" &&
+      this.compatibility.campaignOperationAttestation === true &&
+      this.sessionId && this.sessionId === params.sessionId ? this.sessionCwd : undefined;
+    const context = attestationRoot ? antigravityPermissionContext(params.toolCall, attestationRoot) : undefined;
     this.ev.onEvent({
       kind: "permission_request",
       requestId,
       title: params.toolCall?.title ?? "Permission requested",
       options,
+      ...(attestationRoot ? { requestSource: "provider_tool" as const } : {}),
+      ...(context ? { context } : {}),
     });
     return result;
   }
