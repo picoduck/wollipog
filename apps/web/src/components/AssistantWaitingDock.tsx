@@ -18,7 +18,7 @@ import { sessionDisplayTitle } from "../session-title.js";
 import { sessionStatusSignal } from "../status-meta.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
-import { answerAssistantConfirmation, CampaignReviewDialog } from "./AssistantConfirmationCard.js";
+import { answerAssistantConfirmation, AutomationReviewDialog, CampaignReviewDialog } from "./AssistantConfirmationCard.js";
 import { useLaunchedWorkGroups } from "./AssistantWorkCards.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { holdFieldFocus } from "./requests/hold-field-focus.js";
@@ -261,7 +261,7 @@ function WaitingCard({ item, now, busy, begin, finish, onConfirmationAnswered, o
   const [review, setReview] = useState(false);
   const [failure, setFailure] = useState<{ action: Response; detail: string }>();
   const [details, setDetails] = useState(Boolean(confirmation &&
-    confirmation.arguments.length + (confirmation.campaign ? confirmation.impact.length : 0) <= 2));
+    confirmation.arguments.length + (confirmation.campaign || confirmation.automation ? confirmation.impact.length : 0) <= 2));
   const headingId = useId();
   const detailsId = useId();
   const body = useRef<HTMLDivElement>(null);
@@ -275,7 +275,7 @@ function WaitingCard({ item, now, busy, begin, finish, onConfirmationAnswered, o
   const refusal = session ? sessionCommandRefusal(session, "respond") ?? (!runnerOnline && question ? "The machine is offline." : null) : null;
   const expiresAt = confirmation?.expiresAt ?? request?.expiresAt;
   const title = confirmation?.title ?? request?.title;
-  const kind = confirmation?.campaign ? "Campaign Approval" : confirmation ? "Owner Confirmation"
+  const kind = confirmation?.automation ? "Automation Approval" : confirmation?.campaign ? "Campaign Approval" : confirmation ? "Owner Confirmation"
     : options ? "Tool Approval" : request ? requestKindMeta(request).label : "Session Request";
   const summary = confirmation?.summary ?? question?.context
     ?? (question ? "Choose an option to answer this question." : options ? "This session needs permission to run a tool." : "Open the session to respond to this request.");
@@ -388,13 +388,20 @@ function WaitingCard({ item, now, busy, begin, finish, onConfirmationAnswered, o
           : { name: "session", id: openSessionId }))}
         {(confirmation || options || question) && <div className="assistant-dock-resolve">
           {(confirmation || options) && button("deny")}
-          {confirmation?.campaign
+          {confirmation?.automation
+            ? otherAction("review", "Review Automation…", () => setReview(true), true)
+            : confirmation?.campaign
             ? otherAction("review", "Review Campaign…", () => setReview(true), true)
             : confirmation || options ? button("approve")
             : question ? button("submit", !answerValid) : null}
         </div>}
       </div>
       {review && confirmation?.campaign && <CampaignReviewDialog confirmation={confirmation} onClose={() => setReview(false)}
+        onAnswered={(response, action) => {
+          onCampaignAnswered(action);
+          onConfirmationAnswered(response.thread);
+        }} />}
+      {review && confirmation?.automation && <AutomationReviewDialog confirmation={confirmation} onClose={() => setReview(false)}
         onAnswered={(response, action) => {
           onCampaignAnswered(action);
           onConfirmationAnswered(response.thread);

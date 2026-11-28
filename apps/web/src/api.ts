@@ -302,6 +302,9 @@ export function createApiClient(transport: ApiTransport) {
   approveAssistantCampaign: (threadId: string, confirmationId: string, digest: string) => req<AssistantOwnerConfirmationResponse>(
     `/api/assistant-threads/${encodeURIComponent(threadId)}/confirmations/${encodeURIComponent(confirmationId)}/approve-campaign`,
     { method: "POST", body: JSON.stringify({ digest }) }),
+  approveAssistantAutomation: (threadId: string, confirmationId: string, digest: string) => req<AssistantOwnerConfirmationResponse>(
+    `/api/assistant-threads/${encodeURIComponent(threadId)}/confirmations/${encodeURIComponent(confirmationId)}/approve-automation`,
+    { method: "POST", body: JSON.stringify({ digest }) }),
   reviseAssistantCampaignBudget: (threadId: string, confirmationId: string, digest: string, budget: OrchestratorCampaignBudgetDefault) =>
     req<AssistantOwnerConfirmationResponse>(
       `/api/assistant-threads/${encodeURIComponent(threadId)}/confirmations/${encodeURIComponent(confirmationId)}/campaign-budget`,

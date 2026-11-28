@@ -33691,6 +33691,9 @@ export class ControlPlaneDb {
 
   createAutomation(input: {
     approval?: { occurrenceId: string; resourceDigest: string; result: NonNullable<WorkflowDecisionView["automationCreationResult"]> };
+    beforeInsert?: () => void;
+    afterInsert?: (saved: AutomationSchedule) => void;
+    eventDetail?: Record<string, unknown>;
     automationId: string;
     spec: AutomationSpec;
     nextFireAt: number | null;
@@ -33701,6 +33704,7 @@ export class ControlPlaneDb {
     const { spec } = input;
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      input.beforeInsert?.();
       if (input.approval) {
         const changed = this.stmt(`UPDATE workflow_decisions SET status='consumed', consumed_at=?, automation_creation_result=?
           WHERE occurrence_id=? AND category='automation_creation' AND authority='human' AND status='approved'
@@ -33723,17 +33727,20 @@ export class ControlPlaneDb {
       this.insertAutomationEvent({
         automationId: input.automationId, kind: "created", actor: input.actor,
         detail: { enabled: spec.enabled, nextFireAt: input.nextFireAt,
-          ...(input.approval ? { occurrenceId: input.approval.occurrenceId, resourceDigest: input.approval.resourceDigest } : {}) }, now: input.now,
+          ...(input.approval ? { occurrenceId: input.approval.occurrenceId, resourceDigest: input.approval.resourceDigest } : {}),
+          ...(input.eventDetail ?? {}) }, now: input.now,
       });
-      if (input.assistantAuthorization) bindAssistantAutomation(this, this.getAutomation(input.automationId)!,
+      const saved = this.getAutomation(input.automationId)!;
+      if (input.assistantAuthorization) bindAssistantAutomation(this, saved,
         input.assistantAuthorization.connectionId, input.assistantAuthorization.operation);
       else this.stmt("DELETE FROM assistant_automation_authority WHERE automation_id=?").run(input.automationId);
+      input.afterInsert?.(saved);
       this.db.exec("COMMIT");
+      return saved;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
-    return this.getAutomation(input.automationId)!;
   }
 
   updateAutomation(input: {

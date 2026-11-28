@@ -35,7 +35,7 @@ import {
 import type { HumanPrincipal } from "./identity.js";
 import type { AssistantConnections, AssistantOperations } from "./assistant-connections.js";
 import { AssistantCommandReceipts } from "./assistant-command-receipts.js";
-import { ASSISTANT_CAMPAIGN_START, assistantCampaignLaunchId, AssistantOwnerConfirmationService } from "./assistant-owner-confirmations.js";
+import { ASSISTANT_AUTOMATION_PROPOSE, ASSISTANT_CAMPAIGN_START, assistantCampaignLaunchId, AssistantOwnerConfirmationService } from "./assistant-owner-confirmations.js";
 import { threadDecisionDelegation, type AssistantThreadStore, type StoredThreadState, type ThreadRow } from "./assistant-thread-store.js";
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
@@ -949,6 +949,10 @@ export function createAssistantOwnerConfirmationService(db: ControlPlaneDb, svc:
     receiptStatus: (connectionId, commandId) => receipts.get(connectionId, commandId)?.status,
     campaignOutcome: (id) => {
       const command = db.assistantOwnerConfirmations.command(id);
+      if (command?.operation === ASSISTANT_AUTOMATION_PROPOSE) {
+        const receipt = receipts.get(command.connectionId, command.commandId);
+        return receipt?.resourceId ? { receiptStatus: receipt.status, automationId: receipt.resourceId } : undefined;
+      }
       if (command?.operation !== ASSISTANT_CAMPAIGN_START) return undefined;
       const retained = db.humanCampaignLaunchIdentity(command.ownerUserId, assistantCampaignLaunchId(id));
       if (!retained) return undefined;

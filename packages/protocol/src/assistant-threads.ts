@@ -340,6 +340,40 @@ export type AssistantOwnerConfirmationStatus = "pending" | "approved" | "execute
 /** One line of what an owner confirmation would do, derived by the control plane for display. */
 export interface AssistantOwnerConfirmationDetail { label: string; value: string }
 
+/** Human-readable target labels for reviewing an Assistant automation proposal (#4976). */
+export interface AssistantAutomationTargetDisplay {
+  projectName?: string | null;
+  locationName?: string | null;
+  locationPath?: string | null;
+  runnerName?: string | null;
+  workspaceName?: string | null;
+  workspacePath?: string | null;
+  sessionTitle?: string | null;
+}
+
+/** Resolved delegated decisions and allowance for a proposed scheduled Orchestrator campaign (#4976). */
+export interface AssistantAutomationCampaignDecisionsPreview {
+  controlMode: "custom" | "full_control";
+  parentControl: "off" | "questions" | "questions_and_approvals";
+  decisions: Record<string, "human" | "orchestrator">;
+  fullControlOperations?: string[];
+  delegatablePolicyIds?: string[];
+  budget: {
+    costUsd: number;
+    toolCalls: number;
+    concurrency: number;
+    acceptedFollowUps: number;
+  };
+}
+
+/** Automation-proposal-only fields (#4976). Approval sends the digest of the exact owner-visible schedule. */
+export interface AssistantAutomationConfirmationPreview {
+  digest: string;
+  snapshot: import("./index.js").AutomationCreationSnapshot;
+  targetDisplay?: AssistantAutomationTargetDisplay;
+  campaignDecisions?: AssistantAutomationCampaignDecisionsPreview;
+}
+
 /** A destructive command a Wollipog Assistant thread's assistant asked to run (#4665). Only its
  * owner can answer it, from the thread or the Inbox. It is bound to the exact connection,
  * operation, target, arguments and grant revision; approving runs that command once, and its id
@@ -367,12 +401,14 @@ export interface AssistantOwnerConfirmation {
     /** Older control planes omit this and require a budget in both modes. */
     mode?: "custom" | "full_control";
   };
+  /** Automation-proposal-only fields (#4976). Approval sends the digest of the exact owner-visible schedule. */
+  automation?: AssistantAutomationConfirmationPreview;
   status: AssistantOwnerConfirmationStatus;
   createdAt: number;
   expiresAt: number;
   resolvedAt: number | null;
   /** Present once resolved: the command receipt's status after it ran, or why it did not run. */
-  outcome?: { receiptStatus?: "accepted" | "running" | "succeeded" | "failed" | "uncertain"; reason?: string; sessionId?: string };
+  outcome?: { receiptStatus?: "accepted" | "running" | "succeeded" | "failed" | "uncertain"; reason?: string; sessionId?: string; automationId?: string };
 }
 
 export interface AssistantOwnerConfirmationResponse { confirmation: AssistantOwnerConfirmation; thread: AssistantThread }

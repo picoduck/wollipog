@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import {
   campaignLaunchDisclosure, campaignRepositoryLocation, validCampaignBudgetAuthority, humanRequiredRulesExist, supportsPacedVideoReviewPeer, runnerSupportsProtocol,
+  type AssistantAutomationCampaignDecisionsPreview,
   type AutomationCampaign, type AutomationExecution, type AutomationRunnerTarget, type AutomationSchedule,
   type AutomationSessionRequest, type AutomationSpec, type CreateSessionRequest, type FullControlLaunchRequest, type GovernanceActor,
   type PreparedCampaignLaunch, type SessionView,
@@ -16,7 +17,7 @@ import { authorizeFullControl } from "./campaign-authority.js";
 import { inspectCampaignWorkspace } from "./project-location-inspection.js";
 import { evaluateUiEvidenceReviewClient } from "./ui-evidence-review.js";
 import type { PreStagedDeliveryOptions, ServiceResult, SessionsService } from "./sessions.js";
-import { AssistantRefusal } from "./assistant-connections.js";
+import { AssistantRefusal, assistantCallContext } from "./assistant-connections.js";
 import { authorizeAssistantAutomation, scheduledAssistantOwner, auditAssistantAutomationOccurrence,
   type AssistantAutomationOperation } from "./assistant-automation-authority.js";
 
@@ -285,9 +286,11 @@ export class ScheduledCampaignRuntime {
     const body = { ...stored, runnerId: target.runnerId, workspaceId: target.workspaceId, agentId,
       projectId: target.projectId, projectLocationId: target.projectLocationId };
     let plan: PreparedCampaignLaunch | undefined;
-    const result = this.sessions.createSession(body, undefined, this.scope(human), false, false, false, {
+    // Read-only launch plan inspection never creates a session and must not inherit a calling
+    // Assistant thread's session-launch restrictions (#4976).
+    const result = assistantCallContext.exit(() => this.sessions.createSession(body, undefined, this.scope(human), false, false, false, {
       ...this.context(human), inspectLaunchPlan: value => { plan = value; },
-    });
+    }));
     return plan ?? result.error ?? "The scheduled campaign configuration is unavailable";
   }
 
@@ -323,6 +326,41 @@ export class ScheduledCampaignRuntime {
       root: { runnerId: launch.runnerId, workspaceId: launch.workspaceId, agentId: launch.agentId,
         model: launch.config.model ?? null, effort: launch.config.effort ?? null },
       behavior, delegation, execution, budget };
+  }
+
+  /** Read-only preview of effective delegated decisions and allowance for a proposed scheduled
+   * campaign before it is saved (#4976). Performs no writes, repository inspection or launches. */
+  previewSpec(spec: AutomationSpec, owner: HumanPrincipal): AssistantAutomationCampaignDecisionsPreview | { error: string } | null {
+    const action = spec.action;
+    if (action.kind !== "create_session" || !action.request.campaign) return null;
+    const campaign = action.request.campaign;
+    const primaryTarget: AutomationRunnerTarget = {
+      runnerId: action.request.runnerId, workspaceId: action.request.workspaceId, agentId: action.request.agentId,
+      projectId: action.request.projectId, projectLocationId: action.request.projectLocationId,
+      installationBindings: action.installationBindings,
+    };
+    const launch = this.prepare(action.request, primaryTarget, owner);
+    if (typeof launch === "string") return { error: launch };
+    const childError = this.customChildError(campaign, launch, owner, primaryTarget.runnerId);
+    if (childError) return { error: childError };
+    const budget = previewBudget({ limits: spec.limits, action }, launch);
+    if ("error" in budget) return budget;
+    const budgetError = campaign.fullControl ? effectiveBudgetError(budget, campaign.fullControl.budget?.checkpointsUsd) : null;
+    if (budgetError) return { error: budgetError };
+    const fullControlOperations = campaign.controlMode === "full_control"
+      ? (campaign.fullControl?.operations ?? FULL_CONTROL_LAUNCH_OPERATIONS.filter((operation) => operation !== "ci_rerun"))
+      : undefined;
+    const delegatablePolicyIds = campaign.controlMode === "full_control"
+      ? (campaign.fullControl?.delegatablePolicyIds ?? [])
+      : undefined;
+    return {
+      controlMode: campaign.controlMode,
+      parentControl: launch.policy.delegation.parentControl,
+      decisions: { ...launch.policy.delegation.decisions },
+      ...(fullControlOperations ? { fullControlOperations: [...fullControlOperations] } : {}),
+      ...(delegatablePolicyIds ? { delegatablePolicyIds: [...delegatablePolicyIds] } : {}),
+      budget,
+    };
   }
 
   private scope(human: HumanPrincipal) {

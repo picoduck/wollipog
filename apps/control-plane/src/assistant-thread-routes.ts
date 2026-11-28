@@ -69,18 +69,22 @@ export function registerAssistantThreadRoutes(app: FastifyInstance, deps: {
   // Approve Once runs the bound command and answers with how it ended; repeating it runs nothing.
   app.post("/api/assistant-threads/:threadId/confirmations/:confirmationId/approve", answer((owner, thread, id) => confirmations.approve(owner, thread, id)));
   app.post("/api/assistant-threads/:threadId/confirmations/:confirmationId/deny", answer((owner, thread, id) => confirmations.deny(owner, thread, id)));
+  const digest = (body: unknown, kind: "campaign" | "automation") => {
+    const value = (body as { digest?: unknown } | null)?.digest;
+    if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) {
+      throw new AssistantOwnerConfirmationRefusal(kind === "automation"
+        ? "The current automation review is required."
+        : "The current campaign review is required.", 400);
+    }
+    return value;
+  };
+  app.post("/api/assistant-threads/:threadId/confirmations/:confirmationId/approve-automation",
+    answer((owner, thread, id, body) => confirmations.approve(owner, thread, id, { kind: "automation", digest: digest(body, "automation") })));
   if (deps.reviseCampaign) {
-    const digest = (body: unknown) => {
-      const value = (body as { digest?: unknown } | null)?.digest;
-      if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) {
-        throw new AssistantOwnerConfirmationRefusal("The current campaign review is required.", 400);
-      }
-      return value;
-    };
     app.post("/api/assistant-threads/:threadId/confirmations/:confirmationId/approve-campaign",
-      answer((owner, thread, id, body) => confirmations.approve(owner, thread, id, digest(body))));
+      answer((owner, thread, id, body) => confirmations.approve(owner, thread, id, { kind: "campaign", digest: digest(body, "campaign") })));
     app.put("/api/assistant-threads/:threadId/confirmations/:confirmationId/campaign-budget", answer(async (owner, thread, id, body) => {
-      const next = await deps.reviseCampaign!(owner, thread, id, digest(body), (body as { budget: OrchestratorCampaignBudgetDefault }).budget);
+      const next = await deps.reviseCampaign!(owner, thread, id, digest(body, "campaign"), (body as { budget: OrchestratorCampaignBudgetDefault }).budget);
       if (!next) throw new AssistantOwnerConfirmationRefusal("The campaign request changed or expired. Refresh the thread to review it.", 409);
       return next;
     }));

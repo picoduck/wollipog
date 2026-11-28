@@ -10,6 +10,7 @@ import { assistantThreadTitle } from "../assistant-threads.js";
 import { effortLabel, formatClock } from "../format.js";
 import { useStoreActions } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
+import { AutomationCreationSummary } from "./AutomationCreationSummary.js";
 import { CopyButton } from "./common.js";
 import { Modal } from "./Modal.js";
 import { Notice } from "./Notice.js";
@@ -35,7 +36,7 @@ function useConfirmationAnswer(confirmation: AssistantOwnerConfirmation, onAnswe
       const response = await answerAssistantConfirmation(api, confirmation, intent);
       const outcome = assistantConfirmationOutcome(response.confirmation);
       showToast(outcome.message, { tone: outcome.tone });
-      if (confirmation.campaign) announceAssistantThread(response.thread);
+      if (confirmation.campaign || confirmation.automation) announceAssistantThread(response.thread);
       onAnswered(response, intent);
     } catch (cause) {
       setFailure({
@@ -52,8 +53,9 @@ function useConfirmationAnswer(confirmation: AssistantOwnerConfirmation, onAnswe
 }
 
 export function answerAssistantConfirmation(api: ReturnType<typeof useApi>, confirmation: AssistantOwnerConfirmation, intent: "approve" | "deny") {
-  const { threadId, id, campaign } = confirmation;
+  const { threadId, id, campaign, automation } = confirmation;
   if (intent === "deny") return api.denyAssistantConfirmation(threadId, id);
+  if (automation) return api.approveAssistantAutomation(threadId, id, automation.digest);
   return campaign
     ? api.approveAssistantCampaign(threadId, id, campaign.digest)
     : api.approveAssistantConfirmation(threadId, id);
@@ -177,6 +179,31 @@ export function CampaignReviewDialog({ confirmation, onClose, onAnswered }: {
   );
 }
 
+export function AutomationReviewDialog({ confirmation, onClose, onAnswered }: {
+  confirmation: AssistantOwnerConfirmation;
+  onClose: () => void;
+  onAnswered?: ConfirmationAnswer;
+}) {
+  const automation = confirmation.automation;
+  const { busy, answer, failure } = useConfirmationAnswer(confirmation, (response, intent) => { onClose(); onAnswered?.(response, intent); });
+  if (!automation) return null;
+  return (
+    <Modal title={confirmation.title}
+      onClose={() => { if (!busy) onClose(); }}
+      size="lg" phoneSheet="full"
+      footer={<ConfirmationActions busy={busy} answer={answer} />}>
+      <div className="assistant-campaign-review">
+        {failure && <Notice tone="danger" role="alert" details={<div className="code-well"><pre>{failure.detail}</pre></div>}>
+          {failure.message}
+        </Notice>}
+        <AutomationCreationSummary snapshot={automation.snapshot} targetDisplay={automation.targetDisplay}
+          campaignDecisions={automation.campaignDecisions} />
+        <p className="request-card-reasons">{confirmation.summary}</p>
+      </div>
+    </Modal>
+  );
+}
+
 function CampaignApprovalCard({ confirmation }: { confirmation: AssistantOwnerConfirmation }) {
   const [review, setReview] = useState(false);
   const headingId = `assistant-confirmation-${confirmation.id}`;
@@ -196,6 +223,25 @@ function CampaignApprovalCard({ confirmation }: { confirmation: AssistantOwnerCo
   );
 }
 
+function AutomationApprovalCard({ confirmation }: { confirmation: AssistantOwnerConfirmation }) {
+  const [review, setReview] = useState(false);
+  const headingId = `assistant-confirmation-${confirmation.id}`;
+  return (
+    <li className="request-card" aria-labelledby={headingId}>
+      <div className="request-card-head">
+        <span className="request-card-kind">Approval Needed</span>
+        <span className="request-card-meta">Expires {formatClock(confirmation.expiresAt)}</span>
+      </div>
+      <p className="request-card-title" id={headingId}>{confirmation.title}</p>
+      <p className="assistant-confirmation-summary">{confirmation.target.label}</p>
+      <div className="request-card-foot">
+        <button type="button" className="btn sm primary" onClick={() => setReview(true)}>Review Automation</button>
+      </div>
+      {review && <AutomationReviewDialog confirmation={confirmation} onClose={() => setReview(false)} />}
+    </li>
+  );
+}
+
 /** How many threads the Inbox names; the rest wait behind "+N More", in the Assistants section. */
 const NOTICE_THREADS = 3;
 
@@ -204,7 +250,11 @@ export function AssistantConfirmationsNotice({ waiting }: { waiting: readonly As
   const { navigate } = useStoreActions();
   const [reviewThreadId, setReviewThreadId] = useState<string | null>(null);
   const reviewThread = waiting.find(thread => thread.threadId === reviewThreadId);
-  const campaigns = reviewThread?.confirmations.filter(confirmation => confirmation.campaign) ?? [];
+  const reviewable = reviewThread?.confirmations.filter(confirmation => confirmation.campaign || confirmation.automation) ?? [];
+  const hasCampaigns = reviewable.some(confirmation => confirmation.campaign);
+  const hasAutomations = reviewable.some(confirmation => confirmation.automation);
+  const modalTitle = hasCampaigns && hasAutomations ? "Assistant Approvals"
+    : hasAutomations ? "Automation Approvals" : "Campaign Approvals";
   if (!waiting.length) return null;
   const more = waiting.length - NOTICE_THREADS;
   return (
@@ -220,7 +270,7 @@ export function AssistantConfirmationsNotice({ waiting }: { waiting: readonly As
                 <span className="request-card-kind">{thread.confirmations.length} {thread.confirmations.length === 1 ? "Approval" : "Approvals"}</span>
                 <span className="assistant-approvals-expiry">Expires {formatClock(thread.expiresAt)}</span>
                 <button type="button" className="btn sm ghost" aria-describedby={titleId}
-                  onClick={() => thread.confirmations.some(confirmation => confirmation.campaign)
+                  onClick={() => thread.confirmations.some(confirmation => confirmation.campaign || confirmation.automation)
                     ? setReviewThreadId(thread.threadId)
                     : navigate({ name: "assistants", threadId: thread.threadId })}>
                   Review
@@ -235,14 +285,16 @@ export function AssistantConfirmationsNotice({ waiting }: { waiting: readonly As
           +{more} More
         </button>
       )}
-      {reviewThread && campaigns.length > 0 && (
-        <Modal title="Campaign Approvals" onClose={() => setReviewThreadId(null)}
+      {reviewThread && reviewable.length > 0 && (
+        <Modal title={modalTitle} onClose={() => setReviewThreadId(null)}
           footer={<button type="button" className="btn ghost" onClick={() => {
             setReviewThreadId(null);
             navigate({ name: "assistants", threadId: reviewThread.threadId });
           }}>Open Thread</button>}>
-          <ul className="assistant-inbox-campaigns" aria-label="Campaign Approvals">
-            {campaigns.map(confirmation => <CampaignApprovalCard key={confirmation.id} confirmation={confirmation} />)}
+          <ul className="assistant-inbox-campaigns" aria-label={modalTitle}>
+            {reviewable.map(confirmation => confirmation.automation
+              ? <AutomationApprovalCard key={confirmation.id} confirmation={confirmation} />
+              : <CampaignApprovalCard key={confirmation.id} confirmation={confirmation} />)}
           </ul>
         </Modal>
       )}

@@ -16,6 +16,106 @@ const ok = <T>(data: T, status = 200): ServiceResult<T> => ({ ok: true, status, 
 const identifier = (v: unknown, max: number): v is string => typeof v === "string" &&
   v.trim().length > 0 && v.length <= max && !v.includes("\0");
 
+/** Shared server-side preparation for agent-requested and Assistant-proposed automations.
+ * Validates the complete spec, pins installations, resolves exact Project placement, computes
+ * effective target defaults without mutating overrides, and returns a drift-sensitive target digest. */
+export function prepareAutomationCreationSpec(
+  deps: { db: ControlPlaneDb; campaigns?: ScheduledCampaignRuntime },
+  principal: AuthPrincipal,
+  input: AutomationSpec,
+  requesterId?: string,
+): ServiceResult<Pick<AutomationCreationSnapshot, "spec" | "targetDigest" | "effectiveTargets">> {
+  const parsed = validateAutomationSpec(input);
+  if (!parsed.ok) return fail(parsed.error ?? "Invalid automation configuration", 400);
+  const spec = pinAutomationSpec(deps.db, structuredClone(parsed.data!));
+  const states: unknown[] = requesterId
+    ? [deps.db.sessionScope(requesterId)]
+    : [principal.kind === "human" ? { ownerUserId: principal.userId, organizationId: principal.organizationId } : { kind: principal.kind }];
+  const effectiveTargets: AutomationCreationSnapshot["effectiveTargets"] = [];
+  let inheritedConfig: SessionConfig | undefined;
+  const placementIdentity = (location: NonNullable<ReturnType<ControlPlaneDb["projectLocation"]>>) => ({
+    id: location.id, projectId: location.projectId, runnerId: location.runnerId, workspaceId: location.workspaceId,
+    path: location.path, source: location.source,
+  });
+  const targets: AutomationRunnerTarget[] = [];
+  const action = spec.action;
+  if (action.kind !== "prompt_session") action.request.useWorktree ??= false;
+  if (action.kind === "prompt_session") {
+    if (!deps.db.canAccessSession(principal, action.sessionId)) return fail("Target session is outside this session's audience", 404);
+    const target = deps.db.getSession(action.sessionId);
+    if (!target || target.archived || isTerminal(target.status) || !target.agentId || !target.workspaceId) return fail("Target session is unavailable");
+    targets.push({ runnerId: target.runnerId, workspaceId: target.workspaceId, agentId: target.agentId });
+    inheritedConfig = { model: target.model ?? undefined, effort: target.effort ?? undefined,
+      permissionMode: target.permissionMode ?? undefined };
+    states.push({ sessionId: target.id, scope: deps.db.sessionScope(target.id), model: target.model,
+      effort: target.effort, permissionMode: target.permissionMode, worktreePath: target.worktreePath });
+  } else {
+    targets.push({ ...action.request, installationBindings: action.installationBindings });
+    if (spec.runnerPolicy.kind === "alternate") targets.push(...spec.runnerPolicy.targets);
+  }
+  for (const target of targets) {
+    if (!deps.db.canAccessRunner(principal, target.runnerId) ||
+        !deps.db.canAccessWorkspace(principal, target.runnerId, target.workspaceId)) return fail("Automation target is outside this session's audience", 404);
+    const runner = deps.db.getRunner(target.runnerId);
+    const workspace = runner?.workspaces.find((w) => w.id === target.workspaceId);
+    if (!runner || !workspace || !runnerSupportsProtocol(runner.protocolVersion, "automationCommandReceipts")) return fail("Automation target is unavailable or needs an update");
+    if (action.kind !== "prompt_session" && target.projectId === undefined) {
+      const locations = deps.db.projectLocationsForWorkspace(target.runnerId, target.workspaceId);
+      if (locations.length > 1) return fail("Choose the exact Project Location for this automation target");
+      const placement = { projectId: locations[0]?.projectId ?? null, projectLocationId: locations[0]?.id ?? null };
+      Object.assign(target, placement);
+      if (target === targets[0]) Object.assign(action.request, placement);
+    }
+    if (target.projectId) {
+      const location = target.projectLocationId ? deps.db.projectLocation(target.projectLocationId) : null;
+      if (!deps.db.canAccessProject(principal, target.projectId) || !location ||
+          location.projectId !== target.projectId || location.runnerId !== target.runnerId || location.workspaceId !== target.workspaceId) {
+        return fail("Automation Project Location no longer matches its target");
+      }
+      states.push(placementIdentity(location));
+    }
+    states.push({ runnerId: target.runnerId, workspace: { id: workspace.id, path: workspace.path }, scope: deps.db.workspaceScope(target.runnerId, target.workspaceId),
+      locations: deps.db.projectLocationsForWorkspace(target.runnerId, target.workspaceId).map(placementIdentity) });
+    {
+      const key = "agent";
+      const pin = target.installationBindings?.agent;
+      const agentId = pin ? deps.db.resolveSavedHarnessInstallation(target.runnerId, pin) : target.agentId;
+      const agent = runner.agents.find((a) => a.id === agentId && a.available);
+      if (!agentId || !agent || !deps.db.getAgentLaunch(target.runnerId, agentId)) return fail("The selected agent installation is unavailable");
+      const config: SessionConfig = { ...inheritedConfig, ...action.request.config };
+      const configError = capabilityConfigError(claudeModelConfigForValidation(config, agent.capabilities, agent.driver ?? "acp"), agent.capabilities);
+      if (configError) return fail(configError);
+      const model = resolveEffectiveModelEffort(config, agent.capabilities, agent.driver ?? "acp");
+      if (model.error) return fail(model.error);
+      Object.assign(config, model.value);
+      config.permissionMode ??= defaultPermissionModeForNewSession(agent.driver ?? "acp", agent.capabilities);
+      if (!config.permissionMode && agent.capabilities?.permissionModes?.includes("default")) config.permissionMode = "default";
+      // Some providers have no named default (or expose no selectable modes). Preserve normal
+      // runtime inheritance; explicit unsupported modes were already refused above.
+      // Preview each role independently. Inheritance is not a persistent configuration override:
+      // particularly, a prompt must not restore a target's former permission mode on every fire.
+      effectiveTargets.push({ runnerId: target.runnerId, workspaceId: target.workspaceId, agentId, role: key, config });
+      const launch = deps.db.getAgentLaunch(target.runnerId, agentId)!;
+      states.push({ runnerId: target.runnerId, agentId, installationId: agent.installation?.id,
+        driver: agent.driver, context: agent.context, supportsApprovals: agent.capabilities?.supportsApprovals, config,
+        launchDigest: auditDigest({ command: launch.command, args: launch.args }) });
+    }
+  }
+  const capabilityError = automationCapabilityError(deps.db, spec);
+  if (capabilityError) return fail(capabilityError);
+  if (spec.action.kind === "create_session" && spec.action.request.campaign) {
+    const scope = requesterId ? deps.db.sessionScope(requesterId) : null;
+    const ownerId = principal.kind === "human" ? principal.userId
+      : (requesterId ? deps.db.sessionLauncherUserId(requesterId) : undefined) ?? (scope?.owner.kind === "user" ? scope.owner.userId : undefined);
+    const error = deps.campaigns?.validate(spec, { kind: "human", id: ownerId }) ??
+      (!deps.campaigns ? "Scheduled campaigns are unavailable on this server" : null);
+    if (error) return fail(error);
+  }
+  const normalizedSpec = validateAutomationSpec(spec);
+  if (!normalizedSpec.ok) return fail(normalizedSpec.error ?? "Prepared automation configuration is invalid", 400);
+  return ok({ spec, targetDigest: auditDigest(states)!, effectiveTargets });
+}
+
 /** Session credentials propose, humans resolve, and only this service consumes the exact grant.
  * No provider/runner round trip occurs between revalidation and the local atomic commit. */
 export class AutomationCreationService {
@@ -34,93 +134,7 @@ export class AutomationCreationService {
 
   /** All referenced targets must be in the requester's audience. Runtime admission still applies. */
   private prepare(principal: AuthPrincipal, input: AutomationSpec, requesterId: string): ServiceResult<Pick<AutomationCreationSnapshot, "spec" | "targetDigest" | "effectiveTargets">> {
-    const parsed = validateAutomationSpec(input);
-    if (!parsed.ok) return fail(parsed.error ?? "Invalid automation configuration", 400);
-    const spec = pinAutomationSpec(this.db, structuredClone(parsed.data!));
-    const states: unknown[] = [this.db.sessionScope(requesterId)];
-    const effectiveTargets: AutomationCreationSnapshot["effectiveTargets"] = [];
-    let inheritedConfig: SessionConfig | undefined;
-    const placementIdentity = (location: NonNullable<ReturnType<ControlPlaneDb["projectLocation"]>>) => ({
-      id: location.id, projectId: location.projectId, runnerId: location.runnerId, workspaceId: location.workspaceId,
-      path: location.path, source: location.source,
-    });
-    const targets: AutomationRunnerTarget[] = [];
-    const action = spec.action;
-    if (action.kind !== "prompt_session") action.request.useWorktree ??= false;
-    if (action.kind === "prompt_session") {
-      if (!this.db.canAccessSession(principal, action.sessionId)) return fail("Target session is outside this session's audience", 404);
-      const target = this.db.getSession(action.sessionId);
-      if (!target || target.archived || isTerminal(target.status) || !target.agentId || !target.workspaceId) return fail("Target session is unavailable");
-      targets.push({ runnerId: target.runnerId, workspaceId: target.workspaceId, agentId: target.agentId });
-      inheritedConfig = { model: target.model ?? undefined, effort: target.effort ?? undefined,
-        permissionMode: target.permissionMode ?? undefined };
-      states.push({ sessionId: target.id, scope: this.db.sessionScope(target.id), model: target.model,
-        effort: target.effort, permissionMode: target.permissionMode, worktreePath: target.worktreePath });
-    } else {
-      targets.push({ ...action.request, installationBindings: action.installationBindings });
-      if (spec.runnerPolicy.kind === "alternate") targets.push(...spec.runnerPolicy.targets);
-    }
-    for (const target of targets) {
-      if (!this.db.canAccessRunner(principal, target.runnerId) ||
-          !this.db.canAccessWorkspace(principal, target.runnerId, target.workspaceId)) return fail("Automation target is outside this session's audience", 404);
-      const runner = this.db.getRunner(target.runnerId);
-      const workspace = runner?.workspaces.find((w) => w.id === target.workspaceId);
-      if (!runner || !workspace || !runnerSupportsProtocol(runner.protocolVersion, "automationCommandReceipts")) return fail("Automation target is unavailable or needs an update");
-      if (action.kind !== "prompt_session" && target.projectId === undefined) {
-        const locations = this.db.projectLocationsForWorkspace(target.runnerId, target.workspaceId);
-        if (locations.length > 1) return fail("Choose the exact Project Location for this automation target");
-        const placement = { projectId: locations[0]?.projectId ?? null, projectLocationId: locations[0]?.id ?? null };
-        Object.assign(target, placement);
-        if (target === targets[0]) Object.assign(action.request, placement);
-      }
-      if (target.projectId) {
-        const location = target.projectLocationId ? this.db.projectLocation(target.projectLocationId) : null;
-        if (!this.db.canAccessProject(principal, target.projectId) || !location ||
-            location.projectId !== target.projectId || location.runnerId !== target.runnerId || location.workspaceId !== target.workspaceId) {
-          return fail("Automation Project Location no longer matches its target");
-        }
-        states.push(placementIdentity(location));
-      }
-      states.push({ runnerId: target.runnerId, workspace: { id: workspace.id, path: workspace.path }, scope: this.db.workspaceScope(target.runnerId, target.workspaceId),
-        locations: this.db.projectLocationsForWorkspace(target.runnerId, target.workspaceId).map(placementIdentity) });
-      {
-        const key = "agent";
-        const pin = target.installationBindings?.agent;
-        const agentId = pin ? this.db.resolveSavedHarnessInstallation(target.runnerId, pin) : target.agentId;
-        const agent = runner.agents.find((a) => a.id === agentId && a.available);
-        if (!agentId || !agent || !this.db.getAgentLaunch(target.runnerId, agentId)) return fail("The selected agent installation is unavailable");
-        const config: SessionConfig = { ...inheritedConfig, ...action.request.config };
-        const configError = capabilityConfigError(claudeModelConfigForValidation(config, agent.capabilities, agent.driver ?? "acp"), agent.capabilities);
-        if (configError) return fail(configError);
-        const model = resolveEffectiveModelEffort(config, agent.capabilities, agent.driver ?? "acp");
-        if (model.error) return fail(model.error);
-        Object.assign(config, model.value);
-        config.permissionMode ??= defaultPermissionModeForNewSession(agent.driver ?? "acp", agent.capabilities);
-        if (!config.permissionMode && agent.capabilities?.permissionModes?.includes("default")) config.permissionMode = "default";
-        // Some providers have no named default (or expose no selectable modes). Preserve normal
-        // runtime inheritance; explicit unsupported modes were already refused above.
-        // Preview each role independently. Inheritance is not a persistent configuration override:
-        // particularly, a prompt must not restore a target's former permission mode on every fire.
-        effectiveTargets.push({ runnerId: target.runnerId, workspaceId: target.workspaceId, agentId, role: key, config });
-        const launch = this.db.getAgentLaunch(target.runnerId, agentId)!;
-        states.push({ runnerId: target.runnerId, agentId, installationId: agent.installation?.id,
-          driver: agent.driver, context: agent.context, supportsApprovals: agent.capabilities?.supportsApprovals, config,
-          launchDigest: auditDigest({ command: launch.command, args: launch.args }) });
-      }
-    }
-    const capabilityError = automationCapabilityError(this.db, spec);
-    if (capabilityError) return fail(capabilityError);
-    if (spec.action.kind === "create_session" && spec.action.request.campaign) {
-      const scope = this.db.sessionScope(requesterId);
-      const ownerId = principal.kind === "human" ? principal.userId
-        : this.db.sessionLauncherUserId(requesterId) ?? (scope?.owner.kind === "user" ? scope.owner.userId : undefined);
-      const error = this.campaigns?.validate(spec, { kind: "human", id: ownerId }) ??
-        (!this.campaigns ? "Scheduled campaigns are unavailable on this server" : null);
-      if (error) return fail(error);
-    }
-    const normalizedSpec = validateAutomationSpec(spec);
-    if (!normalizedSpec.ok) return fail(normalizedSpec.error ?? "Prepared automation configuration is invalid", 400);
-    return ok({ spec, targetDigest: auditDigest(states)!, effectiveTargets });
+    return prepareAutomationCreationSpec({ db: this.db, campaigns: this.campaigns }, principal, input, requesterId);
   }
 
   request(sessionId: string, input: AutomationCreationRequest, principal: AgentPrincipal, now = Date.now()): ServiceResult<WorkflowDecisionView> {

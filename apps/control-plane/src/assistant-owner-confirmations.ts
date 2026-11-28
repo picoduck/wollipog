@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import {
   ASSISTANT_OWNER_CONFIRMATION_TTL_MS,
+  type AssistantAutomationConfirmationPreview,
   type AssistantOwnerConfirmation,
   type AssistantOwnerConfirmationDetail,
   type AssistantOwnerConfirmationStatus,
@@ -27,9 +28,11 @@ export interface OwnerConfirmationRequest {
   targetLabel?: string;
   impact?: unknown;
   campaign?: CampaignConfirmationPreview;
+  automation?: AssistantAutomationConfirmationPreview;
 }
 
 export const ASSISTANT_CAMPAIGN_START = "campaign_start";
+export const ASSISTANT_AUTOMATION_PROPOSE = "auto_propose";
 export const assistantCampaignLaunchId = (confirmationId: string) => `assistant-${confirmationId}`;
 export interface CampaignConfirmationPreview {
   facts: AssistantOwnerConfirmationDetail[];
@@ -40,6 +43,8 @@ export interface CampaignConfirmationPreview {
 /** Pending requests one thread may hold at once, so an assistant cannot flood its owner. */
 export const ASSISTANT_OWNER_CONFIRMATION_PENDING_LIMIT = 10;
 const ARGUMENTS_LIMIT = 16 * 1024;
+/** Bounded payload/preview size for complete automation proposals (including multi-task campaigns). */
+const AUTOMATION_LIMIT = 256 * 1024;
 const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const DETAIL_LIMIT = 12;
 const VALUE_LIMIT = 200;
@@ -55,7 +60,8 @@ interface Row {
 /** Title Case label for an operation: `session_archive` reads "Archive Session". */
 const NOUNS: Record<string, string> = { auto: "Automation" };
 const VERBS: Record<string, string> = { review_find_set: "Update Review Finding", campaign_branch_clean: "Clean Campaign Branches",
-  queue_cancel: "Cancel Queued Prompt", session_git: "Discard File Changes", campaign_start: "Start Campaign" };
+  queue_cancel: "Cancel Queued Prompt", session_git: "Discard File Changes", campaign_start: "Start Campaign",
+  auto_propose: "Create Automation" };
 const titleWord = (word: string) => word ? word[0]!.toUpperCase() + word.slice(1) : word;
 export function ownerConfirmationTitle(operation: string): string {
   const parts = operation.split("_");
@@ -71,6 +77,7 @@ export function ownerConfirmationTitle(operation: string): string {
  * the registry marks destructive has one (#4675); the fallback is for an unregistered name. */
 const SUMMARIES: Record<string, string> = {
   campaign_start: "Starts an independent Orchestrator campaign with the settings and authority shown here. Its usage is charged to its own campaign allowance.",
+  auto_propose: "Creates this automation as an owner-authorized schedule with its own limits. It can keep running after this thread closes.",
   // Sessions
   session_stop: "Stops the session and cancels its queued prompts and background jobs. Its transcript and worktree are kept, but it takes no further messages until it is restarted.",
   session_retry_stop: "Sends the session's pending Stop again. It cancels the session's queued prompts and background jobs; its transcript and worktree are kept.",
@@ -232,6 +239,22 @@ export class AssistantOwnerConfirmations {
         return this.view(prior);
       }
     }
+    if (input.automation) {
+      const prior = this.db.prepare(`SELECT * FROM assistant_owner_confirmations
+        WHERE connection_id=? AND operation=? AND command_id=? ORDER BY created_at DESC LIMIT 1`)
+        .get(binding.connectionId, binding.operation, input.commandId) as Row | undefined;
+      if (prior) {
+        const priorBinding = JSON.parse(prior.binding_json) as OwnerConfirmationBinding;
+        if ((prior.status === "pending" || prior.status === "approved") && prior.expires_at > now) {
+          if (priorBinding.argumentsDigest !== binding.argumentsDigest) {
+            throw new AssistantRefusal("This command ID already belongs to a different automation proposal.");
+          }
+          return this.view(prior);
+        }
+        const endedState = prior.status === "pending" ? "expired" : prior.status;
+        throw new AssistantRefusal(`This command ID already belongs to a ${endedState} automation proposal. Nothing was created. Ask your owner before submitting a new proposal with a new command ID.`);
+      }
+    }
     const existing = this.db.prepare(`SELECT id FROM assistant_owner_confirmations
       WHERE connection_id=? AND binding_json=? AND status='pending' AND expires_at>?`).get(binding.connectionId, bindingJson, now) as {id: string} | undefined;
     if (existing) return this.view(this.row(existing.id)!);
@@ -241,10 +264,14 @@ export class AssistantOwnerConfirmations {
       throw new AssistantRefusal(`Your owner already has ${pending} of your requests waiting. Nothing ran. Wait for them to answer before asking for another destructive command.`);
     }
     const argumentsJson = JSON.stringify(input.args);
-    if (argumentsJson.length > ARGUMENTS_LIMIT) throw new AssistantRefusal("This command's arguments are too large to show your owner for approval. Nothing ran. Use smaller arguments.");
-    let impactJson: string | null = input.campaign ? JSON.stringify(input.campaign) : input.impact === undefined ? null : JSON.stringify(input.impact);
+    const maxArguments = input.automation ? AUTOMATION_LIMIT : ARGUMENTS_LIMIT;
+    if (argumentsJson.length > maxArguments) throw new AssistantRefusal("This command's arguments are too large to show your owner for approval. Nothing ran. Use smaller arguments.");
+    let impactJson: string | null = input.automation ? JSON.stringify(input.automation)
+      : input.campaign ? JSON.stringify(input.campaign)
+      : input.impact === undefined ? null : JSON.stringify(input.impact);
     if (input.campaign && impactJson!.length > ARGUMENTS_LIMIT) throw new AssistantRefusal("This campaign's settings are too large to review. No campaign was started.");
-    if (impactJson && impactJson.length > ARGUMENTS_LIMIT) impactJson = JSON.stringify("The preview is too large to show here; open the target to inspect it.");
+    if (input.automation && impactJson!.length > AUTOMATION_LIMIT) throw new AssistantRefusal("This automation's configuration is too large to review. No automation was created.");
+    if (impactJson && !input.automation && impactJson.length > ARGUMENTS_LIMIT) impactJson = JSON.stringify("The preview is too large to show here; open the target to inspect it.");
     // A launched campaign is also counted against this thread's launch limit. Preserve its card
     // record, including an executed request whose launch receipt has yet to be reconciled.
     this.db.prepare(`DELETE FROM assistant_owner_confirmations WHERE status NOT IN ('pending','approved') AND resolved_at<?
@@ -376,13 +403,22 @@ export class AssistantOwnerConfirmations {
   view(row: Row): AssistantOwnerConfirmation {
     const target = JSON.parse(row.target_json) as AssistantTarget;
     const campaign = row.operation === ASSISTANT_CAMPAIGN_START && row.impact_json ? JSON.parse(row.impact_json) as CampaignConfirmationPreview : undefined;
+    const automation = row.operation === ASSISTANT_AUTOMATION_PROPOSE && row.impact_json ? JSON.parse(row.impact_json) as AssistantAutomationConfirmationPreview : undefined;
     const args = JSON.parse(row.arguments_json) as Record<string, unknown>;
     const mode = args.mode === "custom" || args.mode === "full_control" ? args.mode : undefined;
     const budgetlessCustom = campaign && mode === "custom" && !campaign.budget;
     // Pending previews saved before budgetless Custom approval still have the old budget copy.
     const facts = budgetlessCustom
       ? campaign.facts.map(fact => fact.label === "Campaign Budget" ? { ...fact, value: "No campaign budget applies." } : fact)
-      : campaign?.facts;
+      : campaign?.facts ?? (automation ? [
+        { label: "Name", value: automation.snapshot.spec.name },
+        { label: "Schedule", value: `${automation.snapshot.spec.cron} · ${automation.snapshot.spec.timezone}` },
+        { label: "Initial State", value: automation.snapshot.spec.enabled ? "Enabled" : "Paused" },
+        { label: "Limits", value: `$${automation.snapshot.spec.limits.maxCostUsd} USD · ${automation.snapshot.spec.limits.maxToolCalls} tool calls` },
+        ...(automation.snapshot.spec.action.kind === "create_session" && automation.snapshot.spec.action.request.campaign
+          ? [{ label: "Campaign Mode", value: automation.snapshot.spec.action.request.campaign.controlMode === "full_control" ? "Full Control" : "Custom" }]
+          : []),
+      ] : undefined);
     return {
       id: row.id,
       threadId: row.thread_id,
@@ -392,8 +428,9 @@ export class AssistantOwnerConfirmations {
         : ownerConfirmationSummary(row.operation),
       target: { kind: target.kind, id: target.id, label: row.target_label },
       impact: facts ?? impactLines(row.impact_json === null ? undefined : JSON.parse(row.impact_json)),
-      arguments: campaign ? [{ label: "First Message", value: String(args.prompt) }] : argumentLines(args),
+      arguments: campaign ? [{ label: "First Message", value: String(args.prompt) }] : automation ? [] : argumentLines(args),
       ...(campaign ? { campaign: { digest: (JSON.parse(row.binding_json) as OwnerConfirmationBinding).targetDigest, budget: campaign.budget, mode } } : {}),
+      ...(automation ? { automation } : {}),
       status: row.status,
       createdAt: row.created_at,
       expiresAt: row.expires_at,
@@ -447,13 +484,22 @@ export class AssistantOwnerConfirmationService {
 
   /** Approve Once. Records the approval, then runs the bound command and returns how it ended.
    * Approving a request that already ended returns it unchanged and runs nothing. */
-  async approve(owner: HumanPrincipal, threadId: string, id: string, campaignDigest?: string): Promise<AssistantOwnerConfirmation> {
+  async approve(owner: HumanPrincipal, threadId: string, id: string,
+    approval?: { kind: "campaign" | "automation"; digest: string }): Promise<AssistantOwnerConfirmation> {
     const current = this.owned(owner, threadId, id);
-    if (current.campaign?.digest !== campaignDigest || (current.operation === ASSISTANT_CAMPAIGN_START && !current.campaign)) {
-      throw new AssistantOwnerConfirmationRefusal("Review the current campaign settings before approving this launch.", 409);
-    }
-    if (current.campaign && current.campaign.mode !== "custom" && !current.campaign.budget) {
-      throw new AssistantOwnerConfirmationRefusal("Set a campaign budget before approving this launch.", 409);
+    if (current.operation === ASSISTANT_CAMPAIGN_START || current.campaign) {
+      if (approval?.kind !== "campaign" || !current.campaign || current.campaign.digest !== approval.digest) {
+        throw new AssistantOwnerConfirmationRefusal("Review the current campaign settings before approving this launch.", 409);
+      }
+      if (current.campaign.mode !== "custom" && !current.campaign.budget) {
+        throw new AssistantOwnerConfirmationRefusal("Set a campaign budget before approving this launch.", 409);
+      }
+    } else if (current.operation === ASSISTANT_AUTOMATION_PROPOSE || current.automation) {
+      if (approval?.kind !== "automation" || !current.automation || current.automation.digest !== approval.digest) {
+        throw new AssistantOwnerConfirmationRefusal("Review the current automation settings before approving this schedule.", 409);
+      }
+    } else if (approval !== undefined) {
+      throw new AssistantOwnerConfirmationRefusal("Use the standard confirmation approval for this request.", 409);
     }
     const inFlight = this.running.get(id);
     if (inFlight) return inFlight;
@@ -562,6 +608,7 @@ export class AssistantOwnerConfirmationService {
     return view.status === "executed"
       ? `${NOTICE} Your owner approved ${what}. Wollipog ran it once; its receipt reads ${view.outcome?.receiptStatus ?? "unknown"}.` +
         `${view.outcome?.sessionId ? ` Campaign Session: ${view.outcome.sessionId}.` : ""}` +
+        `${view.outcome?.automationId ? ` Automation ID: ${view.outcome.automationId}. Inspect it with auto_get.` : ""}` +
         `${view.outcome?.reason ? ` ${view.outcome.reason}` : ""} Never send that command again: read its receipt and target, then continue.`
       : view.status === "denied"
         ? `${NOTICE} Your owner denied ${what}. Nothing ran. Continue without it, and ask your owner before requesting it again.`
