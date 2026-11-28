@@ -119,6 +119,29 @@ test("an admitted Antigravity child can receive another turn under its tool allo
   } finally { h.db.close(); }
 });
 
+test("restarting an admitted Antigravity child keeps spent tools and its allocation", () => {
+  const h = antigravityCampaign(allowance({ concurrency: 1, acceptedFollowUps: 0 }));
+  try {
+    const worker = h.launch(ANTIGRAVITY_AGENT_ID, { maxToolCalls: 3 });
+    assert.ok(worker.ok && worker.data, worker.error ?? "Antigravity child admission failed");
+    const { id } = worker.data;
+    h.tool(id, "before-restart");
+    h.db.updateSessionStatus(id, "completed", Date.now());
+    const generation = h.db.campaignBudgets.dispatch(id)!.generation;
+    h.db.campaignBudgets.recordCheckpoint(id, { generation, historyEpoch: 0, throughSeq: 0, costUsd: 0 });
+    assert.ok(h.db.campaignBudgets.settleCheckpoint(id, { historyEpoch: 0, hydratedSeq: 0 }));
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 0);
+
+    const restarted = h.svc.restart(id);
+    assert.ok(restarted.ok && restarted.data, restarted.error ?? "Antigravity restart was refused");
+    assert.equal(restarted.data.maxToolCalls, 3);
+    assert.notEqual(h.db.campaignBudgets.dispatch(id)!.generation, generation);
+    const view = h.db.campaignBudgets.view("root")!;
+    assert.equal(view.occupied, 1);
+    assert.equal(view.actual.toolCalls, 1);
+  } finally { h.db.close(); }
+});
+
 test("campaign admission refuses Antigravity cost limits even for a model with a catalog rate", () => {
   const h = antigravityCampaign(allowance({ costUsd: 10, acceptedFollowUps: 0 }));
   try {
