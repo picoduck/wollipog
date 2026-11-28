@@ -14,7 +14,8 @@ import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 
 async function launchWith(conversationCwd: "elsewhere" | "here" | "unknown", profile: "antigravity" | "none" = "antigravity",
-  behavior: { failFresh?: boolean; captureDuringNewSession?: boolean; failMarkerClear?: "always" | "once" } = {}) {
+  behavior: { failFresh?: boolean; captureDuringNewSession?: boolean; failMarkerClear?: "always" | "once";
+    campaignConfig?: SessionMeta["config"] } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-antigravity-handoff-")));
   const repoPath = join(root, "repo");
   execFileSync("git", ["init", "-q", repoPath]);
@@ -27,9 +28,10 @@ async function launchWith(conversationCwd: "elsewhere" | "here" | "unknown", pro
   const meta: SessionMeta = {
     sessionId: "s1", agentId: "google-antigravity", workspaceId: "repo", repoPath, worktreePath: null,
     driver: "acp", command: "agy", args: ["acp"], env: {}, context: { kind: "native" },
-    agentSessionId: "conv-a", status: "idle", title: "s1", config: {}, tokensIn: 0, tokensOut: 0,
+    agentSessionId: "conv-a", status: "idle", title: "s1", config: behavior.campaignConfig ?? {}, tokensIn: 0, tokensOut: 0,
     costUsd: 0, preview: null, pendingApproval: null, seq: 0, createdAt: 1, updatedAt: 1,
     acpCapabilities: { sessionResume: true, loadSession: false } as never,
+    ...(behavior.campaignConfig ? { campaignBudgetDispatch: { rootSessionId: "root", generation: "generation" } } : {}),
     ...(conversationCwd === "elsewhere" ? { providerConversationCwd: elsewhere }
       : conversationCwd === "here" ? { providerConversationCwd: repoPath } : {}),
   };
@@ -127,6 +129,22 @@ async function launchWith(conversationCwd: "elsewhere" | "here" | "unknown", pro
     hasDeliveredHandoff: () => manager["deliveredHandoffs"].has("s1"),
     cleanup: () => { manager.shutdownAll(); rmSync(root, { recursive: true, force: true }); },
   };
+}
+
+for (const [profile, campaignConfig] of [
+  ["none", { maxToolCalls: 3 }],
+  ["antigravity", { costBudgetUsd: 5 }],
+] as const) {
+  test(`runner refuses a campaign ACP launch with ${profile === "none" ? "no verified profile" : "a cost ceiling"} before starting a driver`, async () => {
+    const f = await launchWith("here", profile, { campaignConfig });
+    try {
+      assert.equal(f.ok, false);
+      assert.deepEqual(f.launched, []);
+      assert.equal(f.meta?.status, "failed");
+      assert.ok(f.store.readEvents("s1").some(({ payload }) =>
+        payload.kind === "error" && payload.message.includes("Campaign limits require the verified Google Antigravity profile")));
+    } finally { f.cleanup(); }
+  });
 }
 
 test("a conversation created in another folder continues fresh in this one, seeded once with the conversation so far", async () => {

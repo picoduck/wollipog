@@ -5,7 +5,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import fc from "fast-check";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, projectSessionEventPayloadForProtocol,
+import { ANTIGRAVITY_AGENT_ID, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
+  RUNNER_CAPABILITY_MIN_PROTOCOL, projectSessionEventPayloadForProtocol,
   validCampaignBudgetAuthority, type CampaignBudgetAuthority, type RunnerMetadata, type SessionEventPayload } from "@wollipog/protocol";
 import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
 import { Hub } from "./hub.js";
@@ -16,7 +17,8 @@ import type { HumanPrincipal } from "./identity.js";
 const allowance = (extra: Partial<CampaignBudgetAuthority> = {}): CampaignBudgetAuthority => ({ version: 1,
   accounting: "managed_workers_only", unpriced: "stop", toolCalls: 120, concurrency: 2, ...extra });
 
-function harness(path = ":memory:", protocol = PROTOCOL_VERSION, completion?: "retain" | "stop_and_archive") {
+function harness(path = ":memory:", protocol = PROTOCOL_VERSION, completion?: "retain" | "stop_and_archive",
+  customBudget?: CampaignBudgetAuthority) {
   const db = ControlPlaneDb.open(path);
   const identity = db.localIdentityContext();
   const principal: HumanPrincipal = { ...identity, kind: "human", actorId: identity.userId };
@@ -38,7 +40,17 @@ function harness(path = ":memory:", protocol = PROTOCOL_VERSION, completion?: "r
         parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } } : {}) });
     db.updateSessionStatus(id, "running", 3);
   };
-  make("root");
+  if (customBudget) {
+    policy.behavior.childHarness = null;
+    policy.behavior.childModel = null;
+    policy.behavior.childEffort = null;
+    db.createHumanCampaignLaunch({ id: "root", runnerId: "r", workspaceId: "w", agentId: "claude", title: "root",
+      useWorktree: false, creationActor: "human", role: "orchestrator", orchestratorPolicy: policy,
+      scope: { organizationId: principal.organizationId, owner: { kind: "user", userId: principal.userId } },
+      driver: "claude-code", config: { model: "claude-opus-5-5" }, now: 2 },
+      principal, "antigravity-budget", "a".repeat(64), customBudget);
+    db.updateSessionStatus("root", "running", 3);
+  } else make("root");
   const hub = new Hub(db); hub.isRunnerOnline = () => true; hub.sessionChangedById = () => {};
   const sent: unknown[] = [], logs: string[] = [];
   hub.sendToRunner = (_, message) => { sent.push(message); return true; };
@@ -49,6 +61,118 @@ function harness(path = ":memory:", protocol = PROTOCOL_VERSION, completion?: "r
   const usage = (id: string, costUsd: number) => db.appendEvent(id, { kind: "token_usage", inputTokens: 1, costUsd }, 5, { accrueUsage: true });
   return { db, hub, svc, make, tool, usage, enable, principal, sent, logs,metadata };
 }
+
+function antigravityCampaign(budget: CampaignBudgetAuthority, protocol = PROTOCOL_VERSION,
+  source: "config" | "discovered" = "discovered") {
+  const h = harness(":memory:", protocol, undefined, budget);
+  const agent = { id: ANTIGRAVITY_AGENT_ID, name: "Google Antigravity", driver: "acp", source, command: "agy",
+    args: ["acp"], env: {}, available: true, context: { kind: "native" } } as const;
+  h.db.updateRunnerAgents("r", [...h.metadata.agents, { ...agent, args: [...agent.args] },
+    { ...agent, id: "generic-acp", command: "generic-acp", args: [], source: "config" }], 4);
+  const launch = (agentId = ANTIGRAVITY_AGENT_ID, config: { model?: string; costBudgetUsd?: number; maxToolCalls?: number } = {}) =>
+    h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId, config, prompt: "Implement authorized #2936" },
+      undefined, undefined, false, false, false, { parentSessionId: "root" });
+  return { ...h, launch };
+}
+
+test("a tool-limited Custom campaign admits Antigravity and charges its distinct calls", () => {
+  const h = antigravityCampaign(allowance({ concurrency: 1, acceptedFollowUps: 0 }));
+  try {
+    const worker = h.launch(ANTIGRAVITY_AGENT_ID, { maxToolCalls: 2 });
+    assert.ok(worker.ok && worker.data, worker.error ?? "Antigravity child admission failed");
+    const { id } = worker.data;
+    assert.equal(worker.data.maxToolCalls, 2);
+    assert.match(h.launch().error ?? "", /concurrency allowance reached/);
+    const first = { kind: "tool_call", toolCallId: "call-a", title: "Read", status: "in_progress" } as const;
+    h.svc.onSessionEvent(id, first);
+    h.svc.onSessionEvent(id, { ...first, status: "completed" });
+    h.svc.onSessionEvent(id, { kind: "tool_call_update", toolCallId: "call-a", status: "completed" });
+    let view = h.db.campaignBudgets.view("root")!;
+    assert.equal(view.actual.toolCalls, 1);
+    assert.equal(view.costAccounting, "unavailable");
+    assert.equal(view.occupied, 1);
+    h.svc.onSessionEvent(id, { ...first, toolCallId: "call-b" });
+    view = h.db.campaignBudgets.view("root")!;
+    assert.equal(view.actual.toolCalls, 2);
+    assert.match(h.db.campaignBudgets.admissionError(id) ?? "", /session campaign allocation reached/);
+    assert.equal(view.state, "active");
+  } finally { h.db.close(); }
+});
+
+test("Antigravity can occupy a campaign concurrency slot without a tool ceiling", () => {
+  const h = antigravityCampaign(allowance({ toolCalls: undefined, concurrency: 1, acceptedFollowUps: 0 }));
+  try {
+    assert.ok(h.launch().ok);
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 1);
+    assert.match(h.launch().error ?? "", /concurrency allowance reached/);
+  } finally { h.db.close(); }
+});
+
+test("an admitted Antigravity child can receive another turn under its tool allocation", () => {
+  const h = antigravityCampaign(allowance({ acceptedFollowUps: 0 }));
+  try {
+    const worker = h.launch();
+    assert.ok(worker.ok && worker.data, worker.error ?? "Antigravity child admission failed");
+    h.db.updateSessionStatus(worker.data.id, "idle", Date.now());
+    const followUp = h.svc.prompt(worker.data.id, "Read another file");
+    assert.ok(followUp.ok, followUp.error ?? "Antigravity follow-up was refused");
+  } finally { h.db.close(); }
+});
+
+test("restarting an admitted Antigravity child keeps spent tools and its allocation", () => {
+  const h = antigravityCampaign(allowance({ concurrency: 1, acceptedFollowUps: 0 }));
+  try {
+    const worker = h.launch(ANTIGRAVITY_AGENT_ID, { maxToolCalls: 3 });
+    assert.ok(worker.ok && worker.data, worker.error ?? "Antigravity child admission failed");
+    const { id } = worker.data;
+    h.tool(id, "before-restart");
+    h.db.updateSessionStatus(id, "completed", Date.now());
+    const generation = h.db.campaignBudgets.dispatch(id)!.generation;
+    h.db.campaignBudgets.recordCheckpoint(id, { generation, historyEpoch: 0, throughSeq: 0, costUsd: 0 });
+    assert.ok(h.db.campaignBudgets.settleCheckpoint(id, { historyEpoch: 0, hydratedSeq: 0 }));
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 0);
+
+    const restarted = h.svc.restart(id);
+    assert.ok(restarted.ok && restarted.data, restarted.error ?? "Antigravity restart was refused");
+    assert.equal(restarted.data.maxToolCalls, 3);
+    assert.notEqual(h.db.campaignBudgets.dispatch(id)!.generation, generation);
+    const view = h.db.campaignBudgets.view("root")!;
+    assert.equal(view.occupied, 1);
+    assert.equal(view.actual.toolCalls, 1);
+  } finally { h.db.close(); }
+});
+
+test("campaign admission refuses Antigravity cost limits even for a model with a catalog rate", () => {
+  const h = antigravityCampaign(allowance({ costUsd: 10, acceptedFollowUps: 0 }));
+  try {
+    for (const model of ["unpriced-model", "claude-opus-5-5"]) {
+      const worker = h.launch(ANTIGRAVITY_AGENT_ID, { model });
+      assert.equal(worker.ok, false);
+      assert.match(worker.error ?? "", /Google Antigravity.*cost allowance/);
+    }
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 0);
+    assert.deepEqual(h.sent, []);
+  } finally { h.db.close(); }
+});
+
+test("tool-only campaigns refuse ACP lookalikes, old runners and Antigravity session cost limits", () => {
+  const budget = allowance({ acceptedFollowUps: 0 });
+  const h = antigravityCampaign(budget);
+  const older = antigravityCampaign(budget, RUNNER_CAPABILITY_MIN_PROTOCOL.antigravityCampaignToolAccounting - 1);
+  const configured = antigravityCampaign(budget, PROTOCOL_VERSION, "config");
+  try {
+    assert.match(h.launch("generic-acp").error ?? "", /ACP worker.*verified usage accounting/);
+    assert.match(h.launch(ANTIGRAVITY_AGENT_ID, { costBudgetUsd: 2 }).error ?? "", /Google Antigravity.*cost allowance/);
+    assert.match(older.launch().error ?? "", /Google Antigravity.*runner.*tool-call accounting/);
+    assert.match(configured.launch().error ?? "", /runner-discovered native Google Antigravity/);
+    for (const fixture of [h, older, configured]) {
+      assert.equal(fixture.db.campaignBudgets.view("root")!.occupied, 0);
+      assert.deepEqual(fixture.sent, []);
+    }
+  } finally {
+    for (const fixture of [h, older, configured]) fixture.db.close();
+  }
+});
 
 /** Historical fixture only: no service admission or runner dispatch is performed. */
 function seedHistoricalReview(h: ReturnType<typeof harness>, request: import("@wollipog/protocol").CampaignReviewJobRequest) {

@@ -10820,11 +10820,16 @@ export class SessionManager {
       // session with a new generation (and even a different provider) during that window; the old
       // continuation must not patch or publish its stale launch-local metadata.
       if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
-      if (launchPreparation?.launchRefusal) {
+      const budgetRefusal = meta.driver === "acp" && meta.campaignBudgetDispatch &&
+        (launchPreparation?.acpCompatibility?.profile !== "antigravity" || (meta.config.costBudgetUsd ?? 0) > 0)
+        ? "Campaign limits require the verified Google Antigravity profile and cannot enforce an Antigravity cost allowance."
+        : undefined;
+      const launchRefusal = launchPreparation?.launchRefusal ?? budgetRefusal;
+      if (launchRefusal) {
         // Nothing may be spawned (#4779): fail the launch with the runner's sentence, as a failed
         // provider start would, before any isolation or provider process is set up.
-        this.emitEvent(sessionId, { kind: "error", message: `agent init failed: ${launchPreparation.launchRefusal}` });
-        failLaunch(launchPreparation.launchRefusal);
+        this.emitEvent(sessionId, { kind: "error", message: `agent init failed: ${launchRefusal}` });
+        failLaunch(launchRefusal);
         return false;
       }
       // agy fixes a conversation's working directory when it creates it: a resume in another folder
