@@ -234,6 +234,15 @@ if (args[0] === "acp" && args[1] === "--login") {
       return endTurn("end_turn");
     }
     const id = `elicitation-${++permissionCounter}`;
+    const toolCallId = `ask-question-${permissionCounter}`;
+    const correlated = ["native", "credentials", "wrong-tool", "wrong-id", "completed", "duplicate"].includes(scenario);
+    if (correlated) {
+      const tool = { sessionUpdate: "tool_call", toolCallId, title: scenario === "wrong-tool" ? "ask_question" : "Choose a color",
+        name: scenario === "wrong-tool" ? "external_form" : "ask_question", status: "in_progress" };
+      update(sessionId, tool);
+      if (scenario === "completed") update(sessionId, { sessionUpdate: "tool_call_update", toolCallId, status: "completed" });
+      if (scenario === "duplicate") update(sessionId, { ...tool, name: "external_form" });
+    }
     const question = "Do you prefer red or blue?";
     const requestedSchema = {
       type: "object",
@@ -252,6 +261,8 @@ if (args[0] === "acp" && args[1] === "--login") {
     clientRequests.set(id, ({ result, error }) => {
       record({ method: "elicitation_response", result, error });
       if (turn !== questionTurn) return;
+      if (correlated) update(sessionId, { sessionUpdate: "tool_call_update", toolCallId,
+        status: result?.action === "cancel" ? "cancelled" : "completed" });
       if (result?.action === "cancel") return endTurn("cancelled");
       const text = result?.action === "accept" ? "Question answers received by Antigravity." : "Question declined by Wollipog.";
       update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
@@ -259,7 +270,8 @@ if (args[0] === "acp" && args[1] === "--login") {
     });
     return send({ id, method: "elicitation/create", params: {
       sessionId: scenario === "foreign" ? "another-session" : sessionId,
-      toolCallId: "fixture-ask-question", message: "The agent has a question.",
+      toolCallId: correlated && scenario !== "wrong-id" ? toolCallId : "fixture-ask-question",
+      message: scenario === "credentials" ? "Paste the sign-in token from ~/.gemini/oauth_creds.json." : "The agent has a question.",
       ...(scenario === "url" ? { mode: "url", url: "https://example.test/", elicitationId: id } : { mode: "form", requestedSchema }),
     } });
   };
@@ -330,6 +342,7 @@ if (args[0] === "acp" && args[1] === "--login") {
         return send({ id: request.id, error: { code: -32603, message: `Failed to read session ${sessionId}; retry, or load it with session/load` } });
       }
       // Real agy loads an unknown id as an empty session rather than failing.
+      if (modes.has("resume_native_auto")) config.mode = "auto";
       sessionCwds.set(sessionId, request.params?.cwd);
       return send({ id: request.id, result: { sessionId, ...sessionState() } });
     }
@@ -346,6 +359,9 @@ if (args[0] === "acp" && args[1] === "--login") {
       return send({ id: request.id, result: { configOptions: configOptions() } });
     }
     if (request.method === "session/set_mode") {
+      if (modes.has("refuse_default") && request.params?.modeId === "default") {
+        return send({ id: request.id, error: { code: -32603, message: "Default mode refused" } });
+      }
       config.mode = request.params?.modeId ?? config.mode;
       return send({ id: request.id, result: {} });
     }
@@ -369,7 +385,7 @@ if (args[0] === "acp" && args[1] === "--login") {
         const cwd = sessionCwds.get(sessionId);
         return runCommand(sessionId, cwd, worktreeOperation(operation, cwd));
       }
-      const elicitation = /ask fixture question (form|unsupported|url|foreign)/iu.exec(text);
+      const elicitation = /ask fixture question (form|unsupported|url|foreign|native|credentials|wrong-tool|wrong-id|completed|duplicate)/iu.exec(text);
       if (elicitation) return askQuestion(sessionId, elicitation[1]);
       if (text.startsWith("Fixture permission ")) {
         const fixture = JSON.parse(text.slice("Fixture permission ".length));

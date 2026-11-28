@@ -134,6 +134,8 @@ interface AcpClientDeps {
 
 const DEFAULT_ACP_PROVIDER_TURN_SETTLE_MS = 8_000;
 const DEFAULT_ACP_PROVIDER_TURN_RESPONSE_SETTLE_MS = 2_000;
+const FULL_CONTROL_ANTIGRAVITY_MODE_ERROR =
+  "Full Control Google Antigravity sessions require Default mode or managed Worktree Auto.";
 
 export interface AcpListedSession {
   sessionId: string;
@@ -152,6 +154,9 @@ export class AcpClient {
     reply: (response: CreateElicitationResponse) => void;
   }>();
   private readonly offersFormElicitation: boolean;
+  /** Raw ACP identities for this turn. A false entry cannot be promoted or reused. */
+  private readonly antigravityQuestionCalls = new Map<string, boolean>();
+  private readonly delegatesAntigravityPermissions: boolean;
   private promptCancelling = false;
   private closingSession = false;
   private permCounter = 0;
@@ -244,13 +249,16 @@ export class AcpClient {
   ) {
     this.artifactGuidance = opts.artifactGuidance;
     this.conversationHandoff = opts.conversationHandoff;
+    this.delegatesAntigravityPermissions = opts.compatibility?.profile === "antigravity" &&
+      opts.compatibility.campaignOperationAttestation === true;
+    this.assertAntigravityCampaignMode(opts.initialPermissionMode);
     // Resolved at the spawn below, with no await between: what the launch runs is decided now, not
     // when it was prepared. A refusal throws before anything is spawned.
     const launch = resolveAcpLaunch(opts.command, opts.compatibility);
     this.compatibility = launch.compatibility;
     this.offersFormElicitation = launch.compatibility?.profile === "antigravity" &&
       !opts.initializeOnly && !opts.orchestrator && !opts.orchestratorRole;
-    this.antigravityFullPermissions = launch.compatibility?.profile === "antigravity" &&
+    this.antigravityFullPermissions = !this.delegatesAntigravityPermissions && launch.compatibility?.profile === "antigravity" &&
       !opts.orchestrator && !opts.orchestratorRole &&
       opts.initialPermissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id;
     if (launch.compatibility?.profile === "antigravity" &&
@@ -421,6 +429,7 @@ export class AcpClient {
 
   async newSession(cwd: string): Promise<string> {
     this.sessionCwd = cwd;
+    this.antigravityQuestionCalls.clear();
     this.antigravityWorktreeAutoSelected = false;
     if (this.sessionId) this.terminals.releaseSession(this.sessionId);
     this.terminalEventOutput.clear();
@@ -456,6 +465,7 @@ export class AcpClient {
 
   async resumeSession(sessionId: string, cwd: string): Promise<string> {
     this.sessionCwd = cwd;
+    this.antigravityQuestionCalls.clear();
     this.antigravityWorktreeAutoSelected = false;
     // The caller supplies the durable ACP id, so establish the notification boundary before the
     // request. Agents may publish same-session state immediately around the resume/load response.
@@ -597,11 +607,19 @@ export class AcpClient {
   async setConfig(config: SessionConfig): Promise<void> {
     if (!this.sessionId) throw new Error("ACP session is not established");
     const permissionMode = config.permissionMode;
+    this.assertAntigravityCampaignMode(permissionMode);
+    if (this.delegatesAntigravityPermissions && permissionMode === ANTIGRAVITY_AUTO_MODE.id &&
+        this.sessionCwd !== this.antigravityWorktree) {
+      throw new Error(FULL_CONTROL_ANTIGRAVITY_MODE_ERROR);
+    }
     if (config.model !== undefined) await this.setSelectConfig("model", config.model);
     if (config.effort !== undefined) await this.setSelectConfig("thought_level", config.effort);
     if (permissionMode === undefined) return;
-    if (permissionMode === ANTIGRAVITY_AUTO_MODE.id && this.antigravityWorktreeAutoAvailable &&
-        await this.enableAntigravityWorktreeAuto()) return;
+    if (permissionMode === ANTIGRAVITY_AUTO_MODE.id) {
+      if ((this.delegatesAntigravityPermissions || this.antigravityWorktreeAutoAvailable) &&
+          await this.enableAntigravityWorktreeAuto()) return;
+      if (this.delegatesAntigravityPermissions) throw new Error(FULL_CONTROL_ANTIGRAVITY_MODE_ERROR);
+    }
     if (permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) {
       if (!this.offersAntigravityFullPermissions()) {
         throw new Error("Full Permissions Mode is available only for normal Google Antigravity sessions");
@@ -621,10 +639,20 @@ export class AcpClient {
   }
 
   private offersAntigravityFullPermissions(): boolean {
-    return this.compatibility?.profile === "antigravity" && !this.orchestratorRole;
+    return this.compatibility?.profile === "antigravity" && !this.orchestratorRole && !this.delegatesAntigravityPermissions;
+  }
+
+  private assertAntigravityCampaignMode(mode: string | undefined): void {
+    if (this.delegatesAntigravityPermissions && mode !== undefined && mode !== "default" &&
+        mode !== ANTIGRAVITY_AUTO_MODE.id) {
+      throw new Error(FULL_CONTROL_ANTIGRAVITY_MODE_ERROR);
+    }
   }
 
   private setPermissionMode(mode: string): Promise<void> {
+    if (this.delegatesAntigravityPermissions && mode !== "default") {
+      return Promise.reject(new Error(FULL_CONTROL_ANTIGRAVITY_MODE_ERROR));
+    }
     if (mode === ANTIGRAVITY_AUTO_MODE.id && this.antigravityAutoModeRejected) {
       return Promise.reject(new Error("Auto Mode is unavailable in this Google Antigravity session"));
     }
@@ -638,7 +666,16 @@ export class AcpClient {
     const supported: SessionConfig = {};
     const modeOption = optionForCategory(this.configOptions, "mode");
     // Set Auto independently of model and effort so a rejected model change cannot skip it.
-    if (this.compatibility?.profile === "antigravity" && config.permissionMode === ANTIGRAVITY_AUTO_MODE.id) {
+    if (this.delegatesAntigravityPermissions) {
+      this.assertAntigravityCampaignMode(config.permissionMode);
+      // A resumed conversation may report a native mode that can approve actions in the provider.
+      // Establish Default before prompting. Worktree Auto here is only a runner-side selection.
+      if (config.permissionMode === ANTIGRAVITY_AUTO_MODE.id) {
+        if (!await this.enableAntigravityWorktreeAuto()) throw new Error(FULL_CONTROL_ANTIGRAVITY_MODE_ERROR);
+      } else if (this.currentPermissionMode() !== "default") {
+        await this.setPermissionMode("default");
+      }
+    } else if (this.compatibility?.profile === "antigravity" && config.permissionMode === ANTIGRAVITY_AUTO_MODE.id) {
       try {
         await this.setPermissionMode(ANTIGRAVITY_AUTO_MODE.id);
       } catch {
@@ -748,7 +785,7 @@ export class AcpClient {
     this.antigravityWorktreeAutoSelected = true;
     this.antigravityFullPermissions = false;
     this.emitSessionState();
-    if (!alreadySelected) {
+    if (!alreadySelected && !this.delegatesAntigravityPermissions) {
       this.ev.onEvent({
         kind: "error", nonFatal: true, source: "antigravity_worktree_auto",
         message: ANTIGRAVITY_WORKTREE_AUTO_NOTICE,
@@ -855,6 +892,9 @@ export class AcpClient {
   }
 
   async prompt(text: string, images: PromptImage[] = [], slashCommand?: string): Promise<StopReason> {
+    if (this.delegatesAntigravityPermissions && this.currentPermissionMode() !== "default") {
+      throw new Error(FULL_CONTROL_ANTIGRAVITY_MODE_ERROR);
+    }
     const content: Array<Record<string, unknown>> = [];
     if (slashCommand && !this.commands.some((command) => command.name === slashCommand)) {
       throw new Error("ACP command is not available in this session");
@@ -993,6 +1033,7 @@ export class AcpClient {
   }
 
   private cancelElicitations(): void {
+    this.antigravityQuestionCalls.clear();
     for (const [requestId, { reply }] of this.pendingElicitations) {
       this.pendingElicitations.delete(requestId);
       reply({ action: "cancel" });
@@ -1181,10 +1222,21 @@ export class AcpClient {
   private emitSessionState(): void {
     const state = acpSessionPresentation(this.modes, this.configOptions, this.commands, this.supportsImages);
     if (this.compatibility?.profile === "antigravity") {
-      const offersWorktreeAuto = this.antigravityWorktreeAutoAvailable && this.sessionCwd === this.antigravityWorktree;
+      if (this.delegatesAntigravityPermissions) {
+        state.capabilities.permissionModes = state.capabilities.permissionModes?.filter((mode) => mode === "default");
+        state.capabilities.agentPermissionModes = state.capabilities.agentPermissionModes?.filter((mode) => mode.id === "default");
+        if (state.capabilities.elicitation) {
+          const defaults = state.capabilities.elicitation.default;
+          state.capabilities.elicitation = defaults ? { default: defaults } : {};
+        }
+      }
+      const offersWorktreeAuto = this.antigravityWorktree && this.sessionCwd === this.antigravityWorktree &&
+        (this.delegatesAntigravityPermissions || this.antigravityWorktreeAutoAvailable);
       if (offersWorktreeAuto) {
         const auto = { ...ANTIGRAVITY_AUTO_MODE, source: "runner" as const,
-          description: "Wollipog approves routine worktree actions and asks about the rest." };
+          description: this.delegatesAntigravityPermissions
+            ? "Wollipog sends every permission request to the campaign for a decision."
+            : "Wollipog approves routine worktree actions and asks about the rest." };
         state.capabilities.permissionModes = [...new Set([...(state.capabilities.permissionModes ?? []), auto.id])];
         state.capabilities.agentPermissionModes = [...(state.capabilities.agentPermissionModes ?? [])
           .filter((mode) => mode.id !== auto.id), auto];
@@ -1267,6 +1319,13 @@ export class AcpClient {
         const toolCallId = this.transcriptToolCallId(params.sessionId, u.toolCallId ?? "tool");
         const status = u.status ?? "pending";
         if (!this.promptInFlight) this.noteProviderTurnUpdate("tool_call", { id: toolCallId, status });
+        if (this.delegatesAntigravityPermissions && !this.promptCancelling && !this.providerTurnCancelling &&
+            (this.promptInFlight || this.providerTurnId !== null) &&
+            typeof u.toolCallId === "string" && u.toolCallId.length > 0 && u.toolCallId.length <= 256 &&
+            (this.antigravityQuestionCalls.has(u.toolCallId) || this.antigravityQuestionCalls.size < 128)) {
+          this.antigravityQuestionCalls.set(u.toolCallId, !this.antigravityQuestionCalls.has(u.toolCallId) &&
+            "name" in u && u.name === "ask_question" && (status === "pending" || status === "in_progress"));
+        }
         this.ev.onEvent({
           kind: "tool_call",
           toolCallId,
@@ -1287,6 +1346,11 @@ export class AcpClient {
           this.antigravitySandboxDeniedInTurn = true;
         }
         if (!this.promptInFlight) this.noteProviderTurnUpdate("tool_call_update", { id: toolCallId, status: u.status });
+        if (this.antigravityQuestionCalls.has(u.toolCallId) &&
+            ((u.status != null && u.status !== "pending" && u.status !== "in_progress") ||
+              ("name" in u && u.name != null && u.name !== "ask_question"))) {
+          this.antigravityQuestionCalls.set(u.toolCallId, false);
+        }
         this.ev.onEvent({
           kind: "tool_call_update",
           toolCallId,
@@ -1409,6 +1473,9 @@ export class AcpClient {
 
   private handlePermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
     if (this.disposed || this.orchestrator) return Promise.resolve({ outcome: { outcome: "cancelled" } });
+    if (this.delegatesAntigravityPermissions && (!this.sessionId || params?.sessionId !== this.sessionId)) {
+      return Promise.resolve({ outcome: { outcome: "cancelled" } });
+    }
     // A tool_call notification can trip the runner's local tool guardrail before the next
     // permission RPC arrives in the same prompt. Its cancellation covers that request too.
     if (this.compatibility?.profile === "antigravity" && (this.promptCancelling || this.providerTurnCancelling)) {
@@ -1419,7 +1486,7 @@ export class AcpClient {
       return Promise.resolve({ outcome: { outcome: "cancelled" } });
     }
     const full = this.antigravityFullPermissions && this.offersAntigravityFullPermissions();
-    const worktreeAuto = this.antigravityWorktreeAutoSelected && this.antigravityWorktree &&
+    const worktreeAuto = !this.delegatesAntigravityPermissions && this.antigravityWorktreeAutoSelected && this.antigravityWorktree &&
       this.sessionCwd === this.antigravityWorktree && this.currentPermissionMode() === "default" &&
       this.promptInFlight && !this.promptCancelling && params.sessionId === this.sessionId &&
       antigravityWorktreeAutoAllows(this.antigravityWorktree, params.toolCall);
@@ -1455,9 +1522,7 @@ export class AcpClient {
     }
     // The permission payload is already correlated to a tool call by ACP. Do not combine a
     // partial payload with title text or cached updates that might describe another effect.
-    const attestationRoot = this.compatibility?.profile === "antigravity" &&
-      this.compatibility.campaignOperationAttestation === true &&
-      this.sessionId && this.sessionId === params.sessionId ? this.sessionCwd : undefined;
+    const attestationRoot = this.delegatesAntigravityPermissions ? this.sessionCwd : undefined;
     const context = attestationRoot ? antigravityPermissionContext(params.toolCall, attestationRoot) : undefined;
     this.ev.onEvent({
       kind: "permission_request",
@@ -1492,9 +1557,15 @@ export class AcpClient {
       return;
     }
     const requestId = `acp-elicitation:${randomUUID()}`;
+    // ACP session scope links the form to a specific call. Match the structured provider tool
+    // name observed on that call, never the form's text, the rendered title or the last tool seen.
+    const toolCallId = params.toolCallId;
+    const ownQuestion = typeof toolCallId === "string" && this.antigravityQuestionCalls.get(toolCallId) === true;
+    if (ownQuestion) this.antigravityQuestionCalls.set(toolCallId, false);
     this.pendingElicitations.set(requestId, { form, reply });
     if (providerTurn) this.refreshProviderTurnSettleTimer();
-    this.ev.onEvent({ kind: "question_request", requestId, questions: form.questions, requestSource: "provider_elicitation" });
+    this.ev.onEvent({ kind: "question_request", requestId, questions: form.questions,
+      requestSource: ownQuestion ? "provider_question" : "provider_elicitation" });
   }
 
   private async handleRead(params: ReadTextFileRequest): Promise<ReadTextFileResponse> {
