@@ -5328,7 +5328,10 @@ export class SessionsService {
         { runnerId: req.runnerId, workspaceId });
       if(parentError) return campaignRefusalFail(parentError);
       const view = this.db.campaignBudgets.view(budgetRoot)!;
-      const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, view.authority.costUsd !== undefined);
+      const accountingError = parentSessionId
+        ? this.db.campaignChildBudgetAccountingError({ driver: launch.driver, agentId: req.agentId,
+          runnerId: req.runnerId, executionTarget }, config, view.authority.costUsd !== undefined)
+        : this.db.campaignBudgetAccountingError(launch.driver, config.model, view.authority.costUsd !== undefined);
       if (req.launchSurface === "native_tui" || accountingError) return fail(accountingError ?? "Campaign limits cannot admit unmetered Native TUI workers.", 409);
       try {
         // Its review record is not written yet, so say whether this session is a reviewer (#3618).
@@ -11389,6 +11392,10 @@ export class SessionsService {
     if (peerError) return campaignRefusalFail(peerError);
     const prior = this.db.campaignBudgets.allocation(member.id)!;
     allocation = { ...prior, ...allocation };
+    if (member.driver === "acp" && allocation.costUsd !== undefined) {
+      const error = this.db.campaignChildBudgetAccountingError(member, {}, true);
+      if (error) return campaignRefusalFail(error);
+    }
     const active = this.db.campaignBudgets.active(member.id);
     if (active && ((allocation.costUsd ?? 0) < (prior.costUsd ?? 0) ||
         (allocation.toolCalls ?? 0) < (prior.toolCalls ?? 0))) return fail("a live allocation cannot be released before cancellation settles; finish this worker before redistributing its unspent reservation", 409);
@@ -12446,7 +12453,13 @@ export class SessionsService {
     if (config?.costBudgetUsd !== undefined && (config.costBudgetUsd <= 0 || allocation.costUsd !== undefined && config.costBudgetUsd !== allocation.costUsd) ||
         config?.maxToolCalls !== undefined && (config.maxToolCalls <= 0 || allocation.toolCalls !== undefined && config.maxToolCalls !== allocation.toolCalls) ||
         config?.costCheckpointsUsd !== undefined) return "campaign allocations cannot be changed through session configuration; use allocate_campaign_budget within the human envelope";
-    return this.db.campaignBudgetAccountingError(driver, config?.model ?? session.model, view.authority.costUsd !== undefined);
+    const model = config?.model ?? session.model ?? undefined;
+    const costProtected = view.authority.costUsd !== undefined;
+    if (session.parentSessionId && !session.adopted) {
+      return this.db.campaignChildBudgetAccountingError({ ...session, driver },
+        { model, costBudgetUsd: config?.costBudgetUsd ?? session.costBudgetUsd ?? undefined }, costProtected);
+    }
+    return this.db.campaignBudgetAccountingError(driver, model, costProtected);
   }
 
   private enforceCampaignBudget(sessionId: string, now: number): boolean {

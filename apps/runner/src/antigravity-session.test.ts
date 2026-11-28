@@ -230,7 +230,8 @@ function launchDriver(
     resolveLaunch?: AcpCompatibility["resolveLaunch"]; sessionContext?: DriverOptions["acpSessionContext"];
     fixtureIsolation?: DriverOptions["isolation"];
     appArmorFix?: (executable: string | undefined) => string | undefined; handoff?: string;
-    handoffRecordFails?: boolean; providerTurnSettleMs?: number } = {},
+    handoffRecordFails?: boolean; providerTurnSettleMs?: number;
+    onEvent?: (event: SessionEventPayload) => void } = {},
 ): { driver: AcpDriver; seen: Observed } {
   const context = antigravityCredentialContext();
   const launch = antigravitySessionLaunch(view, context, isolation);
@@ -252,7 +253,10 @@ function launchDriver(
     ...(resumeId ? { resumeId } : {}),
   };
   const driver = new AcpDriver(options, {
-    onEvent: (event: SessionEventPayload) => seen.events.push(event),
+    onEvent: (event: SessionEventPayload) => {
+      seen.events.push(event);
+      overrides.onEvent?.(event);
+    },
     onStderr: (text: string) => seen.stderr.push(text),
     onExit: () => {},
     onProviderInitiatedTurn: (state: "started" | "settled", id: string) => seen.providerTurns.push([state, id]),
@@ -537,6 +541,47 @@ test("a denied command never runs, an allowed one does, and Stop settles a pendi
   await waitFor(() => calls().some((call) => call.method === "session/prompt") ? true : undefined);
   driver.cancel();
   assert.equal(await waiting, "cancelled");
+});
+
+test("Antigravity tool IDs deduplicate updates within a conversation and differ across conversations", async () => {
+  signIn();
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const view = setup({ executable: { path: agy } });
+  const command = async (resumeId?: string) => {
+    const { driver, seen } = launchDriver(view, PROVIDER, cwd, resumeId);
+    await driver.initialize();
+    const conversation = await driver.newSession(cwd);
+    const turn = driver.prompt("Please run the command.");
+    const request = await waitFor(() => seen.events.find((event) => event.kind === "permission_request"));
+    assert.equal(driver.resolvePermission(request.requestId, "deny"), true);
+    assert.equal(await turn, "end_turn");
+    const tool = seen.events.find((event) => event.kind === "tool_call");
+    const updates = seen.events.filter((event) => event.kind === "tool_call_update");
+    assert.ok(tool && updates.length > 0);
+    assert.ok(updates.every((event) => event.toolCallId === tool.toolCallId));
+    assert.equal(await driver.close(), true);
+    return { conversation, toolCallId: tool.toolCallId };
+  };
+
+  const first = await command();
+  assert.deepEqual(await command(first.conversation), first, "the same ACP identity stays stable on resume");
+  const fresh = await command();
+  assert.notEqual(first.toolCallId, fresh.toolCallId, "the fixture reuses its raw ID in the new conversation");
+});
+
+test("Antigravity cancels a permission arriving after the tool event trips cancellation", async () => {
+  signIn();
+  const cwd = mkdtempSync(join(root, "worktree-"));
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined, {
+    onEvent: (event) => {
+      if (event.kind === "tool_call") driver.cancel();
+    },
+  });
+  await driver.initialize();
+  await driver.newSession(cwd);
+  assert.equal(await driver.prompt("Please run the command."), "cancelled");
+  assert.ok(!seen.events.some((event) => event.kind === "permission_request"));
+  assert.equal(existsSync(join(cwd, "fixture-command-ran")), false);
 });
 
 test("Auto Mode is restored on resume and falls back visibly when Antigravity withholds it", async () => {

@@ -6,7 +6,7 @@
  * See docs/ACP-NOTES.md for the exact wire shapes.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import type {
   AuthenticateRequest,
@@ -1263,7 +1263,7 @@ export class AcpClient {
         this.ev.onEvent({ kind: "user_message", text: blockText(u.content as ContentBlock) });
         break;
       case "tool_call": {
-        const toolCallId = u.toolCallId ?? "tool";
+        const toolCallId = this.transcriptToolCallId(params.sessionId, u.toolCallId ?? "tool");
         const status = u.status ?? "pending";
         if (!this.promptInFlight) this.noteProviderTurnUpdate("tool_call", { id: toolCallId, status });
         this.ev.onEvent({
@@ -1279,7 +1279,7 @@ export class AcpClient {
         break;
       }
       case "tool_call_update": {
-        const toolCallId = u.toolCallId ?? "tool";
+        const toolCallId = this.transcriptToolCallId(params.sessionId, u.toolCallId ?? "tool");
         if (this.promptInFlight && u.status === "completed" && this.antigravitySandboxExecutable &&
             this.currentPermissionMode() === ANTIGRAVITY_AUTO_MODE.id &&
             antigravitySandboxSpawnDenied(u.rawOutput, this.antigravitySandboxExecutable)) {
@@ -1339,6 +1339,13 @@ export class AcpClient {
         break;
       }
     }
+  }
+
+  private transcriptToolCallId(sessionId: string, toolCallId: string): string {
+    if (this.compatibility?.profile !== "antigravity") return toolCallId;
+    // ACP IDs are unique within a conversation. A worktree relaunch or restart can start another
+    // conversation in the same Wollipog session, whose tool budget spans both conversations.
+    return createHash("sha256").update(JSON.stringify([sessionId, toolCallId])).digest("hex");
   }
 
   private replayPendingSessionState(sessionId: string): void {
@@ -1401,6 +1408,11 @@ export class AcpClient {
 
   private handlePermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
     if (this.disposed || this.orchestrator) return Promise.resolve({ outcome: { outcome: "cancelled" } });
+    // A tool_call notification can trip the runner's local tool guardrail before the next
+    // permission RPC arrives in the same prompt. Its cancellation covers that request too.
+    if (this.compatibility?.profile === "antigravity" && (this.promptCancelling || this.providerTurnCancelling)) {
+      return Promise.resolve({ outcome: { outcome: "cancelled" } });
+    }
     const trackedProviderTurn = !this.promptInFlight;
     if (trackedProviderTurn && !this.ensureProviderInitiatedTurnStarted()) {
       return Promise.resolve({ outcome: { outcome: "cancelled" } });
