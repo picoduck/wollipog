@@ -1,7 +1,10 @@
 # Agent-Requested Automation Creation
 
 Normal and Orchestrator sessions can propose a Wollipog automation through the
-injected CLI or MCP server. Every creation requires the authenticated session
+injected CLI or MCP server. Built-in Wollipog Assistant threads use the same
+server-side preparation and review summary through `auto_propose` (see
+[Wollipog Assistant Threads](./assistant-threads.md#creating-an-automation)).
+Every creation requires the authenticated session
 owner's approval, including under Full Control. The owner must also meet existing
 automation administration permissions: owner or admin of the personal control-plane
 organization. This capability does not expose

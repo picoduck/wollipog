@@ -355,6 +355,124 @@ const access = { level: "full_access", destructive: "ask" } as const;
 function confirmation(index: number): AssistantOwnerConfirmation {
   const customCampaign = campaignScenario === "custom" || campaignScenario === "custom-saved";
   const budget = campaignScenario === "custom" ? null : { costUsd: 20, toolCalls: 150 };
+  if (params.get("automation") !== null) {
+    const campaignMode = params.get("automation") === "campaign";
+    const digest = index.toString(16).repeat(64);
+    return {
+      id: `aoc_auto_${index}`,
+      threadId: "thr_triage",
+      operation: "auto_propose",
+      title: "Create Automation",
+      summary: "Creates this automation as an owner-authorized schedule with its own limits. It can keep running after this thread closes.",
+      target: {
+        kind: "automation",
+        id: "new",
+        label: campaignMode
+          ? "Nightly Maintenance Campaign · Release Engineering · Build Machine"
+          : "Weekly Read-Only Review · Release Engineering · Build Machine",
+      },
+      impact: [
+        { label: "Name", value: campaignMode ? "Nightly Maintenance Campaign" : "Weekly Read-Only Review" },
+        { label: "Schedule", value: campaignMode ? "0 2 * * * · UTC" : "0 9 * * 1 · UTC" },
+        { label: "Initial State", value: index === 1 ? "Paused" : "Enabled" },
+        { label: "Limits", value: campaignMode ? "$12 USD · 120 tool calls" : "$5 USD · 50 tool calls" },
+        ...(campaignMode ? [{ label: "Campaign Mode", value: "Full Control" }] : []),
+      ],
+      arguments: [],
+      automation: {
+        digest,
+        snapshot: {
+          category: "automation_creation",
+          targetDigest: "a".repeat(64),
+          requestedSpecDigest: "b".repeat(64),
+          nextFireAt: Date.parse("2026-11-23T09:00:00Z"),
+          expiresAt: NOW + 59 * minute,
+          effectiveTargets: [{
+            runnerId: "runner-build",
+            workspaceId: "ws-release",
+            agentId: "claude-native",
+            role: "agent",
+            config: { model: "claude-sonnet-4-6", effort: "high", permissionMode: "read-only" },
+          }],
+          spec: {
+            name: campaignMode ? "Nightly Maintenance Campaign" : "Weekly Read-Only Review",
+            cron: campaignMode ? "0 2 * * *" : "0 9 * * 1",
+            timezone: "UTC",
+            enabled: index !== 1,
+            misfirePolicy: { kind: "skip" },
+            runnerPolicy: { kind: "wait" },
+            concurrencyPolicy: "skip",
+            limits: campaignMode ? { maxCostUsd: 12, maxToolCalls: 120 } : { maxCostUsd: 5, maxToolCalls: 50 },
+            notifications: { pushEvents: ["succeeded", "failed"] },
+            action: {
+              kind: "create_session",
+              request: {
+                runnerId: "runner-build",
+                workspaceId: "ws-release",
+                projectId: "project-releases",
+                projectLocationId: "loc-release",
+                agentId: "claude-native",
+                useWorktree: !campaignMode,
+                config: { model: "claude-sonnet-4-6", effort: "high", permissionMode: "read-only" },
+                prompt: campaignMode
+                  ? `Coordinate nightly read-only repository audits without direct edits. ${"LongUnbrokenAutomationIdentifier".repeat(8)}`
+                  : "Review repository health and open regressions without modifying files.",
+                ...(campaignMode ? {
+                  role: "orchestrator" as const,
+                  orchestrator: {
+                    delegation: {
+                      parentControl: "questions" as const,
+                      decisions: { pr_merge: "human" as const, implementation_question: "orchestrator" as const },
+                    },
+                  },
+                  campaign: {
+                    controlMode: "full_control" as const,
+                    repository: "example/release-tools",
+                    tasks: [
+                      { key: "dead-code", title: "Dead Code Sweep", prompt: "Report unused exports without making edits." },
+                      { key: "flaky-tests", title: "Flaky Tests Check", prompt: "Summarize intermittent test failures from recent CI runs." },
+                    ],
+                    fullControl: {
+                      objective: "Maintain repository health within strict read-only review bounds.",
+                      operations: ["implementation_question", "follow_up_issue_publication"],
+                      budget: { costUsd: 10, toolCalls: 100, concurrency: 2, acceptedFollowUps: 1 },
+                    },
+                  },
+                } : {}),
+              },
+            },
+          },
+        },
+        targetDisplay: {
+          projectName: "Release Engineering",
+          locationName: "Release Checkout",
+          locationPath: "/srv/repos/release-tools",
+          runnerName: "Build Machine",
+          workspaceName: "Release Tools",
+          workspacePath: "/srv/repos/release-tools",
+        },
+        ...(campaignMode ? {
+          campaignDecisions: {
+            controlMode: "full_control",
+            parentControl: "questions",
+            decisions: {
+              implementation_question: "orchestrator",
+              pr_merge: "human",
+              follow_up_issue_publication: "orchestrator",
+              issue_closure: "human",
+            },
+            fullControlOperations: ["implementation_question", "follow_up_issue_publication"],
+            delegatablePolicyIds: [],
+            budget: { costUsd: 10, toolCalls: 100, concurrency: 2, acceptedFollowUps: 1 },
+          },
+        } : {}),
+      },
+      status: "pending",
+      createdAt: NOW - minute + index,
+      expiresAt: NOW + 59 * minute,
+      resolvedAt: null,
+    };
+  }
   if (campaignScenario !== null) return {
     id: `aoc_campaign_${index}`, threadId: "thr_triage", operation: "campaign_start", title: "Start Campaign",
     summary: "Starts an independent Orchestrator campaign with the settings and authority shown here." +
@@ -1153,6 +1271,12 @@ const client = {
   approveAssistantCampaign: async (threadId: string, confirmationId: string, digest: string) => {
     if (found(threadId).confirmations?.find(candidate => candidate.id === confirmationId)?.campaign?.digest !== digest) {
       throw new Error("Review the campaign again.");
+    }
+    return settleConfirmation(threadId, confirmationId, "approve");
+  },
+  approveAssistantAutomation: async (threadId: string, confirmationId: string, digest: string) => {
+    if (found(threadId).confirmations?.find(candidate => candidate.id === confirmationId)?.automation?.digest !== digest) {
+      throw new Error("Review the automation again.");
     }
     return settleConfirmation(threadId, confirmationId, "approve");
   },

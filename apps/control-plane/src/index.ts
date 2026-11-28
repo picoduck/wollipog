@@ -343,6 +343,7 @@ import { AssistantCommandConfirmations } from "./assistant-command-confirmations
 import { registerAssistantSkillParity } from "./assistant-skill-parity.js";
 import { createExtendedSkillsManagement } from "./skill-extended-management.js";
 import { registerAssistantAutomations } from "./assistant-automations.js";
+import { registerAssistantAutomationPropose } from "./assistant-automation-propose.js";
 import { builtInSkills, seedBuiltInSkills } from "./built-in-skills.js";
 import { repairLegacySkillDescriptions } from "./skills.js";
 import { SKILL_GIT_AUTO_UPDATE_SWEEP_MS, SkillGitAutoUpdater, skillGitAutoUpdateIntervalMs } from "./skill-git-auto-update.js";
@@ -2565,6 +2566,7 @@ const assistantManagementMutations = new ManagementMutations(assistantCommandRec
   id => db.assistantConnections.get(id)!, id => db.assistantConnections.destructiveConfirmation(id),
   new AssistantCommandConfirmations(db.raw(), db.assistantOwnerConfirmations));
 registerAssistantAutomations(assistantOperations, db, automations, assistantManagementMutations);
+registerAssistantAutomationPropose(assistantOperations, { db, campaigns: scheduledCampaigns, receipts: assistantCommandReceipts });
 registerAssistantTriggerParity(assistantOperations, db, automations, assistantManagementMutations);
 registerAssistantSkills(assistantOperations, {db, hub, requestHuman, requestPrincipal, pushSkillsSync}, assistantManagementMutations);
 const extendedSkillsDeps = {db, hub, requestHuman, requestPrincipal, pushSkillsSync, builtInSkills: builtInSkills()};

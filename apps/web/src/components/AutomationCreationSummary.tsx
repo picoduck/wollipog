@@ -1,9 +1,24 @@
 import React from "react";
-import type { AutomationCreationSnapshot, CreateSessionRequest } from "@wollipog/protocol";
+import type {
+  AssistantAutomationCampaignDecisionsPreview,
+  AssistantAutomationTargetDisplay,
+  AutomationCreationSnapshot,
+  CreateSessionRequest,
+} from "@wollipog/protocol";
 import { CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE } from "@wollipog/protocol";
 import { useHasStore, useStoreSelector } from "../store.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
 import { AutomationExpectedProviderAccount, providerAccountPreviewPlacement } from "./ProviderAccountSelection.js";
+
+const formatTokenLabel = (value: string) => value.split("_").map((word) =>
+  word === "pr" || word === "ui" || word === "ci" ? word.toUpperCase()
+    : word === "and" ? "and"
+    : word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
+
+const formatNamedId = (name: string | null | undefined, id: string | null | undefined, fallback?: string) => {
+  if (name && id && name !== id) return `${name} (${id})`;
+  return name || id || fallback || "";
+};
 
 /** The account a scheduled session names, or what Default is expected to resolve to (#4512). Account
  * ids are derived from account labels, so a named one follows Hide Account Emails like its label. */
@@ -23,7 +38,11 @@ function ProviderAccountFact({ request }: { request: CreateSessionRequest }) {
 }
 
 /** The human reviews the complete saved configuration, not a summary supplied by the agent. */
-export function AutomationCreationSummary({ snapshot }: { snapshot: AutomationCreationSnapshot }) {
+export function AutomationCreationSummary({ snapshot, targetDisplay, campaignDecisions }: {
+  snapshot: AutomationCreationSnapshot;
+  targetDisplay?: AssistantAutomationTargetDisplay;
+  campaignDecisions?: AssistantAutomationCampaignDecisionsPreview;
+}) {
   const hasStore = useHasStore();
   const { spec } = snapshot;
   const action = spec.action;
@@ -42,20 +61,36 @@ export function AutomationCreationSummary({ snapshot }: { snapshot: AutomationCr
         <div><dt>Session Role</dt><dd>Orchestrator</dd></div>
         <div><dt>Orchestrator Control</dt><dd>{action.request.campaign.controlMode === "full_control" ? "Full Control" : "Custom"}</dd></div>
         <div><dt>Campaign Repository</dt><dd>{action.request.campaign.repository}</dd></div>
-        <div><dt>Campaign Settings</dt><dd><div className="code-well"><pre>{JSON.stringify(action.request.orchestrator, null, 2)}</pre></div></dd></div>
+        {campaignDecisions && <>
+          <div><dt>Parent Control</dt><dd>{formatTokenLabel(campaignDecisions.parentControl)}</dd></div>
+          <div><dt>Decision Owners</dt><dd>{Object.entries(campaignDecisions.decisions).map(([key, owner]) => `${formatTokenLabel(key)}: ${formatTokenLabel(owner)}`).join("\n")}</dd></div>
+          {campaignDecisions.fullControlOperations && <div><dt>Delegated Operations</dt><dd>{campaignDecisions.fullControlOperations.map(formatTokenLabel).join(", ")}</dd></div>}
+          {!!campaignDecisions.delegatablePolicyIds?.length && <div><dt>Delegatable Policy IDs</dt><dd>{campaignDecisions.delegatablePolicyIds.join(", ")}</dd></div>}
+          <div><dt>Effective Campaign Allowance</dt><dd>{`$${campaignDecisions.budget.costUsd} USD · ${campaignDecisions.budget.toolCalls} tool calls · ${campaignDecisions.budget.concurrency} concurrent children · ${campaignDecisions.budget.acceptedFollowUps} accepted follow-ups`}</dd></div>
+        </>}
+        <div><dt>Campaign Settings</dt><dd><div className="code-well"><pre>{JSON.stringify(action.request.orchestrator ?? {}, null, 2)}</pre></div></dd></div>
         <div><dt>Full Control Overrides</dt><dd><div className="code-well"><pre>{JSON.stringify(action.request.campaign.fullControl ?? {}, null, 2)}</pre></div></dd></div>
-        <div><dt>Execution Target</dt><dd>{action.request.executionTargetId ?? "Host"}</dd></div>
-        <div><dt>Recurring Child Tasks</dt><dd>{action.request.campaign.tasks.map(task => <div key={task.key}>
-          <strong>{task.title}</strong><div className="code-well"><pre>{task.prompt}</pre></div>
-        </div>)}</dd></div>
+        <div><dt>Recurring Child Tasks</dt><dd>{action.request.campaign.tasks.length
+          ? action.request.campaign.tasks.map(task => <div key={task.key}>
+              <strong>{task.title}</strong><div className="code-well"><pre>{task.prompt}</pre></div>
+            </div>)
+          : "None"}</dd></div>
       </>}
       <div><dt>Schedule</dt><dd><code>{spec.cron}</code> · {spec.timezone}</dd></div>
       <div><dt>Next Occurrence</dt><dd>{new Date(snapshot.nextFireAt).toISOString()}</dd></div>
       <div><dt>Initial State</dt><dd>{spec.enabled ? "Enabled" : "Paused"}</dd></div>
-      {action.kind === "prompt_session" ? <div><dt>Target Session</dt><dd>{action.sessionId}</dd></div> : <>
-        <div><dt>Machine</dt><dd>{action.request.runnerId}</dd></div>
-        <div><dt>Workspace</dt><dd>{action.request.workspaceId}</dd></div>
-        <div><dt>Project</dt><dd>{action.request.projectId ?? "Workspace Assignment"}</dd></div>
+      {action.kind === "prompt_session" ? <div><dt>Target Session</dt><dd>{formatNamedId(targetDisplay?.sessionTitle, action.sessionId)}</dd></div> : <>
+        <div><dt>Project</dt><dd>{formatNamedId(targetDisplay?.projectName, action.request.projectId, "Workspace Assignment")}</dd></div>
+        {(targetDisplay?.locationName || action.request.projectLocationId) && <div><dt>Execution Location</dt><dd>
+          {formatNamedId(targetDisplay?.locationName, action.request.projectLocationId)}
+          {targetDisplay?.locationPath ? ` · ${targetDisplay.locationPath}` : ""}
+        </dd></div>}
+        <div><dt>Machine</dt><dd>{formatNamedId(targetDisplay?.runnerName, action.request.runnerId)}</dd></div>
+        <div><dt>Workspace</dt><dd>
+          {formatNamedId(targetDisplay?.workspaceName, action.request.workspaceId)}
+          {targetDisplay?.workspacePath ? ` · ${targetDisplay.workspacePath}` : ""}
+        </dd></div>
+        <div><dt>Execution Target</dt><dd>{action.request.executionTargetId ?? "Host"}</dd></div>
         <div><dt>Workspace Strategy</dt><dd>{action.request.useWorktree ? "Worktree" : "In Place"}</dd></div>
       </>}
       {action.kind === "create_session" && <div><dt>Provider Account</dt><dd>{hasStore

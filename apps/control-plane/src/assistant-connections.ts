@@ -237,6 +237,7 @@ export class AssistantOperations {
   }
   list(connection: AssistantConnection): AssistantOperation[] {
     return [...this.operations.values()].filter((operation) => (!operation.threadOnly || connection.threadId) &&
+      !(connection.threadId && THREAD_EXCLUDED_OPERATIONS.has(operation.name)) &&
       (connection.grant.operations === "all" || connection.grant.operations.includes(operation.name)));
   }
   inventory(): { name: string; description: string }[] {
@@ -260,7 +261,10 @@ export class AssistantOperations {
     if (!owner || owner.role !== "owner") throw new AssistantRefusal("The granting owner is no longer an active owner. An active owner must recreate this connection.");
     if (connection.grant.operations !== "all" && !connection.grant.operations.includes(name)) throw new AssistantRefusal(`Operation ${name} is excluded. The owner can allow it in Assistant Connections.`);
     if (connection.threadId && THREAD_EXCLUDED_OPERATIONS.has(name)) {
-      throw new AssistantRefusal(`A Wollipog Assistant thread cannot call ${name}: it schedules work outside the thread's limits. Ask your owner to do it.`);
+      const guidance = name === "auto_create"
+        ? " Use auto_propose to submit a complete automation for owner approval in Wollipog, or ask your owner to do it."
+        : " Ask your owner to do it.";
+      throw new AssistantRefusal(`A Wollipog Assistant thread cannot call ${name}: it schedules work outside the thread's limits.${guidance}`);
     }
     if (!operation.metadata && connection.grant.projects !== "all" && (!target.projectId || !connection.grant.projects.includes(target.projectId))) throw new AssistantRefusal("The target project is excluded by this connection. The owner can select it or grant all projects in Assistant Connections.");
     if (!operation.ownerCanAccess(owner, target)) throw new AssistantRefusal("The granting owner cannot access this target. Restore the owner's resource access or use another connection.");

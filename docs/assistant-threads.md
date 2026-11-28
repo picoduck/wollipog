@@ -135,11 +135,13 @@ deleted. These settings are owner-only.
   message and explicit Custom or Full Control mode. Only the thread's owner can start it from
   the **Start Campaign** confirmation card. The root counts as one launch against the thread's
   launch limit. The root and its workers spend from their own campaign allowance.
-- A thread cannot start scheduled runs. Its connection also
-  cannot call `auto_create`, `auto_update`, `auto_enable`, `auto_test`,
-  `session_role`, `session_adopt` or `session_fork`, since scheduled work, a converted role, an
+- A thread cannot start scheduled runs directly. Its connection excludes `auto_create`,
+  `auto_update`, `auto_enable`, `auto_test`, `session_role`, `session_adopt` and `session_fork`
+  from thread discovery and authorization, since standing scheduled work, a converted role, an
   adopted session or a fork (materialized on the runner without that session creation) would run
-  outside these limits. The owner can still do any of these directly.
+  outside these limits. To propose a recurring automation (standalone session or scheduled
+  Orchestrator campaign), use `auto_propose` for owner approval in Wollipog. The owner can still do
+  any of these directly.
 - `usage` on the thread view reports both limits and what the thread has used of them.
   `launchedSessionIds` lists the thread-budgeted work, and `launchedCampaignIds` lists its
   independent campaign roots.
@@ -359,3 +361,30 @@ External Assistant connections keep the preview-and-confirm behavior above, unch
 An older control plane has no `campaign_start` operation. The command refuses a Location on a
 runner below protocol v391. An older web client cannot approve a campaign through the legacy
 confirmation endpoint.
+
+### Creating an Automation
+
+1. The thread inspects available Machines, Locations, agents and projects (`project_list`,
+   `runner_list`), then calls `auto_propose` with a caller-generated `commandId` and complete
+   `payload` (`AutomationSpec`, for a standalone session or scheduled Orchestrator campaign).
+   The server validates the configuration using the same preparation path as agent-requested
+   automation creation, pins advertised agent installations, resolves exact Project placement and
+   computes the next occurrence preview without saving a schedule or firing a test run.
+2. On the **Create Automation** card, select **Review Automation** from the thread or from
+   **Inbox → Assistant Approvals → Review**. The review displays the exact Project and execution
+   Location, Machine, workspace, schedule, next occurrence, enabled state, prompts, per-run cost
+   and tool-call limits, effective target defaults, and for scheduled campaigns the control mode,
+   repository, recurring child tasks, effective allowance and delegated decisions.
+3. **Approve Once** sends the exact review digest to `/approve-automation`. The control plane
+   re-validates live owner authority, connection grant, targets, installations and effective
+   settings, then atomically consumes the approval, reserves and settles the command receipt, and
+   saves the exact configuration as an owner-authorized schedule (`actor: human`). Because the
+   schedule is owner-authorized rather than bound to the thread's connection, it can continue to
+   run after the originating thread closes, subject to its own limits and the owner's current
+   authority.
+4. **Deny**, expiry, revocation or any material drift in targets, settings or grant leaves no
+   schedule. Retrying `auto_propose` with the same `commandId` reconciles the pending card or
+   durable receipt instead of creating a duplicate. Once approved, the thread receives a
+   `[Wollipog Owner Confirmation]` message with the Automation ID and can verify the saved
+   configuration and next occurrence with `command_get` and `auto_get` without firing a test run.
+   An older web client cannot approve an automation through the legacy confirmation endpoint.

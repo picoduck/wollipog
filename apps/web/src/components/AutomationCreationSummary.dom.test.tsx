@@ -50,3 +50,57 @@ test("slash commands and inherited settings are readable before opening full con
   assert.ok(promptFacts.includes("does not override future session settings"));
 
 });
+
+test("assistant automation preview renders project, location, delegated decisions and campaign allowance", () => {
+  const snapshot = structuredClone(fixture);
+  if (snapshot.spec.action.kind !== "create_session") assert.fail();
+  Object.assign(snapshot.spec.action.request, {
+    role: "orchestrator",
+    campaign: {
+      controlMode: "full_control",
+      repository: "picoduck/wollipog",
+      tasks: [{ key: "sweep", title: "Weekly Sweep", prompt: "Inspect health without changes." }],
+    },
+  });
+  const html = renderToStaticMarkup(
+    <AutomationCreationSummary
+      snapshot={snapshot}
+      targetDisplay={{
+        projectName: "Core Platform",
+        locationName: "Main Checkout",
+        locationPath: "/srv/wollipog",
+        runnerName: "Primary Machine",
+        workspaceName: "Main Workspace",
+        workspacePath: "/srv/wollipog",
+      }}
+      campaignDecisions={{
+        controlMode: "full_control",
+        parentControl: "questions",
+        decisions: { pr_merge: "human", implementation_question: "orchestrator" },
+        fullControlOperations: ["implementation_question", "follow_up_issue_publication"],
+        delegatablePolicyIds: ["policy_readonly"],
+        budget: { costUsd: 5, toolCalls: 50, concurrency: 2, acceptedFollowUps: 1 },
+      }}
+    />,
+  ).split("<details>")[0]!;
+  for (const expected of [
+    "Core Platform (project)",
+    "Execution Location",
+    "Main Checkout (location)",
+    "/srv/wollipog",
+    "Primary Machine (machine)",
+    "Parent Control",
+    "Questions",
+    "Decision Owners",
+    "PR Merge: Human",
+    "Implementation Question: Orchestrator",
+    "Delegated Operations",
+    "Follow Up Issue Publication",
+    "policy_readonly",
+    "$5 USD · 50 tool calls · 2 concurrent children · 1 accepted follow-ups",
+    "Weekly Sweep",
+    "Inspect health without changes.",
+  ]) {
+    assert.ok(html.includes(expected), `expected summary to include ${expected}`);
+  }
+});
