@@ -153,7 +153,7 @@ test("Full Control Antigravity admission requires its own runner capability, nat
     h.db.registerRunner(h.runner, Date.now(), PROTOCOL_VERSION);
     assert.ok(h.svc.restart(id).ok);
     assert.equal(h.startSpec().antigravityFullControlChild, true);
-    h.db.updateSessionStatus(id, "stopped", Date.now());
+    h.svc.onSessionStatus(id, "stopped");
     assert.ok(h.svc.setCampaignControl("full", { mode: "custom" }, 2, h.human).ok);
     assert.match(h.svc.restart(id).error ?? "", /Restore Full Control or create a new Custom worker/u);
 
