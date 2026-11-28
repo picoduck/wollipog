@@ -40,7 +40,7 @@ import type { CampaignFollowUpAdmissionSnapshot, CampaignFollowUpSubject, Releas
 import { campaignBehaviorSources, campaignBehaviorValues, changedCampaignBehavior, exactChildHarnessRow,
   parseCampaignBehaviorRequest } from "./campaign-behavior.js";
 import { agentHarnessIdentityKey } from "@wollipog/protocol";
-import { configuredReview, resolveConfiguredReviewer, ReviewSettingsError, type ReviewPolicyCapture } from "./review-settings.js";
+import { ANTIGRAVITY_CROSS_FAMILY_REVIEW_REQUIRED, configuredReview, resolveConfiguredReviewer, ReviewSettingsError, type ReviewPolicyCapture } from "./review-settings.js";
 import { parseSessionWaitReport } from "./session-waits.js";
 import { isSessionLaunchFailureCode, parseOrchestratorReviewPolicy, sameReviewFamily } from "@wollipog/protocol";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
@@ -12547,7 +12547,9 @@ export class SessionsService {
     const effort = policy.reviewEffort ?? "high";
     try {
       const reviewerModel = resolveConfiguredReviewer(runner, harness, policy.reviewModel, effort, resolveEffectiveModelEffort);
-      if (sameReviewFamily("acp", model, harness, reviewerModel)) return { ready: false, reason: guidance };
+      if (sameReviewFamily("acp", model, harness, reviewerModel)) {
+        return { ready: false, reason: ANTIGRAVITY_CROSS_FAMILY_REVIEW_REQUIRED };
+      }
       return { ready: true, reason: `Google Antigravity can use ${harness === "codex" ? "Codex" : "Claude Code"} (${reviewerModel}, ${effort} effort) for mandatory review on this machine.` };
     } catch (error) {
       if (!(error instanceof ReviewSettingsError)) throw error;
@@ -12594,6 +12596,16 @@ export class SessionsService {
     if (!preflight.supported) return preflight.requirement ?? preflight.reason!;
     if (config?.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) {
       return "Full Permissions Mode is unavailable for Full Control Google Antigravity workers. Use Default or managed Worktree Auto.";
+    }
+    if (config?.model !== undefined && config.model !== session.model) {
+      try {
+        const reviewer = configuredReview(this.db, { ...session, model: config.model },
+          this.db.getRunner(session.runnerId), resolveEffectiveModelEffort);
+        if (!reviewer) return "Changing this worker's model requires a usable cross-family reviewer in Settings → Reviews.";
+      } catch (error) {
+        if (!(error instanceof ReviewSettingsError)) throw error;
+        return error.message;
+      }
     }
     return null;
   }

@@ -23,6 +23,7 @@ const floor = RUNNER_CAPABILITY_MIN_PROTOCOL.antigravityFullControlChild;
 const native = { kind: "native" } as const;
 const implementer = { agentId: ANTIGRAVITY_AGENT_ID, driver: "acp", context: native } as const;
 const fixture = fileURLToPath(new URL("../../runner/src/fixtures/antigravity/fake-agy.mjs", import.meta.url));
+const sameFamilyModel = "claude-sonnet-4-6";
 
 function harness() {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "antigravity-full-control-")));
@@ -33,11 +34,13 @@ function harness() {
   writeFileSync(join(state, "signed-in"), "fixture");
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
+  const human = { ...identity, kind: "human" as const, actorId: identity.userId };
   const scope = { organizationId: identity.organizationId, owner: { kind: "user" as const, userId: identity.userId } };
   const antigravity: AgentDefinition = {
     id: ANTIGRAVITY_AGENT_ID, name: "Google Antigravity", command: process.execPath, args: [fixture, "acp"],
     env: {}, driver: "acp", context: native, source: "discovered", available: true,
-    capabilities: { models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+    capabilities: { models: [{ id: "gemini-fixture" }, { id: sameFamilyModel }], effortLevels: [],
+      slashCommands: [], supportsImages: true, supportsApprovals: true,
       permissionModes: ["auto", "antigravity-full-permissions"] },
   };
   const runner: RunnerMetadata = {
@@ -82,16 +85,16 @@ function harness() {
   }
   const enabled = svc.setCampaignControl("full", { mode: "full_control", objective: "Make the fixture edit",
     operations: ["tool_approval", "question"], delegatablePolicyIds: [] },
-  1, { ...identity, kind: "human", actorId: identity.userId });
+  1, human);
   assert.ok(enabled.ok, enabled.error ?? "Full Control authorization failed");
   return {
-    directory, workspace, state, db, svc, hub, runner, sent,
+    directory, workspace, state, db, svc, hub, runner, sent, human,
     preflight() {
       return svc.antigravityChildPreflight(policy.behavior, db.getRunner(runner.runnerId)!, identity.userId, null);
     },
-    reviewer(model: string | null = null) {
+    reviewer(model: string | null = null, allowSameFamily = false) {
       db.reviewSettings.set(identity.userId, null, { ...DEFAULT_REVIEW_SETTINGS,
-        reviewers: [{ implementer, harness: "claude-code", model, effort: "high", allowSameFamily: false }] });
+        reviewers: [{ implementer, harness: "claude-code", model, effort: "high", allowSameFamily }] });
     },
     launch(parentSessionId?: string, runnerId = runner.runnerId, agentId = ANTIGRAVITY_AGENT_ID, config?: SessionConfig) {
       return svc.createSession({ runnerId, workspaceId: "workspace", agentId, useWorktree: false, config },
@@ -112,13 +115,15 @@ test("Full Control Antigravity admission requires its own runner capability, nat
     h.reviewer("missing-reviewer-model");
     assert.equal(h.preflight()?.ready, false);
     assert.match(h.launch("full").error ?? "", /unavailable.*Settings → Reviews/u);
-    h.reviewer();
+    h.reviewer(null, true);
     assert.equal(h.preflight()?.ready, true);
     assert.match(h.preflight()?.reason ?? "", /Claude Code \(claude-opus-5-5, high effort\)/u);
     assert.match(h.launch("full", "older-machine").error ?? "", /Update.*runner/i);
     assert.match(h.launch("full", h.runner.runnerId, "generic-acp").error ?? "", /Choose that worker or use Custom/u);
     assert.match(h.launch("full", undefined, undefined, { permissionMode: "antigravity-full-permissions" }).error ?? "",
       /Default or managed Worktree Auto/u);
+    assert.match(h.launch("full", undefined, undefined, { model: sameFamilyModel }).error ?? "",
+      /require a cross-family reviewer even when/u);
     const agent = h.runner.agents[0]!;
     agent.source = "config";
     h.db.registerRunner(h.runner, Date.now(), PROTOCOL_VERSION);
@@ -133,13 +138,24 @@ test("Full Control Antigravity admission requires its own runner capability, nat
     assert.equal(h.startSpec().antigravityFullControlChild, true);
     assert.equal(h.startSpec().config?.permissionMode, "default");
     assert.equal(h.svc.setConfig(id, { permissionMode: "antigravity-full-permissions" }).status, 409);
+    assert.match(h.svc.setConfig(id, { model: sameFamilyModel }).error ?? "", /require a cross-family reviewer/u);
+    assert.match(h.svc.prompt(id, "Update the fixture", [], undefined, { model: sameFamilyModel }).error ?? "",
+      /require a cross-family reviewer/u);
+    h.db.updateSessionConfig(id, { model: sameFamilyModel }, Date.now());
+    assert.match(h.svc.requestReviewSession(id, { pullRequest: { repository: "fixture/antigravity", number: 1 },
+      headSha: "a".repeat(40), brief: "Review the fixture edit." }).error ?? "", /require a cross-family reviewer/u);
+    assert.ok(h.svc.setConfig(id, { model: "gemini-fixture" }).ok);
     assert.equal(h.db.antigravityFullControlRoot(id), "full");
     assert.equal(h.db.reviewSettings.sessionPolicy(id)?.reviewModel, "claude-opus-5-5");
+    assert.match(h.svc.setCampaignControl("full", { mode: "custom" }, 2, h.human).error ?? "", /Stop the campaign's/u);
     h.db.registerRunner(h.runner, Date.now(), floor - 1);
     assert.match(h.svc.restart(id).error ?? "", /Update.*runner/i);
     h.db.registerRunner(h.runner, Date.now(), PROTOCOL_VERSION);
     assert.ok(h.svc.restart(id).ok);
     assert.equal(h.startSpec().antigravityFullControlChild, true);
+    h.db.updateSessionStatus(id, "stopped", Date.now());
+    assert.ok(h.svc.setCampaignControl("full", { mode: "custom" }, 2, h.human).ok);
+    assert.match(h.svc.restart(id).error ?? "", /Restore Full Control or create a new Custom worker/u);
 
     for (const parent of [undefined, "custom"]) {
       assert.ok(h.launch(parent).ok);
@@ -164,6 +180,7 @@ test("the admitted fake Antigravity delegates attested permissions on launch, re
   const h = harness();
   const store = new SessionStore(join(h.directory, "runner-sessions"));
   const capabilities: Array<{ optedIn?: true; resumeId?: string }> = [];
+  let controlPlaneProtocol = floor - 1;
   function runner() {
     return new SessionManager((message) => queueMicrotask(() => {
       if (message.type === "session_event") {
@@ -179,7 +196,7 @@ test("the admitted fake Antigravity delegates attested permissions on launch, re
     meta => {
       meta.env = { FAKE_AGY_STATE: h.state };
       return { acpCompatibility: { profile: "antigravity", resumable: true } };
-    });
+    }, undefined, undefined, undefined, () => controlPlaneProtocol);
   }
   let manager = runner();
   h.hub.sendToRunner = (_, message) => {
@@ -221,6 +238,11 @@ test("the admitted fake Antigravity delegates attested permissions on launch, re
         .filter(call => call.method === "permission_response");
       assert.equal(responses.at(-1)?.outcome?.outcome, "selected");
     }
+    assert.equal(await manager.start(h.startSpec()), false);
+    assert.equal(capabilities.length, 0, "the older control plane never reaches provider spawn");
+    assert.ok(store.readEvents(id).some(({ payload }) =>
+      payload.kind === "error" && payload.message.includes("require a current control plane")));
+    controlPlaneProtocol = PROTOCOL_VERSION;
     assert.equal(await manager.start(h.startSpec()), true,
       JSON.stringify(store.readEvents(id).map(event => event.payload)));
     await verifyPermission();

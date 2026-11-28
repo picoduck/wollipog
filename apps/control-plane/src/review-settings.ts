@@ -174,6 +174,9 @@ export class ReviewSettingsService {
 
 export class ReviewSettingsError extends Error { constructor(message: string, readonly status: number) { super(message); } }
 
+export const ANTIGRAVITY_CROSS_FAMILY_REVIEW_REQUIRED =
+  "Full Control Google Antigravity workers require a cross-family reviewer even when Settings → Reviews allows same-family reviews. Choose a different worker model or reviewer.";
+
 /** Resolve and validate the same installation in both launch preflight and review admission. */
 export function resolveConfiguredReviewer(
   runner: RunnerView | null, harness: "codex" | "claude-code", requestedModel: string | null | undefined, effort: string,
@@ -232,8 +235,10 @@ export function configuredReview(db: ControlPlaneDb, session: SessionView, runne
   if (pinned && selection && (selection.harness !== harness || selection.model !== model || selection.effort !== effort)) {
     throw new ReviewSettingsError("The requested contributor reviewer conflicts with the session's captured or owner-configured review policy. Select the configured harness, model and effort.", 409);
   }
-  const allowSameFamily = rule?.harness === harness && rule.allowSameFamily;
+  const requiresCrossFamily = session.driver === "acp" && db.antigravityFullControlRoot(session.id) !== null;
+  const allowSameFamily = !requiresCrossFamily && rule?.harness === harness && rule.allowSameFamily;
   if (!allowSameFamily && sameReviewFamily(session.driver, session.model, harness, model)) {
+    if (requiresCrossFamily) throw new ReviewSettingsError(ANTIGRAVITY_CROSS_FAMILY_REVIEW_REQUIRED, 409);
     throw new ReviewSettingsError(`The configured ${harness} reviewer (${model}) belongs to the implementer's model family. Select this reviewer harness and explicitly allow same-family reviews in Settings → Reviews, or choose another reviewer.`, 409);
   }
   return { harness, configuration: { ...(model ? { model } : {}), effort,
