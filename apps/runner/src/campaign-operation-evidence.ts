@@ -1,6 +1,6 @@
 import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
-import { campaignCodeOperationTargets, type ApprovalContext } from "@wollipog/protocol";
+import { antigravityFileOperationKind, campaignCodeOperationTargets, type ApprovalContext } from "@wollipog/protocol";
 
 /** A `..` segment is resolved by the kernel after the symlinks before it, so lexically collapsing
  * it would attest a different file than the provider opens (#2940). Such paths are never evidence. */
@@ -84,8 +84,9 @@ export function runnerCredentialRoots(input: {
   credentialHomes?: ReadonlyArray<string | undefined>;
 }): CampaignCredentialRoots {
   // An agent with no configured home uses the person's own provider homes, so those are always in.
+  const providerDirectories = [".claude", ".codex", ".gemini", ".pi"];
   const roots = [input.dataDir, input.profileRoot, ...input.providerAccountDirectories,
-    ...[".claude", ".claude.json", ".codex", ".pi"].map((name) => join(input.userHome, name)),
+    ...[...providerDirectories, ".claude.json"].map((name) => join(input.userHome, name)),
     ...(input.credentialHomes ?? []).filter((home): home is string => typeof home === "string" && isAbsolute(home))];
   for (const env of input.agentEnvs) {
     const value = (key: string) => typeof env?.[key] === "string" && isAbsolute(env[key] as string) ? env[key] as string : undefined;
@@ -93,7 +94,7 @@ export function runnerCredentialRoots(input: {
     const home = value("HOME");
     if (!home) continue;
     const shared = within(input.userHome, home) || input.workspacePaths.some((path) => within(path, home));
-    roots.push(...(shared ? [".claude", ".codex", ".pi"].map((name) => join(home, name)) : [home]));
+    roots.push(...(shared ? providerDirectories.map((name) => join(home, name)) : [home]));
   }
   return { roots, except: [input.worktreeRoot] };
 }
@@ -162,7 +163,8 @@ function operationEvidence(toolName: string, operation: NonNullable<ApprovalCont
   }
   if (selectors.cwd && !cwd) return concrete;
   const targets: Array<{ path: string; resolvedPath: string; identity: string; credentialStore?: true }> = [];
-  const allowMissing = concrete.kind === "file" && ["Write", "Edit", "MultiEdit", "applyPatch", "fileChange"].includes(toolName);
+  const allowMissing = concrete.kind === "file" && (antigravityFileOperationKind(toolName) === "edit" ||
+    ["Write", "Edit", "MultiEdit", "applyPatch", "fileChange"].includes(toolName));
   for (const path of selectors.paths) {
     // Never normalize lexically: `jump/..` must reach the kernel's resolution, so it is refused here.
     if (hasParentSegment(path)) return concrete;

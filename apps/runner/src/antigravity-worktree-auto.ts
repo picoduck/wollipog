@@ -1,6 +1,8 @@
 import { lstatSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { parse } from "shell-quote";
+import type { ApprovalContext } from "@wollipog/protocol";
+import { antigravityToolOperation, antigravityToolRecord } from "./antigravity-tool-operation.js";
 
 export const ANTIGRAVITY_WORKTREE_AUTO_NOTICE =
   "Google Antigravity’s terminal sandbox could not start inside this managed worktree. " +
@@ -12,10 +14,6 @@ export const ANTIGRAVITY_WORKTREE_AUTO_NOTICE =
 const WORD = "[A-Za-z0-9_./:=+%@,^-]+|'[^'\\\\`$!\\x00-\\x1f]*'|\"[^\"\\\\`$!\\x00-\\x1f]*\"";
 const SINGLE_COMMAND = new RegExp(`^(?:${WORD})(?:[ \\t]+(?:${WORD}))*$`, "u");
 const REVISION = /^[A-Za-z0-9_][A-Za-z0-9_./^@-]*$/u;
-
-function record(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function withinWorktree(root: string, cwd: string, value: unknown, allowMissing = false): boolean {
   if (typeof value !== "string" || !value || value.length > 4096 || /[:*?\[\]\\\x00-\x1f]/u.test(value) ||
@@ -113,15 +111,11 @@ function pathOperands(args: string[], flags: string[], valid: (path: string) => 
   return true;
 }
 
-function commandAllowed(root: string, raw: Record<string, unknown>): boolean {
-  const { CommandLine: command, Cwd: cwd = root } = raw;
+function commandAllowed(root: string, { input: command, cwd = root }: Extract<ApprovalContext["operation"], { kind: "command" }>): boolean {
   if (typeof cwd !== "string" || !isAbsolute(cwd) || !withinWorktree(root, root, cwd) ||
       typeof command !== "string" || command.length > 8192 || /[\x00-\x08\x0a-\x1f]/u.test(command)) return false;
   const source = command.replace(/^[ \t]+|(?<=[^ \t])[ \t]+$/gu, "");
   if (!SINGLE_COMMAND.test(source)) return false;
-  if (Object.keys(raw).some((key) => !["CommandLine", "Cwd", "WaitMsBeforeAsync", "toolSummary", "SafeToAutoRun"].includes(key))) {
-    return false;
-  }
   const words = parse(source);
   if (!words.every((word): word is string => typeof word === "string")) return false;
   const [binary, ...args] = words;
@@ -133,26 +127,13 @@ function commandAllowed(root: string, raw: Record<string, unknown>): boolean {
   }) ?? false;
 }
 
-const READ_TOOLS = new Set(["read_file", "view_file"]);
-const EDIT_TOOLS = new Set(["write_file", "write_to_file", "replace_file_content", "multi_replace_file_content"]);
-const FILE_TARGET_KEYS = ["TargetFile", "target_file", "file_path", "path"];
-const FILE_ARGUMENT_KEYS = new Set([
-  ...FILE_TARGET_KEYS, "toolSummary", "StartLine", "EndLine", "start_line", "end_line",
-  "content", "CodeContent", "Overwrite", "old_string", "new_string", "replace_all",
-  "TargetContent", "ReplacementContent", "ReplacementChunks", "AllowMultiple",
-]);
-
 /** Use agy's provider-specific tool name and input. The display title cannot grant authority. */
 export function antigravityWorktreeAutoAllows(root: string, tool: unknown): boolean {
-  if (!record(tool) || !record(tool.rawInput) || typeof tool.name !== "string") return false;
-  if (tool.name === "run_command") return tool.kind === "execute" && commandAllowed(root, tool.rawInput);
-  const read = READ_TOOLS.has(tool.name) && tool.kind === "read";
-  const edit = EDIT_TOOLS.has(tool.name) && tool.kind === "edit";
-  if (!read && !edit) return false;
-  const input = tool.rawInput;
-  if (Object.keys(input).some((key) => !FILE_ARGUMENT_KEYS.has(key))) return false;
-  const targets = FILE_TARGET_KEYS.map((key) => input[key]).filter((path) => path !== undefined);
-  if (targets.length !== 1 || !withinWorktree(root, root, targets[0], edit)) return false;
+  if (!antigravityToolRecord(tool)) return false;
+  const operation = antigravityToolOperation(tool);
+  if (operation?.kind === "command") return commandAllowed(root, operation);
+  const edit = tool.kind === "edit";
+  if (operation?.kind !== "file" || !withinWorktree(root, root, operation.path, edit)) return false;
   return tool.locations == null || (Array.isArray(tool.locations) &&
-    tool.locations.every((location) => record(location) && withinWorktree(root, root, location.path, edit)));
+    tool.locations.every((location) => antigravityToolRecord(location) && withinWorktree(root, root, location.path, edit)));
 }

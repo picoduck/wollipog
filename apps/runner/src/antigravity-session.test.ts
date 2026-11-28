@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 import type { AcpRuntimeCapabilities, AgentCapabilities, AgentDefinition, AntigravitySetupView, SessionConfig, SessionEventPayload } from "@wollipog/protocol";
+import { campaignContainedOperation } from "@wollipog/protocol";
 import { negotiateAcpInitialize } from "./acp-contract.js";
 import { resolveAcpSessionContext } from "./acp-session-context.js";
 import {
@@ -31,6 +32,7 @@ import { AntigravitySetupSupervisor, antigravityCredentialContext } from "./anti
 import { AcpDriver } from "./drivers/acp-driver.js";
 import type { DriverOptions } from "./drivers/driver.js";
 import { spawnAgent } from "./spawn.js";
+import { campaignOperationEvidence } from "./campaign-operation-evidence.js";
 
 // Google's CLI is the credential-free fixture fixtures/antigravity/fake-agy.mjs, which models the
 // ACP behavior observed from real agy 1.5.14 (see DRIVERS.md §4.3).
@@ -147,6 +149,14 @@ test("generic ACP sessions neither advertise nor handle elicitation", { timeout:
     assert.equal(await driver.prompt("Ask fixture question url"), "end_turn");
     assert.equal(calls().find(({ method }) => method === "elicitation_response")?.error?.code, -32601);
     assert.ok(!events.some(({ kind }) => kind === "question_request"));
+    const turn = driver.prompt(`Fixture permission ${JSON.stringify({
+      name: "read_file", kind: "read", input: { path: join(root, "source.ts") },
+    })}`);
+    const request = await waitFor(() => events.find((event) => event.kind === "permission_request"));
+    assert.equal(request.requestSource, undefined);
+    assert.equal(request.context, undefined);
+    driver.resolvePermission(request.requestId, "deny");
+    assert.equal(await turn, "end_turn");
   } finally {
     driver.dispose();
   }
@@ -227,6 +237,7 @@ function launchDriver(
   cwd: string,
   resumeId?: string,
   overrides: { layeredEnv?: Record<string, string>; deadlines?: { handshakeMs: number; sessionMs: number }; config?: SessionConfig;
+    campaignOperationAttestation?: true;
     resolveLaunch?: AcpCompatibility["resolveLaunch"]; sessionContext?: DriverOptions["acpSessionContext"];
     fixtureIsolation?: DriverOptions["isolation"];
     appArmorFix?: (executable: string | undefined) => string | undefined; handoff?: string;
@@ -243,6 +254,7 @@ function launchDriver(
     env: { ...launch.env, ...overrides.layeredEnv },
     scrubInheritedEnv: launch.scrubInheritedEnv,
     acpCompatibility: { ...launch.acpCompatibility, ...(overrides.deadlines ? { deadlines: overrides.deadlines } : {}),
+      ...(overrides.campaignOperationAttestation ? { campaignOperationAttestation: true as const } : {}),
       ...(overrides.resolveLaunch ? { resolveLaunch: overrides.resolveLaunch } : {}) },
     cwd,
     config: overrides.config ?? {},
@@ -514,6 +526,8 @@ test("a denied command never runs, an allowed one does, and Stop settles a pendi
   assert.equal(calls().find((call) => call.method === "session/prompt")?.activeMode, "auto");
   assert.equal(calls().find((call) => call.method === "initialize")?.fullPermissions, false);
   assert.equal(request.title, "touch fixture-command-ran", "the card names the command being approved");
+  assert.equal(request.requestSource, undefined, "ordinary Antigravity keeps its original governance scope");
+  assert.equal(request.context, undefined);
   assert.deepEqual(request.options.map((option) => [option.optionId, option.kind]), [["allow", "allow_once"], ["deny", "reject_once"]]);
   assert.ok(seen.events.slice(from).some((event) => event.kind === "tool_call"), "the tool call is shown before the card");
   assert.equal(driver.resolvePermission(request.requestId, "deny"), true);
@@ -541,6 +555,75 @@ test("a denied command never runs, an allowed one does, and Stop settles a pendi
   await waitFor(() => calls().some((call) => call.method === "session/prompt") ? true : undefined);
   driver.cancel();
   assert.equal(await waiting, "cancelled");
+});
+
+test("opted-in Antigravity attests only bounded effects from the ACP permission tool call", {
+  skip: process.platform === "win32", timeout: 15_000,
+}, async () => {
+  signIn();
+  const cwd = realpathSync.native(mkdtempSync(join(root, "attestation-")));
+  const inside = join(cwd, "source.ts");
+  const outside = join(root, "outside.ts");
+  const link = join(cwd, "outside-link.ts");
+  const missing = join(cwd, "new.ts");
+  writeFileSync(inside, "fixture");
+  writeFileSync(outside, "fixture");
+  symlinkSync(outside, link);
+  const { driver, seen } = launchDriver(setup({ executable: { path: agy } }), PROVIDER, cwd, undefined,
+    { campaignOperationAttestation: true });
+  await driver.initialize();
+  await driver.newSession(cwd);
+
+  async function requestPermission(name: string, kind: string, input: unknown, permissionTool?: object) {
+    const from = seen.events.length;
+    const turn = driver.prompt(`Fixture permission ${JSON.stringify({
+      name, kind, input, permissionTool, title: "Read source.ts",
+    })}`);
+    const request = await waitFor(() => seen.events.slice(from).find((event) => event.kind === "permission_request"));
+    assert.equal(request.requestSource, "provider_tool");
+    assert.equal(request.context?.toolName, name);
+    assert.equal(driver.resolvePermission(request.requestId, "deny"), true);
+    assert.equal(await turn, "end_turn");
+    return { ...request, kind: "permission" as const };
+  }
+  for (const [name, kind, input, target] of [
+    ["read_file", "read", { path: inside }, inside],
+    ["view_file", "read", { TargetFile: inside, StartLine: 1 }, inside],
+    ["write_file", "edit", { file_path: missing, content: "fixture" }, missing],
+    ["write_to_file", "edit", { TargetFile: missing, CodeContent: "fixture" }, missing],
+    ["replace_file_content", "edit", { target_file: inside, TargetContent: "fixture", ReplacementContent: "edited" }, inside],
+    ["multi_replace_file_content", "edit", { TargetFile: inside, ReplacementChunks: [] }, inside],
+  ] as const) {
+    const request = await requestPermission(name, kind, input);
+    assert.equal(request.context?.operation?.filesystem?.targets[0]?.resolvedPath, target, name);
+    assert.equal(campaignContainedOperation(request, cwd), true, name);
+  }
+  const command = { kind: "command", input: "cat source.ts", cwd } as const;
+  const run = await requestPermission("run_command", "execute", { CommandLine: command.input, Cwd: cwd });
+  assert.deepEqual(run.context?.operation, campaignOperationEvidence("Bash", command, cwd));
+  assert.equal(campaignContainedOperation(run, cwd), true);
+
+  for (const target of [outside, link]) {
+    const request = await requestPermission("read_file", "read", { path: target });
+    assert.equal(request.context?.operation?.filesystem?.targets[0]?.resolvedPath, outside);
+    assert.equal(campaignContainedOperation(request, cwd), false, target);
+  }
+  for (const [name, kind, input, permissionTool] of [
+    ["unknown_tool", "read", { path: inside }, undefined],
+    ["read_file", "read", { path: inside, TargetFile: outside }, undefined],
+    ["read_file", "read", { path: inside, destination: outside }, undefined],
+    ["read_file", "read", { path: "source.ts" }, undefined],
+    ["write_file", "read", { path: inside }, undefined],
+    ["read_file", "read", { path: inside }, { rawInput: null }],
+    ["read_file", "read", { path: inside }, { locations: [{ path: outside }] }],
+    ["run_command", "execute", { CommandLine: command.input, Cwd: 1 }, undefined],
+    ["run_command", "execute", { CommandLine: command.input, Cwd: cwd, Extra: true }, undefined],
+  ] as const) {
+    const request = await requestPermission(name, kind, input, permissionTool);
+    assert.equal(request.context?.operation, undefined, name);
+  }
+  const absentCwd = await requestPermission("run_command", "execute", { CommandLine: `cat ${inside}` });
+  assert.equal(absentCwd.context?.operation?.filesystem, undefined);
 });
 
 test("Antigravity tool IDs deduplicate updates within a conversation and differ across conversations", async () => {

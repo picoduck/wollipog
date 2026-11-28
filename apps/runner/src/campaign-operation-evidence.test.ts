@@ -6,7 +6,36 @@ import { execFileSync, spawnSync } from "@wollipog/test-support/bounded-child-pr
 import { campaignCodeOperationTargets } from "@wollipog/protocol";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
-import { campaignOperationEvidence, campaignOperationEvidenceCurrent, mountPointsWithin } from "./campaign-operation-evidence.js";
+import {
+  campaignOperationEvidence, campaignOperationEvidenceCurrent, mountPointsWithin, runnerCredentialRoots, setCampaignCredentialRoots,
+} from "./campaign-operation-evidence.js";
+
+test("Antigravity credential roots cover user and configured shared homes, including aliases", {
+  skip: process.platform === "win32",
+}, () => {
+  const root = mkdtempSync(join(tmpdir(), "campaign-antigravity-credentials-"));
+  try {
+    const userHome = join(root, "user");
+    const sharedHome = join(root, "shared");
+    const state = join(root, "mapped-state");
+    mkdirSync(userHome);
+    mkdirSync(state);
+    symlinkSync(state, join(userHome, ".gemini"), "dir");
+    writeFileSync(join(state, "state.json"), "fixture");
+    const roots = runnerCredentialRoots({
+      dataDir: join(root, "data"), worktreeRoot: join(root, "worktrees"), profileRoot: join(root, "profiles"),
+      providerAccountDirectories: [], userHome, agentEnvs: [{ HOME: sharedHome }], workspacePaths: [join(sharedHome, "repo")],
+    });
+    assert.ok(roots.roots.includes(join(userHome, ".gemini")));
+    assert.ok(roots.roots.includes(join(sharedHome, ".gemini")));
+    setCampaignCredentialRoots(() => roots);
+    const operation = campaignOperationEvidence("read_file", { kind: "file", path: join(state, "state.json") }, root);
+    assert.equal(operation.filesystem?.targets[0]?.credentialStore, true);
+  } finally {
+    setCampaignCredentialRoots(() => ({ roots: [], except: [] }));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("worktree containment is attested only when every canonical target and the cwd lie inside the session root (#2940)", () => {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "campaign-containment-")));

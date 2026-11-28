@@ -191,7 +191,7 @@ if (args[0] === "acp" && args[1] === "--login") {
     } };
     if (fullPermissions) return turn.permission.settle({ outcome: "selected", optionId: "allow" });
     send({ id: permissionId, method: "session/request_permission", params: { sessionId, toolCall: {
-      sessionUpdate: "tool_call", ...tool, status: "pending" },
+      sessionUpdate: "tool_call", ...tool, status: "pending", ...fixture?.permissionTool },
       options: [{ optionId: "allow", name: "Allow", kind: modes.has("allow_always_only") ? "allow_always" : "allow_once" },
         { optionId: "deny", name: "Deny", kind: "reject_once" }] } });
   };
@@ -371,6 +371,12 @@ if (args[0] === "acp" && args[1] === "--login") {
       }
       const elicitation = /ask fixture question (form|unsupported|url|foreign)/iu.exec(text);
       if (elicitation) return askQuestion(sessionId, elicitation[1]);
+      if (text.startsWith("Fixture permission ")) {
+        const fixture = JSON.parse(text.slice("Fixture permission ".length));
+        return runCommand(sessionId, sessionCwds.get(sessionId) ?? process.cwd(), {
+          ...fixture, run: () => ({ status: 0, output: "Fixture permission allowed" }),
+        });
+      }
       if (/run (a |the )?command/iu.test(text)) return runCommand(sessionId, sessionCwds.get(sessionId) ?? process.cwd());
       if (/wait/iu.test(text)) return; // Ends only on session/cancel.
       if (/client write/iu.test(text)) {

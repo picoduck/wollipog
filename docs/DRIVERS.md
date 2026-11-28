@@ -1795,8 +1795,11 @@ setup (§4.2), and `apps/runner/src/acp-compatibility.ts` holds the only agent-s
   no sandbox and no launch flag, so it can be chosen at creation or switched in or out between
   turns, and every launch stays under the same runner isolation. agy's own file edits are agent-owned
   tools: in `default` mode real agy wrote a file without asking, so edits are not approval-gated by
-  Wollipog, which does not claim otherwise. No ACP approval context is synthesized from agy's tool
-  input, because governance policies match on that context.
+  Wollipog, which does not claim otherwise. Ordinary Antigravity sessions keep their original ACP
+  approval envelope and governance matching. The runner can opt a profiled launch into campaign
+  operation attestation using the permission's correlated tool call name and raw input. This
+  evidence uses the existing worktree containment contract. Full Control still refuses ACP
+  launches until its admission check can require the complete Antigravity contract.
 
 Tested with agy 1.5.14 on Linux (2026-11-21), signed in with the runner user's own Google sign-in,
 from a bwrap session whose HOME was read-only, through the runner's own code

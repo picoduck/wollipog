@@ -272,6 +272,7 @@ const credentialLiteral = /\b(?:sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9]{12,}|githu
 // Credential stores by path segment, matched against lexical and runner-resolved targets.
 const protectedPath = new RegExp(String.raw`(?:^|[\\/\s"'=:])(?:` + [
   String.raw`\.env[^\\/\s"']*`, String.raw`\.ssh`, String.raw`\.aws`, String.raw`\.azure`, String.raw`\.codex`, String.raw`\.claude`,
+  String.raw`\.gemini`,
   String.raw`\.netrc`, String.raw`\.npmrc`, String.raw`\.pypirc`, String.raw`\.pgpass`, String.raw`\.git-credentials`, String.raw`\.docker`,
   String.raw`\.kube`, String.raw`\.gnupg`, String.raw`\.password-store`,
   String.raw`\.config[\\/](?:gh|hub|gcloud|op|github-copilot|containers[\\/]auth\.json)`,
@@ -324,16 +325,35 @@ export function campaignContainedOperation(request: PendingApproval, repositoryR
   return resolved.every(inside) && (evidence!.cwd === undefined || inside(evidence!.cwd));
 }
 
+/** Antigravity's native single-file tool selectors. */
+export function antigravityFileOperationKind(toolName: string | undefined): "read" | "edit" | undefined {
+  switch (toolName) {
+    case "read_file":
+    case "view_file":
+      return "read";
+    case "write_file":
+    case "write_to_file":
+    case "replace_file_content":
+    case "multi_replace_file_content":
+      return "edit";
+    default:
+      return undefined;
+  }
+}
+
 /** Exact finite operation selectors shared by the runner's evidence collector and resolver.
  * This parses effects, never authorization; unresolved filesystem targets still fail closed. */
 export function campaignCodeOperationTargets(toolName: string | undefined, operation: ApprovalContext["operation"]): { cwd?: string; paths: string[] } | null {
-  if (["Read", "Edit", "Write", "MultiEdit", "applyPatch", "fileChange"].includes(toolName ?? "")) {
+  if (antigravityFileOperationKind(toolName) || ["Read", "Edit", "Write", "MultiEdit", "applyPatch", "fileChange"].includes(toolName ?? "")) {
     return operation?.kind === "file" && typeof operation.path === "string" && operation.path.length <= 1024 ? { paths: [operation.path] } : null;
   }
-  if (!["Bash", "commandExecution"].includes(toolName ?? "") || operation?.kind !== "command") return null;
+  if (!["Bash", "commandExecution", "run_command"].includes(toolName ?? "") || operation?.kind !== "command") return null;
   const command = operation.input;
   if (typeof command !== "string" || !command || command.length > 2000 ||
       (operation.cwd !== undefined && typeof operation.cwd !== "string") || /[\n\r$`;&|<>()[\]{}'"\\*?~#!]/u.test(command)) return null;
+  // Only spaces and tabs delimit agy's literal shell words. Refuse other whitespace before
+  // applying the shared bounded-command selector.
+  if (toolName === "run_command" && (!operation.cwd || /[^\S \t]|[\x00-\x08\x0e-\x1f\x7f]/u.test(command))) return null;
   const words = command.trim().split(/\s+/u);
   if (words.length > 32) return null;
   // Git inspection can execute repository-configured helpers (including clean filters even

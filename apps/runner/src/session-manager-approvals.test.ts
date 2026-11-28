@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync, unlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -227,6 +227,43 @@ test("a delegated approval cancels when its canonical source target changes whil
     assert.deepEqual(received, [null], "changed target receives cancellation, never the delegated grant");
     assert.equal((eventsOf(h.sent, "permission_resolved").at(-1) as { payload: { optionId: string | null } }).payload.optionId, null);
   } finally { h.cleanup(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("parked ACP approvals cannot reuse Antigravity evidence after a symlink swap or request displacement", {
+  skip: process.platform === "win32",
+}, () => {
+  const h = makeHarness(true);
+  const directory = mkdtempSync(join(tmpdir(), "campaign-parked-antigravity-"));
+  try {
+    const root = join(directory, "worktree");
+    mkdirSync(root);
+    const source = join(root, "source.ts"), outside = join(directory, "outside.ts");
+    writeFileSync(source, "fixture"); writeFileSync(outside, "fixture outside");
+    const context = { toolName: "read_file", operation: campaignOperationEvidence("read_file", { kind: "file", path: source }, root) };
+    assert.ok(context.operation.filesystem?.containment);
+    const client = (h.sm as any).active.get("s_perm").client;
+    const received: Array<string | null> = [];
+    client.requiresCurrentDelegatedPermission = true;
+    client.resolvePermission = (_id: string, option: string | null) => { received.push(option); return true; };
+    const emit = (requestId: string) => (h.sm as any).emitEvent("s_perm", {
+      kind: "permission_request", requestId, title: "Inspect Source", requestSource: "provider_tool", context,
+      options: [{ optionId: "allow", name: "Allow Once", kind: "allow_once" }],
+    });
+    emit("current");
+    h.sm.resolvePermission("s_perm", "current", "allow", "parent-session");
+    emit("swapped");
+    unlinkSync(source); symlinkSync(outside, source);
+    h.sm.resolvePermission("s_perm", "swapped", "allow", "parent-session");
+    unlinkSync(source); writeFileSync(source, "fixture");
+    context.operation = campaignOperationEvidence("read_file", { kind: "file", path: source }, root);
+    emit("displaced");
+    emit("latest");
+    h.sm.resolvePermission("s_perm", "displaced", "allow", "parent-session");
+    assert.deepEqual(received, ["allow", null, null]);
+  } finally {
+    h.cleanup();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("a permission's resolution records who settled that exact occurrence, and only that (#2628)", () => {

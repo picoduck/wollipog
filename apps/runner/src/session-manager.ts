@@ -21316,8 +21316,9 @@ export class SessionManager {
     const entry = this.active.get(sessionId);
     const pending = resolvedByParentSessionId ? pendingRequests(this.store.readMeta(sessionId)?.pendingApproval)
       .find((request) => request.requestId === requestId) : undefined;
-    if (pending?.context?.operation && pending.context.toolName &&
-        !campaignOperationEvidenceCurrent(pending.context.toolName, pending.context.operation)) {
+    if ((resolvedByParentSessionId && !pending && entry?.client.requiresCurrentDelegatedPermission) ||
+        (pending?.context?.operation && pending.context.toolName &&
+          !campaignOperationEvidenceCurrent(pending.context.toolName, pending.context.operation))) {
       optionId = null;
       this.log(JSON.stringify({ event: "campaign_operation_evidence_stale", sessionId, requestId }));
     }

@@ -106,6 +106,29 @@ const unresolved = (result: ReturnType<typeof evaluate>, requestClass: string | 
   assert.equal(result.requestClass, requestClass, label);
   assert.ok(!FULL_CONTROL_DECLINED_CLASSES.has(result.requestClass as never), label);
 };
+
+test("Antigravity commands use the Bash authority classes", () => {
+  for (const input of ["cat src/implementation.ts", "cat src/implementation.ts && pwd", "node script.js", "git status"]) {
+    const operation = { ...tool.context!.operation!, input };
+    const request = (toolName: string) => ({ ...tool, context: { toolName, operation } });
+    const result = evaluate(request("run_command"));
+    assert.deepEqual(result, evaluate(request("Bash")), input);
+    if (input.startsWith("git")) unresolved(result, "git_execution_without_bounded_effect_proof");
+    else if (input !== "cat src/implementation.ts") unresolved(result, "script_execution_without_bounded_effect_proof");
+    else assert.equal(result.reason, "authorized_operation");
+  }
+  unresolved(evaluate({ ...tool, context: { toolName: "unknown_tool" } }), "unverified_tool_effects");
+});
+
+test("Gemini and Antigravity provider paths are protected even inside the worktree", () => {
+  for (const path of ["/repo/.gemini/antigravity-cli/state.json", "/repo/.gemini/other-provider/state.json"]) {
+    const request: PendingApproval = { ...tool, context: { toolName: "view_file", operation: {
+      kind: "file", path, filesystem: { containment, targets: [{ path, resolvedPath: path }] },
+    } } };
+    declined(evaluate(request), "secrets_and_sign_in");
+    assert.equal(credentialFormFloor({ question: `Read ${path}`, options: [] }), true);
+  }
+});
 const decided = (result: ReturnType<typeof evaluate>, requestClass: string | undefined, basis = "campaign_delegation", label = String(requestClass)) => {
   assert.equal(result.owner, "orchestrator", label);
   assert.equal(result.basis, basis, label);
