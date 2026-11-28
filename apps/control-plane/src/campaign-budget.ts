@@ -229,6 +229,11 @@ export class CampaignBudgetLedger {
           WHERE s.live_settling=0 AND s.live_unpriced_records>0)`).run(rootId ?? null, rootId ?? null);
   }
 
+  /** An admitted worker has no verified monetary meter, even when it reports no token records. */
+  markCostUnpriced(rootId: string): void {
+    this.sql.prepare("UPDATE campaign_budgets SET cost_unpriced=1 WHERE root_id=?").run(rootId);
+  }
+
   private atomic<T>(work: () => T): T {
     this.sql.exec("SAVEPOINT campaign_budget_write");
     try { const result = work(); this.sql.exec("RELEASE campaign_budget_write"); return result; }

@@ -10820,11 +10820,16 @@ export class SessionManager {
       // session with a new generation (and even a different provider) during that window; the old
       // continuation must not patch or publish its stale launch-local metadata.
       if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
-      if (launchPreparation?.launchRefusal) {
+      const budgetRefusal = meta.driver === "acp" && meta.campaignBudgetDispatch &&
+        (launchPreparation?.acpCompatibility?.profile !== "antigravity" || (meta.config.costBudgetUsd ?? 0) > 0)
+        ? "Campaign limits require the verified Google Antigravity profile and cannot enforce an Antigravity cost allowance."
+        : undefined;
+      const launchRefusal = launchPreparation?.launchRefusal ?? budgetRefusal;
+      if (launchRefusal) {
         // Nothing may be spawned (#4779): fail the launch with the runner's sentence, as a failed
         // provider start would, before any isolation or provider process is set up.
-        this.emitEvent(sessionId, { kind: "error", message: `agent init failed: ${launchPreparation.launchRefusal}` });
-        failLaunch(launchPreparation.launchRefusal);
+        this.emitEvent(sessionId, { kind: "error", message: `agent init failed: ${launchRefusal}` });
+        failLaunch(launchRefusal);
         return false;
       }
       // agy fixes a conversation's working directory when it creates it: a resume in another folder
@@ -23761,14 +23766,16 @@ export class SessionManager {
         !bounded(raw.actionProviderTurnId, 512))) {
       return fail(occurrenceId, "reconciliation runner fence is invalid");
     }
-    const claudeMeta = this.store.readMeta(sessionId);
-    if (claudeMeta?.driver === "claude-code") {
-      // Claude Code exposes no correlated command receipt: in auto or Full Access mode the enqueue
-      // runs without a permission prompt. The forge's merged head is the proof, and it does not
-      // need a live provider, so a stopped child can still settle its armed approval.
-      if (hasRunnerFence) return fail(occurrenceId, "Claude Code reconciliation has no runner fence");
+    const meta = this.store.readMeta(sessionId);
+    const antigravity = meta?.driver === "acp" && meta.agentId === ANTIGRAVITY_AGENT_ID &&
+      meta.context.kind === "native" && (!meta.executionTarget || meta.executionTarget.adapter === "host") &&
+      !this.configuredAgentIds.has(ANTIGRAVITY_AGENT_ID);
+    if (meta && (meta.driver === "claude-code" || antigravity)) {
+      // These paths can enqueue without a correlated command receipt. The forge read uses
+      // persisted session metadata, so a stopped child can still settle its armed approval.
+      if (hasRunnerFence) return fail(occurrenceId, `${antigravity ? "Google Antigravity" : "Claude Code"} reconciliation has no runner fence`);
       const pullRequestUrl = raw.pullRequestUrl as string;
-      const roots = [...new Set([claudeMeta.worktreePath, claudeMeta.repoPath].filter(
+      const roots = [...new Set([meta.worktreePath, meta.repoPath].filter(
         (root): root is string => typeof root === "string" && root.length > 0,
       ))];
       let forge: Awaited<ReturnType<typeof worktreePullRequestState>> = null;
@@ -23777,7 +23784,7 @@ export class SessionManager {
         forge = await this.resolveWorktreePullRequestState(
           root,
           pullRequestUrl,
-          forgeProofOptions(claudeMeta, pullRequestUrl, options.agentEnv),
+          forgeProofOptions(meta, pullRequestUrl, options.agentEnv),
         );
         if (forge) break;
       }
@@ -23808,7 +23815,6 @@ export class SessionManager {
         return fail(occurrenceId, "reconciliation runner fence is stale or mismatched");
       }
     }
-    const meta = this.store.readMeta(sessionId);
     const active = this.active.get(sessionId);
     if (!meta || meta.driver !== "codex-app-server" || !active ||
         !active.client.reconcileCompletedCommand) {

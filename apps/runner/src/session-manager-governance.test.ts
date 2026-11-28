@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PROTOCOL_VERSION, type RunnerToControlPlane, type SessionConfig } from "@wollipog/protocol";
+import { ANTIGRAVITY_AGENT_ID, PROTOCOL_VERSION, type RunnerToControlPlane, type SessionConfig } from "@wollipog/protocol";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { claudeProjectPathKey } from "./claude-background-work.js";
@@ -613,57 +613,73 @@ test("retroactive action reconciliation fails closed without each independent pr
   }
 });
 
-test("Claude Code reconciliation proves the merge from the forge alone, even after the session ended", async () => {
-  const h = harness({});
-  try {
-    (h.sm as any).active.delete("s_governance");
-    const meta = h.store.readMeta("s_governance")!;
-    (h.store as any).writeMeta({ ...meta, worktreePath: "/reclaimed-worktree" });
-    const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1351 --squash --match-head-commit ${"a".repeat(40)}`;
-    const request = {
-      occurrenceId: "workflow-claude",
-      command,
-      commandDigest: "b".repeat(64),
-      pullRequestUrl: "https://github.com/picoduck/wollipog/pull/1351",
-      expectedHeadSha: "a".repeat(40),
-    };
-    const reads: string[] = [];
-    let forge: { state: string; headOid: string } | null = { state: "merged", headOid: "A".repeat(40) };
-    (h.sm as any).resolveWorktreePullRequestState = async (path: string, url: string) => {
-      assert.equal(url, request.pullRequestUrl);
-      reads.push(path);
-      return path === "/reclaimed-worktree" ? null : forge;
-    };
-    assert.deepEqual(await h.sm.reconcileWorkflowAction("s_governance", request), {
-      accepted: true,
-      occurrenceId: "workflow-claude",
-      commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
-      forgeHeadSha: "a".repeat(40),
-    });
-    assert.deepEqual(reads, ["/reclaimed-worktree", "/repo"], "a reclaimed worktree falls back to the repository");
+for (const harnessName of ["Claude Code", "Google Antigravity"]) {
+  test(`${harnessName} reconciliation proves the merge from the forge alone, even after the session ended`, async () => {
+    const h = harness({});
+    try {
+      (h.sm as any).active.delete("s_governance");
+      const meta = h.store.readMeta("s_governance")!;
+      const stopped: SessionMeta = {
+        ...meta, status: "stopped", worktreePath: "/reclaimed-worktree",
+        ...(harnessName === "Google Antigravity" ? { driver: "acp", agentId: ANTIGRAVITY_AGENT_ID } : {}),
+      };
+      h.store.patchMeta(stopped.sessionId, stopped);
+      const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1351 --squash --match-head-commit ${"a".repeat(40)}`;
+      const request = {
+        occurrenceId: "workflow-forge",
+        command,
+        commandDigest: "b".repeat(64),
+        pullRequestUrl: "https://github.com/picoduck/wollipog/pull/1351",
+        expectedHeadSha: "a".repeat(40),
+      };
+      const reads: string[] = [];
+      let forge: { state: string; headOid: string } | null = { state: "merged", headOid: "A".repeat(40) };
+      (h.sm as any).resolveWorktreePullRequestState = async (path: string, url: string) => {
+        assert.equal(url, request.pullRequestUrl);
+        reads.push(path);
+        return path === "/reclaimed-worktree" ? null : forge;
+      };
+      assert.deepEqual(await h.sm.reconcileWorkflowAction("s_governance", request), {
+        accepted: true,
+        occurrenceId: "workflow-forge",
+        commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+        forgeHeadSha: "a".repeat(40),
+      });
+      assert.deepEqual(reads, ["/reclaimed-worktree", "/repo"], "a reclaimed worktree falls back to the repository");
 
-    for (const unproven of [
-      { state: "open", headOid: "a".repeat(40) },
-      { state: "merged", headOid: "f".repeat(40) },
-      null,
-    ]) {
-      forge = unproven;
-      assert.equal((await h.sm.reconcileWorkflowAction("s_governance", request)).accepted, false,
-        `${JSON.stringify(unproven)} is not proof of the approved merge`);
+      for (const unproven of [
+        { state: "open", headOid: "a".repeat(40) },
+        { state: "merged", headOid: "f".repeat(40) },
+        null,
+      ]) {
+        forge = unproven;
+        assert.equal((await h.sm.reconcileWorkflowAction("s_governance", request)).accepted, false,
+          `${JSON.stringify(unproven)} is not proof of the approved merge`);
+      }
+      forge = { state: "merged", headOid: "a".repeat(40) };
+      const fenced = await h.sm.reconcileWorkflowAction("s_governance", {
+        ...request,
+        armedAfterEventSeq: 1,
+        runnerHistoryEpoch: 0,
+        actionProviderThreadId: "thread",
+        actionProviderTurnId: "turn",
+      });
+      assert.equal(fenced.accepted, false, "an App Server fence never applies to forge-only reconciliation");
+
+      if (harnessName === "Google Antigravity") {
+        const readsBefore = reads.length;
+        h.store.patchMeta(stopped.sessionId, { agentId: "generic-acp" });
+        assert.equal((await h.sm.reconcileWorkflowAction("s_governance", request)).accepted, false);
+        h.store.patchMeta(stopped.sessionId, { agentId: ANTIGRAVITY_AGENT_ID });
+        h.sm.setConfiguredAgentIds([ANTIGRAVITY_AGENT_ID]);
+        assert.equal((await h.sm.reconcileWorkflowAction("s_governance", request)).accepted, false);
+        assert.equal(reads.length, readsBefore, "generic ACP and an operator override never get forge-only proof");
+      }
+    } finally {
+      h.cleanup();
     }
-    forge = { state: "merged", headOid: "a".repeat(40) };
-    const fenced = await h.sm.reconcileWorkflowAction("s_governance", {
-      ...request,
-      armedAfterEventSeq: 1,
-      runnerHistoryEpoch: 0,
-      actionProviderThreadId: "thread",
-      actionProviderTurnId: "turn",
-    });
-    assert.equal(fenced.accepted, false, "an App Server fence never applies to a Claude Code session");
-  } finally {
-    h.cleanup();
-  }
-});
+  });
+}
 
 test("retroactive action reconciliation requires the original App Server thread after restart", async () => {
   const h = harness({}, true);

@@ -63,7 +63,7 @@ import { campaignBoundaryRepositoryAt, campaignLocationRepository, campaignRepos
 import { genericRequestScreenData, storedCredentialScreenFact } from "./credential-screen.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
 import { grantReviewMaxIssues, ownerReviewMaxIssues, proposalMaxIssues, scopeApprovalMaxIssuesIncrease, scopeDerivedFollowUpLimit } from "./scope-grant.js";
-import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
+import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, normalizeCostCheckpoints, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignBudgetAuthority, validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation, type CampaignBudgetAuthority } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
 import { ANTIGRAVITY_AGENT_ID, antigravityCliVersionSupportsUsage, type SubscriptionUsageProvider } from "@wollipog/protocol";
@@ -6182,9 +6182,35 @@ export class ControlPlaneDb {
   }
 
   campaignBudgetAccountingError(driver: string, model?: string | null, costProtected = false): string | null {
+    if (driver === "acp") return "Campaign limits cannot admit this ACP worker without verified usage accounting.";
     if (!["claude-code", "codex-app-server"].includes(driver)) return "Campaign limits require metered managed workers; native TUI and external reviewer processes are unsupported.";
     if (costProtected && (!this.usageRateTable || !model || !lookupRate(this.usageRateTable, model))) {
       return "Campaign cost accounting is unavailable or unpriced for this model; protected admission is refused.";
+    }
+    return null;
+  }
+
+  /** Only runner-discovered native Antigravity children publish the scoped ACP tool events. A
+   * configured agent using the same ID does not run with the Antigravity profile. */
+  campaignChildBudgetAccountingError(
+    worker: Pick<NewSessionInput, "driver" | "agentId" | "runnerId" | "executionTarget">,
+    config: Pick<SessionConfig, "model" | "costBudgetUsd" | "costCheckpointsUsd">,
+    costProtected: boolean,
+  ): string | null {
+    if (worker.driver !== "acp" || worker.agentId !== ANTIGRAVITY_AGENT_ID) {
+      return this.campaignBudgetAccountingError(worker.driver, config.model, costProtected);
+    }
+    if (costProtected || (config.costBudgetUsd ?? 0) > 0 || normalizeCostCheckpoints(config.costCheckpointsUsd)) {
+      return "Google Antigravity cannot run under a cost allowance because its ACP usage cannot be reliably priced.";
+    }
+    const runner = this.getRunner(worker.runnerId);
+    const agent = runner?.agents.find((entry) => entry.id === worker.agentId);
+    if (!agent || agent.source !== "discovered" || agent.driver !== "acp" ||
+        agent.context?.kind !== "native" || (worker.executionTarget && worker.executionTarget.adapter !== "host")) {
+      return "Campaign limits require the runner-discovered native Google Antigravity installation.";
+    }
+    if (!runnerSupportsProtocol(runner?.protocolVersion, "antigravityCampaignToolAccounting")) {
+      return "Google Antigravity campaign limits require a runner with Antigravity tool-call accounting support.";
     }
     return null;
   }
@@ -19628,7 +19654,9 @@ export class ControlPlaneDb {
     const userLimits = input.campaignBudgetUserLimits ?? { costUsd: input.config.costBudgetUsd, toolCalls: input.config.maxToolCalls };
     const allocation = budgetRoot ? this.campaignBudgets.prepare(budgetRoot, input.id, { costUsd: input.config.costBudgetUsd, toolCalls: input.config.maxToolCalls }) : null;
     if (budgetView) {
-      const error = this.campaignBudgetAccountingError(input.driver, input.config.model, budgetView.authority.costUsd !== undefined);
+      const error = input.parentSessionId
+        ? this.campaignChildBudgetAccountingError(input, input.config, budgetView.authority.costUsd !== undefined)
+        : this.campaignBudgetAccountingError(input.driver, input.config.model, budgetView.authority.costUsd !== undefined);
       if (error) throw new Error(error);
       input = { ...input, config: { ...input.config,
         ...(allocation?.costUsd === undefined ? {} : { costBudgetUsd: allocation.costUsd }),
@@ -19668,6 +19696,7 @@ export class ControlPlaneDb {
     if (ownsTransaction) this.db.exec("BEGIN");
     try {
       if (budgetRoot && allocation) this.campaignBudgets.admit(budgetRoot, allocation, userLimits);
+      if (budgetRoot && input.driver === "acp") this.campaignBudgets.markCostUnpriced(budgetRoot);
       this.stmt(
          `INSERT INTO sessions
            (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, status, use_worktree, archived, creation_actor,
@@ -27082,18 +27111,20 @@ export class ControlPlaneDb {
   }
 
   /** A lifecycle cleanup may revoke an exact action admission before its delayed provider receipt
-   * is reconciled. Only the original request -> Orchestrator allow -> compatible lifecycle revoke
-   * audit sequence is recoverable; every other revoked decision remains terminal. A forge-proven
-   * merge also recovers from the stop and guardrail revocations its caller names. */
+   * is reconciled. Only the original request, exact approval and compatible lifecycle revocation
+   * audit sequence is recoverable. Antigravity forge reconciliation can also recover the original
+   * human approval in a Custom campaign. */
   isRecoverableWorkflowDecisionActionRevocation(
     sessionId: string,
     occurrenceId: string,
     revocationActors: readonly string[] = RECOVERABLE_ACTION_REVOCATION_ACTORS,
+    allowHumanApproval = false,
   ): boolean {
     const decision = this.workflowDecisionByOccurrence(occurrenceId);
     const admission = decision?.actionAdmission;
     if (!decision || decision.sessionId !== sessionId || decision.status !== "revoked" ||
-        decision.category !== "pr_merge" || decision.authority !== "orchestrator" ||
+        decision.category !== "pr_merge" ||
+        (decision.authority !== "orchestrator" && !(allowHumanApproval && decision.authority === "human")) ||
         decision.consumedAt !== undefined || !admission || admission.kind !== "pr_merge_enqueue" ||
         !Number.isSafeInteger(admission.armedAt) || admission.armedAt < 1 ||
         decision.resolvedAt === undefined) return false;
@@ -27113,12 +27144,15 @@ export class ControlPlaneDb {
     }>;
     if (rows.length !== 3) return false;
     const [requested, allowed, revoked] = rows;
+    const exactApprover = decision.authority === "orchestrator"
+      ? allowed?.actor_kind === "agent" && allowed.actor_id === decision.controllingSessionId
+      : allowed?.actor_kind === "human";
     if (!requested || !allowed || !revoked ||
         requested.stage !== "request" || requested.outcome !== "pending" ||
         requested.actor_kind !== "agent" || requested.actor_id !== decision.sessionId ||
         requested.created_at !== decision.createdAt ||
         allowed.stage !== "resolution" || allowed.outcome !== "allowed" ||
-        allowed.actor_kind !== "agent" || allowed.actor_id !== decision.controllingSessionId ||
+        !exactApprover ||
         allowed.created_at !== decision.resolvedAt ||
         revoked.stage !== "resolution" || revoked.outcome !== "revoked" ||
         revoked.actor_kind !== "system" ||
@@ -27203,7 +27237,7 @@ export class ControlPlaneDb {
     commandDigest: string,
     receiptDigest: string,
     now: number,
-    options: { forgeAttested?: boolean; externalMerge?: boolean; recoverSuperseded?: boolean } = {},
+    options: { forgeAttested?: boolean; externalMerge?: boolean; recoverSuperseded?: boolean; allowHumanLifecycleRecovery?: boolean } = {},
   ): { decision: WorkflowDecisionView; supersededOccurrenceIds: string[] } | null {
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -27217,6 +27251,7 @@ export class ControlPlaneDb {
             sessionId,
             occurrenceId,
             options.forgeAttested ? FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS : RECOVERABLE_ACTION_REVOCATION_ACTORS,
+            options.forgeAttested && options.allowHumanLifecycleRecovery,
           ))));
       const unarmedExternal = options.externalMerge === true && decision?.status === "approved" && !decision.actionAdmission;
       // A provider receipt names one session's command; a forge merge is one fact for every session.

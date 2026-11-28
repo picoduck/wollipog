@@ -1941,6 +1941,14 @@ proof; the transaction also settles the outstanding unarmed replacement. A later
 retains precedence. When a Claude Code child stops before a merge lands, the server revokes the
 grant and can retry its read for up to 24 hours, independently of the child's lifecycle.
 
+The native Google Antigravity profile can also arm the exact approved merge on a compatible
+runner (Refs #4974). For a GitHub pull request, the child can use
+`execute_workflow_decision` once the enqueue is armed. This uses the runner's pinned merge command
+and avoids a separate provider command permission request. If the decision remains armed, reconcile
+after the forge reports `MERGED` at the approved head. The proof comes from the forge. Stop or
+restart revokes the grant before the server checks the forge. The same read-only retry window
+applies whether an Orchestrator or a human approved the original merge.
+
 Protocol v166 lets the resolver tell the child why. `resolve_descendant_workflow_decision` accepts
 an optional `childMessage` of at most 2,000 characters, separate from the audit-only `rationale`.
 The rationale is still never retained. The message is: its audience is the child, so it is stored
