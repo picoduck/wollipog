@@ -97,6 +97,10 @@ export class ReviewSettingsStore {
       : { settings: structuredClone(DEFAULT_REVIEW_SETTINGS), source: "system_default" };
   }
   captureSessionPolicy(sessionId: string, userId: string | null, projectId: string | null, capture: ReviewPolicyCapture): void {
+    const policy = this.resolveSessionPolicy(userId, projectId, capture);
+    this.sql.prepare("INSERT INTO session_review_policy_snapshots(session_id,policy) VALUES (?,?)").run(sessionId, JSON.stringify(policy));
+  }
+  resolveSessionPolicy(userId: string | null, projectId: string | null, capture: ReviewPolicyCapture): SessionReviewPolicySnapshot {
     const effective = userId ? this.effective(userId, projectId) : { settings: DEFAULT_REVIEW_SETTINGS, source: "system_default" as const };
     const rule = effective.settings.reviewers.find(r => agentHarnessIdentityKey(r.implementer) === agentHarnessIdentityKey(capture.implementer));
     const fields = capture.fields;
@@ -106,7 +110,7 @@ export class ReviewSettingsStore {
     const matchingRule = rule?.harness === harness ? rule : undefined;
     const effort = fields.reviewEffort ?? matchingRule?.effort ?? "high";
     const requestedModel = fields.reviewModel ?? matchingRule?.model ?? null;
-    const policy: SessionReviewPolicySnapshot = {
+    return {
       reviewHarness: harness,
       reviewModel: requestedModel ?? (harness ? capture.resolveModel?.(harness, requestedModel, effort) : null) ?? null,
       reviewEffort: effort,
@@ -114,7 +118,6 @@ export class ReviewSettingsStore {
       configured: fixed || effective.source !== "system_default",
       source: fixed ? "campaign_policy" : effective.source,
     };
-    this.sql.prepare("INSERT INTO session_review_policy_snapshots(session_id,policy) VALUES (?,?)").run(sessionId, JSON.stringify(policy));
   }
   sessionPolicy(sessionId: string): SessionReviewPolicySnapshot | undefined {
     const row = this.sql.prepare("SELECT policy FROM session_review_policy_snapshots WHERE session_id=?").get(sessionId) as { policy: string } | undefined;
@@ -171,6 +174,39 @@ export class ReviewSettingsService {
 
 export class ReviewSettingsError extends Error { constructor(message: string, readonly status: number) { super(message); } }
 
+export const ANTIGRAVITY_CROSS_FAMILY_REVIEW_REQUIRED =
+  "Full Control Google Antigravity workers require a cross-family reviewer even when Settings → Reviews allows same-family reviews. Choose a different worker model or reviewer.";
+
+/** Resolve and validate the same installation in both launch preflight and review admission. */
+export function resolveConfiguredReviewer(
+  runner: RunnerView | null, harness: "codex" | "claude-code", requestedModel: string | null | undefined, effort: string,
+  resolveModelEffort: (config: { model?: string; effort?: string }, capabilities: AgentCapabilities | undefined,
+    driver: AgentDriverKind) => { value?: { model: string; effort: string }; error?: string },
+  snapshotted = false,
+): string {
+  if (runner?.runtime?.reviewSession?.configuration !== true) {
+    throw new ReviewSettingsError(`This machine cannot apply the configured ${harness} reviewer (${requestedModel ?? "default model"}, ${effort} effort). Update Wollipog on it before requesting a review.`, 409);
+  }
+  const reviewerId = runner.runtime.reviewSession.reviewers.find(r => r.harness === harness)?.agentId;
+  const reviewer = runner.agents.find(a => a.id === reviewerId && agentAvailableForImplicitLaunch(a));
+  if (!reviewer) {
+    const reason = runner.runtime.reviewSession.unavailable?.tools ?? runner.runtime.reviewSession.unavailable?.[harness]
+      ?? "No launch-ready native installation is advertised. Wait for discovery to finish and retry the review request.";
+    throw new ReviewSettingsError(`The configured ${harness} reviewer (${requestedModel ?? "default model"}, ${effort} effort) is unavailable on this session's machine: ${reason}`, 409);
+  }
+  // Use the same concrete-model resolution as createSession. The catalog's "default" entry is a
+  // UI placeholder, never an immutable launch model that the runner can compare with its spec.
+  const resolved = resolveModelEffort({ ...(requestedModel ? { model: requestedModel } : {}), effort }, reviewer.capabilities,
+    harness === "codex" ? "codex-app-server" : "claude-code");
+  const model = resolved.value?.model;
+  if (resolved.error || !model ||
+      requestedModel != null && !reviewModelSupported(reviewer.capabilities, requestedModel, effort) ||
+      !reviewModelSupported(reviewer.capabilities, model, effort)) {
+    throw new ReviewSettingsError(`The configured ${harness} reviewer (${requestedModel ?? "default model"}, ${effort} effort) is unavailable on this session's machine: the discovered installation does not support the requested model and effort. ${snapshotted ? "Launch a new child with an updated review policy." : "Choose a discovered model and effort in Settings → Reviews."}`, 409);
+  }
+  return model;
+}
+
 /** Null preserves the legacy launch exactly when there is no settings row. */
 export function configuredReview(db: ControlPlaneDb, session: SessionView, runner: RunnerView | null,
   resolveModelEffort: (config: { model?: string; effort?: string }, capabilities: AgentCapabilities | undefined,
@@ -195,31 +231,14 @@ export function configuredReview(db: ControlPlaneDb, session: SessionView, runne
   if (!harness) throw new ReviewSettingsError("Choose a reviewer for this implementing harness in Settings → Reviews.", 409);
   const requestedModel = selectable?.model ?? (snapshot ? snapshot.reviewModel : rule?.model);
   const effort = selectable?.effort ?? (snapshot ? snapshot.reviewEffort : rule?.effort) ?? "high";
-  if (runner?.runtime?.reviewSession?.configuration !== true) {
-    throw new ReviewSettingsError(`This machine cannot apply the configured ${harness} reviewer (${requestedModel ?? "default model"}, ${effort} effort). Update Wollipog on it before requesting a review.`, 409);
-  }
-  const reviewerId = runner.runtime.reviewSession.reviewers.find(r => r.harness === harness)?.agentId;
-  const reviewer = runner.agents.find(a => a.id === reviewerId && agentAvailableForImplicitLaunch(a));
-  if (!reviewer) {
-    const reason = runner.runtime.reviewSession.unavailable?.tools ?? runner.runtime.reviewSession.unavailable?.[harness]
-      ?? "No launch-ready native installation is advertised. Wait for discovery to finish and retry the review request.";
-    throw new ReviewSettingsError(`The configured ${harness} reviewer (${requestedModel ?? "default model"}, ${effort} effort) is unavailable on this session's machine: ${reason}`, 409);
-  }
-  // Use the same concrete-model resolution as createSession. The catalog's "default" entry is a
-  // UI placeholder, never an immutable launch model that the runner can compare with its spec.
-  const resolved = resolveModelEffort({ ...(requestedModel ? { model: requestedModel } : {}), effort }, reviewer.capabilities,
-    harness === "codex" ? "codex-app-server" : "claude-code");
-  const model = resolved.value?.model;
-  if (resolved.error || !model ||
-      requestedModel != null && !reviewModelSupported(reviewer.capabilities, requestedModel, effort) ||
-      !reviewModelSupported(reviewer.capabilities, model, effort)) {
-    throw new ReviewSettingsError(`The configured ${harness} reviewer (${requestedModel ?? "default model"}, ${effort} effort) is unavailable on this session's machine: the discovered installation does not support the requested model and effort. ${snapshot ? "Launch a new child with an updated review policy." : "Choose a discovered model and effort in Settings → Reviews."}`, 409);
-  }
+  const model = resolveConfiguredReviewer(runner, harness, requestedModel, effort, resolveModelEffort, !!snapshot);
   if (pinned && selection && (selection.harness !== harness || selection.model !== model || selection.effort !== effort)) {
     throw new ReviewSettingsError("The requested contributor reviewer conflicts with the session's captured or owner-configured review policy. Select the configured harness, model and effort.", 409);
   }
-  const allowSameFamily = rule?.harness === harness && rule.allowSameFamily;
+  const requiresCrossFamily = session.driver === "acp" && db.antigravityFullControlRoot(session.id) !== null;
+  const allowSameFamily = !requiresCrossFamily && rule?.harness === harness && rule.allowSameFamily;
   if (!allowSameFamily && sameReviewFamily(session.driver, session.model, harness, model)) {
+    if (requiresCrossFamily) throw new ReviewSettingsError(ANTIGRAVITY_CROSS_FAMILY_REVIEW_REQUIRED, 409);
     throw new ReviewSettingsError(`The configured ${harness} reviewer (${model}) belongs to the implementer's model family. Select this reviewer harness and explicitly allow same-family reviews in Settings → Reviews, or choose another reviewer.`, 409);
   }
   return { harness, configuration: { ...(model ? { model } : {}), effort,

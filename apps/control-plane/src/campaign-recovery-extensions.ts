@@ -34,7 +34,8 @@ export function recoveryExtensionContext(db: ControlPlaneDb, campaignId: string,
   const requesterScope = requester && db.sessionScope(requester.id);
   if (!requester || requesterScope?.owner.kind !== "user" || requesterScope.owner.userId !== scope.owner.userId ||
       requesterScope.organizationId !== scope.organizationId ||
-      !campaignAuthorityPreflight(control, root.driver, db.getRunner(requester.runnerId)?.protocolVersion).supported) return null;
+      !campaignAuthorityPreflight(control, requester.driver, db.getRunner(requester.runnerId)?.protocolVersion, undefined,
+        requester.driver === "acp" && db.campaignAntigravityRequester(requester.id, root.id)).supported) return null;
   const worktrees = requester.worktrees ?? [];
   const worktree = worktrees.find(tree => tree.pullRequest?.state === "open" &&
     campaignIssueForgeUrl(tree.pullRequest.url, ref.repository, "change", ref.number));

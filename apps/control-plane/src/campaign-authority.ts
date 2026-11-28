@@ -260,6 +260,7 @@ export function evaluateCampaignAuthority(
   controller: Pick<SessionView, "id" | "driver" | "orchestratorPolicy" | "parentControl" | "parentControlPolicy"> & Partial<Pick<SessionView, "runnerId" | "workspaceId">>,
   requester: Pick<SessionView, "id" | "driver"> & Partial<Pick<SessionView, "runnerId" | "workspaceId">> & {
     repositoryRoot?: string;
+    antigravityFullControlChild?: boolean;
     /** #4119: `campaignBoundaryRepositoryAt` for the requester's runner and workspace, resolved by
      * the server. Needed only away from the controller's own place; absent there means none. */
     boundaryRepository?: string | null;
@@ -297,7 +298,8 @@ export function evaluateCampaignAuthority(
     : raw;
   const evaluated = resolveCampaignAuthority({ control, parentControl: controller.parentControl ?? "off",
     decisions: policy.decisions, root: controller.id === requester.id,
-    supported: full ? campaignAuthorityPreflight(control, requester.driver, protocol, peerContracts?.requester).supported &&
+    supported: full ? campaignAuthorityPreflight(control, requester.driver, protocol, peerContracts?.requester,
+      controller.id !== requester.id && requester.antigravityFullControlChild === true).supported &&
       campaignAuthorityPreflight(control, controller.driver, controllerProtocol, peerContracts?.controller).supported : (protocol ?? 0) >= (snapshot ? 139 : 136),
     snapshot, request: pending, trustedSource: snapshot ? "workflow_route" : pending?.requestSource,
     humanRequired: pending?.humanRequired, repositoryRoot: requester.repositoryRoot,

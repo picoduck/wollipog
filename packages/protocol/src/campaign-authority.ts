@@ -783,8 +783,10 @@ function olderRunner(requirement: { error: string } & RunnerCapabilityRequiremen
   return { supported: false, reason: requirement.error, requirement };
 }
 
+/** Only a worker launch or a request from that admitted worker may supply the trusted Antigravity
+ * profile flag. Controller and root checks never pass it. */
 export function campaignAuthorityPreflight(control: CampaignControl | undefined, driver: string, protocolVersion: number | null | undefined,
-  peerContract?: unknown): CampaignAuthorityPreflight {
+  peerContract?: unknown, antigravityChild = false): CampaignAuthorityPreflight {
   if (!control || control.mode === "custom") return { supported: true };
   if (!validCampaignControl(control)) return { supported: false, reason: "Full Control requires a valid human-authorized boundary." };
   if (control.boundary.evidenceAuthority && !supportsPacedVideoReviewPeer(protocolVersion, peerContract)) {
@@ -800,7 +802,12 @@ export function campaignAuthorityPreflight(control: CampaignControl | undefined,
   if (control.boundary.budgetAuthority && !runnerSupportsProtocol(protocolVersion, "campaignBudgetAdmission")) {
     return olderRunner(runnerCapabilityRequirementError(protocolVersion, "campaignBudgetAdmission", "campaign limits"));
   }
+  if (driver === "acp" && antigravityChild) {
+    return runnerSupportsProtocol(protocolVersion, "antigravityFullControlChild") ? { supported: true }
+      : olderRunner(runnerCapabilityRequirementError(protocolVersion, "antigravityFullControlChild", "Google Antigravity full control children"));
+  }
   const authorityFloor = control.boundary.issueAuthority ? "fullControlIssueAuthority" : "fullControlAuthority";
+  if (driver === "acp") return { supported: false, reason: "Full Control supports ACP only for a runner-discovered native Google Antigravity worker. Choose that worker or use Custom." };
   if (!runnerSupportsProtocol(protocolVersion, authorityFloor) || !["codex-app-server", "claude-code"].includes(driver)) return { supported: false, reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." };
   return { supported: true };
 }

@@ -492,6 +492,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   durableAuthDismissal: 230,
   campaignBudgetAdmission: 218,
   antigravityCampaignToolAccounting: 415,
+  antigravityFullControlChild: 417,
   /** The runner attests a campaign worker's final checkpoint, and omits it from a reconnect
    * inventory, only once it has proven every provider process tree of that generation gone
    * (#3788, #4257, #4256). 307 is the first protocol on main that carries all three. An older
@@ -2782,6 +2783,8 @@ export interface OrchestratorCampaignProjection {
    * Machines uses for it, or `null` where none can run it (#3247). Pass that `agentId` to
    * `create_session`; the policy's own `childHarness.agentId` is not a row on any Machine. */
   childHarnessAgents?: OrchestratorChildHarnessAgent[];
+  /** Per-machine Full Control Antigravity dispatch advisory. Launch rechecks current discovery and settings. */
+  antigravityChildPreflight?: Array<{ runnerId: string; ready: boolean; reason: string }>;
   /** Present when the campaign fixes its Child Model or Child Effort: whether each of the owner's
    * online Machines can run children with that combination (#3248). Do not start a child on a
    * Machine marked unsupported; creation would refuse it. */
@@ -10695,6 +10698,8 @@ export interface SessionLaunchSpec {
     operatorValidation?: import("./paced-video-review.js").OperatorVideoValidationPurpose };
   /** Server-owned accounting lifecycle; never part of user session configuration. */
   campaignBudgetDispatch?: import("./campaign-budget.js").CampaignBudgetDispatch;
+  /** Server-owned v417 launch marker for a native Google Antigravity Full Control worker. */
+  antigravityFullControlChild?: true;
   artifactUploads?: ArtifactUploadPreference;
   projectMemory?: SessionProjectMemory;
   /** Protocol v334 (#4353): why the control plane chose `providerAccountId`. Never names an account. */

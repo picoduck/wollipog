@@ -3941,10 +3941,21 @@ async function readCampaignProjection(id: string, principal: AuthPrincipal, repl
   const runners = policy ? db.listRunnersForPrincipal(principal) : [];
   const agents = policy ? childHarnessAgents(policy, runners) : undefined;
   const modelMachines = policy ? childModelMachines(policy, runners) : undefined;
+  const root = campaignId ? db.getSession(campaignId) : null;
+  const control = root?.orchestratorPolicy?.control;
+  const behavior = root?.orchestratorPolicy?.behavior;
+  const antigravity = control?.mode === "full_control" && behavior ? runners.flatMap(visible => {
+    const runner = db.getRunner(visible.runnerId);
+    if (runner?.status !== "online") return [];
+    const review = svc.antigravityChildPreflight(behavior, runner,
+      db.reviewSettings.sessionUser(id) ?? control.boundary.authorizedByUserId, root?.projectId ?? null);
+    return review ? [{ runnerId: runner.runnerId, ...review }] : [];
+  }) : [];
   return respond(reply, projection.ok && projection.data
     ? { ...projection, data: {
       ...withCampaignHoldAdviceFor(db, principal, projection.data),
       ...(agents ? { childHarnessAgents: agents } : {}),
+      ...(antigravity.length ? { antigravityChildPreflight: antigravity } : {}),
       ...(modelMachines ? { childModelMachines: modelMachines } : {}),
     } }
     : projection);

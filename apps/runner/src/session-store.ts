@@ -138,6 +138,7 @@ export interface SessionMeta {
   sessionId: string;
   /** Opaque control-plane identity of the start command that created or replaced this runtime. */
   controlPlaneLaunchId?: string;
+  antigravityFullControlChild?: true;
   campaignBudgetDispatch?: import("@wollipog/protocol").CampaignBudgetDispatch;
   campaignBudgetCheckpoint?: import("@wollipog/protocol").CampaignBudgetUsageCheckpoint;
   /** The campaign generation of a provider whose retirement began but is not yet proven (#3788).

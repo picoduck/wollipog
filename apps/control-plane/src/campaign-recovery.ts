@@ -85,6 +85,7 @@ export class CampaignRecoveryService {
         if (!request.occurrenceId) continue;
         const decision = request.kind === "workflow_decision" ? this.db.workflowDecisionByOccurrence(request.occurrenceId) : null;
         const evaluated = evaluateCampaignAuthority(root, { ...session,
+          antigravityFullControlChild: session.driver === "acp" && this.db.campaignAntigravityRequester(session.id, root.id),
           repositoryRoot: this.db.sessionRepositoryRoot(session.id) ?? undefined,
           temporaryBranchReceipts: this.db.temporaryBranchReceipts(root.id, session.id),
           boundaryRepository: campaignBoundaryRepositoryAt(this.db, root, session) },

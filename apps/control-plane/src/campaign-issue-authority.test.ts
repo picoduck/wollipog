@@ -3538,13 +3538,18 @@ for (const mode of ["Custom", "Custom With Delegated Merges", "Full Control"] as
         const policy = h.db.getSession(root)!.parentControlPolicy!;
         assert.ok(h.svc.setParentControlPolicy(root, { ...policy.decisions, pr_merge: "orchestrator" }, policy.revision).ok);
       }
-      // Exercise the merge gates on an existing child. Launch admission is independent (#4973).
+      // Exercise merge gates on an existing worker with the durable admission a Full Control
+      // launch would have written (#4973).
       const profile = { ...h.metadata.agents[0]!, id: ANTIGRAVITY_AGENT_ID, name: "Google Antigravity",
         driver: "acp" as const, source: "discovered" as const };
-      const register = (protocol: number, source: "discovered" | "config" = "discovered") =>
+      let fullControlPeer = false;
+      const register = (protocol: number, source: "discovered" | "config" = "discovered") => {
+        fullControlPeer = protocol >= RUNNER_CAPABILITY_MIN_PROTOCOL.antigravityFullControlChild && source === "discovered";
         h.db.registerRunner({ ...h.metadata, agents: [...h.metadata.agents, { ...profile, source }] }, Date.now(), protocol);
+      };
       register(PROTOCOL_VERSION);
-      h.db.raw().prepare("UPDATE sessions SET driver='acp', agent_id=? WHERE id=?").run(profile.id, child);
+      h.db.raw().prepare("UPDATE sessions SET driver='acp', agent_id=?, antigravity_full_control_root=? WHERE id=?")
+        .run(profile.id, mode === "Full Control" ? root : null, child);
 
       const preflights: string[] = [];
       let stale: "head" | "closures" | null = null;
@@ -3594,10 +3599,8 @@ for (const mode of ["Custom", "Custom With Delegated Merges", "Full Control"] as
         });
         assert.ok(requested.ok && requested.data, requested.error ?? "requested result missing");
         const { occurrenceId, authority, resourceDigest } = requested.data;
-        // Until #4973 enables Antigravity at the campaign boundary, Full Control may retain the
-        // merge approval for a human. Both owners issue the same exact merge grant.
-        if (mode === "Custom") assert.equal(authority, "human");
-        if (mode === "Custom With Delegated Merges") assert.equal(authority, "orchestrator");
+        const delegates = mode === "Custom With Delegated Merges" || (mode === "Full Control" && fullControlPeer);
+        assert.equal(authority, delegates ? "orchestrator" : "human");
         const approved = h.svc.resolveWorkflowDecision(root, child, occurrenceId, { outcome: "approve" }, authority,
           authority === "human" ? { kind: "human", id: h.principal.userId } : { kind: "agent", id: root }, () => true);
         assert.ok(approved.ok, approved.error ?? "approved result missing");
@@ -3611,9 +3614,11 @@ for (const mode of ["Custom", "Custom With Delegated Merges", "Full Control"] as
         };
       };
 
-      const unsupported = await prepare(101);
       const floor = RUNNER_CAPABILITY_MIN_PROTOCOL.antigravityMergeReconciliation;
       register(floor - 1);
+      // On this peer the Full Control decision stays human-owned. Bind it on the older peer
+      // so the merge-capability refusal is tested without a concurrent owner change.
+      const unsupported = await prepare(101);
       const upgrade = await unsupported.arm();
       assert.equal(upgrade.status, 409);
       assert.equal(upgrade.capabilityRequirement?.requiredRunnerProtocolVersion, floor);

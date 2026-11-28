@@ -1040,11 +1040,17 @@ export function providerStopError(stop: StopReason, client: Pick<Driver, "lastTu
 export function effectiveAcpCompatibility(
   compatibility: DriverOptions["acpCompatibility"],
   isolation: SpawnIsolation | undefined,
+  fullControlChild?: true,
 ): Pick<DriverOptions, "acpCompatibility"> {
   if (!compatibility) return {};
   // A sandbox makes agy's state directory read-only unless it preserves the provider home.
   const stateReadOnly = isolation && !(isolation.backend === "bwrap" && isolation.preservesProviderHome);
-  return { acpCompatibility: stateReadOnly ? { ...compatibility, resumable: false } : compatibility };
+  const { campaignOperationAttestation: _attestation, ...profile } = compatibility;
+  return { acpCompatibility: {
+    ...profile,
+    ...(stateReadOnly ? { resumable: false } : {}),
+    ...(fullControlChild && compatibility.profile === "antigravity" ? { campaignOperationAttestation: true as const } : {}),
+  } };
 }
 
 /** Bound on the conversation carried into a fresh Antigravity conversation (`conversationHandoff`):
@@ -8245,6 +8251,15 @@ export class SessionManager {
     onMaterialized?: (ready: boolean) => void,
     onLaunchGeneration?: (generation: number) => void,
   ): Promise<boolean> {
+    const admittedAntigravity = this.store.readMeta(spec.sessionId)?.antigravityFullControlChild;
+    if ((admittedAntigravity && spec.antigravityFullControlChild !== true) ||
+        (spec.antigravityFullControlChild === true && (spec.driver !== "acp" || spec.agentId !== ANTIGRAVITY_AGENT_ID ||
+          spec.context?.kind !== "native" || isOrchestratorLaunch(spec) || spec.review || spec.assistant || spec.uiEvidenceReviewer ||
+          (spec.executionTarget && spec.executionTarget.adapter !== "host")))) {
+      durable?.failed("Google Antigravity Full Control requires its original native worker launch.", "INVALID_COMMAND");
+      onMaterialized?.(false);
+      return false;
+    }
     let materializationReported = false;
     const reportMaterialized = (ready: boolean) => {
       if (materializationReported) return;
@@ -8661,6 +8676,7 @@ export class SessionManager {
       title: spec.title ?? "",
       titleSource: spec.titleSource ?? "generated",
       config: spec.config ?? {},
+      antigravityFullControlChild: spec.antigravityFullControlChild,
       campaignBudgetDispatch: spec.campaignBudgetDispatch,
       campaignBudgetCheckpoint: undefined,
       // A relaunch under the same generation does not prove an earlier provider of it gone (#3788),
@@ -10774,6 +10790,9 @@ export class SessionManager {
       // Every launch path crosses here, so a session persisted on the retired exec driver (#3259)
       // fails before any provider, lease, or worktree work.
       if (isRetiredCodexExec(meta)) throw new Error(CODEX_EXEC_RETIRED_REASON);
+      if (meta.antigravityFullControlChild && !runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "antigravityFullControlChild")) {
+        throw new Error("Google Antigravity Full Control workers require a current control plane. Update Wollipog before relaunching.");
+      }
       if (!meta.worktreePath && meta.worktreeRecovery) {
         this.worktreeVerificationRefusals.set(sessionId, launchGeneration);
         this.emitStatus(sessionId, "input_required", meta.worktreeRecovery.detail);
@@ -10824,7 +10843,10 @@ export class SessionManager {
         (launchPreparation?.acpCompatibility?.profile !== "antigravity" || (meta.config.costBudgetUsd ?? 0) > 0)
         ? "Campaign limits require the verified Google Antigravity profile and cannot enforce an Antigravity cost allowance."
         : undefined;
-      const launchRefusal = launchPreparation?.launchRefusal ?? budgetRefusal;
+      const authorityRefusal = meta.antigravityFullControlChild &&
+        launchPreparation?.acpCompatibility?.profile !== "antigravity"
+        ? "Full Control requires the runner-discovered native Google Antigravity profile." : undefined;
+      const launchRefusal = launchPreparation?.launchRefusal ?? authorityRefusal ?? budgetRefusal;
       if (launchRefusal) {
         // Nothing may be spawned (#4779): fail the launch with the runner's sentence, as a failed
         // provider start would, before any isolation or provider process is set up.
@@ -11075,7 +11097,7 @@ export class SessionManager {
           cwd,
           env: meta.env,
           ...(launchPreparation?.scrubInheritedEnv?.length ? { scrubInheritedEnv: launchPreparation.scrubInheritedEnv } : {}),
-          ...effectiveAcpCompatibility(launchPreparation?.acpCompatibility, isolation),
+          ...effectiveAcpCompatibility(launchPreparation?.acpCompatibility, isolation, meta.antigravityFullControlChild),
           config: meta.config,
           artifactGuidance: meta.review ? "" : [artifactGuidance(meta, this.controlPlaneProtocolVersion()), shellGuidance(meta)].filter(Boolean).join(" "),
           ...(conversationHandoff ? { acpConversationHandoff: conversationHandoff } : {}),

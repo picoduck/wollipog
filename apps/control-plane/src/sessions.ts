@@ -40,9 +40,9 @@ import type { CampaignFollowUpAdmissionSnapshot, CampaignFollowUpSubject, Releas
 import { campaignBehaviorSources, campaignBehaviorValues, changedCampaignBehavior, exactChildHarnessRow,
   parseCampaignBehaviorRequest } from "./campaign-behavior.js";
 import { agentHarnessIdentityKey } from "@wollipog/protocol";
-import { configuredReview, ReviewSettingsError } from "./review-settings.js";
+import { ANTIGRAVITY_CROSS_FAMILY_REVIEW_REQUIRED, configuredReview, resolveConfiguredReviewer, ReviewSettingsError, type ReviewPolicyCapture } from "./review-settings.js";
 import { parseSessionWaitReport } from "./session-waits.js";
-import { isSessionLaunchFailureCode, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
+import { isSessionLaunchFailureCode, parseOrchestratorReviewPolicy, sameReviewFamily } from "@wollipog/protocol";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { campaignRepositoryLocation, supportsPacedVideoReviewPeer } from "@wollipog/protocol";
 import { forgeActionBranchName, matchingTemporaryBranchReceipt, temporaryBranchDecisionKeptByPolicy, TEMPORARY_BRANCH_CREATION_RPC_TIMEOUT_MS, type TemporaryBranchReceipt } from "@wollipog/protocol";
@@ -4640,9 +4640,14 @@ export class SessionsService {
       const refusal = this.assistantLaunchRefusal(req.runnerId, launch.driver, launch.context);
       if (refusal) return refusal;
     }
+    const antigravityFullControlChild = controllerPolicy?.control?.mode === "full_control" &&
+      launch.driver === "acp" && launch.context.kind === "native" && !snapshotSpec && !imageReview &&
+      !creationContext?.review && req.role !== "orchestrator" && !usesOrchestratorPresetPermissions(req.config) &&
+      req.launchSurface !== "native_tui" && this.db.nativeAntigravityProfile(req.runnerId, req.agentId);
     if (campaignController?.orchestratorPolicy?.control?.mode === "full_control") {
-      const preflight = campaignAuthorityPreflight(campaignController.orchestratorPolicy.control, launch.driver, runner.protocolVersion,
-        this.pacedVideoInstallationContract(req.runnerId, req.agentId));
+      const preflight = campaignAuthorityPreflight(campaignController.orchestratorPolicy.control, launch.driver,
+        antigravityFullControlChild ? this.runnerProtocolVersion(req.runnerId) : runner.protocolVersion,
+        this.pacedVideoInstallationContract(req.runnerId, req.agentId), antigravityFullControlChild);
       if (!preflight.supported || !campaignBoundaryCurrent(campaignController)) {
         return campaignRefusalFail(preflight.requirement ?? preflight.reason ?? "campaign authority boundary is stale");
       }
@@ -4698,6 +4703,9 @@ export class SessionsService {
       launch = { ...launch, version: targetCandidate?.version, capabilities: undefined };
     }
     const useWorktree = resolvedTarget.useWorktree;
+    if (antigravityFullControlChild && executionTarget.adapter !== "host") {
+      return fail("Choose a native host execution target for a Full Control Google Antigravity worker.", 409);
+    }
     // Refused before anything is created (#4901): the runner would make the worktree, then fail
     // the launch and leave it behind.
     const managedWorktreeRefusal = useWorktree ? managedWorktreeUnsupportedReason({
@@ -4845,8 +4853,13 @@ export class SessionsService {
     // A target-local executable has not advertised the host agent's model or permission catalog.
     // Keep validation honest until that exact target can provide its own capabilities.
     const agentDefinition = runner.agents.find((agent) => agent.id === req.agentId);
-    const agentCapabilities = selectedInstallationId ? undefined :
+    const discoveredCapabilities = selectedInstallationId ? undefined :
       snapshotSpec?.capabilities ?? agentDefinition?.capabilities;
+    // Discovery advertises the ordinary launch presets. The protected profile also accepts
+    // explicit Default, which the runner establishes before submitting its first prompt.
+    const agentCapabilities = antigravityFullControlChild && discoveredCapabilities
+      ? { ...discoveredCapabilities, permissionModes: [...new Set([...(discoveredCapabilities.permissionModes ?? []), "default"])] }
+      : discoveredCapabilities;
     const requestedConfig = { ...(snapshotSpec?.config ?? req.config ?? {}) };
     const explicitManagedModel = !snapshotSpec && isManagedModelChoice(requestedConfig.model);
     if (!snapshotSpec) {
@@ -4926,7 +4939,7 @@ export class SessionsService {
           requestedConfig.permissionMode = savedPermissionMode;
         }
       }
-      if (requestedConfig.permissionMode === undefined) {
+      if (requestedConfig.permissionMode === undefined && !antigravityFullControlChild) {
         requestedConfig.permissionMode = defaultPermissionModeForNewSession(
           launch.driver,
           agentCapabilities,
@@ -4938,6 +4951,10 @@ export class SessionsService {
           requestedConfig.permissionMode !== "bypassPermissions" &&
           requestedConfig.permissionMode !== "orchestrator") {
         return fail("Pi approval-enforcing permission modes require a host execution target with the verified Agent Control bridge", 409);
+      }
+      if (antigravityFullControlChild && requestedConfig.permissionMode !== undefined &&
+          requestedConfig.permissionMode !== "default" && requestedConfig.permissionMode !== ANTIGRAVITY_AUTO_MODE.id) {
+        return fail("Full Control Google Antigravity workers require Default or managed Worktree Auto permissions.", 409);
       }
       const explicitConfigError = capabilityConfigError(
         claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver), agentCapabilities,
@@ -4971,6 +4988,9 @@ export class SessionsService {
     // children it could not count.
     if (threadLaunch && role === "orchestrator") return fail(ASSISTANT_THREAD_ORCHESTRATOR_REFUSAL, 409);
     const orchestrator = role === "orchestrator";
+    if (antigravityFullControlChild && role !== "normal") {
+      return fail("Full Control Google Antigravity workers must use the normal session role.", 409);
+    }
     const presetPermissions = usesOrchestratorPresetPermissions(requestedConfig);
     if (orchestrator && requestedConfig.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) {
       return fail("Full Permissions Mode is available only for normal Antigravity sessions.", 409);
@@ -5534,6 +5554,7 @@ export class SessionsService {
           ...(parentSessionId ? campaignControlRevisionForRunner(campaignController?.parentControlPolicy?.revision, runner.protocolVersion) : {}) } : {}),
       } } : {}),
       acpSessionContext,
+      ...(antigravityFullControlChild ? { antigravityFullControlChild: true as const } : {}),
       ...(creationContext?.review ? { review: creationContext.review.policy } : {}),
       ...(assistantThread ? { assistant: assistantLaunchPolicy(assistantThread.threadId) } : {}),
       ...(imageReview
@@ -5574,23 +5595,26 @@ export class SessionsService {
       const gate = this.sessionSpawnGate(parentSessionId, spawnRequest);
       if (!gate.ok) return failAs(gate);
     }
-    const snapshotReviews = campaignController?.orchestratorPolicy?.reviewPolicySnapshotVersion === 1 && !creationContext?.review;
-    const reviewFields = snapshotReviews ? parseOrchestratorReviewPolicy(campaignController!.orchestratorPolicy!.behavior) : null;
-    if (snapshotReviews && !reviewFields) return fail("the campaign's review policy is invalid; update it before launching a child", 409);
+    const snapshotReviews = antigravityFullControlChild ||
+      campaignController?.orchestratorPolicy?.reviewPolicySnapshotVersion === 1 && !creationContext?.review;
+    const reviewCapture = snapshotReviews ? this.campaignReviewCapture(controllerPolicy!.behavior,
+      agentHarnessIdentityFor({ id: req.agentId, driver: launch.driver, context: launch.context }), runner) : null;
+    if (snapshotReviews && !reviewCapture) return fail("The campaign's review policy is invalid. Update it before launching a child in Settings → Reviews.", 409);
+    if (antigravityFullControlChild) {
+      const userId = creationContext?.defaultOwnerUserId ?? this.db.reviewSettings.sessionUser(parentSessionId!) ??
+        (effectiveSessionScope?.owner.kind === "user" ? effectiveSessionScope.owner.userId : null);
+      const projectId = this.launchProjectId(requestedProject.data, req.runnerId, workspaceId, effectiveSessionScope);
+      const review = this.antigravityReviewerPreflight(reviewCapture, runner, userId, projectId, config.model);
+      if (!review.ready) return fail(review.reason, 409);
+    }
     if (delivery && !scheduled) delivery.stage(plan!);
     let session: SessionView;
     const sessionInput: Parameters<ControlPlaneDb["createSession"]>[0] = {
       // #4467's NewSessionInput consumes this inside the session creation transaction, before
       // staging session.created. The structural spread also compiles before that unit lands.
       ...(creationContext?.assistantWorkOrigin ? {assistantWorkOrigin: creationContext.assistantWorkOrigin} : {}),
-      ...(reviewFields ? { reviewPolicyCapture: { fields: reviewFields,
-        implementer: agentHarnessIdentityFor({ id: req.agentId, driver: launch.driver, context: launch.context }),
-        resolveModel: (harness, model, effort) => {
-          const reviewerId = runner?.runtime?.reviewSession?.reviewers.find(entry => entry.harness === harness)?.agentId;
-          const reviewer = runner?.agents.find(entry => entry.id === reviewerId && entry.available === true);
-          return resolveEffectiveModelEffort({ ...(model ? { model } : {}), effort }, reviewer?.capabilities,
-            harness === "codex" ? "codex-app-server" : "claude-code").value?.model ?? null;
-        } } } : {}),
+      ...(reviewCapture ? { reviewPolicyCapture: reviewCapture } : {}),
+      ...(antigravityFullControlChild ? { antigravityFullControlRoot: campaignController!.id } : {}),
       reviewSettingsUserId: creationContext?.defaultOwnerUserId,
       ...(launcherUserId ? { launcherUserId } : {}),
       campaignBudgetUserLimits,
@@ -6871,6 +6895,8 @@ export class SessionsService {
     const budgetError = this.db.campaignBudgets.admissionError(sessionId);
     if (budgetError) return fail(budgetError, 409);
     let requestedConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
+    const antigravityRefusal = this.antigravityContinuationRefusal(session, requestedConfig);
+    if (antigravityRefusal) return campaignRefusalFail(antigravityRefusal);
     const budgetConfigError = this.campaignBudgetConfigError(session, requestedConfig);
     if (budgetConfigError) return campaignRefusalFail(budgetConfigError);
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before sending a message", 409);
@@ -7819,6 +7845,8 @@ export class SessionsService {
     // report success for work the durable outbox cannot or must not deliver.
     const configInputError = sessionGuardrailConfigError(candidate.command.config);
     if (configInputError) return fail(configInputError, 400);
+    const antigravityRefusal = this.antigravityContinuationRefusal(session, candidate.command.config);
+    if (antigravityRefusal) return campaignRefusalFail(antigravityRefusal);
     const budgetError = this.db.campaignBudgets.admissionError(sessionId) ?? this.campaignBudgetConfigError(session, candidate.command.config);
     if (budgetError) return campaignRefusalFail(budgetError);
     const campaignBehaviorError = this.campaignChildBehaviorError(session, candidate.command.config);
@@ -7978,6 +8006,8 @@ export class SessionsService {
     if (configInputError) return fail(configInputError, 400);
     const budgetConfigError = this.campaignBudgetConfigError(session, config);
     if (budgetConfigError) return campaignRefusalFail(budgetConfigError);
+    const antigravityRefusal = this.antigravityContinuationRefusal(session, config);
+    if (antigravityRefusal) return campaignRefusalFail(antigravityRefusal);
     const campaignBehaviorError = this.campaignChildBehaviorError(session, config);
     if (campaignBehaviorError) return campaignRefusalFail(campaignBehaviorError);
     if (actor.kind === "agent" && actor.id === sessionId &&
@@ -9342,6 +9372,7 @@ export class SessionsService {
     if (!session) return fail("session not found", 404);
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     if (this.db.delegatedImageReviews.isReviewer(sessionId)) return fail(DELEGATED_IMAGE_REVIEWER_ERROR, 409);
+    const antigravityFullControlChild = this.db.antigravityFullControlRoot(sessionId) !== null;
     const budgetError = this.db.campaignBudgets.admissionError(sessionId) ?? this.campaignBudgetConfigError(session);
     if (budgetError) return campaignRefusalFail(budgetError);
     const budgetRoot = this.db.campaignBudgets.governingRoot(sessionId);
@@ -9383,6 +9414,8 @@ export class SessionsService {
     if (isRetiredCodexExec(session)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
     const launch = launchForRestart(this.db, session);
     if (!launch) return fail(`unknown agent '${session.agentId}' on runner '${session.runnerId}'`, 404);
+    const antigravityRefusal = this.antigravityContinuationRefusal({ ...session, driver: launch.driver });
+    if (antigravityRefusal) return campaignRefusalFail(antigravityRefusal);
     // Resolve the launch directory: an ad-hoc browsed path (workspaceId is null) takes precedence over
     // a configured workspace, so restart re-launches from the right place.
     const workspacePath =
@@ -9580,6 +9613,7 @@ export class SessionsService {
         : {}),
       ...(assistantThreadId ? { assistant: assistantLaunchPolicy(assistantThreadId) } : {}),
       acpSessionContext: this.db.getAcpSessionContext(sessionId),
+      ...(antigravityFullControlChild ? { antigravityFullControlChild: true as const } : {}),
     };
     // Persist replacement identity before the ambiguous socket write. A false send leaves the
     // Stop fence and stopped lifecycle intact; a true/half-open send remains fenced until the
@@ -10913,8 +10947,10 @@ export class SessionsService {
   /** The requester with the boundary repository whose Location it runs in (#4119), for campaign
    * authority. Resolved from its own runner and workspace, never from anything it sent. */
   private campaignPlaced<T extends { id?: string; runnerId?: string; workspaceId?: string | null }>(controller: SessionView, requester: T):
-    T & { boundaryRepository: string | null; temporaryBranchReceipts: import("@wollipog/protocol").TemporaryBranchReceipt[] } {
+    T & { boundaryRepository: string | null; antigravityFullControlChild?: boolean; temporaryBranchReceipts: import("@wollipog/protocol").TemporaryBranchReceipt[] } {
     return { ...requester, boundaryRepository: campaignBoundaryRepositoryAt(this.db, controller, requester),
+      ...("driver" in requester && requester.driver === "acp" && requester.id
+        ? { antigravityFullControlChild: this.db.campaignAntigravityRequester(requester.id, controller.id) } : {}),
       temporaryBranchReceipts: requester.id ? this.db.temporaryBranchReceipts(controller.id, requester.id) : [] };
   }
 
@@ -11167,7 +11203,8 @@ export class SessionsService {
           return fail(this.participantOutsideBoundary(participant, projectRepositories?.excludedLocations ?? session.orchestratorPolicy?.excludedLocations ?? []), 409);
         }
         const preflight = campaignAuthorityPreflight(control, participant.driver, this.db.getRunner(participant.runnerId)?.protocolVersion,
-          this.pacedVideoInstallationContract(participant.runnerId, participant.agentId));
+          this.pacedVideoInstallationContract(participant.runnerId, participant.agentId),
+          participant.driver === "acp" && this.db.campaignAntigravityRequester(participant.id, sessionId));
         if (!preflight.supported) return campaignRefusalFail(preflight.requirement ?? preflight.reason!);
         if (control.boundary.budgetAuthority) {
           const accountingError = this.db.campaignBudgetAccountingError(participant.driver, participant.model, control.boundary.budgetAuthority.costUsd !== undefined);
@@ -11180,6 +11217,11 @@ export class SessionsService {
         return fail("Full Control cannot delegate unknown, disabled or Human Required policy rules", 400);
       }
     }
+    if (control.mode === "custom" && this.db.campaignDescendantIds(sessionId).some(id => {
+      if (this.db.antigravityFullControlRoot(id) !== sessionId) return false;
+      const child = this.db.getSession(id);
+      return child && !isTerminal(child.status);
+    })) return fail("Stop the campaign's Full Control Google Antigravity workers before switching to Custom.", 409);
     const outstanding = this.db.authorityBoundWorkflowDecisionsForController(sessionId);
     try {
       if (!this.db.updateSessionCampaignControl(sessionId, control, expectedRevision, now,
@@ -12441,7 +12483,8 @@ export class SessionsService {
     } else {
       if (!controller || control?.mode !== "full_control" || !campaignBoundaryCurrent(controller)) return "campaign allowance boundary is stale or revoked";
       const preflight = campaignAuthorityPreflight(control, driver, this.db.getRunner(session.runnerId)?.protocolVersion,
-        this.pacedVideoInstallationContract(session.runnerId, session.agentId));
+        this.pacedVideoInstallationContract(session.runnerId, session.agentId),
+        driver === "acp" && this.db.campaignAntigravityRequester(session.id, controller.id));
       if (!preflight.supported) return preflight.requirement ?? preflight.reason ?? "campaign allowance requires supported accounting peers";
       if (!this.campaignServesOwnRepository(controller, session)) return "campaign allowance requires a Location of the same boundary repository as the session it serves";
     }
@@ -12483,6 +12526,90 @@ export class SessionsService {
     return true;
   }
 
+  private campaignReviewCapture(behavior: OrchestratorCampaignPolicy["behavior"],
+    implementer: ReturnType<typeof agentHarnessIdentityFor>, runner: RunnerView): ReviewPolicyCapture | null {
+    const fields = parseOrchestratorReviewPolicy(behavior);
+    if (!fields) return null;
+    return { fields, implementer, resolveModel: (harness, model, effort) => {
+      const reviewerId = runner.runtime?.reviewSession?.reviewers.find(entry => entry.harness === harness)?.agentId;
+      const reviewer = runner.agents.find(entry => entry.id === reviewerId && entry.available === true);
+      return resolveEffectiveModelEffort({ ...(model ? { model } : {}), effort }, reviewer?.capabilities,
+        harness === "codex" ? "codex-app-server" : "claude-code").value?.model ?? null;
+    } };
+  }
+
+  private antigravityReviewerPreflight(capture: ReviewPolicyCapture | null, runner: RunnerView, userId: string | null,
+    projectId: string | null, model: string | null | undefined): { ready: boolean; reason: string } {
+    const guidance = "Choose a usable cross-family reviewer for Google Antigravity in Settings → Reviews on this machine.";
+    const policy = capture && this.db.reviewSettings.resolveSessionPolicy(userId, projectId, capture);
+    const harness = policy?.reviewHarness;
+    if (!harness || !policy.configured) return { ready: false, reason: guidance };
+    const effort = policy.reviewEffort ?? "high";
+    try {
+      const reviewerModel = resolveConfiguredReviewer(runner, harness, policy.reviewModel, effort, resolveEffectiveModelEffort);
+      if (sameReviewFamily("acp", model, harness, reviewerModel)) {
+        return { ready: false, reason: ANTIGRAVITY_CROSS_FAMILY_REVIEW_REQUIRED };
+      }
+      return { ready: true, reason: `Google Antigravity can use ${harness === "codex" ? "Codex" : "Claude Code"} (${reviewerModel}, ${effort} effort) for mandatory review on this machine.` };
+    } catch (error) {
+      if (!(error instanceof ReviewSettingsError)) throw error;
+      return { ready: false, reason: `${error.message} ${guidance}` };
+    }
+  }
+
+  /** Before dispatch, report the reviewer available to this worker on the selected machine.
+   * Admission repeats the check using the final project, account settings and model. */
+  antigravityChildPreflight(behavior: OrchestratorCampaignPolicy["behavior"], runner: RunnerView,
+    userId: string | null, projectId: string | null, fixedOnly = false): { ready: boolean; reason: string } | undefined {
+    const fixed = behavior.childHarness;
+    if ((fixed && (fixed.driver !== "acp" || fixed.agentId !== ANTIGRAVITY_AGENT_ID || fixed.context.kind !== "native")) ||
+        (fixedOnly && !fixed)) return undefined;
+    if (!this.db.nativeAntigravityProfile(runner.runnerId, ANTIGRAVITY_AGENT_ID)) {
+      return fixed ? { ready: false, reason: "Choose a machine with the runner-discovered native Google Antigravity profile." } : undefined;
+    }
+    if (!runnerSupportsProtocol(runner.protocolVersion, "antigravityFullControlChild")) {
+      return { ready: false, reason: runnerCapabilityRequirementError(runner.protocolVersion, "antigravityFullControlChild",
+        "Google Antigravity full control children").error };
+    }
+    const agent = runner.agents.find(entry => entry.id === ANTIGRAVITY_AGENT_ID);
+    if (!agent || !agentAvailableForImplicitLaunch(agent)) {
+      return { ready: false, reason: "Google Antigravity is unavailable on this machine. Check its setup in Connections before dispatching." };
+    }
+    return this.antigravityReviewerPreflight(this.campaignReviewCapture(behavior, agentHarnessIdentityFor(agent), runner),
+      runner, userId, projectId, behavior.childModel);
+  }
+
+  private antigravityContinuationRefusal(session: SessionView, config?: SessionConfig): CampaignRefusal | null {
+    const admittedRoot = this.db.antigravityFullControlRoot(session.id);
+    if (session.driver !== "acp") return admittedRoot
+      ? "This Full Control worker can continue only on its original native Google Antigravity profile." : null;
+    if (!admittedRoot && !session.parentSessionId) return null;
+    const controller = this.orchestratorCampaignController(session);
+    if (controller === "refused") return MALFORMED_ANCESTRY_AUTHORITY_REFUSAL;
+    const control = controller?.orchestratorPolicy?.control;
+    if (control?.mode !== "full_control") return admittedRoot
+      ? "This Google Antigravity worker was admitted under Full Control. Restore Full Control or create a new Custom worker." : null;
+    if (!campaignBoundaryCurrent(controller!)) return "The campaign authority boundary is stale. Refresh it before continuing this worker.";
+    const preflight = campaignAuthorityPreflight(control, session.driver, this.runnerProtocolVersion(session.runnerId),
+      this.pacedVideoInstallationContract(session.runnerId, session.agentId),
+      this.db.campaignAntigravityRequester(session.id, controller!.id));
+    if (!preflight.supported) return preflight.requirement ?? preflight.reason!;
+    if (config?.permissionMode === ANTIGRAVITY_FULL_PERMISSIONS_MODE.id) {
+      return "Full Permissions Mode is unavailable for Full Control Google Antigravity workers. Use Default or managed Worktree Auto.";
+    }
+    if (config?.model !== undefined && config.model !== session.model) {
+      try {
+        const reviewer = configuredReview(this.db, { ...session, model: config.model },
+          this.db.getRunner(session.runnerId), resolveEffectiveModelEffort);
+        if (!reviewer) return "Changing this worker's model requires a usable cross-family reviewer in Settings → Reviews.";
+      } catch (error) {
+        if (!(error instanceof ReviewSettingsError)) throw error;
+        return error.message;
+      }
+    }
+    return null;
+  }
+
   private campaignChildBehaviorError(session: SessionView, config: SessionConfig | undefined): CampaignRefusal | null {
     if (!session.parentSessionId || !config) return null;
     const controller = this.orchestratorCampaignController(this.db.getSession(session.parentSessionId));
@@ -12490,7 +12617,8 @@ export class SessionsService {
     if (controller?.orchestratorPolicy?.control?.mode === "full_control") {
       const preflight = campaignAuthorityPreflight(controller.orchestratorPolicy.control, session.driver,
         this.db.getRunner(session.runnerId)?.protocolVersion,
-        this.pacedVideoInstallationContract(session.runnerId, session.agentId));
+        this.pacedVideoInstallationContract(session.runnerId, session.agentId),
+        session.driver === "acp" && this.db.campaignAntigravityRequester(session.id, controller.id));
       if (!preflight.supported || !campaignBoundaryCurrent(controller)) return preflight.requirement ?? preflight.reason ?? "campaign authority boundary is stale";
     }
     const behavior = controller?.orchestratorPolicy?.behavior;
@@ -18684,6 +18812,19 @@ export class SessionsService {
         decision.authorityEvaluation?.reason === "credential_screen_review") return true;
     if (decision.status === "approved" && this.uiEvidenceApprovalNeedsDirectRoute(decision, "approve") &&
         !this.uiEvidenceDirectRouteCurrent(controller, policy, decision)) return false;
+    // A setup refresh may temporarily omit the agent after an enqueue was armed. For this
+    // record-only path the durable worker admission and armed action establish the profile.
+    // Keep the current protocol, repository, and campaign authority checks for the receipt.
+    if (options.recordingCompletedMerge && decision.authority === "orchestrator" && requester &&
+        this.antigravityArmedMerge(requester, decision) && this.db.antigravityFullControlRoot(requester.id) === controller.id) {
+      const runner = this.db.getRunner(requester.runnerId);
+      if (runner && !runner.agents.some(agent => agent.id === requester.agentId)) {
+        return evaluateCampaignAuthority(controller, {
+          ...this.campaignPlaced(controller, requester), antigravityFullControlChild: true,
+        }, runner.protocolVersion, decision.resourceSnapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
+        this.campaignPeerContracts(controller, requester.id)).owner === "orchestrator";
+      }
+    }
     return this.evaluateWorkflowDecisionAuthority(
       controller, policy, decision.sessionId, decision.resourceSnapshot,
     ).effectiveOwner === decision.authority;
@@ -20251,8 +20392,7 @@ export class SessionsService {
   private antigravityMergeProfile(session: SessionView): boolean {
     if (session.driver !== "acp" || session.agentId !== ANTIGRAVITY_AGENT_ID ||
         (session.executionTarget && session.executionTarget.adapter !== "host")) return false;
-    const row = this.db.getRunner(session.runnerId)?.agents.find((agent) => agent.id === ANTIGRAVITY_AGENT_ID);
-    return row?.driver === "acp" && row.context?.kind === "native" && row.source === "discovered";
+    return this.db.nativeAntigravityProfile(session.runnerId, session.agentId);
   }
 
   private antigravityMergeCapabilityFailure(session: SessionView): ServiceResult<never> | null {

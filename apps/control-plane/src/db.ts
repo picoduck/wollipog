@@ -1099,6 +1099,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   runner_registration_snapshot_fingerprint TEXT,
   adopted        INTEGER NOT NULL DEFAULT 0,
   acp_session_context TEXT,
+  antigravity_full_control_root TEXT,
   CHECK (policy_resume_status IS NULL OR policy_resume_status='idle'),
   CHECK (parent_control IN ('off','questions','questions_and_approvals')),
   FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
@@ -3608,7 +3609,7 @@ function campaignAuthorityFromRows(
   controllerProtocol: number | null | undefined = protocol,
   peerContractForSession?: (id: string) => unknown,
   /** #4119: resolves a requester away from the controller's place to its boundary repository. */
-  locations?: Parameters<typeof campaignBoundaryRepositoryAt>[0],
+  locations?: Parameters<typeof campaignBoundaryRepositoryAt>[0] & Pick<ControlPlaneDb, "campaignAntigravityRequester">,
 ) {
   const policy = orchestratorCampaignPolicyFromJson(controller.orchestrator_policy) ?? undefined;
   const control = policy?.control;
@@ -3622,7 +3623,9 @@ function campaignAuthorityFromRows(
   };
   const placed = locations && control?.mode === "full_control"
     ? { ...requester, boundaryRepository: campaignBoundaryRepositoryAt(locations, { ...view, projectId: controller.project_id }, requester) } : requester;
-  return evaluateCampaignAuthority(view, placed, protocol, request, undefined, controllerProtocol, peerContracts);
+  return evaluateCampaignAuthority(view, { ...placed,
+    antigravityFullControlChild: placed.driver === "acp" && locations?.campaignAntigravityRequester(placed.id, view.id),
+  }, protocol, request, undefined, controllerProtocol, peerContracts);
 }
 
 /** The content-free identity under which a campaign publishes one pending request. A typed workflow
@@ -3667,7 +3670,7 @@ function addCampaignRequestSummary(
   repositoryRoot?: string,
   currentRequest?: (pending: PendingApproval) => PendingApproval,
   peerContractForSession?: (id: string) => unknown,
-  locations?: Parameters<typeof campaignBoundaryRepositoryAt>[0],
+  locations?: Parameters<typeof campaignAuthorityFromRows>[6],
 ): void {
   if (request.type === "typed") {
     if (request.authority !== "human" && request.authority !== "orchestrator") return;
@@ -4857,6 +4860,7 @@ export interface NewSessionInput {
   assistantWorkOrigin?: {connectionId: string; commandId: string};
   /** Server-owned campaign fields and the actual implementing harness, captured atomically. */
   reviewPolicyCapture?: ReviewPolicyCapture;
+  antigravityFullControlRoot?: string;
   /** Authenticated launching user for personal review settings, including shared Projects. */
   reviewSettingsUserId?: string;
   /** The authenticated human launching this session (#3840), never from request JSON. A child or
@@ -8173,6 +8177,7 @@ export class ControlPlaneDb {
       "initial_prompt_state TEXT CHECK (initial_prompt_state IN ('submitted','interrupted'))",
       // Secret-free ACP MCP environment references and explicit directory selections.
       "acp_session_context TEXT",
+      "antigravity_full_control_root TEXT",
       // Protocol v60 immutable launch placement. NULL identifies legacy sessions.
       "execution_target TEXT",
       // Protocol v62 pre-acceptance source/artifact input and content-safe adapter proof.
@@ -17985,6 +17990,27 @@ export class ControlPlaneDb {
     return row?.workspace_path ?? null;
   }
 
+  antigravityFullControlRoot(id: string): string | null {
+    const row = this.stmt("SELECT antigravity_full_control_root FROM sessions WHERE id=?").get(id) as
+      { antigravity_full_control_root: string | null } | undefined;
+    return row?.antigravity_full_control_root ?? null;
+  }
+
+  /** Authenticated discovery identifies the native profile. A configured ACP agent may reuse
+   * its id, but cannot inherit this contract. */
+  nativeAntigravityProfile(runnerId: string, agentId: string | null | undefined): boolean {
+    if (agentId !== ANTIGRAVITY_AGENT_ID) return false;
+    const agent = this.getRunner(runnerId)?.agents.find(candidate => candidate.id === agentId);
+    return agent?.driver === "acp" && agent.context?.kind === "native" && agent.source === "discovered";
+  }
+
+  campaignAntigravityRequester(sessionId: string, controllerId: string): boolean {
+    if (sessionId === controllerId) return false;
+    const row = this.stmt("SELECT runner_id, agent_id, antigravity_full_control_root FROM sessions WHERE id=?").get(sessionId) as
+      { runner_id: string; agent_id: string | null; antigravity_full_control_root: string | null } | undefined;
+    return row?.antigravity_full_control_root === controllerId && this.nativeAntigravityProfile(row.runner_id, row.agent_id);
+  }
+
   getAcpSessionContext(id: string): AcpSessionContextConfig | undefined {
     const row = this.stmt("SELECT acp_session_context FROM sessions WHERE id=?").get(id) as
       | { acp_session_context: string | null }
@@ -19736,6 +19762,10 @@ export class ControlPlaneDb {
         input.archived ? input.now : null,
         input.initialPromptSubmitted ? "submitted" : null,
       );
+      if (input.antigravityFullControlRoot) {
+        this.stmt("UPDATE sessions SET antigravity_full_control_root=? WHERE id=?")
+          .run(input.antigravityFullControlRoot, input.id);
+      }
       if (input.role === "assistant") {
         if (!input.assistantThreadId) throw new Error("an assistant session requires its thread");
         this.stmt("UPDATE sessions SET assistant_thread_id=? WHERE id=?").run(input.assistantThreadId, input.id);

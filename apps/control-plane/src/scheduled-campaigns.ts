@@ -429,6 +429,7 @@ export class ScheduledCampaignRuntime {
     const { preflight, proposal } = campaignLaunchPreflight({ request, plan: launch, runner, inspection,
       organizationId: human.organizationId, projectDefaults: launch.projectId ? this.db.projectChildSessionDefaults(launch.projectId) : null,
       accountingError: protectedCost => this.db.campaignBudgetAccountingError(launch.driver, launch.config.model, protectedCost),
+      antigravityChildReview: this.sessions.antigravityChildPreflight(launch.policy.behavior, runner, human.userId, launch.projectId ?? null, true),
       dailyLimit: this.db.getUsageDailyBudget(human.organizationId).perUserUsd !== null,
       invalidPolicyIds: (campaign.fullControl?.delegatablePolicyIds ?? []).filter(id => !this.sessions.governancePolicies().some(p =>
         p.policyId === id && p.enabled && p.effect === "ask" && !p.builtin && !p.conditions?.humanRequired)),

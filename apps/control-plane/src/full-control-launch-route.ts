@@ -180,6 +180,7 @@ export async function prepareFullControlLaunch(dependencies: FullControlLaunchDe
     projectLocations: survey.settled(),
     projectDefaults: plan.projectId ? db.projectChildSessionDefaults(plan.projectId) : null,
     accountingError: (costProtected) => db.campaignBudgetAccountingError(plan.driver, plan.config.model, costProtected),
+    antigravityChildReview: sessions.antigravityChildPreflight(plan.policy.behavior, runnerNow, principal.userId, projectId, true),
     dailyLimit: db.getUsageDailyBudget(plan.scope.organizationId).perUserUsd !== null,
     invalidPolicyIds: policyIds.filter((id) => !sessions.governancePolicies().some((rule) =>
       rule.policyId === id && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired)),
@@ -305,6 +306,7 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
       }),
       projectDefaults: session.projectId ? db.projectChildSessionDefaults(session.projectId) : null,
       accountingError: (costProtected) => db.campaignBudgetAccountingError(session.driver, plan.config.model, costProtected),
+      antigravityChildReview: sessions.antigravityChildPreflight(plan.policy.behavior, runner, principal.userId, ownProjectId, true),
       dailyLimit: db.getUsageDailyBudget(scope.organizationId).perUserUsd !== null,
       invalidPolicyIds: (body.overrides?.delegatablePolicyIds ?? []).filter((policyId) => !sessions.governancePolicies().some((rule) =>
         rule.policyId === policyId && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired)),

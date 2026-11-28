@@ -158,7 +158,7 @@ export interface CampaignLaunchInspectionResult {
 
 export type CampaignLaunchCapabilityId =
   | "repository_scope" | "authority_contract" | "accounting_budget" | "native_review"
-  | "execution_isolation" | "image_evidence" | "video_evidence" | "external_evidence";
+  | "antigravity_child_review" | "execution_isolation" | "image_evidence" | "video_evidence" | "external_evidence";
 
 /** `unsupported` blocks launch, and only a mandatory capability can be unsupported. `human_required`
  * is an allowed, disclosed exception that routes that class of decision to the Human for this
@@ -245,7 +245,7 @@ export interface CampaignLaunchDisclosure {
 const LAUNCH_DISCLOSURE_TEXT_MAX = 4_000;
 const LAUNCH_CAPABILITY_IDS: ReadonlySet<string> = new Set<CampaignLaunchCapabilityId>([
   "repository_scope", "authority_contract", "accounting_budget", "native_review",
-  "execution_isolation", "image_evidence", "video_evidence", "external_evidence",
+  "antigravity_child_review", "execution_isolation", "image_evidence", "video_evidence", "external_evidence",
 ]);
 const LAUNCH_CAPABILITY_STATES: ReadonlySet<string> = new Set<CampaignLaunchCapability["state"]>([
   "verified", "unsupported", "human_required", "informational", "orchestrator_decides",
