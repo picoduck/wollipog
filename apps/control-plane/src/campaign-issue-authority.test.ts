@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { CAMPAIGN_FORGE_OBSERVATION, CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
+import { ANTIGRAVITY_AGENT_ID, CAMPAIGN_FORGE_OBSERVATION, CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL, type CampaignControl, type CampaignPublicationAdmissionFailure, type RunnerMetadata, type WorkflowDecisionView,
   type CampaignWorkItemDetail, type IssueClosureDeliveryGap, type IssueClosureEpicMembers, ISSUE_CLOSURE_DELIVERY_FAILURE_MAX, issueClosureDeliveryFailure,
   issueClosureDeliveryGap, normalizeIssueClosureDeliveryGaps, normalizeIssueClosureEpicMembers } from "@wollipog/protocol";
@@ -3526,6 +3526,166 @@ function fullControlMergeHarness() {
     operations: ["campaign_issue_scope", "issue_closure", "pr_merge", "implementation_question"], delegatablePolicyIds: [],
     issueAuthority: { epics: [100], relatedFollowUps: true, maxIssues: 5, closureReasons: ["completed"] } }, revision, h.principal).ok);
   return h;
+}
+
+for (const mode of ["Custom", "Custom With Delegated Merges", "Full Control"] as const) {
+  test(`Antigravity merge admission and forge reconciliation in ${mode} (Refs #4974)`, async () => {
+    const h = mode === "Full Control" ? fullControlMergeHarness() : harness(false);
+    try {
+      const child = "child";
+      const root = "root";
+      if (mode === "Custom With Delegated Merges") {
+        const policy = h.db.getSession(root)!.parentControlPolicy!;
+        assert.ok(h.svc.setParentControlPolicy(root, { ...policy.decisions, pr_merge: "orchestrator" }, policy.revision).ok);
+      }
+      // Exercise the merge gates on an existing child. Launch admission is independent (#4973).
+      const profile = { ...h.metadata.agents[0]!, id: ANTIGRAVITY_AGENT_ID, name: "Google Antigravity",
+        driver: "acp" as const, source: "discovered" as const };
+      const register = (protocol: number, source: "discovered" | "config" = "discovered") =>
+        h.db.registerRunner({ ...h.metadata, agents: [...h.metadata.agents, { ...profile, source }] }, Date.now(), protocol);
+      register(PROTOCOL_VERSION);
+      h.db.raw().prepare("UPDATE sessions SET driver='acp', agent_id=? WHERE id=?").run(profile.id, child);
+
+      const preflights: string[] = [];
+      let stale: "head" | "closures" | null = null;
+      let mergedHead: string | undefined;
+      let enqueued = false;
+      let proofReads = 0;
+      h.hub.requestFromRunner = async (_runner, requestId, message) => {
+        const envelope = { requestId, sessionId: child };
+        if (message.type === "github_merge_preflight") {
+          preflights.push(message.headSha);
+          if (stale === "head") return { ...envelope, type: "github_merge_preflight_result", ok: false, refusal: "stale_head" };
+          return { ...envelope, type: "github_merge_preflight_result", ok: true,
+            check: { checkedAt: Date.now(), closures: stale === "closures" ? [{ issue: "team/repo#100", sources: ["linked"] }] : [] } };
+        }
+        if (message.type === "forge_decision_action" && message.action.kind === "pr_merge_enqueue") {
+          const decision = h.db.workflowDecisionByOccurrence(message.occurrenceId)!;
+          assert.equal(message.action.headSha, "a".repeat(40));
+          assert.equal(decision.actionAdmission?.command,
+            `gh pr merge https://github.com/team/repo/pull/${message.action.pullRequest} --squash --match-head-commit ${message.action.headSha}`);
+          enqueued = true;
+          return { ...envelope, type: "forge_decision_action_result", occurrenceId: message.occurrenceId, outcome: "enqueued" };
+        }
+        assert.equal(message.type, "reconcile_workflow_action");
+        proofReads += 1;
+        assert.equal(message.armedAfterEventSeq, undefined);
+        assert.equal(message.expectedHeadSha, "a".repeat(40));
+        assert.match(message.command, / --squash --match-head-commit a{40}$/u);
+        return { ...envelope, type: "workflow_action_reconciliation_result", occurrenceId: message.occurrenceId,
+          accepted: mergedHead !== undefined, forgeHeadSha: mergedHead,
+          commandDigest: createHash("sha256").update(message.command).digest("hex") };
+      };
+      const prepare = async (pullRequest: number) => {
+        const headSha = "a".repeat(40);
+        const snapshot = { category: "pr_merge" as const, repository: "team/repo", pullRequest, headSha,
+          reviewResult: "merge" as const, intendedClosures: [],
+          requiredChecks: { headSha, status: "passed" as const, checkedAt: Date.now(), checks: [{ name: "CI", state: "passed" as const }] } };
+        const requested = await h.svc.createWorkflowDecisionWithVideo(child, {
+          resourceKey: `team/repo#${pullRequest}`, requestId: `merge-${pullRequest}`, resourceSnapshot: snapshot,
+        });
+        assert.ok(requested.ok && requested.data, requested.error ?? "requested result missing");
+        const { occurrenceId, authority, resourceDigest } = requested.data;
+        // Until #4973 enables Antigravity at the campaign boundary, Full Control may retain the
+        // merge approval for a human. Both owners issue the same exact merge grant.
+        if (mode === "Custom") assert.equal(authority, "human");
+        if (mode === "Custom With Delegated Merges") assert.equal(authority, "orchestrator");
+        const approved = h.svc.resolveWorkflowDecision(root, child, occurrenceId, { outcome: "approve" }, authority,
+          authority === "human" ? { kind: "human", id: h.principal.userId } : { kind: "agent", id: root }, () => true);
+        assert.ok(approved.ok, approved.error ?? "approved result missing");
+        const command = canonicalPrMergeEnqueueCommand(snapshot);
+        return { occurrenceId, snapshot,
+          arm: () => h.svc.consumeWorkflowDecision(child, occurrenceId, { resourceSnapshot: snapshot,
+            action: { kind: "pr_merge_enqueue", command } }),
+          reconcile: () => h.svc.reconcileWorkflowDecision(child, occurrenceId, { resourceSnapshot: snapshot }),
+          execute: () => h.svc.executeWorkflowDecision(child, occurrenceId, { resourceDigest }),
+          state: () => h.db.workflowDecisionByOccurrence(occurrenceId)!,
+        };
+      };
+
+      const unsupported = await prepare(101);
+      const floor = RUNNER_CAPABILITY_MIN_PROTOCOL.antigravityMergeReconciliation;
+      register(floor - 1);
+      const upgrade = await unsupported.arm();
+      assert.equal(upgrade.status, 409);
+      assert.equal(upgrade.capabilityRequirement?.requiredRunnerProtocolVersion, floor);
+      assert.match(upgrade.error ?? "", /Google Antigravity merge reconciliation.*updat/iu);
+      assert.equal(unsupported.state().status, "revoked");
+      assert.equal(unsupported.state().actionAdmission, undefined);
+
+      register(PROTOCOL_VERSION, "config");
+      const otherAcp = await prepare(102);
+      assert.match((await otherAcp.arm()).error ?? "", /does not expose trusted correlated/u);
+      assert.equal(otherAcp.state().actionAdmission, undefined, "a configured ACP agent cannot qualify through its id alone");
+      register(PROTOCOL_VERSION);
+
+      for (const [pullRequest, change] of [[103, "head"], [104, "closures"]] as const) {
+        const pending = await prepare(pullRequest);
+        stale = change;
+        const refused = await pending.arm();
+        assert.equal(refused.status, 409);
+        assert.equal(pending.state().status, "revoked", refused.error ?? "refused result missing");
+        assert.equal(pending.state().actionAdmission, undefined);
+        stale = null;
+      }
+
+      const live = await prepare(105);
+      assert.match((await live.execute()).error ?? "", /arm the merge first/u);
+      const readsBeforeArming = preflights.length;
+      const armed = await live.arm();
+      assert.ok(armed.ok, armed.error ?? "armed result missing");
+      assert.deepEqual(preflights.slice(readsBeforeArming), [live.snapshot.headSha]);
+      assert.equal(live.state().status, "approved");
+      assert.equal((await live.reconcile()).status, 409, "an enqueue alone does not prove a merge");
+      mergedHead = "f".repeat(40);
+      assert.equal((await live.reconcile()).status, 409, "a different merged head is not the approved merge");
+      mergedHead = live.snapshot.headSha;
+      const settled = await live.reconcile();
+      assert.equal(settled.data?.status, "consumed", settled.error ?? "settled result missing");
+      assert.equal((await live.reconcile()).status, 409);
+      assert.equal((await live.arm()).status, 409);
+      assert.equal(proofReads, 3);
+
+      const managed = await prepare(108);
+      assert.ok((await managed.arm()).ok);
+      const enqueue = await managed.execute();
+      assert.ok(enqueue.ok && enqueued, enqueue.error ?? "enqueue result missing");
+      assert.equal(enqueue.data?.forgeAction?.outcome, "enqueued");
+      assert.equal(enqueue.data?.status, "consumed", "the managed enqueue provides its own receipt");
+      assert.equal((await managed.execute()).status, 409);
+
+      const restarted = await prepare(106);
+      assert.ok((await restarted.arm()).ok);
+      mergedHead = undefined;
+      assert.ok(h.svc.restart(child).ok);
+      assert.equal(restarted.state().status, "revoked");
+      assert.equal((await restarted.arm()).status, 409, "restart revocation never restores the grant");
+      h.db.updateSessionStatus(child, "running", Date.now());
+      mergedHead = restarted.snapshot.headSha;
+      const recovered = await restarted.reconcile();
+      assert.equal(recovered.data?.status, "consumed", recovered.error ?? "recovered result missing");
+      assert.equal((await restarted.reconcile()).status, 409);
+
+      const stopped = await prepare(107);
+      assert.ok((await stopped.arm()).ok);
+      mergedHead = undefined;
+      assert.ok(h.svc.stop(child).ok);
+      assert.equal(stopped.state().status, "revoked");
+      assert.equal((await stopped.arm()).status, 409);
+      await new Promise((resolve) => setImmediate(resolve));
+      const now = Date.now();
+      assert.deepEqual(h.db.dueLifecycleMergeChecks(now + 60_000).map((check) => check.occurrenceId), [stopped.occurrenceId]);
+      h.svc.campaignForgeReadNow = async (_campaign, refs) => {
+        assert.deepEqual(refs, [{ repository: stopped.snapshot.repository, number: stopped.snapshot.pullRequest }]);
+        const checks = { state: "passing" as const, passing: 1, failing: 0, pending: 0 };
+        return [{ ref: refs[0]!, observation: { state: "merged", headSha: stopped.snapshot.headSha, draft: false,
+          baseRef: "main", reviewDecision: "approved", checks, requiredChecks: checks,
+          mergeQueue: null, mergeCommitSha: "c".repeat(40) } }];
+      };
+      await h.svc.retryLifecycleMergeSettlements(now + 60_000);
+      assert.equal(stopped.state().status, "consumed");
+    } finally { h.db.close(); }
+  });
 }
 
 const humanScopeAddition = (h: ReturnType<typeof harness>, requestId: string, number: number, expectedRevision = 1) =>

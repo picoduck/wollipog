@@ -23760,14 +23760,16 @@ export class SessionManager {
         !bounded(raw.actionProviderTurnId, 512))) {
       return fail(occurrenceId, "reconciliation runner fence is invalid");
     }
-    const claudeMeta = this.store.readMeta(sessionId);
-    if (claudeMeta?.driver === "claude-code") {
-      // Claude Code exposes no correlated command receipt: in auto or Full Access mode the enqueue
-      // runs without a permission prompt. The forge's merged head is the proof, and it does not
-      // need a live provider, so a stopped child can still settle its armed approval.
-      if (hasRunnerFence) return fail(occurrenceId, "Claude Code reconciliation has no runner fence");
+    const meta = this.store.readMeta(sessionId);
+    const antigravity = meta?.driver === "acp" && meta.agentId === ANTIGRAVITY_AGENT_ID &&
+      meta.context.kind === "native" && (!meta.executionTarget || meta.executionTarget.adapter === "host") &&
+      !this.configuredAgentIds.has(ANTIGRAVITY_AGENT_ID);
+    if (meta && (meta.driver === "claude-code" || antigravity)) {
+      // These paths can enqueue without a correlated command receipt. The forge read uses
+      // persisted session metadata, so a stopped child can still settle its armed approval.
+      if (hasRunnerFence) return fail(occurrenceId, `${antigravity ? "Google Antigravity" : "Claude Code"} reconciliation has no runner fence`);
       const pullRequestUrl = raw.pullRequestUrl as string;
-      const roots = [...new Set([claudeMeta.worktreePath, claudeMeta.repoPath].filter(
+      const roots = [...new Set([meta.worktreePath, meta.repoPath].filter(
         (root): root is string => typeof root === "string" && root.length > 0,
       ))];
       let forge: Awaited<ReturnType<typeof worktreePullRequestState>> = null;
@@ -23776,7 +23778,7 @@ export class SessionManager {
         forge = await this.resolveWorktreePullRequestState(
           root,
           pullRequestUrl,
-          forgeProofOptions(claudeMeta, pullRequestUrl, options.agentEnv),
+          forgeProofOptions(meta, pullRequestUrl, options.agentEnv),
         );
         if (forge) break;
       }
@@ -23807,7 +23809,6 @@ export class SessionManager {
         return fail(occurrenceId, "reconciliation runner fence is stale or mismatched");
       }
     }
-    const meta = this.store.readMeta(sessionId);
     const active = this.active.get(sessionId);
     if (!meta || meta.driver !== "codex-app-server" || !active ||
         !active.client.reconcileCompletedCommand) {
