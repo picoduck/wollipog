@@ -7052,7 +7052,8 @@ export class SessionsService {
       session.driver,
     );
     if (binding?.preservePermissionMode && mergedConfig.permissionMode !== (session.permissionMode ?? undefined)) {
-      return fail("The original requester's permission mode is no longer supported.", 409);
+      return { ok: false, status: 409, error: "The original requester's permission mode is no longer supported.",
+        errorDetails: { code: "requester_recovery_permission_mode_unavailable" } };
     }
     const effectiveCostBudgetUsd = effectiveConfig?.costBudgetUsd !== undefined
       ? (effectiveConfig.costBudgetUsd > 0 ? effectiveConfig.costBudgetUsd : null)
@@ -15489,6 +15490,10 @@ export class SessionsService {
       }),
     }, undefined, false, { kind: "system_notice" });
     if (sent.ok) this.hub.sessionChangedById(campaignId);
+    else if (sent.errorDetails?.code === "requester_recovery_permission_mode_unavailable") {
+      this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition",
+        triggeredBy: { kind: "system", id: "campaign_recovery" } });
+    }
   }
 
   createWorkflowDecision(

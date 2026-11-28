@@ -1160,6 +1160,29 @@ test("typed recovery retires an interrupted restoration without replaying the la
   } finally { h.db.close(); }
 });
 
+test("typed recovery retires a turn that cannot preserve the original permission mode", async () => {
+  const h = handedOffRecoveryFixture();
+  try {
+    const base = h.metadata.agents[0]!;
+    h.metadata.agents.push({ ...base, id: "claude", driver: "claude-code", command: "claude",
+      capabilities: { ...base.capabilities!, models: [], effortLevels: [], permissionModes: ["default"] } });
+    h.db.registerRunner(h.metadata, Date.now(), PROTOCOL_VERSION);
+    h.db.raw().prepare("UPDATE sessions SET driver='claude-code',agent_id='claude',permission_mode='bypassPermissions' WHERE id='child'").run();
+    h.db.setSessionArchived("child", false, Date.now());
+    h.db.setWorktreePath("child", h.worktree.path);
+    h.db.updateSessionStatus("child", "idle", Date.now());
+    const requested = await h.request();
+    assert.ok(requested.ok, requested.error ?? "recovery request refused");
+    const { occurrenceId } = requested.data!;
+    assert.ok(h.resolve(occurrenceId, "approve").ok);
+    await h.tick();
+    assert.equal(h.db.workflowDecisionByOccurrence(occurrenceId)?.status, "revoked");
+    assert.equal(h.db.getSession("child")?.permissionMode, "bypassPermissions");
+    assert.equal(h.db.getSessionPromptCommand(RECOVERY_PROMPT_PREFIX + occurrenceId), null);
+    assert.equal(h.db.campaignRecovery.record("root", h.record.id)!.attempts, 4);
+  } finally { h.db.close(); }
+});
+
 test("typed recovery requires an actual merge of an explicitly ordered predecessor", async () => {
   const h = handedOffRecoveryFixture();
   const before = { ...h.ref, number: 41 };

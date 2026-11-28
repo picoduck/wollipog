@@ -74,7 +74,7 @@ test("Campaign Recovery can be delegated on one thread for a selected campaign",
   await expect(dialog).toContainText("Select the campaigns for Campaign Recovery.");
   const campaigns = dialog.getByRole("group", { name: "Campaigns", exact: true });
   await campaigns.getByRole("radio", { name: "Selected Campaigns" }).click();
-  await campaigns.getByRole("checkbox", { name: /Long-Running Queue Checks/ }).first().check();
+  await campaigns.getByRole("checkbox", { name: "Release Campaign 0", exact: true }).check();
   await save.click();
   await expect(page.locator("body")).toHaveAttribute("data-delegation-grant", JSON.stringify({
     categories: ["campaign_recovery"], selectionMode: "choose", projects: "all", campaigns: ["campaign_0"],
