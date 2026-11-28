@@ -108,6 +108,17 @@ test("Antigravity can occupy a campaign concurrency slot without a tool ceiling"
   } finally { h.db.close(); }
 });
 
+test("an admitted Antigravity child can receive another turn under its tool allocation", () => {
+  const h = antigravityCampaign(allowance({ acceptedFollowUps: 0 }));
+  try {
+    const worker = h.launch();
+    assert.ok(worker.ok && worker.data, worker.error ?? "Antigravity child admission failed");
+    h.db.updateSessionStatus(worker.data.id, "idle", Date.now());
+    const followUp = h.svc.prompt(worker.data.id, "Read another file");
+    assert.ok(followUp.ok, followUp.error ?? "Antigravity follow-up was refused");
+  } finally { h.db.close(); }
+});
+
 test("campaign admission refuses Antigravity cost limits even for a model with a catalog rate", () => {
   const h = antigravityCampaign(allowance({ costUsd: 10, acceptedFollowUps: 0 }));
   try {
