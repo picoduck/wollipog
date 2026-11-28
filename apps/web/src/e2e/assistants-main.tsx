@@ -624,6 +624,7 @@ if (panelScenario) {
   current.decisionDelegation = { revision: 1, grant: panelScenario === "delegated" ? {
     categories: (Object.keys(ASSISTANT_DECISION_CATEGORIES) as AssistantDecisionCategory[])
       .filter((category) => category !== "campaign_recovery"),
+    selectionMode: "all",
     campaigns: "all", projects: "all", expiresAt: NOW + 8 * 24 * 60 * minute,
   } : null };
   const backing = sessions.get(current.sessionId)!;
