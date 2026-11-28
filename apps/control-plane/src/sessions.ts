@@ -17244,7 +17244,6 @@ export class SessionsService {
     }
     const child = this.db.getSession(sessionId);
     const parent = this.db.getSession(decision.controllingSessionId);
-    const antigravityMerge = snapshot.category === "pr_merge" && child !== null && this.antigravityMergeProfile(child);
     // A publication is performed by its Location's runner, whose own version is checked below.
     if (child && snapshot.category !== "follow_up_issue_publication") {
       const unsupported = this.capabilityFailure(child.runnerId, directForge ? requesterForgeCapability(kind) : "forgeDecisionActions",
@@ -17357,11 +17356,7 @@ export class SessionsService {
       const command = canonicalPrMergeEnqueueCommand(snapshot);
       const admission = decision.actionAdmission;
       if (snapshot.mergeMethod !== undefined) return fail("Wollipog performs GitHub enqueues only; nothing was enqueued", 409);
-      if (antigravityMerge) {
-        const unsupported = this.antigravityMergeCapabilityFailure(child);
-        if (unsupported) return unsupported;
-      }
-      const requiresArming = child.driver === "claude-code" || child.driver === "codex-app-server" || antigravityMerge;
+      const requiresArming = child.driver === "claude-code" || child.driver === "codex-app-server";
       if ((requiresArming || admission) && (!admission || admission.kind !== "pr_merge_enqueue" || admission.command !== command ||
           admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command }))) {
         return fail("arm the merge first: consume_workflow_decision with its exact pr_merge_enqueue action, then execute it", 409);
@@ -17464,13 +17459,6 @@ export class SessionsService {
       // the run's last valid head, checked again here with nothing awaited before dispatch.
       if (snapshot.category === "pr_merge") {
         const currentChild = this.db.getSession(sessionId)!;
-        if (antigravityMerge) {
-          const unsupported = this.antigravityMergeCapabilityFailure(currentChild);
-          if (unsupported) {
-            finish("refused", { reason: "runner_unavailable", summary: boundedForgeSummary(unsupported.error!) });
-            return this.forgeActionResult(sessionId, parent.id, occurrenceId);
-          }
-        }
         const refused = this.mergeReviewEvidenceRefusal(currentChild, snapshot);
         const run = this.db.reviewSessions.history(sessionId, { repository: snapshot.repository, number: snapshot.pullRequest });
         if (refused || (!snapshot.reviewSessionId && run.epoch > 0 && run.lastValid?.headSha !== snapshot.headSha)) {
@@ -17848,7 +17836,7 @@ export class SessionsService {
     }
     const externalMerge = request?.externalMerge === true;
     const child = this.db.getSession(sessionId);
-    const antigravity = child !== null && this.antigravityMergeProfile(child);
+    const antigravity = child !== null && this.antigravityArmedMerge(child, decision);
     const superseded = !externalMerge && decision.status === "superseded" &&
       this.db.reconcilableSupersededMerge(occurrenceId) !== null;
     if (decision.status === "superseded" && decision.supersededBy && !superseded) {
@@ -17877,10 +17865,6 @@ export class SessionsService {
         !(directOwner || this.workflowDecisionRelationship(parent.id, child.id)) || !policy ||
         !this.completedMergeAuthorityCurrent(parent, policy, decision)) {
       return fail("workflow decision authority was revoked or ancestry changed before reconciliation", 409);
-    }
-    if (antigravity) {
-      const unsupported = this.antigravityMergeCapabilityFailure(child);
-      if (unsupported) return unsupported;
     }
     for (const owner of [child, parent]) {
       const unsupported = this.capabilityFailure(
@@ -20223,7 +20207,7 @@ export class SessionsService {
     if (pause && pause.resumedAt === undefined && pause.stoppedSessionIds.includes(sessionId)) return;
     const child = this.db.getSession(sessionId);
     for (const decision of this.db.unconsumedWorkflowDecisionsForSession(sessionId)) {
-      const settle = child && (decision.authority === "orchestrator" || this.antigravityMergeProfile(child)) &&
+      const settle = child && (decision.authority === "orchestrator" || this.antigravityArmedMerge(child, decision)) &&
         FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS.includes(actorId) && this.forgeSettlesArmedMerge(child, decision);
       this.revokeWorkflowDecision(decision, {
         reason: actorId === "session-restarted" ? "session_restarted" : "session_ended", systemId: actorId,
@@ -20263,11 +20247,18 @@ export class SessionsService {
     return this.capabilityFailure(session.runnerId, "antigravityMergeReconciliation", "Google Antigravity merge reconciliation");
   }
 
+  /** An ACP action admission could only have been written for the native Antigravity profile.
+   * The durable admission survives a setup refresh that temporarily omits the agent row. */
+  private antigravityArmedMerge(session: SessionView, decision: WorkflowDecisionView): boolean {
+    return session.driver === "acp" && session.agentId === ANTIGRAVITY_AGENT_ID &&
+      decision.category === "pr_merge" && decision.actionAdmission?.kind === "pr_merge_enqueue";
+  }
+
   /** An enqueue may have run without a permission receipt. Revoke the grant before checking the
    * forge so a relaunched provider cannot reuse it. Only an exact merged head can settle it. */
   private forgeSettlesArmedMerge(child: SessionView, decision: WorkflowDecisionView): boolean {
     return (child.driver === "claude-code" || this.wollipogMayHaveEnqueued(decision) ||
-      (child.driver === "acp" && !this.antigravityMergeCapabilityFailure(child))) && decision.status === "approved" &&
+      this.antigravityArmedMerge(child, decision)) && decision.status === "approved" &&
       decision.category === "pr_merge" && decision.actionAdmission?.kind === "pr_merge_enqueue" &&
       !this.capabilityFailure(
         child.runnerId,
@@ -20322,7 +20313,7 @@ export class SessionsService {
       const child = decision && this.db.getSession(decision.sessionId);
       if (!decision || !child || snapshot?.category !== "pr_merge" || !this.mergeSettlementAuthority(decision, false) ||
           !this.db.isRecoverableWorkflowDecisionActionRevocation(decision.sessionId, occurrenceId,
-            FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS, this.antigravityMergeProfile(child))) {
+            FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS, this.antigravityArmedMerge(child, decision))) {
         this.db.finishLifecycleMergeCheck(occurrenceId);
         continue;
       }
@@ -20363,7 +20354,6 @@ export class SessionsService {
     const admission = decision.actionAdmission;
     const command = canonicalPrMergeEnqueueCommand(snapshot);
     const wollipogQueued = this.wollipogMayHaveEnqueued(decision);
-    const antigravity = this.antigravityMergeProfile(child);
     if ((admission || !wollipogQueued) && (!admission || admission.kind !== "pr_merge_enqueue" || admission.command !== command ||
         admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command }))) {
       return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
@@ -20371,7 +20361,7 @@ export class SessionsService {
     // A managed enqueue has no provider receipt. If the harness normally requires one, observe
     // the merge through the same read-only forge path that Wollipog uses for managed actions.
     if (decision.retirement || !admission ||
-        (wollipogQueued && child.driver !== "claude-code" && !antigravity)) {
+        (wollipogQueued && child.driver !== "claude-code")) {
       const unsupported = this.capabilityFailure(child.runnerId, "forgeDecisionActions", "Wollipog-performed forge actions");
       if (unsupported) return failAs(unsupported);
       const requestId = `forge_decision_action_${randomUUID()}`;
@@ -20393,6 +20383,10 @@ export class SessionsService {
         return fail("forge did not prove the exact approved head was merged", 409);
       }
       return ok({ forgeHeadSha: snapshot.headSha });
+    }
+    if (this.antigravityArmedMerge(child, decision)) {
+      const unsupported = this.capabilityFailure(child.runnerId, "antigravityMergeReconciliation", "Google Antigravity merge reconciliation");
+      if (unsupported) return unsupported;
     }
     const pullRequestUrl = prMergeChangeRequestUrl(snapshot);
     const requestId = `workflow_action_reconcile_${randomUUID()}`;
@@ -20418,12 +20412,6 @@ export class SessionsService {
     }
     if (proof.type !== "workflow_action_reconciliation_result") {
       return fail("forge did not prove the exact approved head was merged", 409);
-    }
-    if (antigravity) {
-      const current = this.db.getSession(child.id);
-      if (!current) return fail("session no longer exists", 409);
-      const unsupported = this.antigravityMergeCapabilityFailure(current);
-      if (unsupported) return unsupported;
     }
     if (proof.requestId !== requestId || proof.sessionId !== child.id ||
         proof.occurrenceId !== decision.occurrenceId || !proof.accepted ||
@@ -20472,7 +20460,6 @@ export class SessionsService {
     const directOwner = Boolean(child && parent && this.directOwnerSelfDecision(child, parent, decision));
     const policy = directOwner ? this.directOwnerPolicy(parent!) : parent?.parentControlPolicy;
     if (!child || !parent || !policy ||
-        (this.antigravityMergeProfile(child) && this.antigravityMergeCapabilityFailure(child)) ||
         (requireLive && (isTerminal(child.status) || isTerminal(parent.status))) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
         !(directOwner || this.workflowDecisionRelationship(parent.id, child.id)) ||
@@ -20510,7 +20497,7 @@ export class SessionsService {
       receiptDigest,
       now,
       { forgeAttested: true, externalMerge, recoverSuperseded: decision.status === "superseded",
-        allowHumanLifecycleRecovery: child !== null && this.antigravityMergeProfile(child) },
+        allowHumanLifecycleRecovery: child !== null && this.antigravityArmedMerge(child, decision) },
     );
     if (!reconciled) return null;
     const consumed = reconciled.decision;

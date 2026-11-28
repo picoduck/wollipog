@@ -471,7 +471,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v413 (Refs #4922): Google Antigravity subscription usage snapshots and source-targeted refresh. */
   antigravitySubscriptionUsage: 413,
   /** The native Antigravity profile can arm a merge and prove its exact merged head. */
-  antigravityMergeReconciliation: 415,
+  antigravityMergeReconciliation: 416,
   managedBackgroundDelivery: 82,
   backgroundFollowUp: 240,
   managedBackgroundInventory: 82,

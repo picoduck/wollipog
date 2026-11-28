@@ -3550,6 +3550,7 @@ for (const mode of ["Custom", "Custom With Delegated Merges", "Full Control"] as
       let stale: "head" | "closures" | null = null;
       let mergedHead: string | undefined;
       let enqueued = false;
+      let managedOutcome: "enqueued" | "uncertain" = "enqueued";
       let proofReads = 0;
       h.hub.requestFromRunner = async (_runner, requestId, message) => {
         const envelope = { requestId, sessionId: child };
@@ -3562,10 +3563,17 @@ for (const mode of ["Custom", "Custom With Delegated Merges", "Full Control"] as
         if (message.type === "forge_decision_action" && message.action.kind === "pr_merge_enqueue") {
           const decision = h.db.workflowDecisionByOccurrence(message.occurrenceId)!;
           assert.equal(message.action.headSha, "a".repeat(40));
-          assert.equal(decision.actionAdmission?.command,
-            `gh pr merge https://github.com/team/repo/pull/${message.action.pullRequest} --squash --match-head-commit ${message.action.headSha}`);
+          if (decision.actionAdmission) {
+            assert.equal(decision.actionAdmission.command,
+              `gh pr merge https://github.com/team/repo/pull/${message.action.pullRequest} --squash --match-head-commit ${message.action.headSha}`);
+          }
           enqueued = true;
-          return { ...envelope, type: "forge_decision_action_result", occurrenceId: message.occurrenceId, outcome: "enqueued" };
+          return { ...envelope, type: "forge_decision_action_result", occurrenceId: message.occurrenceId, outcome: managedOutcome };
+        }
+        if (message.type === "forge_decision_action" && message.action.kind === "pr_merge_observe") {
+          assert.equal(message.action.headSha, "a".repeat(40));
+          return { ...envelope, type: "forge_decision_action_result", occurrenceId: message.occurrenceId,
+            outcome: mergedHead === message.action.headSha ? "already_merged" : "refused" };
         }
         assert.equal(message.type, "reconcile_workflow_action");
         proofReads += 1;
@@ -3613,6 +3621,18 @@ for (const mode of ["Custom", "Custom With Delegated Merges", "Full Control"] as
       assert.equal(unsupported.state().status, "revoked");
       assert.equal(unsupported.state().actionAdmission, undefined);
 
+      const legacy = await prepare(109);
+      assert.equal((await legacy.execute()).data?.status, "consumed");
+      assert.equal(legacy.state().actionAdmission, undefined, "the existing managed action needs no ACP admission");
+      const uncertain = await prepare(110);
+      managedOutcome = "uncertain";
+      assert.equal((await uncertain.execute()).data?.forgeAction?.outcome, "uncertain");
+      assert.equal((await uncertain.reconcile()).status, 409);
+      mergedHead = uncertain.snapshot.headSha;
+      assert.equal((await uncertain.reconcile()).data?.status, "consumed");
+      mergedHead = undefined;
+      managedOutcome = "enqueued";
+
       register(PROTOCOL_VERSION, "config");
       const otherAcp = await prepare(102);
       assert.match((await otherAcp.arm()).error ?? "", /does not expose trusted correlated/u);
@@ -3630,7 +3650,6 @@ for (const mode of ["Custom", "Custom With Delegated Merges", "Full Control"] as
       }
 
       const live = await prepare(105);
-      assert.match((await live.execute()).error ?? "", /arm the merge first/u);
       const readsBeforeArming = preflights.length;
       const armed = await live.arm();
       assert.ok(armed.ok, armed.error ?? "armed result missing");
@@ -3669,6 +3688,8 @@ for (const mode of ["Custom", "Custom With Delegated Merges", "Full Control"] as
       const stopped = await prepare(107);
       assert.ok((await stopped.arm()).ok);
       mergedHead = undefined;
+      // A setup check or runner restart can temporarily remove the Antigravity agent row.
+      h.db.registerRunner(h.metadata, Date.now(), PROTOCOL_VERSION);
       assert.ok(h.svc.stop(child).ok);
       assert.equal(stopped.state().status, "revoked");
       assert.equal((await stopped.arm()).status, 409);

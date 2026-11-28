@@ -1581,9 +1581,9 @@ const PROTOCOL_VERSION_HISTORY: readonly number[] = [
   // 414: Full Control boundary operation for Orchestrator-owned child CI reruns (Refs #4915).
   414,
   // v415 slot
-  // 415: Google Antigravity armed merges reconcile against the exact head read from the forge (Refs #4974).
-  415,
   // v416 slot
+  // 416: Google Antigravity armed merges reconcile against the exact head read from the forge (Refs #4974).
+  416,
   // v417 slot
   // v418 slot
   // v419 slot
